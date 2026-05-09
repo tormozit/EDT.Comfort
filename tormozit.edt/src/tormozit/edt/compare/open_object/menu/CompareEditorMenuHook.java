@@ -120,7 +120,7 @@ public class CompareEditorMenuHook implements IStartup {
         if (cs != null) cs.activateContext(CONTEXT_ID);
 
         // Добавляем кнопку в тулбар EDT с повторными попытками
-        addToolbarButtonWithRetry(editor, 0);
+        addToolbarButtonWithRetry(editor);
 
         Tree tree = getCompareTree(editor);
         if (tree == null) {
@@ -136,29 +136,13 @@ public class CompareEditorMenuHook implements IStartup {
     /**
      * Добавляет кнопки с повторными попытками, если тулбар еще не инициализирован
      */
-    private void addToolbarButtonWithRetry(IEditorPart editor, int attempt)
+    private void addToolbarButtonWithRetry(IEditorPart editor)
     {
-        if (attempt > 2)
-        {
-            System.err.println("Failed to add toolbar buttons after 2 attempts");
-            return;
-        }
-
         Display.getDefault().asyncExec(() -> {
             Object tbm2 = getField(editor, "toolBarManager");
             if (tbm2 instanceof IToolBarManager)
             {
                 fillToolbar((IToolBarManager)tbm2, editor);
-            }
-            else
-            {
-//                ILog log = Platform.getLog(FrameworkUtil.getBundle(CompareEditorMenuHook.class));
-//                String message = "toolBarManager=" + tbm2 + ", editor=" + editor.getClass().getSimpleName();
-//                IStatus status = new Status(IStatus.INFO, "tormozit.edt.compare.open_object", message);
-//                log.log(status);
-
-                // Тулбар еще не создан - повторим через 500 мс
-                Display.getDefault().timerExec(500, () -> addToolbarButtonWithRetry(editor, attempt + 1));
             }
         });
     }

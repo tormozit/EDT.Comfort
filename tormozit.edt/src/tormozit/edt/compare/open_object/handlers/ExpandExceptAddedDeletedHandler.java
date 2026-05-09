@@ -6,6 +6,7 @@ import org.eclipse.core.commands.AbstractHandler;
 import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
 import org.eclipse.jface.viewers.AbstractTreeViewer;
+import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.ui.IEditorPart;
 
@@ -52,6 +53,9 @@ public class ExpandExceptAddedDeletedHandler
         if (cp == null)
             return null;
 
+        // Запоминаем текущую строку до сворачивания
+        ISelection selection = viewer.getSelection();
+
         // Сворачиваем всё, затем раскрываем избирательно
         viewer.collapseAll();
 
@@ -59,6 +63,10 @@ public class ExpandExceptAddedDeletedHandler
         {
             expandSelectively(viewer, cp, root, mode, OpenObjectHandler.getSession(editor));
         }
+
+        // Восстанавливаем выделение и прокручиваем к нему
+        if (selection != null && !selection.isEmpty())
+            viewer.setSelection(selection, true);
 
         return null;
     }
