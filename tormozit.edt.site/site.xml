@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <site>
-   <feature url="features/tormozit.edt.feature_1.0.0.202605090018.jar" id="tormozit.edt.feature" version="1.0.0.202605090018" os="win32" nl="ru">
+   <feature url="features/tormozit.edt.feature_1.0.0.2.jar" id="tormozit.edt.feature" version="1.0.0.2">
       <category name="tormozit.edt"/>
    </feature>
    <category-def name="tormozit.edt" label="Tormozit EDT"/>

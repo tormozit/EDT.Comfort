@@ -134,8 +134,7 @@ public class CompareEditorMenuHook implements IStartup {
     }
 
     /**
-     * Добавляет кнопку "Развернуть все кроме добавленных/удалённых"
-     * в ToolBarManager редактора EDT.
+     * Добавляет кнопки в ToolBarManager редактора EDT.
      * Используем IAction (не CommandContributionItem), чтобы не зависеть
      * от состояния activeWhen/activeContexts в момент клика.
      */
