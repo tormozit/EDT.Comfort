@@ -6,10 +6,6 @@
     <startup class="tormozit.edt.compare.open_object.menu.CompareEditorMenuHook"/>
   </extension>
 
-  <!-- Собственный контекст с родителем window.
-       Более специфичный контекст побеждает при конфликте биндингов
-       (наш F4 > JDT F4 на уровне window). Активируется программно
-       через IContextService editor-сайта в CompareEditorMenuHook. -->
   <extension point="org.eclipse.ui.contexts">
     <context
         id="tormozit.edt.compare.open_object.context"
@@ -29,8 +25,11 @@
     <command
         id="tormozit.edt.compare.open_object.openObject"
         name="Открыть объект"
-        description="Открыть выбранный объект конфигурации в редакторе EDT">
-    </command>
+        description="Открыть выбранный объект конфигурации в редакторе EDT"/>
+    <command
+        id="tormozit.edt.compare.expandExceptAddedDeleted"
+        name="Развернуть все кроме добавленных/удаленных"
+        description="Разворачивает дерево сравнения, пропуская добавленные и удалённые объекты"/>
   </extension>
 
   <extension point="org.eclipse.ui.handlers">
@@ -43,6 +42,34 @@
         </with>
       </activeWhen>
     </handler>
+    <handler
+        commandId="tormozit.edt.compare.expandExceptAddedDeleted"
+        class="tormozit.edt.compare.open_object.handlers.ExpandExceptAddedDeletedHandler">
+      <activeWhen>
+        <with variable="activeEditorId">
+          <equals value="com._1c.g5.v8.dt.compare.ui.editor"/>
+        </with>
+      </activeWhen>
+    </handler>
+  </extension>
+
+  <!-- Toolbar редактора сравнения.
+       Для редакторов Eclipse регистрирует IActionBars через стандартный механизм,
+       поэтому toolbar: URI работает (в отличие от контекстного меню). -->
+  <extension point="org.eclipse.ui.menus">
+    <menuContribution
+        locationURI="toolbar:com._1c.g5.v8.dt.compare.ui.editor?after=additions">
+      <command
+          commandId="tormozit.edt.compare.expandExceptAddedDeleted"
+          tooltip="Развернуть все кроме добавленных/удаленных"
+          style="push">
+        <visibleWhen checkEnabled="false">
+          <with variable="activeEditorId">
+            <equals value="com._1c.g5.v8.dt.compare.ui.editor"/>
+          </with>
+        </visibleWhen>
+      </command>
+    </menuContribution>
   </extension>
 
 </plugin>

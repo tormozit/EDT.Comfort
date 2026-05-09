@@ -4,6 +4,10 @@ import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.eclipse.jface.action.Action;
+import org.eclipse.jface.action.IAction;
+import org.eclipse.jface.action.IToolBarManager;
+import org.eclipse.jface.action.Separator;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.MenuAdapter;
@@ -25,10 +29,12 @@ import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.contexts.IContextService;
-import tormozit.edt.compare.open_object.handlers.OpenObjectHandler;
 
 import com._1c.g5.v8.dt.compare.model.MatchedObjectsComparisonNode;
 import com._1c.g5.v8.dt.compare.ui.editor.DtComparisonView;
+
+import tormozit.edt.compare.open_object.handlers.ExpandExceptAddedDeletedHandler;
+import tormozit.edt.compare.open_object.handlers.OpenObjectHandler;
 
 /**
  * Добавляет пункт «Открыть объект» в контекстное меню дерева сравнения EDT.
@@ -50,8 +56,8 @@ public class CompareEditorMenuHook implements IStartup {
 
     private static final String COMPARE_EDITOR_ID = "com._1c.g5.v8.dt.compare.ui.editor";
     private static final String COMMAND_ID        = "tormozit.edt.compare.open_object.openObject";
-    private static final String CONTEXT_ID  = "tormozit.edt.compare.open_object.context";
-    private static final String ITEM_TEXT   = "Открыть объект\tF2";
+    private static final String CONTEXT_ID        = "tormozit.edt.compare.open_object.context";
+    private static final String ITEM_TEXT         = "Открыть объект\tF2";
 
     // ---- IStartup ----
 
@@ -105,12 +111,15 @@ public class CompareEditorMenuHook implements IStartup {
     }
 
     private void hookEditor(IEditorPart editor) {
-        // Активируем наш контекст через сайт редактора.
-        // IContextService, полученный с editor.getSite(), автоматически
-        // включает контекст когда редактор активен и выключает когда нет.
-        // Это даёт нашему F4 приоритет над window-уровневым F4 JDT.
         IContextService cs = editor.getSite().getService(IContextService.class);
         if (cs != null) cs.activateContext(CONTEXT_ID);
+
+        // Добавляем кнопку в тулбар EDT.
+        // DtComparisonEditor строит тулбар через свой ToolBarManager
+        // (не через IActionBars), поэтому toolbar: URI не работает.
+        // getToolBarManager() — публичный метод редактора.
+        addToolbarButton(editor);
+
         Tree tree = getCompareTree(editor);
         if (tree == null) {
             // Виджеты могут быть ещё не готовы — повторяем после текущего цикла событий
@@ -121,6 +130,34 @@ public class CompareEditorMenuHook implements IStartup {
             return;
         }
         attachMenuListener(editor, tree);
+    }
+
+    /**
+     * Добавляет кнопку "Развернуть все кроме добавленных/удалённых"
+     * в ToolBarManager редактора EDT.
+     * Используем IAction (не CommandContributionItem), чтобы не зависеть
+     * от состояния activeWhen/activeContexts в момент клика.
+     */
+    private void addToolbarButton(IEditorPart editor) {
+        // ToolBarManager может быть ещё не создан — повторяем после цикла событий
+        Display.getDefault().asyncExec(() -> {
+            Object tbm2 = getField(editor, "toolBarManager");
+            if (tbm2 instanceof IToolBarManager)
+                fillToolbar((IToolBarManager)tbm2, editor);
+        });
+    }
+
+    private void fillToolbar(IToolBarManager toolbar, IEditorPart editor) {
+        IAction action = new Action("Развернуть↓", IAction.AS_PUSH_BUTTON) {
+            @Override
+            public void run() {
+                ExpandExceptAddedDeletedHandler.expand(editor);
+            }
+        };
+        action.setToolTipText("Развернуть все кроме добавленных/удалённых");
+        toolbar.add(new Separator());
+        toolbar.add(action);
+        toolbar.update(true);
     }
 
     // ---- SWT MenuListener ----
