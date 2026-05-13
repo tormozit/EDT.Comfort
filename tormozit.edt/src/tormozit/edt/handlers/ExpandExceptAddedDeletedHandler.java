@@ -62,7 +62,18 @@ public class ExpandExceptAddedDeletedHandler extends AbstractHandler
             || mode == ExpandMode.toObject && isObject(element))
             return;       
         toExpand.add(element);
-        for (Object child : cp.getChildren(element)) {
+        Object[] children;
+        try
+        {
+            children = cp.getChildren(element);
+        }
+        catch (Exception e)
+        {
+            // https://github.com/tormozit/EDT-Tormozit/issues/8
+            e.printStackTrace();
+            return;
+        }
+        for (Object child : children) {
             collectElementsToExpand(cp, child, mode, toExpand);
         }
     }

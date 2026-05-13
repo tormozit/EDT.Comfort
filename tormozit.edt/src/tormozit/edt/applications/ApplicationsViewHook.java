@@ -9,26 +9,24 @@ import java.util.List;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.IToolBarManager;
 import org.eclipse.jface.action.Separator;
+import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.ColumnViewer;
+import org.eclipse.jface.viewers.IBaseLabelProvider;
+import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.TreeViewer;
+import org.eclipse.jface.viewers.TreeViewerColumn;
+import org.eclipse.jface.viewers.ViewerCell;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
 import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.events.SelectionEvent;
-import org.eclipse.swt.graphics.GC;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
-import org.eclipse.swt.widgets.Event;
-import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
-import org.eclipse.swt.widgets.Table;
-import org.eclipse.swt.widgets.TableColumn;
-import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.Tree;
-import org.eclipse.swt.widgets.TreeColumn;
-import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.IActionBars;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IStartup;
@@ -41,25 +39,29 @@ import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 
-/**
- * Хук панели «Приложения» EDT.
- *
- * <p>Добавляет в панель:
- * <ul>
- *   <li>Колонку «Начало сеанса конфигуратора» — рисуется через
- *       SWT {@code PaintItem}, чтобы <b>не трогать JFace-рендерер EDT</b>.
- *       Создание {@code TableViewerColumn} / {@code TreeViewerColumn} вызывает
- *       внутренний {@code clearLegacyRenderer()}, который ломает
- *       {@code OwnerDrawLabelProvider} EDT и делает список пустым.</li>
- *   <li>Кнопку «Отключить конфигуратор» в тулбар панели.</li>
- *   <li>Пункт «Отключить конфигуратор» в контекстное меню списка.</li>
- * </ul>
- *
- * <p>COM-подключения хранятся в {@link ComConnectionRegistry}. Подключение
- * конфигуратора выполняется EDT или пользователем через штатные средства;
- * этот хук только отображает дату начала сеанса и предоставляет команду
- * отключения.
- */
+    /**
+     * Хук панели «Приложения» EDT.
+     *
+     * <p>Добавляет в панель:
+     * <ul>
+     *   <li>Многоколоночное дерево: колонка 0 делегирует к оригинальному
+     *       {@code DecoratingStyledCellLabelProvider} EDT, колонка 1 показывает
+     *       «Начало сеанса конфигуратора» (временно отключено). Создание {@code TreeViewerColumn}
+     *       вызывает {@code clearLegacyRenderer()}, который уничтожает
+     *       {@code OwnerDrawLabelProvider} EDT; мы сохраняем ссылку на старый
+     *       провайдер и продолжаем делегировать к его {@code update(cell)}.</li>
+     *   <li>Кнопку «Отключить конфигуратор» в тулбар панели.</li>
+     *   <li>Пункт «Отключить конфигуратор» в контекстное меню списка.</li>
+     * </ul>
+     *
+     * <p>Временная модификация: обращения к ComConnectionRegistry удалены.
+     * Подключение конфигуратора выполняется EDT через createClientAndConnect() в
+     * com._1c.g5.v8.dt.internal.platform.services.core.runtimes.execution.DesignerSessionPool.
+     * Хук должен подписаться на эти события и запоминать дату факта подключения
+     * в колонке списка (в будущей реализации).
+     * Команда "Отключить конфигуратор" должна вызывать release() в том же классе
+     * для выбранных баз (в будущей реализации).
+     */
 public class ApplicationsViewHook implements IStartup
 {
     // ---- Константы ----
@@ -67,9 +69,11 @@ public class ApplicationsViewHook implements IStartup
     private static final String APPLICATIONS_VIEW_CLASS =
         "com.e1c.g5.dt.internal.applications.ui.view.ApplicationsView"; //$NON-NLS-1$
 
-    private static final String CMD_DISCONNECT = "Отключить конфигуратор"; //$NON-NLS-1$
-    private static final String COL_TITLE      = "Начало сеанса конфигуратора"; //$NON-NLS-1$
-    private static final int    COL_WIDTH      = 165;
+    private static final String CMD_DISCONNECT_TITLE = "Освободить конфигуратор"; 
+    private static final String CMD_DISCONNECT_TOOLTIP = "Освободить конфигураторы выбранных инфобаз"; 
+    private static final String COL_CONFIG_TOOLTIP = "Начало сеанса конфигуратора"; 
+    private static final String COL_CONFIG_TITLE = "Конфигуратор"; 
+    private static final int    COL_CONFIG_WIDTH = 165;
 
     private static final DateTimeFormatter DATE_FMT =
         DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss"); //$NON-NLS-1$
@@ -148,70 +152,91 @@ public class ApplicationsViewHook implements IStartup
 
     private void hookView(Object part)
     {
-//        if (!(part instanceof IViewPart)) return;
-//        IViewPart view = (IViewPart) part;
-//
-//        ColumnViewer viewer = findViewer(view);
-//        if (viewer == null) return;
-//
-//        Control control = viewer.getControl();
-//        if (control == null || control.isDisposed()) return;
-//
-//        addSessionColumn(control);
-//        addToolbarButton(view, viewer, control);
-//        addContextMenuItem(viewer, control);
-//        registerRedrawOnRegistryChange(control);
-    }
+        if (!(part instanceof IViewPart)) return;
+        IViewPart view = (IViewPart) part;
 
-    // -----------------------------------------------------------------------
-    // 1. Колонка «Начало сеанса конфигуратора» — чистый SWT, без JFace
-    // -----------------------------------------------------------------------
+        ColumnViewer viewer = findViewer(view);
+        if (viewer == null) return;
 
-    /**
-     * Добавляет SWT-столбец и рисует дату через {@code SWT.PaintItem}.
-     *
-     * <p><b>Почему не TableViewerColumn?</b><br>
-     * Конструктор {@code ViewerColumn} вызывает {@code viewer.clearLegacyRenderer()},
-     * который уничтожает {@code OwnerDrawLabelProvider} EDT — список становится пустым.
-     * Чистый SWT-столбец не трогает JFace-рендерер.
-     */
-    private void addSessionColumn(Control control)
-    {
-        addSessionColumnToTree((Tree) control);
-    }
+        Control control = viewer.getControl();
+        if (control == null || control.isDisposed()) return;
 
-    private void addSessionColumnToTree(Tree tree)
-    {
-        TreeColumn col = new TreeColumn(tree, SWT.NONE);
-        col.setText(COL_TITLE);
-        col.setWidth(COL_WIDTH);
-        col.setResizable(true);
-
-        final int colIdx = tree.indexOf(col);
-
-        Listener painter = event ->
+        if (control instanceof Tree)
         {
-            if (event.index != colIdx) return;
-            Object data = ((TreeItem) event.item).getData();
-            paintDate(event.gc, event.x, event.y, event.height, extractKey(data));
-        };
-        tree.addListener(SWT.PaintItem, painter);
-        tree.addDisposeListener(e -> tree.removeListener(SWT.PaintItem, painter));
-    }
+            setupMultiColumnTree(viewer, (Tree) control);
+        }
+
+         addToolbarButton(view, viewer, control);
+         addContextMenuItem(viewer, control);
+     }
+
+    // -----------------------------------------------------------------------
+    // 1. Многоколоночное дерево с сохранением оригинального рендерера
+    // -----------------------------------------------------------------------
 
     /**
-     * Рисует дату начала сеанса в ячейке. Текст вертикально центрируется.
-     * Метод вызывается из {@code SWT.PaintItem} — только для нашего столбца.
+     * Настраивает TreeViewer на две колонки.
+     *
+     * <p>Перед созданием {@link TreeViewerColumn} сохраняем оригинальный
+     * label provider EDT. Конструктор {@code ViewerColumn} вызывает
+     * {@code viewer.clearLegacyRenderer()}, который делает
+     * {@code disposeOwnerDrawLabelProvider()}, но сам объект-провайдер
+     * остаётся жив и его {@code update(ViewerCell)} продолжает отдавать
+     * текст и иконку. Мы делегируем к нему из провайдера колонки&nbsp;0.
      */
-    private void paintDate(GC gc, int x, int y, int rowHeight, String key)
+    private void setupMultiColumnTree(ColumnViewer viewer, Tree tree)
     {
-        LocalDateTime dt = ComConnectionRegistry.getSessionStart(key);
-        String text = DATE_FMT.format(dt);
-        if (dt == null) text = "не подключено";
-        int fontHeight = gc.getFontMetrics().getHeight();
-        int textY      = y + Math.max(0, (rowHeight - fontHeight) / 2);
-        // transparent=true — не перекрашиваем фон (важно для выделения)
-        gc.drawString(text, x + 3, textY, true);
+        // Защита от повторного применения
+        if (tree.getColumnCount() > 0 || tree.getHeaderVisible())
+            return;
+
+        // Сохраняем старый label provider ДО создания TreeViewerColumn
+        final IBaseLabelProvider oldProvider = viewer.getLabelProvider();
+
+        // Колонка 0 — делегируем к оригинальному рендереру EDT
+        TreeViewerColumn col0 = new TreeViewerColumn((TreeViewer)viewer, SWT.NONE);
+        col0.getColumn().setText("Инфобаза");
+        col0.getColumn().setWidth(200);
+        col0.getColumn().setResizable(true);
+        col0.setLabelProvider(new CellLabelProvider()
+        {
+            @Override
+            public void update(ViewerCell cell)
+            {
+                if (oldProvider instanceof CellLabelProvider)
+                {
+                    ((CellLabelProvider) oldProvider).update(cell);
+                }
+                else if (oldProvider instanceof ILabelProvider)
+                {
+                    ILabelProvider lp = (ILabelProvider) oldProvider;
+                    Object element = cell.getElement();
+                    cell.setText(lp.getText(element));
+                    cell.setImage(lp.getImage(element));
+                }
+            }
+        });
+
+        // Колонка 1 — дата начала сеанса конфигуратора
+         TreeViewerColumn col1 = new TreeViewerColumn((TreeViewer)viewer, SWT.NONE);
+         col1.getColumn().setText(COL_CONFIG_TITLE);
+         col1.getColumn().setToolTipText(COL_CONFIG_TOOLTIP);
+         col1.getColumn().setWidth(COL_CONFIG_WIDTH);
+         col1.getColumn().setResizable(true);
+         col1.setLabelProvider(new CellLabelProvider()
+         {
+             @Override
+             public void update(ViewerCell cell)
+             {
+                 String key = extractKey(cell.getElement());
+                 LocalDateTime dt = null;
+                 String text = (dt != null) ? DATE_FMT.format(dt) : "не подключено";
+                 cell.setText(text);
+             }
+         });
+
+        tree.setHeaderVisible(true);
+        tree.setLinesVisible(true);
     }
 
     // -----------------------------------------------------------------------
@@ -223,7 +248,7 @@ public class ApplicationsViewHook implements IStartup
         IActionBars actionBars = view.getViewSite().getActionBars();
         IToolBarManager toolbar = actionBars.getToolBarManager();
 
-        Action action = new Action(CMD_DISCONNECT)
+        Action action = new Action(CMD_DISCONNECT_TITLE)
         {
             @Override
             public void run()
@@ -232,9 +257,7 @@ public class ApplicationsViewHook implements IStartup
                 // Перерисовка инициируется слушателем реестра в registerRedrawOnRegistryChange
             }
         };
-        action.setToolTipText(
-            "Разорвать COM-подключение конфигуратора для выбранных баз"); //$NON-NLS-1$
-
+        action.setToolTipText(CMD_DISCONNECT_TOOLTIP);
         toolbar.add(new Separator());
         toolbar.add(action);
         actionBars.updateActionBars();
@@ -267,14 +290,13 @@ public class ApplicationsViewHook implements IStartup
                 if (sel.isEmpty()) return;
 
                 // Показываем пункт только если среди выбранных есть активные сеансы
-                boolean anyConnected = sel.toList().stream()
-                    .anyMatch(item -> ComConnectionRegistry.isConnected(extractKey(item)));
+                 boolean anyConnected = false;
                 if (!anyConnected) return;
 
                 addedItems.add(new MenuItem(finalMenu, SWT.SEPARATOR));
 
                 MenuItem item = new MenuItem(finalMenu, SWT.PUSH);
-                item.setText(CMD_DISCONNECT);
+                item.setText(CMD_DISCONNECT_TITLE);
 
                 final IStructuredSelection capturedSel = sel;
                 item.addSelectionListener(new SelectionAdapter()
@@ -312,30 +334,10 @@ public class ApplicationsViewHook implements IStartup
     // 4. Перерисовка при изменении реестра
     // -----------------------------------------------------------------------
 
-    /**
-     * Подписывается на изменения реестра и перерисовывает контрол через
-     * {@code control.redraw()}. Этого достаточно для обновления нашего
-     * SWT-столбца без «тяжёлого» {@code viewer.refresh()}.
-     */
-    private void registerRedrawOnRegistryChange(Control control)
-    {
-        Runnable refresher = () ->
-        {
-            Display d = Display.getDefault();
-            if (d == null || d.isDisposed()) return;
-            d.asyncExec(() ->
-            {
-                if (!control.isDisposed()) control.redraw();
-            });
-        };
 
-        ComConnectionRegistry.addChangeListener(refresher);
-        control.addDisposeListener(
-            e -> ComConnectionRegistry.removeChangeListener(refresher));
-    }
 
     // -----------------------------------------------------------------------
-    // Действия «Отключить конфигуратор»
+    // Действия "Отключить конфигуратор"
     // -----------------------------------------------------------------------
 
     private void disconnectSelected(ColumnViewer viewer)
@@ -345,16 +347,18 @@ public class ApplicationsViewHook implements IStartup
             disconnectItems(sel.toList());
     }
 
-    private void disconnectItems(List<?> items)
-    {
-        for (Object item : items)
-        {
-            String key = extractKey(item);
-            if (ComConnectionRegistry.isConnected(key))
-                ComConnectionRegistry.disconnect(key);
-                // disconnect() уведомляет слушателей → registerRedrawOnRegistryChange → redraw
-        }
-    }
+     private void disconnectItems(List<?> items)
+     {
+         for (Object item : items)
+         {
+             String key = extractKey(item);
+             // Временная модификация: отключение через ComConnectionRegistry отключено
+             // TODO: Реализовать отключение через DesignerSessionPool.release()
+             // if (ComConnectionRegistry.isConnected(key))
+             //     ComConnectionRegistry.disconnect(key);
+                 // disconnect() уведомляет слушателей → registerRedrawOnRegistryChange → refresh
+         }
+     }
 
     // -----------------------------------------------------------------------
     // Поиск ColumnViewer через рефлексию

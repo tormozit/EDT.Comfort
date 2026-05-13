@@ -2,7 +2,7 @@
 <feature
       id="tormozit.edt.feature"
       label="Tormozit EDT"
-      version="1.0.0.7"
+      version="1.0.0.8"
       provider-name="Tormozit">
 
    <description url="http://www.example.com/description">

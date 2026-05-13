@@ -3,7 +3,7 @@ Bundle-ManifestVersion: 2
 Bundle-Name: Tormozit EDT plugin
 Bundle-SymbolicName: tormozit.edt;singleton:=true
 Bundle-Vendor: Tormozit
-Bundle-Version: 1.0.0.7
+Bundle-Version: 1.0.0.8
 Bundle-Activator: tormozit.edt.Activator
 Bundle-ActivationPolicy: lazy
 Bundle-Localization: plugin
