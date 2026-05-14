@@ -27,7 +27,6 @@ import org.eclipse.e4.ui.model.application.ui.basic.MPart;
 
 import com._1c.g5.v8.dt.compare.core.IComparisonSession;
 import com._1c.g5.v8.dt.compare.model.MatchedObjectsComparisonNode;
-import com._1c.g5.v8.dt.ui.aef.models.NavigatorTreeModel;
 
 import tormozit.edt.handlers.OpenObjectHandler;
 

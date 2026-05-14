@@ -20,13 +20,18 @@ import org.eclipse.jface.viewers.ViewerCell;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
+import org.eclipse.swt.events.MouseAdapter;
+import org.eclipse.swt.events.MouseEvent;
+import org.eclipse.swt.events.MouseMoveListener;
 import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.events.SelectionEvent;
+import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Tree;
+import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.IActionBars;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IStartup;
@@ -39,56 +44,44 @@ import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 
-    /**
-     * Хук панели «Приложения» EDT.
-     *
-     * <p>Добавляет в панель:
-     * <ul>
-     *   <li>Многоколоночное дерево: колонка 0 делегирует к оригинальному
-     *       {@code DecoratingStyledCellLabelProvider} EDT, колонка 1 показывает
-     *       «Начало сеанса конфигуратора» (временно отключено). Создание {@code TreeViewerColumn}
-     *       вызывает {@code clearLegacyRenderer()}, который уничтожает
-     *       {@code OwnerDrawLabelProvider} EDT; мы сохраняем ссылку на старый
-     *       провайдер и продолжаем делегировать к его {@code update(cell)}.</li>
-     *   <li>Кнопку «Отключить конфигуратор» в тулбар панели.</li>
-     *   <li>Пункт «Отключить конфигуратор» в контекстное меню списка.</li>
-     * </ul>
-     *
-     * <p>Временная модификация: обращения к ComConnectionRegistry удалены.
-     * Подключение конфигуратора выполняется EDT через createClientAndConnect() в
-     * com._1c.g5.v8.dt.internal.platform.services.core.runtimes.execution.DesignerSessionPool.
-     * Хук должен подписаться на эти события и запоминать дату факта подключения
-     * в колонке списка (в будущей реализации).
-     * Команда "Отключить конфигуратор" должна вызывать release() в том же классе
-     * для выбранных баз (в будущей реализации).
-     */
+/**
+ * Хук панели «Приложения» EDT.
+ *
+ * <p>Добавляет:
+ * <ul>
+ *   <li>Колонку «Конфигуратор» — дата начала SSH-сеанса, статус.</li>
+ *   <li>Клик по ячейке активного сеанса → отключение.</li>
+ *   <li>Кнопку «Отключить конфигуратор» в тулбар.</li>
+ *   <li>Кнопку «Диагностика пула» — пишет полный дамп в Error Log.</li>
+ *   <li>Пункт «Отключить конфигуратор» в контекстное меню.</li>
+ * </ul>
+ */
 public class ApplicationsViewHook implements IStartup
 {
-    // ---- Константы ----
-
     private static final String APPLICATIONS_VIEW_CLASS =
         "com.e1c.g5.dt.internal.applications.ui.view.ApplicationsView"; //$NON-NLS-1$
 
-    private static final String CMD_DISCONNECT_TITLE = "Освободить конфигуратор"; 
-    private static final String CMD_DISCONNECT_TOOLTIP = "Освободить конфигураторы выбранных инфобаз"; 
-    private static final String COL_CONFIG_TOOLTIP = "Начало сеанса конфигуратора"; 
-    private static final String COL_CONFIG_TITLE = "Конфигуратор"; 
+    private static final String COL_CONFIG_TITLE   = "Конфигуратор";
+    private static final String COL_CONFIG_TOOLTIP =
+        "Дата начала SSH-сеанса конфигуратора. Нажмите ячейку для отключения.";
+    private static final int    COL_DB_WIDTH     = 200;
     private static final int    COL_CONFIG_WIDTH = 165;
 
     private static final DateTimeFormatter DATE_FMT =
         DateTimeFormatter.ofPattern("dd.MM.yyyy HH:mm:ss"); //$NON-NLS-1$
 
-    // -----------------------------------------------------------------------
+    // =======================================================================
     // IStartup
-    // -----------------------------------------------------------------------
+    // =======================================================================
 
     @Override
     public void earlyStartup()
     {
+        DesignerSessionPoolAccessor.getInstance().startPolling();
+
         Display.getDefault().asyncExec(() ->
         {
             IWorkbench wb = PlatformUI.getWorkbench();
-
             for (IWorkbenchWindow w : wb.getWorkbenchWindows())
                 hookWindow(w);
 
@@ -102,22 +95,19 @@ public class ApplicationsViewHook implements IStartup
         });
     }
 
-    // -----------------------------------------------------------------------
+    // =======================================================================
     // Подключение к окну / панели
-    // -----------------------------------------------------------------------
+    // =======================================================================
 
     private void hookWindow(IWorkbenchWindow window)
     {
         IWorkbenchPage page = window.getActivePage();
         if (page != null)
-        {
             for (IViewReference ref : page.getViewReferences())
             {
                 IViewPart view = ref.getView(false);
-                if (isApplicationsView(view))
-                    hookView(view);
+                if (isApplicationsView(view)) hookView(view);
             }
-        }
 
         window.getPartService().addPartListener(new IPartListener2()
         {
@@ -126,10 +116,8 @@ public class ApplicationsViewHook implements IStartup
             {
                 IWorkbenchPart part = ref.getPart(false);
                 if (isApplicationsView(part))
-                    // asyncExec: даём partControl завершить возможные отложенные init
                     Display.getDefault().asyncExec(() -> hookView(part));
             }
-
             @Override public void partActivated(IWorkbenchPartReference r)    {}
             @Override public void partBroughtToTop(IWorkbenchPartReference r) {}
             @Override public void partClosed(IWorkbenchPartReference r)       {}
@@ -146,9 +134,9 @@ public class ApplicationsViewHook implements IStartup
                APPLICATIONS_VIEW_CLASS.equals(part.getClass().getName());
     }
 
-    // -----------------------------------------------------------------------
-    // Основная логика хука
-    // -----------------------------------------------------------------------
+    // =======================================================================
+    // Хук панели
+    // =======================================================================
 
     private void hookView(Object part)
     {
@@ -163,211 +151,299 @@ public class ApplicationsViewHook implements IStartup
 
         if (control instanceof Tree)
         {
-            setupMultiColumnTree(viewer, (Tree) control);
+            Tree tree = (Tree) control;
+            setupMultiColumnTree(viewer, tree);
+            addClickableColumn(viewer, tree);
         }
 
-         addToolbarButton(view, viewer, control);
-         addContextMenuItem(viewer, control);
-     }
+        addToolbarButtons(view, viewer);
+        addContextMenuItem(viewer, control);
+        registerRedrawOnPoolChange(viewer);
+    }
 
-    // -----------------------------------------------------------------------
-    // 1. Многоколоночное дерево с сохранением оригинального рендерера
-    // -----------------------------------------------------------------------
+    // =======================================================================
+    // 1. Многоколоночное дерево
+    // =======================================================================
 
-    /**
-     * Настраивает TreeViewer на две колонки.
-     *
-     * <p>Перед созданием {@link TreeViewerColumn} сохраняем оригинальный
-     * label provider EDT. Конструктор {@code ViewerColumn} вызывает
-     * {@code viewer.clearLegacyRenderer()}, который делает
-     * {@code disposeOwnerDrawLabelProvider()}, но сам объект-провайдер
-     * остаётся жив и его {@code update(ViewerCell)} продолжает отдавать
-     * текст и иконку. Мы делегируем к нему из провайдера колонки&nbsp;0.
-     */
     private void setupMultiColumnTree(ColumnViewer viewer, Tree tree)
     {
-        // Защита от повторного применения
-        if (tree.getColumnCount() > 0 || tree.getHeaderVisible())
-            return;
+        if (tree.getColumnCount() > 0 || tree.getHeaderVisible()) return;
 
-        // Сохраняем старый label provider ДО создания TreeViewerColumn
-        final IBaseLabelProvider oldProvider = viewer.getLabelProvider();
+        final IBaseLabelProvider origProvider = viewer.getLabelProvider();
 
-        // Колонка 0 — делегируем к оригинальному рендереру EDT
-        TreeViewerColumn col0 = new TreeViewerColumn((TreeViewer)viewer, SWT.NONE);
+        // Колонка 0 — «Инфобаза»
+        TreeViewerColumn col0 = new TreeViewerColumn((TreeViewer) viewer, SWT.NONE);
         col0.getColumn().setText("Инфобаза");
-        col0.getColumn().setWidth(200);
+        col0.getColumn().setWidth(COL_DB_WIDTH);
         col0.getColumn().setResizable(true);
         col0.setLabelProvider(new CellLabelProvider()
         {
             @Override
             public void update(ViewerCell cell)
             {
-                if (oldProvider instanceof CellLabelProvider)
+                if (origProvider instanceof CellLabelProvider)
+                    ((CellLabelProvider) origProvider).update(cell);
+                else if (origProvider instanceof ILabelProvider)
                 {
-                    ((CellLabelProvider) oldProvider).update(cell);
-                }
-                else if (oldProvider instanceof ILabelProvider)
-                {
-                    ILabelProvider lp = (ILabelProvider) oldProvider;
-                    Object element = cell.getElement();
-                    cell.setText(lp.getText(element));
-                    cell.setImage(lp.getImage(element));
+                    ILabelProvider lp = (ILabelProvider) origProvider;
+                    cell.setText(lp.getText(cell.getElement()));
+                    cell.setImage(lp.getImage(cell.getElement()));
                 }
             }
         });
 
-        // Колонка 1 — дата начала сеанса конфигуратора
-         TreeViewerColumn col1 = new TreeViewerColumn((TreeViewer)viewer, SWT.NONE);
-         col1.getColumn().setText(COL_CONFIG_TITLE);
-         col1.getColumn().setToolTipText(COL_CONFIG_TOOLTIP);
-         col1.getColumn().setWidth(COL_CONFIG_WIDTH);
-         col1.getColumn().setResizable(true);
-         col1.setLabelProvider(new CellLabelProvider()
-         {
-             @Override
-             public void update(ViewerCell cell)
-             {
-                 String key = extractKey(cell.getElement());
-                 LocalDateTime dt = null;
-                 String text = (dt != null) ? DATE_FMT.format(dt) : "не подключено";
-                 cell.setText(text);
-             }
-         });
+        // Колонка 1 — «Конфигуратор»
+        TreeViewerColumn col1 = new TreeViewerColumn((TreeViewer) viewer, SWT.NONE);
+        col1.getColumn().setText(COL_CONFIG_TITLE);
+        col1.getColumn().setToolTipText(COL_CONFIG_TOOLTIP);
+        col1.getColumn().setWidth(COL_CONFIG_WIDTH);
+        col1.getColumn().setResizable(true);
+        col1.setLabelProvider(new CellLabelProvider()
+        {
+            @Override
+            public void update(ViewerCell cell)
+            {
+                Object element = cell.getElement();
+                DesignerSessionPoolAccessor acc = DesignerSessionPoolAccessor.getInstance();
+                LocalDateTime start = acc.getSessionStart(acc.findPoolKey(element));
+                if (start != null)
+                {
+                    cell.setText("\u25CF " + DATE_FMT.format(start)); // ● дата //$NON-NLS-1$
+                    cell.setForeground(
+                        cell.getControl().getDisplay().getSystemColor(SWT.COLOR_DARK_GREEN));
+                }
+                else
+                {
+                    cell.setText("\u2014"); // — //$NON-NLS-1$
+                    cell.setForeground(
+                        cell.getControl().getDisplay().getSystemColor(SWT.COLOR_DARK_GRAY));
+                }
+                cell.setBackground(null);
+            }
+
+            @Override
+            public String getToolTipText(Object element)
+            {
+                return DesignerSessionPoolAccessor.getInstance().isConnected(element)
+                    ? "Нажмите для отключения конфигуратора"
+                    : "Конфигуратор не подключён";
+            }
+        });
 
         tree.setHeaderVisible(true);
         tree.setLinesVisible(true);
     }
 
-    // -----------------------------------------------------------------------
-    // 2. Кнопка в тулбаре панели
-    // -----------------------------------------------------------------------
+    // =======================================================================
+    // 2. Кликабельная колонка
+    // =======================================================================
 
-    private void addToolbarButton(IViewPart view, ColumnViewer viewer, Control control)
+    private void addClickableColumn(ColumnViewer viewer, Tree tree)
     {
-        IActionBars actionBars = view.getViewSite().getActionBars();
-        IToolBarManager toolbar = actionBars.getToolBarManager();
-
-        Action action = new Action(CMD_DISCONNECT_TITLE)
+        // Смена курсора при наведении
+        tree.addMouseMoveListener(new MouseMoveListener()
         {
             @Override
-            public void run()
+            public void mouseMove(MouseEvent e)
             {
-                disconnectSelected(viewer);
-                // Перерисовка инициируется слушателем реестра в registerRedrawOnRegistryChange
+                boolean hand = columnAt(tree, e.x, e.y) == 1 && connectedAt(tree, e.x, e.y);
+                tree.setCursor(hand ? tree.getDisplay().getSystemCursor(SWT.CURSOR_HAND) : null);
             }
-        };
-        action.setToolTipText(CMD_DISCONNECT_TOOLTIP);
-        toolbar.add(new Separator());
-        toolbar.add(action);
-        actionBars.updateActionBars();
+        });
+
+        // Клик ЛКМ
+        tree.addMouseListener(new MouseAdapter()
+        {
+            @Override
+            public void mouseDown(MouseEvent e)
+            {
+                if (e.button != 1) return;
+
+                int col = columnAt(tree, e.x, e.y);
+                if (col != 1) return;
+                TreeItem item = itemAt(tree, e.x, e.y);
+                if (item == null)
+                {
+                    DesignerSessionPoolAccessor.log("col1 click: TreeItem not found"); //$NON-NLS-1$
+                    return;
+                }
+
+                Object element = item.getData();
+                DesignerSessionPoolAccessor acc = DesignerSessionPoolAccessor.getInstance();
+                Object poolKey = acc.findPoolKey(element);
+                if (poolKey == null) return;
+                acc.release(poolKey);
+                if (!viewer.getControl().isDisposed())
+                    viewer.update(element, null);
+            }
+        });
     }
 
-    // -----------------------------------------------------------------------
-    // 3. Пункт в контекстном меню
-    // -----------------------------------------------------------------------
+    // =======================================================================
+    // 3. Кнопки тулбара
+    // =======================================================================
+
+    private void addToolbarButtons(IViewPart view, ColumnViewer viewer)
+    {
+        IActionBars bars = view.getViewSite().getActionBars();
+        IToolBarManager tb = bars.getToolBarManager();
+
+        // «Отключить конфигуратор»
+        Action disconnect = new Action("Отключить конфигуратор")
+        {
+            @Override
+            public void run() { disconnectSelected(viewer); }
+        };
+        disconnect.setToolTipText("Отключить SSH-сеансы конфигуратора выбранных инфобаз");
+        tb.add(new Separator());
+        tb.add(disconnect);
+        bars.updateActionBars();
+    }
+
+    // =======================================================================
+    // 4. Контекстное меню
+    // =======================================================================
 
     private void addContextMenuItem(ColumnViewer viewer, Control control)
     {
         Menu menu = control.getMenu();
-        if (menu == null)
-        {
-            menu = new Menu(control);
-            control.setMenu(menu);
-        }
-
+        if (menu == null) { menu = new Menu(control); control.setMenu(menu); }
         final Menu finalMenu = menu;
 
         MenuAdapter adapter = new MenuAdapter()
         {
-            private final List<MenuItem> addedItems = new ArrayList<>(2);
+            private final List<MenuItem> added = new ArrayList<>(2);
 
             @Override
             public void menuShown(MenuEvent e)
             {
-                IStructuredSelection sel =
-                    (IStructuredSelection) viewer.getSelection();
+                IStructuredSelection sel = (IStructuredSelection) viewer.getSelection();
                 if (sel.isEmpty()) return;
+                DesignerSessionPoolAccessor acc = DesignerSessionPoolAccessor.getInstance();
+                if (sel.toList().stream().noneMatch(acc::isConnected)) return;
 
-                // Показываем пункт только если среди выбранных есть активные сеансы
-                 boolean anyConnected = false;
-                if (!anyConnected) return;
-
-                addedItems.add(new MenuItem(finalMenu, SWT.SEPARATOR));
-
+                added.add(new MenuItem(finalMenu, SWT.SEPARATOR));
                 MenuItem item = new MenuItem(finalMenu, SWT.PUSH);
-                item.setText(CMD_DISCONNECT_TITLE);
-
-                final IStructuredSelection capturedSel = sel;
+                item.setText("Отключить конфигуратор");
+                final IStructuredSelection snap = sel;
                 item.addSelectionListener(new SelectionAdapter()
                 {
                     @Override
                     public void widgetSelected(SelectionEvent ev)
                     {
-                        disconnectItems(capturedSel.toList());
+                        disconnectItems(snap.toList(), viewer);
                     }
                 });
-                addedItems.add(item);
+                added.add(item);
             }
 
             @Override
             public void menuHidden(MenuEvent e)
             {
-                // asyncExec: сначала доставляем widgetSelected, потом dispose
-                Display display = ((Menu) e.widget).getDisplay();
-                List<MenuItem> toDispose = new ArrayList<>(addedItems);
-                addedItems.clear();
-                display.asyncExec(() ->
-                {
-                    for (MenuItem mi : toDispose)
-                        if (!mi.isDisposed()) mi.dispose();
-                });
+                List<MenuItem> toDispose = new ArrayList<>(added);
+                added.clear();
+                ((Menu)e.widget).getDisplay().asyncExec(() ->
+                    toDispose.forEach(mi -> { if (!mi.isDisposed()) mi.dispose(); }));
             }
         };
 
         menu.addMenuListener(adapter);
         control.addDisposeListener(
-            e -> { if (!finalMenu.isDisposed()) finalMenu.removeMenuListener(adapter); });
+            ev -> { if (!finalMenu.isDisposed()) finalMenu.removeMenuListener(adapter); });
     }
 
-    // -----------------------------------------------------------------------
-    // 4. Перерисовка при изменении реестра
-    // -----------------------------------------------------------------------
+    // =======================================================================
+    // 5. Автообновление при смене состояния пула
+    // =======================================================================
 
+    private void registerRedrawOnPoolChange(ColumnViewer viewer)
+    {
+        DesignerSessionPoolAccessor acc = DesignerSessionPoolAccessor.getInstance();
+        Runnable listener = () ->
+            Display.getDefault().asyncExec(() ->
+            {
+                Control c = viewer.getControl();
+                if (c != null && !c.isDisposed()) viewer.refresh();
+            });
+        acc.addChangeListener(listener);
+        viewer.getControl().addDisposeListener(e -> acc.removeChangeListener(listener));
+    }
 
-
-    // -----------------------------------------------------------------------
-    // Действия "Отключить конфигуратор"
-    // -----------------------------------------------------------------------
+    // =======================================================================
+    // Отключение
+    // =======================================================================
 
     private void disconnectSelected(ColumnViewer viewer)
     {
         IStructuredSelection sel = (IStructuredSelection) viewer.getSelection();
-        if (!sel.isEmpty())
-            disconnectItems(sel.toList());
+        if (!sel.isEmpty()) disconnectItems(sel.toList(), viewer);
     }
 
-     private void disconnectItems(List<?> items)
-     {
-         for (Object item : items)
-         {
-             String key = extractKey(item);
-             // Временная модификация: отключение через ComConnectionRegistry отключено
-             // TODO: Реализовать отключение через DesignerSessionPool.release()
-             // if (ComConnectionRegistry.isConnected(key))
-             //     ComConnectionRegistry.disconnect(key);
-                 // disconnect() уведомляет слушателей → registerRedrawOnRegistryChange → refresh
-         }
-     }
+    private void disconnectItems(List<?> elements, ColumnViewer viewer)
+    {
+        DesignerSessionPoolAccessor acc = DesignerSessionPoolAccessor.getInstance();
+        boolean any = false;
+        for (Object el : elements)
+        {
+            Object key = acc.findPoolKey(el);
+            if (key != null) { acc.release(key); any = true; }
+        }
+        if (any)
+            Display.getDefault().asyncExec(() ->
+            {
+                if (!viewer.getControl().isDisposed()) viewer.refresh();
+            });
+    }
 
-    // -----------------------------------------------------------------------
-    // Поиск ColumnViewer через рефлексию
-    // -----------------------------------------------------------------------
+    // =======================================================================
+    // Вспомогательные методы — дерево
+    // =======================================================================
 
-    /**
-     * Перебирает все поля класса вида и его суперклассов в поисках
-     * первого {@link ColumnViewer}. Не зависит от имени поля в EDT.
-     */
+    private static int columnAt(Tree tree, int x, int y)
+    {
+        TreeItem item = itemAt(tree, x, y);
+        if (item == null) return -1;
+        for (int i = 0; i < tree.getColumnCount(); i++)
+            if (item.getBounds(i).contains(x, y)) return i;
+        return -1;
+    }
+
+    private static boolean connectedAt(Tree tree, int x, int y)
+    {
+        TreeItem item = itemAt(tree, x, y);
+        return item != null &&
+               DesignerSessionPoolAccessor.getInstance().isConnected(item.getData());
+    }
+
+    private static TreeItem itemAt(Tree tree, int x, int y)
+    {
+        TreeItem item = tree.getItem(new Point(x, y));
+        if (item != null) return item;
+        for (TreeItem ti : tree.getItems())
+        {
+            TreeItem found = findInItem(ti, x, y);
+            if (found != null) return found;
+        }
+        return null;
+    }
+
+    private static TreeItem findInItem(TreeItem ti, int x, int y)
+    {
+        for (int i = 0; i < ti.getParent().getColumnCount(); i++)
+            if (ti.getBounds(i).contains(x, y)) return ti;
+        if (ti.getExpanded())
+            for (TreeItem child : ti.getItems())
+            {
+                TreeItem found = findInItem(child, x, y);
+                if (found != null) return found;
+            }
+        return null;
+    }
+
+    // =======================================================================
+    // Вспомогательные методы — viewer
+    // =======================================================================
+
     private static ColumnViewer findViewer(Object view)
     {
         Class<?> cls = view.getClass();
@@ -380,8 +456,7 @@ public class ApplicationsViewHook implements IStartup
                 {
                     f.setAccessible(true);
                     Object val = f.get(view);
-                    if (val instanceof ColumnViewer)
-                        return (ColumnViewer) val;
+                    if (val instanceof ColumnViewer) return (ColumnViewer) val;
                 }
                 catch (Exception ignored) {}
             }
@@ -390,34 +465,8 @@ public class ApplicationsViewHook implements IStartup
         return null;
     }
 
-    // -----------------------------------------------------------------------
-    // Извлечение ключа из элемента строки
-    // -----------------------------------------------------------------------
-
-    /**
-     * Возвращает строковый ключ для элемента строки вьюера.
-     * Пробует: {@code getName()} → {@code getTitle()} → {@code toString()}.
-     */
     static String extractKey(Object item)
     {
-        if (item == null) return ""; //$NON-NLS-1$
-
-        String name = invokeString(item, "getName"); //$NON-NLS-1$
-        if (name != null && !name.isEmpty()) return name;
-
-        String title = invokeString(item, "getTitle"); //$NON-NLS-1$
-        if (title != null && !title.isEmpty()) return title;
-
-        return item.toString();
-    }
-
-    private static String invokeString(Object obj, String method)
-    {
-        try
-        {
-            Object r = obj.getClass().getMethod(method).invoke(obj);
-            return r instanceof String ? (String) r : null;
-        }
-        catch (Exception ignored) { return null; }
+        return DesignerSessionPoolAccessor.nameOf(item);
     }
 }

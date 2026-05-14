@@ -364,7 +364,7 @@ public class CompareEditorMenuHook implements IStartup {
 
     // ---- Утилиты рефлексии ----
 
-    private Object getField(Object obj, String name) {
+    public static Object getField(Object obj, String name) {
         Class<?> cls = obj.getClass();
         while (cls != null) {
             try {

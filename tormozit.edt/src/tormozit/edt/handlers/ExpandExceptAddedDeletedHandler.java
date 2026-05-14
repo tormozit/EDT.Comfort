@@ -16,6 +16,8 @@ import org.eclipse.ui.IEditorPart;
 
 import com._1c.g5.v8.dt.compare.model.MatchedObjectsComparisonNode;
 import com._1c.g5.v8.dt.compare.ui.editor.DtComparisonView;
+import com._1c.g5.v8.dt.compare.ui.partialmodel.node.AbstractDirectPartialModelNode;
+import com._1c.g5.v8.dt.compare.ui.partialmodel.node.ProjectPartialModelNode;
 
 public class ExpandExceptAddedDeletedHandler extends AbstractHandler
 {
@@ -103,8 +105,25 @@ public class ExpandExceptAddedDeletedHandler extends AbstractHandler
      */
     private static boolean isAddedOrDeleted(Object element)
     {
-        MatchedObjectsComparisonNode node = extractMatchedNode(element);
-        return !(node == null || node.getNodeSide()== null);
+        boolean isCheckable = true;
+        try
+        {
+            Method methodDesc = element.getClass().getMethod("isCheckable"); //$NON-NLS-1$
+            isCheckable = (Boolean)methodDesc.invoke(element);
+        }
+        catch (Exception e)
+        {
+            // TODO Auto-generated catch block
+            e.printStackTrace();
+        }
+        boolean is = true;
+        if (isCheckable)
+        {
+            MatchedObjectsComparisonNode node = extractMatchedNode(element);
+            is = !(node == null || node.getNodeSide() == null)
+                || (node != null && !node.getComparisonFlags().hasDiffsMainOther());
+        }
+        return is;
     }
 
     /**
