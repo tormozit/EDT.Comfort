@@ -1,7 +1,6 @@
 package tormozit.edt.handlers;
 
 import java.lang.reflect.Field;
-import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.HashSet;
 import java.util.Set;
@@ -21,14 +20,16 @@ import com._1c.g5.v8.dt.compare.ui.partialmodel.node.ProjectPartialModelNode;
 
 public class ExpandExceptAddedDeletedHandler extends AbstractHandler
 {
-    private static Method retrieveMethodCache = null; // мало полезный кэш рефлексии
+    private static Method retrieveMethodCache = null;
+
     @Override
     public Object execute(ExecutionEvent event) throws ExecutionException
     {
         return null;
     }
 
-    public static Object expand(IEditorPart editor, ExpandMode mode) {
+    public static Object expand(IEditorPart editor, ExpandMode mode)
+    {
         AbstractTreeViewer viewer = getTreeViewer(editor);
         if (viewer == null) return null;
 
@@ -36,17 +37,18 @@ public class ExpandExceptAddedDeletedHandler extends AbstractHandler
         if (cp == null) return null;
 
         ISelection selection = viewer.getSelection();
-        
-        // Набор элементов, которые будут развернуты
+
         Set<Object> toExpand = new HashSet<>();
 
         viewer.collapseAll();
-        for (Object root : cp.getElements(viewer.getInput())) {
+        for (Object root : cp.getElements(viewer.getInput()))
+        {
             collectElementsToExpand(cp, root, mode, toExpand);
         }
         viewer.setExpandedElements(toExpand.toArray());
 
-        if (selection != null && !selection.isEmpty()) {
+        if (selection != null && !selection.isEmpty())
+        {
             viewer.setSelection(selection, true);
         }
         return null;
@@ -56,13 +58,16 @@ public class ExpandExceptAddedDeletedHandler extends AbstractHandler
      * Рекурсивно собирает список узлов для раскрытия.
      * Никаких вызовов вьювера внутри!
      */
-    private static void collectElementsToExpand(ITreeContentProvider cp, Object element, 
-                                              ExpandMode mode, Set<Object> toExpand) {
-        if (false 
-            || !cp.hasChildren(element)
-            || mode == ExpandMode.toBothElement && isAddedOrDeleted(element)
-            || mode == ExpandMode.toObject && isObject(element))
-            return;       
+    private static void collectElementsToExpand(ITreeContentProvider cp, Object element,
+                                                ExpandMode mode, Set<Object> toExpand)
+    {
+        if (false
+                || !cp.hasChildren(element)
+                || mode == ExpandMode.toBothElement && isAddedOrDeleted(element)
+                || mode == ExpandMode.toObject      && isObject(element)
+                || mode == ExpandMode.toMarked      && !isMarked(element))
+            return;
+
         toExpand.add(element);
         Object[] children;
         try
@@ -75,17 +80,41 @@ public class ExpandExceptAddedDeletedHandler extends AbstractHandler
             e.printStackTrace();
             return;
         }
-        for (Object child : children) {
+        for (Object child : children)
+        {
             collectElementsToExpand(cp, child, mode, toExpand);
         }
     }
 
     /**
-     * Возвращает {@code true}, если элемент является узлом объекта конфигурации
-     * (имеет хотя бы один ненулевой BM-идентификатор в {@link MatchedObjectsComparisonNode}).
-     *
-     * <p><b>Не вызывает {@code getEObject()} и не открывает BM-транзакцию</b> —
-     * только проверяет поля узла, что на порядок быстрее.
+     * Возвращает {@code true} если у узла установлен чекбокс в дереве сравнения.
+     */
+    private static boolean isMarked(Object element)
+    {
+        boolean isChecked = false;
+        try
+        {
+            Method methodDesc = element.getClass().getMethod("isChecked"); //$NON-NLS-1$
+            isChecked = (Boolean) methodDesc.invoke(element);
+//            return isChecked;
+        }
+        catch (Exception e)
+        {
+            e.printStackTrace();
+        }
+        boolean is = false;
+        if (isChecked)
+        {
+            MatchedObjectsComparisonNode node = extractMatchedNode(element);
+            is = !(node == null || node.getNodeSide() == null)
+                || (node != null && !node.getComparisonFlags().hasDiffsMainOther());
+            is = !is;
+        }
+        return is;
+    }
+
+    /**
+     * Возвращает {@code true} если элемент является узлом объекта конфигурации.
      */
     private static boolean isObject(Object element)
     {
@@ -100,7 +129,7 @@ public class ExpandExceptAddedDeletedHandler extends AbstractHandler
     }
 
     /**
-     * Возвращает {@code true}, если объект присутствует только в одной стороне
+     * Возвращает {@code true} если объект присутствует только в одной стороне
      * сравнения (добавлен или удалён).
      */
     private static boolean isAddedOrDeleted(Object element)
@@ -109,11 +138,10 @@ public class ExpandExceptAddedDeletedHandler extends AbstractHandler
         try
         {
             Method methodDesc = element.getClass().getMethod("isCheckable"); //$NON-NLS-1$
-            isCheckable = (Boolean)methodDesc.invoke(element);
+            isCheckable = (Boolean) methodDesc.invoke(element);
         }
         catch (Exception e)
         {
-            // TODO Auto-generated catch block
             e.printStackTrace();
         }
         boolean is = true;
@@ -127,12 +155,12 @@ public class ExpandExceptAddedDeletedHandler extends AbstractHandler
     }
 
     /**
-     * Извлекает {@link MatchedObjectsComparisonNode} из обёртки элемента дерева,
-     * или {@code null} если элемент не является таким узлом.
+     * Извлекает {@link MatchedObjectsComparisonNode} из обёртки элемента дерева.
      */
     private static MatchedObjectsComparisonNode extractMatchedNode(Object element)
     {
-        if (retrieveMethodCache == null) {
+        if (retrieveMethodCache == null)
+        {
             try
             {
                 retrieveMethodCache = element.getClass().getMethod("retrieveComparisonNode"); //$NON-NLS-1$
@@ -158,7 +186,7 @@ public class ExpandExceptAddedDeletedHandler extends AbstractHandler
         return null;
     }
 
-    // ---- Получение TreeViewer из редактора ----
+    // ---- Утилиты рефлексии ----
 
     private static AbstractTreeViewer getTreeViewer(IEditorPart editor)
     {
@@ -175,8 +203,6 @@ public class ExpandExceptAddedDeletedHandler extends AbstractHandler
             ? (AbstractTreeViewer) viewer : null;
     }
 
-    // ---- Утилиты рефлексии ----
-
     static Object getField(Object obj, String name)
     {
         Class<?> cls = obj.getClass();
@@ -188,22 +214,15 @@ public class ExpandExceptAddedDeletedHandler extends AbstractHandler
                 f.setAccessible(true);
                 return f.get(obj);
             }
-            catch (NoSuchFieldException ignored)
-            {
-                cls = cls.getSuperclass();
-            }
-            catch (Exception ignored)
-            {
-                return null;
-            }
+            catch (NoSuchFieldException ignored) { cls = cls.getSuperclass(); }
+            catch (Exception ignored)            { return null; }
         }
         return null;
     }
 
     static Object invokeNoArg(Object o, String name)
     {
-        if (o == null)
-            return null;
+        if (o == null) return null;
         try
         {
             return o.getClass().getMethod(name).invoke(o);

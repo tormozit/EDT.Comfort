@@ -400,7 +400,7 @@ public final class DesignerSessionPoolAccessor
         return b != null ? b.getBundleContext() : null;
     }
 
-    private static Object tryCall(Object obj, String method)
+    public static Object tryCall(Object obj, String method)
     {
         if (obj == null) return null;
         try { return obj.getClass().getMethod(method).invoke(obj); }
