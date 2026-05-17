@@ -1,7 +1,5 @@
 package tormozit.edt.selection;
 
-import java.lang.reflect.Field;
-import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
@@ -28,6 +26,7 @@ import org.eclipse.e4.ui.model.application.ui.basic.MPart;
 import com._1c.g5.v8.dt.compare.core.IComparisonSession;
 import com._1c.g5.v8.dt.compare.model.MatchedObjectsComparisonNode;
 
+import tormozit.edt.Reflect;
 import tormozit.edt.handlers.OpenObjectHandler;
 
 /**
@@ -180,22 +179,12 @@ public class CompareEditorSelectionProvider
     /**
      * Проверка состояния кнопки "Link with Editor"
      */
-    private boolean isLinkingEnabled(CommonNavigator navigator) {
-        try {
-            // Способ 1: Через метод isLinkingEnabled() (если он доступен в этой версии EDT)
-            Method method = navigator.getClass().getMethod("isLinkingEnabled");
-            return (boolean) method.invoke(navigator);
-        } catch (Exception e) {
-            try {
-                // Способ 2: Через внутреннее поле, если метод скрыт
-                Field field = CommonNavigator.class.getDeclaredField("isLinkingEnabled");
-                field.setAccessible(true);
-                return field.getBoolean(navigator);
-            } catch (Exception e2) {
-                // Если не удалось определить — лучше не двигать дерево (безопасный вариант)
-                return false; 
-            }
-        }
+    private boolean isLinkingEnabled(CommonNavigator navigator)
+    {
+        Object result = Reflect.call(navigator, "isLinkingEnabled");
+        if (result instanceof Boolean) return (Boolean) result;
+        result = Reflect.getField(navigator, "isLinkingEnabled");
+        return result instanceof Boolean && (Boolean) result;
     }
     
     /**
@@ -235,19 +224,19 @@ public class CompareEditorSelectionProvider
     public static IComparisonSession getSession(IEditorPart editor)
     {
         // Из comparisonArtifactsList
-        Object list = OpenObjectHandler.getField(editor, "comparisonArtifactsList");
+        Object list = Reflect.getField(editor, "comparisonArtifactsList");
         if (list instanceof List) {
             for (Object artifact : (List<?>) list) {
-                Object session = OpenObjectHandler.invokeNoArg(artifact, "getSession");
+                Object session = Reflect.call(artifact, "getSession");
                 if (session instanceof IComparisonSession) {
                     return (IComparisonSession) session;
                 }
             }
         }
         // Fallback: из root
-        Object root = OpenObjectHandler.getField(editor, "root");
+        Object root = Reflect.getField(editor, "root");
         if (root != null) {
-            Object session = OpenObjectHandler.invokeNoArg(root, "getComparisonSession");
+            Object session = Reflect.call(root, "getComparisonSession");
             if (session instanceof IComparisonSession) return (IComparisonSession) session;
         }
         return null;
@@ -264,17 +253,9 @@ public class CompareEditorSelectionProvider
      */
     private static MatchedObjectsComparisonNode resolveMatchedNode(Object element)
     {
-        try
-        {
-            Object node = element.getClass()
-                    .getMethod("retrieveComparisonNode") //$NON-NLS-1$
-                    .invoke(element);
-            if (node instanceof MatchedObjectsComparisonNode)
-                return (MatchedObjectsComparisonNode) node;
-        }
-        catch (Exception ignored)
-        {
-        }
+        Object node = Reflect.call(element, "retrieveComparisonNode"); //$NON-NLS-1$
+        if (node instanceof MatchedObjectsComparisonNode)
+            return (MatchedObjectsComparisonNode) node;
         if (element instanceof MatchedObjectsComparisonNode)
             return (MatchedObjectsComparisonNode) element;
         return null;

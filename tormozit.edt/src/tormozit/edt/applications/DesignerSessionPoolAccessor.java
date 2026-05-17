@@ -1,5 +1,6 @@
 package tormozit.edt.applications;
 
+import java.io.File;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.time.LocalDateTime;
@@ -16,9 +17,10 @@ import org.eclipse.ui.PlatformUI;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.FrameworkUtil;
+import org.osgi.framework.InvalidSyntaxException;
 import org.osgi.framework.ServiceReference;
 
-import tormozit.edt.menu.CompareEditorMenuHook;
+import tormozit.edt.Reflect;
 
 /**
  * Рефлексивная обёртка над {@code DesignerSessionPool} EDT.
@@ -70,7 +72,7 @@ public final class DesignerSessionPoolAccessor
     }
 
     private DesignerSessionPoolAccessor() {}
-    volatile Object    pool;
+    volatile Object    pool; // com._1c.g5.v8.dt.internal.platform.services.core.runtimes.execution.DesignerSessionPool - не смог напрямую тип указать
     final List<Field>  mapFields      = new ArrayList<>();
 
     // -----------------------------------------------------------------------
@@ -126,35 +128,15 @@ public final class DesignerSessionPoolAccessor
         return Collections.unmodifiableSet(firstSeenTimes.keySet());
     }
 
-    public boolean isConnected(Object treeEl) { return findPoolKey(treeEl) != null; }
+    public boolean isConnected(Object infobase) {
+        return findPoolKey(infobase) != null;
+    }
 
-    // -----------------------------------------------------------------------
-    // Сопоставление элемента дерева с ключом пула
-    // -----------------------------------------------------------------------
-
-    /**
-     * Возвращает ключ пула для элемента дерева.
-     *
-     * <p>Ключ пула — строка вида {@code "uuid:version"}.
-     * Элемент дерева — {@code InfobaseApplication} с полем {@code infobase},
-     * у которого есть {@code uuid}.
-     *
-     * <p>Стратегии (по порядку):
-     * <ol>
-     *   <li>Прямое совпадение объектов.</li>
-     *   <li>UUID инфобазы: ищем ключ, начинающийся с {@code uuid + ":"}.</li>
-     *   <li>getProject() → совпадение проекта.</li>
-     *   <li>Строковое имя (fallback).</li>
-     * </ol>
-     */
-    public Object findPoolKey(Object el)
+    public Object findPoolKey(Object infobase)
     {
-        if (el == null) return null;
-        Set<Object> keys = firstSeenTimes.keySet();
-        if (keys.isEmpty()) return null;
-        UUID uuid = extractInfobaseUuid(el);
-        for (Object k : keys)
-            if (CompareEditorMenuHook.getField(k, "infobaseUuid") == uuid) 
+        UUID uuid = extractInfobaseUuid(infobase);
+        for (Object k : getActiveKeys())
+            if (Reflect.getField(k, "infobaseUuid") == uuid) 
                 return k;
         return null;
     }
@@ -163,19 +145,114 @@ public final class DesignerSessionPoolAccessor
      * Извлекает UUID инфобазы из элемента дерева.
      * Цепочка: el → getInfobase()/поле "infobase" → getUuid() / regex из toString().
      */
-    private static UUID extractInfobaseUuid(Object el)
+    private static UUID extractInfobaseUuid(Object infobase)
     {
-        if (el == null) return null;
-        Object infobase = tryCall(el, "getInfobase"); //$NON-NLS-1$
-        if (infobase == null)
-            infobase = readField(el, "infobase"); //$NON-NLS-1$
-        if (infobase == null) return null;
-        UUID uuid = (UUID) tryCall(infobase, "getUuid"); //$NON-NLS-1$
+        UUID uuid = (UUID) Reflect.call(infobase, "getUuid"); //$NON-NLS-1$
         if (uuid instanceof UUID)
             return uuid;
         return null;
     }
+    
+    /**
+     * Находит путь к {@code 1cv8.exe} (thick client) для заданной инфобазы.
+     *
+     * <p>Три стратегии по убыванию надёжности:
+     * <ol>
+     *   <li><b>getLocation()</b> — {@code DesignerSessionKey.installation}
+     *       ({@code RuntimeInstallation}) имеет метод {@code getLocation()},
+     *       возвращающий путь к директории платформы. Самый точный источник:
+     *       EDT знает именно ту установку, с которой работает.</li>
+     *   <li><b>Реестр</b> — {@code installationVersionWithBuild} из ключа пула
+     *       → {@code HKLM/HKCU\SOFTWARE\1C\1Cv8\{version}\InstallDir}.</li>
+     *   <li><b>ProcessHandle</b> (крайний случай) — {@code DesignerAgentConnection.agentProcess}
+     *       ({@code java.lang.Process}) → {@code ProcessHandle.of(pid).info().command()}.</li>
+     * </ol>
+     *
+     * @param infobase элемент дерева, для которого нужно найти exe
+     * @return абсолютный путь к {@code 1cv8.exe}, или {@code null} если не найдено
+     */
+    public String extractThickClientExe(Object infobase)
+    {
+        Object poolKey = findPoolKey(infobase);
+        if (poolKey == null)
+        {
+            log("эфф: poolKey не найден для инфобазы"); //$NON-NLS-1$
+            return null;
+        }
 
+        // Стратегия 1: RuntimeInstallation.getLocation()
+        // DesignerSessionKey.installation → RuntimeInstallation.getLocation() → директория платформы
+        Object installation = Reflect.getField(poolKey, "installation"); //$NON-NLS-1$
+        if (installation != null)
+        {
+            Object loc = Reflect.call(installation, "getLocation"); //$NON-NLS-1$
+            String dir  = locationToDir(loc);
+            if (dir != null)
+            {
+                String exe = dir + File.separator + "bin" + File.separator + "1cv8.exe"; //$NON-NLS-1$ //$NON-NLS-2$
+                if (new File(exe).exists())
+                {
+                    return exe;
+                }
+            }
+        }
+
+        // Стратегия 3 (крайний случай): DesignerAgentConnection.agentProcess → ProcessHandle
+        Object connVal = mapValue(poolKey);
+        if (connVal != null)
+        {
+            Object agentProc = Reflect.getField(connVal, "agentProcess"); //$NON-NLS-1$
+            if (agentProc instanceof Process)
+            {
+                Process p = (Process) agentProc;
+                String exe = exeFromProcess(p);
+                if (exe != null)
+                {
+                     return exe;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Преобразует результат {@code RuntimeInstallation.getLocation()} в путь к директории.
+     *
+     * <p>{@code getLocation()} может возвращать {@code String}, {@code java.net.URI}
+     * или EMF-URI вида {@code "file:/C:/Program Files/1cv8/8.3.25.1234"}.
+     */
+    private static String locationToDir(Object loc)
+    {
+        if (loc == null) return null;
+        String s = loc.toString().trim();
+        if (s.startsWith("file:/")) //$NON-NLS-1$
+        {
+            s = s.substring(6).replace('/', File.separatorChar);
+            // Windows: убираем ведущий \ перед "C:\"
+            if (s.startsWith("\\") && s.length() > 2 && s.charAt(2) == ':') //$NON-NLS-1$
+                s = s.substring(1);
+        }
+        // Убираем trailing separator
+        while (s.endsWith(File.separator) || s.endsWith("/")) //$NON-NLS-1$
+            s = s.substring(0, s.length() - 1);
+        return s.isEmpty() ? null : s;
+    }
+
+    /**
+     * Получает путь к исполняемому файлу процесса через {@code ProcessHandle}.
+     * Работает на Java 9+ (EDT использует Java 17).
+     */
+    private static String exeFromProcess(Process process)
+    {
+        try
+        {
+            return ProcessHandle.of(process.pid())
+                .flatMap(h -> h.info().command())
+                .orElse(null);
+        }
+        catch (Exception ignored) { return null; }
+    }
+    
     // -----------------------------------------------------------------------
     // release()
     // -----------------------------------------------------------------------
@@ -196,7 +273,7 @@ public final class DesignerSessionPoolAccessor
             try { 
                 Method m = connVal.getClass().getMethod("release", boolean.class, boolean.class);
                 m.invoke(connVal, true, true);
-                Map cachedConnections = (Map) CompareEditorMenuHook.getField(pool, "cachedConnections");
+                Map cachedConnections = (Map) Reflect.getField(pool, "cachedConnections");
                 cachedConnections.remove(poolKey);
                 return; 
             }
@@ -269,44 +346,46 @@ public final class DesignerSessionPoolAccessor
     private synchronized void ensurePool()
     {
         if (pool != null) return;
-        pool = strategy3_fieldScan();
-        if (pool != null) { log("Найден: field scan"); prepareReflection(); return; } //$NON-NLS-1$
-    }
-
-    // Стратегия 3: рекурсивное сканирование полей EDT-сервисов (РАБОТАЕТ)
-    private Object strategy3_fieldScan()
-    {
+        BundleContext ctx = ourContext();
+        if (ctx == null) return;
+        ServiceReference<Object>[] refs = null;
         try
         {
-            BundleContext ctx = ourContext();
-            if (ctx == null) return null;
-            @SuppressWarnings("unchecked")
-            ServiceReference<Object>[] refs =
-                (ServiceReference<Object>[]) ctx.getAllServiceReferences(null, null);
-            if (refs == null) return null;
-
-            Set<Object> visited = Collections.newSetFromMap(new IdentityHashMap<>());
-            for (ServiceReference<Object> ref : refs)
+            refs = (ServiceReference<Object>[]) ctx.getAllServiceReferences(null, null);
+        }
+        catch (InvalidSyntaxException e)
+        {
+            // TODO Auto-generated catch block
+            e.printStackTrace();
+        }
+        if (refs == null) return;
+        Set<Object> visited = Collections.newSetFromMap(new IdentityHashMap<>());
+        for (ServiceReference<Object> ref : refs)
+        {
+            Object svc = null;
+            try
             {
-                Object svc = null;
-                try
-                {
-                    svc = ctx.getService(ref);
-                    if (svc == null || !svc.getClass().getName().startsWith(EDT_PKG_PREFIX))
-                        continue;
-                    Object found = scanFields(svc, 0, visited);
-                    if (found != null) return found;
-                }
-                catch (Exception ignored) {}
-                finally
-                {
-                    if (svc != null)
-                        try { ctx.ungetService(ref); } catch (Exception ignored) {}
-                }
+                svc = ctx.getService(ref);
+                if (svc == null || !svc.getClass().getName().startsWith(EDT_PKG_PREFIX))
+                    continue;
+                Object found = scanFields(svc, 0, visited);
+                if (found != null) 
+                    {
+                        pool = found;
+                        break;
+                    }
+            }
+            catch (Exception ignored) {}
+            finally
+            {
+                if (svc != null)
+                    try { ctx.ungetService(ref); } catch (Exception ignored) {}
             }
         }
-        catch (Exception e) { log("S3 err: " + e); } //$NON-NLS-1$
-        return null;
+        if (pool != null) 
+        { 
+            prepareReflection(); 
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -405,29 +484,12 @@ public final class DesignerSessionPoolAccessor
         return b != null ? b.getBundleContext() : null;
     }
 
-    public static Object tryCall(Object obj, String method)
-    {
-        if (obj == null) return null;
-        try { return obj.getClass().getMethod(method).invoke(obj); }
-        catch (Exception e) { return null; }
-    }
-
-    private static Object readField(Object obj, String fieldName)
-    {
-        for (Class<?> c = obj.getClass(); c != null; c = c.getSuperclass())
-            for (Field f : c.getDeclaredFields())
-                if (fieldName.equals(f.getName()))
-                    try { f.setAccessible(true); return f.get(obj); }
-                    catch (Exception ignored) {}
-        return null;
-    }
-
     static String nameOf(Object obj)
     {
         if (obj == null) return ""; //$NON-NLS-1$
         for (String m : new String[]{ "getName", "getTitle", "getLocation" }) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         {
-            Object r = tryCall(obj, m);
+            Object r = Reflect.call(obj, m);
             if (r instanceof String && !((String) r).isEmpty()) return (String) r;
         }
         return obj.toString();

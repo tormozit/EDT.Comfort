@@ -1,6 +1,5 @@
 package tormozit.edt.menu;
 
-import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -37,6 +36,7 @@ import org.eclipse.ui.contexts.IContextService;
 import com._1c.g5.v8.dt.compare.model.MatchedObjectsComparisonNode;
 import com._1c.g5.v8.dt.compare.ui.editor.DtComparisonView;
 
+import tormozit.edt.Reflect;
 import tormozit.edt.assist.ContentAssistAutoOpenManager;
 import tormozit.edt.handlers.ExpandExceptAddedDeletedHandler;
 import tormozit.edt.handlers.ExpandMode;
@@ -169,11 +169,11 @@ public class CompareEditorMenuHook implements IStartup
 
     private AbstractTreeViewer getTreeViewerFromEditor(IEditorPart editor)
     {
-        Object view = getField(editor, "comparisonView"); //$NON-NLS-1$
+        Object view = Reflect.getField(editor, "comparisonView"); //$NON-NLS-1$
         if (!(view instanceof DtComparisonView)) return null;
         Object treeControl = ((DtComparisonView) view).getTreeControl();
         if (treeControl == null) return null;
-        Object viewer = invokeNoArg(treeControl, "getTreeViewer"); //$NON-NLS-1$
+        Object viewer = Reflect.call(treeControl, "getTreeViewer"); //$NON-NLS-1$
         return (viewer instanceof AbstractTreeViewer) ? (AbstractTreeViewer) viewer : null;
     }
 
@@ -181,7 +181,7 @@ public class CompareEditorMenuHook implements IStartup
     {
         Display.getDefault().asyncExec(() ->
         {
-            Object tbm = getField(editor, "toolBarManager"); //$NON-NLS-1$
+            Object tbm = Reflect.getField(editor, "toolBarManager"); //$NON-NLS-1$
             if (tbm instanceof IToolBarManager)
                 fillToolbar((IToolBarManager) tbm, editor);
         });
@@ -347,13 +347,13 @@ public class CompareEditorMenuHook implements IStartup
 
     private Tree getCompareTree(IEditorPart editor)
     {
-        Object view = getField(editor, "comparisonView"); //$NON-NLS-1$
+        Object view = Reflect.getField(editor, "comparisonView"); //$NON-NLS-1$
         if (!(view instanceof DtComparisonView)) return null;
         Object treeControl = ((DtComparisonView) view).getTreeControl();
         if (treeControl == null) return null;
-        Object viewer = invokeNoArg(treeControl, "getTreeViewer"); //$NON-NLS-1$
+        Object viewer = Reflect.call(treeControl, "getTreeViewer"); //$NON-NLS-1$
         if (viewer == null) return null;
-        Object widget = invokeNoArg(viewer, "getTree"); //$NON-NLS-1$
+        Object widget = Reflect.call(viewer, "getTree"); //$NON-NLS-1$
         return (widget instanceof Tree) ? (Tree) widget : null;
     }
 
@@ -361,19 +361,19 @@ public class CompareEditorMenuHook implements IStartup
 
     private MatchedObjectsComparisonNode getSelectedMatchedNode(IEditorPart editor)
     {
-        Object view = getField(editor, "comparisonView"); //$NON-NLS-1$
+        Object view = Reflect.getField(editor, "comparisonView"); //$NON-NLS-1$
         if (!(view instanceof DtComparisonView)) return null;
         Object treeControl = ((DtComparisonView) view).getTreeControl();
         if (treeControl == null) return null;
-        Object viewer = invokeNoArg(treeControl, "getTreeViewer"); //$NON-NLS-1$
+        Object viewer = Reflect.call(treeControl, "getTreeViewer"); //$NON-NLS-1$
         if (viewer == null) return null;
-        Object sel = invokeNoArg(viewer, "getSelection"); //$NON-NLS-1$
+        Object sel = Reflect.call(viewer, "getSelection"); //$NON-NLS-1$
         if (!(sel instanceof IStructuredSelection)) return null;
         Object element = ((IStructuredSelection) sel).getFirstElement();
         if (element == null) return null;
         try
         {
-            Object node = invokeNoArg(element, "retrieveComparisonNode"); //$NON-NLS-1$
+            Object node = Reflect.call(element, "retrieveComparisonNode"); //$NON-NLS-1$
             if (node instanceof MatchedObjectsComparisonNode)
                 return (MatchedObjectsComparisonNode) node;
         }
@@ -381,31 +381,5 @@ public class CompareEditorMenuHook implements IStartup
         if (element instanceof MatchedObjectsComparisonNode)
             return (MatchedObjectsComparisonNode) element;
         return null;
-    }
-
-    // ---- Утилиты рефлексии ----
-
-    public static Object getField(Object obj, String name)
-    {
-        Class<?> cls = obj.getClass();
-        while (cls != null)
-        {
-            try
-            {
-                Field f = cls.getDeclaredField(name);
-                f.setAccessible(true);
-                return f.get(obj);
-            }
-            catch (NoSuchFieldException ignored) { cls = cls.getSuperclass(); }
-            catch (Exception ignored)            { return null; }
-        }
-        return null;
-    }
-
-    private Object invokeNoArg(Object o, String name)
-    {
-        if (o == null) return null;
-        try { return o.getClass().getMethod(name).invoke(o); }
-        catch (Exception ignored) { return null; }
     }
 }

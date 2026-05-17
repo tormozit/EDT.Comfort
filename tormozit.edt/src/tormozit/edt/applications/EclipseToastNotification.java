@@ -181,7 +181,11 @@ public final class EclipseToastNotification
 
         return shellHolder[0];
     }
-
+    
+    public static Shell show(String title, String message) 
+    {
+        return show(title, message, 4000);
+    }
     public static void close(final Shell shell) 
     {
         if (shell == null) return;

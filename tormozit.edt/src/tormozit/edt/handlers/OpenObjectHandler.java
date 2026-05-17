@@ -1,6 +1,5 @@
 package tormozit.edt.handlers;
 
-import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.List;
 
@@ -23,6 +22,7 @@ import com._1c.g5.v8.dt.compare.model.ComparisonSide;
 import com._1c.g5.v8.dt.compare.model.MatchedObjectsComparisonNode;
 import com._1c.g5.v8.dt.compare.ui.editor.DtComparisonView;
 
+import tormozit.edt.Reflect;
 import tormozit.edt.selection.CompareEditorSelectionProvider;
 
 /**
@@ -61,14 +61,14 @@ public class OpenObjectHandler extends AbstractHandler {
     public static ISelection getSelection(IEditorPart editor) {
         // Через comparisonView -> treeViewer -> selection
         ISelection sel = null;
-        Object view = getField(editor, "comparisonView");
+        Object view = Reflect.getField(editor, "comparisonView");
         if (view instanceof DtComparisonView) {
             Object treeControl = ((DtComparisonView) view).getTreeControl();
             if (treeControl != null) {
-                Object viewer = invokeNoArg(treeControl, "getTreeViewer");
+                Object viewer = Reflect.call(treeControl, "getTreeViewer");
                 if (viewer != null)
                 {
-                    sel = (ISelection) invokeNoArg(viewer, "getSelection");
+                    sel = (ISelection) Reflect.call(viewer, "getSelection");
                 }
             }
         }
@@ -136,25 +136,6 @@ public class OpenObjectHandler extends AbstractHandler {
     }
 
     // ---- Utility ----
-
-    public static Object getField(Object obj, String name) {
-        Class<?> cls = obj.getClass();
-        while (cls != null) {
-            try {
-                Field f = cls.getDeclaredField(name);
-                f.setAccessible(true);
-                return f.get(obj);
-            } catch (NoSuchFieldException ignored) { cls = cls.getSuperclass(); }
-            catch (Exception ignored) { return null; }
-        }
-        return null;
-    }
-
-    public static Object invokeNoArg(Object o, String name) {
-        if (o == null) return null;
-        try { return o.getClass().getMethod(name).invoke(o); }
-        catch (Exception ignored) { return null; }
-    }
 
     private static void showError(Shell shell, String msg) {
         try {

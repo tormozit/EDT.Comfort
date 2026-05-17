@@ -48,6 +48,8 @@ import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 
+import tormozit.edt.Reflect;
+
 /**
  * Хук панели «Приложения» EDT.
  *
@@ -75,7 +77,7 @@ public class ApplicationsViewHook implements IStartup
     private static final int COL_AUTO_WIDTH = 45;
 
     private static final DateTimeFormatter DATE_FMT =
-        DateTimeFormatter.ofPattern("dd.MM HH:mm:ss"); //$NON-NLS-1$
+        DateTimeFormatter.ofPattern("dd'д'HH:mm:ss"); //$NON-NLS-1$
 
     // =======================================================================
     // IStartup
@@ -203,7 +205,7 @@ public class ApplicationsViewHook implements IStartup
         TreeViewerColumn col1 = new TreeViewerColumn((TreeViewer) viewer, SWT.NONE);
         col1.getColumn().setText("Конфигуратор SSH");
         col1.getColumn().setToolTipText(
-            "Дата начала SSH-сеанса конфигуратора. Нажмите ячейку для отключения.");
+            "Версия платформы и дата начала сеанса конфигуратора SSH. Нажмите ячейку для отключения.");
         col1.getColumn().setWidth(COL_SSH_WIDTH);
         col1.getColumn().setResizable(true);
         col1.setLabelProvider(new CellLabelProvider()
@@ -213,17 +215,19 @@ public class ApplicationsViewHook implements IStartup
             {
                 Object el = cell.getElement();
                 DesignerSessionPoolAccessor acc = DesignerSessionPoolAccessor.getInstance();
-                LocalDateTime start   = acc.getSessionStart(acc.findPoolKey(el));
-                String        version = IRApplicationRegistry.extractEDTPlatformVersion(el);
+                Object infobase = getInfobaseFromApplication(el);
+                LocalDateTime start   = acc.getSessionStart(acc.findPoolKey(infobase));
+                String version = IRApplicationRegistry.extractEDTPlatformVersion(infobase);
                 renderSessionCell(cell, start, version);
             }
 
             @Override
             public String getToolTipText(Object element)
             {
-                return DesignerSessionPoolAccessor.getInstance().isConnected(element)
-                    ? "Нажмите для отключения конфигуратора"
-                    : "Конфигуратор не подключён";
+                Object infobase = getInfobaseFromApplication(element);
+                return DesignerSessionPoolAccessor.getInstance().isConnected(infobase)
+                    ? "Нажмите для отключения конфигуратора SSH"
+                    : "Конфигуратор SSH не подключен";
             }
         });
 
@@ -249,7 +253,8 @@ public class ApplicationsViewHook implements IStartup
             @Override
             public String getToolTipText(Object element)
             {
-                return IRApplicationRegistry.getInstance().isConnected(element)
+                Object infobase = getInfobaseFromApplication(element);
+                return IRApplicationRegistry.getInstance().isConnected(infobase)
                     ? "Нажмите для отключения приложения ИР"
                     : "Приложение ИР не подключено";
             }
@@ -320,6 +325,13 @@ public class ApplicationsViewHook implements IStartup
     // 2. Клик и курсор
     // =======================================================================
 
+    static Object getInfobaseFromApplication(Object element)
+    {
+        if (element == null) return null;
+        Object ib = Reflect.call(element, "getInfobase"); //$NON-NLS-1$
+        return ib != null ? ib : Reflect.getField(element, "infobase"); //$NON-NLS-1$
+    }
+    
     private void addClickableColumns(ColumnViewer viewer, Tree tree)
     {
         tree.addMouseMoveListener(new MouseMoveListener()
@@ -329,11 +341,11 @@ public class ApplicationsViewHook implements IStartup
             {
                 int      col     = columnAt(tree, e.x, e.y);
                 TreeItem item    = itemAt(tree, e.x, e.y);
-                Object   element = item != null ? item.getData() : null;
+                Object   infobase = item==null ? null : getInfobaseFromApplication(item.getData());
 
                 boolean hand =
-                    (col == COL_SSH && DesignerSessionPoolAccessor.getInstance().isConnected(element))
-                 || (col == COL_IR  && IRApplicationRegistry.getInstance().isConnected(element));
+                    (col == COL_SSH && DesignerSessionPoolAccessor.getInstance().isConnected(infobase))
+                 || (col == COL_IR  && IRApplicationRegistry.getInstance().isConnected(infobase));
 
                 tree.setCursor(hand
                     ? tree.getDisplay().getSystemCursor(SWT.CURSOR_HAND)
@@ -353,18 +365,19 @@ public class ApplicationsViewHook implements IStartup
                 TreeItem item = itemAt(tree, e.x, e.y);
                 if (item == null) return;
                 Object element = item.getData();
+                Object infobase = item==null ? null : getInfobaseFromApplication(item.getData());
 
                 if (col == COL_SSH)
                 {
                     DesignerSessionPoolAccessor acc = DesignerSessionPoolAccessor.getInstance();
-                    Object poolKey = acc.findPoolKey(element);
+                    Object poolKey = acc.findPoolKey(infobase);
                     if (poolKey == null) return;
                     acc.release(poolKey);
                 }
                 else
                 {
-                    if (!IRApplicationRegistry.getInstance().isConnected(element)) return;
-                    IRApplicationRegistry.getInstance().disconnect(element);
+                    if (!IRApplicationRegistry.getInstance().isConnected(infobase)) return;
+                    IRApplicationRegistry.getInstance().disconnect(infobase);
                 }
 
                 if (!viewer.getControl().isDisposed())
@@ -616,7 +629,7 @@ public class ApplicationsViewHook implements IStartup
         boolean any = false;
         for (Object el : elements)
         {
-            Object key = acc.findPoolKey(el);
+            Object key = acc.findPoolKey(getInfobaseFromApplication(el));
             if (key != null) { acc.release(key); any = true; }
         }
         if (any)

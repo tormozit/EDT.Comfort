@@ -1,7 +1,7 @@
 package tormozit.edt.applications;
 
+import java.io.File;
 import java.io.UnsupportedEncodingException;
-import java.lang.reflect.Field;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
@@ -11,7 +11,7 @@ import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
-
+import java.util.concurrent.TimeUnit;
 import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.core.runtime.Status;
@@ -19,8 +19,7 @@ import org.eclipse.swt.widgets.Shell;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.FrameworkUtil;
 
-import tormozit.edt.handlers.OpenObjectHandler;
-import tormozit.edt.menu.CompareEditorMenuHook;
+import tormozit.edt.Reflect;
 
 /**
  * Реестр подключений к приложению ИР (Инструменты Разработчика 1С).
@@ -103,16 +102,11 @@ public final class IRApplicationRegistry
     public void addChangeListener(Runnable l)    { if (l != null) changeListeners.add(l); }
     public void removeChangeListener(Runnable l) { changeListeners.remove(l); }
 
-    public boolean isConnected(Object element)
+    public boolean isConnected(Object infobase)
     {
-        IrSession s = sessions.get(sessionKey(element));
+        String key = sessionKey(infobase);
+        IrSession s = sessions.get(key);
         return s != null && s.state == State.CONNECTED;
-    }
-
-    public boolean isConnecting(Object element)
-    {
-        IrSession s = sessions.get(sessionKey(element));
-        return s != null && s.state == State.CONNECTING;
     }
 
     /**
@@ -120,7 +114,9 @@ public final class IRApplicationRegistry
      */
     public LocalDateTime getSessionStart(Object element)
     {
-        IrSession s = sessions.get(sessionKey(element));
+        Object infobase = ApplicationsViewHook.getInfobaseFromApplication(element);
+        String key = sessionKey(infobase);
+        IrSession s = sessions.get(key);
         return (s != null && s.state == State.CONNECTED) ? s.startTime : null;
     }
 
@@ -132,7 +128,9 @@ public final class IRApplicationRegistry
      */
     public String getSessionPlatformVersion(Object element)
     {
-        IrSession s = sessions.get(sessionKey(element));
+        Object infobase = ApplicationsViewHook.getInfobaseFromApplication(element);
+        String key = sessionKey(infobase);
+        IrSession s = sessions.get(key);
         return (s != null && s.state == State.CONNECTED) ? s.platformVersion : null;
     }
 
@@ -156,7 +154,8 @@ public final class IRApplicationRegistry
      */
     public void connect(Object element)
     {
-        String key = sessionKey(element);
+        Object infobase = ApplicationsViewHook.getInfobaseFromApplication(element);
+        String key = sessionKey(infobase);
 
         IrSession existing = sessions.get(key);
         if (existing != null && (existing.state == State.CONNECTING
@@ -164,37 +163,36 @@ public final class IRApplicationRegistry
 
         sessions.put(key, IrSession.connecting());
         notifyListeners();
-
-        String connectionString = buildConnectionString(element);
-        String platformVersion  = extractEDTPlatformVersion(element);
-        String appLabel         = DesignerSessionPoolAccessor.nameOf(element);
-
-        log("connect() key=" + key + " cs=" + removePassword(connectionString) //$NON-NLS-1$ //$NON-NLS-2$
-            + " platform=" + platformVersion); //$NON-NLS-1$
-
-        CompletableFuture.runAsync(() -> doConnect(key, connectionString, platformVersion, appLabel));
+        CompletableFuture.runAsync(() -> doConnect(infobase));
     }
 
     /**
      * Фоновый метод — тост создаётся здесь (syncExec → Shell гарантирован),
      * закрывается в {@code finally} при любом исходе.
      */
-    private void doConnect(String key, String connectionString,
-                           String platformVersion, String appLabel)
+    private void doConnect(Object infobase)
     {
-        Shell connectingToast = EclipseToastNotification.show(
+        String key = sessionKey(infobase);
+        String connectionString = buildConnectionString(infobase);
+        String platformVersion  = extractEDTPlatformVersion(infobase);
+        String appLabel = DesignerSessionPoolAccessor.nameOf(infobase);
+        String exeFullName = DesignerSessionPoolAccessor.getInstance().extractThickClientExe(infobase);
+
+        log("connect() key=" + connectionString + " cs=" + removePassword(connectionString) //$NON-NLS-1$ //$NON-NLS-2$
+            + " platform=" + platformVersion); //$NON-NLS-1$
+       Shell connectingToast = EclipseToastNotification.show(
             "Подключение",
             "Подключается приложение ИР «" + appLabel
                 + "». Закрыть командой «Отключить приложение ИР».",
             60_000);
         try
         {
-            doConnectInternal(key, connectionString, platformVersion, appLabel);
+            doConnectInternal(key, connectionString, platformVersion, appLabel, exeFullName);
         }
         catch (Exception e)
         {
             EclipseToastNotification.show("Ошибка подключения ИР", e.getMessage(), 10_000);
-            sessions.remove(key);
+            sessions.remove(infobase);
             notifyListeners();
         }
         finally
@@ -207,8 +205,7 @@ public final class IRApplicationRegistry
      * Основная логика подключения — порт вложенного цикла из {@code ПодключениеИР()}.
      * @throws UnsupportedEncodingException 
      */
-    private void doConnectInternal(String key, String connectionString,
-                                   String platformVersion, String appLabel)
+    private void doConnectInternal(String key, String connectionString, String platformVersion, String appLabel, String exeFullName)
     {
         String className              = buildComClassName(platformVersion);
         String connectionStringNoPass = removePassword(connectionString);
@@ -270,6 +267,7 @@ public final class IRApplicationRegistry
                     sessions.remove(key); notifyListeners(); return;
                 }
                 log("Попытка " + attempt + " неудача. Повтор..."); //$NON-NLS-1$ //$NON-NLS-2$
+                registerComClass(className, exeFullName, attempt);
             }
         }
 
@@ -309,9 +307,9 @@ public final class IRApplicationRegistry
     // Отключение (аналог ЗакрытьПриложениеИР)
     // -----------------------------------------------------------------------
 
-    public void disconnect(Object element)
+    public void disconnect(Object infobase)
     {
-        String key = sessionKey(element);
+        String key = sessionKey(infobase);
         IrSession session = sessions.get(key);
         if (session == null || session.state == State.IDLE) return;
         CompletableFuture.runAsync(() -> doDisconnect(key, session));
@@ -361,17 +359,13 @@ public final class IRApplicationRegistry
     // Строка соединения (аналог СтрокаСоединенияБазыКонфигуратора)
     // -----------------------------------------------------------------------
 
-    static String buildConnectionString(Object element)
+    static String buildConnectionString(Object infobase)
     {
-        Object infobase = getInfobase(element);
-        if (infobase == null) return ""; //$NON-NLS-1$
-
-        Object connectionString = CompareEditorMenuHook.getField(infobase, "connectionString"); //$NON-NLS-1$
-        String result = (String) tryCall(connectionString, "asConnectionString"); //$NON-NLS-1$
+        Object connectionString = Reflect.getField(infobase, "connectionString"); //$NON-NLS-1$
+        String result = (String) Reflect.call(connectionString, "asConnectionString"); //$NON-NLS-1$
         if (result != null && !result.isEmpty()
                 && (result.contains("File=") || result.contains("Srvr="))) //$NON-NLS-1$ //$NON-NLS-2$
             return result;
-
         return ""; //$NON-NLS-1$
     }
 
@@ -379,41 +373,37 @@ public final class IRApplicationRegistry
     // Версия платформы из EDT-ключа пула ("uuid:version")
     // -----------------------------------------------------------------------
 
-    static String extractEDTPlatformVersion(Object element)
+    static String extractEDTPlatformVersion(Object infobase)
     {
         Set<Object> keys = DesignerSessionPoolAccessor.getInstance().getActiveKeys();
-        String uuid = extractInfobaseUuid(element);
+        String uuid = extractInfobaseUuid(infobase);
 
         if (!uuid.isEmpty())
         {
             for (Object k : keys)
             {
-                String version = (String) OpenObjectHandler.getField(k, "installationVersionWithBuild");
+                String version = (String) Reflect.getField(k, "installationVersionWithBuild");
                 return version;
             }
         }
 
-        log("Версия платформы не определена, используется 8.3"); //$NON-NLS-1$
+//        log("Версия платформы не определена, используется 8.3"); //$NON-NLS-1$
         return "8.3.0.0"; //$NON-NLS-1$
     }
-
+    
     // -----------------------------------------------------------------------
     // Ключ сессии = UUID инфобазы
     // -----------------------------------------------------------------------
 
-    private static String sessionKey(Object element)
+    private static String sessionKey(Object infobase)
     {
-        String uuid = extractInfobaseUuid(element);
-        return uuid.isEmpty() ? String.valueOf(System.identityHashCode(element)) : uuid;
+        String uuid = extractInfobaseUuid(infobase);
+        return uuid.isEmpty() ? String.valueOf(System.identityHashCode(infobase)) : uuid;
     }
 
-    static String extractInfobaseUuid(Object element)
+    static String extractInfobaseUuid(Object infobase)
     {
-        if (element == null) return ""; //$NON-NLS-1$
-        Object infobase = getInfobase(element);
-        if (infobase == null) return ""; //$NON-NLS-1$
-
-        Object uuid = tryCall(infobase, "getUuid"); //$NON-NLS-1$
+        Object uuid = Reflect.call(infobase, "getUuid"); //$NON-NLS-1$
         if (uuid instanceof String && !((String) uuid).isEmpty()) return (String) uuid;
 
         java.util.regex.Matcher m = DesignerSessionPoolAccessor.UUID_PATTERN
@@ -441,30 +431,158 @@ public final class IRApplicationRegistry
         return idx > 0 ? cs.substring(0, idx) : cs;
     }
 
-    private static Object getInfobase(Object element)
-    {
-        if (element == null) return null;
-        Object ib = tryCall(element, "getInfobase"); //$NON-NLS-1$
-        return ib != null ? ib : readField(element, "infobase"); //$NON-NLS-1$
-    }
 
-    private static Object tryCall(Object obj, String method)
-    {
-        if (obj == null) return null;
-        try { return obj.getClass().getMethod(method).invoke(obj); }
-        catch (Exception e) { return null; }
-    }
+    // -----------------------------------------------------------------------
+    // Авторегистрация COM-класса в реестре Windows
+    // Порт блока «Если ТекущаяВерсияТурбоКонф >= "6.0.8771.35683"»
+    // из RDT.os / ПодключениеИР()
+    // -----------------------------------------------------------------------
 
-    private static Object readField(Object obj, String name)
+    /**
+     * При ошибке создания COM-объекта чистит конфликтующую запись другой
+     * разрядности и перерегистрирует класс через {@code 1cv8.exe /RegServer -CurrentUser}.
+     *
+     * <p>EDT (и JVM) всегда 64-bit, поэтому конфликт возникает когда
+     * в {@code HKLM\SOFTWARE\Classes\WOW6432Node} есть старая 32-bit регистрация,
+     * из-за которой ОС «отдаёт» не тот DLL при создании COM-объекта.
+     */
+    private static void registerComClass(String className, String exeFullName, int attempt)
     {
-        Class<?> cls = obj.getClass();
-        while (cls != null)
+        try
         {
-            try { Field f = cls.getDeclaredField(name); f.setAccessible(true); return f.get(obj); }
-            catch (NoSuchFieldException ignored) { cls = cls.getSuperclass(); }
-            catch (Exception ignored)            { return null; }
+            // EDT/JVM всегда 64-bit
+            boolean is64 = false;
+            String subKey        = is64 ? "\\WOW6432Node" : "";  // ветка противоположной разрядности //$NON-NLS-1$ //$NON-NLS-2$
+            String removeBitness = is64 ? "32" : "64"; //$NON-NLS-1$ //$NON-NLS-2$
+            String useBitness    = is64 ? "64" : "32"; //$NON-NLS-1$ //$NON-NLS-2$
+
+            log("Регистрация COM: JVM=" + useBitness + "b класс=" + className); //$NON-NLS-1$ //$NON-NLS-2$
+
+            // 1. CLSID: HKLM\SOFTWARE\Classes\{className}\CLSID → (Default)
+            String clsid = registryReadDefault("HKLM", "SOFTWARE\\Classes\\" + className + "\\CLSID"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            if (clsid == null || clsid.isEmpty())
+            {
+                log("CLSID для " + className + " не найден в реестре, регистрация пропущена"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            log("CLSID " + className + " = " + clsid); //$NON-NLS-1$ //$NON-NLS-2$
+
+            // 2. Ветка LocalServer32 для противоположной разрядности
+            String server32 = "SOFTWARE\\Classes" + subKey + "\\CLSID\\" + clsid + "\\LocalServer32"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+
+            // 3. HKLM — удаляем конфликтующую запись
+            String hklmExe = registryReadDefault("HKLM", server32); //$NON-NLS-1$
+            log(removeBitness + "b LocalServer32 HKLM = " + hklmExe); //$NON-NLS-1$
+            if (hklmExe != null && !hklmExe.isEmpty())
+            {
+                if (registryDeleteKey("HKLM", server32)) //$NON-NLS-1$
+                    log("Удалён " + removeBitness + "b класс " + className //$NON-NLS-1$ //$NON-NLS-2$
+                        + " из HKLM → ОС будет отдавать " + useBitness + "b"); //$NON-NLS-1$ //$NON-NLS-2$
+                else
+                {
+                    if (attempt==2)
+                    {
+                        EclipseToastNotification.show("Регистрация COM", removeBitness
+                            + "b класс из HKLM не удалён (нет прав, запустите EDT от имени администратора)");
+                    }
+                }
+            }
+
+            // 4. HKCU — удаляем конфликтующую запись
+            String hkcuExe = registryReadDefault("HKCU", server32); //$NON-NLS-1$
+            log(removeBitness + "b LocalServer32 HKCU = " + hkcuExe); //$NON-NLS-1$
+            if (hkcuExe != null && !hkcuExe.isEmpty())
+            {
+                if (registryDeleteKey("HKCU", server32)) //$NON-NLS-1$
+                    log("Удалён " + removeBitness + "b класс " + className + " из HKCU"); //$NON-NLS-1$ //$NON-NLS-2$
+                else
+                    if (attempt==2)
+                    {
+                        EclipseToastNotification.show("Регистрация COM", removeBitness + "b класс из HKCU не удалён"); //$NON-NLS-1$
+                    }
+            }
+
+            log("Регистрация: \"" + exeFullName + "\" /RegServer -CurrentUser"); //$NON-NLS-1$ //$NON-NLS-2$
+            Process p = new ProcessBuilder(exeFullName, "/RegServer", "-CurrentUser") //$NON-NLS-1$ //$NON-NLS-2$
+                .redirectErrorStream(true).start();
+            p.waitFor(30, TimeUnit.SECONDS);
+            EclipseToastNotification.show(
+                "Регистрация COM", //$NON-NLS-1$
+                "Зарегистрирован " + className + " для текущего пользователя ОС", 3_000); //$NON-NLS-1$ //$NON-NLS-2$
+            log("Регистрация COM завершена"); //$NON-NLS-1$
         }
+        catch (Exception e)
+        {
+            log("RegisterComClass ошибка: " + e.getMessage()); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * Читает значение по умолчанию (Default) ключа реестра через {@code reg.exe query}.
+     * Результат парсится по маркеру {@code REG_SZ} — не зависит от локали ОС.
+     */
+    private static String registryReadDefault(String hive, String keyPath)
+    {
+        return registryReadValue(hive, keyPath, null);
+    }
+
+    /**
+     * Читает именованное значение ключа реестра через {@code reg.exe query}.
+     * Если {@code valueName} == null — читает значение по умолчанию ({@code /ve}).
+     */
+    private static String registryReadValue(String hive, String keyPath, String valueName)
+    {
+        try
+        {
+            String fullPath = expandHive(hive) + "\\" + keyPath; //$NON-NLS-1$
+            ProcessBuilder pb = valueName == null
+                ? new ProcessBuilder("reg", "query", fullPath, "/ve") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                : new ProcessBuilder("reg", "query", fullPath, "/v", valueName); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            Process p = pb.redirectErrorStream(true).start();
+            String out = new String(p.getInputStream().readAllBytes());
+            p.waitFor(5, TimeUnit.SECONDS);
+            // Формат вывода: «    {name}    REG_SZ    {value}»
+            // Тип может быть REG_SZ, REG_EXPAND_SZ, REG_DWORD
+            for (String line : out.split("\n")) { //$NON-NLS-1$
+                int idx = line.indexOf("REG_"); //$NON-NLS-1$
+                if (idx >= 0)
+                {
+                    // после типа идут 4 и более пробелов, затем значение
+                    String afterType = line.substring(idx);
+                    int valStart = afterType.indexOf("    "); //$NON-NLS-1$
+                    if (valStart >= 0) return afterType.substring(valStart).trim();
+                }
+            }
+        }
+        catch (Exception ignored) {}
         return null;
+    }
+
+    /**
+     * Удаляет ключ реестра через {@code reg.exe delete /f}.
+     * Возвращает {@code true} при успехе (exit code 0).
+     */
+    private static boolean registryDeleteKey(String hive, String keyPath)
+    {
+        try
+        {
+            String fullPath = expandHive(hive) + "\\" + keyPath; //$NON-NLS-1$
+            Process p = new ProcessBuilder("reg", "delete", fullPath, "/f") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                .redirectErrorStream(true).start();
+            p.waitFor(5, TimeUnit.SECONDS);
+            return p.exitValue() == 0;
+        }
+        catch (Exception ignored) { return false; }
+    }
+
+    private static String expandHive(String hive)
+    {
+        switch (hive.toUpperCase())
+        {
+            case "HKLM": return "HKEY_LOCAL_MACHINE"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "HKCU": return "HKEY_CURRENT_USER";  //$NON-NLS-1$ //$NON-NLS-2$
+            default:     return hive;
+        }
     }
 
     private void showError(String msg)
