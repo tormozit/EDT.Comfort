@@ -214,6 +214,12 @@ public final class DesignerSessionPoolAccessor
         }
         return null;
     }
+    
+    boolean is64FromInfobase(Object infobase)
+    {
+        // Временно грязно
+        return ! extractThickClientExe(infobase).contains("(x86)");
+    }
 
     /**
      * Преобразует результат {@code RuntimeInstallation.getLocation()} в путь к директории.

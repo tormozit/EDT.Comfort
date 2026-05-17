@@ -172,22 +172,12 @@ public final class IRApplicationRegistry
      */
     private void doConnect(Object infobase)
     {
-        String key = sessionKey(infobase);
-        String connectionString = buildConnectionString(infobase);
-        String platformVersion  = extractEDTPlatformVersion(infobase);
         String appLabel = DesignerSessionPoolAccessor.nameOf(infobase);
-        String exeFullName = DesignerSessionPoolAccessor.getInstance().extractThickClientExe(infobase);
-
-        log("connect() key=" + connectionString + " cs=" + removePassword(connectionString) //$NON-NLS-1$ //$NON-NLS-2$
-            + " platform=" + platformVersion); //$NON-NLS-1$
-       Shell connectingToast = EclipseToastNotification.show(
-            "Подключение",
-            "Подключается приложение ИР «" + appLabel
-                + "». Закрыть командой «Отключить приложение ИР».",
-            60_000);
+        Shell connectingToast = EclipseToastNotification.show("Подключение",
+            "Подключается приложение ИР «" + appLabel + "». Закрыть командой «Отключить приложение ИР».", 60_000);
         try
         {
-            doConnectInternal(key, connectionString, platformVersion, appLabel, exeFullName);
+            doConnectInternal(infobase);
         }
         catch (Exception e)
         {
@@ -205,9 +195,18 @@ public final class IRApplicationRegistry
      * Основная логика подключения — порт вложенного цикла из {@code ПодключениеИР()}.
      * @throws UnsupportedEncodingException 
      */
-    private void doConnectInternal(String key, String connectionString, String platformVersion, String appLabel, String exeFullName)
+    private void doConnectInternal(Object infobase)
     {
-        String className              = buildComClassName(platformVersion);
+        String key = sessionKey(infobase);
+        String connectionString = buildConnectionString(infobase);
+        String platformVersion = extractEDTPlatformVersion(infobase);
+//        String appLabel = DesignerSessionPoolAccessor.nameOf(infobase);
+        String exeFullName = DesignerSessionPoolAccessor.getInstance().extractThickClientExe(infobase);
+        boolean configBitness64 = DesignerSessionPoolAccessor.getInstance().is64FromInfobase(infobase); 
+        log("connect() key=" + connectionString + " cs=" + removePassword(connectionString) //$NON-NLS-1$ //$NON-NLS-2$
+            + " platform=" + platformVersion); //$NON-NLS-1$
+
+        String className = buildComClassName(platformVersion);
         String connectionStringNoPass = removePassword(connectionString);
         log("COM-класс: " + className + ", БД: " + connectionStringNoPass); //$NON-NLS-1$
 
@@ -267,7 +266,7 @@ public final class IRApplicationRegistry
                     sessions.remove(key); notifyListeners(); return;
                 }
                 log("Попытка " + attempt + " неудача. Повтор..."); //$NON-NLS-1$ //$NON-NLS-2$
-                registerComClass(className, exeFullName, attempt);
+                registerComClass(className, exeFullName, attempt, configBitness64);
             }
         }
 
@@ -446,15 +445,13 @@ public final class IRApplicationRegistry
      * в {@code HKLM\SOFTWARE\Classes\WOW6432Node} есть старая 32-bit регистрация,
      * из-за которой ОС «отдаёт» не тот DLL при создании COM-объекта.
      */
-    private static void registerComClass(String className, String exeFullName, int attempt)
+    private static void registerComClass(String className, String exeFullName, int attempt, boolean configBitness64)
     {
         try
         {
-            // EDT/JVM всегда 64-bit
-            boolean is64 = false;
-            String subKey        = is64 ? "\\WOW6432Node" : "";  // ветка противоположной разрядности //$NON-NLS-1$ //$NON-NLS-2$
-            String removeBitness = is64 ? "32" : "64"; //$NON-NLS-1$ //$NON-NLS-2$
-            String useBitness    = is64 ? "64" : "32"; //$NON-NLS-1$ //$NON-NLS-2$
+            String subKey        = configBitness64 ? "\\WOW6432Node" : "";  // ветка противоположной разрядности //$NON-NLS-1$ //$NON-NLS-2$
+            String removeBitness = configBitness64 ? "32" : "64"; //$NON-NLS-1$ //$NON-NLS-2$
+            String useBitness    = configBitness64 ? "64" : "32"; //$NON-NLS-1$ //$NON-NLS-2$
 
             log("Регистрация COM: JVM=" + useBitness + "b класс=" + className); //$NON-NLS-1$ //$NON-NLS-2$
 
