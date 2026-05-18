@@ -126,7 +126,6 @@ public class ApplicationsViewHook implements IStartup
     @Override
     public void earlyStartup()
     {
-        DesignerSessionPoolAccessor.getInstance().startPolling(); // слишком рано?       
         Display.getDefault().asyncExec(() ->
         {
             IWorkbench wb = PlatformUI.getWorkbench();
@@ -202,7 +201,7 @@ public class ApplicationsViewHook implements IStartup
             setupColumns(viewer, tree);
             addClickHandlers(viewer, tree);
         }
-
+        DesignerSessionPoolAccessor.getInstance().startPolling();
         addToolbarButtons(view, viewer);
         addContextMenu(viewer, control);
         registerRedrawOnPoolChange(viewer);
