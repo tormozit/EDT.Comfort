@@ -5,6 +5,7 @@
   <extension point="org.eclipse.ui.startup">
     <startup class="tormozit.edt.menu.CompareEditorMenuHook"/>
     <startup class="tormozit.edt.applications.ApplicationsViewHook"/>
+    <startup class="tormozit.edt.applications.ApplicationEditorHook"/>
   </extension>
 
   <extension point="org.eclipse.ui.contexts">

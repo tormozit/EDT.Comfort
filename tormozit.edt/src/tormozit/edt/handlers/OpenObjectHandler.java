@@ -102,7 +102,7 @@ public class OpenObjectHandler extends AbstractHandler {
         return null;
     }
 
-    private static void openInEditor(EObject eObject, IEditorPart editor, Shell shell) {
+    public static void openInEditor(EObject eObject, IEditorPart editor, Shell shell) {
         // Используем OpenHelper из EDT UI
         try {
             Class<?> cls = Class.forName("com._1c.g5.v8.dt.ui.util.OpenHelper");
