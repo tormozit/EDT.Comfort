@@ -4,7 +4,7 @@ Bundle-Name: Tormozit EDT plugin
 Bundle-SymbolicName: tormozit.edt;singleton:=true
 Bundle-Vendor: Tormozit
 Bundle-Version: 1.0.0.10-qualifier
-Bundle-Activator: tormozit.edt.Activator
+Bundle-Activator: Activator
 Bundle-ActivationPolicy: lazy
 Bundle-Localization: plugin
 Bundle-RequiredExecutionEnvironment: JavaSE-17

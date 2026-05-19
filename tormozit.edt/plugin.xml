@@ -3,9 +3,9 @@
 <plugin>
 
   <extension point="org.eclipse.ui.startup">
-    <startup class="tormozit.edt.menu.CompareEditorMenuHook"/>
-    <startup class="tormozit.edt.applications.ApplicationsViewHook"/>
-    <startup class="tormozit.edt.applications.ApplicationEditorHook"/>
+    <startup class="CompareConfigMenuHook"/>
+    <startup class="ApplicationsViewHook"/>
+    <startup class="ApplicationEditorHook"/>
   </extension>
 
   <extension point="org.eclipse.ui.contexts">
@@ -44,7 +44,7 @@
   <extension point="org.eclipse.ui.handlers">
     <handler
         commandId="tormozit.edt.compareConf.openObject"
-        class="tormozit.edt.handlers.OpenObjectHandler">
+        class="CompareConfigOpenObjectHandler">
       <activeWhen>
         <with variable="activeEditorId">
           <equals value="com._1c.g5.v8.dt.compare.ui.editor"/>
@@ -53,7 +53,7 @@
     </handler>
     <handler
         commandId="tormozit.edt.compareConf.showInNavigator"
-        class="tormozit.edt.handlers.ShowInNavigatorHandler">
+        class="CompareConfigShowInNavigatorHandler">
       <activeWhen>
         <with variable="activeEditorId">
           <equals value="com._1c.g5.v8.dt.compare.ui.editor"/>
@@ -62,9 +62,6 @@
     </handler>
   </extension>
 
-  <!-- Toolbar редактора сравнения.
-       Для редакторов Eclipse регистрирует IActionBars через стандартный механизм,
-       поэтому toolbar: URI работает (в отличие от контекстного меню). -->
   <extension point="org.eclipse.ui.menus">
   </extension>
 
