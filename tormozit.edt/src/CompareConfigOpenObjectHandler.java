@@ -47,7 +47,7 @@ public class CompareConfigOpenObjectHandler extends AbstractHandler {
      */
     public static void openObject(IEditorPart editor, Shell shell) {
         CompareConfigSelectionProvider selectionProvider = (CompareConfigSelectionProvider) editor.getSite().getSelectionProvider();
-        EObject eObject = selectionProvider.resolveEObject(getSelection(editor));
+        EObject eObject = selectionProvider.resolveEObject(getSelection(editor), null);
         openInEditor(eObject, editor, shell);
     }
     

@@ -1,5 +1,6 @@
 
 
+import java.io.IOException;
 import java.lang.reflect.Field;
 import java.time.LocalDateTime;
 import java.time.format.DateTimeFormatter;
@@ -7,6 +8,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import org.eclipse.core.resources.IProject;
+import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.ContributionItem;
 import org.eclipse.jface.action.IToolBarManager;
 import org.eclipse.jface.action.Separator;
@@ -16,6 +18,7 @@ import org.eclipse.jface.viewers.ColumnViewer;
 import org.eclipse.jface.viewers.EditingSupport;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.ILabelProvider;
+import org.eclipse.jface.dialogs.MessageDialog;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.TreeViewerColumn;
@@ -55,6 +58,9 @@ import org.osgi.framework.ServiceReference;
 import com._1c.g5.v8.dt.platform.services.core.runtimes.environments.IResolvableRuntimeInstallation;
 import com._1c.g5.v8.dt.platform.services.model.InfobaseReference;
 import com._1c.g5.v8.dt.platform.services.model.RuntimeInstallation;
+
+import IRApplicationRegistry.IrSession;
+import IRApplicationRegistry.State;
 
 /**
  * Хук панели «Приложения» EDT.
@@ -454,16 +460,58 @@ public class ApplicationsViewHook implements IStartup
     }
 
     // =======================================================================
-    // 3. Тулбар: кнопка «Подключение»
+    // 3. Тулбар: кнопки «Запустить конфигуратор» и «Подключение»
     // =======================================================================
 
     private void addToolbarButtons(IViewPart view, ColumnViewer viewer)
     {
         IActionBars bars = view.getViewSite().getActionBars();
         IToolBarManager tb = bars.getToolBarManager();
-        ToolItem[] ref = { null };
+        ToolItem[] connectionRef = { null };
+        ToolItem[] launchRef     = { null };
 
         tb.add(new Separator());
+
+        // Кнопка «Запустить конфигуратор» — дублирует одноимённый пункт контекстного меню
+        tb.add(new ContributionItem()
+        {
+            @Override public void fill(ToolBar bar, int index)
+            {
+                ToolItem item = index >= 0
+                    ? new ToolItem(bar, SWT.PUSH, index)
+                    : new ToolItem(bar, SWT.PUSH);
+                item.setText("Запустить конфигуратор"); //$NON-NLS-1$
+                item.setToolTipText("Запустить конфигуратор 1С для выбранной инфобазы"); //$NON-NLS-1$
+                item.setEnabled(false);
+                item.addSelectionListener(new SelectionAdapter()
+                {
+                    @Override public void widgetSelected(SelectionEvent e)
+                    {
+                        // "com._1c.g5.v8.dt.internal.platform.services.ui.infobases.actions.LaunchDesignerAction"
+                        IStructuredSelection sel = (IStructuredSelection) viewer.getSelection();
+                        if (sel.size() == 1)
+                        {
+                            disconnectSsh(sel.toList(), viewer);
+                            InfobaseReference infobase = ApplicationsViewHook.getInfobaseFromApplication(sel.getFirstElement());
+                            IProject project = (IProject) Reflect.getField(sel.getFirstElement(), "project");
+                            String connectionString = IRApplicationRegistry.buildConnectionString(infobase, true);
+                            RuntimeInstallation runtimeInstallation = ApplicationsViewHook.getRuntimeInstallation(project, infobase);
+                            try
+                            {
+                                Runtime.getRuntime().exec("" + runtimeInstallation.getLocation().getPath() + "1cv8.exe");
+                            }
+                            catch (IOException e1)
+                            {
+                                // TODO Auto-generated catch block
+                                e1.printStackTrace();
+                            }
+                        }
+                    }
+                });
+                launchRef[0] = item;
+            }
+        });
+
         tb.add(new ContributionItem()
         {
             @Override public void fill(ToolBar bar, int index)
@@ -481,16 +529,22 @@ public class ApplicationsViewHook implements IStartup
                         showConnectionMenu(item, bar, viewer);
                     }
                 });
-                ref[0] = item;
+                connectionRef[0] = item;
             }
         });
         bars.updateActionBars();
 
         viewer.addSelectionChangedListener(event ->
         {
-            ToolItem ti = ref[0];
-            if (ti != null && !ti.isDisposed())
-                ti.setEnabled(!event.getSelection().isEmpty());
+            IStructuredSelection sel = (IStructuredSelection) event.getSelection();
+
+            ToolItem conn = connectionRef[0];
+            if (conn != null && !conn.isDisposed())
+                conn.setEnabled(!sel.isEmpty());
+
+            ToolItem launch = launchRef[0];
+            if (launch != null && !launch.isDisposed())
+                launch.setEnabled(sel.size() == 1 && getInfobase(sel.getFirstElement()) != null);
         });
     }
 
@@ -610,10 +664,6 @@ public class ApplicationsViewHook implements IStartup
         control.addDisposeListener(
             ev -> { if (!finalMenu.isDisposed()) finalMenu.removeMenuListener(adapter); });
     }
-
-    // =======================================================================
-    // 5. Автообновление
-    // =======================================================================
 
     private void registerRedrawOnPoolChange(ColumnViewer viewer)
     {

@@ -55,6 +55,7 @@ public class CompareConfigMenuHook implements IStartup
     private static final String CONTEXT_ID                = "tormozit.edt.compareConf.context";
     private static final String ITEM_TEXT_OpenObject      = "Открыть объект \tF2";
     private static final String ITEM_TEXT_showInNavigator = "Показать в навигаторе \tCTRL+T";
+    private static final String ITEM_TEXT_compareInIR = "Сравнить в приложении ИР";
 
     // ---- IStartup ----
 
@@ -311,6 +312,18 @@ public class CompareConfigMenuHook implements IStartup
                     public void widgetSelected(SelectionEvent e)
                     {
                         CompareConfigOpenObjectHandler.showInNavigator(editor, tree.getShell());
+                    }
+                });
+                addedItems.add(item2);
+                
+                MenuItem item3 = new MenuItem(menu, SWT.PUSH);
+                item3.setText(ITEM_TEXT_compareInIR);
+                item3.addSelectionListener(new SelectionAdapter()
+                {
+                    @Override
+                    public void widgetSelected(SelectionEvent e)
+                    {
+                        CompareConfigCompareInIRHandler.runCompare(editor, tree.getShell());
                     }
                 });
                 addedItems.add(item2);

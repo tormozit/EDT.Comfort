@@ -27,7 +27,9 @@ import org.eclipse.ui.PlatformUI;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.FrameworkUtil;
 
+import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.platform.services.model.Arch;
+import com._1c.g5.v8.dt.platform.services.model.IConnectionString;
 import com._1c.g5.v8.dt.platform.services.model.InfobaseReference;
 import com._1c.g5.v8.dt.platform.services.model.RuntimeInstallation;
 import com._1c.g5.v8.dt.platform.services.model.impl.RuntimeInstallationImpl;
@@ -73,7 +75,7 @@ public final class IRApplicationRegistry
 
     public enum State { IDLE, CONNECTING, CONNECTED }
 
-    public static final class IrSession
+    public final class IrSession
     {
         public final State         state;
         public final LocalDateTime startTime;      // момент успешного Connect()
@@ -95,12 +97,16 @@ public final class IRApplicationRegistry
             this.appTitle        = appTitle;
         }
 
-        static IrSession connecting()
+        public Object getModule(String name)
         {
-            return new IrSession(State.CONNECTING, LocalDateTime.now(), 0, "", null, null, ""); //$NON-NLS-1$ //$NON-NLS-2$
+            return ComJacobBridge.getProperty(dispatch, name);
         }
     }
-
+    IrSession newSession()
+    {
+        return new IrSession(State.CONNECTING, LocalDateTime.now(), 0, "", null, null, ""); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+    
     // UUID инфобазы → сессия
     private final Map<String, IrSession> sessions        = new ConcurrentHashMap<>();
     private final List<Runnable>         changeListeners = new CopyOnWriteArrayList<>();
@@ -148,6 +154,14 @@ public final class IRApplicationRegistry
         return (s != null && s.state == State.CONNECTED) ? s.platformVersion : null;
     }
 
+    public Object getAnyActiveDispatch()
+    {
+        for (IrSession s : sessions.values())
+            if (s.state == State.CONNECTED && s.dispatch != null)
+                return s.dispatch;
+        return null;
+    }
+
     public boolean isAutoConnect(Object element)
     {
         InfobaseReference infobase = ApplicationsViewHook.getInfobaseFromApplication(element);
@@ -177,7 +191,7 @@ public final class IRApplicationRegistry
         if (existing != null && (existing.state == State.CONNECTING
                 || existing.state == State.CONNECTED)) return;
         IProject activeProject = (IProject) Reflect.getField(element, "project");
-        sessions.put(key, IrSession.connecting());
+        sessions.put(key, newSession());
         notifyListeners();
         CompletableFuture.runAsync(() -> doConnect(activeProject, infobase));
     }
@@ -214,10 +228,10 @@ public final class IRApplicationRegistry
     private void doConnectInternal(IProject project, InfobaseReference infobase)
     {
         String key = sessionKey(infobase);
-        String connectionString = buildConnectionString(infobase);
-        RuntimeInstallation RuntimeInstallation = ApplicationsViewHook.getRuntimeInstallation(project, infobase);
-        String platformVersion = RuntimeInstallation.getVersion().toString();
-        boolean configBitness64 = RuntimeInstallation.getArch() == Arch.X86_64; 
+        String connectionString = buildConnectionString(infobase, true);
+        RuntimeInstallation runtimeInstallation = ApplicationsViewHook.getRuntimeInstallation(project, infobase);
+        String platformVersion = runtimeInstallation.getVersion().toString();
+        boolean configBitness64 = runtimeInstallation.getArch() == Arch.X86_64; 
         log("connect() key=" + connectionString + " cs=" + removePassword(connectionString) //$NON-NLS-1$ //$NON-NLS-2$
             + " platform=" + platformVersion); //$NON-NLS-1$
 
@@ -282,7 +296,7 @@ public final class IRApplicationRegistry
                 }
                 log("Попытка " + attempt + " неудача. Повтор..."); //$NON-NLS-1$ //$NON-NLS-2$
                 // Еще есть красивый способо com._1c.g5.v8.dt.internal.platform.services.core.infobases.sync.connections.DesignerSessionInfobaseConnection.getBaseDirectory()
-                registerComClass(className, RuntimeInstallation.getLocation().getPath(), attempt, configBitness64);
+                registerComClass(className, runtimeInstallation.getLocation().getPath(), attempt, configBitness64);
             }
         }
 
@@ -374,13 +388,19 @@ public final class IRApplicationRegistry
     // Строка соединения (аналог СтрокаСоединенияБазыКонфигуратора)
     // -----------------------------------------------------------------------
 
-    static String buildConnectionString(Object infobase)
+    public static String buildConnectionString(InfobaseReference infobase, boolean withUser)
     {
-        Object connectionString = Reflect.getField(infobase, "connectionString"); //$NON-NLS-1$
+        IConnectionString connectionString = infobase.getConnectionString();
         String result = (String) Reflect.call(connectionString, "asConnectionString"); //$NON-NLS-1$
         if (result != null && !result.isEmpty()
                 && (result.contains("File=") || result.contains("Srvr="))) //$NON-NLS-1$ //$NON-NLS-2$
-            return result;
+            {
+                if (withUser)
+                {
+//                    result += ";Usr=" + infobase.getAuthentication().name() + ";Pwd=" + infobase.getAuthentication().;
+                }
+                return result;
+            }
         return ""; //$NON-NLS-1$
     }
 
@@ -593,5 +613,14 @@ public final class IRApplicationRegistry
     {
         String ts = LocalTime.now().format(LOG_TIME_FMT);
         System.out.println("[TormozitIR " + ts + "] " + message); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * Берем любую активную сессию IRApplicationRegistry.IrSession от main проекта. Если ее нет то подключаем от основного приложения. Если его нет то подключаем от первого приложения.
+    */
+    public static IrSession getSession(IDtProject dtProject)
+    {
+        // TODO Auto-generated method stub
+        return null;
     }
 }

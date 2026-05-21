@@ -4,6 +4,9 @@ import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.eclipse.e4.ui.model.application.ui.basic.MPart;
+import org.eclipse.e4.ui.workbench.modeling.EPartService;
+import org.eclipse.e4.ui.workbench.modeling.ESelectionService;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.viewers.AbstractTreeViewer;
 import org.eclipse.jface.viewers.ISelection;
@@ -13,17 +16,14 @@ import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.SelectionChangedEvent;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.swt.widgets.Display;
-import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.IWorkbenchPage;
-import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.navigator.CommonNavigator;
-import org.eclipse.e4.ui.workbench.modeling.EPartService;
-import org.eclipse.e4.ui.workbench.modeling.ESelectionService;
-import org.eclipse.e4.ui.model.application.ui.basic.MPart;
+import org.eclipse.jdt.annotation.Nullable;
 
 import com._1c.g5.v8.dt.compare.core.IComparisonSession;
+import com._1c.g5.v8.dt.compare.model.ComparisonSide;
 import com._1c.g5.v8.dt.compare.model.MatchedObjectsComparisonNode;
 
 /**
@@ -116,7 +116,7 @@ public class CompareConfigSelectionProvider
 
     public void showObjectInNavigator(ISelection selection, boolean ifForced)
     {
-        EObject eObject = resolveEObject(selection);
+        EObject eObject = resolveEObject(selection, null);
         currentSelection = (eObject != null)
                 ? new StructuredSelection(eObject)
                 : StructuredSelection.EMPTY;
@@ -190,9 +190,8 @@ public class CompareConfigSelectionProvider
      * Возвращает {@code null}, если элемент не является объектом конфигурации
      * или EObject не удалось получить через сессию сравнения.
      */
-    public EObject resolveEObject(ISelection selection)
+    public EObject resolveEObject(ISelection selection, @Nullable ComparisonSide side)
     {
-        //ISelection selection = editor.getSite().getSelectionProvider().getSelection();
         if (!(selection instanceof IStructuredSelection))
             return null;
 
@@ -208,9 +207,12 @@ public class CompareConfigSelectionProvider
         if (session == null)
             return null;
 
-        Long bmId = matchedNode.getMainObjectId();
+        Long bmId = null;
+        if (side == null || side == ComparisonSide.MAIN)
+            bmId = matchedNode.getMainObjectId();
         if (bmId == null || bmId == -1L)
-            bmId = matchedNode.getOtherObjectId();
+            if (side == null || side == ComparisonSide.OTHER)
+                bmId = matchedNode.getOtherObjectId();
         if (bmId == null || bmId == -1L)
             return null;
 
@@ -248,7 +250,7 @@ public class CompareConfigSelectionProvider
      *   <li>прямое приведение типа</li>
      * </ul>
      */
-    private static MatchedObjectsComparisonNode resolveMatchedNode(Object element)
+    public static MatchedObjectsComparisonNode resolveMatchedNode(Object element)
     {
         Object node = Reflect.call(element, "retrieveComparisonNode"); //$NON-NLS-1$
         if (node instanceof MatchedObjectsComparisonNode)
