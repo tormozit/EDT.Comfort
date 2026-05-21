@@ -59,9 +59,6 @@ import com._1c.g5.v8.dt.platform.services.core.runtimes.environments.IResolvable
 import com._1c.g5.v8.dt.platform.services.model.InfobaseReference;
 import com._1c.g5.v8.dt.platform.services.model.RuntimeInstallation;
 
-import IRApplicationRegistry.IrSession;
-import IRApplicationRegistry.State;
-
 /**
  * Хук панели «Приложения» EDT.
  *
