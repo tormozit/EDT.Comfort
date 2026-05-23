@@ -7,7 +7,7 @@ import java.util.Iterator;
  * Рефлексивная обёртка над Jacob (Java COM Bridge).
  *
  * <h3>Classloader в OSGi</h3>
- * {@code ComJacobBridge.class.getClassLoader()} — Equinox BundleClassLoader,
+ * {@code ComBridge.class.getClassLoader()} — Equinox BundleClassLoader,
  * видит {@code Bundle-ClassPath: lib/jacob.jar}.
  *
  * <h3>DLL-загрузка</h3>
@@ -18,9 +18,9 @@ import java.util.Iterator;
  * {@link #iterateComCollection} использует Jacob {@code EnumVariant} для итерации
  * COM-коллекций (результаты WMI ExecQuery, списки окон 1С и т.п.).
  */
-public final class ComJacobBridge
+public final class ComBridge
 {
-    private ComJacobBridge() {}
+    private ComBridge() {}
 
     private static volatile boolean initialized;
     private static volatile boolean available;
@@ -52,13 +52,13 @@ public final class ComJacobBridge
     private static void ensureJacob()
     {
         if (initialized) return;
-        synchronized (ComJacobBridge.class)
+        synchronized (ComBridge.class)
         {
             if (initialized) return;
             initialized = true;
              try
             {
-                ClassLoader cl = ComJacobBridge.class.getClassLoader();
+                ClassLoader cl = ComBridge.class.getClassLoader();
 
                 classActiveXComponent = cl.loadClass("com.jacob.activeX.ActiveXComponent"); //$NON-NLS-1$
                 classDispatch         = cl.loadClass("com.jacob.com.Dispatch");              //$NON-NLS-1$

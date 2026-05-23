@@ -23,6 +23,7 @@ import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.dialogs.MessageDialog;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.handlers.HandlerUtil;
@@ -43,10 +44,13 @@ import com._1c.g5.v8.dt.compare.model.ComparisonNode;
 import com._1c.g5.v8.dt.compare.model.ComparisonSide;
 import com._1c.g5.v8.dt.compare.model.ExternalPropertyComparisonNode;
 import com._1c.g5.v8.dt.compare.model.MatchedObjectsComparisonNode;
+import com._1c.g5.v8.dt.compare.ui.editor.ComparisonTreeControl;
 import com._1c.g5.v8.dt.compare.ui.editor.DtComparisonView;
 import com._1c.g5.v8.dt.compare.ui.util.MergeUiUtils;
 import com._1c.g5.v8.dt.core.filesystem.IQualifiedNameFilePathConverter;
 import com.google.inject.Inject;
+
+import javafx.scene.control.TreeView;
 
 import com._1c.g5.v8.dt.compare.model.SolidResourceComparisonNode;
 import com._1c.g5.v8.dt.export.IExportOperation;
@@ -106,8 +110,8 @@ public class CompareConfigCompareInIRHandler extends AbstractHandler {
             {
                 // Здесь мы находимся в родном потоке для этого COM-объекта. 
                 Object irClient = irSession.getModule("ирКлиент");
-                ComJacobBridge.setProperty(irSession.root, "Visible", true);
-                ComJacobBridge.invoke(irClient, "СравнитьТабличныеДокументыИмпортЛкс", pathMain.toString(), pathOther.toString());
+                ComBridge.setProperty(irSession.root, "Visible", true);
+                ComBridge.invoke(irClient, "СравнитьТабличныеДокументыИмпортЛкс", pathMain.toString(), pathOther.toString());
             } 
             catch (Exception e) 
             {
@@ -157,16 +161,15 @@ public class CompareConfigCompareInIRHandler extends AbstractHandler {
     }
 
     public static ISelection getSelection(IEditorPart editor) {
-        // Через comparisonView -> treeViewer -> selection
         ISelection sel = null;
         Object view = Reflect.getField(editor, "comparisonView");
         if (view instanceof DtComparisonView) {
-            Object treeControl = ((DtComparisonView) view).getTreeControl();
+            ComparisonTreeControl treeControl = ((DtComparisonView) view).getTreeControl();
             if (treeControl != null) {
-                Object viewer = Reflect.call(treeControl, "getTreeViewer");
+                TreeViewer viewer = treeControl.getTreeViewer();
                 if (viewer != null)
                 {
-                    sel = (ISelection) Reflect.call(viewer, "getSelection");
+                    sel = viewer.getSelection();
                 }
             }
         }

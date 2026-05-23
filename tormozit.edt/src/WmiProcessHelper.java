@@ -36,8 +36,8 @@ public final class WmiProcessHelper
     {
         try
         {
-            Object locator = ComJacobBridge.createComObject("WbemScripting.SWbemLocator"); //$NON-NLS-1$
-            Object wmi     = ComJacobBridge.invoke(locator, "ConnectServer", ".", "root\\cimv2"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            Object locator = ComBridge.createComObject("WbemScripting.SWbemLocator"); //$NON-NLS-1$
+            Object wmi     = ComBridge.invoke(locator, "ConnectServer", ".", "root\\cimv2"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             IRApplicationRegistry.log("WMI подключён: root\\cimv2"); //$NON-NLS-1$
             return wmi;
         }
@@ -56,29 +56,32 @@ public final class WmiProcessHelper
      * Порт вызова {@code ПолучитьПроцессОСЛкс(Неопределено, МоментСтарта, 2, "-Embedding")}
      * из {@code ПодключениеИР()}.
      */
-    public static Object findProcess(Object wmi, long startedAfterMs, int toleranceSec)
+    public static Object findProcess(long startedAfterMs, int toleranceSec, String marker)
     {
+        Object wmi  = connectWmi();
         if (wmi == null) return null;
-
         String dateFrom = wqlDate(startedAfterMs - toleranceSec * 1000L);
         String dateTo   = wqlDate(startedAfterMs + (toleranceSec + 1) * 1000L);
 
-        String wql = "Select * from Win32_Process" //$NON-NLS-1$
-            + " Where CommandLine LIKE '%-Embedding%'" //$NON-NLS-1$
-            + " AND Name = '1cv8.exe'" //$NON-NLS-1$
+        String wql = "Select * from Win32_Process Where" //$NON-NLS-1$
+            + " Name = '1cv8.exe'" //$NON-NLS-1$
             + " AND CreationDate >= '" + dateFrom + "'" //$NON-NLS-1$ //$NON-NLS-2$
             + " AND CreationDate <= '" + dateTo   + "'"; //$NON-NLS-1$ //$NON-NLS-2$
+        if (!marker.isEmpty())
+        {
+            wql += " AND CommandLine LIKE '%"+marker+"%'"; //$NON-NLS-1$
+        }
 
         IRApplicationRegistry.log("WQL: " + wql); //$NON-NLS-1$
         try
         {
-            Object resultSet = ComJacobBridge.invoke(wmi, "ExecQuery", wql); //$NON-NLS-1$
+            Object resultSet = ComBridge.invoke(wmi, "ExecQuery", wql); //$NON-NLS-1$
             // Для Каждого ПроцессОС Из ВыборкаПроцессовОС Цикл
             //     Значение = ПроцессОС; Прервать;  // берём первый
             // КонецЦикла;
-            for (Object process : ComJacobBridge.iterateComCollection(resultSet))
+            for (Object process : ComBridge.iterateComCollection(resultSet))
             {
-                long pid = ComJacobBridge.toLong(ComJacobBridge.getProperty(process, "ProcessId")); //$NON-NLS-1$
+                long pid = ComBridge.toLong(ComBridge.getProperty(process, "ProcessId")); //$NON-NLS-1$
                 IRApplicationRegistry.log("Процесс ОС найден, PID=" + pid); //$NON-NLS-1$
                 return process;
             }
@@ -93,14 +96,15 @@ public final class WmiProcessHelper
     }
 
     /** Находит Win32_Process по PID через WMI (для повторного получения объекта при отключении). */
-    public static Object findProcessByPid(Object wmi, long pid)
+    public static Object findProcessByPid(long pid)
     {
+        Object wmi  = connectWmi();
         if (wmi == null || pid <= 0) return null;
         try
         {
-            Object resultSet = ComJacobBridge.invoke(wmi, "ExecQuery", //$NON-NLS-1$
-                "Select * from Win32_Process Where ProcessID = " + pid); //$NON-NLS-1$
-            for (Object p : ComJacobBridge.iterateComCollection(resultSet)) return p;
+            Object resultSet = ComBridge.invoke(wmi, "ExecQuery", //$NON-NLS-1$
+                "Select * from Win32_Process Where ProcessID = " + pid + " AND Name = '1cv8.exe'"); //$NON-NLS-1$
+            for (Object p : ComBridge.iterateComCollection(resultSet)) return p;
             return null;
         }
         catch (Exception e)
@@ -126,7 +130,7 @@ public final class WmiProcessHelper
         {
             try
             {
-                ComJacobBridge.invoke(processObj, "Terminate"); //$NON-NLS-1$
+                ComBridge.invoke(processObj, "Terminate"); //$NON-NLS-1$
                 IRApplicationRegistry.log("Win32_Process.Terminate() OK, PID=" + pid); //$NON-NLS-1$
                 return;
             }
@@ -142,7 +146,7 @@ public final class WmiProcessHelper
     public static long getPid(Object processObj)
     {
         if (processObj == null) return 0L;
-        try { return ComJacobBridge.toLong(ComJacobBridge.getProperty(processObj, "ProcessId")); } //$NON-NLS-1$
+        try { return ComBridge.toLong(ComBridge.getProperty(processObj, "ProcessId")); } //$NON-NLS-1$
         catch (Exception e) { return 0L; }
     }
 

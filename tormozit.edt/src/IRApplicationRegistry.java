@@ -2,6 +2,7 @@
 
 import java.io.File;
 import java.io.UnsupportedEncodingException;
+import java.nio.charset.Charset;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
@@ -100,7 +101,7 @@ public final class IRApplicationRegistry
     // -----------------------------------------------------------------------
     // Синглтон
     // -----------------------------------------------------------------------
-
+    static String MINIMUM_IR_VERSION = "8.18";
     private static final IRApplicationRegistry INSTANCE = new IRApplicationRegistry();
     private static ServiceSupplier<IInfobaseAccessManager> infobaseAccessManagerSupplier = 
         ServiceAccess.supplier(IInfobaseAccessManager.class, Reflect.ourContext()); 
@@ -124,7 +125,14 @@ public final class IRApplicationRegistry
         final Object processObj;
         public String appTitle;
         public IProject project;
-        public final ExecutorService executor; // Выделенный поток для всех операций с этой COM-сессией 
+        public final ExecutorService executor; // Выделенный поток для всех операций с этой COM-сессией
+        /** Аналог ИмяФайлаБуфера — временный файл-канал между EDT и приложением ИР (ИР 7.03+) */
+        public String bufferFileName = ""; //$NON-NLS-1$
+        /** Аналог выхИспользуемоеИмяФайлаПортативногоИР — путь к .epf или .1cd портативного ИР */
+        public String usedPortableFileName = ""; //$NON-NLS-1$
+        /** Не null, если ИР подключён портативно (ирПортативный.epf), а не через расширение.
+         *  В этом случае getModule() использует эту форму вместо root (COM-приложения). */
+        public Object moduleRoot = null;
 
         IrSession(State state, LocalDateTime startTime, long pid, String platformVersion,
                   Object root, Object processObj, String appTitle, IProject project, ExecutorService executor)
@@ -142,7 +150,7 @@ public final class IRApplicationRegistry
 
         public Object getModule(String name)
         {
-            return ComJacobBridge.getProperty(root, name);
+            return ComBridge.getProperty(moduleRoot != null ? moduleRoot : root, name);
         }
     }
     IrSession newSession(ExecutorService executor)
@@ -151,8 +159,14 @@ public final class IRApplicationRegistry
     }
     
     // UUID инфобазы → сессия
-    static private final Map<String, IrSession> sessions        = new ConcurrentHashMap<>();
-    static private final List<Runnable>         changeListeners = new CopyOnWriteArrayList<>();
+    static private final Map<String, IrSession>  sessions           = new ConcurrentHashMap<>();
+    static private final List<Runnable>          changeListeners    = new CopyOnWriteArrayList<>();
+    /** Ключи баз, к которым уже выполнялось хотя бы одно успешное подключение в этом сеансе EDT.
+     *  Аналог ВосстановитьЗначениеСеансаКонфигуратора("ЛиПервоеПодключениеИР"). */
+    static private final Set<String>             firstConnectedKeys = ConcurrentHashMap.newKeySet();
+    /** Аналог ПапкаПортативногоИР — каталог, содержащий ирПортативный.epf и модули.
+     *  Пусто = ещё не определён или не найден. */
+    static private volatile String               portableIrFolder   = ""; //$NON-NLS-1$
 
     // авто-подключение при открытии базы в EDT
     private final Map<String, Boolean> autoConnectMap = new ConcurrentHashMap<>();
@@ -239,7 +253,7 @@ public final class IRApplicationRegistry
 
         // Запускаем подключение строго в контексте этого потока
         executor.submit(() -> {
-            ComJacobBridge.initComThread(); // Инициализируем STA для потока ОДИН раз при старте
+            ComBridge.initComThread(); // Инициализируем STA для потока ОДИН раз при старте
             try
             {
                 doConnect(activeProject, infobase);
@@ -270,7 +284,7 @@ public final class IRApplicationRegistry
             String key = sessionKey(infobase);
             IrSession s = sessions.remove(key);
             if (s != null && s.executor != null) {
-                s.executor.submit(() -> ComJacobBridge.releaseComThread());
+                s.executor.submit(() -> ComBridge.releaseComThread());
                 s.executor.shutdown();
             }
             notifyListeners();
@@ -298,32 +312,28 @@ public final class IRApplicationRegistry
         String className = buildComClassName(platformVersion);
         String connectionStringNoPass = removePassword(connectionString);
         log("COM-класс: " + className + ", БД: " + connectionStringNoPass); //$NON-NLS-1$
-
-        // WMI создаём до запуска 1cv8.exe — нужен для поиска PID нового процесса
-        Object wmi = WmiProcessHelper.connectWmi();
-
-        Object  comDispatch        = null;
-        Object  processObj         = null;
-        long    pid                = 0;
-        boolean success            = false;
-        String  descriptionOnError = ""; //$NON-NLS-1$
-        long    momentStart        = System.currentTimeMillis();
+        Object comDispatch = null;
+        Object processObj = null;
+        long pid = 0;
+        boolean success = false;
+        String descriptionOnError = ""; //$NON-NLS-1$
+        long momentStart = System.currentTimeMillis();
 
         // До 2 попыток — аналог «Для НомерПопытки = 1 По 2»
         for (int attempt = 1; attempt <= 2; attempt++)
         {
             try
             {
-                long startMs = System.currentTimeMillis();
-                comDispatch = ComJacobBridge.createComObject(className);
-
                 // ПолучитьПроцессОСЛкс(Неопределено, startMs, 2, "-Embedding")
-                processObj = WmiProcessHelper.findProcess(wmi, startMs, 2);
-                pid        = WmiProcessHelper.getPid(processObj);
-
-                boolean connected = ComJacobBridge.connect(comDispatch, connectionString);
-                if (connected) { success = true; break; }
-
+                long timeMillis = System.currentTimeMillis();
+                comDispatch = ComBridge.createComObject(className);
+                processObj = WmiProcessHelper.findProcess(timeMillis, 2, "-Embedding");
+                pid = WmiProcessHelper.getPid(processObj);
+                boolean connected = ComBridge.connect(comDispatch, connectionString);
+                if (connected) { 
+                    success = true; 
+                    break; 
+                }
                 descriptionOnError = "Connect() вернул false"; //$NON-NLS-1$
                 comDispatch = null; processObj = null; pid = 0;
             }
@@ -368,34 +378,464 @@ public final class IRApplicationRegistry
         // УстановитьЗаголовок (8.3.10+) / УстановитьЗаголовокСистемы (8.3.9-)
         try
         {
-            Object comApp = ComJacobBridge.getProperty(comDispatch, "КлиентскоеПриложение");
-            ComJacobBridge.invoke(comApp, "УстановитьЗаголовок", title);
+            Object comApp = ComBridge.getProperty(comDispatch, "КлиентскоеПриложение");
+            ComBridge.invoke(comApp, "УстановитьЗаголовок", title);
         }
         catch (Exception e)
         {
-            ComJacobBridge.invoke(comDispatch, "УстановитьЗаголовокСистемы", title); //$NON-NLS-1$
+            ComBridge.invoke(comDispatch, "УстановитьЗаголовокСистемы", title); //$NON-NLS-1$
         }
-
-        final long   finalPid      = pid;
-        final Object finalDispatch = comDispatch;
-        final Object finalProcObj  = processObj;
-        final String finalVersion  = platformVersion;
 
      // Находим временную сессию, чтобы забрать созданный executor
         IrSession connectingSession = sessions.get(key);
         ExecutorService currentExecutor = connectingSession != null ? connectingSession.executor : null;
 
         IrSession irSession = new IrSession(
-            State.CONNECTED, LocalDateTime.now(), finalPid, finalVersion,
-            finalDispatch, finalProcObj, title, project, currentExecutor);
+            State.CONNECTED, LocalDateTime.now(), pid, platformVersion,
+            comDispatch, processObj, title, project, currentExecutor);
         sessions.put(key, irSession);
         notifyListeners();
 
-        EclipseToastNotification.show("ИР подключено", //$NON-NLS-1$
-            title + " подключено за " + duration + " сек", 3_000); //$NON-NLS-1$ //$NON-NLS-2$
-        log("Подключено: " + title + " за " + duration + " с, PID=" + finalPid //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " platform=" + platformVersion); //$NON-NLS-1$
-        Object irClient = irSession.getModule("ирКлиент");
+        // ═══════════════════════════════════════════════════════════════════════
+        // Аналог: МодулиИР = МодулиИР(ПодключениеИР,, ИспользуемоеИмяФайлаПортативногоИР)
+        // ═══════════════════════════════════════════════════════════════════════
+        if (!resolveIrModules(comDispatch, irSession))
+        {
+            // МодулиИР = Неопределено → выхПодключеноНоНетПодсистемы = Истина
+            sessions.remove(key);
+            notifyListeners();
+            return;
+        }
+        // После resolveIrModules: irSession.portableRoot заполнен (портативный) или null (расширение).
+        // irSession.getModule() уже использует правильный корень.
+        // irSession.usedPortableFileName заполнен при портативном варианте.
+        Object irCache  = irSession.getModule("ирКэш");  //$NON-NLS-1$
+        Object irClient = irSession.getModule("ирКлиент"); //$NON-NLS-1$
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // Проверка версии подсистемы ИР
+        // НомерВерсии < Число(СтрЗаменить(МинимальнаяВерсияИР, ".", ""))  →  <  814
+        // ═══════════════════════════════════════════════════════════════════════
+        long irSubsystemVersion = 0;
+        try
+        {
+            irSubsystemVersion = ComBridge.toLong(ComBridge.invoke(irCache, "НомерВерсииПодсистемыИРЛкс")); //$NON-NLS-1$
+        }
+        catch (Exception ignored) { irSubsystemVersion = 0; }
+
+        if (irSubsystemVersion < Integer.parseInt(MINIMUM_IR_VERSION.replace(".", "")))
+        {
+            String versionMsg = String.format(
+                "Обнаружена несовместимая версия подсистемы «Инструменты разработчика». Необходима версия %s и выше", MINIMUM_IR_VERSION);
+            log("Несовместимая версия подсистемы ИР: " + irSubsystemVersion); //$NON-NLS-1$
+            EclipseToastNotification.show("Несовместимая версия ИР", versionMsg, 5_000); //$NON-NLS-1$
+            try { ComBridge.invoke(irClient, "ОткрытьСправкуПоПодсистемеЛкс"); } //$NON-NLS-1$
+            catch (Exception ignored) {}
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // МодулиИР.ирКлиент.ПодключитьСвязанныйКонфигураторЛкс(Конфигуратор.PID, ИмяФайлаБуфера)
+        // Аналог ИР 7.03+ — сообщаем ИР PID нашего процесса и файл-канал для связи
+        // ═══════════════════════════════════════════════════════════════════════
+        String bufferFileName;
+        try
+        {
+            bufferFileName = File.createTempFile("tormozit_ir_", ".tmp").getAbsolutePath(); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (Exception e)
+        {
+            bufferFileName = System.getProperty("java.io.tmpdir") + "\\tormozit_ir_buffer.tmp"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        irSession.bufferFileName = bufferFileName;
+
+        long edtPid = ProcessHandle.current().pid(); // Конфигуратор.PID
+        try
+        {
+            ComBridge.invoke(irClient, "ПодключитьСвязанныйКонфигураторЛкс", edtPid, bufferFileName); //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+            String noRightsMsg = "Нет прав на подсистему «Инструменты разработчика»: " + e.getMessage(); //$NON-NLS-1$
+            // Если у БД нет ни одного пользователя — платформа вернёт специфичную ошибку
+            String cs = buildConnectionString(infobase, false);
+            if (!cs.contains("Usr=")) //$NON-NLS-1$
+                noRightsMsg += ". Необходимо создать пользователя."; //$NON-NLS-1$
+            log(noRightsMsg);
+            EclipseToastNotification.show("ИР: нет прав", noRightsMsg, 5_000); //$NON-NLS-1$
+        }
+
+        // МодулиИР.ирКлиент.ЗакрытьВсеЧужиеФормыЛкс()
+        try { ComBridge.invoke(irClient, "ЗакрытьВсеЧужиеФормыЛкс"); } //$NON-NLS-1$
+        catch (Exception ignored) {}
+
+        // ПодключениеИР.СтандартныеПодсистемыКлиент.ПропуститьПредупреждениеПередЗавершениемРаботыСистемы()
+        // Для БСП — подавляем предупреждение при закрытии. Ошибку игнорируем намеренно,
+        // иначе она блокирует последующие исключения (https://github.com/EvilBeaver/OneScript/issues/1498)
+        try
+        {
+            Object bsp = ComBridge.getProperty(comDispatch, "СтандартныеПодсистемыКлиент"); //$NON-NLS-1$
+            ComBridge.invoke(bsp, "ПропуститьПредупреждениеПередЗавершениемРаботыСистемы"); //$NON-NLS-1$
+        }
+        catch (Exception ignored) {}
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // Если первое подключение этой базы в сеансе EDT — готовим кэш и проверяем Гит
+        // Аналог: ЛиПервоеПодключениеИР = ВосстановитьЗначениеСеансаКонфигуратора("ЛиПервоеПодключениеИР")
+        // ═══════════════════════════════════════════════════════════════════════
+        boolean isFirstConnect = firstConnectedKeys.add(key); // true = ещё не подключались
+        if (isFirstConnect)
+        {
+            try
+            {
+                // МодулиИР.ирКэш.СостояниеПодготовкиКэшМДСеансаЛкс()
+                try { ComBridge.invoke(irCache, "СостояниеПодготовкиКэшМДСеансаЛкс"); } //$NON-NLS-1$
+                catch (Exception ignored) {}
+
+//                Object textField = ComBridge.getProperty(irCache, "ПолеТекстаПрограммы"); //$NON-NLS-1$
+//                ComBridge.invoke(textField, "РазобратьТекущийКонтекст");  // инициирует ИнициациюОписанияМетодовИСвойств //$NON-NLS-1$
+//                ComBridge.invoke(textField, "ПодготовитьГлобальныйКонтекст"); //$NON-NLS-1$
+//                try { ComBridge.invoke(textField, "ЗагрузитьКэшМодулейВПамятьОС"); } //$NON-NLS-1$
+//                catch (Exception ignored) {} // ИР 7.75+
+//
+//                // Проверяем обновлённые модули из папки Гита
+//                Object changedModules = null;
+//                try { changedModules = ComBridge.invoke(textField, "ПодготовитьОбновлениеИзПапкиГита"); } //$NON-NLS-1$
+//                catch (Exception ignored) {} // метод появился в ИР 8.10+
+//
+//                long changedCount = 0;
+//                if (changedModules != null)
+//                {
+//                    try
+//                    {
+//                        changedCount = ComBridge.toLong(ComBridge.invoke(changedModules, "Количество")); //$NON-NLS-1$
+//                    }
+//                    catch (Exception ignored) {}
+//                }
+//                if (changedCount > 0)
+//                {
+//                    final int cnt = changedCount;
+//                    // TODO: по клику тоста — вызвать ОбновитьКэшМодулейИзПапкиГита(changedModules)
+//                    EclipseToastNotification.show(
+//                        "ИР адаптер", //$NON-NLS-1$
+//                        String.format("В папке Гита найдено %d обновлённых модулей. Перенести их в кэш модулей?", cnt), //$NON-NLS-1$
+//                        10_000);
+//                }
+            }
+            catch (Exception e)
+            {
+                log("Ошибка подготовки кэша при первом подключении: " + e.getMessage()); //$NON-NLS-1$
+            }
+        }
+        // СохранитьЗначениеСеансаКонфигуратора("ЛиПервоеПодключениеИР", Ложь) — уже отмечено в firstConnectedKeys
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // Пинг до сервера ИР
+        // МодулиИР.ирКлиент.ЗамеритьПингДоСервераЛкс(ТекстПинга)  — ИР 8.06+
+        // ═══════════════════════════════════════════════════════════════════════
+        long ping = 0;
+        String pingText = ""; //$NON-NLS-1$
+        try
+        {
+            ping = ComBridge.toLong(ComBridge.invoke(irClient, "ЗамеритьПингДоСервераЛкс", pingText)); //$NON-NLS-1$
+        }
+        catch (Exception ignored) { ping = 0; } // ИР 8.06-
+
+        String connectedMsg = title + " подключено за " + duration + " сек"; //$NON-NLS-1$ //$NON-NLS-2$
+        if (duration > 30 || ping > 5)
+            connectedMsg += ". Задержка канала до сервера — " + ping + " сек"; //$NON-NLS-1$ //$NON-NLS-2$
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // Предупреждения для файловой базы ИР
+        // ═══════════════════════════════════════════════════════════════════════
+        boolean isFileBased = buildConnectionString(infobase, false).contains("File="); //$NON-NLS-1$
+        if (isFileBased)
+        {
+            // МодулиИР.ПолучитьВремяОжиданияБлокировкиДанных()
+            try
+            {
+                long lockWait = ComBridge.toLong(ComBridge.invoke(comDispatch, "ПолучитьВремяОжиданияБлокировкиДанных")); //$NON-NLS-1$
+                if (lockWait > 0)
+                    EclipseToastNotification.show("ИР адаптер", //$NON-NLS-1$
+                        "В файловой базе ИР включено ожидание блокировки данных. Рекомендую отключить.", 10_000); //$NON-NLS-1$
+            }
+            catch (Exception ignored) {}
+
+            // МодулиИР.ирКлиент.ЛиВФайловойБазеЕстьВключенныеРегламентныеЗаданияЛкс()
+            try
+            {
+                Object hasJobs = ComBridge.invoke(irClient, "ЛиВФайловойБазеЕстьВключенныеРегламентныеЗаданияЛкс"); //$NON-NLS-1$
+                if (Boolean.TRUE.equals(hasJobs))
+                    EclipseToastNotification.show("ИР адаптер", //$NON-NLS-1$
+                        "В файловой базе ИР включены регламентные задания. Рекомендую отключить.\n" //$NON-NLS-1$
+                        + "Если в коде есть их включение, подавите его проверкой файловой базы.", 10_000); //$NON-NLS-1$
+            }
+            catch (Exception e)
+            {
+                if (e.getMessage() == null || !e.getMessage().contains("Метод объекта не обнаружен")) //$NON-NLS-1$
+                    log("ЛиВФайловойБазеЕстьВключенныеРегламентныеЗадания: " + e.getMessage()); //$NON-NLS-1$
+                // ИР 8.11- — метод ещё не существует, молча игнорируем
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // ПодключениеИР.ОтключитьОбработчикОжидания — запрещённые фоновые обработчики БСП 2.0
+        // ═══════════════════════════════════════════════════════════════════════
+        String[] forbiddenHandlers = {
+            "ОбработчикОжиданияПроверкиДинамическогоИзмененияИБ", // БСП 2.0 //$NON-NLS-1$
+            "ОбработчикДействийРезервногоКопирования",             // БСП 2.0 //$NON-NLS-1$
+            "ОбработчикОжиданияСтандартныхПериодическихПроверок",  // БСП 2.0 //$NON-NLS-1$
+        };
+        for (String handlerName : forbiddenHandlers)
+        {
+            try { ComBridge.invoke(comDispatch, "ОтключитьОбработчикОжидания", handlerName); } //$NON-NLS-1$
+            catch (Exception ignored) {}
+        }
+
+        // ═══════════════════════════════════════════════════════════════════════
+        // Итоговый тост и начало слежения за текущим методом
+        // Аналог: ПоказатьВсплывающееУведомление + НачатьСлежениеЗаТекущимМетодом()
+        // ═══════════════════════════════════════════════════════════════════════
+        EclipseToastNotification.show("ИР подключено", connectedMsg, 3_000); //$NON-NLS-1$
+        log("Подключено: " + title + " за " + duration + " с, PID=" + pid //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " platform=" + platformVersion + " irVer=" + irSubsystemVersion); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    // -----------------------------------------------------------------------
+    // resolveIrModules — порт функции МодулиИР(ПодключениеИР, ЭтоПервоеПодключение, выхИмяФайла)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Определяет корень модулей ИР: расширение (встроено в конфигурацию) или портативный epf.
+     * <ul>
+     *   <li>Расширение: {@code comDispatch.ирПортативный} доступен → {@code root} содержит модули.</li>
+     *   <li>Портативный: {@code comDispatch.ирПортативный} бросает исключение →
+     *       загружаем {@code ирПортативный.epf} из {@link #portableIrFolder}.</li>
+     * </ul>
+     * Побочные эффекты:
+     * <ul>
+     *   <li>Записывает {@code session.portableRoot} (только для портативного варианта).</li>
+     *   <li>Записывает {@code session.usedPortableFileName}.</li>
+     * </ul>
+     *
+     * @return {@code true} — модули найдены и готовы к использованию через {@code session.getModule()};
+     *         {@code false} — подсистема ИР не обнаружена (аналог {@code МодулиИР = Неопределено}).
+     * @throws RuntimeException если версия ИР обновилась и требуется переподключение
+     *         (аналог {@code ВызватьИсключение "Требуется переподключение ИР"}).
+     */
+    private boolean resolveIrModules(Object comDispatch, IrSession session)
+    {
+        String updateFlag = ""; //$NON-NLS-1$
+        Object result     = null;
+        try
+        {
+            // Проверяем доступность модуля ирПортативный.
+            // Если не бросает — ИР встроен как расширение, модули живут прямо в comDispatch.
+            // Комментарий из 1С: //ФлагОбновления = ПодключениеИР.ирПлатформа; — вызывает 200мс задержку
+            ComBridge.getProperty(comDispatch, "ирПортативный"); //$NON-NLS-1$
+            // ирПерехватКлавиатуры — проверка корректности встройки в модуль приложения
+            try
+            {
+                ComBridge.getProperty(comDispatch, "ирПерехватКлавиатуры"); //$NON-NLS-1$
+            }
+            catch (Exception e)
+            {
+                EclipseToastNotification.show("ИР: предупреждение", //$NON-NLS-1$
+                    "Подсистема «Инструменты разработчика» некорректно встроена в конфигурацию " //$NON-NLS-1$
+                    + "(модуль приложения). Часть функций будет недоступна.", 5_000); //$NON-NLS-1$
+            }
+            result = comDispatch; // Результат = ПодключениеИР
+        }
+        catch (Exception embeddedEx)
+        {
+            // модуль ирПортативный не найден → пробуем портативный вариант (ирПортативный.epf)
+            log("ирПортативный не найден в расширении, пробуем портативный epf: " + embeddedEx.getMessage()); //$NON-NLS-1$
+            String folder = initPortableIrFolder();
+            if (!folder.isEmpty())
+            {
+                try
+                {
+                    // Результат = ПодключениеИР.ВнешниеОбработки.ПолучитьФорму(folder + "\ирПортативный.epf")
+                    Object extProcessors = ComBridge.getProperty(comDispatch, "ВнешниеОбработки"); //$NON-NLS-1$
+                    Object portableForm  = ComBridge.invoke(extProcessors, "ПолучитьФорму", folder + "\\ирПортативный.epf"); //$NON-NLS-1$ //$NON-NLS-2$
+                     // Результат.ЗапретитьАвтозапуск = Истина  (ИР 7.45+)
+                    ComBridge.setProperty(portableForm, "ЗапретитьАвтозапуск", true); //$NON-NLS-1$
+                    result = portableForm;
+                }
+                catch (Exception e)
+                {
+                    // Платформа 1С не позволяет ловить некоторые исключения — аналогично молчим
+                    log("Ошибка загрузки ирПортативный.epf: " + e.getMessage()); //$NON-NLS-1$
+                }
+            }
+            if (result != null)
+            {
+                // выхИспользуемоеИмяФайлаПортативногоИР = Результат.ИспользуемоеИмяФайла
+                try
+                {
+                    Object fn = ComBridge.getProperty(result, "ИспользуемоеИмяФайла"); //$NON-NLS-1$
+                    session.usedPortableFileName = fn instanceof String ? (String) fn : ""; //$NON-NLS-1$
+                }
+                catch (Exception ignored) {}
+                // Если не открыта — открываем; если после открытия всё равно закрыта → ИР обновился
+                try
+                {
+                    boolean isOpen = ComBridge.toBoolean(ComBridge.invoke(result, "Открыта")); //$NON-NLS-1$
+                    if (!isOpen)
+                    {
+                        ComBridge.invoke(result, "Открыть"); //$NON-NLS-1$
+                        isOpen = ComBridge.toBoolean(ComBridge.invoke(result, "Открыта")); //$NON-NLS-1$
+                        if (!isOpen)
+                            updateFlag = "ВерсияИРОбновлена"; //$NON-NLS-1$
+                    }
+                }
+                catch (Exception e)
+                {
+                    log("Ошибка открытия портативного ирПортативный.epf: " + e.getMessage()); //$NON-NLS-1$
+                }
+                session.moduleRoot = result; // getModule() будет обращаться к форме, а не к comDispatch
+            }
+            else
+            {
+                // Ни расширение, ни портативный — аналог нижней ветки «Иначе» в 1С:
+                // ОсвежитьПодключениеИР + ЗапуститьСистему "/Execute installer.epf"
+                String installerEpf  = "ирУстановщикРасширения.epf"; //$NON-NLS-1$
+                String installerPath = folder.isEmpty() ? "" //$NON-NLS-1$
+                    : folder + "\\Модули\\" + installerEpf; //$NON-NLS-1$
+
+                String reason;
+                if (WmiProcessHelper.findProcess(System.currentTimeMillis(), 60, installerEpf) != null)
+                {
+                    reason = " Активируйте окно установщика расширения."; //$NON-NLS-1$
+                }
+                else
+                {
+                    reason = " Поэтому запускаем установщик расширения."; //$NON-NLS-1$
+                    if (!installerPath.isEmpty())
+                    {
+                        try { 
+                            ComBridge.invoke(comDispatch, "ЗапуститьСистему", //$NON-NLS-1$
+                            "/Execute\"" + installerPath + "\""); } //$NON-NLS-1$
+                        catch (Exception ignored) {}
+                    }
+                }
+                log("Подсистема ИР не найдена: нет расширения и нет портативного epf." + reason); //$NON-NLS-1$
+                EclipseToastNotification.show("ИР: подсистема не найдена", //$NON-NLS-1$
+                    "В базе нет подсистемы «Инструменты разработчика» и портативный вариант не найден." //$NON-NLS-1$
+                    + reason, 10_000);
+                return false;
+            }
+        }
+
+        // Если портативный обновился — перезапускаем подключение
+        if ("ВерсияИРОбновлена".equals(updateFlag)) //$NON-NLS-1$
+        {
+            EclipseToastNotification.show("ИР адаптер", "Запущено подключение новой версии ИР.", 3_000); //$NON-NLS-1$
+            // TODO: ЗакрытьПриложениеИР + ЗапуститьПодключениеИР → disconnect + scheduleConnect
+            throw new RuntimeException("Требуется переподключение ИР — версия обновилась"); //$NON-NLS-1$
+        }
+
+        return result != null;
+    }
+
+    /**
+     * Аналог инициализации ПапкаПортативногоИР в МодулиИР().
+     * Возвращает путь к папке с ирПортативный.epf, или пустую строку если папка не готова.
+     * <p>Если ИР.zip не найден — пытается скачать с devtool1c.ucoz.ru (аналог автозагрузки в 1С).
+     */
+    private static String initPortableIrFolder()
+    {
+        if (!portableIrFolder.isEmpty()) return portableIrFolder;
+
+        // ПапкаПортативногоИР = ТекущийКаталог() + "\" + ТурбоКонф.ПолучитьКаталогСкрипта() + "\ИР"
+        // В Java: директория состояния плагина + "\ИР"
+        String stateDir = Platform.getStateLocation(
+            FrameworkUtil.getBundle(IRApplicationRegistry.class)).toOSString();
+        String candidate = stateDir + "\\ИР"; //$NON-NLS-1$
+
+        File dir = new File(candidate);
+        log("Каталог портативного ИР: " + candidate); //$NON-NLS-1$
+        if (!dir.exists()) dir.mkdirs();
+
+        File zipFile = new File(candidate + "\\ИР.zip"); //$NON-NLS-1$
+        if (!zipFile.exists())
+        {
+            // Аналог: СоединениеHTTP + ЗагрузитьФайл("https://devtool1c.ucoz.ru/load/0-0-0-6-20")
+            boolean downloaded = downloadPortableIr(zipFile);
+            if (!downloaded)
+            {
+                EclipseToastNotification.show("ИР: портативный вариант не найден", //$NON-NLS-1$
+                    "В " + candidate + " нет файла ИР.zip.\n" //$NON-NLS-1$ //$NON-NLS-2$
+                    + "Расширение: https://devtool1c.ucoz.ru/load/osnovnye/ustanovshhik_varianta_rasshirenie/1-1-0-21\n" //$NON-NLS-1$
+                    + "Портативный: https://devtool1c.ucoz.ru/load/osnovnye/portativnye_instrumenty_razrabotchika_dlja_1s_8_2/1-1-0-6", //$NON-NLS-1$
+                    10_000);
+                return ""; //$NON-NLS-1$
+            }
+        }
+
+        // Разворачиваем архив, если папка только что создана или пуста
+        if (!new File(candidate + "\\ирПортативный.epf").exists()) //$NON-NLS-1$
+        {
+            try { extractZip(zipFile, dir); }
+            catch (Exception e) { log("Ошибка распаковки ИР.zip: " + e.getMessage()); return ""; } //$NON-NLS-1$
+        }
+
+        portableIrFolder = candidate;
+        return portableIrFolder;
+    }
+
+    /** Скачивает ИР.zip (~30 с таймаут). Аналог ЗагрузитьФайл + ЧтениеZipFile в 1С. */
+    private static boolean downloadPortableIr(File zipFile)
+    {
+        try
+        {
+            log("Скачиваем портативный ИР из devtool1c.ucoz.ru..."); //$NON-NLS-1$
+            java.net.URL url = new java.net.URL("https://devtool1c.ucoz.ru/load/0-0-0-6-20"); //$NON-NLS-1$
+            java.net.HttpURLConnection conn = (java.net.HttpURLConnection) url.openConnection();
+            conn.setConnectTimeout(5_000);
+            conn.setReadTimeout(30_000);
+            try (java.io.InputStream in = conn.getInputStream();
+                 java.io.FileOutputStream out = new java.io.FileOutputStream(zipFile))
+            {
+                in.transferTo(out);
+            }
+            finally { conn.disconnect(); }
+            log("ИР.zip скачан в " + zipFile.getAbsolutePath()); //$NON-NLS-1$
+            return true;
+        }
+        catch (Exception e)
+        {
+            log("Ошибка скачивания портативного ИР: " + e.getMessage()); //$NON-NLS-1$
+            EclipseToastNotification.show("ИР: ошибка скачивания", //$NON-NLS-1$
+                "Ошибка скачивания портативного варианта ИР: " + e.getMessage(), 6_000); //$NON-NLS-1$
+            return false;
+        }
+    }
+
+    /** Распаковывает zip-архив в целевую папку. */
+    private static void extractZip(File zipFile, File targetDir) throws Exception
+    {
+        try (java.util.zip.ZipInputStream zis =
+                new java.util.zip.ZipInputStream(new java.io.FileInputStream(zipFile), Charset.forName("cp866")))
+        {
+            java.util.zip.ZipEntry entry;
+            byte[] buf = new byte[8192];
+            while ((entry = zis.getNextEntry()) != null)
+            {
+                File out = new File(targetDir, entry.getName());
+                if (entry.isDirectory()) { out.mkdirs(); }
+                else
+                {
+                    out.getParentFile().mkdirs();
+                    try (java.io.FileOutputStream fos = new java.io.FileOutputStream(out))
+                    {
+                        int n;
+                        while ((n = zis.read(buf)) > 0) fos.write(buf, 0, n);
+                    }
+                }
+                zis.closeEntry();
+            }
+        }
+        log("ИР.zip распакован в " + targetDir.getAbsolutePath()); //$NON-NLS-1$
     }
 
     // -----------------------------------------------------------------------
@@ -420,23 +860,21 @@ public final class IRApplicationRegistry
         {
             try
             {
-                ComJacobBridge.invoke(session.root, "ЗавершитьРаботуСистемы", false);
+                ComBridge.invoke(session.root, "ЗавершитьРаботуСистемы", false);
                 log("ЗавершитьРаботуСистемы(false) — OK");
             }
             catch (Exception e)
             {
                 log("ЗавершитьРаботуСистемы ошибка → УбитьПроцесс: " + e.getMessage());
-                Object wmi  = WmiProcessHelper.connectWmi();
                 Object proc = session.processObj != null ? session.processObj
-                    : WmiProcessHelper.findProcessByPid(wmi, session.pid);
+                    : WmiProcessHelper.findProcessByPid(session.pid);
                 WmiProcessHelper.terminate(proc, session.pid);
                 killed = true;
             }
         }
         else if (session.pid > 0)
         {
-            Object wmi  = WmiProcessHelper.connectWmi();
-            Object proc = WmiProcessHelper.findProcessByPid(wmi, session.pid);
+            Object proc = WmiProcessHelper.findProcessByPid(session.pid);
             WmiProcessHelper.terminate(proc, session.pid);
             killed = true;
         }
