@@ -6,6 +6,7 @@
     <startup class="CompareConfigMenuHook"/>
     <startup class="ApplicationsViewHook"/>
     <startup class="ApplicationEditorHook"/>
+    <startup class="DataCompositionSchemaEditorHook"/> 
   </extension>
 
   <extension point="org.eclipse.ui.contexts">

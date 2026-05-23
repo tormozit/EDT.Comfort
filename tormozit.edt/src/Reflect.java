@@ -2,9 +2,14 @@
 
 import java.lang.reflect.Field;
 
+import org.eclipse.core.resources.IProject;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.FrameworkUtil;
+
+import com._1c.g5.v8.dt.core.platform.IDtProject;
+import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
+import com._1c.g5.wiring.IManagedService;
 
 /**
  * Утилиты Java-рефлексии — единый источник правды для всего плагина.
@@ -96,7 +101,27 @@ public final class Reflect
         Bundle b = FrameworkUtil.getBundle(DesignerSessionPoolAccessor.class);
         return b != null ? b.getBundleContext() : null;
     }
+    
+    public static IDtProject getProjectFromEditor(Object editorPart) {
+        Object project = Reflect.getField(editorPart, "project");
+        
+        if (project instanceof IDtProject) {
+            return (IDtProject) project;
+        }
+        Object context = Reflect.getField(editorPart, "context");
+        if (context != null) {
+            Object p = Reflect.getField(context, "project");
+            if (p instanceof IDtProject) return (IDtProject) p;
+        }
+        return null;
+    }
 
+    public static IManagedService getServiceByClass(Class<?> clazz)
+    {
+        BundleContext ourContext = Reflect.ourContext();
+        return (IManagedService) ourContext.getService(ourContext.getServiceReference(clazz));
+    }
+        
     public static void log(String msg)
     {
        String timestamp = java.time.LocalTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss"));

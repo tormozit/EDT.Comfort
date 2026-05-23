@@ -30,6 +30,8 @@ Require-Bundle: org.eclipse.ui;bundle-version="[3.201.0,4.0.0)",
  com._1c.g5.v8.dt.platform.services.model,
  com._1c.g5.v8.dt.platform,
  com._1c.g5.v8.dt.export,
+ com._1c.g5.v8.dt.dcs.ui,
+ com._1c.g5.v8.dt.dcs.model,
  com.e1c.g5.dt.applications.infobases,
  org.eclipse.e4.ui.workbench,
  org.eclipse.e4.ui.model.workbench,
@@ -43,7 +45,12 @@ Require-Bundle: org.eclipse.ui;bundle-version="[3.201.0,4.0.0)",
  org.eclipse.jgit,
  com._1c.g5.wiring,
  com._1c.g5.v8.dt.team.git.infobases,
- com.e1c.g5.dt.applications
+ com.e1c.g5.dt.applications,
+ com._1c.g5.v8.dt.moxel.ui,
+ com._1c.g5.v8.dt.common.ui,
+ com._1c.g5.v8.dt.dcs,
+ com._1c.g5.v8.dt.xml,
+ com._1c.g5.v8.dt.common
 Import-Package: org.osgi.framework;version="[1.8.0,2.0.0)"
 Bundle-NativeCode: lib/jacob-1.21-x64.dll; osname=Win32; processor=x86-64
 Bundle-ClassPath: ., lib/jacob.jar

@@ -48,6 +48,7 @@ import com._1c.g5.v8.dt.compare.ui.editor.ComparisonTreeControl;
 import com._1c.g5.v8.dt.compare.ui.editor.DtComparisonView;
 import com._1c.g5.v8.dt.compare.ui.util.MergeUiUtils;
 import com._1c.g5.v8.dt.core.filesystem.IQualifiedNameFilePathConverter;
+import com.google.common.net.HttpHeaders.ReferrerPolicyValues;
 import com.google.inject.Inject;
 
 import javafx.scene.control.TreeView;
@@ -82,8 +83,14 @@ public class CompareConfigCompareInIRHandler extends AbstractHandler {
         Object element = ((IStructuredSelection) selection).getFirstElement();
         if (element == null)
             return;
-        Path pathMain = getSideFile(editor, element, ComparisonSide.MAIN); // mxlx
-        Path pathOther = getSideFile(editor, element, ComparisonSide.OTHER); // mxlx
+        Path pathMain = getPropertySideFile(editor, element, ComparisonSide.MAIN); // mxlx
+        if (pathMain == null)
+        {
+            EclipseToastNotification.show("Сравнение метаданных ИР", "Поддерживаются свойства: ТабличныйДокумент.Макет");
+            return;
+        }
+        Path pathOther = getPropertySideFile(editor, element, ComparisonSide.OTHER); // mxlx
+        Path pathAncestor = getPropertySideFile(editor, element, ComparisonSide.COMMON_ANCESTOR); // mxlx
         Path exportDirectory;
         try
         {
@@ -97,21 +104,16 @@ public class CompareConfigCompareInIRHandler extends AbstractHandler {
         }
         IComparisonSession compSession = CompareConfigSelectionProvider.getSession(editor);
         IRApplicationRegistry.IrSession irSession = IRApplicationRegistry.getSession(compSession.getDataSource(ComparisonSide.MAIN).getDtProject());
-        
         if (irSession == null || irSession.executor == null) {
-            Reflect.log("Сессия приложения ИР не найдена или не активна.");
             return;
         }
-
-        // Делегируем выполнение выделенному COM-потоку этой сессии.
-        // UI-поток Eclipse (SWT) при этом не блокируется!
         irSession.executor.submit(() -> {
             try 
             {
                 // Здесь мы находимся в родном потоке для этого COM-объекта. 
                 Object irClient = irSession.getModule("ирКлиент");
                 ComBridge.setProperty(irSession.root, "Visible", true);
-                ComBridge.invoke(irClient, "СравнитьТабличныеДокументыИмпортЛкс", pathMain.toString(), pathOther.toString());
+                ComBridge.invoke(irClient, "СравнитьТабличныеДокументыИмпортЛкс", pathMain.toString(), pathOther.toString(), pathAncestor.toString());
             } 
             catch (Exception e) 
             {
@@ -128,22 +130,30 @@ public class CompareConfigCompareInIRHandler extends AbstractHandler {
      * {@link ComparisonUtils#getFilePathBySymlink}. Это упрощает отладку.
      * @return абсолютный путь к временному файлу, или {@code null} если поток недоступен
      */
-    public static Path getSideFile(IEditorPart editor, Object element, ComparisonSide side)
+    public static Path getPropertySideFile(IEditorPart editor, Object element, ComparisonSide side)
     {
         IComparisonSession session = CompareConfigSelectionProvider.getSession(editor);
-        ExternalPropertyComparisonNode matchedNode = (ExternalPropertyComparisonNode) CompareConfigSelectionProvider.resolveMatchedNode(element);
+        MatchedObjectsComparisonNode matchedNode = CompareConfigSelectionProvider.resolveMatchedNode(element);
+        ExternalPropertyComparisonNode properyNode;
+        try
+        {
+            properyNode = (ExternalPropertyComparisonNode) matchedNode;
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
         BundleContext ctx = Reflect.ourContext();
         ServiceReference<?> ref = ctx.getServiceReference(IComparisonManager.class);
         Object manager = ctx.getService(ref);
         IQualifiedNameFilePathConverter filePathConverter = (IQualifiedNameFilePathConverter) Reflect.getField(manager, "qualifiedNameFilePathConverter");
-
-        InputStream stream = ExternalPropertyUtils.getContentStream(matchedNode, session, side, filePathConverter);
+        InputStream stream = ExternalPropertyUtils.getContentStream(properyNode, session, side, filePathConverter);
         if (stream == null)
             return null;
 
         // Определяем имя файла для временного файла
-        String symlink = matchedNode.getSymlink(side);
-        String qualifyingType = ((SolidResourceComparisonNode) matchedNode).getQualifyingType(side);
+        String symlink = properyNode.getSymlink(side);
+        String qualifyingType = ((SolidResourceComparisonNode) properyNode).getQualifyingType(side);
         Path relativePath = (Path) ComparisonUtils.getFilePathBySymlink(symlink, qualifyingType, filePathConverter);
         String fileName = relativePath != null ? relativePath.getFileName().toString() : "content.xmxl"; //$NON-NLS-1$
         String prefix = "tormozit_" + side.name().toLowerCase() + "_"; //$NON-NLS-1$ //$NON-NLS-2$
@@ -162,9 +172,9 @@ public class CompareConfigCompareInIRHandler extends AbstractHandler {
 
     public static ISelection getSelection(IEditorPart editor) {
         ISelection sel = null;
-        Object view = Reflect.getField(editor, "comparisonView");
-        if (view instanceof DtComparisonView) {
-            ComparisonTreeControl treeControl = ((DtComparisonView) view).getTreeControl();
+        DtComparisonView view = (DtComparisonView) Reflect.getField(editor, "comparisonView");
+        if (view != null) {
+            ComparisonTreeControl treeControl = view.getTreeControl();
             if (treeControl != null) {
                 TreeViewer viewer = treeControl.getTreeViewer();
                 if (viewer != null)

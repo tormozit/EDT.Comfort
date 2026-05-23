@@ -440,7 +440,7 @@ public final class IRApplicationRegistry
         String bufferFileName;
         try
         {
-            bufferFileName = File.createTempFile("tormozit_ir_", ".tmp").getAbsolutePath(); //$NON-NLS-1$ //$NON-NLS-2$
+            bufferFileName = File.createTempFile("tormozit.edt", ".tmp").getAbsolutePath(); //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (Exception e)
         {

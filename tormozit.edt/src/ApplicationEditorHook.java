@@ -45,7 +45,7 @@ import com._1c.g5.v8.dt.ui.editor.input.IDtEditorInput;
  */
 public class ApplicationEditorHook implements IStartup
 {
-    private static final String APPLICATION_EDITOR_ID =
+    private static final String EDITOR_ID =
         "com.e1c.g5.dt.applications.ui.editor.applicationEditor"; //$NON-NLS-1$
 
     private static final String OPEN_HELPER_CLASS =
@@ -81,7 +81,7 @@ public class ApplicationEditorHook implements IStartup
     {
         if (window.getActivePage() != null)
             for (IEditorPart ed : window.getActivePage().getEditors())
-                if (APPLICATION_EDITOR_ID.equals(ed.getSite().getId()))
+                if (EDITOR_ID.equals(ed.getSite().getId()))
                     hookEditor(ed);
 
         window.getPartService().addPartListener(new IPartListener2()
@@ -89,7 +89,7 @@ public class ApplicationEditorHook implements IStartup
             @Override
             public void partOpened(IWorkbenchPartReference ref)
             {
-                if (!APPLICATION_EDITOR_ID.equals(ref.getId())) return;
+                if (!EDITOR_ID.equals(ref.getId())) return;
                 Display.getDefault().asyncExec(() ->
                 {
                     IEditorPart ed = (IEditorPart) ref.getPart(false);
