@@ -2,13 +2,22 @@ import com.google.inject.Inject;
 
 import java.io.OutputStream;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
 import java.nio.file.FileSystem;
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
+import javax.xml.stream.XMLStreamException;
+
 import org.eclipse.core.resources.IProject;
+import org.eclipse.emf.common.util.URI;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.IToolBarManager;
 import org.eclipse.jface.dialogs.IPageChangedListener;
@@ -32,10 +41,12 @@ import org.eclipse.ui.forms.ManagedForm;
 import org.eclipse.ui.forms.editor.FormPage;
 import org.eclipse.ui.forms.widgets.FormToolkit;
 import org.eclipse.ui.forms.widgets.ScrolledForm;
+import org.eclipse.xtext.resource.IResourceServiceProvider;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.ServiceReference;
 
 import com._1c.g5.v8.dt.compare.model.ComparisonSide;
+import com._1c.g5.v8.dt.core.filesystem.IQualifiedNameFilePathConverter;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.core.platform.IResourceLookup;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
@@ -48,6 +59,7 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorEmbeddedEditorPage;
 import com._1c.g5.v8.dt.metadata.mdclass.CompatibilityMode;
 import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchema;
 import com._1c.g5.v8.dt.dcs.util.DcsV8Serializer;
+import com._1c.g5.v8.dt.export.ExportException;
 import com._1c.g5.v8.dt.xml.ChangeAnyRefTypeOutputStream;
 import com._1c.g5.v8.dt.platform.version.IRuntimeVersionSupport;
 import com._1c.g5.v8.dt.platform.version.Version;
@@ -60,8 +72,6 @@ public class DataCompositionSchemaEditorHook implements IStartup
     @Inject
     static private IRuntimeVersionSupport runtimeVersionSupport;
     private static final String EDITOR_ID  = "com._1c.g5.v8.dt.md.ui.editor.commonTemplate"; //$NON-NLS-1$
-//    private static final String commandId  = "tormozit.edt.DataCompositionSchemaEditorHook.EditInIR"; //$NON-NLS-1$
-
     private final Map<IWorkbenchWindow, IPartListener2>          partListeners =
         new HashMap<>();
     private final Map<DtGranularEditor<?>, IPageChangedListener> pageListeners =
@@ -167,29 +177,19 @@ public class DataCompositionSchemaEditorHook implements IStartup
                 if (irSession == null || irSession.executor == null) {
                     return;
                 }
-                
                 irSession.executor.submit(() -> {
                     try 
                     {
                         // Здесь мы находимся в родном потоке для этого COM-объекта. 
-                        // com._1c.g5.v8.dt.dcs.ui.datasets.DataSetsSaveHandler.DataSetsSaveHandler()
-                        String file = File.createTempFile("tormozit.edt", ".xml").getPath();
-                        DataCompositionSchema schema = (DataCompositionSchema) dcsEditor.getModel();
-                        IV8ProjectManager projectManager = (IV8ProjectManager) Global.getServiceByClass(IV8ProjectManager.class);
-                        IV8Project v8Project = projectManager.getProject(project);
-                        int convertMode = v8Project.getCompatibilityMode().compareTo(CompatibilityMode.VERSION8_323) <= 0 ? 0 : 1;
-                        FileOutputStream fileStream = new FileOutputStream(file);
-                        OutputStream outputStream = new ChangeAnyRefTypeOutputStream(fileStream, convertMode);
-//                        outputStream.write(BOM); // new byte[]{-17, -69, -65};
-//                        Version version = runtimeVersionSupport.getRuntimeVersion(schema);
-                        Version version = v8Project.getVersion();
-                        DcsV8Serializer serializer = new DcsV8Serializer(project, version, resourceLookup);
-                        serializer.serializeXML(schema, outputStream, PreferenceUtils.getLineSeparator(project.getWorkspaceProject()), project);
+                        String file = exportToFile(page);
                         ComBridge.setProperty(irSession.root, "Visible", true);
                         Object irClient = irSession.getModule("ирКлиент");
-                        ComBridge.invoke(irClient, "РедактироватьСхемуКомпоновкиИзФайлаЛкс", file, false, page.getModel().eResource().getURI().path());
+                        URI fileUri = page.getModel().eResource().getURI();
+                        String fullObjectName = fileUri.path().substring(1);
+                        // Мультиметка260525_210353
+                        ComBridge.invoke(irClient, "РедактироватьСхемуКомпоновкиИзФайлаЛкс", file, false, fullObjectName);
                         new File(file).delete();
-                        EclipseToastNotification.show("Редактор ИР", "Измененную схему нужно будет вручную загрузить в редактор EDT!");
+                        EclipseToastNotification.show("Редактор ИР", "Измененная схема вернется в EDT, если не будет изменяться там во время редактирования в приложении ИР!");
                     } 
                     catch (Exception e) 
                     {
@@ -201,6 +201,54 @@ public class DataCompositionSchemaEditorHook implements IStartup
             toolbar.pack();
             toolbar.getParent().layout(true);
         });
+    }
+
+    public static String exportToFile(DtGranularEditorEmbeddedEditorPage<?> page)
+        throws IOException, FileNotFoundException, XMLStreamException, ExportException
+    {
+        // com._1c.g5.v8.dt.dcs.ui.datasets.DataSetsSaveHandler.DataSetsSaveHandler()
+        DataCompositionSchemaEditor dcsEditor = (DataCompositionSchemaEditor) page.getEmbeddedEditor();
+        Object editor = Global.getField(page, "editor");
+        Object BmModel = Global.getField(editor, "bmModel");
+        IDtProject project = (IDtProject)Global.getField(BmModel, "project");
+        String file = File.createTempFile("tormozit.edt", ".xml").getPath();
+        DataCompositionSchema schema = (DataCompositionSchema) dcsEditor.getModel();
+        IV8ProjectManager projectManager = (IV8ProjectManager) Global.getServiceByClass(IV8ProjectManager.class);
+        IV8Project v8Project = projectManager.getProject(project);
+        int convertMode = v8Project.getCompatibilityMode().compareTo(CompatibilityMode.VERSION8_323) <= 0 ? 0 : 1;
+        FileOutputStream fileStream = new FileOutputStream(file);
+        OutputStream outputStream = new ChangeAnyRefTypeOutputStream(fileStream, convertMode);
+//                        outputStream.write(BOM); // new byte[]{-17, -69, -65};
+//                        Version version = runtimeVersionSupport.getRuntimeVersion(schema);
+        Version version = v8Project.getVersion();
+        DcsV8Serializer serializer = new DcsV8Serializer(project, version, resourceLookup);
+        serializer.serializeXML(schema, outputStream, PreferenceUtils.getLineSeparator(project.getWorkspaceProject()), project);
+        return file;
+    }
+
+    public static boolean importFromFile(DtGranularEditorEmbeddedEditorPage<?> page, File file)
+    {
+        // com._1c.g5.v8.dt.dcs.ui.datasets.DataSetsSaveHandler.DataSetsSaveHandler()
+        DataCompositionSchemaEditor dcsEditor = (DataCompositionSchemaEditor) page.getEmbeddedEditor();
+        Object editor = Global.getField(page, "editor");
+        Object BmModel = Global.getField(editor, "bmModel");
+        IDtProject project = (IDtProject)Global.getField(BmModel, "project");
+        IV8ProjectManager projectManager = (IV8ProjectManager) Global.getServiceByClass(IV8ProjectManager.class);
+        IV8Project v8Project = projectManager.getProject(project);
+        Version version = v8Project.getVersion();
+        DcsV8Serializer serializer = new DcsV8Serializer(project, version, resourceLookup);
+        try
+        {
+            DataCompositionSchema schema = serializer.deserializeXML(new FileInputStream(file));
+            dcsEditor.setModel(schema);
+            return false;
+        }
+        catch (Exception e)
+        {
+            // TODO Auto-generated catch block
+            e.printStackTrace();
+        }
+        return true;
     }
 
     private ToolBar findToolbar(Composite container) {

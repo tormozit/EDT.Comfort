@@ -1,6 +1,7 @@
 
 
 import java.io.File;
+import java.nio.file.Files;
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.nio.charset.Charset;
@@ -97,8 +98,8 @@ public final class IRApplicationRegistry
     private static ServiceSupplier<IInfobaseAccessManager> infobaseAccessManagerSupplier = 
         ServiceAccess.supplier(IInfobaseAccessManager.class, Global.ourContext()); 
     public static IRApplicationRegistry getInstance() { return INSTANCE; }
-    /** Аналог ИмяФайлаБуфера — временный файл-канал между EDT и приложением ИР (ИР 7.03+) */
-    static public String bufferFileName = ""; // оперативный единый для всех приложений EDT и ИР буферный файл, не учитываем пересечения //$NON-NLS-1$
+    /** Аналог ПапкаПередачиФайлов — временный транспортный каталог для передачи файлов из приложения ИР в EDT */
+    static public String transportFolder = ""; // оперативный единый для всех приложений EDT и ИР буферный файл, не учитываем пересечения //$NON-NLS-1$
     /** Аналог выхИспользуемоеИмяФайлаПортативногоИР — путь к .epf или .1cd портативного ИР */
     static public String usedPortableFileName = ""; //$NON-NLS-1$
 
@@ -276,16 +277,17 @@ public final class IRApplicationRegistry
      */
     private void doConnectInternal(IProject project, InfobaseReference infobase)
     {
-        if (bufferFileName == "")
+        if (transportFolder == "")
         {
             try
             {
-                bufferFileName = File.createTempFile("tormozit.edt", ".tmp").getAbsolutePath(); //$NON-NLS-1$ //$NON-NLS-2$
+                transportFolder = Files.createTempDirectory("tormozit").toString();
             }
-            catch (Exception e)
+            catch (IOException e)
             {
-                bufferFileName = System.getProperty("java.io.tmpdir") + "\\tormozit_ir_buffer.tmp"; //$NON-NLS-1$ //$NON-NLS-2$
-            } 
+                // TODO Auto-generated catch block
+                e.printStackTrace();
+            }
         }       
         String key = sessionKey(infobase);
         String connectionString = buildConnectionString(infobase, true);
@@ -405,7 +407,7 @@ public final class IRApplicationRegistry
         long edtPid = ProcessHandle.current().pid(); // Конфигуратор.PID
         try
         {
-            ComBridge.invoke(irClient, "ПодключитьСвязанныйКонфигураторЛкс", edtPid, bufferFileName); //$NON-NLS-1$
+            ComBridge.invoke(irClient, "ПодключитьСвязанныйКонфигураторЛкс", edtPid, transportFolder); //$NON-NLS-1$
         }
         catch (Exception e)
         {
@@ -1016,6 +1018,17 @@ public final class IRApplicationRegistry
         if (application==null)
             return null;            
         getInstance().connectInfobaseApplication(application);
+        return null;
+    }
+    public static IrSession getSession(long pid)
+    {
+        for (Map.Entry<String, IrSession> entry : sessions.entrySet())
+        {
+            String key = entry.getKey();
+            IrSession session = entry.getValue();
+            if (session.pid == pid)
+                return session;
+        }
         return null;
     }
 }

@@ -7,6 +7,7 @@
     <startup class="ApplicationsViewHook"/>
     <startup class="ApplicationEditorHook"/>
     <startup class="DataCompositionSchemaEditorHook"/> 
+    <startup class="BSLEditorMenuHook"/>  
   </extension>
 
   <extension point="org.eclipse.ui.contexts">
@@ -72,7 +73,7 @@
       </activeWhen>
     </handler>
     <handler
-        class="JumpToRef"
+        class="GoToDefinition"
         commandId="tormozit.edt.JumpToRef">
      </handler>
   </extension>

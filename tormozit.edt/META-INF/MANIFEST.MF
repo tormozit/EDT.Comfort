@@ -51,7 +51,9 @@ Require-Bundle: org.eclipse.ui;bundle-version="[3.201.0,4.0.0)",
  com._1c.g5.v8.dt.dcs,
  com._1c.g5.v8.dt.xml,
  com._1c.g5.v8.dt.common,
- com._1c.g5.v8.dt.navigator
+ com._1c.g5.v8.dt.navigator,
+ com.fasterxml.jackson.core.jackson-databind,
+ com.fasterxml.jackson.core.jackson-core
 Import-Package: org.osgi.framework;version="[1.8.0,2.0.0)"
 Bundle-NativeCode: lib/jacob-1.21-x64.dll; osname=Win32; processor=x86-64
 Bundle-ClassPath: ., lib/jacob.jar

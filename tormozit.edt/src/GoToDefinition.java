@@ -1,13 +1,18 @@
 
 import java.io.File;
+import java.io.FileNotFoundException;
+import java.io.IOException;
 import java.io.ObjectInputStream.GetField;
 import java.lang.reflect.Method;
+import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
+import javax.xml.stream.XMLStreamException;
 
 import org.eclipse.core.commands.AbstractHandler;
 import org.eclipse.core.commands.ExecutionEvent;
@@ -38,6 +43,12 @@ import org.eclipse.xtext.resource.IResourceServiceProvider;
 import org.eclipse.xtext.ui.label.GlobalDescriptionLabelProvider;
 import com.google.inject.Injector;
 
+import javafx.scene.shape.Path;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.core.JsonProcessingException;
+
 import com._1c.g5.v8.bm.core.BmPlatform;
 import com._1c.g5.v8.bm.core.IBmNamespace;
 import com._1c.g5.v8.bm.core.IBmPlatformTransaction;
@@ -46,6 +57,8 @@ import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
+import com._1c.g5.v8.dt.export.ExportException;
+import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorEmbeddedEditorPage;
 import com.google.inject.Inject;
 
 import tormozit.edt.assist.ContentAssistAutoOpenSettings;
@@ -76,7 +89,7 @@ import tormozit.edt.assist.ContentAssistAutoOpenSettings;
  *   <li>{@link CompareConfigOpenObjectHandler#openInEditor} как запасной вариант</li>
  * </ul>
  */
-public class JumpToRef extends AbstractHandler
+public class GoToDefinition extends AbstractHandler
 {
     // IQualifiedNameFilePathConverter получается через getQualifiedNameConverter(IFile),
     // а не через @Inject — AbstractHandler создаётся Eclipse, а не Guice-инжектором.
@@ -221,9 +234,45 @@ public class JumpToRef extends AbstractHandler
     @Override
     public Object execute(ExecutionEvent event) throws ExecutionException
     {
+        File newFile = null, oldFile = null;
+        IRApplicationRegistry.IrSession irSession = null;
+        IProject project = null;
+        long PID = 0;
+        String command = "";
+        String transportFolder = IRApplicationRegistry.transportFolder;
+        File commandFile = new File(transportFolder + "\\Команда.txt");
+        if (true
+            && commandFile.exists()
+            && System.currentTimeMillis() - commandFile.lastModified() < 5000)
+        {
+            try
+            {
+                command = Files.readString(commandFile.toPath());
+                Files.delete(commandFile.toPath());
+                ObjectMapper mapper = new ObjectMapper();
+                JsonNode commandObject = mapper.readTree(command);
+                command = commandObject.get("Команда").asText();
+                PID = commandObject.get("ИДПроцесса").asLong();
+                irSession = IRApplicationRegistry.getSession(PID);
+                project = irSession.project;
+            }
+            catch (IOException e)
+            {
+                // TODO Auto-generated catch block
+                e.printStackTrace();
+            }
+//            МаркерВыводаСообщения = "<ВывестиСообщение> ";
+//            Если СтрНачинаетсяС(ЗначениеИзБуфера, МаркерВыводаСообщения) Тогда
+//                Текст = ПоследнийФрагментЛкс(ЗначениеИзБуфера, МаркерВыводаСообщения);
+//                ТурбоКонф.ПоказатьВсплывающееУведомление(НазваниеСкрипта(), Текст,, ЭтотОбъект, "ПоказатьПриложениеИР",, "Показать приложение ИР"); 
+//                ТурбоКонф.ОтжатьМодификаторыПослеЗавершенияСкрипта = Истина;
+//                Возврат Истина;
+//            КонецЕсли;
+            newFile = new File(transportFolder.toString() + "\\НовыйТекст.txt");
+            oldFile = new File(transportFolder.toString() + "\\СтарыйТекст.txt");
+        }
         Shell shell = HandlerUtil.getActiveShell(event);
         IWorkbenchPage page = HandlerUtil.getActiveWorkbenchWindow(event).getActivePage();
-
         String ref = getClipboardText(shell);
         if (ref == null || ref.isBlank())
         {
@@ -232,12 +281,37 @@ public class JumpToRef extends AbstractHandler
             return null;
         }
         ref = ref.strip();
-        Global.log("JumpToRef: ref = " + ref); //$NON-NLS-1$
+        Global.log("GoToDefinition: ref = " + ref); //$NON-NLS-1$
 
         if (!jump(ref, shell, page))
             EclipseToastNotification.show("Перейти к определению", //$NON-NLS-1$
                 "Не удалось перейти по ссылке:\n" + truncate(ref, 120), 5000); //$NON-NLS-1$
 
+         if (newFile != null) {
+             if (command.contains("Макет.")) {
+                 // Мультиметка260525_210353
+                 boolean allowImport = false;
+                 String currentFilename = null;
+                 DtGranularEditorEmbeddedEditorPage dcsEditor = (DtGranularEditorEmbeddedEditorPage)page;
+                 try
+                {
+                     currentFilename = DataCompositionSchemaEditorHook.exportToFile(dcsEditor);
+                     allowImport = Files.readString(new File(currentFilename).toPath()) == Files.readString(oldFile.toPath());
+                }
+                catch (Exception e)
+                {
+                    // TODO Auto-generated catch block
+                    e.printStackTrace();
+                }
+               if (allowImport)
+                {
+                   DataCompositionSchemaEditorHook.importFromFile(dcsEditor, newFile);
+                }
+               else {
+                   EclipseToastNotification.show(ref, "Объект был изменен в EDT после начала редактирования в приложении ИР. Загрузка не выполнена. Временный файл новой версии - " + newFile.toString(), 10000);
+               }
+             }
+         }
         return null;
     }
 
@@ -348,7 +422,7 @@ public class JumpToRef extends AbstractHandler
         String bslPath = moduleToBslPath(r.modulePath, r.extension);
         if (bslPath == null)
         {
-            Global.log("JumpToRef: не могу построить путь для " + r.modulePath); //$NON-NLS-1$
+            Global.log("GoToDefinition: не могу построить путь для " + r.modulePath); //$NON-NLS-1$
             return false;
         }
         return openBslFileAt(bslPath, r.line, page, shell);
@@ -371,7 +445,7 @@ public class JumpToRef extends AbstractHandler
         }
         if (file == null)
         {
-            Global.log("JumpToRef: файл не найден: " + filePath); //$NON-NLS-1$
+            Global.log("GoToDefinition: файл не найден: " + filePath); //$NON-NLS-1$
             return false;
         }
         return openFileAtLine(file, line, page, shell);
@@ -479,14 +553,14 @@ public class JumpToRef extends AbstractHandler
         String mdoPath = mdNameToMdoPath(fullName);
         if (mdoPath == null)
         {
-            Global.log("JumpToRef: не могу построить .mdo-путь для: " + fullName); //$NON-NLS-1$
+            Global.log("GoToDefinition: не могу построить .mdo-путь для: " + fullName); //$NON-NLS-1$
             return false;
         }
 
         IFile mdoFile = findFileInWorkspace(mdoPath, page);
         if (mdoFile == null)
         {
-            Global.log("JumpToRef: .mdo не найден: " + mdoPath); //$NON-NLS-1$
+            Global.log("GoToDefinition: .mdo не найден: " + mdoPath); //$NON-NLS-1$
             return false;
         }
 
@@ -499,7 +573,7 @@ public class JumpToRef extends AbstractHandler
         }
 
         // ── Запасной вариант: IDE.openEditor — EDT сам выберет нужный редактор ──
-        Global.log("JumpToRef: EObject не получен, открываем .mdo напрямую"); //$NON-NLS-1$
+        Global.log("GoToDefinition: EObject не получен, открываем .mdo напрямую"); //$NON-NLS-1$
         try
         {
             IEditorPart ed = IDE.openEditor(page, mdoFile, true);
@@ -507,7 +581,7 @@ public class JumpToRef extends AbstractHandler
         }
         catch (PartInitException e)
         {
-            Global.log("JumpToRef: IDE.openEditor(.mdo): " + e); //$NON-NLS-1$
+            Global.log("GoToDefinition: IDE.openEditor(.mdo): " + e); //$NON-NLS-1$
             return false;
         }
     }
@@ -523,7 +597,7 @@ public class JumpToRef extends AbstractHandler
         QualifiedName fqn = filePathConverter.getFqn(file);
         if (fqn == null)
         {
-            Global.log("JumpToRef: getFqn вернул null для " + file.getFullPath()); //$NON-NLS-1$
+            Global.log("GoToDefinition: getFqn вернул null для " + file.getFullPath()); //$NON-NLS-1$
             return null;
         }
 
@@ -576,16 +650,16 @@ public class JumpToRef extends AbstractHandler
                     catch (Exception ignored) {}
                 }
             }
-            Global.log("JumpToRef: OpenHelper не нашёл openEditor для " //$NON-NLS-1$
+            Global.log("GoToDefinition: OpenHelper не нашёл openEditor для " //$NON-NLS-1$
                 + eObject.getClass().getSimpleName());
         }
         catch (ClassNotFoundException e)
         {
-            Global.log("JumpToRef: OpenHelper не найден: " + e); //$NON-NLS-1$
+            Global.log("GoToDefinition: OpenHelper не найден: " + e); //$NON-NLS-1$
         }
         catch (Exception e)
         {
-            Global.log("JumpToRef: openEObjectInEditor: " + e); //$NON-NLS-1$
+            Global.log("GoToDefinition: openEObjectInEditor: " + e); //$NON-NLS-1$
         }
     }
 
@@ -598,7 +672,7 @@ public class JumpToRef extends AbstractHandler
         IFile file = findFileInWorkspace(bslPath, page);
         if (file == null)
         {
-            Global.log("JumpToRef: BSL не найден: " + bslPath); //$NON-NLS-1$
+            Global.log("GoToDefinition: BSL не найден: " + bslPath); //$NON-NLS-1$
             return false;
         }
         return openFileAtLine(file, line, page, shell);
@@ -615,7 +689,7 @@ public class JumpToRef extends AbstractHandler
         }
         catch (PartInitException e)
         {
-            Global.log("JumpToRef: openFileAtLine: " + e); //$NON-NLS-1$
+            Global.log("GoToDefinition: openFileAtLine: " + e); //$NON-NLS-1$
             return false;
         }
     }
@@ -637,7 +711,7 @@ public class JumpToRef extends AbstractHandler
         }
         catch (BadLocationException e)
         {
-            Global.log("JumpToRef: revealLine " + lineNumber + ": " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.log("GoToDefinition: revealLine " + lineNumber + ": " + e); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -903,7 +977,7 @@ public class JumpToRef extends AbstractHandler
     private static void openUrl(String url)
     {
         try { org.eclipse.swt.program.Program.launch(url); }
-        catch (Exception e) { Global.log("JumpToRef: openUrl: " + e); } //$NON-NLS-1$
+        catch (Exception e) { Global.log("GoToDefinition: openUrl: " + e); } //$NON-NLS-1$
     }
 
     private static String getClipboardText(Shell shell)
