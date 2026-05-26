@@ -280,7 +280,7 @@ public class GoToDefinition extends AbstractHandler
             command = getClipboardText(shell);
             if (command == null || command.isBlank())
             {
-                EclipseToastNotification.show("Перейти к определению", //$NON-NLS-1$
+                ToastNotification.show("Перейти к определению", //$NON-NLS-1$
                     "Буфер обмена пуст.", 4000); //$NON-NLS-1$
                 return null;
             }
@@ -288,7 +288,7 @@ public class GoToDefinition extends AbstractHandler
         }
         Global.log("GoToDefinition: ref = " + command); //$NON-NLS-1$
         if (!jump(command, shell, page))
-            EclipseToastNotification.show("Перейти к определению", //$NON-NLS-1$
+            ToastNotification.show("Перейти к определению", //$NON-NLS-1$
                 "Не удалось перейти по ссылке:\n" + truncate(command, 120), 5000); //$NON-NLS-1$
 
          if (newFile != null) {
@@ -313,7 +313,7 @@ public class GoToDefinition extends AbstractHandler
                    DataCompositionSchemaEditorHook.importFromFile(dcsEditor, newFile);
                 }
                else {
-                   EclipseToastNotification.show(command, "Объект был изменен в EDT после начала редактирования в приложении ИР. Загрузка не выполнена. Временный файл новой версии - " + newFile.toString(), 10000);
+                   ToastNotification.show(command, "Объект был изменен в EDT после начала редактирования в приложении ИР. Загрузка не выполнена. Временный файл новой версии - " + newFile.toString(), 10000);
                }
              }
          }
@@ -551,7 +551,7 @@ public class GoToDefinition extends AbstractHandler
         IV8Project v8Project = projectManager.getProject(Global.getActiveEditorProject(true));
         if (v8Project == null)
         {
-            EclipseToastNotification.show("Переход к определению", //$NON-NLS-1$
+            ToastNotification.show("Переход к определению", //$NON-NLS-1$
                 "Сначала нужно активировать проект."); //$NON-NLS-1$
             return false;
         }

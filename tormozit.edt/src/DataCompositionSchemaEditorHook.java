@@ -54,6 +54,7 @@ import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.dcs.ui.DataCompositionSchemaEditor;
 import com._1c.g5.v8.dt.dcs.ui.EditorPageBase;
 import com._1c.g5.v8.dt.dcs.ui.datasets.DataSets;
+import com._1c.g5.v8.dt.dcs.ui.datasets.DataSetsLoadHandler;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorEmbeddedEditorPage;
 import com._1c.g5.v8.dt.metadata.mdclass.CompatibilityMode;
@@ -64,6 +65,12 @@ import com._1c.g5.v8.dt.xml.ChangeAnyRefTypeOutputStream;
 import com._1c.g5.v8.dt.platform.version.IRuntimeVersionSupport;
 import com._1c.g5.v8.dt.platform.version.Version;
 import com._1c.g5.v8.dt.common.PreferenceUtils;
+import com._1c.g5.v8.bm.core.IBmTransaction;
+import com._1c.g5.v8.bm.integration.AbstractBmTask;
+import com._1c.g5.v8.bm.integration.IBmEditingContext;
+import com._1c.g5.v8.dt.dcs.ui.DcsEvent;
+import com._1c.g5.v8.dt.dcs.ui.DcsEvent.DcsEventType;
+import org.eclipse.core.runtime.IProgressMonitor;
 
 public class DataCompositionSchemaEditorHook implements IStartup
 {
@@ -189,7 +196,7 @@ public class DataCompositionSchemaEditorHook implements IStartup
                         // Мультиметка260525_210353
                         ComBridge.invoke(irClient, "РедактироватьСхемуКомпоновкиИзФайлаЛкс", file, false, fullObjectName);
                         new File(file).delete();
-                        EclipseToastNotification.show("Редактор ИР", "Измененная схема вернется в EDT, если не будет изменяться там во время редактирования в приложении ИР!");
+                        ToastNotification.show("Редактор ИР", "Измененная схема вернется в EDT, если не будет изменяться там во время редактирования в приложении ИР!");
                     } 
                     catch (Exception e) 
                     {
@@ -230,7 +237,7 @@ public class DataCompositionSchemaEditorHook implements IStartup
 
     public static boolean importFromFile(DtGranularEditorEmbeddedEditorPage<?> page, File file)
     {
-     // com._1c.g5.v8.dt.dcs.ui.datasets.DataSetsLoadHandler.DataSetsLoadHandler()
+        // com._1c.g5.v8.dt.dcs.ui.datasets.DataSetsLoadHandler.DataSetsLoadHandler()
         DataCompositionSchemaEditor dcsEditor = (DataCompositionSchemaEditor) page.getEmbeddedEditor();
         Object editor = Global.getField(page, "editor");
         Object BmModel = Global.getField(editor, "bmModel");
@@ -241,8 +248,22 @@ public class DataCompositionSchemaEditorHook implements IStartup
         DcsV8Serializer serializer = new DcsV8Serializer(project, version, resourceLookup);
         try (FileInputStream fis = new FileInputStream(file))
         {
-            DataCompositionSchema schema = serializer.deserializeXML(fis);
-            dcsEditor.setModel(schema);
+            final DataCompositionSchema schemaNew = serializer.deserializeXML(fis);
+            final DataCompositionSchema schemaOld = (DataCompositionSchema) dcsEditor.getModel();
+            IBmEditingContext editingContext = dcsEditor.getEditingContext();
+            editingContext.execute(new AbstractBmTask<Object>("DataSetsLoadHandler merge task via reflection") {
+                @Override
+                public Void execute(IBmTransaction transaction, IProgressMonitor progressMonitor) {
+                    try {
+                        DataCompositionSchema schemaOldTransactional = (DataCompositionSchema) transaction.toTransactionObject(schemaOld);
+                        Global.invoke(DataSetsLoadHandler.class, "replaceContents", schemaOldTransactional, schemaNew);
+                    } catch (Exception e) {
+                        throw new RuntimeException("Ошибка при рефлексивном вызове replaceContents", e);
+                    }
+                    return null;
+                }
+            });
+            dcsEditor.notify(new DcsEvent(DcsEventType.EDITOR_SCHEMA_LOADED, schemaOld));
             return false;
         }
         catch (Exception e)

@@ -76,7 +76,14 @@ public final class Global
     {
         if (obj == null || methodName == null) return null;
         int argc = args == null ? 0 : args.length;
-        for (Class<?> c = obj.getClass(); c != null; c = c.getSuperclass())
+        
+        // Если передан экземпляр класса Class, значит мы вызываем статический метод этого класса.
+        // В противном случае — обычный метод экземпляра объекта.
+        boolean isStatic = obj instanceof Class<?>;
+        Class<?> startClass = isStatic ? (Class<?>) obj : obj.getClass();
+        Object targetInstance = isStatic ? null : obj;
+
+        for (Class<?> c = startClass; c != null; c = c.getSuperclass())
         {
             for (java.lang.reflect.Method m : c.getDeclaredMethods())
             {
@@ -85,7 +92,7 @@ public final class Global
                     try
                     {
                         m.setAccessible(true);
-                        return m.invoke(obj, args);
+                        return m.invoke(targetInstance, args);
                     }
                     catch (java.lang.reflect.InvocationTargetException e)
                     {
@@ -99,6 +106,7 @@ public final class Global
         }
         return null;
     }
+    
     /**
      * Вызывает публичный метод {@code methodName} без аргументов на объекте {@code obj}.
      *
@@ -176,7 +184,7 @@ public final class Global
         }
         if (showMessage)
         {
-            EclipseToastNotification.show("Проект", "Отсутствует активный проект");
+            ToastNotification.show("Проект", "Отсутствует активный проект");
         }
         return null;
     }

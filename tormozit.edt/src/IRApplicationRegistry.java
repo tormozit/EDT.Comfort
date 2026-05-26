@@ -248,7 +248,7 @@ public final class IRApplicationRegistry
     private void doConnect(IProject project, InfobaseReference infobase)
     {
         String appLabel = DesignerSessionPoolAccessor.nameOf(infobase);
-        Shell connectingToast = EclipseToastNotification.show(toastTitle(),
+        Shell connectingToast = ToastNotification.show(toastTitle(),
             "Подключается приложение ИР «" + appLabel + "». Закрыть командой «Отключить приложение ИР».", 60_000);
         try
         {
@@ -256,7 +256,7 @@ public final class IRApplicationRegistry
         }
         catch (Exception e)
         {
-            EclipseToastNotification.show(toastTitle(), "Ошибка подключения: " + e.getMessage(), 10_000);
+            ToastNotification.show(toastTitle(), "Ошибка подключения: " + e.getMessage(), 10_000);
             String key = sessionKey(infobase);
             IrSession s = sessions.remove(key);
             if (s != null && s.executor != null) {
@@ -267,7 +267,7 @@ public final class IRApplicationRegistry
         }
         finally
         {
-            EclipseToastNotification.close(connectingToast);
+            ToastNotification.close(connectingToast);
         }
     }
 
@@ -344,7 +344,7 @@ public final class IRApplicationRegistry
                         + " через " + className + ":\n" + descriptionOnError; //$NON-NLS-1$ //$NON-NLS-2$
                     showError(msg);
                     if (!descriptionOnError.contains("Ошибка разделенного доступа")) //$NON-NLS-1$
-                        EclipseToastNotification.show(toastTitle(), "Зарегистрируйте " + className + " (/RegServer -CurrentUser).", 8_000); //$NON-NLS-1$ //$NON-NLS-2$
+                        ToastNotification.show(toastTitle(), "Зарегистрируйте " + className + " (/RegServer -CurrentUser).", 8_000); //$NON-NLS-1$ //$NON-NLS-2$
                     sessions.remove(key); notifyListeners(); return;
                 }
                 Global.log("Попытка " + attempt + " неудача. Повтор..."); //$NON-NLS-1$ //$NON-NLS-2$
@@ -400,7 +400,7 @@ public final class IRApplicationRegistry
         {
             String versionMsg = String.format(
                 "Обнаружена несовместимая версия подсистемы " + irSubsystemTitle() + ". Необходима версия %s и выше", MINIMUM_IR_VERSION);
-            EclipseToastNotification.show(toastTitle(), versionMsg, 5_000); //$NON-NLS-1$
+            ToastNotification.show(toastTitle(), versionMsg, 5_000); //$NON-NLS-1$
             try { ComBridge.invoke(irClient, "ОткрытьСправкуПоПодсистемеЛкс"); } //$NON-NLS-1$
             catch (Exception ignored) {}
         }
@@ -416,7 +416,7 @@ public final class IRApplicationRegistry
             String cs = buildConnectionString(infobase, false);
             if (!cs.contains("Usr=")) //$NON-NLS-1$
                 noRightsMsg += ". Необходимо создать пользователя."; //$NON-NLS-1$
-            EclipseToastNotification.show(toastTitle(), noRightsMsg, 5_000); //$NON-NLS-1$
+            ToastNotification.show(toastTitle(), noRightsMsg, 5_000); //$NON-NLS-1$
         }
 
         // МодулиИР.ирКлиент.ЗакрытьВсеЧужиеФормыЛкс()
@@ -461,7 +461,7 @@ public final class IRApplicationRegistry
 //                {
 //                    final int cnt = changedCount;
 //                    // TODO: по клику тоста — вызвать ОбновитьКэшМодулейИзПапкиГита(changedModules)
-//                    EclipseToastNotification.show(
+//                    ToastNotification.show(
 //                        toastTitle(), //$NON-NLS-1$
 //                        String.format("В папке Гита найдено %d обновлённых модулей. Перенести их в кэш модулей?", cnt), //$NON-NLS-1$
 //                        10_000);
@@ -492,7 +492,7 @@ public final class IRApplicationRegistry
 //            {
 //                long lockWait = ComBridge.toLong(ComBridge.invoke(comDispatch, "ПолучитьВремяОжиданияБлокировкиДанных")); //$NON-NLS-1$
 //                if (lockWait > 0)
-//                    EclipseToastNotification.show(toastTitle(), //$NON-NLS-1$
+//                    ToastNotification.show(toastTitle(), //$NON-NLS-1$
 //                        "В файловой базе ИР включено ожидание блокировки данных. Рекомендую отключить.", 10_000); //$NON-NLS-1$
 //            }
 //            catch (Exception ignored) {}
@@ -500,7 +500,7 @@ public final class IRApplicationRegistry
             // МодулиИР.ирКлиент.ЛиВФайловойБазеЕстьВключенныеРегламентныеЗаданияЛкс()
             Boolean hasJobs = ComBridge.toBoolean(ComBridge.invoke(irClient, "ЛиВФайловойБазеЕстьВключенныеРегламентныеЗаданияЛкс")); //$NON-NLS-1$
             if (hasJobs)
-                EclipseToastNotification.show(toastTitle(), //$NON-NLS-1$
+                ToastNotification.show(toastTitle(), //$NON-NLS-1$
                     "В файловой базе ИР включены регламентные задания. Рекомендую отключить.\n" //$NON-NLS-1$
                     + "Если в коде есть их включение, подавите его проверкой файловой базы.", 10_000, 
                     () -> irSession.executor.submit(() -> {ComBridge.invoke(irClient, "ОткрытьКонсольЗаданийЛкс", true);})); //$NON-NLS-1$
@@ -515,7 +515,7 @@ public final class IRApplicationRegistry
             try { ComBridge.invoke(comDispatch, "ОтключитьОбработчикОжидания", handlerName); } //$NON-NLS-1$
             catch (Exception ignored) {}
         }
-        EclipseToastNotification.show(toastTitle(), connectedMsg, 3_000); //$NON-NLS-1$
+        ToastNotification.show(toastTitle(), connectedMsg, 3_000); //$NON-NLS-1$
     }
 
     // -----------------------------------------------------------------------
@@ -557,7 +557,7 @@ public final class IRApplicationRegistry
             }
             catch (Exception e)
             {
-                EclipseToastNotification.show("ИР: предупреждение", //$NON-NLS-1$
+                ToastNotification.show("ИР: предупреждение", //$NON-NLS-1$
                     "Подсистема ИР некорректно встроена в конфигурацию " //$NON-NLS-1$
                     + "(модуль приложения). Часть функций будет недоступна.", 5_000); //$NON-NLS-1$
             }
@@ -635,7 +635,7 @@ public final class IRApplicationRegistry
                         catch (Exception ignored) {}
                     }
                 }
-                EclipseToastNotification.show(toastTitle(), 
+                ToastNotification.show(toastTitle(), 
                     "В базе нет подсистемы " + irSubsystemTitle() + " и портативный вариант не найден." //$NON-NLS-1$
                     + reason, 10_000);
                 return false;
@@ -645,7 +645,7 @@ public final class IRApplicationRegistry
         // Если портативный обновился — перезапускаем подключение
         if ("ВерсияИРОбновлена".equals(updateFlag)) //$NON-NLS-1$
         {
-            EclipseToastNotification.show(toastTitle(), "Запущено подключение новой версии ИР.", 3_000); //$NON-NLS-1$
+            ToastNotification.show(toastTitle(), "Запущено подключение новой версии ИР.", 3_000); //$NON-NLS-1$
             // TODO: ЗакрытьПриложениеИР + ЗапуститьПодключениеИР → disconnect + scheduleConnect
             throw new RuntimeException("Требуется переподключение ИР — версия обновилась"); //$NON-NLS-1$
         }
@@ -688,8 +688,8 @@ public final class IRApplicationRegistry
             }
            catch (Exception e)
            {
-               EclipseToastNotification.show(toastTitle(), "Ошибка скачивания портативного варианта ИР: " + e.getMessage(), 6_000); //$NON-NLS-1$
-               EclipseToastNotification.show(toastTitle(),  
+               ToastNotification.show(toastTitle(), "Ошибка скачивания портативного варианта ИР: " + e.getMessage(), 6_000); //$NON-NLS-1$
+               ToastNotification.show(toastTitle(),  
                    "В базе нет подсистемы " + irSubsystemTitle() + " и в " + candidate + " нет ее портативного варианта.\n"
                    + " Прямые ссылки на ИР:\n"
                    + "Расширение: https://devtool1c.ucoz.ru/load/osnovnye/ustanovshhik_varianta_rasshirenie/1-1-0-21\n" //$NON-NLS-1$
@@ -766,7 +766,7 @@ public final class IRApplicationRegistry
             WmiProcessHelper.terminate(proc, session.pid);
             killed = true;
         }
-        EclipseToastNotification.show(toastTitle(), 
+        ToastNotification.show(toastTitle(), 
             killed ? "Процесс приложения ИР завершён принудительно." //$NON-NLS-1$
                    : "Приложение ИР завершено. Отключение займёт несколько секунд.", //$NON-NLS-1$
             3_000);
@@ -871,7 +871,7 @@ public final class IRApplicationRegistry
             {
                 if (attempt==2)
                 {
-                    EclipseToastNotification.show(toastTitle(), "Запустите EDT от имени администратора, чтобы он удалил " + removeBitness + "b класс " + className + " из HKLM");
+                    ToastNotification.show(toastTitle(), "Запустите EDT от имени администратора, чтобы он удалил " + removeBitness + "b класс " + className + " из HKLM");
                 }
             }
         }
@@ -884,19 +884,19 @@ public final class IRApplicationRegistry
             else
                 if (attempt==2)
                 {
-                    EclipseToastNotification.show(toastTitle(), "Ошибка удаления " + removeBitness + "b класса из HKCU"); //$NON-NLS-1$
+                    ToastNotification.show(toastTitle(), "Ошибка удаления " + removeBitness + "b класса из HKCU"); //$NON-NLS-1$
                 }
         }
         try
         {
             Process p = new ProcessBuilder(exeFullName, "/RegServer", "-CurrentUser").redirectErrorStream(true).start();
             p.waitFor(30, TimeUnit.SECONDS);
-            EclipseToastNotification.show(toastTitle(),
+            ToastNotification.show(toastTitle(),
                 "Из-за ошибки подключения регистрируем класс " + className + " для текущей версии платформы 1С и текущего пользователя ОС", 3_000);
         }
         catch (Exception e)
         {
-            EclipseToastNotification.show(toastTitle(),
+            ToastNotification.show(toastTitle(),
                 "Ошибка регистрации " + className + " для текущего пользователя ОС: " + e.getMessage(), 3_000); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
@@ -971,7 +971,7 @@ public final class IRApplicationRegistry
 
     private void showError(String msg)
     {
-        EclipseToastNotification.show(toastTitle(), "Ошибка подключения: " + msg, 6_000); //$NON-NLS-1$
+        ToastNotification.show(toastTitle(), "Ошибка подключения: " + msg, 6_000); //$NON-NLS-1$
     }
 
     private void notifyListeners()

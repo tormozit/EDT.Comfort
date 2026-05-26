@@ -86,7 +86,7 @@ public class CompareConfigCompareInIRHandler extends AbstractHandler {
         Path pathMain = getPropertySideFile(editor, element, ComparisonSide.MAIN); // mxlx
         if (pathMain == null)
         {
-            EclipseToastNotification.show("Сравнение метаданных ИР", "Поддерживаются свойства: ТабличныйДокумент.Макет");
+            ToastNotification.show("Сравнение метаданных ИР", "Поддерживаются свойства: ТабличныйДокумент.Макет");
             return;
         }
         Path pathOther = getPropertySideFile(editor, element, ComparisonSide.OTHER); // mxlx

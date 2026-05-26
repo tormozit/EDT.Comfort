@@ -14,7 +14,7 @@ import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.*;
 
-public final class EclipseToastNotification
+public final class ToastNotification
 {
     // =======================================================================
     // НАСТРОЙКИ АНИМАЦИИ И ВНЕШНЕГО ВИДА
@@ -46,7 +46,7 @@ public final class EclipseToastNotification
         ToastEntry(Shell s, int y, int h) { shell = s; this.y = y; this.height = h; }
     }
 
-    private EclipseToastNotification() {}
+    private ToastNotification() {}
 
     // =======================================================================
     // ПУБЛИЧНЫЙ API

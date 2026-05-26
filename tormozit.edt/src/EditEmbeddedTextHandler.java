@@ -87,7 +87,7 @@ public final class EditEmbeddedTextHandler
         String embeddedText = extractStringLiteral(doc, offset);
         if (embeddedText == null)
         {
-            EclipseToastNotification.show("Вложенный текст",
+            ToastNotification.show("Вложенный текст",
                 "Поместите курсор внутрь строкового литерала BSL");
             return;
         }
@@ -96,7 +96,7 @@ public final class EditEmbeddedTextHandler
         IDtProject dtProject = getProjectFromBslEditor(editor);
         if (dtProject == null)
         {
-            EclipseToastNotification.show("Вложенный текст",
+            ToastNotification.show("Вложенный текст",
                 "Не удалось определить проект редактора");
             return;
         }
@@ -107,7 +107,7 @@ public final class EditEmbeddedTextHandler
         if (irSession == null || irSession.executor == null)
         {
             // getSession() уже запустил подключение — сообщаем пользователю
-            EclipseToastNotification.show("Вложенный текст",
+            ToastNotification.show("Вложенный текст",
                 "Ожидайте подключения к приложению ИР, затем повторите команду");
             return;
         }
@@ -126,7 +126,7 @@ public final class EditEmbeddedTextHandler
             catch (Exception e)
             {
                 Global.log("EditEmbeddedTextHandler: ошибка вызова ИР: " + e.getMessage()); //$NON-NLS-1$
-                EclipseToastNotification.show("Вложенный текст",
+                ToastNotification.show("Вложенный текст",
                     "Ошибка вызова ИР: " + e.getMessage(), 5_000);
             }
         });
