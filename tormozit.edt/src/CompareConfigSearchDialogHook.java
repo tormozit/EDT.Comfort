@@ -1,11 +1,16 @@
-
-
 import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 
 import org.eclipse.jface.viewers.AbstractTreeViewer;
 import org.eclipse.jface.viewers.StructuredSelection;
+import org.eclipse.jface.viewers.IContentProvider;
+import org.eclipse.jface.viewers.ITreeContentProvider;
+import org.eclipse.jface.viewers.ISelection;
+import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.IBaseLabelProvider;
+import org.eclipse.jface.viewers.ITableLabelProvider;
+import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.widgets.Button;
@@ -15,38 +20,27 @@ import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.swt.widgets.Tree;
-import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IPartService;
 import org.eclipse.ui.IWorkbenchPart;
 
+import com._1c.g5.v8.dt.compare.model.ComparisonSide;
 import com._1c.g5.v8.dt.compare.ui.editor.DtComparisonView;
+import com._1c.g5.v8.dt.compare.ui.partialmodel.node.AbstractDirectPartialModelNode;
+import com._1c.g5.v8.dt.compare.ui.partialmodel.node.AbstractNodeWithLabels;
 
 /**
  * Патч диалога поиска EDT (CTRL+F в дереве сравнения).
  *
  * Добавляет флажок "Только имена объектов" (включён по умолчанию).
  * Когда флажок снят — кнопки "Далее"/"Назад" используют наш поиск:
- * обходят все видимые строки дерева и ищут текст во всех ячейках.
- *
- * Подключается один раз через Display.addFilter(SWT.Show) в earlyStartup(),
- * что гарантирует перехват каждого нового открытия диалога.
+ * обходят всю модель дерева (включая свернутые узлы) и ищут текст во всех ячейках.
  */
 public class CompareConfigSearchDialogHook
 {
-    /** Ключ-маркер: диалог уже был обработан нами. */
     private static final String PATCHED_KEY = "tormozit.searchPatched"; //$NON-NLS-1$
-
-    /** Имя целевого класса EDT-диалога поиска. */
     private static final String DIALOG_CLASS = "ComparisonTreeSearchDialog"; //$NON-NLS-1$
 
-    // ---- Публичный API ----
-
-    /**
-     * Регистрирует Display-фильтр, который перехватывает открытие
-     * диалога поиска EDT и добавляет в него наш флажок.
-     * Вызывать один раз при старте плагина.
-     */
     public static void install(Display display)
     {
         display.addFilter(SWT.Show, event ->
@@ -55,9 +49,8 @@ public class CompareConfigSearchDialogHook
                 return;
             Shell shell = (Shell)event.widget;
             if (shell.getData(PATCHED_KEY) != null)
-                return; // уже патчили этот экземпляр
+                return; 
 
-            // JFace хранит экземпляр Window/Dialog в shell.getData()
             Object dialog = shell.getData();
             if (dialog == null)
                 return;
@@ -69,8 +62,6 @@ public class CompareConfigSearchDialogHook
         });
     }
 
-    // ---- Патч диалога ----
-
     private static void patchDialog(Shell shell, Object dialog)
     {
         Button btnCase = (Button)getField(dialog, "buttonCaseSensitive"); //$NON-NLS-1$
@@ -80,35 +71,34 @@ public class CompareConfigSearchDialogHook
         if (btnNext == null || btnPrev == null)
             return;
 
-        // Родительский Composite диалога (GridLayout, 1 колонка)
         Composite parent = btnCase != null ? btnCase.getParent() : btnNext.getParent();
 
-        // Создаём флажок в том же Composite
-        Button cbNamesOnly = new Button(parent, SWT.CHECK);
-        cbNamesOnly.setText("Только имена объектов"); //$NON-NLS-1$
-        cbNamesOnly.setSelection(true); // включён по умолчанию
-        cbNamesOnly.setLayoutData(new GridData(
-            GridData.BEGINNING, GridData.CENTER, false, false));
+        Button cbDetailedSearch = new Button(parent, SWT.CHECK);
+        cbDetailedSearch.setText("По всем строкам");
+        cbDetailedSearch.setToolTipText("Стандартный поиск EDT ищет только по строкам имен объектов. Этот флажок включает просмотр всех строк (Tormozit)");
+        cbDetailedSearch.setSelection(true);
+        cbDetailedSearch.setLayoutData(new GridData(GridData.BEGINNING, GridData.CENTER, false, false));
 
-        // Помещаем после "Is case sensitive", перед строкой с кнопками
         if (btnCase != null)
-            cbNamesOnly.moveBelow(btnCase);
+            cbDetailedSearch.moveBelow(btnCase);
+        
+        Button cbSearchObjectColumn = new Button(parent, SWT.CHECK);
+        cbSearchObjectColumn.setText("По всем колонкам");
+        cbSearchObjectColumn.setToolTipText("Дополнительно к поиску в колонках значений еще искать в колонке \"Объект\" (Tormozit)");
+        cbSearchObjectColumn.setSelection(true); 
+        cbSearchObjectColumn.setLayoutData(new GridData(GridData.BEGINNING, GridData.CENTER, false, false));
 
-        // Перехватываем кнопки "Далее" и "Назад"
-        interceptButton(btnNext, cbNamesOnly, dialog, false);
-        interceptButton(btnPrev, cbNamesOnly, dialog, true);
+        if (btnCase != null)
+            cbSearchObjectColumn.moveBelow(btnCase);
+        
+        interceptButton(btnNext, cbDetailedSearch, dialog, false, cbSearchObjectColumn);
+        interceptButton(btnPrev, cbDetailedSearch, dialog, true, cbSearchObjectColumn);
 
-        // Обновляем размер диалога
         parent.layout(true, true);
         shell.pack();
     }
 
-    /**
-     * Снимает оригинальные SWT-слушатели с кнопки и добавляет наш:
-     * если флажок включён — отдаём управление EDT, иначе — наш поиск.
-     */
-    private static void interceptButton(Button button, Button cbNamesOnly,
-        Object dialog, boolean backward)
+    private static void interceptButton(Button button, Button cbDetailedSearch, Object dialog, boolean backward, Button cbSearchObjectColumn)
     {
         Listener[] original = button.getListeners(SWT.Selection);
         for (Listener l : original)
@@ -116,23 +106,21 @@ public class CompareConfigSearchDialogHook
 
         button.addListener(SWT.Selection, event ->
         {
-            if (cbNamesOnly.isDisposed() || cbNamesOnly.getSelection())
+            if (!cbDetailedSearch.getSelection())
             {
-                // Флажок включён — EDT ищет сам (только имена объектов)
                 for (Listener l : original)
                     l.handleEvent(event);
             }
             else
             {
-                // Флажок выключен — наш поиск по всем ячейкам всех строк
-                performFullTreeSearch(dialog, backward);
+                performFullTreeSearch(dialog, backward, cbSearchObjectColumn.getSelection());
             }
         });
     }
 
-    // ---- Поиск по всем ячейкам ----
+    // ---- Поиск по всей модели дерева ----
 
-    private static void performFullTreeSearch(Object dialog, boolean backward)
+    private static void performFullTreeSearch(Object dialog, boolean backward, boolean searchObjectColumn)
     {
         Text textFilter = (Text)getField(dialog, "textFilter"); //$NON-NLS-1$
         if (textFilter == null || textFilter.isDisposed())
@@ -149,59 +137,105 @@ public class CompareConfigSearchDialogHook
         AbstractTreeViewer viewer = getTreeViewerFromDialog(dialog);
         if (viewer == null)
             return;
-        Tree tree = (Tree)viewer.getControl();
-        List<TreeItem> items = new ArrayList<>();
-        collectItems(tree.getItems(), items);
+            
+        IContentProvider cp = viewer.getContentProvider();
+        if (!(cp instanceof ITreeContentProvider))
+            return;
+        ITreeContentProvider provider = (ITreeContentProvider) cp;
+
+        // Собираем ВСЕ элементы модели (включая нераскрытые)
+        List<Object> items = new ArrayList<>();
+        Object[] roots = provider.getElements(viewer.getInput());
+        if (roots != null)
+        {
+            for (Object root : roots)
+            {
+                items.add(root);
+                collectModelItems(root, provider, items);
+            }
+        }
+        
         if (items.isEmpty())
             return;
 
-        // Определяем текущую позицию
-        TreeItem[] sel = tree.getSelection();
-        int current = sel.length > 0 ? items.indexOf(sel[0]) : -1;
+        // Определяем текущую позицию по модели
+        ISelection sel = viewer.getSelection();
+        int current = -1;
+        if (sel instanceof IStructuredSelection && !sel.isEmpty())
+        {
+            current = items.indexOf(((IStructuredSelection) sel).getFirstElement());
+        }
 
         int n = items.size();
-        // backward: шагаем назад (n-1 шаг вперёд по кольцу)
         int step = backward ? n - 1 : 1;
 
         for (int i = 1; i <= n; i++)
         {
             int idx = (current + i * step) % n;
-            TreeItem candidate = items.get(idx);
-            if (matches(candidate, effectiveQuery, caseSensitive))
+            Object candidate = items.get(idx);
+            
+            if (isMatched(candidate, effectiveQuery, caseSensitive, viewer, searchObjectColumn))
             {
-                tree.setSelection(candidate);
-                tree.showItem(candidate);
-                // Уведомляем JFace-слой об изменении выделения
-                viewer.setSelection(new StructuredSelection(candidate.getData()), true);
-                clearStatus(dialog);
-                return;
+                // setSelection с флагом reveal=true заставит дерево само
+                // раскрыть все нужные родительские ветки и прокрутить к элементу!
+                viewer.setSelection(new StructuredSelection(candidate), true);
+                if (!viewer.getSelection().isEmpty())
+                {
+                    clearStatus(dialog);
+                    return;
+                }
             }
         }
 
-        // Ничего не найдено — показываем статус как EDT
         setStatus(dialog, "Совпадений не найдено"); //$NON-NLS-1$
     }
 
-    /** Рекурсивно собирает все видимые строки (только раскрытые ветки). */
-    private static void collectItems(TreeItem[] items, List<TreeItem> result)
+    /** Рекурсивно собирает все элементы модели, используя провайдер контента. */
+    private static void collectModelItems(Object parent, ITreeContentProvider provider, List<Object> result)
     {
-        for (TreeItem item : items)
+        Object[] children = provider.getChildren(parent);
+        if (children != null)
         {
-            result.add(item);
-            collectItems(item.getItems(), result);
+            for (Object child : children)
+            {
+                result.add(child);
+                collectModelItems(child, provider, result);
+            }
         }
     }
 
-    /** Проверяет, содержит ли хотя бы одна ячейка строки искомый текст. */
-    private static boolean matches(TreeItem item, String query, boolean caseSensitive)
+    /** Проверяет совпадение текста в ячейках модели через LabelProvider. */
+    private static boolean isMatched(Object element, String query, boolean caseSensitive, AbstractTreeViewer viewer, boolean searchObjectColumn)
     {
-        int cols = Math.max(1, item.getParent().getColumnCount());
-        for (int col = 0; col < cols; col++)
-        {
-            String text = item.getText(col);
-            if (caseSensitive ? text.contains(query)
-                              : text.toLowerCase().contains(query))
-                return true;
+        IBaseLabelProvider baseLabelProvider = viewer.getLabelProvider();
+        if (baseLabelProvider instanceof ILabelProvider) {
+            String text;
+            if (element instanceof AbstractNodeWithLabels) {
+                AbstractNodeWithLabels node = (AbstractNodeWithLabels) element; 
+                text = node.getSideLabel(ComparisonSide.MAIN);
+                if (text != null && (caseSensitive ? text.contains(query) : text.toLowerCase().contains(query)))
+                {
+                    return true;
+                }
+                text = node.getSideLabel(ComparisonSide.OTHER);
+                if (text != null && (caseSensitive ? text.contains(query) : text.toLowerCase().contains(query)))
+                {
+                    return true;
+                }
+                text = node.getSideLabel(ComparisonSide.COMMON_ANCESTOR);
+                if (text != null && (caseSensitive ? text.contains(query) : text.toLowerCase().contains(query)))
+                {
+                    return true;
+                }
+            }
+            if (searchObjectColumn && element instanceof AbstractDirectPartialModelNode) {
+                AbstractDirectPartialModelNode node = (AbstractDirectPartialModelNode) element; 
+                text = node.getLabel();
+                if (text != null && (caseSensitive ? text.contains(query) : text.toLowerCase().contains(query)))
+                {
+                    return true;
+                }
+            }
         }
         return false;
     }
@@ -212,13 +246,9 @@ public class CompareConfigSearchDialogHook
     {
         try
         {
-            dialog.getClass()
-                  .getMethod("setMessage", String.class) //$NON-NLS-1$
-                  .invoke(dialog, message);
+            dialog.getClass().getMethod("setMessage", String.class).invoke(dialog, message); //$NON-NLS-1$
         }
-        catch (Exception ignored)
-        {
-        }
+        catch (Exception ignored) {}
     }
 
     private static void clearStatus(Object dialog)
@@ -230,18 +260,14 @@ public class CompareConfigSearchDialogHook
 
     private static AbstractTreeViewer getTreeViewerFromDialog(Object dialog)
     {
-        // ComparisonTreeSearchDialog → controller → partService → активный редактор
         Object controller = getField(dialog, "controller"); //$NON-NLS-1$
-        if (controller == null)
-            return null;
+        if (controller == null) return null;
 
         IPartService ps = (IPartService)getField(controller, "partService"); //$NON-NLS-1$
-        if (ps == null)
-            return null;
+        if (ps == null) return null;
 
         IWorkbenchPart part = ps.getActivePart();
-        if (!(part instanceof IEditorPart))
-            return null;
+        if (!(part instanceof IEditorPart)) return null;
 
         return getTreeViewerFromEditor((IEditorPart)part);
     }
@@ -249,12 +275,10 @@ public class CompareConfigSearchDialogHook
     private static AbstractTreeViewer getTreeViewerFromEditor(IEditorPart editor)
     {
         Object view = getField(editor, "comparisonView"); //$NON-NLS-1$
-        if (!(view instanceof DtComparisonView))
-            return null;
+        if (!(view instanceof DtComparisonView)) return null;
 
         Object treeControl = ((DtComparisonView)view).getTreeControl();
-        if (treeControl == null)
-            return null;
+        if (treeControl == null) return null;
 
         Object viewer = invokeNoArg(treeControl, "getTreeViewer"); //$NON-NLS-1$
         return (viewer instanceof AbstractTreeViewer) ? (AbstractTreeViewer)viewer : null;
@@ -273,29 +297,16 @@ public class CompareConfigSearchDialogHook
                 f.setAccessible(true);
                 return f.get(obj);
             }
-            catch (NoSuchFieldException ignored)
-            {
-                cls = cls.getSuperclass();
-            }
-            catch (Exception ignored)
-            {
-                return null;
-            }
+            catch (NoSuchFieldException ignored) { cls = cls.getSuperclass(); }
+            catch (Exception ignored) { return null; }
         }
         return null;
     }
 
     private static Object invokeNoArg(Object o, String name)
     {
-        if (o == null)
-            return null;
-        try
-        {
-            return o.getClass().getMethod(name).invoke(o);
-        }
-        catch (Exception ignored)
-        {
-            return null;
-        }
+        if (o == null) return null;
+        try { return o.getClass().getMethod(name).invoke(o); }
+        catch (Exception ignored) { return null; }
     }
 }

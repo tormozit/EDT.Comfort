@@ -1,5 +1,4 @@
 
-
 import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.Field;
@@ -8,13 +7,11 @@ import java.nio.file.Files;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.Adapters;
-import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.IStructuredSelection;
-import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.ui.IEditorInput;
 import org.eclipse.ui.IEditorPart;
-import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.IWorkbenchPage;
+import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.navigator.CommonNavigator;
 import org.osgi.framework.Bundle;
@@ -24,22 +21,23 @@ import org.osgi.framework.FrameworkUtil;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.wiring.IManagedService;
-import com._1c.g5.v8.dt.navigator.AbstractDtNavigator;
-import com._1c.g5.v8.dt.md.ui.navigator.adapters.CommonNavigatorAdapter;
+
 /**
- * Утилиты Java-рефлексии — единый источник правды для всего плагина.
- *
- * <p>Заменяет дублирующиеся реализации, которые были рассыпаны по четырём классам:
- * <ul>
- *   <li>{@code CompareConfigMenuHook.getField} / {@code invokeNoArg}</li>
- *   <li>{@code CompareConfigOpenObjectHandler.getField} / {@code invokeNoArg}</li>
- *   <li>{@code IRApplicationRegistry.readField} / {@code tryCall}</li>
- *   <li>{@code DesignerSessionPoolAccessor.readField} / {@code tryCall}</li>
- * </ul>
+ * Утилиты Java-рефлексии и общего назначения — единый источник правды для всего плагина.
  */
 public final class Global
 {
+    /** ID навигатора EDT. */
+    static final String NAVIGATOR_VIEW_ID  = "com._1c.g5.v8.dt.ui2.navigator";  //$NON-NLS-1$
+
+    /** ID редактора сравнения конфигураций EDT. */
+    static final String COMPARE_EDITOR_ID  = "com._1c.g5.v8.dt.compare.ui.editor"; //$NON-NLS-1$
+
     private Global() {}
+
+    // =========================================================================
+    // Рефлексия
+    // =========================================================================
 
     /**
      * Читает значение поля {@code fieldName} из объекта {@code obj},
@@ -70,15 +68,12 @@ public final class Global
      * включая private и protected.
      *
      * @return результат вызова, или {@code null} при любой ошибке
-     * @throws RuntimeException если метод бросает проверяемое исключение (причина из {@code InvocationTargetException})
      */
     public static Object invoke(Object obj, String methodName, Object... args)
     {
         if (obj == null || methodName == null) return null;
         int argc = args == null ? 0 : args.length;
-        
-        // Если передан экземпляр класса Class, значит мы вызываем статический метод этого класса.
-        // В противном случае — обычный метод экземпляра объекта.
+
         boolean isStatic = obj instanceof Class<?>;
         Class<?> startClass = isStatic ? (Class<?>) obj : obj.getClass();
         Object targetInstance = isStatic ? null : obj;
@@ -106,7 +101,7 @@ public final class Global
         }
         return null;
     }
-    
+
     /**
      * Вызывает публичный метод {@code methodName} без аргументов на объекте {@code obj}.
      *
@@ -119,84 +114,139 @@ public final class Global
         catch (Exception ignored) { return null; }
     }
 
+    // =========================================================================
+    // OSGi / сервисы
+    // =========================================================================
+
     public static BundleContext ourContext()
     {
         Bundle b = FrameworkUtil.getBundle(Global.class);
         return b != null ? b.getBundleContext() : null;
     }
-    
-    public static IDtProject getProjectFromEditor(Object editorPart) {
-        Object project = Global.getField(editorPart, "project");
-        
-        if (project instanceof IDtProject) {
-            return (IDtProject) project;
+
+    public static IManagedService getServiceByClass(Class<?> clazz)
+    {
+        BundleContext ctx = Global.ourContext();
+        return (IManagedService) ctx.getService(ctx.getServiceReference(clazz));
+    }
+
+    // =========================================================================
+    // Проекты
+    // =========================================================================
+
+    /**
+     * Возвращает активный {@link IProject} из нескольких источников (в порядке приоритета):
+     * <ol>
+     *   <li>Файл, открытый в активном редакторе ({@code IEditorInput → IFile → IProject}).</li>
+     *   <li>Редактор сравнения конфигураций EDT — через сессию сравнения
+     *       ({@link CompareConfigOpenObjectHandler#getProjectFromEditor}).</li>
+     *   <li>Выделенный элемент в навигаторе EDT.</li>
+     * </ol>
+     *
+     * @param page рабочая страница; если {@code null} — берётся активная страница IDE
+     * @return проект или {@code null}
+     */
+    public static IProject getActiveProject(IWorkbenchPage page)
+    {
+        if (page == null) page = getActivePage();
+        if (page == null) return null;
+
+        IEditorPart editor = page.getActiveEditor();
+
+        // 1. Из файла активного редактора
+        if (editor != null)
+        {
+            IFile file = editorToFile(editor);
+            if (file != null) return file.getProject();
         }
-        Object context = Global.getField(editorPart, "context");
-        if (context != null) {
-            Object p = Global.getField(context, "project");
+
+        // 2. Из редактора сравнения конфигураций
+        if (editor != null && COMPARE_EDITOR_ID.equals(editor.getSite().getId()))
+        {
+            IProject p = CompareConfigOpenObjectHandler.getProjectFromEditor(editor);
+            if (p != null) return p;
+        }
+
+        // 3. Из навигатора EDT
+        IProject navProject = getProjectFromNavigator(page);
+        if (navProject != null) return navProject;
+
+        return null;
+    }
+
+    /**
+     * Устаревший метод — делегирует к {@link #getActiveProject(IWorkbenchPage)}.
+     * Оставлен для обратной совместимости.
+     *
+     * @param showMessage если {@code true} и проект не найден, показывает уведомление
+     */
+    public static IProject getActiveEditorProject(boolean showMessage)
+    {
+        IProject project = getActiveProject(null);
+        if (project == null && showMessage)
+            ToastNotification.show("Проект", "Отсутствует активный проект");
+        return project;
+    }
+
+    /** Возвращает {@link IDtProject} из поля {@code project} произвольного редактора. */
+    public static IDtProject getProjectFromEditor(Object editorPart)
+    {
+        Object project = Global.getField(editorPart, "project"); //$NON-NLS-1$
+        if (project instanceof IDtProject) return (IDtProject) project;
+        Object context = Global.getField(editorPart, "context"); //$NON-NLS-1$
+        if (context != null)
+        {
+            Object p = Global.getField(context, "project"); //$NON-NLS-1$
             if (p instanceof IDtProject) return (IDtProject) p;
         }
         return null;
     }
 
-    public static IManagedService getServiceByClass(Class<?> clazz)
-    {
-        BundleContext ourContext = Global.ourContext();
-        return (IManagedService) ourContext.getService(ourContext.getServiceReference(clazz));
-    }
-        
+    // =========================================================================
+    // Вспомогательные
+    // =========================================================================
+
     public static void log(String msg)
     {
-       String timestamp = java.time.LocalTime.now().format(java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss"));
-       System.out.println("[Tormozit " + timestamp + "] " + msg);
-    }
-    
-    public static IProject getActiveEditorProject(boolean showMessage) {
-        IEditorPart activeEditor = null;
-        IWorkbenchPage activePage = PlatformUI.getWorkbench().getActiveWorkbenchWindow().getActivePage();
-        if (activePage != null)
-        {
-            activeEditor = activePage.getActiveEditor();
-            if (activeEditor != null)
-            {
-                IEditorInput input = activeEditor.getEditorInput();
-                if (input != null)
-                {
-                    IFile file = input.getAdapter(IFile.class);
-                    if (file != null)
-                    {
-                        return file.getProject();
-                    }
-                }
-            }
-        }
-        if (activeEditor != null)
-        {
-            CommonNavigator navigator = (CommonNavigator) activePage.findView("com._1c.g5.v8.dt.ui2.navigator"); // ID Навигатора EDT com._1c.g5.v8.dt.internal.navigator.ui.Navigator
-            IStructuredSelection  selection = (IStructuredSelection ) navigator.getSite().getSelectionProvider().getSelection();
-            Object firstElement = selection.getFirstElement();
-            IProject project = (IProject) Adapters.adapt(firstElement, IProject.class);
-            if (project!=null)
-            {
-                return project;
-            }
-            String z = "";
-        }
-        if (showMessage)
-        {
-            ToastNotification.show("Проект", "Отсутствует активный проект");
-        }
-        return null;
+        String ts = java.time.LocalTime.now()
+            .format(java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")); //$NON-NLS-1$
+        System.out.println("[Tormozit " + ts + "] " + msg); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
-    public static String readTextFromFile(File commandFile) throws IOException
+    public static String readTextFromFile(File file) throws IOException
     {
-        String text;
-        text = Files.readString(commandFile.toPath());
-        if (text.startsWith("\uFEFF")) {
-           // Удаляем BOM 
-            text = text.substring(1); 
-        }
-        return text;
+        String text = Files.readString(file.toPath());
+        return text.startsWith("\uFEFF") ? text.substring(1) : text; // strip BOM
     }
- }
+
+    // =========================================================================
+    // Приватные утилиты
+    // =========================================================================
+
+    private static IWorkbenchPage getActivePage()
+    {
+        IWorkbenchWindow w = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+        return w != null ? w.getActivePage() : null;
+    }
+
+    private static IFile editorToFile(IEditorPart editor)
+    {
+        if (editor == null) return null;
+        IEditorInput input = editor.getEditorInput();
+        return input != null ? input.getAdapter(IFile.class) : null;
+    }
+
+    private static IProject getProjectFromNavigator(IWorkbenchPage page)
+    {
+        try
+        {
+            CommonNavigator nav = (CommonNavigator) page.findView(NAVIGATOR_VIEW_ID);
+            if (nav == null) return null;
+            IStructuredSelection sel = (IStructuredSelection)
+                nav.getSite().getSelectionProvider().getSelection();
+            if (sel == null || sel.isEmpty()) return null;
+            return Adapters.adapt(sel.getFirstElement(), IProject.class);
+        }
+        catch (Exception ignored) { return null; }
+    }
+}

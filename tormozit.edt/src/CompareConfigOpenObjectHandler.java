@@ -4,6 +4,9 @@ import java.util.List;
 import org.eclipse.core.commands.AbstractHandler;
 import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
+import org.eclipse.core.resources.IProject;
+import org.eclipse.core.resources.ResourcesPlugin;
+import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.dialogs.MessageDialog;
 import org.eclipse.jface.viewers.ISelection;
@@ -46,7 +49,7 @@ public class CompareConfigOpenObjectHandler extends AbstractHandler {
     public static void openObject(IEditorPart editor, Shell shell) {
         // Создаем временный экземпляр-хелпер, так как он больше не зарегистрирован как SelectionProvider
         CompareConfigSelectionListener helper = new CompareConfigSelectionListener(editor);
-        EObject eObject = helper.resolveEObject(getSelection(editor), null);
+        EObject eObject = helper.resolveEObject(getSelection(editor), null, true);
         
         if (eObject != null) {
             openInEditor(eObject, editor, shell);
@@ -144,5 +147,108 @@ public class CompareConfigOpenObjectHandler extends AbstractHandler {
         try {
             MessageDialog.openInformation(shell, "Открыть объект", msg);
         } catch (Exception ignored) {}
+    }
+
+    // =========================================================================
+    // Получение IProject из редактора сравнения
+    // =========================================================================
+
+    /**
+     * Возвращает {@link IProject} основной (MAIN) стороны сравнения.
+     *
+     * <p>Пробует три стратегии (в порядке убывания надёжности):
+     * <ol>
+     *   <li>Вызов {@code getProject()} / {@code getDtProject().getWorkspaceProject()}
+     *       на {@link IComparisonDataSource} каждой из сторон.</li>
+     *   <li>Вызов {@code getProject()} на самой сессии.</li>
+     *   <li>Извлечение имени проекта из URI ресурса выбранного EObject.</li>
+     * </ol>
+     *
+     * @return проект или {@code null} если не удалось определить
+     */
+    public static IProject getProjectFromEditor(IEditorPart editor)
+    {
+        IComparisonSession session = CompareConfigSelectionListener.getSession(editor);
+        if (session == null)
+            return null;
+
+        // Стратегия 1: через источник данных каждой из сторон
+        for (ComparisonSide side : ComparisonSide.values())
+        {
+            IProject p = projectFromDataSource(session.getDataSource(side));
+            if (p != null)
+                return p;
+        }
+
+        // Стратегия 2: через метод сессии
+        Object proj = Global.call(session, "getProject"); //$NON-NLS-1$
+        if (proj instanceof IProject)
+            return (IProject)proj;
+
+        // Стратегия 3: из URI ресурса выделенного EObject
+        ISelection sel = getSelection(editor);
+        if (sel instanceof IStructuredSelection)
+        {
+            Object element = ((IStructuredSelection)sel).getFirstElement();
+            MatchedObjectsComparisonNode node = CompareConfigSelectionListener.resolveMatchedNode(element);
+            if (node != null)
+            {
+                Long bmId = node.getMainObjectId();
+                if (bmId == null || bmId == -1L)
+                    bmId = node.getOtherObjectId();
+                if (bmId != null && bmId != -1L)
+                {
+                    EObject eObj = getEObject(session, bmId, node);
+                    IProject p = projectFromEObject(eObj);
+                    if (p != null)
+                        return p;
+                }
+            }
+        }
+
+        return null;
+    }
+    /** Получает {@link IProject} из источника данных сессии через рефлексию. */
+    private static IProject projectFromDataSource(IComparisonDataSource ds)
+    {
+        if (ds == null) return null;
+
+        Object proj = Global.call(ds, "getProject"); //$NON-NLS-1$
+        if (proj instanceof IProject) return (IProject) proj;
+
+        Object dtProj = Global.call(ds, "getDtProject"); //$NON-NLS-1$
+        if (dtProj != null)
+        {
+            Object wp = Global.call(dtProj, "getWorkspaceProject"); //$NON-NLS-1$
+            if (wp instanceof IProject) return (IProject) wp;
+        }
+
+        Object ns = Global.call(ds, "getNamespace"); //$NON-NLS-1$
+        if (ns != null)
+        {
+            Object p = Global.call(ns, "getProject"); //$NON-NLS-1$
+            if (p instanceof IProject) return (IProject) p;
+        }
+        return null;
+    }
+
+    /** Извлекает {@link IProject} из platform-resource URI ресурса EObject. */
+    private static IProject projectFromEObject(EObject obj)
+    {
+        if (obj == null || obj.eResource() == null) return null;
+        URI uri = obj.eResource().getURI();
+        if (!uri.isPlatformResource()) return null;
+
+        // "/ProjectName/src/..."
+        String platformPath = uri.toPlatformString(true);
+        if (platformPath == null) return null;
+
+        // Берём сегмент после ведущего "/"
+        String name = platformPath.startsWith("/") ? platformPath.substring(1) : platformPath; //$NON-NLS-1$
+        int slash = name.indexOf('/');
+        if (slash > 0) name = name.substring(0, slash);
+
+        IProject p = ResourcesPlugin.getWorkspace().getRoot().getProject(name);
+        return (p != null && p.exists()) ? p : null;
     }
 }
