@@ -126,9 +126,9 @@ public class CompareConfigMenuHook implements IStartup
 
         addToolbarButtonWithRetry(editor);
 
-        CompareConfigSelectionProvider selProvider = new CompareConfigSelectionProvider(editor);
-        editor.getSite().setSelectionProvider(selProvider);
-        wireTreeViewerToProvider(editor, selProvider);
+        // ВМЕСТО УСТАНОВКИ SELECTION PROVIDER — ПРОСТО ВЕШАЕМ СЛУШАТЕЛЬ НА ДЕРЕВО
+        CompareConfigSelectionListener syncListener = new CompareConfigSelectionListener(editor);
+        wireTreeViewerToListener(editor, syncListener);
 
         Tree tree = getCompareTree(editor);
         if (tree == null)
@@ -143,8 +143,7 @@ public class CompareConfigMenuHook implements IStartup
         attachMenuListener(editor, tree);
     }
 
-    private void wireTreeViewerToProvider(IEditorPart editor,
-                                          CompareConfigSelectionProvider provider)
+    private void wireTreeViewerToListener(IEditorPart editor, CompareConfigSelectionListener listener)
     {
         Display.getDefault().asyncExec(() ->
         {
@@ -154,11 +153,11 @@ public class CompareConfigMenuHook implements IStartup
                 Display.getDefault().asyncExec(() ->
                 {
                     AbstractTreeViewer v = getTreeViewerFromEditor(editor);
-                    if (v != null) provider.setTreeViewer(v);
+                    if (v != null) listener.setTreeViewer(v);
                 });
                 return;
             }
-            provider.setTreeViewer(viewer);
+            listener.setTreeViewer(viewer);
         });
     }
 

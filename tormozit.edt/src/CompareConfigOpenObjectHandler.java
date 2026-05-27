@@ -1,5 +1,3 @@
-
-
 import java.lang.reflect.Method;
 import java.util.List;
 
@@ -46,13 +44,21 @@ public class CompareConfigOpenObjectHandler extends AbstractHandler {
      * от фокуса / activeContexts / activeWhen.
      */
     public static void openObject(IEditorPart editor, Shell shell) {
-        CompareConfigSelectionProvider selectionProvider = (CompareConfigSelectionProvider) editor.getSite().getSelectionProvider();
-        EObject eObject = selectionProvider.resolveEObject(getSelection(editor), null);
-        openInEditor(eObject, editor, shell);
+        // Создаем временный экземпляр-хелпер, так как он больше не зарегистрирован как SelectionProvider
+        CompareConfigSelectionListener helper = new CompareConfigSelectionListener(editor);
+        EObject eObject = helper.resolveEObject(getSelection(editor), null);
+        
+        if (eObject != null) {
+            openInEditor(eObject, editor, shell);
+        } else {
+            // Тихо выходим или можно добавить showError(shell, "Не удалось получить объект для узла");
+        }
     }
     
     public static void showInNavigator(IEditorPart editor, Shell shell) {
-        ((CompareConfigSelectionProvider) editor.getSite().getSelectionProvider()).showObjectInNavigator(getSelection(editor), true);
+        // Аналогично используем как хелпер для вызова логики подсветки в Навигаторе
+        CompareConfigSelectionListener helper = new CompareConfigSelectionListener(editor);
+        helper.showObjectInNavigator(getSelection(editor), true);
     }
 
     public static ISelection getSelection(IEditorPart editor) {
@@ -123,7 +129,7 @@ public class CompareConfigOpenObjectHandler extends AbstractHandler {
         } catch (ClassNotFoundException e) {
             showError(shell, "OpenHelper не найден: " + e.getMessage());
             return;
-            } catch (Exception e) {
+        } catch (Exception e) {
             showError(shell, "Ошибка OpenHelper: " + e.getMessage());
             return;
         }

@@ -102,18 +102,19 @@ public class CompareConfigCompareInIRHandler extends AbstractHandler {
             e.printStackTrace();
             return;
         }
-        IComparisonSession compSession = CompareConfigSelectionProvider.getSession(editor);
+        IComparisonSession compSession = CompareConfigSelectionListener.getSession(editor);
         IRApplicationRegistry.IrSession irSession = IRApplicationRegistry.getSession(compSession.getDataSource(ComparisonSide.MAIN).getDtProject());
         if (irSession == null || irSession.executor == null) {
             return;
         }
+        String ancestor = pathAncestor != null ?pathAncestor.toString() : null;
         irSession.executor.submit(() -> {
             try 
             {
                 // Здесь мы находимся в родном потоке для этого COM-объекта. 
                 Object irClient = irSession.getModule("ирКлиент");
                 ComBridge.setProperty(irSession.root, "Visible", true);
-                ComBridge.invoke(irClient, "СравнитьТабличныеДокументыИмпортЛкс", pathMain.toString(), pathOther.toString(), pathAncestor.toString());
+                ComBridge.invoke(irClient, "СравнитьТабличныеДокументыИмпортЛкс", pathMain.toString(), pathOther.toString(), ancestor);
             } 
             catch (Exception e) 
             {
@@ -132,8 +133,8 @@ public class CompareConfigCompareInIRHandler extends AbstractHandler {
      */
     public static Path getPropertySideFile(IEditorPart editor, Object element, ComparisonSide side)
     {
-        IComparisonSession session = CompareConfigSelectionProvider.getSession(editor);
-        MatchedObjectsComparisonNode matchedNode = CompareConfigSelectionProvider.resolveMatchedNode(element);
+        IComparisonSession session = CompareConfigSelectionListener.getSession(editor);
+        MatchedObjectsComparisonNode matchedNode = CompareConfigSelectionListener.resolveMatchedNode(element);
         ExternalPropertyComparisonNode properyNode;
         try
         {
