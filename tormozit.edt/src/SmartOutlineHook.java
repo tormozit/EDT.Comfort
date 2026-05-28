@@ -177,6 +177,7 @@ public class SmartOutlineHook implements IStartup {
 
                 viewer.setComparator(new SmartOutlineComparator(smartFilter.getNamePremiumCache(), smartFilter.getParamPremiumCache(), baseLp));
                 viewer.refresh();
+                selectFirstVisibleItem(viewer.getControl());
             }
         });
 
@@ -202,6 +203,24 @@ public class SmartOutlineHook implements IStartup {
                 display.removeFilter(SWT.KeyDown, arrowFilter);
             }
         });
+    }
+    
+    private static void selectFirstVisibleItem(Control control) {
+        if (control == null || control.isDisposed()) return;
+
+        if (control instanceof Tree) {
+            Tree tree = (Tree) control;
+            if (tree.getItemCount() > 0) {
+                TreeItem first = tree.getItem(0);
+                tree.setSelection(first);
+                tree.showItem(first);
+                
+                Event selectionEvent = new Event();
+                selectionEvent.widget = tree;
+                selectionEvent.item = first;
+                tree.notifyListeners(SWT.Selection, selectionEvent);
+            }
+        }
     }
     
     private static void navigateTree(Tree tree, int keyCode) {

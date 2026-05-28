@@ -102,11 +102,8 @@ public class GetRef extends AbstractHandler
     public Object execute(ExecutionEvent event) throws ExecutionException
     {
         IWorkbenchPart part = HandlerUtil.getActivePart(event);
-        IWorkbenchPage page = part.getSite().getPage();
-        Shell           shell = HandlerUtil.getActiveShell(event);
-
-        String ref = resolveRef(part, page);
-
+        Shell shell = HandlerUtil.getActiveShell(event);
+        String ref = getRef(part);
         if (ref == null || ref.isBlank())
         {
             ToastNotification.show("Ссылка",
@@ -115,8 +112,6 @@ public class GetRef extends AbstractHandler
                 5000);
             return null;
         }
-
-        Global.log("GetRef: " + ref); //$NON-NLS-1$
         setClipboardText(ref, shell);
         ToastNotification.show("Скопирована ссылка", ref, 6000);
         return null;
@@ -126,8 +121,9 @@ public class GetRef extends AbstractHandler
     // Диспетчер источников
     // =========================================================================
 
-    private static String resolveRef(IWorkbenchPart part, IWorkbenchPage page)
+    public static String getRef(IWorkbenchPart part)
     {
+        IWorkbenchPage page = part.getSite().getPage();
         // 1. Дерево сравнения конфигураций
         if (part instanceof IEditorPart
                 && Global.COMPARE_EDITOR_ID.equals(part.getSite().getId()))

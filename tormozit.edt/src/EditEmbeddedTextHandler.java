@@ -1,4 +1,6 @@
 
+import java.io.File;
+
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.jface.text.BadLocationException;
@@ -107,8 +109,6 @@ public final class EditEmbeddedTextHandler
         if (irSession == null || irSession.executor == null)
         {
             // getSession() уже запустил подключение — сообщаем пользователю
-            ToastNotification.show("Вложенный текст",
-                "Ожидайте подключения к приложению ИР, затем повторите команду");
             return;
         }
 
@@ -121,7 +121,9 @@ public final class EditEmbeddedTextHandler
             {
                 ComBridge.setProperty(irSession.root, "Visible", true); //$NON-NLS-1$
                 Object irClient = irSession.getModule("ирКлиент"); //$NON-NLS-1$
-                ComBridge.invoke(irClient, "ОткрытьТекстЛкс", textToOpen); //$NON-NLS-1$
+                String ref = GetRef.getRef(editor);
+                ComBridge.invoke(irClient, "ОткрытьТекстЛкс", textToOpen, ref, null, false, ref); //$NON-NLS-1$
+                ToastNotification.show("Редактор ИР", "Измененный вложенный текст вернется в EDT, если не будет изменяться там во время редактирования в приложении ИР!");
             }
             catch (Exception e)
             {

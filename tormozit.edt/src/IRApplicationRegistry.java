@@ -1026,6 +1026,7 @@ public final class IRApplicationRegistry
         if (application==null)
             return null;            
         getInstance().connectInfobaseApplication(application);
+        ToastNotification.show(toastTitle(), "Ожидайте подключения приложения ИР, затем повторите команду");
         return null;
     }
     
