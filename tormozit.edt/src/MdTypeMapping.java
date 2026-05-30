@@ -4,81 +4,37 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * TODO Нужно максимально опереться на нтатный преобразователь EDT com._1c.g5.v8.dt.md.naming.MdSymbolicLinkLocalizer.localizeSymbolicLink(String symbolicLink, EObject contextObject, EStructuralFeature feature, Locale locale)
- *
- * <h3>Три формы одного типа</h3>
- * <pre>
- *   RU  (ед.ч. рус.)  — «Справочник»
- *   EN1 (ед.ч. англ.) — «Catalog»
- *   EN+ (мн.ч. англ.) — «Catalogs»  (имя папки в EDT-проекте; null для вложенных типов)
- * </pre>
- *
- * <h3>Поддерживаемые преобразования одного имени типа</h3>
- * <pre>
- *   ruToEnSing("Справочник")          = "Catalog"
- *   enSingToRu("Catalog")             = "Справочник"
- *   ruToFolder("Справочник")          = "Catalogs"
- *   enSingToFolder("Catalog")         = "Catalogs"
- *   folderToRu("Catalogs")            = "Справочник"
- *   folderToEnSing("Catalogs")        = "Catalog"
- * </pre>
- *
- * <h3>Нормализация в любую форму из любой</h3>
- * <pre>
- *   anyToRu("Catalog")      = anyToRu("Catalogs")      = "Справочник"
- *   anyToEnSing("Catalogs") = anyToEnSing("Справочник") = "Catalog"
- *   anyToFolder("Справочник") = anyToFolder("Catalog")  = "Catalogs"
- * </pre>
- *
- * <h3>Операции с полным именем объекта («Тип.Имя» или «Папка/Имя»)</h3>
- * <pre>
- *   toRuFullName("Catalog.Валюты")        = "Справочник.Валюты"
- *   toEnSingFullName("Справочник.Валюты") = "Catalog.Валюты"
- *   toFolderPath("Справочник.Валюты")     = "Catalogs/Валюты"
- *   toFolderPath("Catalog.Валюты")        = "Catalogs/Валюты"
- *   pathToRuFullName("Catalogs/Валюты")   = "Справочник.Валюты"
- *   pathToEnSingFullName("Catalogs/Валюты") = "Catalog.Валюты"
- * </pre>
- *
- * <h3>BM URI → полное русское имя (используется в GetRef)</h3>
- * <pre>
- *   bmFqnToRuFullName("Catalog.Валюты")                         = "Справочник.Валюты"
- *   bmFqnToRuFullName("Catalog.Валюты.Template.Классификатор")  = "Справочник.Валюты.Макет.Классификатор"
- * </pre>
+ * Единственный источник правды для маппинга имён типов метаданных 1С
+ * во всех формах написания.
  */
 public final class MdTypeMapping
 {
     private MdTypeMapping() {}
 
     // =========================================================================
-    // Шесть производных маппингов — заполняются через add() / addAlias()
+    // Шесть производных маппингов  RU / EN ед.ч. / EN мн.ч. (папка EDT)
     // =========================================================================
 
-    /** RU ед.ч. → EN ед.ч.  «Справочник» → «Catalog» */
     static final Map<String, String> RU_TO_EN_SING        = new LinkedHashMap<>();
-
-    /** EN ед.ч. → RU ед.ч.  «Catalog» → «Справочник» */
     static final Map<String, String> EN_SING_TO_RU        = new LinkedHashMap<>();
-
-    /** RU ед.ч. → EN мн.ч./папка  «Справочник» → «Catalogs»  (замена TYPE_TO_FOLDER) */
     static final Map<String, String> RU_TO_FOLDER         = new LinkedHashMap<>();
-
-    /** EN ед.ч. → EN мн.ч./папка  «Catalog» → «Catalogs» */
     static final Map<String, String> EN_SING_TO_FOLDER    = new LinkedHashMap<>();
-
-    /** EN мн.ч./папка → RU ед.ч.  «Catalogs» → «Справочник» */
     static final Map<String, String> FOLDER_TO_RU         = new LinkedHashMap<>();
-
-    /** EN мн.ч./папка → EN ед.ч.  «Catalogs» → «Catalog» */
     static final Map<String, String> FOLDER_TO_EN_SING    = new LinkedHashMap<>();
 
+    /**
+     * RU ед.ч. → RU мн.ч.  «Справочник» → «Справочники».
+     * Используется в {@link #ruToRuPlural} для построения имён менеджеров
+     * (например {@code ПрямоеИмяМодуляИзПолного} в ИР).
+     */
+    private static final Map<String, String> RU_TO_RU_PLURAL = new LinkedHashMap<>();
+
     // =========================================================================
-    // Единая таблица: (RU ед.ч., EN ед.ч., EN мн.ч./папка или null)
+    // Единая таблица: (RU ед.ч., EN ед.ч., EN мн.ч./папка)
     // =========================================================================
 
     static
     {
-        // ── Объекты верхнего уровня с папкой в EDT ───────────────────────────
         add("Справочник",                   "Catalog",                      "Catalogs");
         add("Документ",                     "Document",                     "Documents");
         add("Перечисление",                 "Enum",                         "Enums");
@@ -123,11 +79,9 @@ public final class MdTypeMapping
         add("СтильОформления",              "StyleItem",                    "StyleItems");
         add("Интерфейс",                    "Interface",                    "Interfaces");
 
-        // ── Псевдонимы ───────────────────────────────────────────────────────
         addAlias("ОбщийМодульПовторногоИспользования", "ОбщийМодуль");
 
-        // ── Вложенные типы без самостоятельной папки в EDT ───────────────────
-        // Модули конфигурации/приложения
+        // ── Вложенные типы без папки ─────────────────────────────────────────
         add("Конфигурация",                     "Configuration",                null);
         add("МодульУправляемогоПриложения",     "ManagedApplicationModule",     null);
         add("МодульОбычногоПриложения",         "OrdinaryApplicationModule",    null);
@@ -142,243 +96,151 @@ public final class MdTypeMapping
         add("Форма",                            "Form",                         null);
         add("Команда",                          "Command",                      null);
 
-        // ── Под-объекты объектов метаданных (используются в BM FQN) ─────────
-        // Эти типы встречаются как сегменты BM URI вида
-        // "Catalog.Валюты.Template.Классификатор" и нужны для GetRef.eObjectToFullName.
-        add("Форма",               "Form",           "Forms");
-        add("Команда",             "Command",        "Commands");
-        add("Макет",               "Template",       "Templates");
+        // ── Под-объекты (BM FQN) ─────────────────────────────────────────────
+        add("Макет",               "Template",        null);
         add("ТабличнаяЧасть",      "TabularSection",  null);
         add("Реквизит",            "Attribute",       null);
         add("Измерение",           "Dimension",       null);
         add("Ресурс",              "Resource",        null);
         add("Перерасчет",          "Recalculation",   null);
         add("ПризнакУчета",        "AccountingFlag",  null);
+
+        // ── RU ед.ч. → RU мн.ч. для менеджеров ─────────────────────────────
+        // Используется в ПрямоеИмяМодуляИзПолного: МодульМенеджера → «Справочники.Валюты»
+        RU_TO_RU_PLURAL.put("Справочник",             "Справочники");
+        RU_TO_RU_PLURAL.put("Документ",               "Документы");
+        RU_TO_RU_PLURAL.put("Перечисление",           "Перечисления");
+        RU_TO_RU_PLURAL.put("ПланОбмена",             "ПланыОбмена");
+        RU_TO_RU_PLURAL.put("ПланВидовХарактеристик", "ПланыВидовХарактеристик");
+        RU_TO_RU_PLURAL.put("ПланСчетов",             "ПланыСчетов");
+        RU_TO_RU_PLURAL.put("ПланВидовРасчета",       "ПланыВидовРасчета");
+        RU_TO_RU_PLURAL.put("РегистрСведений",        "РегистрыСведений");
+        RU_TO_RU_PLURAL.put("РегистрНакопления",      "РегистрыНакопления");
+        RU_TO_RU_PLURAL.put("РегистрБухгалтерии",     "РегистрыБухгалтерии");
+        RU_TO_RU_PLURAL.put("РегистрРасчета",         "РегистрыРасчета");
+        RU_TO_RU_PLURAL.put("БизнесПроцесс",          "БизнесПроцессы");
+        RU_TO_RU_PLURAL.put("Задача",                 "Задачи");
+        RU_TO_RU_PLURAL.put("Обработка",              "Обработки");
+        RU_TO_RU_PLURAL.put("Отчет",                  "Отчеты");
     }
 
     // =========================================================================
     // Методы поиска по одному имени типа
     // =========================================================================
 
-    /** «Справочник» → «Catalog»; {@code null} если тип не известен. */
     public static String ruToEnSing(String ru)             { return RU_TO_EN_SING.get(ru); }
-
-    /** «Catalog» → «Справочник»; {@code null} если тип не известен. */
     public static String enSingToRu(String enSing)         { return EN_SING_TO_RU.get(enSing); }
-
-    /** «Справочник» → «Catalogs»; {@code null} для вложенных типов (модули, формы). */
     public static String ruToFolder(String ru)             { return RU_TO_FOLDER.get(ru); }
-
-    /** «Catalog» → «Catalogs»; {@code null} для вложенных типов. */
     public static String enSingToFolder(String enSing)     { return EN_SING_TO_FOLDER.get(enSing); }
-
-    /** «Catalogs» → «Справочник»; {@code null} если папка не известна. */
     public static String folderToRu(String folder)         { return FOLDER_TO_RU.get(folder); }
-
-    /** «Catalogs» → «Catalog»; {@code null} если папка не известна. */
     public static String folderToEnSing(String folder)     { return FOLDER_TO_EN_SING.get(folder); }
 
+    /**
+     * «Справочник» → «Справочники».
+     * Используется при формировании «прямого имени» менеджера объекта
+     * (аналог {@code ирОбщий.ИмяТипаМДМножественноеИзЕдинЛкс} в ИР).
+     *
+     * @return RU мн.ч., или {@code null} если тип не известен
+     */
+    public static String ruToRuPlural(String ruSingular)   
+    { 
+        return RU_TO_RU_PLURAL.get(ruSingular); 
+    }
+
     // =========================================================================
-    // Нормализация из любой формы в нужную
+    // Нормализация из любой формы
     // =========================================================================
 
-    /**
-     * Принимает тип в любой форме (RU / EN ед.ч. / EN мн.ч.) и возвращает RU ед.ч.
-     * Возвращает {@code null} если тип не распознан.
-     */
     public static String anyToRu(String type)
     {
         if (type == null) return null;
-        if (RU_TO_EN_SING.containsKey(type)) return type;          // уже RU
-        String r = EN_SING_TO_RU.get(type);  if (r != null) return r; // EN ед.ч.
-        return FOLDER_TO_RU.get(type);                             // EN мн.ч.
+        if (RU_TO_EN_SING.containsKey(type)) return type;
+        String r = EN_SING_TO_RU.get(type); if (r != null) return r;
+        return FOLDER_TO_RU.get(type);
     }
 
-    /**
-     * Принимает тип в любой форме и возвращает EN ед.ч.
-     * Возвращает {@code null} если тип не распознан.
-     */
     public static String anyToEnSing(String type)
     {
         if (type == null) return null;
-        if (EN_SING_TO_RU.containsKey(type)) return type;          // уже EN ед.ч.
-        String e = RU_TO_EN_SING.get(type);  if (e != null) return e; // RU
-        return FOLDER_TO_EN_SING.get(type);                        // EN мн.ч.
+        if (EN_SING_TO_RU.containsKey(type)) return type;
+        String e = RU_TO_EN_SING.get(type); if (e != null) return e;
+        return FOLDER_TO_EN_SING.get(type);
     }
 
-    /**
-     * Принимает тип в любой форме и возвращает EN мн.ч. (папку EDT).
-     * Возвращает {@code null} если тип не распознан или не имеет самостоятельной папки.
-     */
     public static String anyToFolder(String type)
     {
         if (type == null) return null;
-        if (FOLDER_TO_RU.containsKey(type)) return type;           // уже папка
-        String f = RU_TO_FOLDER.get(type);   if (f != null) return f; // RU
-        return EN_SING_TO_FOLDER.get(type);                        // EN ед.ч.
+        if (FOLDER_TO_RU.containsKey(type)) return type;
+        String f = RU_TO_FOLDER.get(type); if (f != null) return f;
+        return EN_SING_TO_FOLDER.get(type);
     }
 
     // =========================================================================
-    // Операции с полным именем объекта  («Тип.Имя»  или «Папка/Имя»)
+    // Операции с полным именем («Тип.Имя» или «Папка/Имя»)
     // =========================================================================
 
-    /**
-     * Нормализует тип к RU ед.ч. в полном имени вида «Тип.Объект».
-     *
-     * <pre>
-     *   "Catalog.Валюты"    → "Справочник.Валюты"
-     *   "Catalogs/Валюты"   → "Справочник.Валюты"
-     *   "Справочник.Валюты" → "Справочник.Валюты"  (без изменений)
-     * </pre>
-     *
-     * @return нормализованное имя через «.», {@code null} если тип не распознан
-     */
     public static String toRuFullName(String fullName)
     {
-        Parsed p = parse(fullName);
-        if (p == null) return null;
-        String ru = anyToRu(p.type);
-        return ru == null ? null : ru + "." + p.name; //$NON-NLS-1$
+        Parsed p = parse(fullName); if (p == null) return null;
+        String ru = anyToRu(p.type); return ru == null ? null : ru + "." + p.name;
     }
 
-    /**
-     * Нормализует тип к EN ед.ч. в полном имени вида «Тип.Объект».
-     *
-     * <pre>
-     *   "Справочник.Валюты" → "Catalog.Валюты"
-     *   "Catalogs/Валюты"   → "Catalog.Валюты"
-     *   "Catalog.Валюты"    → "Catalog.Валюты"      (без изменений)
-     * </pre>
-     *
-     * @return нормализованное имя через «.», {@code null} если тип не распознан
-     */
     public static String toEnSingFullName(String fullName)
     {
-        Parsed p = parse(fullName);
-        if (p == null) return null;
-        String en = anyToEnSing(p.type);
-        return en == null ? null : en + "." + p.name; //$NON-NLS-1$
+        Parsed p = parse(fullName); if (p == null) return null;
+        String en = anyToEnSing(p.type); return en == null ? null : en + "." + p.name;
     }
 
-    /**
-     * Преобразует полное имя объекта в путь к папке EDT (через {@code '/'}).
-     *
-     * <pre>
-     *   "Справочник.Валюты" → "Catalogs/Валюты"
-     *   "Catalog.Валюты"    → "Catalogs/Валюты"
-     *   "Catalogs/Валюты"   → "Catalogs/Валюты"     (уже готово)
-     * </pre>
-     *
-     * @return строка вида «Folder/ObjectName», {@code null} если тип без папки
-     */
-    public static String toFolderPath(String fullName)
+    public static String toFolderPath(String fullName)        { return toFolderPath(fullName, '/'); }
+    public static String toFolderPath(String fullName, char sep)
     {
-        return toFolderPath(fullName, '/');
+        Parsed p = parse(fullName); if (p == null) return null;
+        String f = anyToFolder(p.type); return f == null ? null : f + sep + p.name;
     }
 
-    /**
-     * То же что {@link #toFolderPath(String)}, но с явным разделителем.
-     *
-     * @param separator {@code '/'} или {@code '\\'}
-     */
-    public static String toFolderPath(String fullName, char separator)
-    {
-        Parsed p = parse(fullName);
-        if (p == null) return null;
-        String folder = anyToFolder(p.type);
-        return folder == null ? null : folder + separator + p.name;
-    }
-
-    /**
-     * Конвертирует путь вида «Папка/Объект» в полное имя с RU типом.
-     *
-     * <pre>
-     *   "Catalogs/Валюты"   → "Справочник.Валюты"
-     *   "Catalogs\Валюты"   → "Справочник.Валюты"
-     * </pre>
-     */
     public static String pathToRuFullName(String path)
     {
-        Parsed p = parse(path);
-        if (p == null) return null;
-        String ru = anyToRu(p.type);
-        return ru == null ? null : ru + "." + p.name; //$NON-NLS-1$
+        Parsed p = parse(path); if (p == null) return null;
+        String ru = anyToRu(p.type); return ru == null ? null : ru + "." + p.name;
     }
 
-    /**
-     * Конвертирует путь вида «Папка/Объект» в полное имя с EN ед.ч. типом.
-     *
-     * <pre>
-     *   "Catalogs/Валюты"   → "Catalog.Валюты"
-     * </pre>
-     */
     public static String pathToEnSingFullName(String path)
     {
-        Parsed p = parse(path);
-        if (p == null) return null;
-        String en = anyToEnSing(p.type);
-        return en == null ? null : en + "." + p.name; //$NON-NLS-1$
+        Parsed p = parse(path); if (p == null) return null;
+        String en = anyToEnSing(p.type); return en == null ? null : en + "." + p.name;
     }
 
     // =========================================================================
-    // BM URI FQN → полное русское имя (для GetRef.eObjectToFullName)
+    // BM URI FQN → полное русское имя
     // =========================================================================
 
     /**
-     * Конвертирует FQN из BM URI (или от {@code IQualifiedNameProvider}) в полное русское имя.
-     *
-     * <p>BM URI в EDT имеет вид {@code bm://Конфигурация/Catalog.Валюты}, где часть пути
-     * ({@code uri.path().substring(1)}) — это FQN объекта в EN-форме.
-     * Аналогично {@code IQualifiedNameProvider} возвращает FQN вида
-     * {@code "Catalog.Валюты.Template.Классификатор"}.
-     *
-     * <p>Алгоритм: разбивает FQN по «.», каждую пару сегментов (ТипEN, Имя) конвертирует
-     * через {@link #anyToRu(String)}.
-     *
+     * Конвертирует FQN из BM URI в полное русское имя.
      * <pre>
-     *   "Catalog.Валюты"                         → "Справочник.Валюты"
-     *   "Catalog.Валюты.Template.Классификатор"  → "Справочник.Валюты.Макет.Классификатор"
-     *   "CommonModule.МойМодуль"                 → "ОбщийМодуль.МойМодуль"
+     *   "Catalog.Валюты"                        → "Справочник.Валюты"
+     *   "Catalog.Валюты.Template.Классификатор" → "Справочник.Валюты.Макет.Классификатор"
      * </pre>
-     *
-     * @param fqn FQN в EN-форме; может быть {@code null}
-     * @return полное русское имя, или {@code null} если первый тип не распознан
      */
     public static String bmFqnToRuFullName(String fqn)
     {
         if (fqn == null || fqn.isBlank()) return null;
-
-        String[] parts = fqn.split("\\.", -1); //$NON-NLS-1$
+        String[] parts = fqn.split("\\.", -1);
         if (parts.length < 2) return null;
-
-        // Первая пара: тип и имя объекта верхнего уровня
         String typeRu = anyToRu(parts[0]);
         if (typeRu == null) return null;
-
         StringBuilder sb = new StringBuilder(typeRu).append('.').append(parts[1]);
-
-        // Дополнительные пары: тип и имя под-объекта (макет, форма, команда …)
         for (int i = 2; i + 1 < parts.length; i += 2)
         {
             String subTypeRu = anyToRu(parts[i]);
-            if (subTypeRu != null)
-                sb.append('.').append(subTypeRu).append('.').append(parts[i + 1]);
+            if (subTypeRu != null) sb.append('.').append(subTypeRu).append('.').append(parts[i + 1]);
         }
-
         return sb.toString();
     }
 
     // =========================================================================
-    // Совместимость: замена TYPE_TO_FOLDER в GoToDefinition
+    // Совместимость
     // =========================================================================
 
-    /**
-     * Возвращает неизменяемое представление карты «RU ед.ч. → папка EDT».
-     * Используется в GoToDefinition для инициализации TYPE_TO_FOLDER:
-     * <pre>
-     *   static final Map&lt;String, String&gt; TYPE_TO_FOLDER = MdTypeMapping.getRuToFolderMap();
-     * </pre>
-     */
     public static Map<String, String> getRuToFolderMap()
     {
         return Collections.unmodifiableMap(RU_TO_FOLDER);
@@ -388,13 +250,6 @@ public final class MdTypeMapping
     // Регистрация
     // =========================================================================
 
-    /**
-     * Регистрирует запись типа метаданных во все шесть маппингов.
-     *
-     * @param ru     русское ед.ч.: «Справочник»
-     * @param enSing английское ед.ч.: «Catalog»
-     * @param enPlur папка EDT (мн.ч.): «Catalogs»; {@code null} для вложенных типов
-     */
     private static void add(String ru, String enSing, String enPlur)
     {
         RU_TO_EN_SING.put(ru, enSing);
@@ -408,11 +263,6 @@ public final class MdTypeMapping
         }
     }
 
-    /**
-     * Регистрирует альтернативное RU-имя для уже существующего типа.
-     * Псевдоним участвует в RU → EN1 и RU → папка, но не перезаписывает
-     * обратные маппинги (EN → RU, папка → RU).
-     */
     private static void addAlias(String ruAlias, String ruCanonical)
     {
         String enSing = RU_TO_EN_SING.get(ruCanonical);
@@ -422,33 +272,27 @@ public final class MdTypeMapping
     }
 
     // =========================================================================
-    // Вспомогательный разбор строки «Тип.Имя» или «Папка/Имя»
+    // Разбор строки «Тип.Имя» или «Папка/Имя»
     // =========================================================================
 
-    private static final class Parsed
-    {
-        final String type;
-        final String name;
-        Parsed(String type, String name) { this.type = type; this.name = name; }
-    }
+    private static final class Parsed { final String type, name; Parsed(String t, String n) { type=t; name=n; } }
 
     private static Parsed parse(String s)
     {
         if (s == null || s.isBlank()) return null;
-        int best = Integer.MAX_VALUE;
         for (int i = 0; i < s.length(); i++)
         {
             char c = s.charAt(i);
-            if (c == '.' || c == '/' || c == '\\') { best = i; break; }
+            if (c == '.' || c == '/' || c == '\\')
+            {
+                String type = s.substring(0, i), name = s.substring(i + 1);
+                return (type.isBlank() || name.isBlank()) ? null : new Parsed(type, name);
+            }
         }
-        if (best == Integer.MAX_VALUE) return null;
-        String type = s.substring(0, best);
-        String name = s.substring(best + 1);
-        if (type.isBlank() || name.isBlank()) return null;
-        return new Parsed(type, name);
+        return null;
     }
     public static String ruToEnSingRequired(String ru)
     {
         return RU_TO_EN_SING.get(ru);
-    }
+    } 
 }

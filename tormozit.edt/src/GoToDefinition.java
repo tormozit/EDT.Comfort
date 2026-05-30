@@ -64,18 +64,6 @@ public class GoToDefinition extends AbstractHandler
     /** RU ед.ч. → папка EDT. */
     static final Map<String, String> TYPE_TO_FOLDER = MdTypeMapping.getRuToFolderMap();
 
-    /** Суффикс модуля в ссылке → BSL-файл в EDT. */
-    static final Map<String, String> MODULE_SUFFIX_TO_BSL = new LinkedHashMap<>();
-    static
-    {
-        MODULE_SUFFIX_TO_BSL.put("МодульОбъекта",               "ObjectModule.bsl");
-        MODULE_SUFFIX_TO_BSL.put("МодульМенеджера",             "ManagerModule.bsl");
-        MODULE_SUFFIX_TO_BSL.put("МодульНабораЗаписей",         "RecordSetModule.bsl");
-        MODULE_SUFFIX_TO_BSL.put("МодульКоманды",               "CommandModule.bsl");
-        MODULE_SUFFIX_TO_BSL.put("Модуль",                      "Module.bsl");
-        MODULE_SUFFIX_TO_BSL.put("Форма",                       "Module.bsl");
-    }
-
     /** Тип+суффикс данных → базовый тип МД. «СправочникСсылка» → «Справочник». */
     static final Map<String, String> TYPE_SUFFIX_MAP = new LinkedHashMap<>();
     static
@@ -220,9 +208,11 @@ public class GoToDefinition extends AbstractHandler
 
     public static boolean jump(String raw, Shell shell, IWorkbenchPage page)
     {
-        if (raw == null) return false;
+        if (raw == null) 
+            return false;
         String ref = raw.strip();
-        if (ref.isEmpty()) return false;
+        if (ref.isEmpty()) 
+            return false;
 
         if (ref.startsWith("http://") || ref.startsWith("https://")) //$NON-NLS-1$ //$NON-NLS-2$
         { openUrl(ref); 
@@ -246,13 +236,15 @@ public class GoToDefinition extends AbstractHandler
             List<String> names = extractMdNamesFromTypeDescription(ref);
             if (!names.isEmpty())
             {
-                if (names.size() == 1) return openByFullName(names.get(0), shell, page);
+                if (names.size() == 1) 
+                    return openByFullName(names.get(0), shell, page);
                 return pickAndOpen(names, shell, page);
             }
         }
 
         String stripped = stripTypeSuffix(ref);
-        if (stripped != null) return openByFullName(stripped, shell, page);
+        if (stripped != null) 
+            return openByFullName(stripped, shell, page);
 
         return openByFullName(ref, shell, page);
     }
@@ -264,7 +256,8 @@ public class GoToDefinition extends AbstractHandler
     private static boolean handleModuleLineRefs(String text, Shell shell, IWorkbenchPage page)
     {
         List<ModuleLineRef> refs = parseAllModuleLineRefs(text);
-        if (refs.isEmpty()) return false;
+        if (refs.isEmpty()) 
+            return false;
 
         ModuleLineRef chosen;
         if (refs.size() == 1)
@@ -279,7 +272,8 @@ public class GoToDefinition extends AbstractHandler
                 "Найдено несколько ссылок. Выберите строку для перехода:", //$NON-NLS-1$
                 MessageDialog.QUESTION, labels, 0);
             int idx = dlg.open();
-            if (idx < 0 || idx >= refs.size()) return false;
+            if (idx < 0 || idx >= refs.size())
+                return false;
             chosen = refs.get(idx);
         }
         return openModuleLineRef(chosen, page, shell);
@@ -339,7 +333,8 @@ public class GoToDefinition extends AbstractHandler
      */
     private static boolean openModuleRefViaUri(ModuleLineRef r, IWorkbenchPage page)
     {
-        if (r.modulePath == null) return false;
+        if (r.modulePath == null) 
+            return false;
 
         // 1. Путь к BSL-файлу (src/<Folder>/<Object>/ObjectModule.bsl и т.п.)
         String bslPath = moduleToBslPath(r.modulePath, r.extension);
@@ -408,7 +403,8 @@ public class GoToDefinition extends AbstractHandler
         if (r.method != null && !r.method.isEmpty())
         {
             int methodLine0 = findMethodLine(document, r.method);
-            if (methodLine0 >= 0) return methodLine0 + r.offset;
+            if (methodLine0 >= 0) 
+                return methodLine0 + r.offset;
         }
         return Math.max(0, r.line - 1);
     }
@@ -433,7 +429,8 @@ public class GoToDefinition extends AbstractHandler
         {
             int eol = text.indexOf('\n', pos);
             if (eol < 0) eol = text.length();
-            if (p.matcher(text.substring(pos, eol)).find()) return line;
+            if (p.matcher(text.substring(pos, eol)).find()) 
+                return line;
             pos = eol + 1;
             line++;
         }
@@ -464,7 +461,8 @@ public class GoToDefinition extends AbstractHandler
     private static boolean openXdtoRef(String ref, Shell shell, IWorkbenchPage page)
     {
         String[] parts = ref.split("\\.", 3); //$NON-NLS-1$
-        if (parts.length < 2) return false;
+        if (parts.length < 2) 
+            return false;
         return openMdObjectByFullName("ПакетXDTO." + parts[1], shell, page); //$NON-NLS-1$
     }
 
@@ -474,7 +472,8 @@ public class GoToDefinition extends AbstractHandler
 
     public static boolean openByFullName(String fullName, Shell shell, IWorkbenchPage page)
     {
-        if (fullName == null || fullName.isBlank()) return false;
+        if (fullName == null || fullName.isBlank()) 
+            return false;
         fullName = fullName.strip();
 
         String extension = null;
@@ -484,21 +483,12 @@ public class GoToDefinition extends AbstractHandler
             extension = fullName.substring(0, spaceIdx);
             fullName  = fullName.substring(spaceIdx + 1);
         }
-
         if (isModuleSuffixPath(fullName))
         {
             String bslPath = moduleToBslPath(fullName, extension);
-            if (bslPath != null) return openBslFileAt(bslPath, 0, page, shell);
+            if (bslPath != null)
+                return openBslFileAt(bslPath, 0, page, shell);
         }
-
-        int formPos = indexOfFormPart(fullName);
-        if (formPos >= 0)
-        {
-            String formBsl = formNameToBslPath(fullName, formPos, extension);
-            if (formBsl != null && openBslFileAt(formBsl, 0, page, shell)) return true;
-            return openMdObjectByFullName(fullName.substring(0, formPos), shell, page);
-        }
-
         return openMdObjectByFullName(fullName, shell, page);
     }
 
@@ -545,7 +535,8 @@ public class GoToDefinition extends AbstractHandler
             return true;
         }
         Global.log("GoToDefinition: EObject не получен, открываем .mdo напрямую"); //$NON-NLS-1$
-        try { return IDE.openEditor(page, mdoFile, true) != null; }
+        try { 
+            return IDE.openEditor(page, mdoFile, true) != null; }
         catch (PartInitException e)
         {
             Global.log("GoToDefinition: IDE.openEditor(.mdo): " + e); //$NON-NLS-1$
@@ -571,13 +562,22 @@ public class GoToDefinition extends AbstractHandler
     public static EObject resolveEObjectByQualifiedName(String fqn, IV8Project v8Project)
     {
         IBmModelManager modelManager =
-            (IBmModelManager) Global.getServiceByClass(IBmModelManager.class);
+            (IBmModelManager)Global.getServiceByClass(IBmModelManager.class);
         BmPlatform platform = modelManager.getBmPlatform();
         IBmPlatformTransaction transaction = platform.beginReadOnlyTransaction(true);
         IBmNamespace ns = modelManager.getBmNamespace(v8Project.getProject());
-        try { return (EObject) transaction.getTopObjectByFqn(ns, fqn); }
-        catch (Exception e) { return null; }
-        finally { transaction.commit(); }
+        try
+        {
+            return (EObject)transaction.getTopObjectByFqn(ns, fqn);
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+        finally
+        {
+            transaction.commit();
+        }
     }
 
     // =======================================================================
@@ -587,7 +587,11 @@ public class GoToDefinition extends AbstractHandler
     private static boolean openBslFileAt(String bslPath, int line, IWorkbenchPage page, Shell shell)
     {
         IFile file = findFileInWorkspace(bslPath, page);
-        if (file == null) { Global.log("GoToDefinition: BSL не найден: " + bslPath); return false; } //$NON-NLS-1$
+        if (file == null)
+        {
+            Global.log("GoToDefinition: BSL не найден: " + bslPath);
+            return false;
+        } //$NON-NLS-1$
         return openFileAtLine(file, line, page, shell);
     }
 
@@ -596,16 +600,23 @@ public class GoToDefinition extends AbstractHandler
         try
         {
             IEditorPart editor = IDE.openEditor(page, file, true);
-            if (editor == null) return false;
-            if (line > 0) revealLine(editor, line);
+            if (editor == null)
+                return false;
+            if (line > 0)
+                revealLine(editor, line);
             return true;
         }
-        catch (PartInitException e) { Global.log("GoToDefinition: openFileAtLine: " + e); return false; } //$NON-NLS-1$
+        catch (PartInitException e)
+        {
+            Global.log("GoToDefinition: openFileAtLine: " + e);
+            return false;
+        } //$NON-NLS-1$
     }
 
     private static void revealLine(IEditorPart editor, int lineNumber)
     {
-        if (lineNumber <= 0 || !(editor instanceof ITextEditor)) return;
+        if (lineNumber <= 0 || !(editor instanceof ITextEditor)) 
+            return;
         ITextEditor te  = (ITextEditor) editor;
         IDocument   doc = te.getDocumentProvider().getDocument(te.getEditorInput());
         if (doc == null) return;
@@ -662,7 +673,7 @@ public class GoToDefinition extends AbstractHandler
         if (p.length < 3)
             return null;
 
-        String rootFolder = MdTypeMapping.ruToFolder(p[0]);
+        String rootFolder = MdTypeMapping.anyToFolder(p[0]);
         if (rootFolder == null)
             return null;
 
@@ -685,7 +696,7 @@ public class GoToDefinition extends AbstractHandler
         // контейнеры: Команда и Форма
         for (int i = 2; i < last - 1; i += 2)
         {
-            String folder = MdTypeMapping.ruToFolder(p[i]);
+            String folder = MdTypeMapping.anyToFolder(p[i]);
             if (folder == null)
                 return null;
 
@@ -710,32 +721,13 @@ public class GoToDefinition extends AbstractHandler
     private static String mdNameToMdoPath(String fullName)
     {
         String[] parts = fullName.split("\\.", 3); //$NON-NLS-1$
-        if (parts.length < 2) return null;
+        if (parts.length < 2) 
+            return null;
         String folder = MdTypeMapping.anyToFolder(parts[0]);
-        if (folder == null) return null;
+        if (folder == null) 
+            return null;
         String objectName = parts[1];
         return "src/" + folder + "/" + objectName + "/" + objectName + ".mdo"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-    }
-
-    private static String formNameToBslPath(String fullName, int formIdx, String extension)
-    {
-        String[] parts = fullName.split("\\."); //$NON-NLS-1$
-        for (int i = 0; i < parts.length - 1; i++)
-        {
-            if ("Форма".equals(parts[i]) || "Forms".equals(parts[i])) //$NON-NLS-1$ //$NON-NLS-2$
-            {
-                if (i >= 1 && i + 1 < parts.length)
-                {
-                    String folder = MdTypeMapping.anyToFolder(parts[0]);
-                    if (folder == null) return null;
-                    String prefix = extension != null
-                        ? "src/ext/" + extension + "/" + folder //$NON-NLS-1$ //$NON-NLS-2$
-                        : "src/" + folder; //$NON-NLS-1$
-                    return prefix + "/" + parts[1] + "/Forms/" + parts[i + 1] + "/Module.bsl"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                }
-            }
-        }
-        return null;
     }
 
     // =======================================================================
@@ -745,7 +737,8 @@ public class GoToDefinition extends AbstractHandler
     private static String stripTypeSuffix(String ref)
     {
         int dot = ref.indexOf('.');
-        if (dot < 0) return null;
+        if (dot < 0) 
+            return null;
         String base = TYPE_SUFFIX_MAP.get(ref.substring(0, dot));
         return base != null ? base + ref.substring(dot) : null;
     }
@@ -756,10 +749,13 @@ public class GoToDefinition extends AbstractHandler
         for (String part : TYPE_DESCRIPTION_SPLITTER.split(types))
         {
             String t = part.strip();
-            if (t.isEmpty()) continue;
+            if (t.isEmpty()) 
+                continue;
             String stripped = stripTypeSuffix(t);
-            if (stripped != null)     result.add(stripped);
-            else if (t.contains(".")) result.add(t); //$NON-NLS-1$
+            if (stripped != null)    
+                result.add(stripped);
+            else if (t.contains(".")) 
+                result.add(t); //$NON-NLS-1$
         }
         return result;
     }
@@ -771,7 +767,8 @@ public class GoToDefinition extends AbstractHandler
             "Найдено несколько объектов. Выберите для перехода:", //$NON-NLS-1$
             MessageDialog.QUESTION, names.toArray(new String[0]), 0);
         int idx = dlg.open();
-        if (idx < 0 || idx >= names.size()) return false;
+        if (idx < 0 || idx >= names.size()) 
+            return false;
         return openByFullName(names.get(idx), shell, page);
     }
 
@@ -786,7 +783,8 @@ public class GoToDefinition extends AbstractHandler
         for (String marker : new String[]{ ".Форма.", ".Forms.", ".ЭлементыФормы.", ".Элементы." }) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         {
             int idx = fullName.indexOf(marker);
-            if (idx >= 0) return idx;
+            if (idx >= 0) 
+                return idx;
         }
         return -1;
     }
@@ -802,13 +800,16 @@ public class GoToDefinition extends AbstractHandler
         while (m.find())
         {
             ModuleLineRef r = new ModuleLineRef();
-            r.extension  = m.group(1);
+            r.extension = m.group(1);
             r.modulePath = m.group(2);
-            r.line       = parseInt(m.group(3));
-            r.method     = m.group(4);
-            r.offset     = parseInt(m.group(5));
+            r.line = parseInt(m.group(3));
+            r.method = m.group(4);
+            r.offset = parseInt(m.group(5));
             if (r.modulePath.contains("/") || r.modulePath.contains("\\")) //$NON-NLS-1$ //$NON-NLS-2$
-            { r.file = r.modulePath; r.modulePath = null; }
+            {
+                r.file = r.modulePath;
+                r.modulePath = null;
+            }
             result.add(r);
         }
         return result;
@@ -819,16 +820,18 @@ public class GoToDefinition extends AbstractHandler
         String extension;
         String modulePath;
         String file;
-        int    line;
+        int line;
         String method;
-        int    offset;
+        int offset;
 
         String displayLabel()
         {
             String base = modulePath != null ? modulePath : file;
             String s = (base != null ? base : "") + " (" + line + ")"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            if (method != null)    s += " : " + method;    //$NON-NLS-1$
-            if (extension != null) s += " [" + extension + "]"; //$NON-NLS-1$ //$NON-NLS-2$
+            if (method != null)
+                s += " : " + method; //$NON-NLS-1$
+            if (extension != null)
+                s += " [" + extension + "]"; //$NON-NLS-1$ //$NON-NLS-2$
             return s;
         }
     }
@@ -839,22 +842,41 @@ public class GoToDefinition extends AbstractHandler
 
     private static void openUrl(String url)
     {
-        try { org.eclipse.swt.program.Program.launch(url); }
-        catch (Exception e) { Global.log("GoToDefinition: openUrl: " + e); } //$NON-NLS-1$
+        try
+        {
+            org.eclipse.swt.program.Program.launch(url);
+        }
+        catch (Exception e)
+        {
+            Global.log("GoToDefinition: openUrl: " + e); //$NON-NLS-1$
+        }
     }
 
     private static String getClipboardText(Shell shell)
     {
         Clipboard cb = new Clipboard(shell.getDisplay());
-        try { return (String) cb.getContents(TextTransfer.getInstance()); }
-        finally { cb.dispose(); }
+        try
+        {
+            return (String)cb.getContents(TextTransfer.getInstance());
+        }
+        finally
+        {
+            cb.dispose();
+        }
     }
 
     private static int parseInt(String s)
     {
-        if (s == null) return 0;
-        try { return Integer.parseInt(s); }
-        catch (NumberFormatException e) { return 0; }
+        if (s == null)
+            return 0;
+        try
+        {
+            return Integer.parseInt(s);
+        }
+        catch (NumberFormatException e)
+        {
+            return 0;
+        }
     }
 
     private static String truncate(String s, int max)

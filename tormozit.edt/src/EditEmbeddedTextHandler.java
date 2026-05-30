@@ -49,13 +49,16 @@ public final class EditEmbeddedTextHandler
     public static boolean isApplicable(BslXtextEditor editor)
     {
         ISourceViewer viewer = editor.getInternalSourceViewer();
-        if (viewer == null) return false;
+        if (viewer == null) 
+            return false;
 
         IDocument doc = viewer.getDocument();
-        if (doc == null) return false;
+        if (doc == null) 
+            return false;
 
         Object sel = viewer.getSelectionProvider().getSelection();
-        if (!(sel instanceof ITextSelection)) return false;
+        if (!(sel instanceof ITextSelection))
+            return false;
 
         return extractStringLiteral(doc, ((ITextSelection) sel).getOffset()) != null;
     }
@@ -75,13 +78,16 @@ public final class EditEmbeddedTextHandler
     {
         // 1. Получаем viewer и документ
         ISourceViewer viewer = editor.getInternalSourceViewer();
-        if (viewer == null) return;
+        if (viewer == null) 
+            return;
 
         IDocument doc = viewer.getDocument();
-        if (doc == null) return;
+        if (doc == null) 
+            return;
 
         Object sel = viewer.getSelectionProvider().getSelection();
-        if (!(sel instanceof ITextSelection)) return;
+        if (!(sel instanceof ITextSelection)) 
+            return;
 
         int offset = ((ITextSelection) sel).getOffset();
 
@@ -128,8 +134,7 @@ public final class EditEmbeddedTextHandler
             catch (Exception e)
             {
                 Global.log("EditEmbeddedTextHandler: ошибка вызова ИР: " + e.getMessage()); //$NON-NLS-1$
-                ToastNotification.show("Вложенный текст",
-                    "Ошибка вызова ИР: " + e.getMessage(), 5_000);
+                ToastNotification.show("Вложенный текст", "Ошибка вызова ИР: " + e.getMessage(), 5_000);
             }
         });
     }
@@ -208,29 +213,21 @@ public final class EditEmbeddedTextHandler
 
             if (openQuoteIdx < 0)
                 return null; // курсор вне строки
-
-            // ── Шаг 3: собрать содержимое литерала ──────────────────────────
             String afterOpenQuote = openLineText.substring(openQuoteIdx + 1);
-
-            // Однострочный вариант: закрывающая " на той же строке
             int closeIdx = afterOpenQuote.indexOf('"');
             if (closeIdx >= 0)
                 return afterOpenQuote.substring(0, closeIdx);
 
             // Многострочный: собираем строки продолжения (начинаются с |)
             StringBuilder sb = new StringBuilder(afterOpenQuote);
-
             for (int ln = openingLineNum + 1; ln < doc.getNumberOfLines(); ln++)
             {
                 IRegion li       = doc.getLineInformation(ln);
                 String  lineText = doc.get(li.getOffset(), li.getLength());
                 String  trimmed  = lineText.stripLeading();
-
                 if (!trimmed.startsWith("|")) //$NON-NLS-1$
                     break; // не продолжение — литерал не закрыт корректно
-
                 String lineContent = trimmed.substring(1); // убираем |
-
                 int closeQuote = lineContent.indexOf('"');
                 if (closeQuote >= 0)
                 {
@@ -238,10 +235,8 @@ public final class EditEmbeddedTextHandler
                     sb.append('\n').append(lineContent, 0, closeQuote);
                     return sb.toString();
                 }
-
                 sb.append('\n').append(lineContent);
             }
-
             return null; // закрывающая кавычка не найдена
         }
         catch (BadLocationException e)
@@ -268,26 +263,31 @@ public final class EditEmbeddedTextHandler
     {
         // Стратегия 1: прямое поле
         Object p = Global.getField(editor, "project"); //$NON-NLS-1$
-        if (p instanceof IDtProject) return (IDtProject) p;
+        if (p instanceof IDtProject) 
+            return (IDtProject) p;
 
         try
         {
             // Стратегия 2: через IFile
             IEditorInput input = editor.getEditorInput();
-            if (input == null) return null;
+            if (input == null) 
+                return null;
 
             IFile file = input.getAdapter(IFile.class);
-            if (file == null) return null;
+            if (file == null) 
+                return null;
 
             IProject iProject = file.getProject();
 
             IV8ProjectManager projectManager =
                 (IV8ProjectManager) Global.getServiceByClass(IV8ProjectManager.class);
-            if (projectManager == null) return null;
+            if (projectManager == null)
+                return null;
 
             // Пробуем getDtProject(IProject) — наиболее вероятное имя метода
             Object result = Global.invoke(projectManager, "getDtProject", iProject); //$NON-NLS-1$
-            if (result instanceof IDtProject) return (IDtProject) result;
+            if (result instanceof IDtProject) 
+                return (IDtProject) result;
 
             // Стратегия 3: перебор всех проектов
             Object allProjects = Global.call(projectManager, "getProjects"); //$NON-NLS-1$
@@ -320,7 +320,8 @@ public final class EditEmbeddedTextHandler
         if (proj instanceof IV8Project)
         {
             Object dt = Global.call(proj, "getDtProject"); //$NON-NLS-1$
-            if (dt instanceof IDtProject) return (IDtProject) dt;
+            if (dt instanceof IDtProject)
+                return (IDtProject) dt;
         }
         return null;
     }

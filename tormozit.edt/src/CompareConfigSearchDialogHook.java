@@ -5,6 +5,7 @@ import java.util.List;
 import org.eclipse.jface.dialogs.IDialogSettings; // Добавлен импорт
 import org.eclipse.jface.viewers.AbstractTreeViewer;
 import org.eclipse.jface.viewers.StructuredSelection;
+import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.jface.viewers.IContentProvider;
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.ISelection;
@@ -155,7 +156,7 @@ public class CompareConfigSearchDialogHook
 
     // ---- Поиск по всей модели дерева ----
 
-    private static void performFullTreeSearch(Object dialog, boolean backward, boolean searchObjectColumn)
+    private static void performFullTreeSearch(Object dialog, boolean backward, boolean cbSearchAllColumns)
     {
         Text textFilter = (Text)getField(dialog, "textFilter"); //$NON-NLS-1$
         if (textFilter == null || textFilter.isDisposed())
@@ -186,7 +187,7 @@ public class CompareConfigSearchDialogHook
             for (Object root : roots)
             {
                 items.add(root);
-                collectModelItems(root, provider, items);
+                collectModelItems(root, provider, items, viewer);
             }
         }
         
@@ -209,7 +210,7 @@ public class CompareConfigSearchDialogHook
             int idx = (current + i * step) % n;
             Object candidate = items.get(idx);
             
-            if (isMatched(candidate, effectiveQuery, caseSensitive, viewer, searchObjectColumn))
+            if (isMatched(candidate, effectiveQuery, caseSensitive, viewer, cbSearchAllColumns))
             {
                 viewer.setSelection(new StructuredSelection(candidate), true);
                 if (!viewer.getSelection().isEmpty())
@@ -222,23 +223,41 @@ public class CompareConfigSearchDialogHook
 
         setStatus(dialog, "Совпадений не найдено"); //$NON-NLS-1$
     }
+    
+    public static boolean isNodeMatchFilters(
+        Object element,
+        AbstractTreeViewer viewer)
+    {
+        for (ViewerFilter filter : viewer.getFilters())
+        {
+            if (!filter.select(viewer, null, element))
+            {
+                return false;
+            }
+        }
 
-    /** Рекурсивно собирает все элементы модели, используя провайдер контента. */
-    private static void collectModelItems(Object parent, ITreeContentProvider provider, List<Object> result)
+        return true;
+    }
+    
+    /** Рекурсивно собирает все элементы модели, используя провайдер контента и фильтры. */
+    private static void collectModelItems(Object parent, ITreeContentProvider provider, List<Object> result, AbstractTreeViewer viewer)
     {
         Object[] children = provider.getChildren(parent);
         if (children != null)
         {
             for (Object child : children)
             {
-                result.add(child);
-                collectModelItems(child, provider, result);
+                if (isNodeMatchFilters(child, viewer))
+                {
+                    result.add(child);
+                }
+                collectModelItems(child, provider, result, viewer);
             }
         }
     }
 
     /** Проверяет совпадение текста в ячейках модели через LabelProvider. */
-    private static boolean isMatched(Object element, String query, boolean caseSensitive, AbstractTreeViewer viewer, boolean searchObjectColumn)
+    private static boolean isMatched(Object element, String query, boolean caseSensitive, AbstractTreeViewer viewer, boolean cbSearchAllColumns)
     {
         IBaseLabelProvider baseLabelProvider = viewer.getLabelProvider();
         if (baseLabelProvider instanceof ILabelProvider) {
@@ -261,7 +280,7 @@ public class CompareConfigSearchDialogHook
                     return true;
                 }
             }
-            if (searchObjectColumn && element instanceof AbstractDirectPartialModelNode) {
+            if (cbSearchAllColumns && element instanceof AbstractDirectPartialModelNode) {
                 AbstractDirectPartialModelNode node = (AbstractDirectPartialModelNode) element; 
                 text = node.getLabel();
                 if (text != null && (caseSensitive ? text.contains(query) : text.toLowerCase().contains(query)))

@@ -43,7 +43,7 @@ public class CompareConfigExpandHandler extends AbstractHandler
         viewer.collapseAll();
         for (Object root : cp.getElements(viewer.getInput()))
         {
-            collectElementsToExpand(cp, root, mode, toExpand);
+            collectElementsToExpand(cp, root, mode, toExpand, viewer);
         }
         viewer.setExpandedElements(toExpand.toArray());
 
@@ -58,8 +58,7 @@ public class CompareConfigExpandHandler extends AbstractHandler
      * Рекурсивно собирает список узлов для раскрытия.
      * Никаких вызовов вьювера внутри!
      */
-    private static void collectElementsToExpand(ITreeContentProvider cp, Object element,
-                                                CompareConfigExpandMode mode, Set<Object> toExpand)
+    private static void collectElementsToExpand(ITreeContentProvider cp, Object element, CompareConfigExpandMode mode, Set<Object> toExpand, AbstractTreeViewer viewer)
     {
         if (false
                 || !cp.hasChildren(element)
@@ -82,7 +81,8 @@ public class CompareConfigExpandHandler extends AbstractHandler
         }
         for (Object child : children)
         {
-            collectElementsToExpand(cp, child, mode, toExpand);
+            if (CompareConfigSearchDialogHook.isNodeMatchFilters(child, viewer));
+                collectElementsToExpand(cp, child, mode, toExpand, viewer);
         }
     }
 
