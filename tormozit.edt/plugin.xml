@@ -69,7 +69,7 @@
   <extension point="org.eclipse.ui.handlers">
     <handler
         commandId="tormozit.edt.compareConf.openObject"
-        class="ExecutableExtensionFactory:CompareConfigOpenObjectHandler">
+        class="tormozit.CompareConfigOpenObjectHandler">
       <activeWhen>
         <with variable="activeEditorId">
           <equals value="com._1c.g5.v8.dt.compare.ui.editor"/>
@@ -78,7 +78,7 @@
     </handler>
     <handler
         commandId="tormozit.edt.compareConf.showInNavigator"
-        class="ExecutableExtensionFactory:CompareConfigShowInNavigatorHandler">
+        class="tormozit.CompareConfigShowInNavigatorHandler">
       <activeWhen>
         <with variable="activeEditorId">
           <equals value="com._1c.g5.v8.dt.compare.ui.editor"/>
@@ -86,11 +86,11 @@
       </activeWhen>
     </handler>
     <handler
-        class="ExecutableExtensionFactory:GoToDefinition"
+        class="tormozit.GoToDefinition"
         commandId="tormozit.edt.JumpToRef">
      </handler>
     <handler
-        class="ExecutableExtensionFactory:GetRef"
+        class="tormozit.GetRef"
         commandId="tormozit.edt.CopyRef">
      </handler>
   </extension>

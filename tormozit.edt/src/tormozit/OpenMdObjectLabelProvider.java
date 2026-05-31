@@ -30,7 +30,6 @@ public class OpenMdObjectLabelProvider extends LabelProvider implements IStyledL
         this.baseStyled = baseStyled;
         this.baseDecorator = baseDecorator;
         this.matcher = new SmartMatcher("");
-
         this.matchStyler = new Styler() {
             @Override
             public void applyStyles(TextStyle textStyle) {

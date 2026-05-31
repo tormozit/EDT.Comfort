@@ -5,7 +5,11 @@ import org.eclipse.jface.viewers.ILabelDecorator;
 import org.eclipse.jface.viewers.ILabelProvider;
 
 import java.lang.reflect.Field;
+import java.util.List;
 
+import org.eclipse.core.runtime.jobs.IJobChangeEvent;
+import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.core.runtime.jobs.JobChangeAdapter;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.widgets.Control;
@@ -22,13 +26,12 @@ public class OpenMdObjectHook implements IStartup {
     @Override
     public void earlyStartup()
     {
-        Activator.getDefault().getInjector().injectMembers(this);
         Display.getDefault().asyncExec(() -> {
             install(Display.getDefault());
         });
     }
 
-    private static final String PATCHED_KEY = "OpenMdObjectPatched";
+    private static final String PATCHED_KEY = "tormozit.mdObjectPatched";
 
     public static void install(Display display) {
         if (display == null || display.isDisposed()) return;
@@ -106,22 +109,19 @@ public class OpenMdObjectHook implements IStartup {
                     new org.eclipse.ui.dialogs.OpenMdObjectItemsFilter(
                             (FilteredItemsSelectionDialog) dialog, smartLp, filterText.getText());
 
-            // Подменяем filter в ОБОИХ классах:
-            // - OpenMdObjectSelectionDialog.filter (подкласс) — для createFilter() и MdObjectLabelProvider
-            // - FilteredItemsSelectionDialog.filter (суперкласс) — для applyFilter() и RefreshJob
-            Global.setField(dialog, "filter", smartFilter);
-            setFieldExactClass(dialog, FilteredItemsSelectionDialog.class, "filter", smartFilter);
-
             // --- 6. Удаляем стандартный modify listener EDT ---
             for (Listener l : filterText.getListeners(SWT.Modify)) {
                 filterText.removeListener(SWT.Modify, l);
             }
 
-            // --- 7. Debounce + applyFilter с восстановлением фильтра ---
+            // --- 7. Debounce ---
             final Runnable[] pendingTask = new Runnable[1];
             final Display display = filterText.getDisplay();
+            final boolean[] isSettingFakeText = new boolean[1];
 
             filterText.addModifyListener(e -> {
+                if (isSettingFakeText[0]) return;
+
                 String pattern = filterText.getText();
                 if (pendingTask[0] != null) display.timerExec(-1, pendingTask[0]);
 
@@ -131,13 +131,27 @@ public class OpenMdObjectHook implements IStartup {
                     smartLp.setPattern(pattern);
                     comparator.setMatcher(new SmartMatcher(pattern));
 
-                    Global.invoke(dialog, "applyFilter");
-                    // applyFilter → createFilter() → new MdObjectItemsFilter()
-                    // applyFilter записывает результат в super.filter
-                    // createFilter записывает результат в sub.filter
-                    // Восстанавливаем оба поля на наш фильтр:
-                    Global.setField(dialog, "filter", smartFilter);
-                    setFieldExactClass(dialog, FilteredItemsSelectionDialog.class, "filter", smartFilter);
+                    if (pattern.trim().isEmpty() && !" ".equals(filterText.getText())) {
+                        // Пустой фильтр: устанавливаем фейковый пробел, чтобы RefreshJob
+                        // прошел через fillContentProvider → matchItem()
+                        isSettingFakeText[0] = true;
+                        try {
+                            filterText.setText(" ");
+                            Global.invoke(dialog, "applyFilter");
+                            // applyFilter создаст MdObjectItemsFilter, подменяем на наш
+                            Global.setField(dialog, "filter", smartFilter);
+                            setFieldExactClass(dialog, FilteredItemsSelectionDialog.class, "filter", smartFilter);
+                        } finally {
+                            isSettingFakeText[0] = false;
+                        }
+
+                        // После завершения job восстанавливаем пустой текст
+                        restoreTextAfterJob(dialog, filterText, display, isSettingFakeText);
+                    } else {
+                        Global.invoke(dialog, "applyFilter");
+                        Global.setField(dialog, "filter", smartFilter);
+                        setFieldExactClass(dialog, FilteredItemsSelectionDialog.class, "filter", smartFilter);
+                    }
                 };
                 display.timerExec(150, pendingTask[0]);
             });
@@ -148,10 +162,23 @@ public class OpenMdObjectHook implements IStartup {
                 }
             });
 
-            // Принудительный applyFilter при открытии
-            Global.invoke(dialog, "applyFilter");
-            Global.setField(dialog, "filter", smartFilter);
-            setFieldExactClass(dialog, FilteredItemsSelectionDialog.class, "filter", smartFilter);
+            // При открытии
+            if (filterText.getText().trim().isEmpty() && !" ".equals(filterText.getText())) {
+                isSettingFakeText[0] = true;
+                try {
+                    filterText.setText(" ");
+                    Global.invoke(dialog, "applyFilter");
+                    Global.setField(dialog, "filter", smartFilter);
+                    setFieldExactClass(dialog, FilteredItemsSelectionDialog.class, "filter", smartFilter);
+                } finally {
+                    isSettingFakeText[0] = false;
+                }
+                restoreTextAfterJob(dialog, filterText, display, isSettingFakeText);
+            } else {
+                Global.invoke(dialog, "applyFilter");
+                Global.setField(dialog, "filter", smartFilter);
+                setFieldExactClass(dialog, FilteredItemsSelectionDialog.class, "filter", smartFilter);
+            }
 
             shell.setData(PATCHED_KEY, Boolean.TRUE);
             Global.log("OpenMdObjectHook: patched successfully");
@@ -161,18 +188,45 @@ public class OpenMdObjectHook implements IStartup {
         }
     }
 
-    /**
-     * Устанавливает значение поля в КОНКРЕТНОМ классе (не поднимаясь по иерархии).
-     * Нужно для FilteredItemsSelectionDialog.filter, т.к. OpenMdObjectSelectionDialog
-     * объявляет своё поле filter, которое скрывает (shadows) поле суперкласса.
-     */
+    private static void restoreTextAfterJob(Object dialog, Text filterText,
+                                             Display display, boolean[] isSettingFakeText) {
+        Object refreshJob = Global.getField(dialog, "refreshJob");
+        if (refreshJob == null) refreshJob = Global.getField(dialog, "fRefreshJob");
+
+        Runnable restore = () -> {
+            if (!filterText.isDisposed() && " ".equals(filterText.getText())) {
+                isSettingFakeText[0] = true;
+                try {
+                    filterText.setText("");
+                } finally {
+                    isSettingFakeText[0] = false;
+                }
+            }
+        };
+
+        if (refreshJob instanceof Job) {
+            Job job = (Job) refreshJob;
+            int state = job.getState();
+            if (state == Job.RUNNING || state == Job.WAITING) {
+                job.addJobChangeListener(new JobChangeAdapter() {
+                    @Override
+                    public void done(IJobChangeEvent event) {
+                        display.asyncExec(restore);
+                    }
+                });
+                return;
+            }
+        }
+        // Job уже завершился или не найден — восстанавливаем сразу
+        display.asyncExec(restore);
+    }
+
     private static void setFieldExactClass(Object obj, Class<?> exactClass, String fieldName, Object value) {
         try {
             Field f = exactClass.getDeclaredField(fieldName);
             f.setAccessible(true);
             f.set(obj, value);
         } catch (NoSuchFieldException ignored) {
-            // поле с таким именем в этом классе не найдено — нормально
         } catch (Exception e) {
             Global.log("OpenMdObjectHook: failed to set " + exactClass.getName() + "." + fieldName + ": " + e);
         }

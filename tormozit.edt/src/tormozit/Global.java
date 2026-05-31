@@ -41,10 +41,6 @@ public final class Global
 
     private Global() {}
 
-    // =========================================================================
-    // Рефлексия
-    // =========================================================================
-
     /**
      * Читает значение поля {@code fieldName} из объекта {@code obj},
      * поднимаясь по иерархии суперклассов.
@@ -238,7 +234,7 @@ public final class Global
 
     public static String readTextFromFile(File file) throws IOException
     {
-        String text = Files.readString(file.toPath());
+        String text = normalizeLineSeparators(Files.readString(file.toPath()));
         return text.startsWith("\uFEFF") ? text.substring(1) : text; // strip BOM
     }
 
@@ -278,13 +274,9 @@ public final class Global
     
     public static IViewPart getViewById(String id) {
         IWorkbench workbench = PlatformUI.getWorkbench();
-
         for (IWorkbenchWindow window : workbench.getWorkbenchWindows()) {
             for (IWorkbenchPage page : window.getPages()) {
-
-                IViewReference ref =
-                    page.findViewReference(id);
-
+                IViewReference ref = page.findViewReference(id);
                 if (ref != null) {
                     IViewPart view = ref.getView(false); // не создавать, если не открыт
                     if (view != null)
@@ -294,5 +286,10 @@ public final class Global
         }
         return null;
     }
-    
+    public static String normalizeLineSeparators(String text) {
+        if (text == null) return null;
+        // Сначала заменяем \r\n на \n (Windows)
+        // Затем заменяем оставшиеся \r на \n (старые Mac)
+        return text.replace("\r\n", "\n").replace("\r", "\n");
+    }    
 }

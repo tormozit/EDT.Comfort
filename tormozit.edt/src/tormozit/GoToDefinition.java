@@ -209,21 +209,21 @@ public class GoToDefinition extends AbstractHandler
             }
             catch (Exception e) { e.printStackTrace(); }
         }
-        if (newFile != null && (command.contains("Модуль(") || command.endsWith("Форма("))) {
-            session.getCodeEditor(GetRef.getActiveBslEditor(page.getActivePart()));
+        if (newFile != null && (command.contains("Модуль(") || command.contains("Форма("))) {
+            session.syncCodeEditorToIR(GetRef.getActiveBslEditor(page.getActivePart()));
             final IRSession finalSession = session;
             try {
                 String currentTextLiteral = session.executeOnComThread(() ->
                     finalSession.selectTextLiteral()
                 );
-                boolean allowImport = currentTextLiteral.compareTo(Global.readTextFromFile(oldFile)) == 0;
+                boolean allowImport = Global.normalizeLineSeparators(currentTextLiteral).compareTo(Global.readTextFromFile(oldFile))==0;
                 String newText = Global.readTextFromFile(newFile);
                 if (allowImport) {
                     session.executeOnComThread(() ->
                         {
                             return finalSession.replaceSelectedText(newText);
-                        }
-                );
+                        });
+                    session.syncCodeEditorFromIR(GetRef.getActiveBslEditor(page.getActivePart()));
                 } else {
                     notifyDenyReplaceObject(newFile, command);
                 }
@@ -236,7 +236,7 @@ public class GoToDefinition extends AbstractHandler
 
     public void notifyDenyReplaceObject(File newFile, String command)
     {
-        ToastNotification.show(command,
+        ToastNotification.show("Редактор ИР",
             "Объект был изменён в EDT после начала редактирования в ИР. "
             + "Загрузка не выполнена. Временный файл: " + newFile, 10000);
     }

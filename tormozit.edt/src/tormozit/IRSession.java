@@ -7,10 +7,13 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
 import org.eclipse.core.resources.IProject;
+import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.ITextSelection;
 import org.eclipse.jface.text.TextSelection;
 import org.eclipse.jface.text.source.ISourceViewer;
+import org.eclipse.jface.viewers.ISelectionProvider;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
+import org.eclipse.xtext.util.TextRegion;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.platform.services.model.InfobaseReference;
@@ -31,6 +34,8 @@ public final class IRSession
         public Object moduleRoot = null;
         public InfobaseReference infobase;
         public Object codeEditor = null; // ирКлсПолеТекстаПрограммы
+        public TextRegion changedTextRange = null;
+        public String newTextOfRange = ""; 
 
         IRSession(IRApplication.State state, LocalDateTime startTime, long pid, String platformVersion,
                   Object root, Object processObj, String appTitle, IProject project, ExecutorService executor, InfobaseReference infobase)
@@ -69,8 +74,7 @@ public final class IRSession
             }
         }
 
-        public void getCodeEditor(BslXtextEditor editor) {
-            // Читаем данные из UI-потока EDT — они нам понадобятся в COM-потоке
+        public void syncCodeEditorToIR(BslXtextEditor editor) {
             ISourceViewer viewer = editor.getInternalSourceViewer();
             Object sel = viewer.getSelectionProvider().getSelection();
             ITextSelection textSelection = (ITextSelection) sel;
@@ -89,6 +93,27 @@ public final class IRSession
                 setText(text, moduleName, offset, endOffset);
                 return null;
             });
+        }
+        public void syncCodeEditorFromIR(BslXtextEditor editor) {
+            executeOnComThread(() -> {
+                readChangedTextRange();
+                return null;
+            });
+            ISourceViewer viewer = editor.getInternalSourceViewer();
+            IXtextDocument doc = (IXtextDocument) viewer.getDocument();
+            doc.modify(resource -> {
+                try {
+                    doc.replace(changedTextRange.getOffset(), changedTextRange.getLength(), newTextOfRange);
+                } catch (BadLocationException e) {
+                    throw new RuntimeException("Ошибка позиционирования при вставке текста из ИР", e);
+                }
+                return null;
+            });
+            int newOffset = changedTextRange.getOffset();
+            int newLength = newTextOfRange.length();
+            viewer.setSelectedRange(newOffset, newLength);
+            changedTextRange = null;
+            newTextOfRange = "";
         }
         /**
          * 
@@ -116,9 +141,18 @@ public final class IRSession
         public Object replaceSelectedText(String text)
         {
      //        ВставитьИзмененныйТекстовыйЛитерал(Знач НовыйТекст, Знач СтарыйТекстЛитерала = "", выхТекстИзменен = Ложь)
-            return ComBridge.toString(ComBridge.invoke(codeEditor, "ВставитьИзмененныйТекстовыйЛитерал", text));
+            String string = ComBridge.toString(ComBridge.invoke(codeEditor, "ВставитьИзмененныйТекстовыйЛитерал", text));
+            return string;
             
        }
+
+        public void readChangedTextRange()
+        {
+            newTextOfRange = ComBridge.toString(ComBridge.getProperty(codeEditor, "мЗамещающийФрагмент"));
+            Object comRange = ComBridge.getProperty(codeEditor, "мЗаменяемыйДиапазон");
+            int rangeStart = (int) ComBridge.toLong(ComBridge.getProperty(comRange, "Начало")) - 1;
+            changedTextRange = new TextRegion(rangeStart, (int) ComBridge.toLong(ComBridge.getProperty(comRange, "Конец")) - 1 - rangeStart);
+        }
 
         public String selectTextLiteral()
         {
@@ -132,4 +166,5 @@ public final class IRSession
         {
             return ComBridge.toBoolean(ComBridge.invoke(codeEditor, "ОткрытьРедакторТекстовогоЛитерала", null, null, null, true, null, false));
         }
+
     }

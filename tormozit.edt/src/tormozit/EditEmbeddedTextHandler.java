@@ -87,7 +87,7 @@ public final class EditEmbeddedTextHandler
             return;
         }
         String ref = GetRef.buildExtendedRef(editor, false);
-        irSession.getCodeEditor(editor);
+        irSession.syncCodeEditorToIR(editor);
         irSession.executor.submit(() ->
         {
             try
