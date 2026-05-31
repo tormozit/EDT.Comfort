@@ -130,16 +130,35 @@ public class SmartMatcher {
             }
         }
         if (matchedWordsCount == fragments.length) {
+            // БазоваяПремия: с первого слова без пропусков=3, с первого с пропусками=2, не с первого=1
             int wordsDiff = lastMatchedWordIdx - firstMatchedWordIdx + 1;
             boolean noGaps = (wordsDiff == fragments.length);
+            int basePremium;
             if (firstMatchedWordIdx == 0) {
-                if (noGaps) 
-                    return 3;      // с первого слова, без пропусков
-                else 
-                    return 2;             // с первого слова, с пропусками
+                basePremium = noGaps ? 3 : 2;
             } else {
-                return 1;                  // не с первого слова
+                basePremium = 1;
             }
+
+            // Проверяем порядок: каждый следующий фрагмент должен совпадать со словом
+            // с бо́льшим индексом, чем предыдущий
+            boolean orderKept = true;
+            int prevWordIdx = -1;
+            for (String frag : fragments) {
+                for (int w = 0; w < wordBoundaries.size(); w++) {
+                    int boundaryPos = wordBoundaries.get(w);
+                    if (lowerText.startsWith(frag, boundaryPos)) {
+                        if (w <= prevWordIdx) {
+                            orderKept = false;
+                        }
+                        prevWordIdx = w;
+                        break;
+                    }
+                }
+            }
+
+            // ПремияФильтра = БазоваяПремия * 2 - (порядок нарушен ? 1 : 0)
+            return basePremium * 2 - (orderKept ? 0 : 1);
         } else {
             // Все фрагменты есть, но не все совпали с началами слов — совпадение внутри слов
             return 1;
