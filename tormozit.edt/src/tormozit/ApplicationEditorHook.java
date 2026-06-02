@@ -61,9 +61,6 @@ public class ApplicationEditorHook implements IStartup
     {
         Display.getDefault().asyncExec(() ->
         {
-            for (IWorkbenchWindow w : PlatformUI.getWorkbench().getWorkbenchWindows())
-                hookWindow(w);
-
             PlatformUI.getWorkbench().addWindowListener(new org.eclipse.ui.IWindowListener()
             {
                 @Override public void windowOpened(IWorkbenchWindow w)     { hookWindow(w); }
@@ -71,6 +68,13 @@ public class ApplicationEditorHook implements IStartup
                 @Override public void windowDeactivated(IWorkbenchWindow w) {}
                 @Override public void windowClosed(IWorkbenchWindow w)      {}
             });
+
+//            // Даём EDT время завершить BuildMarkersJob перед обходом уже открытых редакторов.
+//            Display.getDefault().timerExec(3000, () ->
+//            {
+                for (IWorkbenchWindow w : PlatformUI.getWorkbench().getWorkbenchWindows())
+                    hookWindow(w);
+//            });
         });
     }
 

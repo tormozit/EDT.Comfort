@@ -7,6 +7,7 @@
     <startup class="tormozit.ApplicationsViewHook"/>
     <startup class="tormozit.ApplicationEditorHook"/>
     <startup class="tormozit.DataCompositionSchemaEditorHook"/> 
+    <startup class="tormozit.MoxelEditorHook"/>
     <startup class="tormozit.BSLEditorMenuHook"/> 
     <startup class="tormozit.SmartOutlineHook"/> 
     <startup class="tormozit.OpenMdObjectHook"/>

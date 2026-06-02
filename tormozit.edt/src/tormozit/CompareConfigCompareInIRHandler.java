@@ -141,8 +141,6 @@ public class CompareConfigCompareInIRHandler extends AbstractHandler {
         InputStream stream = ExternalPropertyUtils.getContentStream(properyNode, session, side, filePathConverter);
         if (stream == null)
             return null;
-
-        // Определяем имя файла для временного файла
         String symlink = properyNode.getSymlink(side);
         String qualifyingType = ((SolidResourceComparisonNode) properyNode).getQualifyingType(side);
         Path relativePath = (Path) ComparisonUtils.getFilePathBySymlink(symlink, qualifyingType, filePathConverter);

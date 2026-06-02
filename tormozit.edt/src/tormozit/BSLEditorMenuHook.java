@@ -88,9 +88,8 @@ public class BSLEditorMenuHook implements IStartup
         Display.getDefault().asyncExec(() ->
         {
 //          Activator.getDefault().getInjector().injectMembers(this); // Слишком рано?
-            for (IWorkbenchWindow w : PlatformUI.getWorkbench().getWorkbenchWindows())
-                hookWindow(w);
 
+            // Подписка на будущие окна — сразу, без задержки.
             PlatformUI.getWorkbench().addWindowListener(new IWindowListener()
             {
                 @Override public void windowOpened(IWorkbenchWindow w)     { hookWindow(w); }
@@ -98,6 +97,15 @@ public class BSLEditorMenuHook implements IStartup
                 @Override public void windowDeactivated(IWorkbenchWindow w) {}
                 @Override public void windowClosed(IWorkbenchWindow w)      {}
             });
+
+            // Для уже открытых редакторов (восстановлённая сессия) — даём EDT время
+            // завершить инициализацию маркеров (DtGranularEditorMarkerSupport),
+            // иначе race condition при старте приводит к NPE в BuildMarkersJob.
+//            Display.getDefault().timerExec(3000, () ->
+//            {
+                for (IWorkbenchWindow w : PlatformUI.getWorkbench().getWorkbenchWindows())
+                    hookWindow(w);
+//            });
         });
     }
 
