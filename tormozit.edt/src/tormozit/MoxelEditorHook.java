@@ -1,6 +1,5 @@
 package tormozit;
 
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -11,8 +10,6 @@ import java.util.Set;
 import java.util.WeakHashMap;
 
 import org.eclipse.core.resources.IFile;
-import org.eclipse.jface.viewers.ISelection;
-import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
@@ -27,8 +24,12 @@ import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
+import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IEditorPart;
+import org.eclipse.ui.forms.editor.IFormPage;
 import org.eclipse.ui.IPartListener2;
+import org.eclipse.jface.dialogs.IPageChangedListener;
+import org.eclipse.jface.dialogs.PageChangedEvent;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
@@ -56,11 +57,13 @@ import com._1c.g5.v8.dt.ui.MultiSelection;
  */
 public class MoxelEditorHook implements IStartup
 {
-    private static final String EDITOR_ID = "com._1c.g5.v8.dt.md.ui.editor.commonTemplate"; //$NON-NLS-1$
+    private static final String SPREADSHEET_PAGE_ID = "editors.commontemplate.pages.spreadsheet"; //$NON-NLS-1$
     private static final String MENU_TEXT = "Редактор ИР"; //$NON-NLS-1$
     private static final String HOOK_MARKER = "tormozit.tabdocMenuHooked"; //$NON-NLS-1$
 
     private final Map<IWorkbenchWindow, IPartListener2> partListeners = new HashMap<>();
+    private final Set<DtGranularEditor<?>> pageChangeHookedEditors =
+        java.util.Collections.newSetFromMap(new WeakHashMap<>());
     private final Set<Control> menuDetectHookedControls =
         java.util.Collections.newSetFromMap(new WeakHashMap<>());
 
@@ -96,24 +99,12 @@ public class MoxelEditorHook implements IStartup
             @Override
             public void partOpened(IWorkbenchPartReference ref)
             {
-                if (!EDITOR_ID.equals(ref.getId())) return;
-                Display.getDefault().asyncExec(() ->
-                {
-                    IEditorPart part = (IEditorPart) ref.getPart(false);
-                    if (part instanceof DtGranularEditor<?>)
-                        applyPatchToGranularEditor((DtGranularEditor<?>) part);
-                });
+                Display.getDefault().asyncExec(() -> hookGranularEditorPart(ref.getPart(false)));
             }
 
             @Override public void partActivated(IWorkbenchPartReference r)
             {
-                if (!EDITOR_ID.equals(r.getId())) return;
-                Display.getDefault().asyncExec(() ->
-                {
-                    Object p = r.getPart(false);
-                    if (p instanceof DtGranularEditor<?>)
-                        applyPatchToGranularEditor((DtGranularEditor<?>) p);
-                });
+                Display.getDefault().asyncExec(() -> hookGranularEditorPart(r.getPart(false)));
             }
 
             @Override public void partBroughtToTop(IWorkbenchPartReference r) {}
@@ -129,14 +120,31 @@ public class MoxelEditorHook implements IStartup
 
         if (window.getActivePage() != null)
             for (IEditorPart ed : window.getActivePage().getEditors())
-                if (ed instanceof DtGranularEditor<?> && EDITOR_ID.equals(ed.getSite().getId()))
-                    applyPatchToGranularEditor((DtGranularEditor<?>) ed);
+                hookGranularEditorPart(ed);
+    }
+
+    private void hookGranularEditorPart(Object part)
+    {
+        if (!(part instanceof DtGranularEditor<?>)) return;
+        DtGranularEditor<?> editor = (DtGranularEditor<?>) part;
+        applyPatchToGranularEditor(editor);
+        if (pageChangeHookedEditors.add(editor))
+        {
+            editor.addPageChangedListener(new IPageChangedListener()
+            {
+                @Override
+                public void pageChanged(PageChangedEvent event)
+                {
+                    Display.getDefault().asyncExec(() -> applyPatchToGranularEditor(editor));
+                }
+            });
+        }
     }
 
     private void applyPatchToGranularEditor(DtGranularEditor<?> editor)
     {
         org.eclipse.ui.forms.editor.IFormPage activePage = editor.getActivePageInstance();
-        if (activePage instanceof DtGranularEditorEmbeddedEditorPage)
+        if (activePage instanceof DtGranularEditorEmbeddedEditorPage<?>)
             applyPatchToEditorPage(editor, (DtGranularEditorEmbeddedEditorPage<?>) activePage);
     }
 
@@ -257,22 +265,68 @@ public class MoxelEditorHook implements IStartup
             }
         };
     }
+    private static MoxelControl getMoxelControl(MoxelEditor moxelEditor)
+    {
+        if (moxelEditor == null) return null;
+        MoxelViewer viewer = moxelEditor.getInternalViewer();
+        return viewer != null ? viewer.getMoxelControl() : null;
+    }
+
+    /** Снимок выделения ячеек до selectAll/copy. */
+    private static final class SavedCellsSelection
+    {
+        final SheetAccessor sheet;
+        final int x, y, width, height;
+
+        SavedCellsSelection(CellsSelection selection)
+        {
+            sheet = selection.getSheet();
+            Rectangle r = selection.getNormalizedPosition();
+            x = r.x;
+            y = r.y;
+            width = r.width;
+            height = r.height;
+        }
+
+        CellsSelection restore()
+        {
+            return new CellsSelection(sheet, x, y, width, height);
+        }
+    }
+
+    private static SavedCellsSelection captureCellsSelection(MoxelEditor moxelEditor)
+    {
+        MoxelControl control = getMoxelControl(moxelEditor);
+        if (control == null) return null;
+        Selection tailSelection = control.getTailSelection();
+        if (!(tailSelection instanceof CellsSelection)) return null;
+        return new SavedCellsSelection((CellsSelection) tailSelection);
+    }
+
+    private static void restoreCellsSelection(MoxelEditor moxelEditor, SavedCellsSelection saved)
+    {
+        if (saved == null) return;
+        MoxelControl control = getMoxelControl(moxelEditor);
+        if (control == null || control.isDisposed()) return;
+        try
+        {
+            control.replaceAllSelection(saved.restore());
+        }
+        catch (Exception e)
+        {
+            Global.log("MoxelEditorHook.restoreCellsSelection: " + e.getMessage()); //$NON-NLS-1$
+        }
+    }
+
     private static String getCurrentRegionName(MoxelEditor moxelEditor)
     {
-        MoxelViewer viewer = moxelEditor.getInternalViewer();
-        if (viewer == null)
-            return null;
-        MoxelControl control = viewer.getMoxelControl();
+        MoxelControl control = getMoxelControl(moxelEditor);
+        if (control == null) return null;
         Selection tailSelection = control.getTailSelection();
-        if (!(tailSelection instanceof CellsSelection))
-        {
-            return null;
-        }
-        Rectangle r = ((CellsSelection)tailSelection).getNormalizedPosition();
+        if (!(tailSelection instanceof CellsSelection)) return null;
+        Rectangle r = ((CellsSelection) tailSelection).getNormalizedPosition();
         int r1 = r.y + 1, c1 = r.x + 1;
         int r2 = r.y + r.height + 1, c2 = r.x + r.width + 1;
-//        if (r1 == r2 && c1 == c2)
-//            return "R" + r1 + "C" + c1; //$NON-NLS-1$
         return "R" + r1 + "C" + c1 + ":R" + r2 + "C" + c2; //$NON-NLS-1$
     }
     private static void openInIr(DtGranularEditor<?> granularEditor, MoxelEditor embeddedEditor)
@@ -300,7 +354,6 @@ public class MoxelEditorHook implements IStartup
 //                    Функция ОткрытьТабличныйДокументЛкс(ТабличныйДокумент = Неопределено, Знач Заголовок = "", Знач ТолькоПросмотр = Ложь, Знач КлючУникальности = Неопределено, ВставитьВсеИзБуфера = Ложь,
 //                        Знач Модально = Ложь, Знач ИмяТекущейОбласти = Неопределено, Знач КлючИсточника = "") Экспорт
                     ComBridge.invoke(irClient, "ОткрытьТабличныйДокументЛкс", null, fullObjectName, false, fullObjectName, true, false, currentRegionName, fullObjectName);
-                    ToastNotification.show("Редактор ИР", "Табличный документ открыт в ИР."); //$NON-NLS-1$ //$NON-NLS-2$
                 }
                 catch (Exception e)
                 {
@@ -314,27 +367,99 @@ public class MoxelEditorHook implements IStartup
         }
     }
 
-    private static boolean copyToClipboardViaCommands(IEditorPart editor)
+    /**
+     * Возвращает {@link MoxelEditor} активной или страницы табличного макета.
+     */
+    public static MoxelEditor findMoxelEditor(DtGranularEditor<?> editor)
     {
-        if (editor == null || editor.getSite() == null) return false;
+        if (editor == null) return null;
+        IFormPage activePage = editor.getActivePageInstance();
+        MoxelEditor moxel = moxelFromPage(activePage);
+        if (moxel != null) return moxel;
+        IFormPage spreadsheetPage = editor.findPage(SPREADSHEET_PAGE_ID);
+        return moxelFromPage(spreadsheetPage);
+    }
+
+    private static MoxelEditor moxelFromPage(IFormPage page)
+    {
+        if (!(page instanceof DtGranularEditorEmbeddedEditorPage<?>)) return null;
+        IEditorPart embedded = ((DtGranularEditorEmbeddedEditorPage<?>) page).getEmbeddedEditor();
+        return embedded instanceof MoxelEditor ? (MoxelEditor) embedded : null;
+    }
+
+    /**
+     * Вставляет табличный документ из системного буфера (ИР кладёт его туда перед вызовом).
+     * Использует штатные команды EDT: {@code selectAll} + {@code paste}.
+     */
+    public static boolean importTabularDocumentFromIrClipboard(MoxelEditor editor, Shell shell)
+    {
+        if (editor == null) return false;
+        Display display = shell != null && !shell.isDisposed()
+            ? shell.getDisplay() : Display.getDefault();
+        if (display == null || display.isDisposed()) return false;
+
+        final boolean[] ok = new boolean[] { false };
+        display.syncExec(() ->
+        {
+            SavedCellsSelection savedSelection = captureCellsSelection(editor);
+            try
+            {
+                if (!pasteToMoxelViaCommands(editor))
+                {
+                    ToastNotification.show("Редактор ИР",
+                        "Не удалось вставить табличный документ из буфера обмена.", 5000); //$NON-NLS-1$
+                    return;
+                }
+                ok[0] = true;
+            }
+            finally
+            {
+                restoreCellsSelection(editor, savedSelection);
+            }
+        });
+        return ok[0];
+    }
+
+    private static boolean copyToClipboardViaCommands(MoxelEditor editor)
+    {
+        return runMoxelEditCommands(editor,
+            "org.eclipse.ui.edit.selectAll", //$NON-NLS-1$
+            "org.eclipse.ui.edit.copy"); //$NON-NLS-1$
+    }
+
+    private static boolean pasteToMoxelViaCommands(MoxelEditor editor)
+    {
+        return runMoxelEditCommands(editor,
+            "org.eclipse.ui.edit.selectAll", //$NON-NLS-1$
+            "org.eclipse.ui.edit.paste"); //$NON-NLS-1$
+    }
+
+    private static boolean runMoxelEditCommands(MoxelEditor editor, String... commandIds)
+    {
+        if (editor == null || editor.getSite() == null || commandIds.length == 0) return false;
         Display display = Display.getDefault();
         if (display == null || display.isDisposed()) return false;
 
         final boolean[] ok = new boolean[] { false };
         display.syncExec(() ->
         {
+            SavedCellsSelection saved = captureCellsSelection(editor);
             try
             {
                 editor.setFocus();
                 IHandlerService hs = editor.getSite().getService(IHandlerService.class);
                 if (hs == null) return;
-                hs.executeCommand("org.eclipse.ui.edit.selectAll", null); //$NON-NLS-1$
-                hs.executeCommand("org.eclipse.ui.edit.copy", null); //$NON-NLS-1$
+                for (String commandId : commandIds)
+                    hs.executeCommand(commandId, null);
                 ok[0] = true;
             }
             catch (Exception ignored)
             {
                 ok[0] = false;
+            }
+            finally
+            {
+                restoreCellsSelection(editor, saved);
             }
         });
         return ok[0];

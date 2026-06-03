@@ -18,14 +18,26 @@ public final class ContentAssistPatcher
     public static boolean applyPatch(SourceViewer sourceViewer, int timeout, String charset)
     {
         ContentAssistant contentAssist = getContentAssistant(sourceViewer);
-        if (contentAssist == null) return false;
+        if (contentAssist == null)
+        {
+            ContentAssistDebug.log("applyPatch FAIL: ContentAssistant null"); //$NON-NLS-1$
+            return false;
+        }
 
         IContentAssistProcessor current =
             contentAssist.getContentAssistProcessor(IDocument.DEFAULT_CONTENT_TYPE);
-        if (current == null) return false;
+        if (current == null)
+        {
+            ContentAssistDebug.log("applyPatch FAIL: processor null"); //$NON-NLS-1$
+            return false;
+        }
 
         IContentAssistProcessor xtext = unwrap(current);
-        if (!(xtext instanceof XtextContentAssistProcessor)) return false;
+        if (!(xtext instanceof XtextContentAssistProcessor))
+        {
+            ContentAssistDebug.log("applyPatch FAIL: not Xtext, got " + current.getClass().getName()); //$NON-NLS-1$
+            return false;
+        }
 
         ((XtextContentAssistProcessor) xtext)
             .setCompletionProposalAutoActivationCharacters(charset);
@@ -41,13 +53,14 @@ public final class ContentAssistPatcher
 
         contentAssist.setAutoActivationDelay(timeout);
         contentAssist.enableAutoActivation(true);
-
-        // Нейтрализуем штатный sorter — наш сортирует сам
-        contentAssist.setSorter(new SmartCodeProposalSorter());
+        contentAssist.enableAutoInsert(false);
+        contentAssist.setRepeatedInvocationMode(true);
+        contentAssist.setSorter(new PreserveOrderProposalSorter());
 
         // Перезапрос + подавление штатной раскраски
         ContentAssistSessionReloader.install(sourceViewer, contentAssist, wrapper);
 
+        ContentAssistDebug.log("applyPatch OK delegate=" + xtext.getClass().getSimpleName()); //$NON-NLS-1$
         return true;
     }
 

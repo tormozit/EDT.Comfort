@@ -201,8 +201,10 @@ public final class ContentAssistManager
         SourceViewer sourceViewer = (SourceViewer) viewer;
 
         // --- автооткрытие и символы-триггеры ---
-        ContentAssistPatcher.applyPatch(
+        boolean ok = ContentAssistPatcher.applyPatch(
             sourceViewer, settings.getTimeout(), settings.getCharset());
+        ContentAssistDebug.log("BslEditor patch " + (ok ? "OK" : "FAIL") //$NON-NLS-1$
+            + " editor=" + editor.getTitle()); //$NON-NLS-1$
     }
 
     private void registerPartListener(IWorkbenchWindow window)

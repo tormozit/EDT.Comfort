@@ -57,6 +57,7 @@ import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorEmbeddedEditorPage;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
+import com._1c.g5.v8.dt.moxel.ui.editor.MoxelEditor;
 import com._1c.g5.v8.dt.ui.editor.IDtGranularEditor;
 import com._1c.g5.v8.dt.ui.util.OpenHelper;
 
@@ -192,22 +193,38 @@ public class GoToDefinition extends AbstractHandler
             return null;
         }
 
-        if (newFile != null && command.contains("Макет.")) //$NON-NLS-1$ //$NON-NLS-2$
+        if (session != null && command.contains("Макет.")) //$NON-NLS-1$ //$NON-NLS-2$
         {
-            DtGranularEditor templateEditor = (DtGranularEditor) page.getActiveEditor();
-            DtGranularEditorEmbeddedEditorPage dcsEditor =
-                (DtGranularEditorEmbeddedEditorPage) templateEditor
-                    .findPage("editors.commontemplate.pages.dcs"); //$NON-NLS-1$
-            try
+            IEditorPart activeEditor = page.getActiveEditor();
+            if (activeEditor instanceof DtGranularEditor<?>)
             {
-                String currentFilename = DataCompositionSchemaEditorHook.exportToFile(dcsEditor);
-                boolean allowImport = Global.readTextFromFile(new File(currentFilename)).compareTo(Global.readTextFromFile(oldFile)) == 0;
-                if (allowImport)
-                    DataCompositionSchemaEditorHook.importFromFile(dcsEditor, newFile);
+                DtGranularEditor<?> templateEditor = (DtGranularEditor<?>) activeEditor;
+                DtGranularEditorEmbeddedEditorPage<?> dcsPage =
+                    (DtGranularEditorEmbeddedEditorPage<?>) templateEditor
+                        .findPage("editors.commontemplate.pages.dcs"); //$NON-NLS-1$
+                if (dcsPage != null && dcsPage.getEmbeddedEditor() != null && newFile != null)
+                {
+                    try
+                    {
+                        String currentFilename = DataCompositionSchemaEditorHook.exportToFile(dcsPage);
+                        boolean allowImport = Global.readTextFromFile(new File(currentFilename))
+                            .compareTo(Global.readTextFromFile(oldFile)) == 0;
+                        if (allowImport)
+                            DataCompositionSchemaEditorHook.importFromFile(dcsPage, newFile);
+                        else
+                            notifyDenyReplaceObject(newFile, command);
+                    }
+                    catch (Exception e) { e.printStackTrace(); }
+                }
                 else
-                    notifyDenyReplaceObject(newFile, command);
+                {
+                    MoxelEditor moxelEditor = MoxelEditorHook.findMoxelEditor(templateEditor);
+                    if (moxelEditor != null)
+                        MoxelEditorHook.importTabularDocumentFromIrClipboard(moxelEditor, shell);
+                    ToastNotification.show("Редактор ИР",
+                        "Объект получен из буфера обмена. Резервный файл смотри в приложении ИР"); //$NON-NLS-1$
+                }
             }
-            catch (Exception e) { e.printStackTrace(); }
         }
         if (newFile != null && (command.contains("Модуль(") || command.contains("Форма("))) {
             session.syncCodeEditorToIR(GetRef.getActiveBslEditor(page.getActivePart()));
@@ -234,11 +251,14 @@ public class GoToDefinition extends AbstractHandler
         return null;
     }
 
-    public void notifyDenyReplaceObject(File newFile, String command)
+    public static void notifyDenyReplaceObject(File newFile, String command)
     {
+        String details = newFile != null
+            ? "Временный файл: " + newFile //$NON-NLS-1$
+            : command;
         ToastNotification.show("Редактор ИР",
             "Объект был изменён в EDT после начала редактирования в ИР. "
-            + "Загрузка не выполнена. Временный файл: " + newFile, 10000);
+            + "Загрузка не выполнена. " + details, 10000); //$NON-NLS-1$
     }
 
     public static boolean jump(String raw, Shell shell, IWorkbenchPage page, IProject project)

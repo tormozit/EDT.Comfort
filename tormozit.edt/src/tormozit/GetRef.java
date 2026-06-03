@@ -45,7 +45,10 @@ import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.compare.core.IComparisonSession;
 import com._1c.g5.v8.dt.compare.model.MatchedObjectsComparisonNode;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
+import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorEmbeddedEditorPage;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
+import com._1c.g5.v8.dt.ui.editor.IDtEditor;
+import com._1c.g5.v8.dt.ui.editor.input.IDtEditorInput;
 
 public class GetRef extends AbstractHandler
 {
@@ -418,13 +421,73 @@ public class GetRef extends AbstractHandler
     private static String refFromGranularEditor(DtGranularEditor<?> editor)
     {
         IFormPage activePage = editor.getActivePageInstance();
+        // У вложенных страниц (макет, модуль …) getModel() — объект страницы, не корень редактора.
+        String ref = refFromDtEditorModel(activePage);
+        if (ref != null) return ref;
+
         if (activePage instanceof DtGranularEditorXtextEditorPage<?>)
         {
-            IEditorPart embedded =
-                ((DtGranularEditorXtextEditorPage<?>) activePage).getEmbeddedEditor();
-            if (embedded != null) { String ref = refFromEditorInput(embedded.getEditorInput()); if (ref != null) return ref; }
+            ref = refFromEmbeddedEditor(
+                ((DtGranularEditorXtextEditorPage<?>) activePage).getEmbeddedEditor());
+            if (ref != null) return ref;
         }
+        else if (activePage instanceof DtGranularEditorEmbeddedEditorPage<?>)
+        {
+            ref = refFromEmbeddedEditor(
+                ((DtGranularEditorEmbeddedEditorPage<?>) activePage).getEmbeddedEditor());
+            if (ref != null) return ref;
+        }
+
+        ref = refFromDtEditorModel(editor);
+        if (ref != null) return ref;
         return refFromEditorInput(editor.getEditorInput());
+    }
+
+    @SuppressWarnings("rawtypes")
+    private static String refFromDtEditorModel(Object dtEditorOrPage)
+    {
+        if (dtEditorOrPage instanceof IDtEditor)
+        {
+            try
+            {
+                IDtEditor dtEditor = (IDtEditor) dtEditorOrPage;
+                String ref = refFromEObjectModel(dtEditor.getModel());
+                if (ref != null) return ref;
+                Object input = dtEditor.getEditorInput();
+                if (input instanceof IDtEditorInput)
+                {
+                    ref = refFromEObjectModel(((IDtEditorInput) input).getModel());
+                    if (ref != null) return ref;
+                }
+            }
+            catch (Exception e) { Global.log("GetRef.refFromDtEditorModel: " + e); } //$NON-NLS-1$
+        }
+        for (String field : new String[] { "mdObject", "topObject", "modelObject" }) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        {
+            Object value = Global.getField(dtEditorOrPage, field);
+            String ref = refFromEObjectModel(value);
+            if (ref != null) return ref;
+        }
+        return null;
+    }
+
+    private static String refFromEObjectModel(Object model)
+    {
+        if (!(model instanceof EObject)) return null;
+        String best = null;
+        for (EObject o = (EObject) model; o != null; o = o.eContainer())
+        {
+            String ref = eObjectToFullName(o);
+            if (ref == null) continue;
+            if (best == null || ref.length() > best.length()) best = ref;
+        }
+        return best;
+    }
+
+    private static String refFromEmbeddedEditor(IEditorPart embedded)
+    {
+        if (embedded == null) return null;
+        return refFromEditorInput(embedded.getEditorInput());
     }
 
     private static String refFromEditorInput(IEditorInput input)
@@ -557,7 +620,22 @@ public class GetRef extends AbstractHandler
             if (p.length < 4 || p[3].isEmpty()) return base + "." + sectionRu; //$NON-NLS-1$
             return base + "." + sectionRu + "." + stripFileExt(p[3]); //$NON-NLS-1$ //$NON-NLS-2$
         }
+        String nested = pathToFullNameFromNestedFolders(p, base);
+        if (nested != null) return nested;
         return base;
+    }
+
+    /** Ищет Templates/Forms/… не только в p[2] (глубокий путь к файлу макета). */
+    private static String pathToFullNameFromNestedFolders(String[] p, String base)
+    {
+        for (int i = 2; i < p.length - 1; i++)
+        {
+            String sectionRu = SUBFOLDER_TO_RU.get(p[i]);
+            if (sectionRu == null) continue;
+            String item = stripFileExt(p[i + 1]);
+            if (!item.isEmpty()) return base + "." + sectionRu + "." + item; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        return null;
     }
 
     private static String withExt(String ext, String name) { return ext != null ? ext + " " + name : name; } //$NON-NLS-1$

@@ -2,7 +2,9 @@ package tormozit;
 
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.NullProgressMonitor;
+import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.jface.text.IInformationControlCreator;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
 import org.eclipse.jface.text.contentassist.ICompletionProposalExtension;
@@ -15,12 +17,16 @@ import org.eclipse.jface.text.contentassist.IContextInformation;
 import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
-import org.eclipse.swt.widgets.Control;
-import org.eclipse.swt.widgets.Shell;
 
-public class SmartCompletionProposal implements 
-    ICompletionProposal, 
+/**
+ * Обёртка proposal с подсветкой и фильтрацией через {@link SmartCodeMatcher}.
+ */
+public class SmartCompletionProposal implements
+    ICompletionProposal,
+    ICompletionProposalExtension,
+    ICompletionProposalExtension2,
     ICompletionProposalExtension3,
+    ICompletionProposalExtension4,
     ICompletionProposalExtension5,
     ICompletionProposalExtension6
 {
@@ -33,7 +39,12 @@ public class SmartCompletionProposal implements
         this.matcher = matcher;
     }
 
-    public ICompletionProposal getDelegate() { return delegate; }
+    public ICompletionProposal getDelegate()
+    {
+        return delegate;
+    }
+
+    // ---- ICompletionProposal ------------------------------------------------
 
     @Override
     public StyledString getStyledDisplayString()
@@ -43,17 +54,113 @@ public class SmartCompletionProposal implements
             return new StyledString(display != null ? display : "");
 
         StyledString result = new StyledString(display);
-        for (SmartMatcher.HighlightRange range : matcher.getHighlightRanges(display))
-        {
-            result.setStyle(range.offset, range.length, StyledString.QUALIFIER_STYLER);
-        }
+        SmartMatchHighlight.applyRanges(result, matcher.getHighlightRanges(display));
         return result;
     }
-    @Override public String getDisplayString() { return delegate.getDisplayString(); }
-    @Override public Image getImage() { return delegate.getImage(); }
-    @Override public Point getSelection(IDocument document) { return delegate.getSelection(document); }
-    @Override public IContextInformation getContextInformation() { return delegate.getContextInformation(); }
-    @Override public void apply(IDocument document) { delegate.apply(document); }
+
+    @Override
+    public String getDisplayString()
+    {
+        return delegate.getDisplayString();
+    }
+
+    @Override
+    public Image getImage()
+    {
+        return delegate.getImage();
+    }
+
+    @Override
+    public Point getSelection(IDocument document)
+    {
+        return delegate.getSelection(document);
+    }
+
+    @Override
+    public IContextInformation getContextInformation()
+    {
+        return delegate.getContextInformation();
+    }
+
+    @Override
+    public void apply(IDocument document)
+    {
+        delegate.apply(document);
+    }
+
+    // ---- ICompletionProposalExtension ---------------------------------------
+
+    @Override
+    public void apply(IDocument document, char trigger, int offset)
+    {
+        if (delegate instanceof ICompletionProposalExtension)
+            ((ICompletionProposalExtension) delegate).apply(document, trigger, offset);
+        else
+            delegate.apply(document);
+    }
+
+    @Override
+    public boolean isValidFor(IDocument document, int offset)
+    {
+        return matchesFilter(document, offset, null);
+    }
+
+    @Override
+    public char[] getTriggerCharacters()
+    {
+        if (delegate instanceof ICompletionProposalExtension)
+            return ((ICompletionProposalExtension) delegate).getTriggerCharacters();
+        return null;
+    }
+
+    @Override
+    public int getContextInformationPosition()
+    {
+        if (delegate instanceof ICompletionProposalExtension)
+            return ((ICompletionProposalExtension) delegate).getContextInformationPosition();
+        return -1;
+    }
+
+    // ---- ICompletionProposalExtension2 --------------------------------------
+
+    @Override
+    public void apply(ITextViewer viewer, char trigger, int stateMask, int offset)
+    {
+        if (delegate instanceof ICompletionProposalExtension2)
+            ((ICompletionProposalExtension2) delegate).apply(viewer, trigger, stateMask, offset);
+        else if (viewer != null && viewer.getDocument() != null)
+            apply(viewer.getDocument(), trigger, offset);
+    }
+
+    @Override
+    public void selected(ITextViewer viewer, boolean smartToggle)
+    {
+        if (delegate instanceof ICompletionProposalExtension2)
+            ((ICompletionProposalExtension2) delegate).selected(viewer, smartToggle);
+    }
+
+    @Override
+    public void unselected(ITextViewer viewer)
+    {
+        if (delegate instanceof ICompletionProposalExtension2)
+            ((ICompletionProposalExtension2) delegate).unselected(viewer);
+    }
+
+    @Override
+    public boolean validate(IDocument document, int offset, DocumentEvent event)
+    {
+        return matchesFilter(document, offset, event);
+    }
+
+    // ---- ICompletionProposalExtension4 --------------------------------------
+
+    @Override
+    public boolean isAutoInsertable()
+    {
+        return false;
+    }
+
+    // ---- ICompletionProposalExtension3 / 5 / 6 ------------------------------
 
     @Override
     public String getAdditionalProposalInfo()
@@ -62,8 +169,10 @@ public class SmartCompletionProposal implements
         {
             Object info = ((ICompletionProposalExtension5) delegate)
                 .getAdditionalProposalInfo(new NullProgressMonitor());
-            if (info instanceof String) return (String) info;
-            if (info instanceof StyledString) return ((StyledString) info).getString();
+            if (info instanceof String)
+                return (String) info;
+            if (info instanceof StyledString)
+                return ((StyledString) info).getString();
             return info != null ? info.toString() : null;
         }
         return delegate.getAdditionalProposalInfo();
@@ -80,19 +189,33 @@ public class SmartCompletionProposal implements
     @Override
     public Object getAdditionalProposalInfo(IProgressMonitor monitor)
     {
-        return ((ICompletionProposalExtension5) delegate).getAdditionalProposalInfo(monitor);
+        if (delegate instanceof ICompletionProposalExtension5)
+            return ((ICompletionProposalExtension5) delegate).getAdditionalProposalInfo(monitor);
+        return null;
     }
 
     @Override
     public CharSequence getPrefixCompletionText(IDocument document, int completionOffset)
     {
-        return ((ICompletionProposalExtension3) delegate).getPrefixCompletionText(document, completionOffset);
+        if (delegate instanceof ICompletionProposalExtension3)
+            return ((ICompletionProposalExtension3) delegate)
+                .getPrefixCompletionText(document, completionOffset);
+        return null;
     }
 
     @Override
     public int getPrefixCompletionStart(IDocument document, int completionOffset)
     {
-        return ((ICompletionProposalExtension3) delegate).getPrefixCompletionStart(document, completionOffset);
+        if (delegate instanceof ICompletionProposalExtension3)
+            return ((ICompletionProposalExtension3) delegate)
+                .getPrefixCompletionStart(document, completionOffset);
+        return completionOffset;
     }
 
+    // ---- фильтрация popup ----------------------------------------------------
+
+    private boolean matchesFilter(IDocument document, int offset, DocumentEvent event)
+    {
+        return SmartContentAssistProcessor.proposalMatchesFilter(delegate, document, offset, event);
+    }
 }

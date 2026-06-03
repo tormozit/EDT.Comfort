@@ -51,23 +51,48 @@ public class SmartCodeMatcher extends SmartMatcher {
             }
             return crosses ? 5 : 15;
         }
+        AdaptiveWordMatch match = matchAdaptiveWords(partText);
+        if (!match.matched)
+            return 0;
+        int gap = match.lastWord - match.firstWord + 1;
+        boolean consecutive = (gap == match.matchedWords);
+        if (match.firstWord == 0) {
+            return consecutive ? 35 : 20;
+        }
+        return consecutive ? 18 : 8;
+    }
+
+    /** Результат посимвольного сопоставления фильтра по словам CamelCase. */
+    private static final class AdaptiveWordMatch {
+        boolean matched;
+        int firstWord = -1;
+        int lastWord = -1;
+        int matchedWords;
+        final List<HighlightRange> ranges = new ArrayList<>();
+    }
+
+    /**
+     * Один проход: фильтр по префиксам слов + хвост только как startsWith следующего слова.
+     * Позиции подсветки — {@code wordStarts[i] + offset} внутри слова.
+     */
+    private AdaptiveWordMatch matchAdaptiveWords(String partText) {
+        AdaptiveWordMatch result = new AdaptiveWordMatch();
         List<String> words = splitWords(partText);
-        if (words.isEmpty()) return 0;
+        if (words.isEmpty())
+            return result;
+
+        int[] wordStarts = buildWordStarts(words);
         String remaining = fullPattern;
-        int matchedWords = 0;
-        int first = -1, last = -1;
         int w = 0;
         while (!remaining.isEmpty() && w < words.size()) {
-            String word = words.get(w).toLowerCase();
-            int common = 0;
-            int max = Math.min(remaining.length(), word.length());
-            while (common < max && remaining.charAt(common) == word.charAt(common)) {
-                common++;
-            }
+            String wordLower = words.get(w).toLowerCase();
+            int common = commonPrefixLength(remaining, wordLower);
             if (common > 0) {
-                if (first == -1) first = w;
-                last = w;
-                matchedWords++;
+                if (result.firstWord == -1)
+                    result.firstWord = w;
+                result.lastWord = w;
+                result.matchedWords++;
+                result.ranges.add(new HighlightRange(wordStarts[w], common));
                 remaining = remaining.substring(common);
                 w++;
             } else {
@@ -75,25 +100,40 @@ public class SmartCodeMatcher extends SmartMatcher {
             }
         }
         if (!remaining.isEmpty()) {
-            int start = (last == -1) ? 0 : last + 1;
+            int start = (result.lastWord == -1) ? 0 : result.lastWord + 1;
             for (int i = start; i < words.size(); i++) {
-                if (words.get(i).toLowerCase().contains(remaining)) {
-                    if (first == -1) first = i;
-                    last = i;
-                    matchedWords++;
+                String wordLower = words.get(i).toLowerCase();
+                if (wordLower.startsWith(remaining)) {
+                    if (result.firstWord == -1)
+                        result.firstWord = i;
+                    result.lastWord = i;
+                    result.matchedWords++;
+                    result.ranges.add(new HighlightRange(wordStarts[i], remaining.length()));
                     remaining = "";
                     break;
                 }
             }
         }
-        if (!remaining.isEmpty()) return 0;
-        int gap = last - first + 1;
-        boolean consecutive = (gap == matchedWords);
-        if (first == 0) {
-            return consecutive ? 35 : 20;
-        } else {
-            return consecutive ? 18 : 8;
+        result.matched = remaining.isEmpty();
+        return result;
+    }
+
+    private static int[] buildWordStarts(List<String> words) {
+        int[] starts = new int[words.size()];
+        int pos = 0;
+        for (int i = 0; i < words.size(); i++) {
+            starts[i] = pos;
+            pos += words.get(i).length();
         }
+        return starts;
+    }
+
+    private static int commonPrefixLength(String a, String b) {
+        int max = Math.min(a.length(), b.length());
+        int n = 0;
+        while (n < max && a.charAt(n) == b.charAt(n))
+            n++;
+        return n;
     }
 
     private List<String> splitWords(String text) {
@@ -129,34 +169,7 @@ public class SmartCodeMatcher extends SmartMatcher {
             return ranges;
         }
 
-        // Адаптивное разбиение по словам
-        List<String> words = splitWords(namePart);
-        String remaining = lowerFull;
-        int pos = 0;
-        for (String word : words) {
-            if (remaining.isEmpty()) break;
-            String wordLower = word.toLowerCase();
-            int common = 0;
-            int max = Math.min(remaining.length(), word.length());
-            while (common < max && remaining.charAt(common) == wordLower.charAt(common)) {
-                common++;
-            }
-            if (common > 0) {
-                ranges.add(new HighlightRange(pos, common));
-                remaining = remaining.substring(common);
-            }
-            pos += word.length();
-            if (pos < namePart.length() && isDelimiter(namePart.charAt(pos))) {
-                pos++; // пропускаем разделитель
-            }
-        }
-        // Хвост
-        if (!remaining.isEmpty()) {
-            int tailIdx = lowerName.indexOf(remaining);
-            if (tailIdx >= 0) {
-                ranges.add(new HighlightRange(tailIdx, remaining.length()));
-            }
-        }
-        return ranges;
+        AdaptiveWordMatch match = matchAdaptiveWords(namePart);
+        return match.matched ? match.ranges : ranges;
     }
 }

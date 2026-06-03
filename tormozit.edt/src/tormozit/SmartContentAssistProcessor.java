@@ -4,33 +4,32 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 
+import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
 import org.eclipse.jface.text.contentassist.IContentAssistProcessor;
 import org.eclipse.jface.text.contentassist.IContextInformation;
 import org.eclipse.jface.text.contentassist.IContextInformationValidator;
+import org.eclipse.swt.graphics.Point;
 
 /**
- * Обёртка над оригинальным {@link IContentAssistProcessor}.
+ * Обёртка над {@link IContentAssistProcessor}.
  *
- * <p><b>Кэширование:</b> при первом вызове {@code computeCompletionProposals}
- * запрашивает полный список у delegate и сохраняет его. При последующих
- * вызовах, если фильтр изменился на ±1 символ (ввод/удаление), берёт кэш,
- * фильтрует и сортирует — <b>delegate не вызывается</b>.
+ * <p><b>Полный список</b> (п.1): при пустом фильтре — кэш delegate без smart-фильтрации.
+ * <p><b>Фильтр+сорт+цвет</b> (п.2): при непустом фильтре — {@link #filterAndSort} по кэшу.
  */
 public class SmartContentAssistProcessor implements IContentAssistProcessor
 {
     private static final int NAME_WEIGHT = 10;
     private static final int PARAM_WEIGHT = 1;
+    private static final ICompletionProposal[] EMPTY = new ICompletionProposal[0];
 
     private final IContentAssistProcessor delegate;
     private final String activationChars;
 
-    // Кэш полного списка
-    private ICompletionProposal[] cachedProposals;
-    private String cachedFilter = "";
-    private boolean cacheValid = false;
+    private ICompletionProposal[] fullListCache = EMPTY;
+    private boolean fullListReady = false;
 
     public SmartContentAssistProcessor(IContentAssistProcessor delegate, String activationChars)
     {
@@ -43,129 +42,165 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         return delegate;
     }
 
-    /** Сбрасывает кэш полного списка proposals. */
     public void invalidateCache()
     {
-        cacheValid = false;
-        cachedProposals = null;
-        cachedFilter = "";
+        fullListReady = false;
+        fullListCache = EMPTY;
+        ContentAssistDebug.log("invalidateCache"); //$NON-NLS-1$
+    }
+
+    /** Заполняет кэш полного списка (вызов при старте сессии assist). */
+    public void warmFullListCache(ITextViewer viewer)
+    {
+        ContentAssistDebug.log("warmFullListCache"); //$NON-NLS-1$
+        loadFullList(viewer);
     }
 
     @Override
     public ICompletionProposal[] computeCompletionProposals(ITextViewer viewer, int offset)
     {
-        String filter = computeFilter(viewer, offset);
+        int caret = resolveCaretOffset(viewer, offset);
+        String filter = computeIdentifierFilter(viewer == null ? null : viewer.getDocument(), caret);
+        SmartFilterTracker.setCurrentFilter(filter);
 
-        // Быстрый путь: контекст тот же, только фильтр изменился
-        if (cacheValid && cachedProposals != null && isIncrementalChange(filter))
+        if (filter.isEmpty())
         {
-            cachedFilter = filter;
-            return filterAndSort(cachedProposals, filter);
+            if (!fullListReady)
+                loadFullList(viewer);
+            ContentAssistDebug.log("compute FULL offset=" + offset + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + " count=" + fullListCache.length //$NON-NLS-1$
+                + ContentAssistDebug.sampleTypes(fullListCache, 2));
+            return fullListCache;
         }
 
-        // Медленный путь: перезапрашиваем полный список у delegate
-        ICompletionProposal[] raw = delegate.computeCompletionProposals(viewer, offset);
+        if (!fullListReady)
+            loadFullList(viewer);
+        ICompletionProposal[] out = filterAndSort(fullListCache, filter);
+        ContentAssistDebug.log("compute FILTER offset=" + offset + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
+            + " filter=\"" + filter + "\" cache=" + fullListCache.length //$NON-NLS-1$ //$NON-NLS-2$
+            + " out=" + out.length + ContentAssistDebug.sampleTypes(out, 3)); //$NON-NLS-1$
+        return out;
+    }
+
+    // ---- Точка вызова алгоритма для popup.validate / isValidFor ----------------
+
+    static boolean proposalMatchesFilter(ICompletionProposal proposal, IDocument document,
+                                         int offset, DocumentEvent event)
+    {
+        String filter = computeActiveFilter(document, offset, event);
+        if (filter.isEmpty())
+            return true;
+        boolean ok = computeScore(new SmartCodeMatcher(filter), proposal) > 0;
+        ContentAssistDebug.logValidate(ok, filter, proposal, offset);
+        return ok;
+    }
+
+    // ---- Кэш полного списка ---------------------------------------------------
+
+    private void loadFullList(ITextViewer viewer)
+    {
+        int caret = resolveCaretOffset(viewer, 0);
+        ICompletionProposal[] raw = delegate.computeCompletionProposals(viewer, caret);
         if (raw == null || raw.length == 0)
         {
-            cacheValid = false;
-            return raw;
+            fullListCache = EMPTY;
+            fullListReady = raw != null;
+            ContentAssistDebug.log("loadFullList EMPTY rawNull=" + (raw == null) + " caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
         }
-
-        cachedProposals = raw;
-        cachedFilter = filter;
-        cacheValid = true;
-        return filterAndSort(raw, filter);
+        fullListCache = unwrapProposals(raw);
+        fullListReady = true;
+        ContentAssistDebug.log("loadFullList count=" + fullListCache.length + " caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
-    // -------------------------------------------------------------------------
-    // Проверка контекста: фильтр изменился на ±1 символ (ввод/удаление)
-    // -------------------------------------------------------------------------
-
-    private boolean isIncrementalChange(String newFilter)
+    private static int resolveCaretOffset(ITextViewer viewer, int fallback)
     {
-        if (newFilter.equals(cachedFilter))
-            return true; // фильтр не изменился (стрелки и т.п.)
-
-        int diff = newFilter.length() - cachedFilter.length();
-        if (diff == 1 && newFilter.startsWith(cachedFilter))
-            return true; // добавлен 1 символ
-
-        if (diff == -1 && cachedFilter.startsWith(newFilter))
-            return true; // удалён 1 символ (Backspace)
-
-        return false;
+        if (viewer != null)
+        {
+            try
+            {
+                if (viewer.getTextWidget() != null)
+                {
+                    int caret = viewer.getTextWidget().getCaretOffset();
+                    if (caret >= 0)
+                        return caret;
+                }
+                Point sel = viewer.getSelectedRange();
+                if (sel != null && sel.x >= 0)
+                    return sel.x + Math.max(0, sel.y);
+            }
+            catch (Exception ignored) {}
+        }
+        return fallback;
     }
 
-    // -------------------------------------------------------------------------
-    // Фильтрация + сортировка
-    // -------------------------------------------------------------------------
+    // ---- Фильтрация + сортировка + обёртка ------------------------------------
 
     private ICompletionProposal[] filterAndSort(ICompletionProposal[] raw, String filter)
     {
-        if (filter.isEmpty())
-        {
-            // При пустом фильтре возвращаем полный список (delegate уже отсортировал)
-            return raw;
-        }
+        if (raw == null || raw.length == 0)
+            return EMPTY;
 
         SmartCodeMatcher matcher = new SmartCodeMatcher(filter);
-
-        // Фильтрация: оставляем только score > 0
         List<ICompletionProposal> filtered = new ArrayList<>(raw.length);
         int[] scores = new int[raw.length];
 
-        for (int i = 0; i < raw.length; i++)
+        for (ICompletionProposal p : raw)
         {
-            int score = computeScore(matcher, raw[i]);
+            int score = computeScore(matcher, p);
             if (score > 0)
             {
                 scores[filtered.size()] = score;
-                filtered.add(raw[i]);
+                filtered.add(p);
             }
         }
 
         if (filtered.isEmpty())
-            return new ICompletionProposal[0];
+            return EMPTY;
 
-        // Сортировка по убыванию score, затем алфавит
         Integer[] idx = new Integer[filtered.size()];
-        for (int i = 0; i < idx.length; i++) idx[i] = i;
+        for (int i = 0; i < idx.length; i++)
+            idx[i] = i;
 
         final int[] s = Arrays.copyOf(scores, filtered.size());
-
         Arrays.sort(idx, (a, b) -> {
             if (s[a] != s[b])
                 return Integer.compare(s[b], s[a]);
             return compareDisplayStrings(filtered.get(a), filtered.get(b));
         });
 
-        // Оборачиваем в SmartCompletionProposal с подсветкой
         ICompletionProposal[] result = new ICompletionProposal[idx.length];
         for (int i = 0; i < idx.length; i++)
-        {
-            ICompletionProposal original = filtered.get(idx[i]);
-            result[i] = new SmartCompletionProposal(original, matcher);
-        }
+            result[i] = new SmartCompletionProposal(filtered.get(idx[i]), matcher);
         return result;
     }
 
-    // -------------------------------------------------------------------------
-    // Утилиты (доступны извне)
-    // -------------------------------------------------------------------------
-
-    /** Совокупная премия предложения при заданном matcher-е. */
     static int computeScore(SmartCodeMatcher matcher, ICompletionProposal proposal)
     {
-        String display = displayString(proposal);
-        if (display == null || display.isEmpty()) return 0;
-        return matcher.computeNamePremium(display) * NAME_WEIGHT
-             + matcher.computeParamPremium(display) * PARAM_WEIGHT;
+        String display = displayString(unwrapProposal(proposal));
+        if (display == null || display.isEmpty())
+            return 0;
+        int name = matcher.computeNamePremium(display);
+        if (name <= 0)
+            return 0;
+        return name * NAME_WEIGHT + matcher.computeParamPremium(display) * PARAM_WEIGHT;
     }
 
-    /**
-     * Полное сравнение двух предложений: сначала по score (убывание),
-     * потом алфавитно. Используется из {@link SmartCodeProposalSorter}.
-     */
+    static ICompletionProposal unwrapProposal(ICompletionProposal proposal)
+    {
+        while (proposal instanceof SmartCompletionProposal)
+            proposal = ((SmartCompletionProposal) proposal).getDelegate();
+        return proposal;
+    }
+
+    private static ICompletionProposal[] unwrapProposals(ICompletionProposal[] raw)
+    {
+        ICompletionProposal[] result = new ICompletionProposal[raw.length];
+        for (int i = 0; i < raw.length; i++)
+            result[i] = unwrapProposal(raw[i]);
+        return result;
+    }
+
     public static int compareProposals(SmartCodeMatcher matcher,
                                        ICompletionProposal p1,
                                        ICompletionProposal p2)
@@ -191,24 +226,21 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         return (p == null) ? null : p.getDisplayString();
     }
 
-    // -------------------------------------------------------------------------
-    // Вычисление фильтра
-    // -------------------------------------------------------------------------
-
-    /**
-     * Вычисляет фильтр: идём назад от курсора до первого символа,
-     * не являющегося частью BSL-идентификатора.
-     */
-    private String computeFilter(ITextViewer viewer, int offset)
+    static String computeIdentifierFilter(IDocument doc, int offset)
     {
         try
         {
-            IDocument doc = viewer.getDocument();
-            if (doc == null || offset <= 0) return "";
+            if (doc == null || offset < 0)
+                return "";
             int start = offset;
             while (start > 0 && isFilterChar(doc.getChar(start - 1)))
                 start--;
-            return (start < offset) ? doc.get(start, offset - start) : "";
+            if (start < offset)
+                return doc.get(start, offset - start);
+            int end = offset;
+            while (end < doc.getLength() && isFilterChar(doc.getChar(end)))
+                end++;
+            return (end > offset) ? doc.get(offset, end - offset) : "";
         }
         catch (Exception e)
         {
@@ -216,17 +248,29 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         }
     }
 
-    /**
-     * Символы, допустимые внутри BSL-идентификатора.
-     * Точка исключена намеренно: после точки начинается новый контекст
-     * (Объект.Метод), фильтр берётся только от последнего сегмента.
-     */
-    private boolean isFilterChar(char c)
+    static String computeActiveFilter(IDocument doc, int offset, DocumentEvent event)
+    {
+        int caret = offset;
+        if (event != null)
+        {
+            try
+            {
+                String text = event.getText();
+                int eventEnd = event.getOffset() + (text != null ? text.length() : 0);
+                caret = Math.max(caret, eventEnd);
+            }
+            catch (Exception ignored) {}
+        }
+        String filter = computeIdentifierFilter(doc, caret);
+        if (!filter.isEmpty())
+            return filter;
+        return computeIdentifierFilter(doc, offset);
+    }
+
+    static boolean isFilterChar(char c)
     {
         return Character.isLetterOrDigit(c) || c == '_';
     }
-
-    // ---- Делегирование остальных методов ------------------------------------
 
     @Override
     public IContextInformation[] computeContextInformation(ITextViewer viewer, int offset)
@@ -237,7 +281,8 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     @Override
     public char[] getCompletionProposalAutoActivationCharacters()
     {
-        if (activationChars != null) return activationChars.toCharArray();
+        if (activationChars != null)
+            return activationChars.toCharArray();
         return delegate.getCompletionProposalAutoActivationCharacters();
     }
 
