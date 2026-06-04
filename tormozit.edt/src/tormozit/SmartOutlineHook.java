@@ -59,6 +59,9 @@ public class SmartOutlineHook implements IStartup {
     }
 
     private static void tryPatchOutline(Shell shell) {
+        if (shell.getData(PATCHED_KEY) != null)
+            return;
+
         Text filterText = findTextWidget(shell);
         Tree treeWidget = findTreeWidget(shell);
 
@@ -217,29 +220,12 @@ private static void applySmartSearch(TreeViewer viewer, Text filterText) {
             }
         });
 
-        // МОДЕРНИЗИРОВАННЫЙ ФИЛЬТР СОБЫТИЙ: Добавлена поддержка SWT.PAGE_DOWN и SWT.PAGE_UP
-        Display display = filterText.getDisplay();
-        Listener arrowFilter = new Listener() {
-            @Override
-            public void handleEvent(Event event) {
-                if (event.widget == filterText && 
-                    (event.keyCode == SWT.ARROW_DOWN || event.keyCode == SWT.ARROW_UP || 
-                     event.keyCode == SWT.PAGE_DOWN || event.keyCode == SWT.PAGE_UP)) {
-                    
-                    navigateTree(viewer.getTree(), event.keyCode);
-                    event.type = SWT.None;
-                }
-            }
-        };
-        
-        display.addFilter(SWT.KeyDown, arrowFilter);
+        FilterFieldListNavigation.installTreeNavigation(filterText, viewer.getTree());
 
+        Display display = filterText.getDisplay();
         filterText.addDisposeListener(e -> {
             if (pendingFilterTask[0] != null && !display.isDisposed()) {
                 display.timerExec(-1, pendingFilterTask[0]);
-            }
-            if (!display.isDisposed()) {
-                display.removeFilter(SWT.KeyDown, arrowFilter);
             }
         });
     }
@@ -267,115 +253,6 @@ private static void applySmartSearch(TreeViewer viewer, Text filterText) {
         TreeItem[] children = item.getItems();
         if (children.length == 0) return item;
         return getFirstTerminalItem(children[0]);
-    }
-    
-    private static void navigateTree(Tree tree, int keyCode) {
-        if (tree == null || tree.isDisposed() || tree.getItemCount() == 0) return;
-
-        TreeItem[] selection = tree.getSelection();
-        TreeItem targetItem = null;
-
-        // Вычисляем высоту "страницы" динамически на основе размеров виджета на экране
-        int itemHeight = tree.getItemHeight();
-        int pageSteps = (itemHeight > 0) ? (tree.getClientArea().height / itemHeight) : 10;
-        if (pageSteps <= 0) pageSteps = 10; // На всякий случай дефолтное значение
-
-        if (selection.length == 0) {
-            // Если ничего не выбрано
-            if (keyCode == SWT.ARROW_DOWN || keyCode == SWT.PAGE_DOWN) {
-                targetItem = tree.getItem(0);
-            } else {
-                targetItem = getLastVisibleItem(tree);
-            }
-        } else {
-            TreeItem current = selection[0];
-            
-            if (keyCode == SWT.ARROW_DOWN) {
-                targetItem = getNextVisibleItem(tree, current);
-            } else if (keyCode == SWT.ARROW_UP) {
-                targetItem = getPreviousVisibleItem(tree, current);
-            } else if (keyCode == SWT.PAGE_DOWN) {
-                // Шагаем вниз на размер одной видимой страницы
-                targetItem = current;
-                for (int i = 0; i < pageSteps; i++) {
-                    TreeItem next = getNextVisibleItem(tree, targetItem);
-                    if (next == null) break; // Уперлись в самый низ списка
-                    targetItem = next;
-                }
-            } else if (keyCode == SWT.PAGE_UP) {
-                // Шагаем вверх на размер одной видимой страницы
-                targetItem = current;
-                for (int i = 0; i < pageSteps; i++) {
-                    TreeItem prev = getPreviousVisibleItem(tree, targetItem);
-                    if (prev == null) break; // Уперлись в самый верх списка
-                    targetItem = prev;
-                }
-            }
-        }
-
-        if (targetItem != null && !targetItem.isDisposed()) {
-            tree.setSelection(targetItem);
-            tree.showItem(targetItem);
-            
-            Event selectionEvent = new Event();
-            selectionEvent.widget = tree;
-            selectionEvent.item = targetItem;
-            tree.notifyListeners(SWT.Selection, selectionEvent);
-        }
-    }
-
-    private static TreeItem getNextVisibleItem(Tree tree, TreeItem item) {
-        if (item.getExpanded() && item.getItemCount() > 0) {
-            return item.getItem(0);
-        }
-        return getNextSiblingOrParentSibling(tree, item);
-    }
-
-    private static TreeItem getNextSiblingOrParentSibling(Tree tree, TreeItem item) {
-        TreeItem parent = item.getParentItem();
-        TreeItem[] siblings = (parent == null) ? tree.getItems() : parent.getItems();
-        
-        int index = indexOfItem(siblings, item);
-        if (index >= 0 && index < siblings.length - 1) {
-            return siblings[index + 1];
-        }
-        
-        if (parent != null) {
-            return getNextSiblingOrParentSibling(tree, parent);
-        }
-        return null;
-    }
-
-    private static TreeItem getPreviousVisibleItem(Tree tree, TreeItem item) {
-        TreeItem parent = item.getParentItem();
-        TreeItem[] siblings = (parent == null) ? tree.getItems() : parent.getItems();
-        
-        int index = indexOfItem(siblings, item);
-        if (index > 0) {
-            TreeItem prevSibling = siblings[index - 1];
-            return getLastVisibleDescendant(prevSibling);
-        }
-        return parent;
-    }
-
-    private static TreeItem getLastVisibleDescendant(TreeItem item) {
-        if (item.getExpanded() && item.getItemCount() > 0) {
-            return getLastVisibleDescendant(item.getItem(item.getItemCount() - 1));
-        }
-        return item;
-    }
-
-    private static TreeItem getLastVisibleItem(Tree tree) {
-        if (tree.getItemCount() == 0) return null;
-        TreeItem lastRoot = tree.getItem(tree.getItemCount() - 1);
-        return getLastVisibleDescendant(lastRoot);
-    }
-
-    private static int indexOfItem(TreeItem[] items, TreeItem item) {
-        for (int i = 0; i < items.length; i++) {
-            if (items[i] == item) return i;
-        }
-        return -1;
     }
     
     private static ILabelProvider createLabelProviderAdapter(IBaseLabelProvider rawLp) {

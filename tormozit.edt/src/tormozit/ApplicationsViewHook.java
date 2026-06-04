@@ -472,48 +472,48 @@ public class ApplicationsViewHook implements IStartup
         ToolItem[] launchRef     = { null };
         tb.add(new Separator());
 
-        // Кнопка «Запустить конфигуратор» — дублирует одноимённый пункт контекстного меню
-        tb.add(new ContributionItem()
-        {
-            @Override public void fill(ToolBar bar, int index)
-            {
-                if (bar != null && !bar.isDisposed()) {
-                    bar.setFont(org.eclipse.jface.resource.JFaceResources.getDialogFont());
-                }
-                ToolItem item = index >= 0
-                    ? new ToolItem(bar, SWT.PUSH, index)
-                    : new ToolItem(bar, SWT.PUSH);
-                item.setText("Запустить конфигуратор"); //$NON-NLS-1$
-                item.setToolTipText("Запустить конфигуратор 1С для выбранной инфобазы"); //$NON-NLS-1$
-                item.setEnabled(false);
-                item.addSelectionListener(new SelectionAdapter()
-                {
-                    @Override public void widgetSelected(SelectionEvent e)
-                    {
-                        // "com._1c.g5.v8.dt.internal.platform.services.ui.infobases.actions.LaunchDesignerAction"
-                        IStructuredSelection sel = (IStructuredSelection) viewer.getSelection();
-                        if (sel.size() == 1)
-                        {
-                            disconnectSsh(sel.toList(), viewer);
-                            InfobaseReference infobase = ApplicationsViewHook.getInfobaseFromApplication(sel.getFirstElement());
-                            IProject project = (IProject) Global.getField(sel.getFirstElement(), "project");
-                            String connectionString = IRApplication.buildConnectionString(infobase, true);
-                            RuntimeInstallation runtimeInstallation = ApplicationsViewHook.getRuntimeInstallation(project, infobase);
-                            try
-                            {
-                                Runtime.getRuntime().exec("" + runtimeInstallation.getLocation().getPath() + "1cv8.exe");
-                            }
-                            catch (IOException e1)
-                            {
-                                // TODO Auto-generated catch block
-                                e1.printStackTrace();
-                            }
-                        }
-                    }
-                });
-                launchRef[0] = item;
-            }
-        });
+//        // Кнопка «Запустить конфигуратор» — дублирует одноимённый пункт контекстного меню
+//        tb.add(new ContributionItem()
+//        {
+//            @Override public void fill(ToolBar bar, int index)
+//            {
+//                if (bar != null && !bar.isDisposed()) {
+//                    bar.setFont(org.eclipse.jface.resource.JFaceResources.getDialogFont());
+//                }
+//                ToolItem item = index >= 0
+//                    ? new ToolItem(bar, SWT.PUSH, index)
+//                    : new ToolItem(bar, SWT.PUSH);
+//                item.setText("Запустить конфигуратор"); //$NON-NLS-1$
+//                item.setToolTipText("Запустить конфигуратор 1С для выбранной инфобазы"); //$NON-NLS-1$
+//                item.setEnabled(false);
+//                item.addSelectionListener(new SelectionAdapter()
+//                {
+//                    @Override public void widgetSelected(SelectionEvent e)
+//                    {
+//                        // "com._1c.g5.v8.dt.internal.platform.services.ui.infobases.actions.LaunchDesignerAction"
+//                        IStructuredSelection sel = (IStructuredSelection) viewer.getSelection();
+//                        if (sel.size() == 1)
+//                        {
+//                            disconnectSsh(sel.toList(), viewer);
+//                            InfobaseReference infobase = ApplicationsViewHook.getInfobaseFromApplication(sel.getFirstElement());
+//                            IProject project = (IProject) Global.getField(sel.getFirstElement(), "project");
+//                            String connectionString = IRApplication.buildConnectionString(infobase, true);
+//                            RuntimeInstallation runtimeInstallation = ApplicationsViewHook.getRuntimeInstallation(project, infobase);
+//                            try
+//                            {
+//                                Runtime.getRuntime().exec("" + runtimeInstallation.getLocation().getPath() + "1cv8.exe");
+//                            }
+//                            catch (IOException e1)
+//                            {
+//                                // TODO Auto-generated catch block
+//                                e1.printStackTrace();
+//                            }
+//                        }
+//                    }
+//                });
+//                launchRef[0] = item;
+//            }
+//        });
 
         tb.add(new ContributionItem()
         {

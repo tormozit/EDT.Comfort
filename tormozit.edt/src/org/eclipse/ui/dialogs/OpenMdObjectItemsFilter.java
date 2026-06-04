@@ -3,6 +3,8 @@ package org.eclipse.ui.dialogs;
 import java.util.List;
 import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.ui.dialogs.FilteredItemsSelectionDialog;
+import org.eclipse.ui.dialogs.FilteredItemsSelectionDialog.ItemsFilter;
+
 import tormozit.Global;
 import tormozit.SmartMatcher;
 
@@ -18,11 +20,53 @@ public class OpenMdObjectItemsFilter extends FilteredItemsSelectionDialog.ItemsF
         dialog.super();
         this.dialog = dialog;
         this.labelProvider = labelProvider;
-        this.matcher = new SmartMatcher(pattern);
+        setPattern(pattern);
     }
 
     public void setPattern(String pattern) {
         this.matcher = new SmartMatcher(pattern);
+        syncPatternMatcher();
+    }
+
+    private void syncPatternMatcher() {
+        patternMatcher.setPattern(matcher.isEmpty ? "" : matcher.fullPattern);
+    }
+
+    /**
+     * Нужно ли пропустить перезапуск jobs (как {@code applyFilter} + {@code equalsFilter} в EDT).
+     * Вызывать <b>до</b> {@link #setPattern(String)} — иначе при {@code currentFilter == this}
+     * сравнение всегда true и фильтр замирает после первого символа.
+     */
+    public boolean shouldSkipSchedule(String pattern, Object currentFilter) {
+        if (currentFilter == this) {
+            return patternUnchanged(pattern);
+        }
+        if (currentFilter instanceof ItemsFilter) {
+            String saved = patternMatcher.getPattern();
+            applyPatternToMatcher(pattern);
+            boolean same = equalsFilter((ItemsFilter) currentFilter);
+            patternMatcher.setPattern(saved);
+            return same;
+        }
+        return false;
+    }
+
+    @Override
+    public String getPattern() {
+        return patternMatcher.getPattern();
+    }
+
+    private boolean patternUnchanged(String pattern) {
+        SmartMatcher next = new SmartMatcher(pattern);
+        if (matcher.isEmpty != next.isEmpty) {
+            return false;
+        }
+        return matcher.fullPattern.equals(next.fullPattern);
+    }
+
+    private void applyPatternToMatcher(String pattern) {
+        SmartMatcher next = new SmartMatcher(pattern);
+        patternMatcher.setPattern(next.isEmpty ? "" : next.fullPattern);
     }
 
     @Override
@@ -70,16 +114,6 @@ public class OpenMdObjectItemsFilter extends FilteredItemsSelectionDialog.ItemsF
         Object uriA = Global.invoke(descA, "getEObjectURI");
         Object uriB = Global.invoke(descB, "getEObjectURI");
         return uriA != null && uriA.equals(uriB);
-    }
-
-    @Override
-    public String getPattern() {
-        return matcher.isEmpty ? " " : matcher.fullPattern;
-    }
-
-    @Override
-    public boolean isSubFilter(FilteredItemsSelectionDialog.ItemsFilter filter) {
-        return false;
     }
 
     @Override

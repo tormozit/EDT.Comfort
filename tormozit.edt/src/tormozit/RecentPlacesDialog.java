@@ -306,13 +306,6 @@ public class RecentPlacesDialog extends Dialog
             {
                 switch (e.keyCode)
                 {
-                    case SWT.ARROW_DOWN:
-                    case SWT.ARROW_UP:
-                    case SWT.PAGE_DOWN:
-                    case SWT.PAGE_UP:
-                        navigateList(e.keyCode);
-                        e.doit = false;
-                        break;
                     case SWT.CR:
                     case SWT.KEYPAD_CR:
                         okPressed();
@@ -321,6 +314,12 @@ public class RecentPlacesDialog extends Dialog
                         break;
                 }
             }
+        });
+
+        FilterFieldListNavigation.installTableNavigation(filterText, table, newIdx ->
+        {
+            if (newIdx < filtered.size())
+                listViewer.setSelection(new StructuredSelection(filtered.get(newIdx)));
         });
 
         table.addKeyListener(new KeyAdapter()
@@ -367,32 +366,6 @@ public class RecentPlacesDialog extends Dialog
         }
         finally { cb.dispose(); }
         ToastNotification.show("Скопировано", text, 4000);
-    }
-
-    private void navigateList(int keyCode)
-    {
-        Table table = listViewer.getTable();
-        if (table.getItemCount() == 0) return;
-
-        int idx   = table.getSelectionIndex();
-        int count = table.getItemCount();
-        int itemH = table.getItemHeight();
-        int page  = itemH > 0 ? Math.max(1, table.getClientArea().height / itemH) : 10;
-
-        int newIdx;
-        switch (keyCode)
-        {
-            case SWT.ARROW_DOWN: newIdx = Math.min(idx + 1, count - 1);    break;
-            case SWT.ARROW_UP:   newIdx = Math.max(idx - 1, 0);            break;
-            case SWT.PAGE_DOWN:  newIdx = Math.min(idx + page, count - 1); break;
-            case SWT.PAGE_UP:    newIdx = Math.max(idx - page, 0);         break;
-            default: return;
-        }
-
-        table.setSelection(newIdx);
-        table.showSelection();
-        if (newIdx < filtered.size())
-            listViewer.setSelection(new StructuredSelection(filtered.get(newIdx)));
     }
 
     public RecentPlaces.Entry getSelectedEntry()

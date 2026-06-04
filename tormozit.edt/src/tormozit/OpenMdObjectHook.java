@@ -6,17 +6,16 @@ import org.eclipse.jface.viewers.ILabelProvider;
 
 import java.lang.reflect.Field;
 
-import org.eclipse.core.runtime.jobs.IJobChangeEvent;
 import org.eclipse.core.runtime.jobs.Job;
-import org.eclipse.core.runtime.jobs.JobChangeAdapter;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.swt.SWT;
-import org.eclipse.swt.widgets.Control;
+import org.eclipse.jface.viewers.TableViewer;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.dialogs.FilteredItemsSelectionDialog;
@@ -65,21 +64,19 @@ public class OpenMdObjectHook implements IStartup {
         try {
             if (dialog == null) return;
 
-            // --- 1. Text фильтра ---
             Object patternControlObj = Global.invoke(dialog, "getPatternControl");
             if (!(patternControlObj instanceof Text)) {
-                Global.log("OpenMdObjectHook: getPatternControl returned " + patternControlObj);
+                OpenMdObjectDebug.log("patch FAIL getPatternControl=" + patternControlObj);
                 return;
             }
             Text filterText = (Text) patternControlObj;
 
-            // --- 2. Текущий LabelProvider ---
             Object currentBaseLpObj = Global.getField(dialog, "mdObjectLabelProvider");
             if (currentBaseLpObj == null) {
                 currentBaseLpObj = Global.invoke(dialog, "getListLabelProvider");
             }
             if (!(currentBaseLpObj instanceof IBaseLabelProvider)) {
-                Global.log("OpenMdObjectHook: labelProvider not found: " + currentBaseLpObj);
+                OpenMdObjectDebug.log("patch FAIL labelProvider=" + currentBaseLpObj);
                 return;
             }
             IBaseLabelProvider currentBaseLp = (IBaseLabelProvider) currentBaseLpObj;
@@ -90,65 +87,44 @@ public class OpenMdObjectHook implements IStartup {
             ILabelDecorator currentDecorator = (currentBaseLp instanceof ILabelDecorator)
                     ? (ILabelDecorator) currentBaseLp : null;
 
-            // --- 3. Умный LabelProvider ---
             OpenMdObjectLabelProvider smartLp = new OpenMdObjectLabelProvider(
                     currentLp, currentStyled, currentDecorator);
-            smartLp.setPattern(filterText.getText());
 
             Global.invoke(dialog, "setListLabelProvider", smartLp);
             Global.invoke(dialog, "setListSelectionLabelDecorator", smartLp);
 
-            // --- 4. Компаратор ---
             OpenMdObjectComparator comparator = new OpenMdObjectComparator(smartLp);
-            comparator.setMatcher(new SmartMatcher(filterText.getText()));
             setFieldExactClass(dialog, FilteredItemsSelectionDialog.class, "itemsComparator", comparator);
             setFieldExactClass(dialog, FilteredItemsSelectionDialog.class, "fItemsComparator", comparator);
 
-            // --- 5. Фильтр ---
             org.eclipse.ui.dialogs.OpenMdObjectItemsFilter smartFilter =
                     new org.eclipse.ui.dialogs.OpenMdObjectItemsFilter(
                             (FilteredItemsSelectionDialog) dialog, smartLp, filterText.getText());
 
-            // --- 6. Удаляем стандартный modify listener EDT ---
             for (Listener l : filterText.getListeners(SWT.Modify)) {
                 filterText.removeListener(SWT.Modify, l);
             }
+            for (Listener l : filterText.getListeners(SWT.KeyDown)) {
+                filterText.removeListener(SWT.KeyDown, l);
+            }
 
-            // --- 7. Debounce ---
+            Table listTable = getDialogTable(dialog);
+            if (listTable != null) {
+                FilterFieldListNavigation.installTableNavigation(filterText, listTable);
+            }
+
             final Runnable[] pendingTask = new Runnable[1];
             final Display display = filterText.getDisplay();
-            final boolean[] isSettingFakeText = new boolean[1];
 
             filterText.addModifyListener(e -> {
-                if (isSettingFakeText[0]) return;
-
                 String pattern = filterText.getText();
+                OpenMdObjectDebug.log("modify text=\"" + pattern + "\" len=" + pattern.length());
                 if (pendingTask[0] != null) display.timerExec(-1, pendingTask[0]);
 
                 pendingTask[0] = () -> {
                     if (filterText.isDisposed()) return;
-
-                    smartFilter.setPattern(pattern);
-                    smartLp.setPattern(pattern);
-                    comparator.setMatcher(new SmartMatcher(pattern));
-
-                    if (pattern.trim().isEmpty()) {
-                        // Пустой фильтр: фейковый пробел для прохода через matchItem
-                        isSettingFakeText[0] = true;
-                        try {
-                            filterText.setText(" ");
-                            Global.invoke(dialog, "applyFilter");
-                            Global.setField(dialog, "filter", smartFilter);
-                            setFieldExactClass(dialog, FilteredItemsSelectionDialog.class, "filter", smartFilter);
-                        } finally {
-                            isSettingFakeText[0] = false;
-                        }
-                        restoreTextAfterJob(dialog, filterText, display, isSettingFakeText);
-                    } else {
-                        Global.invoke(dialog, "applyFilter");
-                        Global.setField(dialog, "filter", smartFilter);
-                        setFieldExactClass(dialog, FilteredItemsSelectionDialog.class, "filter", smartFilter);
-                    }
+                    OpenMdObjectDebug.log("debounce fire text=\"" + filterText.getText() + "\"");
+                    applySmartFilter(dialog, smartFilter, smartLp, comparator, filterText.getText());
                 };
                 display.timerExec(150, pendingTask[0]);
             });
@@ -159,75 +135,90 @@ public class OpenMdObjectHook implements IStartup {
                 }
             });
 
-            // === ПРИ ОТКРЫТИИ ===
-            // Подменяем компоненты, но НЕ вызываем applyFilter — пусть EDT сам запустит
-            // фильтрацию когда будет готово. Но если фильтр уже пустой, форсируем показ истории.
-            Global.setField(dialog, "filter", smartFilter);
-            setFieldExactClass(dialog, FilteredItemsSelectionDialog.class, "filter", smartFilter);
-
-            if (filterText.getText().trim().isEmpty()) {
-                // Форсируем показ истории через фейковый пробел
-                display.timerExec(300, () -> {
-                    if (filterText.isDisposed()) return;
-                    if (!filterText.getText().trim().isEmpty()) return; // пользователь уже что-то ввел
-
-                    isSettingFakeText[0] = true;
-                    try {
-                        filterText.setText(" ");
-                        Global.invoke(dialog, "applyFilter");
-                        Global.setField(dialog, "filter", smartFilter);
-                        setFieldExactClass(dialog, FilteredItemsSelectionDialog.class, "filter", smartFilter);
-                    } finally {
-                        isSettingFakeText[0] = false;
-                    }
-                    restoreTextAfterJob(dialog, filterText, display, isSettingFakeText);
-                });
-            }
+            applySmartFilter(dialog, smartFilter, smartLp, comparator, filterText.getText());
 
             shell.setData(PATCHED_KEY, Boolean.TRUE);
-            Global.log("OpenMdObjectHook: patched successfully");
+            OpenMdObjectDebug.log("patch OK initial text=\"" + filterText.getText() + "\"");
 
             Label target = Global.findLabelByText(shell, "Выберите элемент");
             if (target != null && !target.isDisposed()) {
                 target.setText("Фильтр разбивается на слова пробелами и ищется вхождение всех слов одновременно");
-                target.getParent().layout(); // пересчитать layout
+                target.getParent().layout();
             }
 
         } catch (Exception e) {
+            OpenMdObjectDebug.log("patch ERROR: " + e.getMessage());
             e.printStackTrace();
         }
     }
 
-    private static void restoreTextAfterJob(Object dialog, Text filterText,
-                                             Display display, boolean[] isSettingFakeText) {
-        Object refreshJob = Global.getField(dialog, "refreshJob");
-        if (refreshJob == null) refreshJob = Global.getField(dialog, "fRefreshJob");
+    /**
+     * Запуск фильтрации без {@code applyFilter}/{@code createFilter} — один экземпляр
+     * {@link org.eclipse.ui.dialogs.OpenMdObjectItemsFilter} на весь цикл EDT jobs.
+     */
+    private static void applySmartFilter(Object dialog,
+            org.eclipse.ui.dialogs.OpenMdObjectItemsFilter smartFilter,
+            OpenMdObjectLabelProvider smartLp,
+            OpenMdObjectComparator comparator,
+            String pattern) {
+        Object currentFilter = Global.getField(dialog, "filter");
+        String patBefore = smartFilter.getPattern();
+        boolean skip = smartFilter.shouldSkipSchedule(pattern, currentFilter);
 
-        Runnable restore = () -> {
-            if (!filterText.isDisposed() && " ".equals(filterText.getText())) {
-                isSettingFakeText[0] = true;
-                try {
-                    filterText.setText("");
-                } finally {
-                    isSettingFakeText[0] = false;
-                }
-            }
-        };
+        OpenMdObjectDebug.log("applySmartFilter text=\"" + pattern + "\" smartPatBefore=\"" + patBefore //$NON-NLS-1$
+                + "\" current=" + OpenMdObjectDebug.filterDesc(currentFilter) + " skip=" + skip); //$NON-NLS-1$
 
-        if (refreshJob instanceof Job) {
-            Job job = (Job) refreshJob;
-            int state = job.getState();
-            if (state == Job.RUNNING || state == Job.WAITING) {
-                job.addJobChangeListener(new JobChangeAdapter() {
-                    @Override
-                    public void done(IJobChangeEvent event) {
-                        display.asyncExec(restore);
-                    }
-                });
-                return;
+        smartFilter.setPattern(pattern);
+        smartLp.setPattern(pattern);
+        comparator.setMatcher(new SmartMatcher(pattern));
+
+        if (skip) {
+            OpenMdObjectDebug.log("applySmartFilter SKIP schedule (pattern unchanged for EDT)");
+            return;
+        }
+
+        Job filterHistoryJob = getJobField(dialog, "filterHistoryJob", "fFilterHistoryJob");
+        Job filterJob = getJobField(dialog, "filterJob", "fFilterJob");
+        OpenMdObjectDebug.log("applySmartFilter cancel jobs fh=" + OpenMdObjectDebug.jobState(filterHistoryJob) //$NON-NLS-1$
+                + " fj=" + OpenMdObjectDebug.jobState(filterJob)); //$NON-NLS-1$
+        if (filterHistoryJob != null) filterHistoryJob.cancel();
+        if (filterJob != null) filterJob.cancel();
+
+        Object contentProvider = Global.getField(dialog, "contentProvider");
+        if (contentProvider != null) {
+            Global.invoke(contentProvider, "stopReloadingCache");
+        }
+
+        Global.setField(dialog, "filter", smartFilter);
+        setFieldExactClass(dialog, FilteredItemsSelectionDialog.class, "filter", smartFilter);
+
+        if (filterHistoryJob != null) {
+            filterHistoryJob.schedule();
+            OpenMdObjectDebug.log("applySmartFilter SCHEDULED filterHistoryJob smartPat=\"" //$NON-NLS-1$
+                    + smartFilter.getPattern() + "\""); //$NON-NLS-1$
+        } else {
+            OpenMdObjectDebug.log("applySmartFilter WARN filterHistoryJob not found");
+        }
+    }
+
+    private static Table getDialogTable(Object dialog)
+    {
+        Object viewerObj = Global.getField(dialog, "tableViewer");
+        if (viewerObj == null)
+            viewerObj = Global.getField(dialog, "fTableViewer");
+        if (viewerObj instanceof TableViewer)
+            return ((TableViewer) viewerObj).getTable();
+        return null;
+    }
+
+    private static Job getJobField(Object dialog, String... fieldNames) {
+        for (String name : fieldNames) {
+            Object job = Global.getField(dialog, name);
+            if (job instanceof Job) {
+                return (Job) job;
             }
         }
-        display.asyncExec(restore);
+        return null;
     }
 
     private static void setFieldExactClass(Object obj, Class<?> exactClass, String fieldName, Object value) {
@@ -237,7 +228,7 @@ public class OpenMdObjectHook implements IStartup {
             f.set(obj, value);
         } catch (NoSuchFieldException ignored) {
         } catch (Exception e) {
-            Global.log("OpenMdObjectHook: failed to set " + exactClass.getName() + "." + fieldName + ": " + e);
+            OpenMdObjectDebug.log("setField FAIL " + exactClass.getName() + "." + fieldName + ": " + e.getMessage());
         }
     }
 }
