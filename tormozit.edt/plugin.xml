@@ -9,6 +9,7 @@
     <startup class="tormozit.DataCompositionSchemaEditorHook"/> 
     <startup class="tormozit.MoxelEditorHook"/>
     <startup class="tormozit.BSLEditorMenuHook"/> 
+    <startup class="tormozit.TextEditorRightClickCaretHook"/>
     <startup class="tormozit.SmartOutlineHook"/> 
     <startup class="tormozit.OpenMdObjectHook"/>
     <startup class="tormozit.MenuTooltipStatusLineHook"/>
