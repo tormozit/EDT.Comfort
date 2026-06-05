@@ -1,24 +1,25 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <feature
-      id="tormozit.edt.feature"
-      label="Tormozit EDT"
+      id="tormozit.comfort.feature"
+      label="EDT Comfort"
       version="1.0.0.10-qualifier"
-      provider-name="Tormozit">
+      provider-name="tormozit">
 
-   <description url="http://www.example.com/description">
-      [Enter Feature Description here.]
+   <description url="">
+      Удобства и интеграция традиционных редакторов для EDT 1С
    </description>
 
-   <copyright url="http://www.example.com/copyright">
-      [Enter Copyright Description here.]
+   <copyright url="">
+      (c) tormozit
    </copyright>
 
-   <license url="http://www.example.com/license">
-      [Enter License Description here.]
+   <license url="">
+      MIT
    </license>
 
    <plugin
-         id="tormozit.edt"
-         version="0.0.0"/>
+         id="tormozit.comfort"
+         version="0.0.0"
+         unpack="false"/>
 
 </feature>

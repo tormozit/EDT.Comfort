@@ -523,7 +523,7 @@ public class ApplicationsViewHook implements IStartup
                     ? new ToolItem(bar, SWT.DROP_DOWN, index)
                     : new ToolItem(bar, SWT.DROP_DOWN);
                 item.setText("Подключение"); //$NON-NLS-1$
-                item.setToolTipText("Управление подключениями инфобаз (Tormozit)"); //$NON-NLS-1$
+                item.setToolTipText("Управление подключениями инфобаз (Comfort)"); //$NON-NLS-1$
                 item.setEnabled(false);
                 item.addSelectionListener(new SelectionAdapter()
                 {

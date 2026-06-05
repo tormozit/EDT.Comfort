@@ -63,27 +63,27 @@
     <command
         id="tormozit.edt.compareConf.openObject"
         name="Открыть объект"
-        description="Открыть выбранный объект конфигурации в редакторе (Tormozit)"/>
+        description="Открыть выбранный объект конфигурации в редакторе (Comfort)"/>
      <command
         id="tormozit.edt.compareConf.showInNavigator"
         name="Показать в навигаторе"
-        description="Показать выбранный объект конфигурации в навигаторе (Tormozit)"/>
+        description="Показать выбранный объект конфигурации в навигаторе (Comfort)"/>
      <command
             id="tormozit.edt.GoToDefinition"
             name="Перейти к определению"
-            description="Перейти к определению (Tormozit)"/>
+            description="Перейти к определению (Comfort)"/>
      <command
             id="tormozit.edt.JumpFromClipboard"
             name="Перейти по ссылке из буфера"
-            description="Перейти по ссылке из буфера обмена (Tormozit)"/>
+            description="Перейти по ссылке из буфера обмена (Comfort)"/>
     <command
             id="tormozit.edt.CopyRef"
             name="Копировать ссылку"
-            description="Копировать ссылку на текущий объект или строку модуля (Tormozit)"/>
+            description="Копировать ссылку на текущий объект или строку модуля (Comfort)"/>
     <command
             id="tormozit.edt.RecentPlaces"
             name="Последние места"
-            description="Открыть список последних посещённых методов и объектов метаданных (Tormozit)"/>
+            description="Открыть список последних посещённых методов и объектов метаданных (Comfort)"/>
   </extension>
 
   <extension point="org.eclipse.ui.handlers">
@@ -129,19 +129,19 @@
             <command
               commandId="tormozit.edt.JumpFromClipboard"
               label = "Перейти"
-              tooltip="Перейти по ссылке из буфера обмена (Tormozit)"
+              tooltip="Перейти по ссылке из буфера обмена (Comfort)"
               style="push">
             </command>
             <command
               commandId="tormozit.edt.CopyRef"
               label = "Ссылка"
-              tooltip="Копировать ссылку на текущий объект или строку модуля (Tormozit)"
+              tooltip="Копировать ссылку на текущий объект или строку модуля (Comfort)"
               style="push">
             </command>
             <command
               commandId="tormozit.edt.RecentPlaces"
               label = "Последние"
-              tooltip="Последние посещённые методы и объекты метаданных (Tormozit)"
+              tooltip="Последние посещённые методы и объекты метаданных (Comfort)"
               style="push">
             </command>
          </toolbar>

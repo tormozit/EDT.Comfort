@@ -1,9 +1,9 @@
 Manifest-Version: 1.0
 Bundle-ManifestVersion: 2
-Bundle-Name: Tormozit EDT plugin
-Bundle-SymbolicName: tormozit.edt;singleton:=true
+Bundle-SymbolicName: tormozit.comfort;singleton:=true
+Bundle-Name: EDT Comfort
 Bundle-Vendor: Tormozit
-Bundle-Version: 1.0.0.11-qualifier
+Bundle-Version: 1.0.0.10-qualifier
 Bundle-Activator: tormozit.Activator
 Bundle-ActivationPolicy: lazy
 Bundle-Localization: plugin

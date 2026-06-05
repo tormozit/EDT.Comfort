@@ -154,7 +154,7 @@ public class DataCompositionSchemaEditorHook implements IStartup
                 return; // Проверяем еще раз перед самой вставкой
             ToolItem item = new ToolItem(toolbar, SWT.PUSH);
             item.setText("Редактор ИР"); 
-            item.setToolTipText("Редактировать в консоли компоновки данных ИР (Tormozit)");
+            item.setToolTipText("Редактировать в консоли компоновки данных ИР (Comfort)");
             item.addListener(SWT.Selection, event -> {
                 Object editor = Global.getField(page, "editor");
                 Object BmModel = Global.getField(editor, "bmModel");

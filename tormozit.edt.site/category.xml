@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <site>
-  <category-def name="tormozit.edt" label="Tormozit EDT">
-    <description>Плагин для EDT: открытие объектов из редактора сравнения.</description>
+  <category-def name="tormozit.comfort" label="EDT Comfort">
+    <description>Удобства и интеграция традиционных редакторов для EDT 1С</description>
   </category-def>
   <!-- version="0.0.0" означает "последняя доступная версия" -->
-  <feature id="tormozit.edt.feature" version="0.0.0">
-    <category name="tormozit.edt"/>
+  <feature id="tormozit.comfort.feature" version="0.0.0">
+    <category name="tormozit.comfort"/>
   </feature>
 </site>
