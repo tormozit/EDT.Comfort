@@ -6,7 +6,7 @@
 
   <groupId>tormozit</groupId>
   <artifactId>tormozit.edt.parent</artifactId>
-  <version>1.0.0-SNAPSHOT</version>
+  <version>1.0.0.10-SNAPSHOT</version>
   <packaging>pom</packaging>
 
   <prerequisites>
@@ -76,7 +76,7 @@
           <artifactId>tycho-packaging-plugin</artifactId>
           <version>${tycho.version}</version>
           <configuration>
-            <format>'v'yyyyMMddHHmm</format>
+            <format>yyyyMMddHHmm</format>
           </configuration>
         </plugin>
         <plugin>
@@ -89,7 +89,7 @@
           <artifactId>tycho-p2-repository-plugin</artifactId>
           <version>${tycho.version}</version>
           <configuration>
-            <finalName>tormozit.edt</finalName>
+            <finalName>tormozit.comfort</finalName>
           </configuration>
         </plugin>
         <plugin>

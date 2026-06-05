@@ -1,1 +1,11 @@
 /EDT-Tormozit.zip
+
+# PDE update site build output (не коммитить — пересобирается локально)
+tormozit.edt.site/features/
+tormozit.edt.site/plugins/
+tormozit.edt.site/content.jar
+tormozit.edt.site/artifacts.jar
+tormozit.edt.site/*.zip
+
+# Maven/Tycho build output
+**/target/
