@@ -160,12 +160,23 @@ public class GoToDefinition extends AbstractHandler
             newFile = new File(transportFolder + "\\НовыйТекст.txt"); //$NON-NLS-1$
             oldFile = new File(transportFolder + "\\СтарыйТекст.txt"); //$NON-NLS-1$
         }
-        else
+        else if (event.getCommand().getId()=="tormozit.edt.JumpFromClipboard")
         {
             command = getClipboardText(shell);
             if (command == null || command.isBlank())
             {
                 ToastNotification.show("Перейти к определению", "Буфер обмена пуст.", 4000);
+                return null;
+            }
+            command = command.strip();
+        }
+        else
+        {
+            command = getTextFromActiveEditor(page);
+            if (command == null || command.isBlank())
+            {
+                ToastNotification.show("Перейти к определению",
+                    "Не удалось получить текст из активного редактора.", 4000);
                 return null;
             }
             command = command.strip();
@@ -894,6 +905,170 @@ public class GoToDefinition extends AbstractHandler
                 s += " [" + extension + "]"; //$NON-NLS-1$ //$NON-NLS-2$
             return s;
         }
+    }
+
+    // =======================================================================
+    // ТЕКСТ ИЗ АКТИВНОГО РЕДАКТОРА (основная команда без аргументов)
+    // =======================================================================
+
+    /**
+     * Пытается получить целевой текст из активного редактора по следующей цепочке
+     * приоритетов:
+     *
+     * <ol>
+     *   <li><b>BSL-редактор — выделение</b>: если пользователь выделил текст
+     *       в BSL-редакторе, возвращается выделенный фрагмент.</li>
+     *   <li><b>BSL-редактор — слово/выражение под курсором</b>: если курсор стоит
+     *       внутри слова, извлекается максимально длинная цепочка идентификаторов
+     *       через точку (например {@code Справочники.Валюты}).</li>
+     *   <li><b>Активный SWT-виджет — текстовое поле или ячейка</b>: если фокус
+     *       стоит в {@link org.eclipse.swt.widgets.Text} или
+     *       {@link org.eclipse.swt.widgets.Combo}, возвращается выделенный текст,
+     *       а при его отсутствии — всё содержимое поля.</li>
+     * </ol>
+     *
+     * @return текст для перехода или {@code null} / пустая строка если ничего не найдено
+     */
+    private static String getTextFromActiveEditor(IWorkbenchPage page)
+    {
+        if (page == null) return null;
+
+        // 1. BSL-редактор
+        IEditorPart editor = page.getActiveEditor();
+        BslXtextEditor bslEditor = GetRef.getActiveBslEditor(
+                editor != null ? editor : page.getActivePart());
+        if (bslEditor != null)
+        {
+            String text = getTextFromBslEditor(bslEditor);
+            if (text != null && !text.isBlank())
+                return text.substring(0, 1000);
+        }
+
+        // 2. Активный SWT-виджет (ячейка таблицы, поле ввода формы МД и т. п.)
+        return getTextFromFocusedWidget();
+    }
+
+    /**
+     * Извлекает текст из BSL-редактора.
+     * Если есть непустое выделение — возвращает его.
+     * Иначе — цепочку идентификаторов через точку вокруг позиции курсора.
+     */
+    private static String getTextFromBslEditor(BslXtextEditor editor)
+    {
+        ISourceViewer viewer = editor.getInternalSourceViewer();
+        if (viewer == null) return null;
+        IDocument doc = viewer.getDocument();
+        if (doc == null) return null;
+
+        Object sel = viewer.getSelectionProvider().getSelection();
+        if (!(sel instanceof ITextSelection)) return null;
+        ITextSelection textSel = (ITextSelection) sel;
+
+        // 1a. Есть непустое выделение — берём его напрямую
+        String selected = textSel.getText();
+        if (selected != null && !selected.isBlank())
+            return selected.strip();
+
+        // 1b. Слово/идентификатор под курсором
+        try
+        {
+            return extractQualifiedNameAt(doc, textSel.getOffset());
+        }
+        catch (BadLocationException e)
+        {
+            return null;
+        }
+    }
+
+    /**
+     * Извлекает максимально длинный составной идентификатор (цепочку через точку)
+     * вокруг позиции {@code offset} в документе.
+     *
+     * <p>Символы идентификатора: буквы (включая кириллицу), цифры, {@code _}, {@code .}.
+     * Точка засчитывается только если с обеих сторон от неё стоят буквы/цифры/_
+     * (то есть конечная точка отбрасывается).
+     *
+     * <p>Примеры:
+     * <pre>
+     *   "Справочники.Валюты.НайтиПоКоду()" → "Справочники.Валюты.НайтиПоКоду"
+     *   "СправочникСсылка.Валюты"           → "СправочникСсылка.Валюты"
+     * </pre>
+     */
+    private static String extractQualifiedNameAt(IDocument doc, int offset)
+            throws BadLocationException
+    {
+        String text = doc.get();
+        int len = text.length();
+        if (offset < 0 || offset >= len) return null;
+
+        // Расширяем влево
+        int start = offset;
+        while (start > 0 && isQNameChar(text.charAt(start - 1)))
+            start--;
+
+        // Расширяем вправо
+        int end = offset;
+        while (end < len && isQNameChar(text.charAt(end)))
+            end++;
+
+        if (start >= end) return null;
+
+        // Убираем ведущие/завершающие точки
+        String raw = text.substring(start, end);
+        raw = raw.replaceAll("^\\.+|\\.+$", ""); //$NON-NLS-1$
+
+        return raw.isBlank() ? null : raw;
+    }
+
+    /** Символы, входящие в составной идентификатор 1С (включая точку-разделитель). */
+    private static boolean isQNameChar(char c)
+    {
+        return Character.isLetterOrDigit(c) || c == '_' || c == '.';
+    }
+
+    /**
+     * Получает текст из SWT-виджета в фокусе.
+     * Поддерживает {@link org.eclipse.swt.widgets.Text} и
+     * {@link org.eclipse.swt.widgets.Combo}.
+     * Возвращает выделение (если есть) или всё содержимое поля.
+     */
+    private static String getTextFromFocusedWidget()
+    {
+        org.eclipse.swt.widgets.Display display =
+                org.eclipse.swt.widgets.Display.getDefault();
+        if (display == null || display.isDisposed()) 
+            return null;
+        // getFocusControl() должен вызываться из UI-потока; мы уже в нём.
+        org.eclipse.swt.widgets.Control focused = display.getFocusControl();
+        if (focused == null || focused.isDisposed()) 
+            return null;
+        if (focused instanceof org.eclipse.swt.widgets.Text)
+        {
+            org.eclipse.swt.widgets.Text text = (org.eclipse.swt.widgets.Text) focused;
+            String sel = text.getSelectionText();
+            if (sel != null && !sel.isBlank()) 
+                return sel.strip();
+            return text.getText().strip();
+        }
+        if (focused instanceof org.eclipse.swt.widgets.Combo)
+        {
+            org.eclipse.swt.widgets.Combo combo = (org.eclipse.swt.widgets.Combo) focused;
+            // Combo не предоставляет getSelectionText(), используем bounds
+            org.eclipse.swt.graphics.Point pt = combo.getSelection();
+            String all = combo.getText();
+            if (pt.x < pt.y && pt.y <= all.length())
+                return all.substring(pt.x, pt.y).strip();
+            return all.strip();
+        }
+        if (focused instanceof org.eclipse.swt.custom.StyledText)
+        {
+            org.eclipse.swt.custom.StyledText st = (org.eclipse.swt.custom.StyledText) focused;
+            String sel = st.getSelectionText();
+            if (sel != null && !sel.isBlank()) 
+                return sel.strip();
+            return st.getText();
+        }
+        return null;
     }
 
     // =======================================================================

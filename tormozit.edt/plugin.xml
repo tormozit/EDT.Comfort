@@ -11,6 +11,7 @@
     <startup class="tormozit.BSLEditorMenuHook"/> 
     <startup class="tormozit.TextEditorRightClickCaretHook"/>
     <startup class="tormozit.SmartOutlineHook"/> 
+    <startup class="tormozit.NavigatorFilterHook"/>
     <startup class="tormozit.OpenMdObjectHook"/>
     <startup class="tormozit.MenuTooltipStatusLineHook"/>
     <startup class="tormozit.RecentPlacesTracker"/>
@@ -37,7 +38,7 @@
           sequence="M1+T">
     </key>
     <key
-          commandId="tormozit.edt.JumpToRef"
+          commandId="tormozit.edt.GoToDefinition"
           contextId="org.eclipse.ui.contexts.window"
           schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
           sequence="M1+F12">
@@ -66,8 +67,12 @@
         name="Показать в навигаторе"
         description="Показать выбранный объект конфигурации в навигаторе (Tormozit)"/>
      <command
-            id="tormozit.edt.JumpToRef"
-            name="Перейти по ссылке"
+            id="tormozit.edt.GoToDefinition"
+            name="Перейти к определению"
+            description="Перейти к определению (Tormozit)"/>
+     <command
+            id="tormozit.edt.JumpFromClipboard"
+            name="Перейти по ссылке из буфера"
             description="Перейти по ссылке из буфера обмена (Tormozit)"/>
     <command
             id="tormozit.edt.CopyRef"
@@ -100,9 +105,13 @@
     </handler>
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.GoToDefinition"
-        commandId="tormozit.edt.JumpToRef">
+        commandId="tormozit.edt.GoToDefinition">
      </handler>
     <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.GoToDefinition"
+        commandId="tormozit.edt.JumpFromClipboard">
+     </handler>  
+     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.GetRef"
         commandId="tormozit.edt.CopyRef">
      </handler>
@@ -116,7 +125,7 @@
       <menuContribution locationURI="toolbar:org.eclipse.ui.main.toolbar?after=additions">
          <toolbar id="tormozit.edt.toolbar.mainGroup">
             <command
-              commandId="tormozit.edt.JumpToRef"
+              commandId="tormozit.edt.JumpFromClipboard"
               label = "Перейти"
               tooltip="Перейти по ссылке из буфера обмена (Tormozit)"
               style="push">

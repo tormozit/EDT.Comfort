@@ -1,6 +1,9 @@
 package tormozit;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Set;
+import org.eclipse.jface.viewers.AbstractTreeViewer;
 import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.TreeViewer;
@@ -50,6 +53,88 @@ public class SmartOutlineFilter extends ViewerFilter {
         return paramPremiumCache;
     }
 
+    /**
+     * Верхний уровень дерева всегда раскрыт.
+     * При непустом фильтре дополнительно раскрываются ветки на пути к совпадениям.
+     */
+    public void applyTreeExpansion(AbstractTreeViewer viewer)
+    {
+        if (viewer == null)
+            return;
+        Object cp = viewer.getContentProvider();
+        if (!(cp instanceof ITreeContentProvider))
+            return;
+        ITreeContentProvider tcp = (ITreeContentProvider) cp;
+        Object input = viewer.getInput();
+        if (input == null)
+            return;
+        Set<Object> toExpand = new LinkedHashSet<>();
+        collectTopLevelExpansion(viewer, toExpand);
+        if (!matcher.isEmpty)
+        {
+            for (Object root : tcp.getElements(input))
+                collectExpandPath(tcp, root, toExpand);
+        }
+        if (!toExpand.isEmpty())
+            viewer.setExpandedElements(toExpand.toArray());
+    }
+
+    /** Только корневые узлы (проекты). */
+    void collectRootExpansion(AbstractTreeViewer viewer, Set<Object> toExpand)
+    {
+        if (viewer == null || toExpand == null)
+            return;
+        Object cp = viewer.getContentProvider();
+        if (!(cp instanceof ITreeContentProvider))
+            return;
+        ITreeContentProvider tcp = (ITreeContentProvider) cp;
+        Object input = viewer.getInput();
+        if (input == null)
+            return;
+        for (Object root : tcp.getElements(input))
+            toExpand.add(root);
+    }
+
+    /** Корневые узлы и их прямые потомки (группы типов) — при открытии без фильтра. */
+    void collectTopLevelExpansion(AbstractTreeViewer viewer, Set<Object> toExpand)
+    {
+        collectRootExpansion(viewer, toExpand);
+        if (viewer == null || toExpand == null)
+            return;
+        Object cp = viewer.getContentProvider();
+        if (!(cp instanceof ITreeContentProvider))
+            return;
+        ITreeContentProvider tcp = (ITreeContentProvider) cp;
+        Object input = viewer.getInput();
+        if (input == null)
+            return;
+        for (Object root : tcp.getElements(input))
+        {
+            for (Object child : tcp.getChildren(root))
+                toExpand.add(child);
+        }
+    }
+
+    private boolean collectExpandPath(ITreeContentProvider cp, Object element, Set<Object> toExpand)
+    {
+        String text = labelProvider.getText(element);
+        if (!cp.hasChildren(element))
+            return matcher.matches(text);
+
+        boolean descendant = false;
+        for (Object child : cp.getChildren(element))
+        {
+            if (collectExpandPath(cp, child, toExpand))
+                descendant = true;
+        }
+        if (descendant || matcher.matches(text))
+        {
+            toExpand.add(element);
+            return true;
+        }
+        return false;
+    }
+
     @Override
     public boolean select(Viewer viewer, Object parentElement, Object element) {
         boolean hasChildren = false;
@@ -66,7 +151,7 @@ public class SmartOutlineFilter extends ViewerFilter {
             if (!matcher.matches(text))
                 return false;
         }
-        else if (pruneEmptyBranches && treeViewer != null)
+        else if (pruneEmptyBranches && !matcher.isEmpty && treeViewer != null)
         {
             if (!matcher.matches(text) && !hasMatchingDescendant(treeViewer, element))
                 return false;

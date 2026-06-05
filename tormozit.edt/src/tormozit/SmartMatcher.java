@@ -20,6 +20,11 @@ public class SmartMatcher {
         }
     }
 
+    public String[] getFragments()
+    {
+        return fragments.clone();
+    }
+
     public boolean matches(String text) {
         if (isEmpty) return true;
         if (text == null) return false;
@@ -31,6 +36,22 @@ public class SmartMatcher {
             }
         }
         return true;
+    }
+
+    /** Фрагменты, которые есть в {@code text}, но отсутствуют в {@code other}. */
+    public List<String> fragmentsInNotIn(String text, String other)
+    {
+        List<String> result = new ArrayList<>();
+        if (isEmpty || text == null)
+            return result;
+        String lowerText = text.toLowerCase();
+        String lowerOther = other != null ? other.toLowerCase() : ""; //$NON-NLS-1$
+        for (String frag : fragments)
+        {
+            if (lowerText.contains(frag) && !lowerOther.contains(frag))
+                result.add(frag);
+        }
+        return result;
     }
 
     /**

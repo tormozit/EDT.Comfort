@@ -150,9 +150,10 @@ public class MoxelEditorHook implements IStartup
 
     private void applyPatchToEditorPage(DtGranularEditor<?> granularEditor, DtGranularEditorEmbeddedEditorPage<?> page)
     {
-        MoxelEditor moxelEditor = (MoxelEditor) page.getEmbeddedEditor();
-        if (moxelEditor==null)
+        IEditorPart embeddedEditor = page.getEmbeddedEditor();
+        if (!(embeddedEditor instanceof MoxelEditor))
             return;
+        MoxelEditor moxelEditor = (MoxelEditor) embeddedEditor;
         Control partControl = page.getPartControl();
         if (!(partControl instanceof Composite))
             return;
