@@ -20,7 +20,6 @@ jobs:
           distribution: 'temurin'
 
       - name: Sync version
-        id: version
         run: pwsh site/sync-version.ps1
 
       - name: Remove stale target/ module if present
@@ -28,6 +27,14 @@ jobs:
 
       - name: Build with Maven
         run: mvn -B clean package
+
+      - name: Read built version
+        id: version
+        run: |
+          JAR=$(ls site/target/repository/features/tormozit.comfort.feature_*.jar | head -1)
+          VER=$(basename "$JAR" .jar | sed 's/tormozit.comfort.feature_//')
+          echo "Built version: $VER"
+          echo "release_version=$VER" >> $GITHUB_OUTPUT
 
       - name: Checkout existing gh-pages
         uses: actions/checkout@v4.2.2
@@ -63,5 +70,5 @@ jobs:
           clean: true
           clean-exclude: |
             [0-9]*.[0-9]*.[0-9]*.[0-9]*/
-            [0-9]*.[0-9]*.[0-9]*.[0-9]*.[0-9]*/
+            [0-9]*.[0-9]*.[0-9]*.[0-9]*-[0-9]*/
           commit-message: "Add update site ${{ steps.version.outputs.release_version }}"

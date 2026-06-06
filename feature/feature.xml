@@ -2,7 +2,7 @@
 <feature
       id="tormozit.comfort.feature"
       label="EDT Comfort"
-      version="1.0.0.10.20260606134344"
+      version="1.0.0.10-qualifier"
       provider-name="tormozit">
 
    <description url="">

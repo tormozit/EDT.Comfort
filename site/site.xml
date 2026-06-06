@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <site>
-   <feature url="features/tormozit.comfort.feature_1.0.0.10.20260606134344.jar" id="tormozit.comfort.feature" version="0.0.0">
+   <feature url="features/tormozit.comfort.feature_1.0.0.10-qualifier.jar" id="tormozit.comfort.feature" version="0.0.0">
       <category name="tormozit.comfort"/>
    </feature>
    <category-def name="tormozit.comfort" label="EDT Comfort"/>
