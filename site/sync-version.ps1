@@ -22,7 +22,8 @@ if (-not $release) {
 
 # PDE и Tycho сами подставляют метку времени вместо "qualifier" при каждой сборке
 $qualifier = "$release-qualifier"
-Write-Host "Sync version: $qualifier"
+$releaseSnapshot = "$release-SNAPSHOT"
+Write-Host "Sync version: $qualifier (Maven: $releaseSnapshot)"
 
 function Set-Utf8NoBomContent {
     param(
@@ -79,7 +80,18 @@ $siteTextNew = [regex]::Replace(
 )
 [System.IO.File]::WriteAllText($sitePath, $siteTextNew, (New-Object System.Text.UTF8Encoding($false)))
 
-# site/pom.xml
+# pom.xml — версия parent и ссылки на parent во всех модулях
+$parentVersionPattern = '(<artifactId>comfort\.parent</artifactId>\s*<version>)[^<]+(</version>)'
+Get-ChildItem -Path $Root -Recurse -Filter 'pom.xml' | ForEach-Object {
+    $pomText = [System.IO.File]::ReadAllText($_.FullName, [System.Text.Encoding]::UTF8)
+    if ([regex]::IsMatch($pomText, $parentVersionPattern)) {
+        $pomNew = [regex]::Replace($pomText, $parentVersionPattern, "`${1}$releaseSnapshot`${2}")
+        [System.IO.File]::WriteAllText($_.FullName, $pomNew, (New-Object System.Text.UTF8Encoding($false)))
+        Write-Host "Updated: $($_.FullName) parent version -> $releaseSnapshot"
+    }
+}
+
+# site/pom.xml — версия модуля site
 $sitePomPath = Join-Path $PSScriptRoot 'pom.xml'
 $sitePomText = [System.IO.File]::ReadAllText($sitePomPath, [System.Text.Encoding]::UTF8)
 $sitePomPattern = '(<artifactId>comfort\.site</artifactId>\s*<version>)[^<]+(</version>)'
