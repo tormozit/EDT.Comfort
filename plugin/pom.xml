@@ -11,6 +11,6 @@
     <relativePath>../pom.xml</relativePath> 
   </parent>
   
-  <artifactId>comfort</artifactId>
+  <artifactId>tormozit.comfort</artifactId>
   <packaging>eclipse-plugin</packaging>
 </project>

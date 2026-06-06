@@ -4,7 +4,7 @@
 #
 # GitHub Actions:
 #   - Тег v1.0.0.10 создаётся один раз при переходе на новую линейку версии.
-#   - Повторные сборки без нового тега: Actions → Deploy p2 Update Site → Run workflow (ветка master).
+#   - Повторные сборки: push в master или Actions → Run workflow (ветка master).
 #   - При смене линейки: измените comfort.release, создайте тег v<новая_версия>, запушьте.
 #
 # Локально: Build All в site (Eclipse) или site\build.bat (Maven).
