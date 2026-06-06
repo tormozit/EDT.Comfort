@@ -9,4 +9,6 @@
 #
 # URL: https://tormozit.github.io/EDT.Comfort/  (composite, все версии)
 #      https://tormozit.github.io/EDT.Comfort/<версия>/  (одна версия)
+#
+# Один раз: GitHub → Settings → Pages → Deploy from branch → gh-pages / (root)
 comfort.release=1.0.0.10

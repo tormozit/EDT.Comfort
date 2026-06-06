@@ -75,13 +75,26 @@ jobs:
       - name: Generate composite metadata
         run: python3 .github/workflows/generate_composite.py
 
-      - name: Deploy to GitHub Pages
-        uses: JamesIves/github-pages-deploy-action@v4.7.3
-        with:
-          folder: deploy
-          branch: gh-pages
-          clean: true
-          clean-exclude: |
-            [0-9]*.[0-9]*.[0-9]*.[0-9]*/
-            [0-9]*.[0-9]*.[0-9]*-[0-9]*/
-          commit-message: "Publish p2 site ${{ steps.ver.outputs.version }}"
+      - name: Verify deploy folder before push
+        run: |
+          VER="${{ steps.ver.outputs.version }}"
+          test -d "deploy/$VER/features" || (echo "ERROR: deploy/$VER/features missing" && exit 1)
+          test -d "deploy/$VER/plugins" || (echo "ERROR: deploy/$VER/plugins missing" && exit 1)
+          test -f deploy/.nojekyll || (echo "ERROR: deploy/.nojekyll missing" && exit 1)
+          test -f deploy/p2.index || (echo "ERROR: deploy/p2.index missing" && exit 1)
+          echo "deploy tree:"
+          find deploy -maxdepth 3 -type f | head -30
+
+      - name: Push to gh-pages branch
+        run: |
+          VER="${{ steps.ver.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          cd deploy
+          git init -b gh-pages
+          git add -A
+          git status
+          git commit -m "Publish p2 site ${VER}"
+          git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          git push -f origin gh-pages

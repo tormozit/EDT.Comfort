@@ -116,7 +116,4 @@ jobs:
           folder: deploy
           branch: gh-pages
           clean: true
-          clean-exclude: |
-            [0-9]*.[0-9]*.[0-9]*.[0-9]*/
-            [0-9]*.[0-9]*.[0-9]*-[0-9]*/
           commit-message: "Add update site ${{ steps.version.outputs.release_version }}"

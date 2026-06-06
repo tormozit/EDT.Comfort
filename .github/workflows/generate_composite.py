@@ -53,4 +53,26 @@ artifact.repository.factory.order=compositeArtifacts.jar,!
 with open(os.path.join(deploy_dir, 'p2.index'), 'w') as f:
     f.write(p2_index)
 
+# GitHub Pages: отключить Jekyll (иначе *.jar и p2-структура не отдаются)
+open(os.path.join(deploy_dir, '.nojekyll'), 'w').close()
+
+# Простая страница для браузера (p2-клиенты используют p2.index)
+links = '\n'.join(
+    f'    <li><a href="{c}/p2.index">{c}</a></li>' for c in children
+)
+index_html = f'''<!DOCTYPE html>
+<html lang="ru">
+<head><meta charset="utf-8"><title>EDT Comfort p2</title></head>
+<body>
+  <h1>EDT Comfort — p2 update site</h1>
+  <p>В Eclipse/EDT: <code>https://tormozit.github.io/EDT.Comfort/</code></p>
+  <ul>
+{links}
+  </ul>
+</body>
+</html>
+'''
+with open(os.path.join(deploy_dir, 'index.html'), 'w', encoding='utf-8') as f:
+    f.write(index_html)
+
 print("Generated composite site with children:", children)
