@@ -1,10 +1,12 @@
 name: Deploy p2 Update Site with History
 
+# Тег v<версия> (например v1.0.0.10) создаётся один раз на линейку версии.
+# Повторные экспериментальные сборки — через "Run workflow" (workflow_dispatch), без новых тегов.
 on:
+  workflow_dispatch:
   push:
     tags:
-      - 'v*'
-  workflow_dispatch:
+      - 'v[0-9]*.[0-9]*.[0-9]*.[0-9]*'
 
 jobs:
   build-and-deploy:
@@ -18,6 +20,17 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
+
+      - name: Validate tag matches version.txt
+        if: github.ref_type == 'tag'
+        run: |
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          FILE_VER=$(grep 'comfort.release=' site/version.txt | cut -d= -f2 | tr -d '[:space:]')
+          if [ "$TAG_VER" != "$FILE_VER" ]; then
+            echo "ERROR: tag v$TAG_VER does not match comfort.release=$FILE_VER in version.txt"
+            exit 1
+          fi
+          echo "Tag v$TAG_VER matches version.txt"
 
       - name: Sync version
         run: pwsh site/sync-version.ps1
