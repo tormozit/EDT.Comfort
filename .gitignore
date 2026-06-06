@@ -13,5 +13,3 @@ feature/target/
 site/target/
 tp/target/
 
-# Полный номер сборки (генерируется sync-version.ps1)
-site/build-version.txt
