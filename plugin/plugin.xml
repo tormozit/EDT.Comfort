@@ -20,38 +20,38 @@
 
   <extension point="org.eclipse.ui.contexts">
     <context
-        id="tormozit.edt.compareConf.context"
+        id="tormozit.compareConf.context"
         name="Редактор сравнения EDT"
         parentId="org.eclipse.ui.contexts.window"/>
   </extension>
 
   <extension point="org.eclipse.ui.bindings">
     <key
-          commandId="tormozit.edt.compareConf.openObject"
-          contextId="tormozit.edt.compareConf.context"
+          commandId="tormozit.compareConf.openObject"
+          contextId="tormozit.compareConf.context"
           schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
           sequence="F2">
     </key>
     <key
-          commandId="tormozit.edt.compareConf.showInNavigator"
-          contextId="tormozit.edt.compareConf.context"
+          commandId="tormozit.compareConf.showInNavigator"
+          contextId="tormozit.compareConf.context"
           schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
           sequence="M1+T">
     </key>
     <key
-          commandId="tormozit.edt.GoToDefinition"
+          commandId="tormozit.GoToDefinition"
           contextId="org.eclipse.ui.contexts.window"
           schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
           sequence="M1+F12">
     </key>
     <key
-          commandId="tormozit.edt.CopyRef"
+          commandId="tormozit.CopyRef"
           contextId="org.eclipse.ui.contexts.window"
           schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
           sequence="M1+F11">
     </key>
     <key
-          commandId="tormozit.edt.RecentPlaces"
+          commandId="tormozit.RecentPlaces"
           contextId="org.eclipse.ui.contexts.window"
           schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
           sequence="M1+3">
@@ -60,34 +60,34 @@
 
   <extension point="org.eclipse.ui.commands">
     <command
-        id="tormozit.edt.compareConf.openObject"
+        id="tormozit.compareConf.openObject"
         name="Открыть объект"
         description="Открыть выбранный объект конфигурации в редакторе (Comfort)"/>
      <command
-        id="tormozit.edt.compareConf.showInNavigator"
+        id="tormozit.compareConf.showInNavigator"
         name="Показать в навигаторе"
         description="Показать выбранный объект конфигурации в навигаторе (Comfort)"/>
      <command
-            id="tormozit.edt.GoToDefinition"
+            id="tormozit.GoToDefinition"
             name="Перейти к определению"
             description="Перейти к определению (Comfort)"/>
      <command
-            id="tormozit.edt.JumpFromClipboard"
+            id="tormozit.JumpFromClipboard"
             name="Перейти по ссылке из буфера"
             description="Перейти по ссылке из буфера обмена (Comfort)"/>
     <command
-            id="tormozit.edt.CopyRef"
+            id="tormozit.CopyRef"
             name="Копировать ссылку"
             description="Копировать ссылку на текущий объект или строку модуля (Comfort)"/>
     <command
-            id="tormozit.edt.RecentPlaces"
+            id="tormozit.RecentPlaces"
             name="Последние места"
             description="Открыть список последних посещённых методов и объектов метаданных (Comfort)"/>
   </extension>
 
   <extension point="org.eclipse.ui.handlers">
     <handler
-        commandId="tormozit.edt.compareConf.openObject"
+        commandId="tormozit.compareConf.openObject"
         class="tormozit.ExecutableExtensionFactory:tormozit.CompareConfigOpenObjectHandler">
       <activeWhen>
         <with variable="activeEditorId">
@@ -96,7 +96,7 @@
       </activeWhen>
     </handler>
     <handler
-        commandId="tormozit.edt.compareConf.showInNavigator"
+        commandId="tormozit.compareConf.showInNavigator"
         class="tormozit.ExecutableExtensionFactory:tormozit.CompareConfigShowInNavigatorHandler">
       <activeWhen>
         <with variable="activeEditorId">
@@ -106,39 +106,39 @@
     </handler>
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.GoToDefinition"
-        commandId="tormozit.edt.GoToDefinition">
+        commandId="tormozit.GoToDefinition">
      </handler>
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.GoToDefinition"
-        commandId="tormozit.edt.JumpFromClipboard">
+        commandId="tormozit.JumpFromClipboard">
      </handler>  
      <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.GetRef"
-        commandId="tormozit.edt.CopyRef">
+        commandId="tormozit.CopyRef">
      </handler>
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.RecentPlacesHandler"
-        commandId="tormozit.edt.RecentPlaces">
+        commandId="tormozit.RecentPlaces">
      </handler>
   </extension>
 
   <extension point="org.eclipse.ui.menus">
       <menuContribution locationURI="toolbar:org.eclipse.ui.main.toolbar?after=additions">
-         <toolbar id="tormozit.edt.toolbar.mainGroup">
+         <toolbar id="tormozit.toolbar.mainGroup">
             <command
-              commandId="tormozit.edt.JumpFromClipboard"
+              commandId="tormozit.JumpFromClipboard"
               label = "Перейти"
               tooltip="Перейти по ссылке из буфера обмена (Comfort)"
               style="push">
             </command>
             <command
-              commandId="tormozit.edt.CopyRef"
+              commandId="tormozit.CopyRef"
               label = "Ссылка"
               tooltip="Копировать ссылку на текущий объект или строку модуля (Comfort)"
               style="push">
             </command>
             <command
-              commandId="tormozit.edt.RecentPlaces"
+              commandId="tormozit.RecentPlaces"
               label = "Последние"
               tooltip="Последние посещённые методы и объекты метаданных (Comfort)"
               style="push">
@@ -147,19 +147,17 @@
       </menuContribution>
    </extension>
 
-  <!-- Страница настроек -->
   <extension point="org.eclipse.ui.preferencePages">
     <page
-        category="com._1c.g5.v8.dt.bsl.Bsl"
-        class="tormozit.ContentAssistPreferencePage"
-        id="tormozit.edt.contentAssistAutoOpen.preferencePages"
-        name="Автооткрытие подсказки"/>
+        category="com._1c.g5.v8"
+        class="tormozit.ComfortPreferencePage"
+        id="tormozit.ComfortPreferencePages"
+        name="Комфорт (Tormozit)"/>
   </extension>
 
-  <!-- Инициализатор значений по умолчанию для настроек -->
   <extension point="org.eclipse.core.runtime.preferences">
     <initializer
-        class="tormozit.ContentAssistInitializer"/>
+        class="tormozit.ComfortInitializer"/>
   </extension>
 
 </plugin>

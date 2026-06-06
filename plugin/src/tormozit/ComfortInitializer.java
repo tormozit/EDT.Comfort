@@ -7,7 +7,7 @@ import org.eclipse.core.runtime.preferences.AbstractPreferenceInitializer;
  * Регистрируется через точку расширения {@code org.eclipse.core.runtime.preferences}
  * в {@code plugin.xml}.
  */
-public class ContentAssistInitializer extends AbstractPreferenceInitializer
+public class ComfortInitializer extends AbstractPreferenceInitializer
 {
     @Override
     public void initializeDefaultPreferences()

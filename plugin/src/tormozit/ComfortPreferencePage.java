@@ -14,11 +14,11 @@ import org.eclipse.ui.IWorkbenchPreferencePage;
  * Поле «Символы» скрыто — его значение захардкожено в
  * {@link ContentAssistSettings#CHARSET_VALUE}.
  */
-public class ContentAssistPreferencePage
+public class ComfortPreferencePage
         extends FieldEditorPreferencePage
         implements IWorkbenchPreferencePage
 {
-    public ContentAssistPreferencePage()
+    public ComfortPreferencePage()
     {
         super(GRID);
     }
@@ -35,6 +35,7 @@ public class ContentAssistPreferencePage
     @Override
     protected void createFieldEditors()
     {
+        //  Группа "Автооткрытие окна автодополнения"
         addField(new BooleanFieldEditor(
             ContentAssistSettings.PREF_ENABLED,
             "Включено",

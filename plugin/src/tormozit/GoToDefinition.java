@@ -160,7 +160,7 @@ public class GoToDefinition extends AbstractHandler
             newFile = new File(transportFolder + "\\НовыйТекст.txt"); //$NON-NLS-1$
             oldFile = new File(transportFolder + "\\СтарыйТекст.txt"); //$NON-NLS-1$
         }
-        else if (event.getCommand().getId()=="tormozit.edt.JumpFromClipboard")
+        else if (event.getCommand().getId()=="tormozit.JumpFromClipboard")
         {
             command = getClipboardText(shell);
             if (command == null || command.isBlank())

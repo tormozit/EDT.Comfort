@@ -145,7 +145,7 @@ public final class ContentAssistPopupUi
         bar.setLayoutData(barData);
 
         Button toggle = new Button(bar, SWT.CHECK);
-        toggle.setText("Фильтр включен"); //$NON-NLS-1$
+        toggle.setText("Фильтр"); //$NON-NLS-1$
         toggle.setSelection(SmartAssistFilterState.isSmartFilterEnabled());
         toggle.addListener(SWT.Selection, e -> {
             SmartAssistFilterState.setSmartFilterEnabled(toggle.getSelection());
