@@ -2,7 +2,39 @@
 <projectDescription>
 	<name>EDT.Comfort-root</name>
 	<comment></comment>
-	<projects/>
-	<buildSpec/>
-	<natures/>
+	<projects>
+	</projects>
+	<buildSpec>
+	</buildSpec>
+	<natures>
+	</natures>
+	<filteredResources>
+		<filter>
+			<id>1780764743249</id>
+			<name></name>
+			<type>10</type>
+			<matcher>
+				<id>org.eclipse.ui.ide.multiFilter</id>
+				<arguments>1.0-name-matches-false-false-plugin</arguments>
+			</matcher>
+		</filter>
+		<filter>
+			<id>1780764743254</id>
+			<name></name>
+			<type>10</type>
+			<matcher>
+				<id>org.eclipse.ui.ide.multiFilter</id>
+				<arguments>1.0-name-matches-false-false-feature</arguments>
+			</matcher>
+		</filter>
+		<filter>
+			<id>1780764743257</id>
+			<name></name>
+			<type>10</type>
+			<matcher>
+				<id>org.eclipse.ui.ide.multiFilter</id>
+				<arguments>1.0-name-matches-false-false-site</arguments>
+			</matcher>
+		</filter>
+	</filteredResources>
 </projectDescription>
