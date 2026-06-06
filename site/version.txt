@@ -2,10 +2,11 @@
 # При сборке PDE/Tycho вместо "qualifier" подставляется метка времени автоматически.
 # Пример итоговой версии: 1.0.0.10-202606061430
 #
-# GitHub Actions:
-#   - Тег v1.0.0.10 создаётся один раз при переходе на новую линейку версии.
-#   - Повторные сборки: push в master или Actions → Run workflow (ветка master).
-#   - При смене линейки: измените comfort.release, создайте тег v<новая_версия>, запушьте.
+# Публикация на GitHub Pages:
+#   1. Соберите локально (Eclipse Build All в site/ или site\build.bat).
+#   2. Закоммитьте site/features/, site/plugins/, site/content.jar, site/artifacts.jar.
+#   3. Actions → Publish p2 site → Run workflow.
 #
-# Локально: Build All в site (Eclipse) или site\build.bat (Maven).
+# URL: https://tormozit.github.io/EDT.Comfort/  (composite, все версии)
+#      https://tormozit.github.io/EDT.Comfort/<версия>/  (одна версия)
 comfort.release=1.0.0.10

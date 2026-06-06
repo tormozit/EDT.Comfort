@@ -1,24 +1,77 @@
 name: Publish p2 site
 
+# Локально: Eclipse Build All в site/ (или mvn package) → закоммитить
+# site/features/, site/plugins/, site/content.jar, site/artifacts.jar → Run workflow.
 on:
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout source
+        uses: actions/checkout@v4
 
       - name: Read version
         id: ver
         run: |
           VER=$(grep 'comfort.release=' site/version.txt | cut -d= -f2 | tr -d '[:space:]')
           echo "version=$VER" >> $GITHUB_OUTPUT
+          echo "Publishing version: $VER"
+
+      - name: Verify p2 repository is committed
+        run: |
+          if [ ! -d site/features ]; then
+            echo "ERROR: site/features/ not found in git."
+            echo "Build locally, then commit p2 artifacts:"
+            echo "  site/features/  site/plugins/  site/content.jar  site/artifacts.jar"
+            exit 1
+          fi
+          ls -la site/features/ site/plugins/ 2>/dev/null || true
+          ls -la site/*.jar 2>/dev/null || true
+
+      - name: Checkout existing gh-pages
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: gh-pages
+        continue-on-error: true
+
+      - name: Prepare deploy folder
+        run: |
+          mkdir -p "deploy/${{ steps.ver.outputs.version }}"
+          for item in features plugins content.jar artifacts.jar p2.index; do
+            if [ -e "site/$item" ]; then
+              cp -r "site/$item" "deploy/${{ steps.ver.outputs.version }}/"
+            fi
+          done
+
+          if [ -d gh-pages ]; then
+            for dir in gh-pages/*/; do
+              name=$(basename "$dir")
+              if [[ "$name" != "p2.index" && "$name" != "compositeContent.jar" && "$name" != "compositeArtifacts.jar" && "$name" != "index.html" ]]; then
+                if [ ! -d "deploy/$name" ]; then
+                  cp -r "$dir" "deploy/$name"
+                fi
+              fi
+            done
+          fi
+
+          ls -laR deploy
+
+      - name: Generate composite metadata
+        run: python3 .github/workflows/generate_composite.py
 
       - name: Deploy to GitHub Pages
-        uses: JamesIves/github-pages-deploy-action@v4
+        uses: JamesIves/github-pages-deploy-action@v4.7.3
         with:
-          folder: site
-          target-folder: ${{ steps.ver.outputs.version }}
+          folder: deploy
           branch: gh-pages
-          clean: false
+          clean: true
+          clean-exclude: |
+            [0-9]*.[0-9]*.[0-9]*.[0-9]*/
+            [0-9]*.[0-9]*.[0-9]*-[0-9]*/
+          commit-message: "Publish p2 site ${{ steps.ver.outputs.version }}"

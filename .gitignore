@@ -1,2 +1,8 @@
 .tmp*
-# PDE update site build output (не коммитить — пересобирается локально)
+# Maven/Tycho build cache (не коммитить)
+site/target/
+plugin/target/
+feature/target/
+tp/target/
+
+# P2 update site (site/features/, plugins/, *.jar) — коммитить для publish.yml
