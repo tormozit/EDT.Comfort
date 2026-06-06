@@ -4,6 +4,9 @@ import org.eclipse.swt.SWT;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
+import org.eclipse.jface.viewers.ILabelProvider;
+import org.eclipse.jface.viewers.ITreeContentProvider;
+import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IWorkbenchPage;
@@ -95,6 +98,108 @@ public class RecentPlacesTracker implements IStartup
     // =========================================================================
     // Случай 1: BSL-редактор
     // =========================================================================
+
+    /**
+     * Quick Outline: сразу добавить выбранный метод в «Последние места».
+     * Группирующие узлы дерева пропускаются.
+     */
+    public static void recordOutlineSelection(TreeViewer viewer, Object element, ILabelProvider labels)
+    {
+        if (viewer == null || element == null)
+            return;
+        Object cp = viewer.getContentProvider();
+        if (cp instanceof ITreeContentProvider
+                && ((ITreeContentProvider) cp).hasChildren(element))
+            return;
+
+        String methodName = resolveOutlineMethodName(element, labels);
+        if (methodName == null || methodName.isEmpty())
+            return;
+
+        BslXtextEditor editor = getActiveBslEditorFromWorkbench();
+        if (editor == null)
+            return;
+
+        recordOutlineMethod(editor, methodName);
+    }
+
+    private static BslXtextEditor getActiveBslEditorFromWorkbench()
+    {
+        IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+        if (window == null)
+            return null;
+        IWorkbenchPage page = window.getActivePage();
+        if (page == null)
+            return null;
+        IEditorPart editor = page.getActiveEditor();
+        return editor != null ? GetRef.getActiveBslEditor(editor) : null;
+    }
+
+    private static String resolveOutlineMethodName(Object element, ILabelProvider labels)
+    {
+        for (String method : new String[] { "getName", "getMethodName", "getSimpleName", "getLabel" }) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        {
+            Object value = Global.invoke(element, method);
+            if (value instanceof String && isMethodIdentifier((String) value))
+                return (String) value;
+        }
+        String label = labels != null
+            ? SmartTreeElementLabels.resolve(element, labels instanceof org.eclipse.jface.viewers.IBaseLabelProvider
+                ? (org.eclipse.jface.viewers.IBaseLabelProvider) labels : null)
+            : SmartTreeElementLabels.resolve(element, null);
+        return extractMethodNameFromLabel(label);
+    }
+
+    private static boolean isMethodIdentifier(String name)
+    {
+        if (name == null || name.isEmpty())
+            return false;
+        if (!Character.isLetter(name.charAt(0)) && name.charAt(0) != '_')
+            return false;
+        for (int i = 1; i < name.length(); i++)
+        {
+            char c = name.charAt(i);
+            if (!Character.isLetterOrDigit(c) && c != '_')
+                return false;
+        }
+        return true;
+    }
+
+    private static String extractMethodNameFromLabel(String label)
+    {
+        if (label == null || label.isEmpty())
+            return null;
+        String text = label.trim();
+        int paren = text.indexOf('(');
+        if (paren > 0)
+            text = text.substring(0, paren).trim();
+        int space = text.lastIndexOf(' ');
+        if (space >= 0 && space + 1 < text.length())
+            text = text.substring(space + 1).trim();
+        return isMethodIdentifier(text) ? text : null;
+    }
+
+    private static void recordOutlineMethod(BslXtextEditor bslEditor, String methodName)
+    {
+        org.eclipse.ui.IEditorInput input = bslEditor.getEditorInput();
+        if (input == null)
+            return;
+        org.eclipse.core.resources.IFile file =
+            input.getAdapter(org.eclipse.core.resources.IFile.class);
+        if (file == null)
+            return;
+
+        GetRef.ModuleRef moduleRef =
+            GetRef.pathToModuleRef(file.getProjectRelativePath().toString());
+        if (moduleRef == null)
+            return;
+
+        String modulePath = moduleRef.modulePath;
+        String navRef = GetRef.buildExtendedRefForMethod(bslEditor, methodName);
+        String key = modulePath + ": " + methodName; //$NON-NLS-1$
+        RecentPlaces.getInstance().add(key, navRef != null ? navRef : key, key, methodName);
+        Global.log("RecentPlaces add (Outline): " + key); //$NON-NLS-1$
+    }
 
     private static void recordBslPlace(BslXtextEditor bslEditor)
     {

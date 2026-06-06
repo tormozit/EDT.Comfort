@@ -154,6 +154,56 @@ public class GetRef extends AbstractHandler
         return ctx != null ? ctx.buildRef1(addLineText) : null;
     }
 
+    /** Расширенная ссылка на объявление метода по имени (Quick Outline и т.п.). */
+    public static String buildExtendedRefForMethod(BslXtextEditor bslEditor, String methodName)
+    {
+        if (bslEditor == null || methodName == null || methodName.isBlank())
+            return null;
+        IEditorInput input = bslEditor.getEditorInput();
+        if (input == null)
+            return null;
+        IFile file = input.getAdapter(IFile.class);
+        if (file == null)
+            return null;
+        ModuleRef moduleRef = pathToModuleRef(file.getProjectRelativePath().toString());
+        if (moduleRef == null)
+            return null;
+        ISourceViewer viewer = bslEditor.getInternalSourceViewer();
+        if (viewer == null)
+            return null;
+        IDocument doc = viewer.getDocument();
+        if (doc == null)
+            return null;
+        int line0 = findMethodDeclarationLine(doc, methodName);
+        if (line0 < 0)
+            return null;
+        int lineNumber = line0 + 1;
+        return "{" + moduleRef.toRefPrefix() + "(" + lineNumber + ",0:" + methodName + ",0)}"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+    }
+
+    static int findMethodDeclarationLine(IDocument doc, String methodName)
+    {
+        if (doc == null || methodName == null || methodName.isBlank())
+            return -1;
+        Pattern p = Pattern.compile(
+            "^\\s*(?:Асинх\\s+)?(?:Процедура|Функция|Procedure|Function)\\s+" //$NON-NLS-1$
+            + Pattern.quote(methodName) + "\\s*[\\(\\s]", //$NON-NLS-1$
+            Pattern.UNICODE_CASE);
+        try
+        {
+            int lines = doc.getNumberOfLines();
+            for (int line0 = 0; line0 < lines; line0++)
+            {
+                IRegion info = doc.getLineInformation(line0);
+                String text = doc.get(info.getOffset(), info.getLength());
+                if (p.matcher(text).find())
+                    return line0;
+            }
+        }
+        catch (BadLocationException ignored) {}
+        return -1;
+    }
+
     private static ModuleLineContext computeModuleLineContext(BslXtextEditor bslEditor)
     {
         IEditorInput input = bslEditor.getEditorInput();

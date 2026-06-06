@@ -1,11 +1,18 @@
 package tormozit;
+import java.util.LinkedHashSet;
+import java.util.Set;
+
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.jface.viewers.CheckboxTreeViewer;
 import org.eclipse.jface.viewers.ICheckStateProvider;
+import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.LabelProvider;
+import org.eclipse.jface.viewers.ISelectionChangedListener;
+import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.StyledCellLabelProvider;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.ViewerFilter;
@@ -13,6 +20,10 @@ import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.ModifyEvent;
 import org.eclipse.swt.events.ModifyListener;
 import org.eclipse.swt.custom.StyledText;
+import org.eclipse.swt.layout.GridData;
+import org.eclipse.swt.layout.GridLayout;
+import org.eclipse.swt.layout.RowLayout;
+import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
@@ -38,6 +49,11 @@ public class SmartOutlineHook implements IStartup {
     }
     
     private static final String PATCHED_KEY = "tormozit.outlinePatched";
+    private static final String CLEAR_BUTTON_KEY = "tormozit.outlineClearButton"; //$NON-NLS-1$
+    private static final String CLEAR_INSTALLED_KEY = "tormozit.outlineClearInstalled"; //$NON-NLS-1$
+    private static final String LAST_PATTERN_KEY = "tormozit.outlineLastPattern"; //$NON-NLS-1$
+    private static final String PENDING_CLEAR_SELECTION_KEY = "tormozit.outlinePendingClearSelection"; //$NON-NLS-1$
+    private static final String SUPPRESS_RECENT_KEY = "tormozit.outlineSuppressRecent"; //$NON-NLS-1$
     /** Заголовок {@code SelectTypeDialog_title} / {@code TypeDescriptionDialogComponent_DialogTitle}. */
     private static final String SELECT_TYPE_DIALOG_TITLE =
             "\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435 \u0442\u0438\u043f\u0430 \u0434\u0430\u043d\u043d\u044b\u0445"; //$NON-NLS-1$
@@ -333,7 +349,11 @@ private static void applySmartSearch(TreeViewer viewer, Control filterControl, S
 
         boolean typeTree = isTypeTreeDialog(shellTitle, dialogName);
         SmartOutlineFilter smartFilter = new SmartOutlineFilter(baseLp, typeTree, typeTree);
+        if (!typeTree)
+            smartFilter.setFlattenWhenFiltered(true);
         smartFilter.setPattern(getFilterPattern(filterControl));
+
+        wrapContentProviderForFlatOutline(viewer, smartFilter, baseLp, typeTree);
 
         IStyledLabelProvider innerStyledLp = null;
         if (rawLp instanceof DelegatingStyledCellLabelProvider) {
@@ -384,6 +404,15 @@ private static void applySmartSearch(TreeViewer viewer, Control filterControl, S
                         // Никаких промежуточных прыжков скроллбара и старых выделений пользователь не увидит.
                         tree.setRedraw(false);
                         try {
+                            String lastPattern = tree.getData(LAST_PATTERN_KEY) instanceof String
+                                ? (String) tree.getData(LAST_PATTERN_KEY) : ""; //$NON-NLS-1$
+                            boolean clearingFilter = pattern.isEmpty() && !lastPattern.isEmpty();
+                            IStructuredSelection pendingSelection = takePendingClearSelection(filterControl);
+                            if (pendingSelection == null && clearingFilter
+                                && viewer.getSelection() instanceof IStructuredSelection)
+                                pendingSelection = (IStructuredSelection) viewer.getSelection();
+                            final IStructuredSelection savedSelection = pendingSelection;
+
                             // 1. Очищаем кэши и задаем новый текст поиска
                             smartFilter.refreshPattern(pattern);
                             
@@ -397,9 +426,15 @@ private static void applySmartSearch(TreeViewer viewer, Control filterControl, S
                             if (highlightControl instanceof AefTreeItemHighlight)
                                 ((AefTreeItemHighlight) highlightControl).apply(viewer, patchedShell);
 
-                            // 4. Выделение первой строки — только для обычного SWT-дерева (AEF/LWT ломает TreeItem)
-                            if (!aefTree)
-                                selectFirstVisibleItem(tree);
+                            // 4. Выделение: при очистке — прежняя строка, при фильтре — первая видимая
+                            if (clearingFilter)
+                                runSuppressingOutlineRecent(tree,
+                                    () -> restoreOutlineSelection(viewer, smartFilter, savedSelection));
+                            else if (!pattern.isEmpty() && !aefTree)
+                                runSuppressingOutlineRecent(tree,
+                                    () -> selectFirstVisibleItem(tree, smartFilter));
+
+                            tree.setData(LAST_PATTERN_KEY, pattern);
                         } finally {
                             // Включаем отрисовку обратно. ОС мгновенно отобразит финальный готовый результат
                             tree.setRedraw(true);
@@ -414,12 +449,160 @@ private static void applySmartSearch(TreeViewer viewer, Control filterControl, S
 
         FilterFieldListNavigation.installTreeNavigation(filterControl, viewer.getTree());
 
+        if (!typeTree)
+        {
+            installClearFilterButton(filterControl, viewer, patchedShell);
+            installOutlineRecentPlacesTracking(viewer, baseLp);
+        }
+
         Display display = filterControl.getDisplay();
         filterControl.addDisposeListener(e -> {
             if (pendingFilterTask[0] != null && !display.isDisposed()) {
                 display.timerExec(-1, pendingFilterTask[0]);
             }
         });
+    }
+
+    private static void wrapContentProviderForFlatOutline(TreeViewer viewer, SmartOutlineFilter smartFilter,
+                                                          ILabelProvider baseLp, boolean typeTree)
+    {
+        if (typeTree || viewer == null)
+            return;
+        Object cp = viewer.getContentProvider();
+        if (!(cp instanceof ITreeContentProvider))
+            return;
+        if (cp instanceof SmartOutlineFlatContentProvider)
+            return;
+        viewer.setContentProvider(new SmartOutlineFlatContentProvider((ITreeContentProvider) cp, smartFilter, baseLp));
+    }
+
+    private static void installOutlineRecentPlacesTracking(TreeViewer viewer, ILabelProvider baseLp)
+    {
+        if (viewer == null)
+            return;
+        viewer.addSelectionChangedListener(new ISelectionChangedListener() {
+            @Override
+            public void selectionChanged(org.eclipse.jface.viewers.SelectionChangedEvent event)
+            {
+                Tree tree = viewer.getTree();
+                if (tree != null && Boolean.TRUE.equals(tree.getData(SUPPRESS_RECENT_KEY)))
+                    return;
+                if (!(event.getSelection() instanceof IStructuredSelection))
+                    return;
+                IStructuredSelection sel = (IStructuredSelection) event.getSelection();
+                if (sel.isEmpty())
+                    return;
+                RecentPlacesTracker.recordOutlineSelection(viewer, sel.getFirstElement(), baseLp);
+            }
+        });
+    }
+
+    private static void runSuppressingOutlineRecent(Tree tree, Runnable action)
+    {
+        if (tree == null || action == null)
+            return;
+        tree.setData(SUPPRESS_RECENT_KEY, Boolean.TRUE);
+        try
+        {
+            action.run();
+        }
+        finally
+        {
+            tree.setData(SUPPRESS_RECENT_KEY, null);
+        }
+    }
+
+    private static void installClearFilterButton(Control filterControl, TreeViewer viewer, Shell shell)
+    {
+        if (filterControl == null || filterControl.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(filterControl.getData(CLEAR_INSTALLED_KEY)))
+            return;
+
+        Composite parent = filterControl.getParent();
+        if (parent == null || parent.isDisposed())
+            return;
+
+        Button clear = new Button(parent, SWT.PUSH);
+        clear.setText("Очистить"); //$NON-NLS-1$
+        org.eclipse.swt.widgets.Layout layout = parent.getLayout();
+        if (layout instanceof GridLayout)
+        {
+            GridLayout gl = (GridLayout) layout;
+            Object ld = filterControl.getLayoutData();
+            if (ld instanceof GridData)
+            {
+                GridData filterGd = (GridData) ld;
+                if (filterGd.horizontalSpan > 1)
+                    filterGd.horizontalSpan--;
+            }
+            clear.setLayoutData(new GridData(SWT.NONE, SWT.CENTER, false, false));
+            gl.numColumns = Math.max(gl.numColumns + 1, 2);
+        }
+        else if (!(layout instanceof RowLayout))
+        {
+            parent.setLayout(new RowLayout(SWT.HORIZONTAL));
+        }
+        clear.pack();
+
+        filterControl.setData(CLEAR_INSTALLED_KEY, Boolean.TRUE);
+        parent.setData(CLEAR_BUTTON_KEY, clear);
+        clear.addListener(SWT.Selection, e -> {
+            if (viewer != null && viewer.getSelection() instanceof IStructuredSelection)
+                filterControl.setData(PENDING_CLEAR_SELECTION_KEY, viewer.getSelection());
+            setFilterText(filterControl, ""); //$NON-NLS-1$
+        });
+
+        parent.layout(true, true);
+        if (shell != null && !shell.isDisposed())
+            shell.layout(true, true);
+    }
+
+    private static IStructuredSelection takePendingClearSelection(Control filterControl)
+    {
+        if (filterControl == null)
+            return null;
+        Object pending = filterControl.getData(PENDING_CLEAR_SELECTION_KEY);
+        filterControl.setData(PENDING_CLEAR_SELECTION_KEY, null);
+        return pending instanceof IStructuredSelection ? (IStructuredSelection) pending : null;
+    }
+
+    private static void restoreOutlineSelection(TreeViewer viewer, SmartOutlineFilter smartFilter,
+                                                IStructuredSelection selection)
+    {
+        if (viewer == null || selection == null || selection.isEmpty())
+            return;
+        Object element = selection.getFirstElement();
+        Set<Object> toExpand = new LinkedHashSet<>();
+        smartFilter.collectTopLevelExpansion(viewer, toExpand);
+        addAncestorChain(viewer, element, toExpand);
+        if (!toExpand.isEmpty())
+            viewer.setExpandedElements(toExpand.toArray());
+        viewer.setSelection(new StructuredSelection(element), true);
+    }
+
+    private static void addAncestorChain(TreeViewer viewer, Object element, Set<Object> toExpand)
+    {
+        if (viewer == null || element == null || toExpand == null)
+            return;
+        Object cp = viewer.getContentProvider();
+        if (!(cp instanceof ITreeContentProvider))
+            return;
+        ITreeContentProvider tcp = (ITreeContentProvider) cp;
+        Object parent = tcp.getParent(element);
+        while (parent != null)
+        {
+            toExpand.add(parent);
+            parent = tcp.getParent(parent);
+        }
+    }
+
+    private static void setFilterText(Control filterControl, String text)
+    {
+        if (filterControl instanceof Text)
+            ((Text) filterControl).setText(text);
+        else if (filterControl instanceof StyledText)
+            ((StyledText) filterControl).setText(text);
     }
 
     private static String getFilterPattern(Control filterControl)
@@ -440,7 +623,7 @@ private static void applySmartSearch(TreeViewer viewer, Control filterControl, S
         else if (filterControl instanceof StyledText)
             ((StyledText) filterControl).addModifyListener(listener);
     }
-    private static void selectFirstVisibleItem(Control control) {
+    private static void selectFirstVisibleItem(Control control, SmartOutlineFilter smartFilter) {
         if (control == null || control.isDisposed()) return;
         if (!(control instanceof Tree))
             return;
@@ -452,7 +635,9 @@ private static void applySmartSearch(TreeViewer viewer, Control filterControl, S
             TreeItem first = tree.getItem(0);
             if (first == null || first.isDisposed())
                 return;
-            TreeItem terminal = getFirstTerminalItem(first);
+            TreeItem terminal = first;
+            if (smartFilter == null || !smartFilter.isFlattenWhenFiltered() || !smartFilter.isFiltering())
+                terminal = getFirstTerminalItem(first);
             if (terminal == null || terminal.isDisposed())
                 return;
             tree.setSelection(terminal);

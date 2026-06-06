@@ -16,6 +16,7 @@ public class SmartOutlineFilter extends ViewerFilter {
     private final ILabelProvider labelProvider;
     private final boolean pruneEmptyBranches;
     private final boolean codeMatcher;
+    private boolean flattenWhenFiltered;
     
     private final Map<Object, Integer> namePremiumCache = new HashMap<>();
     private final Map<Object, Integer> paramPremiumCache = new HashMap<>();
@@ -55,6 +56,23 @@ public class SmartOutlineFilter extends ViewerFilter {
         return paramPremiumCache;
     }
 
+    /** Плоский список совпадений без группирующих веток (Quick Outline). */
+    public void setFlattenWhenFiltered(boolean flattenWhenFiltered) {
+        this.flattenWhenFiltered = flattenWhenFiltered;
+    }
+
+    public boolean isFlattenWhenFiltered() {
+        return flattenWhenFiltered;
+    }
+
+    public boolean isFiltering() {
+        return !matcher.isEmpty;
+    }
+
+    public boolean matchesText(String text) {
+        return matcher.matches(text);
+    }
+
     /**
      * Верхний уровень дерева всегда раскрыт.
      * При непустом фильтре дополнительно раскрываются ветки на пути к совпадениям.
@@ -72,6 +90,8 @@ public class SmartOutlineFilter extends ViewerFilter {
             return;
         Set<Object> toExpand = new LinkedHashSet<>();
         collectTopLevelExpansion(viewer, toExpand);
+        if (flattenWhenFiltered && !matcher.isEmpty)
+            return;
         if (!matcher.isEmpty)
         {
             for (Object root : tcp.getElements(input))
