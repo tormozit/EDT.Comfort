@@ -16,26 +16,26 @@ artifact.repository.factory.order=artifacts.xml,artifacts.jar,!
 
 
 def fix_content_xml(xml_text: str) -> str:
-    """Категория не должна иметь тот же id, что и bundle (ломает p2)."""
+    """Переименовать только category-IU, если его id совпал с bundle id."""
     if "p2.type.category" not in xml_text:
         return xml_text
 
-    pattern = re.compile(
-        rf"<unit id='{re.escape(BUNDLE_ID)}'[^>]*>.*?p2\.type\.category.*?</unit>",
-        re.DOTALL,
-    )
-
-    def repl(match: re.Match) -> str:
-        unit_xml = match.group(0)
-        unit_xml = unit_xml.replace(f"id='{BUNDLE_ID}'", f"id='{CATEGORY_ID}'", 1)
-        unit_xml = unit_xml.replace(
-            f"namespace='org.eclipse.equinox.p2.iu' name='{BUNDLE_ID}'",
-            f"namespace='org.eclipse.equinox.p2.iu' name='{CATEGORY_ID}'",
-            1,
-        )
-        return unit_xml
-
-    return pattern.sub(repl, xml_text)
+    parts = re.split(r"(?=<unit )", xml_text)
+    fixed = []
+    for part in parts:
+        if (
+            part.strip().startswith("<unit")
+            and "p2.type.category" in part
+            and f"id='{BUNDLE_ID}'" in part
+        ):
+            part = part.replace(f"id='{BUNDLE_ID}'", f"id='{CATEGORY_ID}'", 1)
+            part = part.replace(
+                f"namespace='org.eclipse.equinox.p2.iu' name='{BUNDLE_ID}'",
+                f"namespace='org.eclipse.equinox.p2.iu' name='{CATEGORY_ID}'",
+                1,
+            )
+        fixed.append(part)
+    return "".join(fixed)
 
 
 def publish_p2_files(target_dir: str) -> None:
@@ -46,7 +46,12 @@ def publish_p2_files(target_dir: str) -> None:
 
     with zipfile.ZipFile(content_jar, "r") as zin:
         content_xml = fix_content_xml(zin.read("content.xml").decode("utf-8"))
-        artifacts_xml = zin.read("artifacts.xml").decode("utf-8") if "artifacts.xml" in zin.namelist() else None
+
+    artifacts_xml = None
+    if os.path.isfile(artifacts_jar):
+        with zipfile.ZipFile(artifacts_jar, "r") as zin:
+            if "artifacts.xml" in zin.namelist():
+                artifacts_xml = zin.read("artifacts.xml").decode("utf-8")
 
     with open(os.path.join(target_dir, "content.xml"), "w", encoding="utf-8", newline="\n") as f:
         f.write(content_xml)
@@ -57,7 +62,7 @@ def publish_p2_files(target_dir: str) -> None:
     with open(content_jar, "wb") as f:
         f.write(buf.getvalue())
 
-    if artifacts_xml and os.path.isfile(artifacts_jar):
+    if artifacts_xml:
         with open(os.path.join(target_dir, "artifacts.xml"), "w", encoding="utf-8", newline="\n") as f:
             f.write(artifacts_xml)
         buf = io.BytesIO()

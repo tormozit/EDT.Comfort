@@ -89,7 +89,8 @@ jobs:
           test -f "deploy/$VER/p2.index" || (echo "ERROR: deploy/$VER/p2.index missing" && exit 1)
           test -f deploy/.nojekyll || (echo "ERROR: deploy/.nojekyll missing" && exit 1)
           grep -q content.xml deploy/p2.index || (echo "ERROR: root p2.index must reference content.xml" && exit 1)
-          ! grep -q "p2.type.category" deploy/content.xml || grep -q "id='comfort'" deploy/content.xml || (echo "ERROR: category id still conflicts with bundle id" && exit 1)
+          grep -q "unit id='tormozit.comfort'" deploy/content.xml || (echo "ERROR: bundle IU tormozit.comfort missing from content.xml" && exit 1)
+          test -f deploy/artifacts.xml || (echo "ERROR: deploy/artifacts.xml missing" && exit 1)
           echo "deploy tree:"
           find deploy -maxdepth 3 -type f | head -30
 
