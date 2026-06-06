@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <site>
-  <category-def name="tormozit.comfort" label="EDT Comfort">
+  <category-def name="comfort" label="EDT Comfort">
     <description>Удобства и интеграция традиционных редакторов для EDT 1С</description>
   </category-def>
   <!-- version="0.0.0" означает "последняя доступная версия" -->
   <feature id="tormozit.comfort.feature" version="0.0.0">
-    <category name="tormozit.comfort"/>
+    <category name="comfort"/>
   </feature>
 </site>
