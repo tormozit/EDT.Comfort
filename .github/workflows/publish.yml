@@ -72,7 +72,9 @@ jobs:
           ls -la deploy
           ls -la "deploy/$VER"
 
-      - name: Generate composite metadata
+      - name: Generate p2 site layout
+        env:
+          LATEST_VERSION: ${{ steps.ver.outputs.version }}
         run: python3 .github/workflows/generate_composite.py
 
       - name: Verify deploy folder before push
@@ -80,8 +82,12 @@ jobs:
           VER="${{ steps.ver.outputs.version }}"
           test -d "deploy/$VER/features" || (echo "ERROR: deploy/$VER/features missing" && exit 1)
           test -d "deploy/$VER/plugins" || (echo "ERROR: deploy/$VER/plugins missing" && exit 1)
-          test -f deploy/.nojekyll || (echo "ERROR: deploy/.nojekyll missing" && exit 1)
+          test -d deploy/features || (echo "ERROR: deploy/features missing at root" && exit 1)
+          test -f deploy/content.jar || (echo "ERROR: deploy/content.jar missing at root" && exit 1)
           test -f deploy/p2.index || (echo "ERROR: deploy/p2.index missing" && exit 1)
+          test -f "deploy/$VER/p2.index" || (echo "ERROR: deploy/$VER/p2.index missing" && exit 1)
+          test -f deploy/.nojekyll || (echo "ERROR: deploy/.nojekyll missing" && exit 1)
+          grep -q content.jar deploy/p2.index || (echo "ERROR: root p2.index must reference content.jar" && exit 1)
           echo "deploy tree:"
           find deploy -maxdepth 3 -type f | head -30
 

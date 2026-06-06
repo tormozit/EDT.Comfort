@@ -1,78 +1,78 @@
-import os, time, zipfile
+import os
+import shutil
 
 deploy_dir = "deploy"
-timestamp = str(int(time.time() * 1000))
+latest = os.environ.get("LATEST_VERSION", "")
 
-# List child repos (version folders), newest first
-children = [d for d in sorted(os.listdir(deploy_dir), reverse=True)
-            if os.path.isdir(os.path.join(deploy_dir, d)) and not d.startswith('.')]
+# Папки версий (только каталоги с цифрами в имени)
+children = [
+    d for d in os.listdir(deploy_dir)
+    if os.path.isdir(os.path.join(deploy_dir, d)) and d[0:1].isdigit()
+]
+children.sort(reverse=True)
 
-# compositeContent.xml
-content_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
-<repository name="EDT Comfort Update Site" type="org.eclipse.equinox.internal.p2.metadata.repository.CompositeMetadataRepository" version="1.0.0">
-  <properties size="1">
-    <property name="p2.timestamp" value="{timestamp}"/>
-  </properties>
-  <children size="{len(children)}">
-'''
+if latest and latest in children:
+    children.remove(latest)
+    children.insert(0, latest)
+elif children:
+    latest = children[0]
+
+simple_p2_index = """version=1
+metadata.repository.factory.order=content.jar,!
+artifact.repository.factory.order=artifacts.jar,!
+"""
+
+# p2.index в каждой папке версии (для прямого URL .../1.0.0.10/)
 for child in children:
-    content_xml += f'    <child location="{child}"/>\n'
-content_xml += '''  </children>
-</repository>
-'''
+    child_dir = os.path.join(deploy_dir, child)
+    with open(os.path.join(child_dir, "p2.index"), "w", encoding="utf-8") as f:
+        f.write(simple_p2_index)
 
-# compositeArtifacts.xml
-artifacts_xml = f'''<?xml version="1.0" encoding="UTF-8"?>
-<repository name="EDT Comfort Update Site" type="org.eclipse.equinox.internal.p2.artifact.repository.CompositeArtifactRepository" version="1.0.0">
-  <properties size="1">
-    <property name="p2.timestamp" value="{timestamp}"/>
-  </properties>
-  <children size="{len(children)}">
-'''
-for child in children:
-    artifacts_xml += f'    <child location="{child}"/>\n'
-artifacts_xml += '''  </children>
-</repository>
-'''
+# Корень = простой p2-сайт (последняя версия), Eclipse/EDT понимают без composite
+if latest:
+    latest_dir = os.path.join(deploy_dir, latest)
+    for item in ("features", "plugins", "content.jar", "artifacts.jar"):
+        src = os.path.join(latest_dir, item)
+        dst = os.path.join(deploy_dir, item)
+        if not os.path.exists(src):
+            continue
+        if os.path.isdir(src):
+            if os.path.exists(dst):
+                shutil.rmtree(dst)
+            shutil.copytree(src, dst)
+        else:
+            shutil.copy2(src, dst)
 
-# Pack to JAR
-def write_jar(name, xml_content):
-    jar_path = os.path.join(deploy_dir, name)
-    xml_name = name.replace('.jar', '.xml')
-    with zipfile.ZipFile(jar_path, 'w', zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(xml_name, xml_content)
+with open(os.path.join(deploy_dir, "p2.index"), "w", encoding="utf-8") as f:
+    f.write(simple_p2_index)
 
-write_jar('compositeContent.jar', content_xml)
-write_jar('compositeArtifacts.jar', artifacts_xml)
+# Удалить composite-файлы прошлой схемы (ломали Eclipse)
+for old in ("compositeContent.jar", "compositeArtifacts.jar"):
+    path = os.path.join(deploy_dir, old)
+    if os.path.exists(path):
+        os.remove(path)
 
-# p2.index for composite site
-p2_index = '''version=1
-metadata.repository.factory.order=compositeContent.jar,!
-artifact.repository.factory.order=compositeArtifacts.jar,!
-'''
-with open(os.path.join(deploy_dir, 'p2.index'), 'w') as f:
-    f.write(p2_index)
+open(os.path.join(deploy_dir, ".nojekyll"), "w").close()
 
-# GitHub Pages: отключить Jekyll (иначе *.jar и p2-структура не отдаются)
-open(os.path.join(deploy_dir, '.nojekyll'), 'w').close()
-
-# Простая страница для браузера (p2-клиенты используют p2.index)
-links = '\n'.join(
-    f'    <li><a href="{c}/p2.index">{c}</a></li>' for c in children
+version_links = "\n".join(
+    f'    <li><a href="{c}/">{c}</a> — фиксированная версия</li>' for c in children
 )
-index_html = f'''<!DOCTYPE html>
+index_html = f"""<!DOCTYPE html>
 <html lang="ru">
 <head><meta charset="utf-8"><title>EDT Comfort p2</title></head>
 <body>
   <h1>EDT Comfort — p2 update site</h1>
-  <p>В Eclipse/EDT: <code>https://tormozit.github.io/EDT.Comfort/</code></p>
+  <p>Установить новое ПО (последняя версия):<br>
+  <code>https://tormozit.github.io/EDT.Comfort/</code></p>
+  <p>Архивные версии:</p>
   <ul>
-{links}
+{version_links}
   </ul>
 </body>
 </html>
-'''
-with open(os.path.join(deploy_dir, 'index.html'), 'w', encoding='utf-8') as f:
+"""
+with open(os.path.join(deploy_dir, "index.html"), "w", encoding="utf-8") as f:
     f.write(index_html)
 
-print("Generated composite site with children:", children)
+print("Latest at root:", latest)
+print("Version folders:", children)

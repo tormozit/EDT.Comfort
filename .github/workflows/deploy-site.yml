@@ -107,7 +107,9 @@ jobs:
             done
           fi
 
-      - name: Generate composite metadata
+      - name: Generate p2 site layout
+        env:
+          LATEST_VERSION: ${{ steps.version.outputs.release_version }}
         run: python .github/workflows/generate_composite.py
 
       - name: Deploy to GitHub Pages
