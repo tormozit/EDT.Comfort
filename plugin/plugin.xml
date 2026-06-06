@@ -10,8 +10,7 @@
     <startup class="tormozit.MoxelEditorHook"/>
     <startup class="tormozit.BSLEditorMenuHook"/> 
     <startup class="tormozit.TextEditorRightClickCaretHook"/>
-    <startup class="tormozit.FormEditorRightClickSelectHook"/>
-    <startup class="tormozit.FormEditorEventOrderHook"/>
+    <startup class="tormozit.FormEditorHook"/>
     <startup class="tormozit.SmartOutlineHook"/> 
     <startup class="tormozit.NavigatorFilterHook"/>
     <startup class="tormozit.OpenMdObjectHook"/>
@@ -148,7 +147,7 @@
       </menuContribution>
    </extension>
 
-  <!-- Страница настроек автооткрытия подсказки BSL -->
+  <!-- Страница настроек -->
   <extension point="org.eclipse.ui.preferencePages">
     <page
         category="com._1c.g5.v8.dt.bsl.Bsl"
@@ -157,7 +156,7 @@
         name="Автооткрытие подсказки"/>
   </extension>
 
-  <!-- Инициализатор значений по умолчанию для настроек автооткрытия -->
+  <!-- Инициализатор значений по умолчанию для настроек -->
   <extension point="org.eclipse.core.runtime.preferences">
     <initializer
         class="tormozit.ContentAssistInitializer"/>

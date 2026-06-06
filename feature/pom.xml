@@ -6,10 +6,10 @@
   <modelVersion>4.0.0</modelVersion>
   <parent>
     <groupId>tormozit</groupId>
-    <artifactId>tormozit.edt.parent</artifactId>
-    <version>1.0.0-SNAPSHOT</version>
+    <artifactId>comfort.parent</artifactId>
+    <version>1.0-SNAPSHOT</version>
     <relativePath>../pom.xml</relativePath>
   </parent>
-  <artifactId>tormozit.edt.feature</artifactId>
+  <artifactId>comfort.feature</artifactId>
   <packaging>eclipse-feature</packaging>
 </project>

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <projectDescription>
-	<name>tormozit.edt.site</name>
+	<name>site</name>
 	<comment></comment>
 	<projects>
 	</projects>
@@ -11,15 +11,15 @@
 			<arguments>
 				<dictionary>
 					<key>org.eclipse.ant.ui.ANT_SCRIPT</key>
-					<value>$P{project_loc:/tormozit.edt.site}/../sync-version-ant.xml</value>
-				</dictionary>
-				<dictionary>
-					<key>org.eclipse.ant.ui.DEFAULT_TARGET</key>
-					<value>sync</value>
+					<value>$P{project_loc:/site}/../sync-version-ant.xml</value>
 				</dictionary>
 				<dictionary>
 					<key>org.eclipse.ant.ui.AUTO_BUILD</key>
 					<value>true</value>
+				</dictionary>
+				<dictionary>
+					<key>org.eclipse.ant.ui.DEFAULT_TARGET</key>
+					<value>sync</value>
 				</dictionary>
 			</arguments>
 		</buildCommand>

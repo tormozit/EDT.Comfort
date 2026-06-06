@@ -16,6 +16,7 @@ import org.eclipse.jface.action.MenuManager;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
+import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Menu;
@@ -25,22 +26,37 @@ import org.eclipse.ui.IStartup;
 import org.eclipse.ui.actions.CompoundContributionItem;
 
 /**
- * Упорядочивает подменю «События» в контекстном меню дерева элементов формы
- * ({@code FormEditor}) в соответствии с порядком конфигуратора 1С.
+ * Объединяет два поведения редактора форм EDT:
  *
- * <p>Механизм: глобальный display-фильтр на {@link SWT#MenuDetect}.
- * На SWT-меню дерева вешается {@link MenuAdapter}: после полного построения
- * корневого меню находим каскад «События» и подключаем {@link IMenuListener}
- * к его JFace {@link MenuManager}.
+ * <ol>
+ *   <li><b>Правый клик в области предпросмотра (WYSIWYG).</b>
+ *       На {@link SWT#MouseDown} посылает синтетический левый клик,
+ *       чтобы EDT выбрал элемент формы под курсором до открытия контекстного меню.
+ *       Область предпросмотра реализована классом
+ *       {@code WysiwygNativeComposite} (наследник {@link Composite}).
  *
- * <p>EDT наполняет подменю через {@code ElementItemEventsContributionItem}
- * ({@link CompoundContributionItem}): в {@link IMenuManager#getItems()} лежит
- * один compound-элемент, а реальные пункты возвращает
- * {@link CompoundContributionItem#getContributionItems()}. Перед показом подменю
- * разворачиваем compound, сортируем и подменяем содержимое менеджера.
+ *   <li><b>Сортировка подменю «События».</b>
+ *       Упорядочивает пункты подменю «События» контекстного меню дерева элементов
+ *       формы в соответствии с порядком конфигуратора 1С.
+ *       Механизм: глобальный display-фильтр на {@link SWT#MenuDetect};
+ *       на SWT-меню дерева вешается {@link MenuAdapter}, после построения
+ *       корневого меню находим каскад «События» и подключаем {@link IMenuListener}
+ *       к его JFace {@link MenuManager}.
+ * </ol>
  */
-public class FormEditorEventOrderHook implements IStartup
+public class FormEditorHook implements IStartup
 {
+    // -----------------------------------------------------------------------
+    // Константы — правый клик (RightClickSelect)
+    // -----------------------------------------------------------------------
+
+    /** Простое имя класса wysiwyg-области предпросмотра форм. */
+    private static final String WYSIWYG_CLASS = "WysiwygNativeComposite"; //$NON-NLS-1$
+
+    // -----------------------------------------------------------------------
+    // Константы — порядок событий (EventOrder)
+    // -----------------------------------------------------------------------
+
     /** Текст подменю событий (FormItemActionsGroup_Events_group_name). */
     private static final String EVENTS_SUBMENU_TEXT = "События"; //$NON-NLS-1$
 
@@ -64,8 +80,7 @@ public class FormEditorEventOrderHook implements IStartup
 
     /**
      * Эталонный порядок событий формы как в конфигураторе 1С.
-     * Ключ — имя события (оно же содержится в тексте пункта меню EDT).
-     * Значение — порядковый номер (меньше = выше в меню).
+     * Ключ — имя события; значение — порядковый номер (меньше = выше в меню).
      */
     private static final Map<String, Integer> FORM_EVENT_ORDER = buildOrderMap(
         "ПриСозданииНаСервере",                                            //  1
@@ -105,6 +120,10 @@ public class FormEditorEventOrderHook implements IStartup
         "ПриВставкеИзБуфераОбмена"                                         // 35
     );
 
+    // -----------------------------------------------------------------------
+    // IStartup
+    // -----------------------------------------------------------------------
+
     @Override
     public void earlyStartup()
     {
@@ -115,11 +134,54 @@ public class FormEditorEventOrderHook implements IStartup
     {
         if (display == null || display.isDisposed())
             return;
-        display.addFilter(SWT.MenuDetect, FormEditorEventOrderHook::handleMenuDetect);
+        display.addFilter(SWT.MouseDown, FormEditorHook::handleMouseDown);
+        display.addFilter(SWT.MenuDetect, FormEditorHook::handleMenuDetect);
     }
 
     // -----------------------------------------------------------------------
-    // Display filter
+    // Правый клик — выбор элемента формы
+    // -----------------------------------------------------------------------
+
+    private static void handleMouseDown(Event e)
+    {
+        if (e.button != 3)
+            return;
+        if (!(e.widget instanceof Composite))
+            return;
+        if (!WYSIWYG_CLASS.equals(e.widget.getClass().getSimpleName()))
+            return;
+
+        simulateLeftClick((Composite) e.widget, e.x, e.y);
+    }
+
+    /**
+     * Посылает синтетическую пару MouseDown/MouseUp левой кнопки на виджет,
+     * чтобы EDT выбрал элемент формы под курсором до открытия контекстного меню.
+     */
+    private static void simulateLeftClick(Composite widget, int x, int y)
+    {
+        if (widget.isDisposed())
+            return;
+
+        Event down = new Event();
+        down.type   = SWT.MouseDown;
+        down.button = 1;
+        down.x      = x;
+        down.y      = y;
+        down.count  = 1;
+        widget.notifyListeners(SWT.MouseDown, down);
+
+        Event up = new Event();
+        up.type   = SWT.MouseUp;
+        up.button = 1;
+        up.x      = x;
+        up.y      = y;
+        up.count  = 1;
+        widget.notifyListeners(SWT.MouseUp, up);
+    }
+
+    // -----------------------------------------------------------------------
+    // Сортировка подменю «События»
     // -----------------------------------------------------------------------
 
     private static void handleMenuDetect(Event e)
@@ -146,13 +208,9 @@ public class FormEditorEventOrderHook implements IStartup
         });
     }
 
-    // -----------------------------------------------------------------------
-    // Поиск и подключение подменю «События»
-    // -----------------------------------------------------------------------
-
     /**
-     * Корневое меню уже построено (ActionGroup EDT отработал) — ищем каскад
-     * «События» и подключаем сортировку к его JFace MenuManager.
+     * Корневое меню уже построено — ищем каскад «События» и подключаем сортировку
+     * к его JFace MenuManager.
      */
     private static void onFormTreeMenuShown(Menu menu)
     {
@@ -210,12 +268,10 @@ public class FormEditorEventOrderHook implements IStartup
     {
         if (!hookedEventsMenus.add(eventsMenu))
             return;
-        eventsMenu.addMenuListener(FormEditorEventOrderHook::onEventsMenuAboutToShow);
+        eventsMenu.addMenuListener(FormEditorHook::onEventsMenuAboutToShow);
     }
 
-    /**
-     * Синхронно, до заполнения SWT-меню: разворачиваем compound и сортируем.
-     */
+    /** Синхронно, до заполнения SWT-меню: разворачиваем compound и сортируем. */
     private static void onEventsMenuAboutToShow(IMenuManager eventsMenu)
     {
         sortEventItems(eventsMenu);
@@ -249,9 +305,7 @@ public class FormEditorEventOrderHook implements IStartup
             eventsMenu.add(item);
     }
 
-    /**
-     * Разворачивает {@link CompoundContributionItem} EDT в плоский список пунктов.
-     */
+    /** Разворачивает {@link CompoundContributionItem} EDT в плоский список пунктов. */
     private static List<IContributionItem> collectExpandedItems(IMenuManager menu)
     {
         List<IContributionItem> result = new ArrayList<>();

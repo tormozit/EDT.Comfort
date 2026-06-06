@@ -5,8 +5,8 @@
   <modelVersion>4.0.0</modelVersion>
 
   <groupId>tormozit</groupId>
-  <artifactId>tormozit.edt.parent</artifactId>
-  <version>1.0.0.10-SNAPSHOT</version>
+  <artifactId>comfort.parent</artifactId>
+  <version>1.0-SNAPSHOT</version>
   <packaging>pom</packaging>
 
   <prerequisites>
@@ -23,10 +23,10 @@
   </properties>
 
   <modules>
-    <module>target-platform</module>
-    <module>tormozit.edt</module>
-    <module>tormozit.edt.feature</module>
-    <module>tormozit.edt.site</module>
+    <module>target</module>
+    <module>project</module>
+    <module>feature</module>
+    <module>site</module>
   </modules>
 
   <build>
@@ -43,8 +43,8 @@
             <target>
               <artifact>
                 <groupId>tormozit</groupId>
-                <artifactId>tormozit.edt.target</artifactId>
-                <version>1.0.0-SNAPSHOT</version>
+                <artifactId>default</artifactId>
+                <version>1.0-SNAPSHOT</version>
               </artifact>
             </target>
             <environments>

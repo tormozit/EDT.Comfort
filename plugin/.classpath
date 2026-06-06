@@ -7,6 +7,6 @@
 			<attribute name="module" value="true"/>
 		</attributes>
 	</classpathentry>
-	<classpathentry kind="lib" path="C:/VC/EDT-Tormozit/tormozit.edt/lib/jacob.jar"/>
+	<classpathentry exported="true" kind="lib" path="lib/jacob.jar"/>
 	<classpathentry kind="output" path="bin"/>
 </classpath>
