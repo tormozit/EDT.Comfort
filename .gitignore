@@ -6,6 +6,7 @@ site/content.jar
 site/artifacts.jar
 site/*.zip
 
-# Maven/Tycho build output (but not the root /target which is the target-platform project)
-**/target/
-!/target/
+# Maven/Tycho build output — исключаем вложенные target/, но не корневую
+plugin/target/
+feature/target/
+site/target/
