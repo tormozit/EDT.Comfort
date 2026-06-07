@@ -154,7 +154,7 @@
         category="com._1c.g5.v8"
         class="tormozit.ComfortPreferencePage"
         id="tormozit.ComfortPreferencePages"
-        name="Комфорт (Tormozit)"/>
+        name="Комфорт"/>
   </extension>
 
   <extension point="org.eclipse.core.runtime.preferences">

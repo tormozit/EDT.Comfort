@@ -85,6 +85,8 @@ public class SmartOutlineHook implements IStartup {
 
     private static void schedulePatchAttempt(Display display, Shell shell, int attempt)
     {
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+            return;
         if (shell.isDisposed() || shell.getData(PATCHED_KEY) != null)
             return;
         int delay = attempt == 0 ? 0 : 80;

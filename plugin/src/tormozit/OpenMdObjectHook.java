@@ -63,6 +63,8 @@ public class OpenMdObjectHook implements IStartup {
     }
 
     private static void tryPatchDialog(Shell shell, Object dialog) {
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+            return;
         try {
             if (dialog == null) return;
 

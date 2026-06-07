@@ -13,6 +13,11 @@
       (c) tormozit
    </copyright>
 
+   <url>
+      <update label="EDT Comfort" url="https://tormozit.github.io/EDT.Comfort/"/>
+      <discovery label="EDT Comfort" url="https://tormozit.github.io/EDT.Comfort/"/>
+   </url>
+
    <plugin
          id="tormozit.comfort"
          version="0.0.0"

@@ -132,6 +132,8 @@ public final class InfobasesViewHook implements IStartup
 
     private static void schedulePatch(IViewPart view, int attempt)
     {
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+            return;
         Display display = Display.getDefault();
         int delay = attempt == 0 ? 0 : 100;
         display.timerExec(delay, () -> {

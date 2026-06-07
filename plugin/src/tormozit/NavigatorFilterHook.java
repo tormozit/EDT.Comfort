@@ -134,6 +134,8 @@ public final class NavigatorFilterHook implements IStartup
     {
         if (view == null)
             return;
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+            return;
         if (attempt == 0)
         {
             NavigatorFilterDebug.log("schedule source=" + source //$NON-NLS-1$

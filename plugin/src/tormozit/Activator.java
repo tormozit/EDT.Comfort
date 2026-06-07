@@ -46,7 +46,11 @@ public class Activator extends AbstractUIPlugin
         // manager.start() будет вызван из earlyStartup() после запуска Workbench.
         ContentAssistSettings settings =
             ContentAssistSettings.init(PLUGIN_ID);
+        settings.getPreferenceStore().setDefault(
+            ComfortSettings.PREF_REPLACE_LIST_FILTERS,
+            ComfortSettings.DEFAULT_REPLACE_LIST_FILTERS);
         ContentAssistManager.init(settings);
+        ComfortSettings.init(PLUGIN_ID);
 
         // Подключаем персистентное хранилище последних мест.
         RecentPlaces.getInstance().init(PLUGIN_ID);
