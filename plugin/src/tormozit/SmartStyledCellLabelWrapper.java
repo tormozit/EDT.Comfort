@@ -37,6 +37,9 @@ public final class SmartStyledCellLabelWrapper extends StyledCellLabelProvider
         String text = cell.getText();
         if (text == null || text.isEmpty())
             return;
+        // НЕ КРАСИТЬ СТРОКУ, ЕСЛИ НЕТ ПОЛНОГО СОВПАДЕНИЯ ВСЕХ СЛОВ ФИЛЬТРА.
+        if (!highlightMatcher.matches(text))
+            return;
         SmartMatchHighlight.appendMatchRanges(cell, highlightMatcher.getHighlightRanges(text));
     }
 

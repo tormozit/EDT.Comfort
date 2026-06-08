@@ -18,12 +18,12 @@ public final class NavigatorSearchTextCache
     private final Set<Integer> qualifierMiss = new HashSet<>();
     private String qualifierPattern = ""; //$NON-NLS-1$
 
-    public String searchText(Object element, IBaseLabelProvider labelBase)
+    public String searchText(Object element, Object labelSource)
     {
         if (element == null)
             return ""; //$NON-NLS-1$
         return searchTextByElement.computeIfAbsent(element,
-                e -> NavigatorTreeElementLabels.resolveSearchText(e, labelBase));
+                e -> NavigatorTreeElementLabels.resolveSearchText(e, labelSource));
     }
 
     public NavigatorFuzzySearch.QualifierMatch qualifier(MdObject mdObject, String pattern, String objectName)

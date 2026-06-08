@@ -545,6 +545,8 @@ final class PropertySheetComfortUi
             return;
         if (session.comfortPushInProgress)
             return;
+        // Читаем значение кнопки ДО любых async-операций — потом она может быть сброшена через applyDisplay
+        final Object capturedPushValue = PropertySheetComfortValueControls.readComfortPushValue(row.created);
         session.comfortPushInProgress = true;
         session.suppressFullRefreshUntil = System.currentTimeMillis() + 3_000L;
         try
@@ -578,6 +580,12 @@ final class PropertySheetComfortUi
             }
             PropertySheetComfortValueControls.applyToNative(session, row.created, nativeValue,
                     row.valueViewModel, row.propertyName, row.valueView, renderer);
+            if (row.created.kind == PropertySheetComfortValueControls.Kind.BOOLEAN)
+                PropertySheetDebug.sync("comfort→native BOOLEAN DIAG vm=" //$NON-NLS-1$
+                        + (row.valueViewModel != null ? row.valueViewModel.getClass().getName() : "null") //$NON-NLS-1$
+                        + " view=" + PropertySheetDebug.safe(row.valueView) //$NON-NLS-1$
+                        + " hasSetChecked=" + hasMethod(row.valueViewModel, "setChecked") //$NON-NLS-1$ //$NON-NLS-2$
+                        + " viewVmClass=" + resolveViewVmClass(row.valueView)); //$NON-NLS-1$
             scheduleContextualEditableRefresh(session, triggerProperty);
         }
         finally
@@ -984,6 +992,26 @@ final class PropertySheetComfortUi
         return null;
     }
 
+    private static boolean hasMethod(Object obj, String methodName)
+    {
+        if (obj == null)
+            return false;
+        for (java.lang.reflect.Method m : obj.getClass().getMethods())
+            if (m.getName().equals(methodName))
+                return true;
+        return false;
+    }
+
+    private static String resolveViewVmClass(Object valueView)
+    {
+        if (valueView == null)
+            return "null"; //$NON-NLS-1$
+        Object vm = Global.invoke(valueView, "getViewModel"); //$NON-NLS-1$
+        if (vm == null)
+            vm = Global.getField(valueView, "viewModel"); //$NON-NLS-1$
+        return vm != null ? vm.getClass().getName() : "null"; //$NON-NLS-1$
+    }
+
     private static boolean isHierarchyDependentField(String propertyName)
     {
         return "Вид иерархии".equals(propertyName) //$NON-NLS-1$
@@ -1150,6 +1178,11 @@ final class PropertySheetComfortUi
 
         ComfortRow row = new ComfortRow(entry.name, created.displayValue, nameLabel, created,
                 rowComposite, nativeValue, valueVm, valueView);
+        if (row.created.kind == PropertySheetComfortValueControls.Kind.BOOLEAN)
+            PropertySheetDebug.sync("createPropertyRow BOOLEAN " //$NON-NLS-1$
+                    + PropertySheetDebug.quote(entry.name)
+                    + " valueView=" + PropertySheetDebug.safe(valueView) //$NON-NLS-1$
+                    + " valueVm=" + PropertySheetDebug.safe(valueVm)); //$NON-NLS-1$
         wireRow(session, row);
         session.paletteRows.add(new PropertySheetPaletteRow(nameLabel, rowComposite,
                 new Control[] { nameLabel, created.control }, entry.name));
@@ -1163,65 +1196,99 @@ final class PropertySheetComfortUi
      */
     private static void wireModelChangeListener(ComfortRow row, Runnable onNativeChange)
     {
-        Object valueVm = row.valueViewModel;
-        if (valueVm == null)
+        Object valueView = row.valueView;
+        if (valueView == null)
             return;
-        Object model = Global.invoke(valueVm, "getModel"); //$NON-NLS-1$
-        if (model == null)
-            return;
-        // Пробуем addChangeListener и addValueListener
-        tryWireListenerOnTarget(model, onNativeChange);
-        tryWireListenerOnTarget(valueVm, onNativeChange);
-        PropertySheetDebug.sync("wireModelListener " //$NON-NLS-1$
+        // LightCheckbox хранится в поле "lightControl" класса LwtView
+        Object lightCheckbox = getDeclaredFieldValue(valueView, "lightControl"); //$NON-NLS-1$
+        PropertySheetDebug.sync("wireModelListener attempt " //$NON-NLS-1$
                 + PropertySheetDebug.quote(row.propertyName)
-                + " model=" + PropertySheetDebug.safe(model)); //$NON-NLS-1$
-    }
-
-    private static final String MODEL_LISTENER_WIRED_KEY = "tormozit.ps.modelListenerWired"; //$NON-NLS-1$
-
-    private static void tryWireListenerOnTarget(Object target, Runnable onNativeChange)
-    {
-        if (target == null)
-            return;
-        // Проверяем addChangeListener(IChangeListener) и addValueListener(IValueChangedListener)
-        for (String addMethod : new String[] {
-                "addChangeListener", "addValueListener", "addListener", "addObserver" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-        })
+                + " view=" + PropertySheetDebug.safe(valueView) //$NON-NLS-1$
+                + " light=" + PropertySheetDebug.safe(lightCheckbox)); //$NON-NLS-1$
+        if (lightCheckbox == null)
         {
-            java.lang.reflect.Method[] methods = target.getClass().getMethods();
-            for (java.lang.reflect.Method m : methods)
+            PropertySheetDebug.sync("wireModelListener FAIL no lightControl field view=" //$NON-NLS-1$
+                    + PropertySheetDebug.safe(valueView));
+            return;
+        }
+        // Находим addStateChangedListener(IChangedListener) на LightCheckbox
+        java.lang.reflect.Method addMethod = null;
+        Class<?> listenerType = null;
+        for (java.lang.reflect.Method m : lightCheckbox.getClass().getMethods())
+        {
+            if (!"addStateChangedListener".equals(m.getName())) //$NON-NLS-1$
+                continue;
+            Class<?>[] params = m.getParameterTypes();
+            if (params.length == 1 && params[0].isInterface())
             {
-                if (!m.getName().equals(addMethod))
-                    continue;
-                java.lang.Class<?>[] params = m.getParameterTypes();
-                if (params.length != 1)
-                    continue;
-                java.lang.Class<?> listenerType = params[0];
-                if (!listenerType.isInterface())
-                    continue;
-                // Создаём Proxy-слушатель
-                try
-                {
-                    Object proxy = java.lang.reflect.Proxy.newProxyInstance(
-                            listenerType.getClassLoader(),
-                            new java.lang.Class<?>[] { listenerType },
-                            (p, method, args) -> {
-                                // Игнорируем Object-методы
-                                String mn = method.getName();
-                                if ("equals".equals(mn) || "hashCode".equals(mn) || "toString".equals(mn))
-                                    return java.lang.reflect.Proxy.getInvocationHandler(p);
-                                // Любой вызов = событие изменения
-                                onNativeChange.run();
-                                return null;
-                            });
-                    m.invoke(target, proxy);
-                    PropertySheetDebug.syncVerbose("wireModelListener OK " //$NON-NLS-1$
-                            + addMethod + " on " + PropertySheetDebug.safe(target)); //$NON-NLS-1$
-                    return; // достаточно одного listener
-                }
-                catch (Throwable ignored) {}
+                addMethod = m;
+                listenerType = params[0];
+                break;
             }
         }
+        if (addMethod == null || listenerType == null)
+        {
+            PropertySheetDebug.sync("wireModelListener FAIL no addStateChangedListener light=" //$NON-NLS-1$
+                    + PropertySheetDebug.safe(lightCheckbox));
+            return;
+        }
+        try
+        {
+            final java.lang.reflect.Method finalAdd = addMethod;
+            final Class<?> finalType = listenerType;
+            Object proxy = java.lang.reflect.Proxy.newProxyInstance(
+                    finalType.getClassLoader(),
+                    new Class<?>[] { finalType },
+                    (p, method, args) -> {
+                        String mn = method.getName();
+                        if ("equals".equals(mn)) return false;
+                        if ("hashCode".equals(mn)) return System.identityHashCode(p);
+                        if ("toString".equals(mn)) return "ComfortSyncListener"; //$NON-NLS-1$
+                        // changed(source, newValue) — любой вызов = событие
+                        Object newVal = args != null && args.length > 1 ? args[1] : null;
+                        PropertySheetDebug.sync("wireModelListener fired " //$NON-NLS-1$
+                                + PropertySheetDebug.quote(row.propertyName)
+                                + " newValue=" + newVal); //$NON-NLS-1$
+                        onNativeChange.run();
+                        return null;
+                    });
+            addMethod.invoke(lightCheckbox, proxy);
+            PropertySheetDebug.sync("wireModelListener OK " //$NON-NLS-1$
+                    + PropertySheetDebug.quote(row.propertyName)
+                    + " light=" + PropertySheetDebug.safe(lightCheckbox)); //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+            PropertySheetDebug.sync("wireModelListener EXCEPTION " + e); //$NON-NLS-1$
+        }
+    }
+
+    /** Читает приватное/protected поле из obj или его суперклассов по имени. */
+    private static Object getDeclaredFieldValue(Object obj, String fieldName)
+    {
+        if (obj == null || fieldName == null)
+            return null;
+        Class<?> cls = obj.getClass();
+        while (cls != null && cls != Object.class)
+        {
+            try
+            {
+                java.lang.reflect.Field f = cls.getDeclaredField(fieldName);
+                f.setAccessible(true);
+                return f.get(obj);
+            }
+            catch (NoSuchFieldException e)
+            {
+                cls = cls.getSuperclass();
+            }
+            catch (Exception e)
+            {
+                PropertySheetDebug.sync("getDeclaredField FAIL " + fieldName + " on " //$NON-NLS-1$ //$NON-NLS-2$
+                        + obj.getClass().getName() + ": " + e); //$NON-NLS-1$
+                return null;
+            }
+        }
+        return null;
     }
     private static void wireRow(Session session, ComfortRow row)
     {
@@ -1241,11 +1308,20 @@ final class PropertySheetComfortUi
             row.valueControl().addMouseListener(click);
         PropertySheetComfortValueControls.wireNativeMirror(row.nativeValueControl, row.valueView,
                 row.created.kind, () -> pullNativeToComfort(session, row));
-        // Дополнительный wire для LWT BOOLEAN через AEF model listener
-        if (row.created.kind == PropertySheetComfortValueControls.Kind.BOOLEAN
-                && (row.nativeValueControl == null || row.nativeValueControl.isDisposed()))
+        // Для BOOLEAN откладываем wire через asyncExec:
+        // в момент createPropertyRow поле lightControl в LwtView ещё null
+        // (рендерер вызовет bind() позже при отрисовке).
+        if (row.created.kind == PropertySheetComfortValueControls.Kind.BOOLEAN)
         {
-            wireModelChangeListener(row, () -> pullNativeToComfort(session, row));
+            org.eclipse.swt.widgets.Display display = row.rowComposite.getDisplay();
+            Runnable onNativeChange = () -> pullNativeToComfort(session, row);
+            display.timerExec(300, () -> wireModelChangeListener(row, onNativeChange));
+            display.timerExec(1000, () -> {
+                // дополнительная попытка если 300ms не хватило
+                Object lc = getDeclaredFieldValue(row.valueView, "lightControl"); //$NON-NLS-1$
+                if (lc == null)
+                    wireModelChangeListener(row, onNativeChange);
+            });
         }
         PropertySheetComfortValueControls.wireChange(row.created, () -> {
             if (row.updatingFromNative)

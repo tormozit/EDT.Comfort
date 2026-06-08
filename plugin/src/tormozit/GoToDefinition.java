@@ -160,7 +160,7 @@ public class GoToDefinition extends AbstractHandler
             newFile = new File(transportFolder + "\\НовыйТекст.txt"); //$NON-NLS-1$
             oldFile = new File(transportFolder + "\\СтарыйТекст.txt"); //$NON-NLS-1$
         }
-        else if (event.getCommand().getId()=="tormozit.JumpFromClipboard")
+        else if (event.getCommand().getId().equals("tormozit.JumpFromClipboard"))
         {
             command = getClipboardText(shell);
             if (command == null || command.isBlank())
@@ -625,8 +625,10 @@ public class GoToDefinition extends AbstractHandler
         return resolveEObjectByQualifiedName(fqn.toString(), v8Project);
     }
 
-    public static EObject resolveEObjectByQualifiedName(String fqn, IV8Project v8Project)
+    public static EObject resolveEObjectByQualifiedName(String fullName, IV8Project v8Project)
     {
+        String fqn = MdTypeMapping.anyFullNameToBmFqn(fullName);
+        if (fqn == null) return null;
         IBmModelManager modelManager =
             (IBmModelManager)Global.getServiceByClass(IBmModelManager.class);
         BmPlatform platform = modelManager.getBmPlatform();
@@ -634,7 +636,21 @@ public class GoToDefinition extends AbstractHandler
         IBmNamespace ns = modelManager.getBmNamespace(v8Project.getProject());
         try
         {
-            return (EObject)transaction.getTopObjectByFqn(ns, fqn);
+            // getTopObjectByFqn принимает только FQN top-level объекта (первые два сегмента).
+            // Если fullName содержит дополнительные сегменты (напр. Справочник.Валюты.Макет.Классификатор),
+            // сначала получаем родительский top-object, затем обходим EMF-дерево вниз.
+            String[] fqnParts = fqn.split("\\.", -1); //$NON-NLS-1$
+            String topFqn = fqnParts[0] + "." + fqnParts[1]; //$NON-NLS-1$
+            EObject eObject = (EObject) transaction.getTopObjectByFqn(ns, topFqn);
+            if (eObject == null || fqnParts.length <= 2)
+                return eObject;
+            // Спускаемся по дочерним объектам по парам (тип, имя)
+            for (int i = 2; i + 1 < fqnParts.length && eObject != null; i += 2)
+            {
+                String childName = fqnParts[i + 1];
+                eObject = findChildByName(eObject, childName);
+            }
+            return eObject;
         }
         catch (Exception e)
         {
@@ -644,6 +660,51 @@ public class GoToDefinition extends AbstractHandler
         {
             transaction.commit();
         }
+    }
+
+    /**
+     * Ищет прямой дочерний EMF-объект (EObject) по имени свойства "name".
+     * Перебирает все containment-ссылки и сравнивает (без учёта регистра).
+     */
+    private static EObject findChildByName(EObject parent, String name)
+    {
+        if (parent == null || name == null) return null;
+        for (org.eclipse.emf.ecore.EReference ref : parent.eClass().getEAllContainments())
+        {
+            Object val = parent.eGet(ref);
+            if (ref.isMany())
+            {
+                for (Object item : (java.util.List<?>) val)
+                {
+                    if (item instanceof EObject)
+                    {
+                        EObject child = (EObject) item;
+                        String childName = getEObjectName(child);
+                        if (name.equalsIgnoreCase(childName))
+                            return child;
+                    }
+                }
+            }
+            else if (val instanceof EObject)
+            {
+                EObject child = (EObject) val;
+                String childName = getEObjectName(child);
+                if (name.equalsIgnoreCase(childName))
+                    return child;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Получает имя EObject через структурный признак "name".
+     */
+    private static String getEObjectName(EObject obj)
+    {
+        org.eclipse.emf.ecore.EStructuralFeature nameFeature = obj.eClass().getEStructuralFeature("name"); //$NON-NLS-1$
+        if (nameFeature == null) return null;
+        Object val = obj.eGet(nameFeature);
+        return val instanceof String ? (String) val : null;
     }
 
     // =======================================================================

@@ -419,4 +419,42 @@ public final class MdTypeMapping
     {
         return RU_TO_EN_SING.get(ru);
     }
+
+    /**
+     * Конвертирует полное имя (RU или EN) в FQN BM URI.
+     * Обратная операция к {@link #bmFqnToRuFullName}.
+     * Русские сегменты переводит в EN ед.ч., английские пропускает как есть.
+     * <pre>
+     *   "Справочник.Валюты"                        → "Catalog.Валюты"
+     *   "Catalog.Валюты"                           → "Catalog.Валюты"
+     *   "Справочник.Валюты.Макет.Классификатор"    → "Catalog.Валюты.Template.Классификатор"
+     *   "Catalog.Валюты.Template.Классификатор"    → "Catalog.Валюты.Template.Классификатор"
+     *   "Справочник.Валюты.МодульОбъекта"           → "Catalog.Валюты.ObjectModule"
+     *   "Document.Заказ.Command.Провести"          → "Document.Заказ.Command.Провести"
+     * </pre>
+     *
+     * @return FQN BM URI, или {@code null} если не удалось разобрать
+     */
+    public static String anyFullNameToBmFqn(String fullName)
+    {
+        if (fullName == null || fullName.isBlank()) return null;
+        String[] parts = fullName.split("\\.", -1);
+        if (parts.length < 2) return null;
+
+        // Первый сегмент: определяем язык и нормализуем в EN ед.ч.
+        String typeEn = anyToEnSing(parts[0]);
+        if (typeEn == null) return null;
+        StringBuilder sb = new StringBuilder(typeEn).append('.').append(parts[1]);
+
+        // Последующие пары: тип под-объекта + имя
+        for (int i = 2; i + 1 < parts.length; i += 2)
+        {
+            String subTypeEn = anyToEnSing(parts[i]);
+            if (subTypeEn != null)
+            {
+                sb.append('.').append(subTypeEn).append('.').append(parts[i + 1]);
+            }
+        }
+        return sb.toString();
+    }
 }

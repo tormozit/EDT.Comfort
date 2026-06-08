@@ -3,33 +3,44 @@ package tormozit;
 import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.jface.viewers.ILabelProviderListener;
 import org.eclipse.jface.viewers.StyledCellLabelProvider;
-import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.jface.viewers.ViewerCell;
-import org.eclipse.swt.custom.StyleRange;
 import org.eclipse.swt.graphics.Image;
 
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 
 /**
- * Подсветка навигатора: без раскраски групп; у объектов — штатный серый квалификатор
- * с подсветкой вхождения в синониме/комментарии/подсказке.
+ * Подсветка навигатора поверх штатного {@link StyledCellLabelProvider} EDT:
+ * иконки, уголок изменений, git-суффикс в скобках — из {@code base.update(cell)}.
+ * При пустом фильтре ячейка не меняется; при поиске — только overlay подсветки
+ * и при необходимости серый квалификатор до динамических суффиксов.
+ *
+ * <p>НЕ ТРОГАТЬ ГРУППЫ: {@link NavigatorTreeElementLabels#isGroupNode(Object)} — без подсветки
+ * и без пересборки надписи (только штатный {@code base.update}).
  */
 public final class NavigatorStyledCellLabelWrapper extends StyledCellLabelProvider
         implements SmartLabelHighlight, ILabelProvider
 {
     private final StyledCellLabelProvider base;
     private final NavigatorSearchTextCache searchCache;
+    private final Object labelSource;
     private String highlightPattern = ""; //$NON-NLS-1$
 
     public NavigatorStyledCellLabelWrapper(StyledCellLabelProvider base)
     {
-        this(base, null);
+        this(base, null, null);
     }
 
     public NavigatorStyledCellLabelWrapper(StyledCellLabelProvider base, NavigatorSearchTextCache searchCache)
     {
+        this(base, searchCache, null);
+    }
+
+    public NavigatorStyledCellLabelWrapper(StyledCellLabelProvider base, NavigatorSearchTextCache searchCache,
+            Object labelSource)
+    {
         this.base = base;
         this.searchCache = searchCache;
+        this.labelSource = labelSource;
     }
 
     @Override
@@ -49,50 +60,55 @@ public final class NavigatorStyledCellLabelWrapper extends StyledCellLabelProvid
         Object element = cell.getElement();
         base.update(cell);
 
-        if (NavigatorTreeElementLabels.isGroupNode(element))
-        {
-            cell.setStyleRanges(null);
-            return;
-        }
-        if (highlightPattern.isEmpty())
+        // НЕ ТРОГАТЬ ГРУППЫ: служебные папки EDT — только штатная отрисовка
+        if (highlightPattern.isEmpty() || NavigatorTreeElementLabels.isGroupNode(element))
             return;
 
-        StyledString styled = new StyledString(cell.getText() != null ? cell.getText() : ""); //$NON-NLS-1$
-        decorateObjectLabel(styled, element);
-        applyStyledString(cell, styled);
-    }
-
-    private void decorateObjectLabel(StyledString styled, Object element)
-    {
-        MdObject mdObject = NavigatorTreeElementLabels.resolveMdObject(element);
-        if (mdObject == null || styled == null)
+        String text = cell.getText();
+        if (text == null || text.isEmpty())
             return;
-
-        String name = mdObject.getName() != null ? mdObject.getName() : ""; //$NON-NLS-1$
-
-        NavigatorFuzzySearch.QualifierMatch qualifier = searchCache != null
-                ? searchCache.qualifier(mdObject, highlightPattern, name)
-                : NavigatorFuzzySearch.findQualifierMatch(mdObject, highlightPattern, name);
-        if (qualifier != null && qualifier.text != null && !qualifier.text.isEmpty())
-        {
-            styled.append("  ", StyledString.QUALIFIER_STYLER); //$NON-NLS-1$
-            styled.append(qualifier.text, StyledString.QUALIFIER_STYLER);
-        }
 
         SmartMatcher matcher = new SmartMatcher(highlightPattern);
-        String plain = styled.getString();
-        if (matcher.matches(plain))
-            SmartMatchHighlight.applyRanges(styled, matcher.getHighlightRanges(plain));
+        // ПОДСВЕТКА ТОЛЬКО ПРИ ПОЛНОМ СОВПАДЕНИИ ВСЕХ СЛОВ ФИЛЬТРА
+        // ПО ПОЛНОМУ ПОИСКОВОМУ ТЕКСТУ ОБЪЕКТА (ИМЯ+СИНОНИМ+КОММЕНТАРИЙ+TOOLTIP).
+        if (!matchesFullFilter(element, matcher, text))
+            return;
+
+        NavigatorFuzzySearch.QualifierMatch qualifier = resolveQualifier(element);
+        if (qualifier == null)
+        {
+            SmartMatchHighlight.appendMatchRanges(cell, matcher.getHighlightRanges(text));
+            return;
+        }
+
+        NavigatorLabelQualifier.applyToCell(cell, element, qualifier, matcher);
     }
 
-    private static void applyStyledString(ViewerCell cell, StyledString styled)
+    private NavigatorFuzzySearch.QualifierMatch resolveQualifier(Object element)
     {
-        if (cell == null || styled == null)
-            return;
-        cell.setText(styled.getString());
-        StyleRange[] ranges = styled.getStyleRanges();
-        if (ranges != null && ranges.length > 0)
-            cell.setStyleRanges(ranges);
+        MdObject mdObject = NavigatorTreeElementLabels.resolveMdObject(element);
+        if (mdObject == null)
+            return null;
+
+        String name = mdObject.getName() != null ? mdObject.getName() : ""; //$NON-NLS-1$
+        return searchCache != null
+                ? searchCache.qualifier(mdObject, highlightPattern, name)
+                : NavigatorFuzzySearch.findQualifierMatch(mdObject, highlightPattern, name);
+    }
+
+    private boolean matchesFullFilter(Object element, SmartMatcher matcher, String fallbackText)
+    {
+        if (matcher == null || matcher.isEmpty)
+            return false;
+        // ФИЛЬТРАЦИЯ НЕ ДОЛЖНА БЛОКИРОВАТЬ ВВОД:
+        // используем кешированный searchText, без тяжелого пересчета EMF на каждый repaint.
+        if (searchCache != null && labelSource != null)
+        {
+            String searchText = searchCache.searchText(element, labelSource);
+            if (searchText != null && !searchText.isEmpty())
+                return matcher.matches(searchText);
+        }
+        return matcher.matches(fallbackText);
     }
 
     @Override

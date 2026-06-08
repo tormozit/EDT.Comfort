@@ -11,6 +11,11 @@ import com._1c.g5.v8.dt.navigator.providers.INavigatorContentProviderFolder;
 /**
  * Текст для умного фильтра навигатора EDT: как штатный поиск — только объекты метаданных,
  * не группы («Реквизиты», «Макеты»…); строка поиска = имя + синоним/комментарий + подсказка.
+ *
+ * <p><b>НЕ ТРОГАТЬ ГРУППЫ</b> ({@link #isGroupNode(Object)}): служебные папки EDT
+ * (Реквизиты, Макеты, группы типов и т.п.) не участвуют в тексте поиска, подсветке
+ * совпадений и собственном совпадении фильтра. Они остаются видимыми только как контейнеры
+ * пути к объектам метаданных. Корень конфигурации и сами объекты — вне этого правила.
  */
 public final class NavigatorTreeElementLabels
 {
@@ -29,7 +34,10 @@ public final class NavigatorTreeElementLabels
 
     private NavigatorTreeElementLabels() {}
 
-    /** Группа навигатора — не участвует в собственном совпадении по тексту. */
+    /**
+     * Служебная папка навигатора EDT. НЕ ТРОГАТЬ ГРУППЫ: не фильтровать и не раскрашивать
+     * по паттерну; только показывать, если в поддереве есть совпадения.
+     */
     public static boolean isGroupNode(Object element)
     {
         if (element == null)
@@ -45,7 +53,7 @@ public final class NavigatorTreeElementLabels
         return isInstanceOf(element, VIRTUAL_ADAPTER) || isInstanceOf(element, EXTERNAL_FOLDER_ADAPTER);
     }
 
-    public static String resolveSearchText(Object element, IBaseLabelProvider labelProvider)
+    public static String resolveSearchText(Object element, Object labelSource)
     {
         if (element == null)
             return ""; //$NON-NLS-1$
@@ -58,6 +66,8 @@ public final class NavigatorTreeElementLabels
         if (model instanceof EObject)
             return buildEObjectSearchText((EObject) model);
 
+        IBaseLabelProvider labelProvider = labelSource instanceof IBaseLabelProvider
+                ? (IBaseLabelProvider) labelSource : null;
         return SmartTreeElementLabels.resolve(element, labelProvider);
     }
 

@@ -2013,36 +2013,69 @@ final class PropertySheetControlInterop
         PropertySheetDebug.sync("invokeCheckboxOnView OK " + via + " selected=" + selected); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
-    /** Имитация клика: только {@code handleEvent(Selection)}, без {@code setChecked}. */
+    /** Имитация клика по полю checkboxField страницы: сначала {@code setChecked}, затем handleEvent. */
     private static boolean toggleLightCheckbox(Object light, boolean selected)
     {
         if (light == null)
             return false;
         String cn = light.getClass().getName();
-        if (!cn.contains("Checkbox") && !cn.contains("CheckBox")) //$NON-NLS-1$ //$NON-NLS-2$
-            return false;
-        Object current = Global.invoke(light, "isChecked"); //$NON-NLS-1$
-        if (current instanceof Boolean && ((Boolean) current).booleanValue() == selected)
-            return true;
-        Control swt = bridgeSwtLightControlOnly(light);
-        for (int eventType : new int[] { SWT.Selection, SWT.MouseDown })
+        // light может быть LwtCheckboxView — тогда берём поле checkbox
+        if (cn.contains("CheckboxView") || cn.contains("CheckBoxView")) //$NON-NLS-1$ //$NON-NLS-2$
         {
-            Event event = new Event();
-            event.type = eventType;
-            event.button = 1;
-            if (swt != null && !swt.isDisposed())
-                event.widget = swt;
-            if (Global.invokeVoid(light, "handleEvent", event)) //$NON-NLS-1$
+            Object checkbox = Global.getField(light, "checkbox"); //$NON-NLS-1$
+            if (checkbox != null)
             {
-                Object after = Global.invoke(light, "isChecked"); //$NON-NLS-1$
-                if (after instanceof Boolean && ((Boolean) after).booleanValue() == selected)
-                    return true;
+                // setChecked на LightCheckbox обновит визуал + EMF observable,
+                // но ПАЛИТРА не знает. Поэтому добавляем handleEvent/notifyListeners.
+                Global.invokeVoid(checkbox, "setChecked", Boolean.valueOf(selected)); //$NON-NLS-1$
+                // notifyStateChangedListeners = CheckboxControlListener.changed() → queueAndWaitEvent
+                boolean notified = Global.invokeVoid(checkbox, "notifyStateChangedListeners"); //$NON-NLS-1$
+                if (!notified)
+                    notified = Global.invokeVoid(checkbox, "notifyListeners"); //$NON-NLS-1$
+                if (!notified)
+                {
+                    Event event = new Event();
+                    event.type = SWT.Selection;
+                    event.button = 1;
+                    notified = Global.invokeVoid(light, "handleEvent", event); //$NON-NLS-1$
+                }
+                PropertySheetDebug.sync("toggleLightCheckbox via CheckboxView.checkbox.setChecked(" //$NON-NLS-1$
+                        + selected + ") notified=" + notified); //$NON-NLS-1$
+                return true;
             }
         }
-        if (!notifyLightSelection(light))
+        if (!cn.contains("Checkbox") && !cn.contains("CheckBox")) //$NON-NLS-1$ //$NON-NLS-2$
             return false;
+        // light = LightCheckbox
+        Object current = Global.invoke(light, "isChecked"); //$NON-NLS-1$
+        if (current instanceof Boolean && ((Boolean) current).booleanValue() == selected)
+        {
+            // Уже нужное состояние
+            PropertySheetDebug.sync("toggleLightCheckbox already=" + selected); //$NON-NLS-1$
+            return true;
+        }
+        Global.invokeVoid(light, "setChecked", Boolean.valueOf(selected)); //$NON-NLS-1$
+        boolean notified = Global.invokeVoid(light, "notifyStateChangedListeners"); //$NON-NLS-1$
+        if (!notified)
+            notified = Global.invokeVoid(light, "notifyListeners"); //$NON-NLS-1$
+        if (!notified)
+        {
+            Control swt = bridgeSwtLightControlOnly(light);
+            for (int eventType : new int[] { SWT.Selection, SWT.MouseDown })
+            {
+                Event event = new Event();
+                event.type = eventType;
+                event.button = 1;
+                if (swt != null && !swt.isDisposed())
+                    event.widget = swt;
+                notified |= Global.invokeVoid(light, "handleEvent", event); //$NON-NLS-1$
+            }
+        }
         Object after = Global.invoke(light, "isChecked"); //$NON-NLS-1$
-        return after instanceof Boolean && ((Boolean) after).booleanValue() == selected;
+        boolean ok = !(after instanceof Boolean) || ((Boolean) after).booleanValue() == selected;
+        PropertySheetDebug.sync("toggleLightCheckbox LightCheckbox setChecked(" + selected //$NON-NLS-1$
+                + ") notified=" + notified + " ok=" + ok); //$NON-NLS-1$
+        return ok;
     }
 
     static void simulateNativeValueChange(PropertySheetComfortValueControls.Kind kind,

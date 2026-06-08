@@ -181,7 +181,7 @@ public class SmartOutlineFilter extends ViewerFilter {
     }
 
     /** Есть совпадение в узле или любом потомке (мемоизация — один проход на ветку). */
-    private boolean hasMatchInSubtree(ITreeContentProvider cp, Object element)
+    protected boolean hasMatchInSubtree(ITreeContentProvider cp, Object element)
     {
         Boolean memo = subtreeMatchMemo.get(element);
         if (memo != null)

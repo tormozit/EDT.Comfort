@@ -587,7 +587,7 @@ final class PropertySheetComfortValueControls
         }
     }
 
-    private static Object readComfortPushValue(Created created)
+    static Object readComfortPushValue(Created created)
     {
         if (created == null)
             return ""; //$NON-NLS-1$
@@ -811,32 +811,27 @@ final class PropertySheetComfortValueControls
             pushModelValue(valueVm, Boolean.valueOf(selected));
             return;
         }
-        // Fallback: прямой push в IValue (LwtCheckboxView — нет SWT-кнопки)
-        PropertySheetDebug.sync("comfort→native boolean via IValue selected=" + selected //$NON-NLS-1$
+        // Fallback для LwtCheckboxView: valueVm — это CheckboxViewModel с методом setChecked(boolean).
+        // EMF databinding автоматически передаёт изменение в LightCheckbox.
+        PropertySheetDebug.sync("comfort→native boolean FALLBACK vm=" //$NON-NLS-1$
+                + PropertySheetDebug.safe(valueVm) //$NON-NLS-1$
+                + " vmClass=" + (valueVm != null ? valueVm.getClass().getName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
                 + " view=" + PropertySheetDebug.safe(valueView)); //$NON-NLS-1$
-        pushModelValue(valueVm, Boolean.valueOf(selected));
-        // Имитация изменения через view (обновит palette engine)
-        if (valueView != null)
+        if (valueVm != null && Global.invokeVoid(valueVm, "setChecked", Boolean.valueOf(selected))) //$NON-NLS-1$
         {
-            for (String method : new String[] {
-                    "handleSelection", "selectionChanged", "handleValueChange", "valueChanged", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-                    "handleCheck", "setChecked", "setSelected" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            })
-            {
-                if (Global.invokeVoid(valueView, method, Boolean.valueOf(selected)))
-                {
-                    PropertySheetDebug.sync("comfort→native boolean view." + method + " OK"); //$NON-NLS-1$ //$NON-NLS-2$
-                    return;
-                }
-            }
+            PropertySheetDebug.sync("comfort→native boolean setChecked(" + selected + ") OK"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
         }
-        // Через IValue: vm.getModel().setValue(selected) + valueChanged()
-        Object model = valueVm != null ? Global.invoke(valueVm, "getModel") : null; //$NON-NLS-1$
-        if (model != null)
+        // valueVm не CheckboxViewModel — ищем CheckboxViewModel через valueView.getViewModel()
+        Object checkboxVm = valueView != null ? Global.invoke(valueView, "getViewModel") : null; //$NON-NLS-1$
+        if (checkboxVm == null && valueView != null)
+            checkboxVm = Global.getField(valueView, "viewModel"); //$NON-NLS-1$
+        PropertySheetDebug.sync("comfort→native boolean checkboxVm=" //$NON-NLS-1$
+                + (checkboxVm != null ? checkboxVm.getClass().getName() : "null")); //$NON-NLS-1$
+        if (checkboxVm != null && Global.invokeVoid(checkboxVm, "setChecked", Boolean.valueOf(selected))) //$NON-NLS-1$
         {
-            Global.invoke(model, "setValue", Boolean.valueOf(selected)); //$NON-NLS-1$
-            Global.invoke(model, "valueChanged"); //$NON-NLS-1$
-            PropertySheetDebug.sync("comfort→native boolean model.setValue OK selected=" + selected); //$NON-NLS-1$
+            PropertySheetDebug.sync("comfort→native boolean checkboxVm.setChecked(" + selected + ") OK"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
         }
         PropertySheetDebug.sync("comfort→native FAIL checkbox selected=" + selected //$NON-NLS-1$
                 + " view=" + PropertySheetDebug.safe(valueView)); //$NON-NLS-1$

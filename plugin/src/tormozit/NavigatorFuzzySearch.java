@@ -90,15 +90,77 @@ public final class NavigatorFuzzySearch
             return null;
 
         String safeName = objectName != null ? objectName.trim() : ""; //$NON-NLS-1$
+        SmartMatcher matcher = new SmartMatcher(pattern);
         QualifierMatch best = null;
+        List<QualifierMatch> parts = new ArrayList<>();
 
         for (String hidden : collectHiddenTexts(mdObject))
         {
             QualifierMatch candidate = tryQualifier(hidden, pattern, safeName);
-            if (candidate != null && (best == null || candidate.score > best.score))
+            if (candidate == null)
+                continue;
+            parts.add(candidate);
+            if (best == null || candidate.score > best.score)
                 best = candidate;
         }
-        return best;
+        if (parts.isEmpty())
+            return null;
+        if (matcher.getFragments().length <= 1)
+            return best;
+
+        QualifierMatch merged = mergeQualifierMatches(parts);
+        return merged != null ? merged : best;
+    }
+
+    /** Склеивает совпадения из нескольких атрибутов (синоним + комментарий + tooltip...). */
+    private static QualifierMatch mergeQualifierMatches(List<QualifierMatch> parts)
+    {
+        if (parts == null || parts.isEmpty())
+            return null;
+
+        List<QualifierMatch> unique = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        for (QualifierMatch part : parts)
+        {
+            if (part == null || part.text == null)
+                continue;
+            String trimmed = part.text.trim();
+            if (trimmed.isEmpty() || !seen.add(trimmed))
+                continue;
+            unique.add(part);
+            if (unique.size() >= 3)
+                break;
+        }
+        if (unique.isEmpty())
+            return null;
+        if (unique.size() == 1)
+            return unique.get(0);
+
+        StringBuilder text = new StringBuilder();
+        List<int[]> ranges = new ArrayList<>();
+        int score = 0;
+        for (QualifierMatch part : unique)
+        {
+            if (part == null || part.text == null)
+                continue;
+            if (text.length() > 0)
+                text.append(" | "); //$NON-NLS-1$
+            int offset = text.length();
+            text.append(part.text);
+            if (part.ranges != null)
+            {
+                for (int[] range : part.ranges)
+                {
+                    if (range == null || range.length < 2 || range[1] <= 0)
+                        continue;
+                    ranges.add(new int[] { offset + range[0], range[1] });
+                }
+            }
+            score += part.score;
+        }
+        if (text.length() == 0)
+            return null;
+        return new QualifierMatch(text.toString(), ranges, score);
     }
 
     private static QualifierMatch tryQualifier(String source, String pattern, String objectName)

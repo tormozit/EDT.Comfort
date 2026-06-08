@@ -56,17 +56,18 @@ final class SearchBoxFilterAccess
                     composite.layout(true, true);
             }
         }
-        Control textControl = findTextControl(searchBox);
         Object observable = Global.getField(searchBox, "searchTextObservable"); //$NON-NLS-1$
         if (observable == null)
             observable = Global.invoke(searchBox, "getSearchTextObservable"); //$NON-NLS-1$
+        Control textControl = findTextControl(searchBox);
         String mode;
-        if (textControl instanceof StyledText)
+        // SearchBox хранит ввод в searchTextObservable; StyledText внутри может ещё не существовать.
+        if (observable != null)
+            mode = "observable"; //$NON-NLS-1$
+        else if (textControl instanceof StyledText)
             mode = "styledText"; //$NON-NLS-1$
         else if (textControl instanceof Text)
             mode = "text"; //$NON-NLS-1$
-        else if (observable != null)
-            mode = "observable"; //$NON-NLS-1$
         else
             mode = "listener"; //$NON-NLS-1$
         return new SearchBoxFilterAccess(searchBox, textControl, observable, mode);
@@ -86,27 +87,43 @@ final class SearchBoxFilterAccess
 
     String readPattern()
     {
-        if (textControl instanceof StyledText && !textControl.isDisposed())
-            return ((StyledText) textControl).getText();
-        if (textControl instanceof Text && !textControl.isDisposed())
-            return ((Text) textControl).getText();
+        // SWTDelayedObservableValueDecorator.getValue() — только UI-поток.
         if (observable != null && isUiThread())
         {
             Object value = Global.invoke(observable, "getValue"); //$NON-NLS-1$
-            if (value instanceof String)
-                return (String) value;
+            String extracted = asStringValue(value);
+            if (extracted != null)
+                return extracted;
         }
-        Object text = Global.invoke(searchBox, "getText"); //$NON-NLS-1$
-        if (text instanceof String)
-            return (String) text;
-        if (observable == null)
+        return readPatternWithoutObservable();
+    }
+
+    /** Без observable — безопасно с фонового SearchJob. */
+    private String readPatternWithoutObservable()
+    {
+        Object active = Global.invoke(searchBox, "getActivePattern"); //$NON-NLS-1$
+        String activePattern = asStringValue(active);
+        if (activePattern != null)
+            return activePattern;
+        for (String field : new String[] { "activePattern", "lastSearchText", "searchPattern", "pattern", "searchText" }) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
         {
-            for (String field : new String[] { "lastSearchText", "searchPattern", "pattern" }) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            {
-                Object last = Global.getField(searchBox, field);
-                if (last instanceof String)
-                    return (String) last;
-            }
+            String last = asStringValue(Global.getField(searchBox, field));
+            if (last != null)
+                return last;
+        }
+        if (isUiThread())
+        {
+            StyledText styled = styledTextFromSearchBox(searchBox);
+            if (styled != null && !styled.isDisposed())
+                return styled.getText();
+            if (textControl instanceof StyledText && !textControl.isDisposed())
+                return ((StyledText) textControl).getText();
+            if (textControl instanceof Text && !textControl.isDisposed())
+                return ((Text) textControl).getText();
+            Object text = Global.invoke(searchBox, "getText"); //$NON-NLS-1$
+            String directText = asStringValue(text);
+            if (directText != null)
+                return directText;
         }
         return ""; //$NON-NLS-1$
     }
@@ -120,7 +137,7 @@ final class SearchBoxFilterAccess
             Consumer<String> onPatternChange)
     {
         boolean attached = false;
-        ModifyListener onModify = e -> onPatternChange.accept(null);
+        ModifyListener onModify = e -> notifyPatternChange(onPatternChange, null);
         if ("styledText".equals(mode) && textControl instanceof StyledText) //$NON-NLS-1$
         {
             ((StyledText) textControl).addModifyListener(onModify);
@@ -144,6 +161,23 @@ final class SearchBoxFilterAccess
         if (attachSearchListenerProxy(navigator, nativeListener, propertyPage, onPatternChange))
             attached = true;
         return attached;
+    }
+
+    /** Пустой explicit из performSearch("") не подменяет реальный ввод в observable. */
+    private void notifyPatternChange(Consumer<String> onChange, String explicit)
+    {
+        if (explicit != null && !explicit.isEmpty())
+        {
+            runOnUiThread(onChange, explicit);
+            return;
+        }
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() -> {
+            String pattern = readPattern();
+            onChange.accept(pattern != null ? pattern : ""); //$NON-NLS-1$
+        });
     }
 
     void disableNativeAutoSearch()
@@ -181,14 +215,41 @@ final class SearchBoxFilterAccess
         }
         else
             sb.append("n/a"); //$NON-NLS-1$
+        StyledText styled = styledTextFromSearchBox(searchBox);
+        sb.append(" styledText="); //$NON-NLS-1$
+        sb.append(styled == null ? "null" : styled.getClass().getSimpleName()); //$NON-NLS-1$
+        Object observable = Global.getField(searchBox, "searchTextObservable"); //$NON-NLS-1$
+        if (observable == null)
+            observable = Global.invoke(searchBox, "getSearchTextObservable"); //$NON-NLS-1$
+        if (observable != null && isUiThread())
+        {
+            Object value = Global.invoke(observable, "getValue"); //$NON-NLS-1$
+            sb.append(" observableValue=\"").append(asStringValue(value)).append("\""); //$NON-NLS-1$ //$NON-NLS-2$
+        }
         Control text = findTextControl(searchBox);
         sb.append(" textControl="); //$NON-NLS-1$
         sb.append(text == null ? "null" : text.getClass().getSimpleName()); //$NON-NLS-1$
         return sb.toString();
     }
 
+    private static StyledText styledTextFromSearchBox(Object searchBox)
+    {
+        if (searchBox == null)
+            return null;
+        for (String field : new String[] { "text", "searchText", "styledText" }) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        {
+            Object text = Global.getField(searchBox, field);
+            if (text instanceof StyledText)
+                return (StyledText) text;
+        }
+        return null;
+    }
+
     private static Control findTextControl(Object searchBox)
     {
+        StyledText styled = styledTextFromSearchBox(searchBox);
+        if (styled != null)
+            return styled;
         if (searchBox instanceof StyledText)
             return (Control) searchBox;
         if (searchBox instanceof Text)
@@ -245,11 +306,23 @@ final class SearchBoxFilterAccess
             display.asyncExec(() -> onPatternChange.accept(pattern));
     }
 
+    private void notifyPatternChangeFromValueEvent(Consumer<String> onChange, Object[] args)
+    {
+        String fromEvent = patternFromValueChangeArgs(args);
+        notifyPatternChange(onChange, fromEvent);
+    }
+
     private static String patternFromPerformSearchArgs(Object[] args)
     {
-        if (args == null || args.length == 0 || !(args[0] instanceof String))
-            return ""; //$NON-NLS-1$
-        return (String) args[0];
+        if (args == null || args.length == 0)
+            return null;
+        for (Object arg : args)
+        {
+            String value = asStringValue(arg);
+            if (value != null)
+                return value;
+        }
+        return null;
     }
 
     private static String patternFromValueChangeArgs(Object[] args)
@@ -261,8 +334,9 @@ final class SearchBoxFilterAccess
         if (diff != null)
         {
             Object newValue = Global.invoke(diff, "getNewValue"); //$NON-NLS-1$
-            if (newValue instanceof String)
-                return (String) newValue;
+            String extracted = asStringValue(newValue);
+            if (extracted != null)
+                return extracted;
         }
         return null;
     }
@@ -273,7 +347,7 @@ final class SearchBoxFilterAccess
         Object delegate = nativeListener;
         if (delegate == null && navigator != null)
             delegate = Global.getField(navigator, "searchPerformer"); //$NON-NLS-1$
-        Object proxy = createSearchListener(onPatternChange, delegate, propertyPage);
+        Object proxy = createSearchListener(this, onPatternChange, delegate, propertyPage);
         if (proxy == null)
             return false;
         Global.invoke(searchBox, "setSearchListener", proxy); //$NON-NLS-1$
@@ -281,15 +355,16 @@ final class SearchBoxFilterAccess
         return true;
     }
 
-    private static Object createValueChangeListener(Consumer<String> onChange)
+    private Object createValueChangeListener(Consumer<String> onChange)
     {
         try
         {
             Class<?> iface = Class.forName("org.eclipse.core.databinding.observable.value.IValueChangeListener"); //$NON-NLS-1$
+            SearchBoxFilterAccess self = this;
             return java.lang.reflect.Proxy.newProxyInstance(iface.getClassLoader(), new Class<?>[] { iface },
                     (proxy, method, args) -> {
                         if ("handleValueChange".equals(method.getName())) //$NON-NLS-1$
-                            runOnUiThread(onChange, patternFromValueChangeArgs(args));
+                            self.notifyPatternChangeFromValueEvent(onChange, args);
                         return null;
                     });
         }
@@ -299,7 +374,8 @@ final class SearchBoxFilterAccess
         }
     }
 
-    private static Object createSearchListener(Consumer<String> onSearch, Object nativeDelegate, Object propertyPage)
+    private static Object createSearchListener(SearchBoxFilterAccess self, Consumer<String> onSearch,
+            Object nativeDelegate, Object propertyPage)
     {
         try
         {
@@ -308,13 +384,16 @@ final class SearchBoxFilterAccess
                     (proxy, method, args) -> {
                         if ("performSearch".equals(method.getName())) //$NON-NLS-1$
                         {
-                            String pattern = patternFromPerformSearchArgs(args);
-                            runOnUiThread(onSearch, pattern);
-                            // Нативный performSearch("") пересобирает палитру и очищает Comfort UI.
+                            String fromArgs = patternFromPerformSearchArgs(args);
+                            self.notifyPatternChange(onSearch, fromArgs);
+                            String pattern = fromArgs;
+                            if (pattern == null || pattern.isEmpty())
+                                pattern = self.readPatternWithoutObservable();
+                            // Фильтрация — штатный SearchJob (не блокирует ввод в SearchBox).
                             boolean comfortActive = propertyPage != null
                                     && PropertySheetComfortUi.isInstalled(propertyPage)
                                     && PropertySheetComfortUi.hasRows(propertyPage);
-                            if (pattern.isEmpty() && nativeDelegate != null && !comfortActive)
+                            if (nativeDelegate != null && (!comfortActive || pattern != null && !pattern.isEmpty()))
                                 return method.invoke(nativeDelegate, args);
                             return null;
                         }
@@ -327,5 +406,19 @@ final class SearchBoxFilterAccess
         {
             return null;
         }
+    }
+
+    private static String asStringValue(Object value)
+    {
+        if (value == null)
+            return null;
+        if (value instanceof String)
+            return (String) value;
+        if (value instanceof CharSequence)
+            return value.toString();
+        Object extracted = Global.invoke(value, "getValue"); //$NON-NLS-1$
+        if (extracted != null && extracted != value)
+            return asStringValue(extracted);
+        return null;
     }
 }

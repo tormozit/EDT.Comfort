@@ -187,6 +187,16 @@ public final class Global
         return (IManagedService) ctx.getService(ctx.getServiceReference(clazz));
     }
 
+    @SuppressWarnings("unchecked")
+    public static <T> T getOsgiService(Class<T> clazz)
+    {
+        BundleContext ctx = ourContext();
+        if (ctx == null || clazz == null)
+            return null;
+        org.osgi.framework.ServiceReference<T> ref = ctx.getServiceReference(clazz);
+        return ref != null ? ctx.getService(ref) : null;
+    }
+
     // =========================================================================
     // Проекты
     // =========================================================================
