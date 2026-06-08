@@ -359,4 +359,8 @@ public final class Global
         });
     }
 
+    public static String pluginSignForTooltip()
+    {
+        return " (Комфорт)";
+    }
 }

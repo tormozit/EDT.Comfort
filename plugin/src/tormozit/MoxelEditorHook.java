@@ -240,7 +240,7 @@ public class MoxelEditorHook implements IStartup
 
                 MenuItem item = new MenuItem(menu, SWT.PUSH);
                 item.setText(MENU_TEXT);
-                item.setToolTipText("Открыть табличный документ в редакторе ИР (Comfort)"); //$NON-NLS-1$
+                item.setToolTipText("Открыть табличный документ в редакторе ИР" + Global.pluginSignForTooltip()); //$NON-NLS-1$
                 item.addSelectionListener(new SelectionAdapter()
                 {
                     @Override

@@ -82,7 +82,7 @@ public class CompareConfigSearchDialogHook
 
         Button cbSearchAllRows = new Button(parent, SWT.CHECK);
         cbSearchAllRows.setText("По всем строкам");
-        cbSearchAllRows.setToolTipText("Стандартный поиск EDT ищет только по строкам имен объектов. Этот флажок включает просмотр всех строк (Comfort)");
+        cbSearchAllRows.setToolTipText("Стандартный поиск EDT ищет только по строкам имен объектов. Этот флажок включает просмотр всех строк" + Global.pluginSignForTooltip());
         cbSearchAllRows.setLayoutData(new GridData(GridData.BEGINNING, GridData.CENTER, false, false));
         
         // Восстановление состояния при открытии (по умолчанию true, если настройки еще не создавались)
@@ -99,7 +99,7 @@ public class CompareConfigSearchDialogHook
         
         Button cbSearchAllColumns = new Button(parent, SWT.CHECK);
         cbSearchAllColumns.setText("По всем колонкам");
-        cbSearchAllColumns.setToolTipText("Дополнительно к поиску в колонках значений еще искать в колонке \"Объект\" (Comfort)");
+        cbSearchAllColumns.setToolTipText("Дополнительно к поиску в колонках значений еще искать в колонке \"Объект\"" + Global.pluginSignForTooltip());
         cbSearchAllColumns.setLayoutData(new GridData(GridData.BEGINNING, GridData.CENTER, false, false));
 
         // Восстановление состояния при открытии (по умолчанию true, если настройки еще не создавались)

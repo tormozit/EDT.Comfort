@@ -283,7 +283,7 @@ public class BSLEditorMenuHook implements IStartup
                 MenuItem item = new MenuItem(menu, SWT.PUSH);
                 item.setText(ITEM_TEXT_EditEmbedded);
                 item.setToolTipText(
-                    "Открыть вложенный текст в редакторе текста приложения ИР (Comfort)");
+                    "Открыть вложенный текст в редакторе текста приложения ИР" + Global.pluginSignForTooltip());
                 item.addSelectionListener(new SelectionAdapter()
                 {
                     @Override

@@ -203,7 +203,7 @@ public class CompareConfigMenuHook implements IStartup
                     ? new ToolItem(bar, SWT.DROP_DOWN, index)
                     : new ToolItem(bar, SWT.DROP_DOWN);
                 item.setText("Развернуть");
-                item.setToolTipText("Развернуть дерево сравнения до нужного уровня (Comfort)");
+                item.setToolTipText("Развернуть дерево сравнения до нужного уровня" + Global.pluginSignForTooltip());
 
                 item.addSelectionListener(new SelectionAdapter()
                 {

@@ -88,7 +88,10 @@ public class GetRef extends AbstractHandler
         IWorkbenchPart part = HandlerUtil.getActivePart(event);
         Shell          shell = HandlerUtil.getActiveShell(event);
         BslXtextEditor bslEditor = getActiveBslEditor(part);
-        if (bslEditor != null) { showModuleLineRefs(bslEditor, shell); return null; }
+        if (bslEditor != null) { 
+            showModuleLineRefs(bslEditor, shell);
+            return null; 
+        }
         String ref = getRefFromPart(part);
         if (ref == null || ref.isBlank())
         {
@@ -243,20 +246,19 @@ public class GetRef extends AbstractHandler
 
     public static BslXtextEditor getActiveBslEditor(IWorkbenchPart part)
     {
-        IWorkbenchPage page  = part.getSite().getPage();
-        if (part instanceof BslXtextEditor) return (BslXtextEditor) part;
-        IEditorPart editor = page != null ? page.getActiveEditor() : null;
-        if (editor instanceof DtGranularEditor<?>)
+        if (part instanceof BslXtextEditor)
+            return (BslXtextEditor) part;
+        if (part instanceof DtGranularEditor<?>)
         {
-            IFormPage activePage = ((DtGranularEditor<?>) editor).getActivePageInstance();
+            IFormPage activePage = ((DtGranularEditor<?>) part).getActivePageInstance();
             if (activePage instanceof DtGranularEditorXtextEditorPage<?>)
             {
                 IEditorPart embedded =
                     ((DtGranularEditorXtextEditorPage<?>) activePage).getEmbeddedEditor();
-                if (embedded instanceof BslXtextEditor) return (BslXtextEditor) embedded;
+                if (embedded instanceof BslXtextEditor) 
+                    return (BslXtextEditor) embedded;
             }
         }
-        if (editor instanceof BslXtextEditor) return (BslXtextEditor) editor;
         return null;
     }
 

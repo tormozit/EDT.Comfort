@@ -61,30 +61,33 @@
   </extension>
 
   <extension point="org.eclipse.ui.commands">
+    <category
+        id="tormozit.commands.global"
+        name="Комфорт"
+        description="Команды плагина Комфорт"/>
     <command
         id="tormozit.compareConf.openObject"
         name="Открыть объект"
-        description="Открыть выбранный объект конфигурации в редакторе (Comfort)"/>
+        description="Открыть выбранный объект конфигурации в редакторе (Комфорт)"/>
      <command
         id="tormozit.compareConf.showInNavigator"
         name="Показать в навигаторе"
-        description="Показать выбранный объект конфигурации в навигаторе (Comfort)"/>
+        description="Показать выбранный объект конфигурации в навигаторе (Комфорт)"/>
      <command
-            id="tormozit.GoToDefinition"
-            name="Перейти к определению"
-            description="Перейти к определению (Comfort)"/>
-     <command
-            id="tormozit.JumpFromClipboard"
-            name="Перейти по ссылке из буфера"
-            description="Перейти по ссылке из буфера обмена (Comfort)"/>
+        id="tormozit.GoToDefinition"
+        name="Перейти к определению"
+        categoryId="tormozit.commands.global"
+        description="Перейти к определению (Комфорт)"/>
     <command
-            id="tormozit.CopyRef"
-            name="Копировать ссылку"
-            description="Копировать ссылку на текущий объект или строку модуля (Comfort)"/>
+        id="tormozit.CopyRef"
+        name="Копировать ссылку"
+        categoryId="tormozit.commands.global"
+        description="Копировать ссылку на текущий объект или строку модуля (Комфорт)"/>
     <command
-            id="tormozit.RecentPlaces"
-            name="Последние места"
-            description="Открыть список последних посещённых методов и объектов метаданных (Comfort)"/>
+        id="tormozit.RecentPlaces"
+        name="Последние места"
+        categoryId="tormozit.commands.global"
+        description="Открыть список последних посещённых методов и объектов метаданных (Комфорт)"/>
   </extension>
 
   <extension point="org.eclipse.ui.handlers">
@@ -130,19 +133,19 @@
             <command
               commandId="tormozit.JumpFromClipboard"
               label = "Перейти"
-              tooltip="Перейти по ссылке из буфера обмена (Comfort)"
+              tooltip="Перейти по ссылке из буфера обмена (Комфорт)"
               style="push">
             </command>
             <command
               commandId="tormozit.CopyRef"
               label = "Ссылка"
-              tooltip="Копировать ссылку на текущий объект или строку модуля (Comfort)"
+              tooltip="Копировать ссылку на текущий объект или строку модуля (Комфорт)"
               style="push">
             </command>
             <command
               commandId="tormozit.RecentPlaces"
               label = "Последние"
-              tooltip="Последние посещённые методы и объекты метаданных (Comfort)"
+              tooltip="Последние посещённые методы и объекты метаданных (Комфорт)"
               style="push">
             </command>
          </toolbar>

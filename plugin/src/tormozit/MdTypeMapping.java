@@ -79,6 +79,11 @@ public final class MdTypeMapping
         add("IntegrationService",           "IntegrationService",           "IntegrationServices");
         add("СтильОформления",              "StyleItem",                    "StyleItems");
         add("Интерфейс",                    "Interface",                    "Interfaces");
+        
+        // Дочерние
+        add("Форма", "Form", "Forms");
+        add("Команда", "Command", "Commands");
+        add("Макет", "Template", "Templates");
 
         addAlias("ОбщийМодульПовторногоИспользования", "ОбщийМодуль");
 

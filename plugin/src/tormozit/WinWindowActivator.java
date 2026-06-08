@@ -52,12 +52,12 @@ public final class WinWindowActivator
 
         User32.INSTANCE.EnumWindows((hwnd, data) ->
         {
-            if (!User32.INSTANCE.IsWindowVisible(hwnd))
-                return true;
+//            if (!User32.INSTANCE.IsWindowVisible(hwnd))
+//                return true;
 
-            HWND owner = User32.INSTANCE.GetWindow(hwnd, new DWORD(WinUser.GW_OWNER));
-            if (owner != null && owner.getPointer() != null && !Pointer.NULL.equals(owner.getPointer()))
-                return true;
+//            HWND owner = User32.INSTANCE.GetWindow(hwnd, new DWORD(WinUser.GW_OWNER));
+//            if (owner != null && owner.getPointer() != null && !Pointer.NULL.equals(owner.getPointer()))
+//                return true;
 
             char[] title = new char[512];
             if (User32.INSTANCE.GetWindowText(hwnd, title, title.length) == 0)
@@ -100,12 +100,12 @@ public final class WinWindowActivator
             User32.INSTANCE.ShowWindow(hwnd, WinUser.SW_SHOW);
 
         HWND fg = User32.INSTANCE.GetForegroundWindow();
-//        int fgThread = fg != null ? User32.INSTANCE.GetWindowThreadProcessId(fg, null) : 0;
-//        int targetThread = User32.INSTANCE.GetWindowThreadProcessId(hwnd, null);
-//
-//        boolean attached = fgThread != 0 && targetThread != 0 && fgThread != targetThread;
-//        if (attached)
-//            User32.INSTANCE.AttachThreadInput(fgThread, targetThread, true);
+        int fgThreadId = fg != null ? User32.INSTANCE.GetWindowThreadProcessId(fg, null) : 0;
+        int targetThreadId = User32.INSTANCE.GetWindowThreadProcessId(hwnd, null);
+
+        boolean attached = fgThreadId != 0 && targetThreadId != 0 && fgThreadId != targetThreadId;
+        if (attached)
+            User32.INSTANCE.AttachThreadInput(new DWORD(fgThreadId), new DWORD(targetThreadId), true);
 
         try
         {
@@ -114,8 +114,8 @@ public final class WinWindowActivator
         }
         finally
         {
-//            if (attached)
-//                User32.INSTANCE.AttachThreadInput(fgThread, targetThread, false);
+            if (attached)
+                User32.INSTANCE.AttachThreadInput(new DWORD(fgThreadId), new DWORD(targetThreadId), false);
         }
     }
 }
