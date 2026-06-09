@@ -49,6 +49,9 @@ public class Activator extends AbstractUIPlugin
         settings.getPreferenceStore().setDefault(
             ComfortSettings.PREF_REPLACE_LIST_FILTERS,
             ComfortSettings.DEFAULT_REPLACE_LIST_FILTERS);
+        settings.getPreferenceStore().setDefault(
+            ComfortSettings.PREF_CONTENT_ASSIST_LOG,
+            ComfortSettings.DEFAULT_CONTENT_ASSIST_LOG);
         ContentAssistManager.init(settings);
         ComfortSettings.init(PLUGIN_ID);
 

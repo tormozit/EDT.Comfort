@@ -16,6 +16,9 @@ public class SmartCodeProposalSorter implements ICompletionProposalSorter
     @Override
     public int compare(ICompletionProposal p1, ICompletionProposal p2)
     {
+        if (!SmartAssistFilterState.isSmartFilterEnabled())
+            return compareDisplay(p1, p2);
+
         String filter = SmartFilterTracker.getCurrentFilter();
         if (filter.isEmpty())
             return compareDisplay(p1, p2);

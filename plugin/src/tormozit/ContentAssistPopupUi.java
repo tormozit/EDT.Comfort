@@ -24,6 +24,11 @@ public final class ContentAssistPopupUi
     public static void ensureFilterToggle(ContentAssistant assistant, SourceViewer viewer,
                                           SmartContentAssistProcessor processor)
     {
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+        {
+            removeFilterToggle(assistant);
+            return;
+        }
         try
         {
             Object popup = ContentAssistPopupSync.getPopupObject(assistant);
@@ -85,8 +90,34 @@ public final class ContentAssistPopupUi
         catch (Exception ignored) {}
     }
 
+    public static void removeFilterToggle(ContentAssistant assistant)
+    {
+        try
+        {
+            Object popup = ContentAssistPopupSync.getPopupObject(assistant);
+            if (popup == null)
+                return;
+            Shell shell = ContentAssistPopupSync.getProposalShell(popup);
+            if (shell == null || shell.isDisposed())
+                return;
+            Composite bar = (Composite) shell.getData(BAR_DATA_KEY);
+            if (bar != null && !bar.isDisposed())
+            {
+                bar.dispose();
+                shell.setData(BAR_DATA_KEY, null);
+                shell.layout(true, true);
+            }
+        }
+        catch (Exception ignored) {}
+    }
+
     public static void syncFilterToggle(ContentAssistant assistant, SourceViewer viewer)
     {
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+        {
+            removeFilterToggle(assistant);
+            return;
+        }
         try
         {
             Object popup = ContentAssistPopupSync.getPopupObject(assistant);
@@ -149,7 +180,7 @@ public final class ContentAssistPopupUi
         toggle.setSelection(SmartAssistFilterState.isSmartFilterEnabled());
         toggle.addListener(SWT.Selection, e -> {
             SmartAssistFilterState.setSmartFilterEnabled(toggle.getSelection());
-            ContentAssistPopupSync.applyFilteredList(assistant, viewer, processor);
+            ContentAssistPopupSync.recomputePopupList(assistant, viewer, processor);
         });
 
         Label contextLabel = new Label(bar, SWT.NONE);

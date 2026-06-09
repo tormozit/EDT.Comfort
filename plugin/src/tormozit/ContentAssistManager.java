@@ -226,7 +226,8 @@ public final class ContentAssistManager
         {
             String prop = event.getProperty();
             if (ContentAssistSettings.PREF_ENABLED.equals(prop)
-                    || ContentAssistSettings.PREF_TIMEOUT.equals(prop))
+                    || ContentAssistSettings.PREF_TIMEOUT.equals(prop)
+                    || ComfortSettings.PREF_REPLACE_LIST_FILTERS.equals(prop))
             {
                 settings.loadSettings();
                 applyPatchToOpenedEditors(); // безопасен из любого потока

@@ -8,10 +8,8 @@ import org.eclipse.jface.text.contentassist.ICompletionProposal;
  * Утилитный класс для сортировки списков предложений автодополнения.
  * Используется для тестов и прямых вызовов вне {@link SmartContentAssistProcessor}.
  *
- * <p>Фактическая сортировка при работе редактора выполняется в
- * {@link SmartContentAssistProcessor#computeCompletionProposals}, а встроенный
- * sorter {@code ContentAssistant} нейтрализован через
- * {@link ContentAssistPatcher.NeutralSorter}.
+ * <p>Фактическая сортировка при работе редактора — через {@link SmartCodeProposalSorter}
+ * ({@code ContentAssistant.setSorter}).
  */
 public final class SmartCompletionSorter
 {

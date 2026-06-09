@@ -11,8 +11,14 @@ public final class ComfortSettings
     /** Ключ булевой настройки «Заменять фильтры в списках». */
     public static final String PREF_REPLACE_LIST_FILTERS = "comfort.replaceListFilters"; //$NON-NLS-1$
 
+    /** Ключ: журнал Content Assist в окне {@link ContentAssistLogView}. */
+    public static final String PREF_CONTENT_ASSIST_LOG = "comfort.contentAssistLog"; //$NON-NLS-1$
+
     /** Значение «Заменять фильтры в списках» по умолчанию. */
     public static final boolean DEFAULT_REPLACE_LIST_FILTERS = true;
+
+    /** Журнал Content Assist выключен по умолчанию. */
+    public static final boolean DEFAULT_CONTENT_ASSIST_LOG = false;
 
     private static ComfortSettings instance;
 
@@ -47,5 +53,13 @@ public final class ComfortSettings
         if (settings == null)
             return DEFAULT_REPLACE_LIST_FILTERS;
         return settings.preferenceStore.getBoolean(PREF_REPLACE_LIST_FILTERS);
+    }
+
+    public static boolean isContentAssistLogEnabled()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_CONTENT_ASSIST_LOG;
+        return settings.preferenceStore.getBoolean(PREF_CONTENT_ASSIST_LOG);
     }
 }

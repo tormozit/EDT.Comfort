@@ -9,6 +9,7 @@ import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.jface.text.source.ISourceViewer;
+import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
 import org.eclipse.jface.text.contentassist.ContentAssistant;
 import org.eclipse.jface.text.contentassist.IContentAssistProcessor;
@@ -31,8 +32,9 @@ import com._1c.g5.v8.dt.mcore.TypeItem;
 /**
  * Обёртка над {@link IContentAssistProcessor}.
  *
- * <p><b>Полный список</b> (п.1): при пустом фильтре — кэш delegate без smart-фильтрации.
- * <p><b>Фильтр+сорт+цвет</b> (п.2): при непустом фильтре — {@link #filterAndSort} по кэшу.
+ * <p>Загружает полный список у delegate и оборачивает в {@link SmartCompletionProposal}.
+ * Фильтрация — {@link #filterAndSort} по кэшу; при вводе debounced {@code recomputePopupList}.
+ * Полный список delegate грузится в фоне ({@link #scheduleLoadFullListCache}).
  */
 public class SmartContentAssistProcessor implements IContentAssistProcessor
 {
@@ -48,13 +50,23 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     private final String activationChars;
 
     private ICompletionProposal[] fullListCache = EMPTY;
+    /** Последний непустой список при пустом фильтре (delegate иногда мигает). */
+    private ICompletionProposal[] lastStableEmptyList = EMPTY;
     private boolean fullListReady = false;
+    /** Полный список delegate загружен; иначе только interim с каретки. */
+    private boolean fullListComplete = false;
     /** Позиция '.' контекста member-access для кэша, {@code Integer.MIN_VALUE} — без точки. */
     private int fullListContextKey = Integer.MIN_VALUE;
     /** Отмена устаревших {@link #scheduleMemberAccessReload}. */
     private int memberAccessReloadSeq = 0;
     /** Уже запланирована догрузка для текущего {@link #memberAccessReloadSeq}. */
     private int memberAccessReloadScheduledSeq = -1;
+    /** Пауза без ввода и с пустым фильтром перед тяжёлой {@link #loadFullList}. */
+    private static final int IDLE_FULL_LIST_MS = 1500;
+    private Runnable pendingIdleLoadTask;
+    private boolean pendingIdleLoadReadOnly;
+    /** Префикс на прошлом шаге фильтра (тот же anchor, смена «сооб»→«мета»). */
+    private String lastTrackedFilter = ""; //$NON-NLS-1$
 
     public SmartContentAssistProcessor(IContentAssistProcessor delegate, String activationChars)
     {
@@ -124,10 +136,14 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     public void invalidateCache()
     {
         fullListReady = false;
+        fullListComplete = false;
         fullListCache = EMPTY;
+        lastStableEmptyList = EMPTY;
         fullListContextKey = Integer.MIN_VALUE;
         memberAccessReloadSeq++;
         memberAccessReloadScheduledSeq = -1;
+        cancelIdleFullListLoad();
+        lastTrackedFilter = ""; //$NON-NLS-1$
         ContentAssistDebug.log("invalidateCache"); //$NON-NLS-1$
     }
 
@@ -136,8 +152,45 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         LAST_COMPUTE_CARET.remove();
     }
 
-    /** Каретка и префикс фильтра для validate до первого {@link #computeCompletionProposals}. */
+    /** Только каретка и префикс фильтра (debounced recompute, без idle load). */
+    static void primeFilterTrackerOnly(ITextViewer viewer, int caret)
+    {
+        int widgetCaret = resolveWidgetCaret(viewer);
+        if (widgetCaret >= 0)
+            caret = widgetCaret;
+        SmartContentAssistProcessor processor = ContentAssistSessionReloader.getActiveProcessor();
+        String previous = processor != null
+            ? processor.lastTrackedFilter
+            : SmartFilterTracker.getCurrentFilter();
+        updateFilterTracker(viewer, caret);
+        if (processor != null)
+        {
+            processor.onFilterPrefixChanged(viewer, caret, previous,
+                SmartFilterTracker.getCurrentFilter());
+            processor.onFilterActivity(viewer);
+        }
+    }
+
+    /** Каретка, фильтр и планирование idle-загрузки кэша (compute / старт сессии). */
     static void primeAssistContext(ITextViewer viewer, int caret)
+    {
+        int widgetCaret = resolveWidgetCaret(viewer);
+        if (widgetCaret >= 0)
+            caret = widgetCaret;
+        SmartContentAssistProcessor processor = ContentAssistSessionReloader.getActiveProcessor();
+        String previous = processor != null
+            ? processor.lastTrackedFilter
+            : SmartFilterTracker.getCurrentFilter();
+        updateFilterTracker(viewer, caret);
+        if (processor != null)
+        {
+            processor.onFilterPrefixChanged(viewer, caret, previous,
+                SmartFilterTracker.getCurrentFilter());
+            processor.rescheduleIdleFullListLoad(viewer, false);
+        }
+    }
+
+    private static void updateFilterTracker(ITextViewer viewer, int caret)
     {
         if (caret < 0)
             return;
@@ -146,20 +199,100 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         SmartFilterTracker.setCurrentFilter(computeIdentifierFilter(doc, caret));
     }
 
-    /** Заполняет кэш полного списка (вызов при старте сессии assist). */
-    public void warmFullListCache(ITextViewer viewer)
+    public boolean isFullListReady()
     {
-        ContentAssistDebug.log("warmFullListCache"); //$NON-NLS-1$
-        int caret = resolveCaretOffset(viewer, 0);
-        primeAssistContext(viewer, caret);
+        return fullListReady;
+    }
+
+    public boolean isFullListComplete()
+    {
+        return fullListComplete;
+    }
+
+    /** Отмена idle-загрузки при вводе; полная загрузка — только при пустом фильтре. */
+    public void onFilterActivity(ITextViewer viewer)
+    {
+        cancelIdleFullListLoad();
+        if (!fullListComplete && viewer != null
+            && SmartFilterTracker.getCurrentFilter().isEmpty())
+            rescheduleIdleFullListLoad(viewer, false);
+    }
+
+    /**
+     * Сброс interim-кэша, если префикс заменён (сооб→пусто→мета), а не дописан.
+     * Якорь тот же — {@link #computeFullListContextKey} не меняется, delegate-список устаревает.
+     */
+    private void onFilterPrefixChanged(ITextViewer viewer, int caret, String previous,
+                                       String next)
+    {
+        if (previous == null)
+            previous = ""; //$NON-NLS-1$
+        if (next == null)
+            next = ""; //$NON-NLS-1$
+
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        String docFilter = computeIdentifierFilter(doc, caret);
+        if (!next.equals(docFilter))
+        {
+            next = docFilter;
+            SmartFilterTracker.setCurrentFilter(next);
+        }
+        previous = lastTrackedFilter;
+
+        if (!shouldInvalidateInterimCache(previous, next))
+        {
+            lastTrackedFilter = next;
+            return;
+        }
+        invalidateInterimListCache(viewer);
+        ContentAssistDebug.log("fullList prefix change \"" + previous + "\" -> \"" + next //$NON-NLS-1$ //$NON-NLS-2$
+            + "\" reload"); //$NON-NLS-1$
+        lastTrackedFilter = next;
+    }
+
+    /**
+     * Сброс interim-кэша: очистка слова или смена первого символа (сооб→мета).
+     * Не по «ни один не префикс другого» — даёт ложные срабатывания при гонках каретки.
+     */
+    private static boolean shouldInvalidateInterimCache(String previous, String next)
+    {
+        if (next.isEmpty() && !previous.isEmpty())
+            return true;
+        if (!next.isEmpty() && !previous.isEmpty()
+            && Character.toLowerCase(next.charAt(0))
+                != Character.toLowerCase(previous.charAt(0)))
+            return true;
+        return false;
+    }
+
+    private void invalidateInterimListCache(ITextViewer viewer)
+    {
+        fullListReady = false;
+        fullListComplete = false;
+        fullListCache = EMPTY;
+        lastStableEmptyList = EMPTY;
+        cancelIdleFullListLoad();
+        if (viewer != null && SmartFilterTracker.getCurrentFilter().isEmpty())
+            rescheduleIdleFullListLoad(viewer, false);
+    }
+
+    /** Отложенная загрузка полного списка на UI-потоке (не в hot path ввода). */
+    public void scheduleLoadFullListCache(ITextViewer viewer)
+    {
+        if (fullListComplete && fullListCache.length > 0)
+            return;
+        int caret = resolveWidgetCaret(viewer);
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         ensureFullListForContext(viewer, doc, caret);
-        loadFullList(viewer);
+        rescheduleIdleFullListLoad(viewer, false);
     }
 
     @Override
     public ICompletionProposal[] computeCompletionProposals(ITextViewer viewer, int offset)
     {
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+            return delegate.computeCompletionProposals(viewer, offset);
+
         if (RepeatedInvocationDetect.isActive())
         {
             ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
@@ -169,63 +302,306 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             ContentAssistSessionReloader.scheduleFilterToggleUiSync();
         }
 
-        int caret = resolveCaretOffset(viewer, offset);
+        int widgetCaret = resolveWidgetCaret(viewer);
+        int caret = resolveInvocationCaret(viewer, offset);
+        ContentAssistPopupSync.syncPopupOffsetsToCaret(viewer, caret);
         primeAssistContext(viewer, caret);
-        if (caret != offset)
-            ContentAssistPopupSync.syncPopupOffsetsToCaret(viewer, caret);
         IDocument doc = viewer == null ? null : viewer.getDocument();
         String filter = SmartFilterTracker.getCurrentFilter();
 
         ensureFullListForContext(viewer, doc, caret);
 
         boolean reloadUnfiltered = SmartAssistFilterState.consumeUnfilteredReloadPending();
-        if (reloadUnfiltered)
+        if (reloadUnfiltered && shouldReloadDelegateOnUnfiltered())
         {
-            if (shouldReloadDelegateOnUnfiltered())
-            {
-                fullListReady = false;
-                fullListCache = EMPTY;
-                memberAccessReloadScheduledSeq = -1;
-                loadFullList(viewer, true);
-            }
-            else
-            {
-                ContentAssistDebug.log("unfilteredReload reuse cache=" + fullListCache.length //$NON-NLS-1$
-                    + " key=" + fullListContextKey); //$NON-NLS-1$
-            }
+            fullListReady = false;
+            fullListComplete = false;
+            fullListCache = EMPTY;
+            memberAccessReloadScheduledSeq = -1;
+            rescheduleIdleFullListLoad(viewer, true);
         }
-        else if (!fullListReady)
+        else if (reloadUnfiltered)
         {
-            loadFullList(viewer, false);
+            ContentAssistDebug.log("unfilteredReload reuse cache=" + fullListCache.length //$NON-NLS-1$
+                + " key=" + fullListContextKey); //$NON-NLS-1$
         }
 
-        ICompletionProposal[] out;
+        int probeOffset = resolveDelegateProbeOffset(viewer, offset, caret);
+        ICompletionProposal[] out = resolveProposalList(viewer, probeOffset, caret, filter,
+            SmartAssistFilterState.isSmartFilterEnabled());
         if (!SmartAssistFilterState.isSmartFilterEnabled())
         {
-            out = buildUnfilteredList(fullListCache, filter);
-            ContentAssistDebug.log("compute UNFILTERED offset=" + offset + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                + " filter=\"" + filter + "\" count=" + out.length //$NON-NLS-1$ //$NON-NLS-2$
-                + ContentAssistDebug.sampleTypes(out, 2));
-        }
-        else if (filter.isEmpty())
-        {
-            out = buildUnfilteredList(fullListCache, "");
-            ContentAssistDebug.log("compute FULL offset=" + offset + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                + " count=" + out.length //$NON-NLS-1$
-                + ContentAssistDebug.sampleTypes(out, 2));
+            ContentAssistDebug.log("compute UNFILTERED offset=" + offset + " probe=" + probeOffset //$NON-NLS-1$ //$NON-NLS-2$
+                + " caret=" + caret + " filter=\"" + filter + "\" count=" + out.length //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " cacheReady=" + fullListReady + ContentAssistDebug.sampleTypes(out, 2)); //$NON-NLS-1$
         }
         else
         {
-            out = filterAndSort(fullListCache, filter);
-            ContentAssistDebug.log("compute FILTER offset=" + offset + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                + " filter=\"" + filter + "\" cache=" + fullListCache.length //$NON-NLS-1$ //$NON-NLS-2$
-                + " out=" + out.length + ContentAssistDebug.sampleTypes(out, 3)); //$NON-NLS-1$
+            String caretSrc = caret != widgetCaret && widgetCaret >= 0
+                ? " invocation=" + caret + " widget=" + widgetCaret //$NON-NLS-1$ //$NON-NLS-2$
+                : " caret=" + caret; //$NON-NLS-1$
+            ContentAssistDebug.log("compute SMART offset=" + offset + " probe=" + probeOffset //$NON-NLS-1$ //$NON-NLS-2$
+                + caretSrc + " filter=\"" + filter + "\" cache=" //$NON-NLS-1$ //$NON-NLS-2$
+                + fullListCache.length + " count=" + out.length + " cacheReady=" + fullListReady //$NON-NLS-1$ //$NON-NLS-2$
+                + ContentAssistDebug.sampleTypes(out, 3));
         }
 
         return out;
     }
 
+    /**
+     * Явное обновление popup (toggle, Ctrl+Space, догрузка кэша): может вернуть
+     * уже отфильтрованный список (toggle, debounced ввод, догрузка кэша).
+     */
+    public ICompletionProposal[] computeForPopupRefresh(ITextViewer viewer, int offset)
+    {
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+            return delegate.computeCompletionProposals(viewer, offset);
+
+        int caret = offset >= 0 ? clampCaret(viewer != null ? viewer.getDocument() : null, offset)
+            : resolveWidgetCaret(viewer);
+        primeFilterTrackerOnly(viewer, caret);
+        IDocument doc = viewer == null ? null : viewer.getDocument();
+        String filter = SmartFilterTracker.getCurrentFilter();
+
+        ensureFullListForContext(viewer, doc, caret);
+        int probeOffset = resolveDelegateProbeOffset(viewer, offset, caret);
+        return resolveProposalList(viewer, probeOffset, caret, filter,
+            SmartAssistFilterState.isSmartFilterEnabled());
+    }
+
+    /**
+     * Кэш готов — smart-фильтр по полному списку.
+     * Кэш не готов — штатный список delegate (popup не пустой), догрузка кэша отложена.
+     */
+    private ICompletionProposal[] resolveProposalList(ITextViewer viewer, int offset, int caret,
+                                                      String filter, boolean smartEnabled)
+    {
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        if (doc != null && caret >= 0)
+            filter = computeIdentifierFilter(doc, caret);
+
+        if (!smartEnabled)
+        {
+            ICompletionProposal[] raw = unwrapProposals(fetchDelegateList(viewer, offset, caret));
+            return buildUnfilteredList(raw);
+        }
+
+        if (!filter.isEmpty() && isCacheValidForCaret(doc, caret))
+            return filterAndSort(fullListCache, filter);
+
+        ICompletionProposal[] raw = unwrapProposals(fetchDelegateList(viewer, offset, caret));
+        absorbInterimIntoCache(viewer, caret, raw);
+        if (filter.isEmpty())
+            return resolveEmptyFilterList(viewer, offset, caret, raw);
+        ICompletionProposal[] source = resolveFilterSource(raw);
+        return filterSmartWithFallback(viewer, offset, caret, source, filter);
+    }
+
+    private ICompletionProposal[] resolveFilterSource(ICompletionProposal[] interim)
+    {
+        if (fullListComplete)
+            return fullListCache;
+        if (fullListCache.length >= interim.length)
+            return fullListCache;
+        return interim;
+    }
+
+    private boolean isCacheValidForCaret(IDocument doc, int caret)
+    {
+        return fullListReady && fullListCache.length > 0
+            && doc != null && caret >= 0
+            && computeFullListContextKey(doc, caret) == fullListContextKey;
+    }
+
+    private void absorbInterimIntoCache(ITextViewer viewer, int caret, ICompletionProposal[] raw)
+    {
+        if (fullListComplete || raw == null || raw.length == 0)
+            return;
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        if (doc == null || caret < 0)
+            return;
+        if (computeFullListContextKey(doc, caret) != fullListContextKey)
+            return;
+        ICompletionProposal[] unwrapped = unwrapProposals(raw);
+        if (unwrapped.length > fullListCache.length)
+        {
+            fullListCache = unwrapped;
+            fullListReady = true;
+        }
+    }
+
+    private ICompletionProposal[] resolveEmptyFilterList(ITextViewer viewer, int offset, int caret)
+    {
+        return resolveEmptyFilterList(viewer, offset, caret,
+            unwrapProposals(fetchDelegateList(viewer, offset, caret)));
+    }
+
+    private ICompletionProposal[] resolveEmptyFilterList(ITextViewer viewer, int offset, int caret,
+                                                       ICompletionProposal[] interim)
+    {
+        if (interim.length > 0)
+        {
+            lastStableEmptyList = buildWrappedList(interim);
+            return lastStableEmptyList;
+        }
+        if (lastStableEmptyList.length > 0)
+            return lastStableEmptyList;
+        if (fullListReady && fullListCache.length > 0)
+            return buildWrappedList(fullListCache);
+        ICompletionProposal[] retry = unwrapProposals(fetchDelegateList(viewer, offset, caret));
+        if (retry.length > 0)
+        {
+            lastStableEmptyList = buildWrappedList(retry);
+            return lastStableEmptyList;
+        }
+        return EMPTY;
+    }
+
+    private ICompletionProposal[] filterSmartWithFallback(ITextViewer viewer, int offset, int caret,
+                                                        ICompletionProposal[] raw, String filter)
+    {
+        ICompletionProposal[] result = filterAndSort(raw, filter);
+        if (result.length > 0 || filter.isEmpty())
+            return result;
+
+        if (fullListCache.length > 0 && raw != fullListCache)
+        {
+            result = filterAndSort(fullListCache, filter);
+            if (result.length > 0)
+                return result;
+        }
+
+        ICompletionProposal[] retry = unwrapProposals(fetchDelegateList(viewer, offset, caret));
+        absorbInterimIntoCache(viewer, caret, retry);
+        if (retry.length > 0)
+        {
+            result = filterAndSort(retry, filter);
+            if (result.length > 0)
+                return result;
+            if (fullListCache.length > 0)
+            {
+                result = filterAndSort(fullListCache, filter);
+                if (result.length > 0)
+                    return result;
+            }
+            return EMPTY;
+        }
+        if (fullListCache.length > 0)
+            return filterAndSort(fullListCache, filter);
+        return EMPTY;
+    }
+
+    private ICompletionProposal[] fetchDelegateList(ITextViewer viewer, int probeOffset, int caret)
+    {
+        ICompletionProposal[] nativeList = delegate.computeCompletionProposals(viewer, probeOffset);
+        if ((nativeList == null || nativeList.length == 0) && caret >= 0 && caret != probeOffset)
+            nativeList = delegate.computeCompletionProposals(viewer, caret);
+        if ((nativeList == null || nativeList.length == 0) && caret >= 0 && viewer != null)
+        {
+            IDocument doc = viewer.getDocument();
+            if (doc != null)
+            {
+                int wordStart = computeIdentifierWordStart(doc, caret);
+                if (wordStart >= 0 && wordStart != probeOffset)
+                    nativeList = delegate.computeCompletionProposals(viewer, wordStart);
+            }
+        }
+        return nativeList != null ? nativeList : EMPTY;
+    }
+
+    static int computeIdentifierWordStart(IDocument doc, int caret)
+    {
+        if (doc == null || caret < 0)
+            return caret;
+        String filter = computeIdentifierFilter(doc, caret);
+        if (filter.isEmpty())
+            return caret;
+        return Math.max(0, caret - filter.length());
+    }
+
+    private static int resolveDelegateProbeOffset(ITextViewer viewer, int invocationOffset,
+                                                  int caret)
+    {
+        if (caret >= 0)
+            return caret;
+        if (viewer != null && invocationOffset >= 0)
+        {
+            IDocument doc = viewer.getDocument();
+            if (doc != null && invocationOffset <= doc.getLength())
+                return invocationOffset;
+        }
+        return invocationOffset;
+    }
+
+    /** Сбрасывает таймер при каждом символе; {@link #loadFullList} — только после паузы. */
+    void rescheduleIdleFullListLoad(ITextViewer viewer, boolean forceDelegateReadOnly)
+    {
+        if (viewer == null || fullListComplete)
+            return;
+        if (!SmartFilterTracker.getCurrentFilter().isEmpty())
+        {
+            cancelIdleFullListLoad();
+            return;
+        }
+        org.eclipse.swt.widgets.Control widget = viewer.getTextWidget()
+            instanceof org.eclipse.swt.widgets.Control
+            ? (org.eclipse.swt.widgets.Control) viewer.getTextWidget()
+            : null;
+        if (widget == null || widget.isDisposed())
+            return;
+        org.eclipse.swt.widgets.Display display = widget.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+
+        pendingIdleLoadReadOnly = forceDelegateReadOnly;
+        if (pendingIdleLoadTask != null)
+            display.timerExec(-1, pendingIdleLoadTask);
+
+        final int contextKey = fullListContextKey;
+        final boolean readOnly = forceDelegateReadOnly;
+        pendingIdleLoadTask = () -> {
+            pendingIdleLoadTask = null;
+            if (widget.isDisposed() || fullListComplete || contextKey != fullListContextKey)
+                return;
+            if (!SmartFilterTracker.getCurrentFilter().isEmpty())
+            {
+                rescheduleIdleFullListLoad(viewer, readOnly);
+                return;
+            }
+            ContentAssistDebug.log("loadFullList idle readOnly=" + readOnly); //$NON-NLS-1$
+            loadFullList(viewer, readOnly);
+            if (contextKey != fullListContextKey)
+            {
+                fullListReady = false;
+                fullListComplete = false;
+                fullListCache = EMPTY;
+                return;
+            }
+            if (fullListReady && SmartFilterTracker.getCurrentFilter().isEmpty())
+                ContentAssistSessionReloader.refreshPopupIfOpen();
+        };
+        display.timerExec(IDLE_FULL_LIST_MS, pendingIdleLoadTask);
+    }
+
+    private void cancelIdleFullListLoad()
+    {
+        if (pendingIdleLoadTask == null)
+            return;
+        SourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
+        if (viewer != null && viewer.getTextWidget() instanceof org.eclipse.swt.widgets.Control)
+        {
+            org.eclipse.swt.widgets.Control widget = (org.eclipse.swt.widgets.Control) viewer.getTextWidget();
+            if (!widget.isDisposed())
+                widget.getDisplay().timerExec(-1, pendingIdleLoadTask);
+        }
+        pendingIdleLoadTask = null;
+    }
+
     // ---- Точка вызова алгоритма для popup.validate / isValidFor ----------------
+
+    private static final ThreadLocal<SmartCodeMatcher> VALIDATE_MATCHER = new ThreadLocal<>();
+    private static final ThreadLocal<String> VALIDATE_FILTER = new ThreadLocal<>();
 
     static boolean proposalMatchesFilter(ICompletionProposal proposal, IDocument document,
                                          int offset, DocumentEvent event)
@@ -236,10 +612,28 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             return true;
         String filter = computeActiveFilter(document, offset, event);
         if (filter.isEmpty())
-            return true;
-        boolean ok = computeScore(new SmartCodeMatcher(filter), proposal) > 0;
-        ContentAssistDebug.logValidate(ok, filter, proposal, offset);
+        {
+            String tracked = SmartFilterTracker.getCurrentFilter();
+            if (!tracked.isEmpty())
+                filter = tracked;
+            else
+                return true;
+        }
+        SmartCodeMatcher matcher = VALIDATE_MATCHER.get();
+        if (matcher == null || !filter.equals(VALIDATE_FILTER.get()))
+        {
+            matcher = new SmartCodeMatcher(filter);
+            VALIDATE_MATCHER.set(matcher);
+            VALIDATE_FILTER.set(filter);
+        }
+        boolean ok = computeScore(matcher, proposal) > 0;
         return ok;
+    }
+
+    static void clearValidateMatcherCache()
+    {
+        VALIDATE_MATCHER.remove();
+        VALIDATE_FILTER.remove();
     }
 
     /** Точка в документе или смена контекста — не сужать старый список через validate. */
@@ -266,11 +660,16 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         {
             fullListContextKey = contextKey;
             fullListReady = false;
+            fullListComplete = false;
             fullListCache = EMPTY;
+            lastStableEmptyList = EMPTY;
+            lastTrackedFilter = ""; //$NON-NLS-1$
             memberAccessReloadSeq++;
             memberAccessReloadScheduledSeq = -1;
+            cancelIdleFullListLoad();
             ContentAssistDebug.log("fullList context change key=" + contextKey //$NON-NLS-1$
                 + " caret=" + caret); //$NON-NLS-1$
+            rescheduleIdleFullListLoad(viewer, false);
         }
     }
 
@@ -307,9 +706,12 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
     private void loadFullList(ITextViewer viewer, boolean forceDelegateReadOnly)
     {
-        int caret = resolveCaretOffset(viewer, 0);
+        int caret = resolveWidgetCaret(viewer);
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         int dot = ReceiverTypeLabel.findMemberAccessDot(doc, caret);
+        int contextKey = computeFullListContextKey(doc, caret);
+        if (contextKey != fullListContextKey)
+            return;
 
         ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
         ICompletionProposal[] raw = loadDelegateProposals(viewer, doc, caret, dot, assistant,
@@ -323,11 +725,14 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                 scheduleMemberAccessReload(viewer, dot);
             return;
         }
+        if (computeFullListContextKey(doc, caret) != fullListContextKey)
+            return;
         fullListCache = unwrapProposals(raw);
         fullListReady = true;
+        fullListComplete = true;
         ContentAssistDebug.log("loadFullList count=" + fullListCache.length //$NON-NLS-1$
             + " dot=" + dot + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
-            + (forceDelegateReadOnly ? " readOnly" : "")); //$NON-NLS-1$ //$NON-NLS-2$
+            + (forceDelegateReadOnly ? " readOnly" : "") + " complete"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE)
             scheduleMemberAccessReload(viewer, dot);
     }
@@ -417,8 +822,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         java.util.LinkedHashSet<Integer> set = new java.util.LinkedHashSet<>();
         if (dot < 0)
         {
-            set.add(caret);
-            if (!SmartAssistFilterState.isSmartFilterEnabled() && doc != null)
+            if (doc != null)
             {
                 String prefix = computeIdentifierFilter(doc, caret);
                 if (!prefix.isEmpty())
@@ -428,6 +832,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                         set.add(wordStart);
                 }
             }
+            set.add(caret);
             if (assistant != null)
             {
                 int popupOffset = ContentAssistPopupSync.getFilterOffset(assistant);
@@ -516,7 +921,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             if (fullListCache.length >= MIN_STABLE_MEMBER_CACHE)
                 return;
             IDocument doc = viewer.getDocument();
-            int caret = resolveCaretOffset(viewer, 0);
+            int caret = resolveWidgetCaret(viewer);
             if (ReceiverTypeLabel.findMemberAccessDot(doc, caret) != dotContextKey)
                 return;
             int prev = fullListCache.length;
@@ -535,38 +940,80 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             fullListCache = unwrapProposals(raw);
             fullListReady = true;
             if (fullListCache.length >= MIN_STABLE_MEMBER_CACHE)
+            {
+                fullListComplete = true;
                 memberAccessReloadScheduledSeq = memberAccessReloadSeq;
+            }
             ContentAssistSessionReloader.refreshPopupIfOpen();
         }
         catch (Exception ignored) {}
     }
 
-    private static int resolveCaretOffset(ITextViewer viewer, int fallback)
+    /**
+     * Каретка на момент вызова assist: {@code invocationOffset} от ContentAssistant
+     * (позиция Ctrl+Space). {@code StyledText.getCaretOffset()} на первом вызове часто
+     * отстаёт от неё.
+     */
+    static int resolveInvocationCaret(ITextViewer viewer, int invocationOffset)
     {
-        if (viewer != null)
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        int widget = resolveWidgetCaret(viewer);
+        if (invocationOffset >= 0 && widget >= 0)
+            return clampCaret(doc, Math.max(invocationOffset, widget));
+        if (invocationOffset >= 0)
+            return clampCaret(doc, invocationOffset);
+        return widget >= 0 ? widget : 0;
+    }
+
+    /** Каретка виджета — для refresh, смены каретки, idle-загрузки кэша. */
+    static int resolveWidgetCaret(ITextViewer viewer)
+    {
+        if (viewer == null)
+            return -1;
+        try
         {
-            try
+            Point sel = viewer.getSelectedRange();
+            if (sel != null && sel.x >= 0)
+                return sel.x + Math.max(0, sel.y);
+            if (viewer.getTextWidget() != null)
             {
-                if (viewer.getTextWidget() != null)
-                {
-                    int caret = viewer.getTextWidget().getCaretOffset();
-                    if (caret >= 0)
-                        return caret;
-                }
-                Point sel = viewer.getSelectedRange();
-                if (sel != null && sel.x >= 0)
-                    return sel.x + Math.max(0, sel.y);
+                int caret = viewer.getTextWidget().getCaretOffset();
+                if (caret >= 0)
+                    return caret;
             }
-            catch (Exception ignored) {}
         }
-        return fallback;
+        catch (Exception ignored) {}
+        return -1;
     }
 
     /**
-     * Полный список без smart-фильтрации: все элементы кэша, алфавит, подсветка по префиксу
-     * в редакторе ({@code highlightFilter}), validate не сужает список.
+     * Старт сессии / sync popup: максимум из виджета, completion и invocation.
+     * {@code fInvocationOffset} часто = начало слова (пустой префикс), виджет — каретка.
      */
-    private ICompletionProposal[] buildUnfilteredList(ICompletionProposal[] raw, String highlightFilter)
+    static int resolveSessionCaret(ContentAssistant assistant, ITextViewer viewer)
+    {
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        int best = -1;
+        int widget = resolveWidgetCaret(viewer);
+        if (widget >= 0)
+            best = widget;
+        if (assistant != null)
+        {
+            int completion = ContentAssistPopupSync.getLastCompletionOffset(assistant);
+            if (completion >= 0)
+                best = Math.max(best, completion);
+            int inv = ContentAssistPopupSync.getInvocationOffset(assistant);
+            if (inv >= 0)
+                best = Math.max(best, inv);
+        }
+        return best >= 0 ? clampCaret(doc, best) : 0;
+    }
+
+    /**
+     * Полный список при выключенном smart-фильтре: все элементы, алфавит;
+     * {@link SmartCompletionProposal#validate} пропускает всё, подсветка по {@link SmartFilterTracker}.
+     */
+    private ICompletionProposal[] buildUnfilteredList(ICompletionProposal[] raw)
     {
         if (raw == null || raw.length == 0)
             return EMPTY;
@@ -576,15 +1023,32 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             list.add(unwrapProposal(p));
         list.sort((a, b) -> compareDisplayStrings(a, b));
 
-        SmartCodeMatcher matcher = new SmartCodeMatcher(highlightFilter != null ? highlightFilter : "");
         ICompletionProposal[] result = new ICompletionProposal[list.size()];
         for (int i = 0; i < list.size(); i++)
-            result[i] = new SmartCompletionProposal(list.get(i), matcher);
+            result[i] = wrapProposal(list.get(i));
         return result;
     }
 
-    // ---- Фильтрация + сортировка + обёртка ------------------------------------
+    /** Полный кэш, обёрнутый для штатного {@code validate} + {@link SmartCodeProposalSorter}. */
+    private ICompletionProposal[] buildWrappedList(ICompletionProposal[] raw)
+    {
+        if (raw == null || raw.length == 0)
+            return EMPTY;
 
+        ICompletionProposal[] result = new ICompletionProposal[raw.length];
+        for (int i = 0; i < raw.length; i++)
+            result[i] = wrapProposal(unwrapProposal(raw[i]));
+        return result;
+    }
+
+    private static ICompletionProposal wrapProposal(ICompletionProposal proposal)
+    {
+        if (proposal instanceof SmartCompletionProposal)
+            return proposal;
+        return new SmartCompletionProposal(proposal);
+    }
+
+    /** Только для {@link #computeForPopupRefresh} — не для штатного keystroke path. */
     private ICompletionProposal[] filterAndSort(ICompletionProposal[] raw, String filter)
     {
         if (raw == null || raw.length == 0)
@@ -600,7 +1064,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             if (score > 0)
             {
                 scores[filtered.size()] = score;
-                filtered.add(p);
+                filtered.add(unwrapProposal(p));
             }
         }
 
@@ -620,7 +1084,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
         ICompletionProposal[] result = new ICompletionProposal[idx.length];
         for (int i = 0; i < idx.length; i++)
-            result[i] = new SmartCompletionProposal(filtered.get(idx[i]), matcher);
+            result[i] = wrapProposal(filtered.get(idx[i]));
         return result;
     }
 
@@ -702,39 +1166,69 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
     static int resolveFilterCaret(IDocument doc, int offset, DocumentEvent event)
     {
-        int caret = offset;
+        // offset из popup.validate — это fFilterOffset (начало слова), не каретка
+        int caret = resolveFilterCaretPreferWidget(doc);
+        if (caret >= 0)
+            return caret;
+
         if (event != null)
         {
             try
             {
                 String text = event.getText();
                 int eventEnd = event.getOffset() + (text != null ? text.length() : 0);
-                caret = Math.max(caret, eventEnd);
+                return clampCaret(doc, eventEnd);
             }
             catch (Exception ignored) {}
         }
-        else
+
+        if (doc != null && offset >= 0)
         {
-            Integer last = LAST_COMPUTE_CARET.get();
-            if (last != null && last >= 0)
-                caret = last;
-            else
+            String tracked = SmartFilterTracker.getCurrentFilter();
+            if (!tracked.isEmpty())
             {
-                org.eclipse.jface.text.source.ISourceViewer active =
-                    ContentAssistSessionReloader.getActiveViewer();
-                if (active != null)
-                {
-                    int widgetCaret = resolveCaretOffset(active, offset);
-                    if (widgetCaret >= 0)
-                        caret = widgetCaret;
-                }
-                else if (doc != null)
-                    caret = doc.getLength();
+                int candidate = offset + tracked.length();
+                if (candidate <= doc.getLength()
+                    && tracked.equals(computeIdentifierFilter(doc, candidate)))
+                    return candidate;
             }
+            String atOffset = computeIdentifierFilter(doc, offset);
+            if (!atOffset.isEmpty())
+                return clampCaret(doc, offset + atOffset.length());
+            return clampCaret(doc, offset);
         }
-        if (doc != null && caret > doc.getLength())
-            caret = doc.getLength();
-        return caret;
+        return offset;
+    }
+
+    private static int resolveFilterCaretPreferWidget(IDocument doc)
+    {
+        org.eclipse.jface.text.source.ISourceViewer active =
+            ContentAssistSessionReloader.getActiveViewer();
+        if (active != null)
+        {
+            int widgetCaret = resolveWidgetCaret(active);
+            if (widgetCaret >= 0)
+                return clampCaret(doc, widgetCaret);
+        }
+        ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
+        if (assistant != null)
+        {
+            int completionOff = ContentAssistPopupSync.getLastCompletionOffset(assistant);
+            if (completionOff >= 0)
+                return clampCaret(doc, completionOff);
+        }
+        Integer last = LAST_COMPUTE_CARET.get();
+        if (last != null && last >= 0)
+            return clampCaret(doc, last);
+        return -1;
+    }
+
+    private static int clampCaret(IDocument doc, int caret)
+    {
+        if (doc == null || caret < 0)
+            return caret;
+        int len = doc.getLength();
+        return caret > len ? len : caret;
     }
 
     static boolean isFilterChar(char c)

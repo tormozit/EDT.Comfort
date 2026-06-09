@@ -43,8 +43,8 @@ import org.eclipse.swt.widgets.Text;
 /**
  * Диалог «Последние места».
  *
- * <p>Колонки таблицы — {@link TableColumnLayout} (штатный JFace).
- * Размер окна — {@link #getDialogBoundsSettings()}. Ширины «Проект» и «Дата» — в той же секции.
+ * <p>Колонки: «Путь», «Имя» (последний фрагмент + фильтр/подсветка), «Проект», «Дата».
+ * Layout — {@link TableColumnLayout}; размер окна — {@link #getDialogBoundsSettings()}.
  */
 public class RecentPlacesDialog extends Dialog
 {
@@ -52,18 +52,22 @@ public class RecentPlacesDialog extends Dialog
         DateTimeFormatter.ofPattern("dd.MM HH:mm:ss"); //$NON-NLS-1$
 
     private static final String SETTINGS_SECTION      = "RecentPlacesDialog"; //$NON-NLS-1$
-    private static final String KEY_COL_PROJECT_WIDTH = "colProjectWidth";    //$NON-NLS-1$
-    private static final String KEY_COL_DATE_WIDTH    = "colDateWidth";       //$NON-NLS-1$
+    private static final String KEY_COL_NAME_WIDTH    = "colNameWidth";    //$NON-NLS-1$
+    private static final String KEY_COL_PROJECT_WIDTH = "colProjectWidth"; //$NON-NLS-1$
+    private static final String KEY_COL_DATE_WIDTH    = "colDateWidth";    //$NON-NLS-1$
 
+    private static final int DEFAULT_NAME_COL_WIDTH    = 120;
     private static final int DEFAULT_PROJECT_COL_WIDTH = 90;
     private static final int DEFAULT_DATE_COL_WIDTH    = 90;
     private static final int MIN_PLACE_COL_WIDTH       = 80;
+    private static final int MIN_NAME_COL_WIDTH        = 50;
     private static final int MIN_PROJECT_COL_WIDTH     = 40;
     private static final int MIN_DATE_COL_WIDTH        = 70;
 
     private Text        filterText;
     private TableViewer listViewer;
-    private ListLabelProvider listLabelProvider;
+    private NameLabelProvider nameLabelProvider;
+    private TableColumn nameColumn;
     private TableColumn projectColumn;
     private TableColumn dateColumn;
 
@@ -121,10 +125,12 @@ public class RecentPlacesDialog extends Dialog
         area.setLayout(new org.eclipse.swt.layout.GridLayout(1, false));
 
         filterText = new Text(area, SWT.BORDER | SWT.SEARCH | SWT.ICON_CANCEL);
-        filterText.setMessage("Фильтр по имени метода или объекта..."); //$NON-NLS-1$
+        filterText.setMessage("Фильтр по имени метода или объекта (колонка «Имя»)..."); //$NON-NLS-1$
         filterText.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
 
         IDialogSettings settings = dialogSettings();
+        int nameWidth = readColWidth(settings, KEY_COL_NAME_WIDTH,
+            DEFAULT_NAME_COL_WIDTH, MIN_NAME_COL_WIDTH);
         int projectWidth = readColWidth(settings, KEY_COL_PROJECT_WIDTH,
             DEFAULT_PROJECT_COL_WIDTH, MIN_PROJECT_COL_WIDTH);
         int dateWidth = readColWidth(settings, KEY_COL_DATE_WIDTH,
@@ -143,9 +149,24 @@ public class RecentPlacesDialog extends Dialog
 
         TableViewerColumn colPlace = new TableViewerColumn(listViewer, SWT.NONE);
         TableColumn placeColumn = colPlace.getColumn();
-        placeColumn.setText("Место"); //$NON-NLS-1$
-        listLabelProvider = new ListLabelProvider();
-        colPlace.setLabelProvider(new DelegatingStyledCellLabelProvider(listLabelProvider));
+        placeColumn.setText("Путь"); //$NON-NLS-1$
+        colPlace.setLabelProvider(new ColumnLabelProvider()
+        {
+            @Override
+            public String getText(Object element)
+            {
+                if (!(element instanceof RecentPlaces.Entry))
+                    return ""; //$NON-NLS-1$
+                RecentPlaces.Entry entry = (RecentPlaces.Entry) element;
+                return placePrefix(entry.displayName, entry.ownName);
+            }
+        });
+
+        TableViewerColumn colName = new TableViewerColumn(listViewer, SWT.NONE);
+        nameColumn = colName.getColumn();
+        nameColumn.setText("Имя"); //$NON-NLS-1$
+        nameLabelProvider = new NameLabelProvider();
+        colName.setLabelProvider(new DelegatingStyledCellLabelProvider(nameLabelProvider));
 
         TableViewerColumn colProject = new TableViewerColumn(listViewer, SWT.NONE);
         projectColumn = colProject.getColumn();
@@ -179,6 +200,8 @@ public class RecentPlacesDialog extends Dialog
 
         columnLayout.setColumnData(placeColumn,
             new ColumnWeightData(1, MIN_PLACE_COL_WIDTH, true));
+        columnLayout.setColumnData(nameColumn,
+            new ColumnPixelData(nameWidth, true, true));
         columnLayout.setColumnData(projectColumn,
             new ColumnPixelData(projectWidth, true, true));
         columnLayout.setColumnData(dateColumn,
@@ -255,19 +278,31 @@ public class RecentPlacesDialog extends Dialog
 
     private void saveColumnWidths()
     {
-        if (projectColumn == null || dateColumn == null
-                || projectColumn.isDisposed() || dateColumn.isDisposed())
+        if (nameColumn == null || projectColumn == null || dateColumn == null
+                || nameColumn.isDisposed() || projectColumn.isDisposed() || dateColumn.isDisposed())
             return;
         IDialogSettings settings = dialogSettings();
+        settings.put(KEY_COL_NAME_WIDTH, Integer.toString(nameColumn.getWidth()));
         settings.put(KEY_COL_PROJECT_WIDTH, Integer.toString(projectColumn.getWidth()));
         settings.put(KEY_COL_DATE_WIDTH, Integer.toString(dateColumn.getWidth()));
     }
 
+    /** Префикс пути в колонке «Путь» (всё до последнего фрагмента — {@code ownName}). */
+    private static String placePrefix(String displayName, String ownName)
+    {
+        if (displayName == null || displayName.isEmpty())
+            return ""; //$NON-NLS-1$
+        if (ownName == null || ownName.isEmpty())
+            return displayName;
+        int idx = displayName.toLowerCase().lastIndexOf(ownName.toLowerCase());
+        return idx > 0 ? displayName.substring(0, idx) : ""; //$NON-NLS-1$
+    }
+
     // =========================================================================
-    // Label provider
+    // Колонка «Имя» — фильтр и подсветка
     // =========================================================================
 
-    private final class ListLabelProvider extends LabelProvider implements IStyledLabelProvider
+    private final class NameLabelProvider extends LabelProvider implements IStyledLabelProvider
     {
         private SmartMatcher matcher = new SmartMatcher(""); //$NON-NLS-1$
 
@@ -281,12 +316,12 @@ public class RecentPlacesDialog extends Dialog
         {
             if (!(element instanceof RecentPlaces.Entry))
                 return new StyledString();
-            RecentPlaces.Entry entry = (RecentPlaces.Entry) element;
-            String display = entry.displayName != null ? entry.displayName : ""; //$NON-NLS-1$
-            String own     = entry.ownName     != null ? entry.ownName     : ""; //$NON-NLS-1$
+            String name = ((RecentPlaces.Entry) element).ownName;
+            if (name == null)
+                name = ""; //$NON-NLS-1$
 
             StyledString styled = new StyledString();
-            for (Segment seg : buildSegments(display, own, matcher))
+            for (Segment seg : buildNameSegments(name, matcher))
             {
                 if (seg.highlight)
                     styled.append(seg.text, SmartMatchHighlight.styler());
@@ -297,29 +332,19 @@ public class RecentPlacesDialog extends Dialog
         }
     }
 
-    // =========================================================================
-    // Сегменты подсветки
-    // =========================================================================
-
-    private static List<Segment> buildSegments(String displayName, String ownName, SmartMatcher m)
+    private static List<Segment> buildNameSegments(String name, SmartMatcher m)
     {
         List<Segment> result = new ArrayList<>();
-        if (m.isEmpty || ownName.isEmpty())
+        if (m.isEmpty || name.isEmpty())
         {
-            result.add(new Segment(displayName, false));
+            result.add(new Segment(name, false));
             return result;
         }
 
-        int ownOffset = findOwnOffset(displayName, ownName);
-        List<SmartMatcher.HighlightRange> raw = m.getHighlightRanges(ownName);
+        List<SmartMatcher.HighlightRange> raw = m.getHighlightRanges(name);
         List<int[]> ranges = new ArrayList<>();
         for (SmartMatcher.HighlightRange hr : raw)
-        {
-            int start = ownOffset + hr.offset;
-            int end   = start + hr.length;
-            if (ownOffset >= 0 && start >= 0 && end <= displayName.length())
-                ranges.add(new int[]{ start, end });
-        }
+            ranges.add(new int[]{ hr.offset, hr.offset + hr.length });
 
         ranges.sort((a, b) -> Integer.compare(a[0], b[0]));
         List<int[]> merged = new ArrayList<>();
@@ -335,21 +360,16 @@ public class RecentPlacesDialog extends Dialog
         for (int[] r : merged)
         {
             if (r[0] > pos)
-                result.add(new Segment(displayName.substring(pos, r[0]), false));
-            result.add(new Segment(displayName.substring(r[0], r[1]), true));
+                result.add(new Segment(name.substring(pos, r[0]), false));
+            if (r[0] < name.length())
+                result.add(new Segment(name.substring(r[0], Math.min(r[1], name.length())), true));
             pos = r[1];
         }
-        if (pos < displayName.length())
-            result.add(new Segment(displayName.substring(pos), false));
+        if (pos < name.length())
+            result.add(new Segment(name.substring(pos), false));
         if (result.isEmpty())
-            result.add(new Segment(displayName, false));
+            result.add(new Segment(name, false));
         return result;
-    }
-
-    private static int findOwnOffset(String displayName, String ownName)
-    {
-        int idx = displayName.toLowerCase().lastIndexOf(ownName.toLowerCase());
-        return idx >= 0 ? idx : 0;
     }
 
     private static final class Segment
@@ -387,7 +407,7 @@ public class RecentPlacesDialog extends Dialog
     {
         if (listViewer.getControl().isDisposed()) return;
         SmartMatcher m = new SmartMatcher(pattern);
-        listLabelProvider.setMatcher(m);
+        nameLabelProvider.setMatcher(m);
         filtered = new ArrayList<>();
         for (RecentPlaces.Entry e : allEntries)
             if (m.matches(e.ownName)) filtered.add(e);

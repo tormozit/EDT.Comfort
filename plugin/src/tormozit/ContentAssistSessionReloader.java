@@ -6,18 +6,27 @@ import org.eclipse.jface.text.contentassist.ICompletionListener;
 import org.eclipse.jface.text.contentassist.IContentAssistProcessor;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.custom.CaretEvent;
+import org.eclipse.swt.custom.CaretListener;
+import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Widget;
 
+import java.util.IdentityHashMap;
+
 /**
- * Сессия assist: подмена {@code fFilterRunnable}, Ctrl+Space → переключатель фильтра.
+ * Сессия assist: prepend к {@code fFilterRunnable} для {@link SmartFilterTracker},
+ * Ctrl+Space → переключатель фильтра.
  */
 public final class ContentAssistSessionReloader
 {
     private static final String DATA_KEY = "ContentAssistSessionReloader.installed"; //$NON-NLS-1$
+
+    private static final IdentityHashMap<SourceViewer, ContentAssistSessionReloader> INSTALLED =
+        new IdentityHashMap<>();
 
     private static final ThreadLocal<ContentAssistant> ACTIVE_ASSISTANT = new ThreadLocal<>();
     private static final ThreadLocal<SourceViewer> ACTIVE_VIEWER = new ThreadLocal<>();
@@ -29,18 +38,35 @@ public final class ContentAssistSessionReloader
     private final SmartContentAssistProcessor processor;
     private final CtrlSpaceFilter ctrlSpaceFilter;
     private final String displayFilterKey;
+    private final ICompletionListener completionListener;
+    private CaretListener sessionCaretListener;
 
     public static void install(SourceViewer viewer, ContentAssistant assistant,
                                SmartContentAssistProcessor processor)
     {
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+            return;
         Widget w = viewer.getTextWidget();
         if (!(w instanceof Control)) return;
         Control control = (Control) w;
-        if (control.getData(DATA_KEY) != null) return;
+        if (INSTALLED.containsKey(viewer))
+            return;
 
-        new ContentAssistSessionReloader(viewer, assistant, processor);
+        ContentAssistSessionReloader reloader =
+            new ContentAssistSessionReloader(viewer, assistant, processor);
+        INSTALLED.put(viewer, reloader);
         control.setData(DATA_KEY, Boolean.TRUE);
-        ContentAssistDebug.log("install completionListener (filterRunnable hijack)"); //$NON-NLS-1$
+        ContentAssistDebug.log("install completionListener"); //$NON-NLS-1$
+    }
+
+    /** Снятие listener и флага (после {@link ContentAssistPatcher} → native assist). */
+    public static void uninstall(SourceViewer viewer, ContentAssistant assistant)
+    {
+        ContentAssistSessionReloader reloader = INSTALLED.remove(viewer);
+        if (reloader != null)
+            reloader.detach();
+        if (viewer != null && viewer.getTextWidget() != null)
+            viewer.getTextWidget().setData(DATA_KEY, null);
     }
 
     private ContentAssistSessionReloader(SourceViewer viewer, ContentAssistant assistant,
@@ -52,53 +78,130 @@ public final class ContentAssistSessionReloader
         this.ctrlSpaceFilter = new CtrlSpaceFilter(assistant);
         this.displayFilterKey = "tormozit.ctrlSpaceFilter." + System.identityHashCode(viewer); //$NON-NLS-1$
 
-        assistant.addCompletionListener(new ICompletionListener() {
+        this.completionListener = new ICompletionListener() {
             @Override
             public void assistSessionStarted(ContentAssistEvent event)
             {
                 ContentAssistDebug.resetValidateStats();
                 SmartAssistFilterState.reset();
+                processor.invalidateCache();
+                ContentAssistPopupSync.clearSyncState();
                 ContentAssistDebug.log("assistSessionStarted auto=" + event.isAutoActivated //$NON-NLS-1$
                     + " processor=" + processorName(event.processor)); //$NON-NLS-1$
                 ACTIVE_ASSISTANT.set(assistant);
                 ACTIVE_VIEWER.set(viewer);
                 ACTIVE_PROCESSOR.set(processor);
+
                 int caret = ContentAssistPopupSync.syncSessionOffsets(assistant, viewer);
-                SmartContentAssistProcessor.primeAssistContext(viewer, caret);
-                processor.warmFullListCache(viewer);
-                ContentAssistPopupSync.installFilterOverride(assistant, viewer, processor);
-                installCtrlSpaceFilter();
-                Control c = (Control) viewer.getTextWidget();
-                if (c != null && !c.isDisposed())
-                    c.getDisplay().asyncExec(() -> {
-                        if (ContentAssistPopupSync.isPopupVisible(assistant))
-                            ContentAssistPopupSync.applyFilteredList(assistant, viewer, processor);
-                        ContentAssistPopupSync.refreshAdditionalInfo(assistant);
-                        ContentAssistPopupUi.ensureFilterToggle(assistant, viewer, processor);
-                    });
+                if (viewer.getDocument() != null && caret >= 0)
+                {
+                    SmartFilterTracker.setCurrentFilter(
+                        SmartContentAssistProcessor.computeIdentifierFilter(
+                            viewer.getDocument(), caret));
+                }
+
+                boolean comfortListFilter = ComfortSettings.isReplaceListFiltersEnabled();
+                if (!comfortListFilter)
+                {
+                    ContentAssistPopupSync.uninstallFilterTrackerPrepend(assistant);
+                    SmartFilterTracker.setCurrentFilter(""); //$NON-NLS-1$
+                }
+                else
+                {
+                    SmartContentAssistProcessor.primeAssistContext(viewer, caret);
+                    ContentAssistPopupSync.installFilterTrackerPrepend(assistant, viewer);
+                    installCtrlSpaceFilter();
+                    installSessionCaretListener();
+                }
+
+                if (comfortListFilter)
+                    ContentAssistPopupSync.scheduleSessionPopupSync(assistant, viewer, processor);
+                else
+                {
+                    Control c = (Control) viewer.getTextWidget();
+                    if (c != null && !c.isDisposed())
+                        c.getDisplay().asyncExec(() -> {
+                            ContentAssistPopupUi.removeFilterToggle(assistant);
+                            ContentAssistPopupSync.refreshAdditionalInfo(assistant);
+                        });
+                }
             }
 
             @Override
             public void assistSessionEnded(ContentAssistEvent event)
             {
                 uninstallCtrlSpaceFilter();
+                uninstallSessionCaretListener();
+                ContentAssistPopupSync.cancelCaretRecompute(viewer);
+                ContentAssistPopupSync.cancelSessionPopupSync(viewer);
+
                 ACTIVE_ASSISTANT.remove();
                 ACTIVE_VIEWER.remove();
                 ACTIVE_PROCESSOR.remove();
-                ContentAssistPopupSync.uninstallFilterOverride(assistant);
+
+                ContentAssistPopupSync.uninstallFilterTrackerPrepend(assistant);
                 ContentAssistPopupSync.clearPendingFilterToggleSelection();
-                ContentAssistDebug.log("assistSessionEnded processor=" + processorName(event.processor)); //$NON-NLS-1$
+                ContentAssistPopupSync.clearSyncState();
+                ContentAssistDebug.log("assistSessionEnded processor=" //$NON-NLS-1$
+                    + processorName(event.processor));
                 processor.invalidateCache();
                 SmartFilterTracker.setCurrentFilter("");
                 SmartAssistFilterState.reset();
                 SmartContentAssistProcessor.clearLastComputeCaret();
+                SmartContentAssistProcessor.clearValidateMatcherCache();
             }
 
             @Override
             public void selectionChanged(
                 org.eclipse.jface.text.contentassist.ICompletionProposal proposal,
                 boolean smartToggle) {}
-        });
+        };
+        assistant.addCompletionListener(completionListener);
+    }
+
+    private void detach()
+    {
+        uninstallCtrlSpaceFilter();
+        uninstallSessionCaretListener();
+        ContentAssistPopupSync.cancelCaretRecompute(viewer);
+        assistant.removeCompletionListener(completionListener);
+    }
+
+    private void installSessionCaretListener()
+    {
+        if (sessionCaretListener != null)
+            return;
+        if (!(viewer.getTextWidget() instanceof StyledText))
+            return;
+        StyledText text = (StyledText) viewer.getTextWidget();
+        sessionCaretListener = this::onSessionCaretMoved;
+        text.addCaretListener(sessionCaretListener);
+    }
+
+    private void uninstallSessionCaretListener()
+    {
+        if (sessionCaretListener == null)
+            return;
+        if (viewer.getTextWidget() instanceof StyledText)
+        {
+            StyledText text = (StyledText) viewer.getTextWidget();
+            if (!text.isDisposed())
+                text.removeCaretListener(sessionCaretListener);
+        }
+        sessionCaretListener = null;
+    }
+
+    private void onSessionCaretMoved(CaretEvent event)
+    {
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+            return;
+        int caret = event.caretOffset;
+        if (caret < 0)
+            return;
+        SmartContentAssistProcessor.primeFilterTrackerOnly(viewer, caret);
+        if (!ContentAssistPopupSync.isPopupVisible(assistant))
+            return;
+        ContentAssistPopupSync.scheduleRecomputeOnCaretChange(assistant, viewer, processor);
     }
 
     private void installCtrlSpaceFilter()
@@ -147,6 +250,8 @@ public final class ContentAssistSessionReloader
     /** Повторная загрузка списка после reconcile (member-access после точки). */
     public static void refreshPopupIfOpen()
     {
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+            return;
         ContentAssistant ca = ACTIVE_ASSISTANT.get();
         SourceViewer viewer = ACTIVE_VIEWER.get();
         SmartContentAssistProcessor processor = ACTIVE_PROCESSOR.get();
@@ -154,11 +259,15 @@ public final class ContentAssistSessionReloader
             return;
         if (!ContentAssistPopupSync.isPopupVisible(ca))
             return;
-        ContentAssistPopupSync.applyFilteredList(ca, viewer, processor);
+        if (ContentAssistPopupSync.isRecomputeInProgress())
+            return;
+        ContentAssistPopupSync.recomputePopupList(ca, viewer, processor);
     }
 
     public static void scheduleFilterToggleUiSync()
     {
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+            return;
         ContentAssistant ca = ACTIVE_ASSISTANT.get();
         SourceViewer viewer = ACTIVE_VIEWER.get();
         if (ca == null)
@@ -183,11 +292,10 @@ public final class ContentAssistSessionReloader
             return;
         SmartContentAssistProcessor processor = ACTIVE_PROCESSOR.get();
         c.getDisplay().asyncExec(() -> {
+            ContentAssistPopupUi.syncFilterToggle(ca, viewer);
             if (ca != null && viewer != null && processor != null
                 && ContentAssistPopupSync.isPopupVisible(ca))
-                ContentAssistPopupSync.applyFilteredList(ca, viewer, processor);
-            else
-                ContentAssistPopupUi.syncFilterToggle(ca, viewer);
+                ContentAssistPopupSync.recomputePopupList(ca, viewer, processor);
         });
     }
 
@@ -205,7 +313,7 @@ public final class ContentAssistSessionReloader
         return p.getClass().getSimpleName();
     }
 
-    /** Ctrl+Space при открытом popup — переключение фильтра в {@link SmartContentAssistProcessor}. */
+    /** Ctrl+Space при открытом popup — переключение фильтра. */
     static final class CtrlSpaceFilter implements Listener
     {
         private final ContentAssistant assistant;

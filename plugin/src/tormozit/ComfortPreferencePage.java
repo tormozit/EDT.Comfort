@@ -30,7 +30,7 @@ public class ComfortPreferencePage
 {
     private static final String REPLACE_LIST_FILTERS_TOOLTIP =
             "Текст фильтра будет дробиться на фрагменты пробелами и будет требоваться и подсвечиваться вхождение каждого фрагмента с мягким учетом порядка.\n"
-            + "Влияет на навигатор, список баз, быструю схему модуля, диалоги выбора типа и открытия объекта метаданных"; //$NON-NLS-1$
+            + "Влияет на навигатор, список баз, быструю схему модуля, диалоги выбора типа и открытия объекта метаданных, список автодополнения"; //$NON-NLS-1$
 
     public ComfortPreferencePage()
     {
@@ -81,6 +81,15 @@ public class ComfortPreferencePage
             codeEditorGroup);
         timeoutField.setValidRange(0, 10_000);
         addField(timeoutField);
+
+        BooleanFieldEditor contentAssistLogField = new BooleanFieldEditor(
+            ComfortSettings.PREF_CONTENT_ASSIST_LOG,
+            "Журнал Content Assist (отладка фильтра)",
+            codeEditorGroup);
+        addField(contentAssistLogField);
+        setFieldTooltip(contentAssistLogField,
+            "Показывает окно с логом фильтра и popupSync.\n"
+            + "Окно: Показать представление → Прочее → Журнал Content Assist"); //$NON-NLS-1$
 
         // Поле «Символы» намеренно не добавляется:
         // значение задано константой ContentAssistSettings.CHARSET_VALUE

@@ -6,49 +6,30 @@ import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
 
 /**
- * Логи content assist в консоль EDT: {@code Global.log} → {@code [Tormozit …] [ContentAssist] …}.
- * Отключить: {@code -Dtormozit.contentAssist.debug=false}.
+ * Логи Content Assist в окне {@link ContentAssistLogView}.
+ * Включение: Параметры → Комфорт → «Журнал Content Assist».
  */
 public final class ContentAssistDebug
 {
-    private static final boolean ENABLED =
-        !"false".equalsIgnoreCase(System.getProperty("tormozit.contentAssist.debug", "true")); //$NON-NLS-1$ //$NON-NLS-2$
-
     private static final AtomicInteger validateCalls = new AtomicInteger();
-    private static final AtomicInteger validateReject = new AtomicInteger();
 
     private ContentAssistDebug() {}
 
     public static boolean isEnabled()
     {
-        return ENABLED;
+        return ComfortSettings.isContentAssistLogEnabled();
     }
 
     public static void log(String msg)
     {
-        if (ENABLED)
-            Global.log("[ContentAssist] " + msg); //$NON-NLS-1$
+        if (!isEnabled())
+            return;
+        ContentAssistLog.append(msg);
     }
 
     public static void logValidate(boolean accepted, String filter, ICompletionProposal proposal, int offset)
     {
-        if (!ENABLED)
-            return;
-        int n = validateCalls.incrementAndGet();
-        boolean raw = !(proposal instanceof SmartCompletionProposal);
-        if (raw && n <= 5)
-            log("validate on RAW (not SmartCompletionProposal) — штатный incremental popup"); //$NON-NLS-1$
-        if (!accepted)
-        {
-            int r = validateReject.incrementAndGet();
-            if (r <= 15 || raw)
-                log("validate REJECT #" + r + " filter=\"" + filter + "\" offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
-                    + " item=" + proposalLabel(proposal)); //$NON-NLS-1$
-        }
-        else if (n <= 2)
-        {
-            log("validate ok #" + n + " filter=\"" + filter + "\" " + proposalLabel(proposal)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        }
+        validateCalls.incrementAndGet();
     }
 
     public static String sampleTypes(ICompletionProposal[] arr, int max)
@@ -69,7 +50,6 @@ public final class ContentAssistDebug
     public static void resetValidateStats()
     {
         validateCalls.set(0);
-        validateReject.set(0);
     }
 
     public static String proposalLabel(ICompletionProposal p)

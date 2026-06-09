@@ -2,7 +2,7 @@ package tormozit;
 
 /**
  * Хранилище текущего фильтра для {@link SmartCodeProposalSorter}.
- * Значение обновляется {@link ContentAssistSessionReloader} в {@code keyReleased}.
+ * Значение обновляется debounced filter и {@link SmartContentAssistProcessor#primeFilterTrackerOnly}.
  */
 public final class SmartFilterTracker
 {

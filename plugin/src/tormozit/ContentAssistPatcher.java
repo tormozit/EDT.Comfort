@@ -42,27 +42,57 @@ public final class ContentAssistPatcher
         ((XtextContentAssistProcessor) xtext)
             .setCompletionProposalAutoActivationCharacters(charset);
 
+        applyCommonAssistSettings(contentAssist, timeout);
+
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+        {
+            restoreNativeAssist(contentAssist, current, sourceViewer);
+            ContentAssistDebug.log("applyPatch NATIVE delegate=" + xtext.getClass().getSimpleName()); //$NON-NLS-1$
+            return true;
+        }
+
         SmartContentAssistProcessor wrapper;
-        if (current instanceof SmartContentAssistProcessor) {
+        if (current instanceof SmartContentAssistProcessor)
             wrapper = (SmartContentAssistProcessor) current;
-        } else {
+        else
+        {
             wrapper = new SmartContentAssistProcessor(xtext, charset);
             contentAssist.setContentAssistProcessor(wrapper, IDocument.DEFAULT_CONTENT_TYPE);
             forceReplaceProcessor(contentAssist, IDocument.DEFAULT_CONTENT_TYPE, wrapper);
         }
 
+        contentAssist.setSorter(new SmartCodeProposalSorter());
+        ContentAssistSessionReloader.install(sourceViewer, contentAssist, wrapper);
+
+        ContentAssistDebug.log("applyPatch OK delegate=" + xtext.getClass().getSimpleName()); //$NON-NLS-1$
+        return true;
+    }
+
+    private static void applyCommonAssistSettings(ContentAssistant contentAssist, int timeout)
+    {
         contentAssist.setAutoActivationDelay(timeout);
         contentAssist.enableAutoActivation(true);
         contentAssist.enableAutoInsert(false);
         contentAssist.setRepeatedInvocationMode(true);
         contentAssist.setStatusLineVisible(false);
-        contentAssist.setSorter(new PreserveOrderProposalSorter());
+    }
 
-        // Перезапрос + подавление штатной раскраски
-        ContentAssistSessionReloader.install(sourceViewer, contentAssist, wrapper);
-
-        ContentAssistDebug.log("applyPatch OK delegate=" + xtext.getClass().getSimpleName()); //$NON-NLS-1$
-        return true;
+    /** Глобально выключены фильтры — штатный processor и сортировка EDT. */
+    private static void restoreNativeAssist(ContentAssistant contentAssist,
+                                            IContentAssistProcessor current,
+                                            SourceViewer sourceViewer)
+    {
+        IContentAssistProcessor nativeProc = unwrap(current);
+        ContentAssistPopupSync.uninstallFilterTrackerPrepend(contentAssist);
+        ContentAssistPopupSync.clearSyncState();
+        ContentAssistPopupUi.removeFilterToggle(contentAssist);
+        if (current instanceof SmartContentAssistProcessor)
+        {
+            contentAssist.setContentAssistProcessor(nativeProc, IDocument.DEFAULT_CONTENT_TYPE);
+            forceReplaceProcessor(contentAssist, IDocument.DEFAULT_CONTENT_TYPE, nativeProc);
+        }
+        contentAssist.setSorter(null);
+        ContentAssistSessionReloader.uninstall(sourceViewer, contentAssist);
     }
 
     public static ContentAssistant getContentAssistant(SourceViewer sourceViewer)

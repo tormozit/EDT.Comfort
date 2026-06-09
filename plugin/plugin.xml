@@ -152,6 +152,19 @@
       </menuContribution>
    </extension>
 
+  <extension point="org.eclipse.ui.views">
+    <category
+        id="tormozit.views"
+        name="Комфорт"/>
+    <view
+        allowMultiple="false"
+        category="tormozit.views"
+        class="tormozit.ContentAssistLogView"
+        id="tormozit.ContentAssistLogView"
+        name="Журнал Content Assist"
+        restorable="true"/>
+  </extension>
+
   <extension point="org.eclipse.ui.preferencePages">
     <page
         category="com._1c.g5.v8"

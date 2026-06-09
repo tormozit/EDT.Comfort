@@ -27,5 +27,8 @@ public class ComfortInitializer extends AbstractPreferenceInitializer
         store.setDefault(
             ComfortSettings.PREF_REPLACE_LIST_FILTERS,
             ComfortSettings.DEFAULT_REPLACE_LIST_FILTERS);
+        store.setDefault(
+            ComfortSettings.PREF_CONTENT_ASSIST_LOG,
+            ComfortSettings.DEFAULT_CONTENT_ASSIST_LOG);
     }
 }

@@ -19,7 +19,8 @@ import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 
 /**
- * Обёртка proposal с подсветкой и фильтрацией через {@link SmartCodeMatcher}.
+ * Обёртка proposal: штатный popup вызывает {@link #validate} и
+ * {@link #getStyledDisplayString()} — фильтр и подсветка через общий {@link SmartCodeMatcher}.
  */
 public class SmartCompletionProposal implements
     ICompletionProposal,
@@ -31,12 +32,10 @@ public class SmartCompletionProposal implements
     ICompletionProposalExtension6
 {
     private final ICompletionProposal delegate;
-    private final SmartCodeMatcher matcher;
 
-    public SmartCompletionProposal(ICompletionProposal delegate, SmartCodeMatcher matcher)
+    public SmartCompletionProposal(ICompletionProposal delegate)
     {
         this.delegate = delegate;
-        this.matcher = matcher;
     }
 
     public ICompletionProposal getDelegate()
@@ -50,8 +49,12 @@ public class SmartCompletionProposal implements
     public StyledString getStyledDisplayString()
     {
         String display = delegate.getDisplayString();
-        if (display == null || matcher == null || matcher.isEmpty)
-            return new StyledString(display != null ? display : "");
+        if (display == null)
+            return new StyledString(""); //$NON-NLS-1$
+
+        SmartCodeMatcher matcher = resolveHighlightMatcher();
+        if (matcher.isEmpty)
+            return new StyledString(display);
 
         StyledString result = new StyledString(display);
         SmartMatchHighlight.applyRanges(result, matcher.getHighlightRanges(display));
@@ -212,7 +215,11 @@ public class SmartCompletionProposal implements
         return completionOffset;
     }
 
-    // ---- фильтрация popup ----------------------------------------------------
+    private SmartCodeMatcher resolveHighlightMatcher()
+    {
+        String filter = SmartFilterTracker.getCurrentFilter();
+        return new SmartCodeMatcher(filter != null ? filter : ""); //$NON-NLS-1$
+    }
 
     private boolean matchesFilter(IDocument document, int offset, DocumentEvent event)
     {
