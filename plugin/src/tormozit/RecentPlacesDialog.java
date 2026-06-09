@@ -6,7 +6,12 @@ import java.util.List;
 
 import org.eclipse.jface.dialogs.Dialog;
 import org.eclipse.jface.dialogs.IDialogConstants;
+import org.eclipse.jface.dialogs.IDialogSettings;
+import org.eclipse.jface.layout.TableColumnLayout;
+import org.eclipse.jface.viewers.ColumnPixelData;
+import org.eclipse.jface.viewers.ColumnWeightData;
 import org.eclipse.jface.viewers.ArrayContentProvider;
+import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.jface.viewers.IStructuredSelection;
@@ -14,17 +19,17 @@ import org.eclipse.jface.viewers.LabelProvider;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.jface.viewers.TableViewer;
+import org.eclipse.jface.viewers.TableViewerColumn;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
-import org.eclipse.swt.events.ControlAdapter;
-import org.eclipse.swt.events.ControlEvent;
 import org.eclipse.swt.events.KeyAdapter;
 import org.eclipse.swt.events.KeyEvent;
 import org.eclipse.swt.events.ModifyEvent;
 import org.eclipse.swt.events.ModifyListener;
 import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
@@ -38,19 +43,29 @@ import org.eclipse.swt.widgets.Text;
 /**
  * Диалог «Последние места».
  *
- * <p>Список — одноколоночный {@link TableViewer} с {@link DelegatingStyledCellLabelProvider},
- * как в {@code OpenMdObjectSelectionDialog} / {@code FilteredItemsSelectionDialog}
- * (не {@link org.eclipse.jface.viewers.TableViewerColumn} — на Windows ломает выделение).
+ * <p>Колонки таблицы — {@link TableColumnLayout} (штатный JFace).
+ * Размер окна — {@link #getDialogBoundsSettings()}. Ширины «Проект» и «Дата» — в той же секции.
  */
 public class RecentPlacesDialog extends Dialog
 {
     private static final DateTimeFormatter TIME_FMT =
         DateTimeFormatter.ofPattern("dd.MM HH:mm:ss"); //$NON-NLS-1$
 
+    private static final String SETTINGS_SECTION      = "RecentPlacesDialog"; //$NON-NLS-1$
+    private static final String KEY_COL_PROJECT_WIDTH = "colProjectWidth";    //$NON-NLS-1$
+    private static final String KEY_COL_DATE_WIDTH    = "colDateWidth";       //$NON-NLS-1$
+
+    private static final int DEFAULT_PROJECT_COL_WIDTH = 90;
+    private static final int DEFAULT_DATE_COL_WIDTH    = 90;
+    private static final int MIN_PLACE_COL_WIDTH       = 80;
+    private static final int MIN_PROJECT_COL_WIDTH     = 40;
+    private static final int MIN_DATE_COL_WIDTH        = 70;
+
     private Text        filterText;
     private TableViewer listViewer;
-    private TableColumn listColumn;
     private ListLabelProvider listLabelProvider;
+    private TableColumn projectColumn;
+    private TableColumn dateColumn;
 
     private List<RecentPlaces.Entry> allEntries;
     private List<RecentPlaces.Entry> filtered;
@@ -74,7 +89,29 @@ public class RecentPlacesDialog extends Dialog
     @Override
     protected Point getInitialSize()
     {
-        return new Point(700, 500);
+        // super читает DIALOG_WIDTH/HEIGHT из getDialogBoundsSettings(); не подменять фиксированным размером.
+        IDialogSettings settings = dialogSettings();
+        if (settings.get("DIALOG_WIDTH") == null) //$NON-NLS-1$
+            return new Point(700, 500);
+        return super.getInitialSize();
+    }
+
+    @Override
+    protected IDialogSettings getDialogBoundsSettings()
+    {
+        return dialogSettings();
+    }
+
+    @Override
+    protected int getDialogBoundsStrategy()
+    {
+        return DIALOG_PERSISTSIZE | DIALOG_PERSISTLOCATION;
+    }
+
+    @Override
+    protected boolean isResizable()
+    {
+        return true;
     }
 
     @Override
@@ -85,32 +122,69 @@ public class RecentPlacesDialog extends Dialog
 
         filterText = new Text(area, SWT.BORDER | SWT.SEARCH | SWT.ICON_CANCEL);
         filterText.setMessage("Фильтр по имени метода или объекта..."); //$NON-NLS-1$
-        filterText.setLayoutData(new org.eclipse.swt.layout.GridData(
-            SWT.FILL, SWT.CENTER, true, false));
+        filterText.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
 
-        // Как FilteredItemsSelectionDialog: одна колонка, без заголовка, DelegatingStyledCellLabelProvider на viewer
-        listViewer = new TableViewer(area,
-            SWT.BORDER | SWT.SINGLE | SWT.FULL_SELECTION | SWT.V_SCROLL | SWT.H_SCROLL);
+        IDialogSettings settings = dialogSettings();
+        int projectWidth = readColWidth(settings, KEY_COL_PROJECT_WIDTH,
+            DEFAULT_PROJECT_COL_WIDTH, MIN_PROJECT_COL_WIDTH);
+        int dateWidth = readColWidth(settings, KEY_COL_DATE_WIDTH,
+            DEFAULT_DATE_COL_WIDTH, MIN_DATE_COL_WIDTH);
+
+        Composite tableHost = new Composite(area, SWT.NONE);
+        TableColumnLayout columnLayout = new TableColumnLayout(true);
+        tableHost.setLayout(columnLayout);
+        tableHost.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+
+        listViewer = new TableViewer(tableHost,
+            SWT.BORDER | SWT.SINGLE | SWT.FULL_SELECTION | SWT.V_SCROLL);
         Table table = listViewer.getTable();
-        table.setHeaderVisible(false);
-        table.setLinesVisible(false);
-        table.setLayoutData(new org.eclipse.swt.layout.GridData(
-            SWT.FILL, SWT.FILL, true, true));
+        table.setHeaderVisible(true);
+        table.setLinesVisible(true);
 
-        listColumn = new TableColumn(table, SWT.NONE);
-        table.addControlListener(new ControlAdapter()
+        TableViewerColumn colPlace = new TableViewerColumn(listViewer, SWT.NONE);
+        TableColumn placeColumn = colPlace.getColumn();
+        placeColumn.setText("Место"); //$NON-NLS-1$
+        listLabelProvider = new ListLabelProvider();
+        colPlace.setLabelProvider(new DelegatingStyledCellLabelProvider(listLabelProvider));
+
+        TableViewerColumn colProject = new TableViewerColumn(listViewer, SWT.NONE);
+        projectColumn = colProject.getColumn();
+        projectColumn.setText("Проект"); //$NON-NLS-1$
+        colProject.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
-            public void controlResized(ControlEvent e)
+            public String getText(Object element)
             {
-                if (!table.isDisposed())
-                    listColumn.setWidth(Math.max(50, table.getClientArea().width - 4));
+                if (!(element instanceof RecentPlaces.Entry))
+                    return ""; //$NON-NLS-1$
+                String name = ((RecentPlaces.Entry) element).projectName;
+                return name != null && !name.isBlank() ? name : "\u2014"; //$NON-NLS-1$
             }
         });
 
-        listLabelProvider = new ListLabelProvider();
+        TableViewerColumn colDate = new TableViewerColumn(listViewer, SWT.NONE);
+        dateColumn = colDate.getColumn();
+        dateColumn.setText("Дата"); //$NON-NLS-1$
+        colDate.setLabelProvider(new ColumnLabelProvider()
+        {
+            @Override
+            public String getText(Object element)
+            {
+                if (!(element instanceof RecentPlaces.Entry))
+                    return ""; //$NON-NLS-1$
+                RecentPlaces.Entry entry = (RecentPlaces.Entry) element;
+                return entry.visitedAt != null ? entry.visitedAt.format(TIME_FMT) : ""; //$NON-NLS-1$
+            }
+        });
+
+        columnLayout.setColumnData(placeColumn,
+            new ColumnWeightData(1, MIN_PLACE_COL_WIDTH, true));
+        columnLayout.setColumnData(projectColumn,
+            new ColumnPixelData(projectWidth, true, true));
+        columnLayout.setColumnData(dateColumn,
+            new ColumnPixelData(dateWidth, true, true));
+
         listViewer.setContentProvider(ArrayContentProvider.getInstance());
-        listViewer.setLabelProvider(new DelegatingStyledCellLabelProvider(listLabelProvider));
 
         allEntries = RecentPlaces.getInstance().getAll();
         filtered   = new ArrayList<>(allEntries);
@@ -142,8 +216,55 @@ public class RecentPlacesDialog extends Dialog
         super.okPressed();
     }
 
+    @Override
+    public boolean close()
+    {
+        saveColumnWidths();
+        return super.close();
+    }
+
     // =========================================================================
-    // Label provider (тот же контракт, что OpenMdObjectLabelProvider)
+    // Настройки (окно + колонки)
+    // =========================================================================
+
+    private static IDialogSettings dialogSettings()
+    {
+        IDialogSettings top = Activator.getDefault().getDialogSettings();
+        IDialogSettings section = top.getSection(SETTINGS_SECTION);
+        if (section == null)
+            section = top.addNewSection(SETTINGS_SECTION);
+        return section;
+    }
+
+    private static int readColWidth(IDialogSettings settings, String key,
+                                    int defaultWidth, int minWidth)
+    {
+        String raw = settings.get(key);
+        if (raw == null || raw.isEmpty())
+            return defaultWidth;
+        try
+        {
+            int w = Integer.parseInt(raw);
+            return w >= minWidth ? w : defaultWidth;
+        }
+        catch (NumberFormatException ex)
+        {
+            return defaultWidth;
+        }
+    }
+
+    private void saveColumnWidths()
+    {
+        if (projectColumn == null || dateColumn == null
+                || projectColumn.isDisposed() || dateColumn.isDisposed())
+            return;
+        IDialogSettings settings = dialogSettings();
+        settings.put(KEY_COL_PROJECT_WIDTH, Integer.toString(projectColumn.getWidth()));
+        settings.put(KEY_COL_DATE_WIDTH, Integer.toString(dateColumn.getWidth()));
+    }
+
+    // =========================================================================
+    // Label provider
     // =========================================================================
 
     private final class ListLabelProvider extends LabelProvider implements IStyledLabelProvider
@@ -171,11 +292,6 @@ public class RecentPlacesDialog extends Dialog
                     styled.append(seg.text, SmartMatchHighlight.styler());
                 else
                     styled.append(seg.text);
-            }
-            if (entry.visitedAt != null)
-            {
-                styled.append("  ", StyledString.QUALIFIER_STYLER); //$NON-NLS-1$
-                styled.append(entry.visitedAt.format(TIME_FMT), StyledString.QUALIFIER_STYLER);
             }
             return styled;
         }

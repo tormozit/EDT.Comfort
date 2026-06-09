@@ -31,7 +31,7 @@ import org.eclipse.ui.preferences.ScopedPreferenceStore;
  * сеансами через Eclipse Preferences (InstanceScope).
  *
  * <p>Формат сериализации (одна запись = одна строка, поля через {@code \t}):
- * {@code <timestamp>\t<key>\t<navRef>\t<displayName>\t<ownName>}
+ * {@code <timestamp>\t<key>\t<navRef>\t<displayName>\t<ownName>\t<projectName>}
  */
 public final class RecentPlaces
 {
@@ -81,16 +81,20 @@ public final class RecentPlaces
          */
         public final String ownName;
 
+        /** Имя проекта EDT, в котором было зафиксировано место. */
+        public final String projectName;
+
         /** Дата и время последнего посещения. */
         public final LocalDateTime visitedAt;
 
         public Entry(String key, String navRef, String displayName,
-                     String ownName, LocalDateTime visitedAt)
+                     String ownName, String projectName, LocalDateTime visitedAt)
         {
             this.key         = key;
             this.navRef      = navRef;
             this.displayName = displayName;
             this.ownName     = ownName;
+            this.projectName = projectName != null ? projectName : ""; //$NON-NLS-1$
             this.visitedAt   = visitedAt;
         }
     }
@@ -138,12 +142,13 @@ public final class RecentPlaces
      * @param navRef      ссылка для навигации (может содержать номер строки)
      * @param displayName строка для отображения
      * @param ownName     собственное имя для фильтрации
+     * @param projectName имя проекта EDT
      */
     public synchronized void add(String key, String navRef,
-                                  String displayName, String ownName)
+                                  String displayName, String ownName, String projectName)
     {
         if (key == null || key.isBlank()) return;
-        map.put(key, new Entry(key, navRef, displayName, ownName, LocalDateTime.now()));
+        map.put(key, new Entry(key, navRef, displayName, ownName, projectName, LocalDateTime.now()));
         save();
     }
 
@@ -182,6 +187,7 @@ public final class RecentPlaces
             sb.append(SEP).append(escape(e.navRef));
             sb.append(SEP).append(escape(e.displayName));
             sb.append(SEP).append(escape(e.ownName));
+            sb.append(SEP).append(escape(e.projectName));
         }
         prefs.setValue(PREF_KEY, sb.toString());
         try { prefs.save(); }
@@ -197,11 +203,22 @@ public final class RecentPlaces
         for (String line : raw.split("\n", -1)) //$NON-NLS-1$
         {
             if (line.isBlank()) continue;
-            // Новый формат: 5 полей. Старый (4 поля без navRef) — поддерживаем.
-            String[] parts = line.split(String.valueOf(SEP), 5);
+            // Новый формат: 6 полей. Старые (5 и 4 поля) — поддерживаем.
+            String[] parts = line.split(String.valueOf(SEP), 6);
             try
             {
-                if (parts.length == 5)
+                if (parts.length == 6)
+                {
+                    LocalDateTime dt = parseDt(parts[0]);
+                    String key         = unescape(parts[1]);
+                    String navRef      = unescape(parts[2]);
+                    String displayName = unescape(parts[3]);
+                    String ownName     = unescape(parts[4]);
+                    String projectName = unescape(parts[5]);
+                    if (!key.isBlank())
+                        map.put(key, new Entry(key, navRef, displayName, ownName, projectName, dt));
+                }
+                else if (parts.length == 5)
                 {
                     LocalDateTime dt = parseDt(parts[0]);
                     String key         = unescape(parts[1]);
@@ -209,7 +226,7 @@ public final class RecentPlaces
                     String displayName = unescape(parts[3]);
                     String ownName     = unescape(parts[4]);
                     if (!key.isBlank())
-                        map.put(key, new Entry(key, navRef, displayName, ownName, dt));
+                        map.put(key, new Entry(key, navRef, displayName, ownName, "", dt)); //$NON-NLS-1$
                 }
                 else if (parts.length == 4)
                 {
@@ -219,7 +236,7 @@ public final class RecentPlaces
                     String displayName = unescape(parts[2]);
                     String ownName     = unescape(parts[3]);
                     if (!key.isBlank())
-                        map.put(key, new Entry(key, key, displayName, ownName, dt));
+                        map.put(key, new Entry(key, key, displayName, ownName, "", dt)); //$NON-NLS-1$
                 }
             }
             catch (Exception ex)

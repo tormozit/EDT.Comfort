@@ -90,7 +90,8 @@ public class RecentPlacesTracker implements IStartup
             String ref = GetRef.getRefFromPart(page.getActivePart());
             if (ref == null || ref.isBlank()) return;
             String ownName = lastSegment(ref);
-            RecentPlaces.getInstance().add(ref, ref, ref, ownName);
+            String projectName = resolveProjectName(page, null);
+            RecentPlaces.getInstance().add(ref, ref, ref, ownName, projectName);
             Global.log("RecentPlaces add (MD): " + ref); //$NON-NLS-1$
         }
     }
@@ -197,7 +198,8 @@ public class RecentPlacesTracker implements IStartup
         String modulePath = moduleRef.modulePath;
         String navRef = GetRef.buildExtendedRefForMethod(bslEditor, methodName);
         String key = modulePath + ": " + methodName; //$NON-NLS-1$
-        RecentPlaces.getInstance().add(key, navRef != null ? navRef : key, key, methodName);
+        String projectName = resolveProjectName(null, file);
+        RecentPlaces.getInstance().add(key, navRef != null ? navRef : key, key, methodName, projectName);
         Global.log("RecentPlaces add (Outline): " + key); //$NON-NLS-1$
     }
 
@@ -247,8 +249,21 @@ public class RecentPlacesTracker implements IStartup
         }
 
         RecentPlaces.getInstance().add(key, navRef != null ? navRef : key,
-                                        displayName, ownName);
+                                        displayName, ownName, resolveProjectName(null, file));
         Global.log("RecentPlaces add (BSL): " + displayName); //$NON-NLS-1$
+    }
+
+    private static String resolveProjectName(IWorkbenchPage page,
+            org.eclipse.core.resources.IFile file)
+    {
+        if (file != null)
+        {
+            org.eclipse.core.resources.IProject p = file.getProject();
+            if (p != null)
+                return p.getName();
+        }
+        org.eclipse.core.resources.IProject p = Global.getActiveProject(page, false);
+        return p != null ? p.getName() : ""; //$NON-NLS-1$
     }
 
     /**
