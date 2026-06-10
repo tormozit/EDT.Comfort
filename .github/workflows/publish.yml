@@ -79,6 +79,7 @@ jobs:
 
       - name: Verify deploy folder before push
         run: |
+          set -euo pipefail
           VER="${{ steps.ver.outputs.version }}"
           test -d "deploy/$VER/features" || (echo "ERROR: deploy/$VER/features missing" && exit 1)
           test -d "deploy/$VER/plugins" || (echo "ERROR: deploy/$VER/plugins missing" && exit 1)
@@ -93,7 +94,7 @@ jobs:
           test ! -f deploy/content.jar || (echo "ERROR: root content.jar must not exist (use composite repo)" && exit 1)
           grep -q "unit id='tormozit.comfort'" "deploy/$VER/content.xml" || (echo "ERROR: bundle IU missing from deploy/$VER/content.xml" && exit 1)
           mkdir -p /tmp/site-ver-check
-          jar xf site/content.jar -C /tmp/site-ver-check content.xml
+          unzip -p site/content.jar content.xml > /tmp/site-ver-check/content.xml
           SITE_VER=$(grep -o "id='tormozit.comfort' version='[^']*'" /tmp/site-ver-check/content.xml | head -1 | sed "s/.*version='\\([^']*\\)'.*/\\1/")
           DEPLOY_VER=$(grep -o "id='tormozit.comfort' version='[^']*'" "deploy/$VER/content.xml" | head -1 | sed "s/.*version='\\([^']*\\)'.*/\\1/")
           echo "site/content.jar version: $SITE_VER"
