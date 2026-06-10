@@ -10,10 +10,22 @@ on:
 #    tags:
 #     - 'v[0-9]*.[0-9]*.[0-9]*.[0-9]*'
 
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
 jobs:
   build-and-deploy:
     # EDT target — win32; slicer + platform.support требуют Windows (на Linux planner ломается).
     runs-on: windows-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v4.2.2
@@ -112,7 +124,19 @@ jobs:
           LATEST_VERSION: ${{ steps.version.outputs.release_version }}
         run: python .github/workflows/generate_composite.py
 
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./deploy
+
       - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Push to gh-pages branch
         uses: JamesIves/github-pages-deploy-action@v4.7.3
         with:
           folder: deploy

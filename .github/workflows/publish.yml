@@ -7,10 +7,19 @@ on:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
 
 jobs:
   publish:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -103,6 +112,18 @@ jobs:
           test "$SITE_VER" = "$DEPLOY_VER" || (echo "ERROR: deploy version ($DEPLOY_VER) != committed site ($SITE_VER). Push site/ and re-run workflow." && exit 1)
           echo "deploy tree:"
           find deploy -maxdepth 3 -type f | head -30
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./deploy
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
 
       - name: Push to gh-pages branch
         uses: peaceiris/actions-gh-pages@v4
