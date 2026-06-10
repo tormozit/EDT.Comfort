@@ -163,7 +163,7 @@
         category="tormozit.views"
         class="tormozit.ContentAssistLogView"
         id="tormozit.ContentAssistLogView"
-        name="Журнал Content Assist"
+        name="Журнал Комфорт"
         restorable="true"/>
   </extension>
 

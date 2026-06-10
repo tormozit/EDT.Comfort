@@ -22,6 +22,32 @@ artifact.repository.factory.order=compositeArtifacts.xml,compositeArtifacts.jar,
 """
 
 
+def bump_p2_timestamp(xml_text: str) -> str:
+    """Сброс кэша p2 при повторной публикации в тот же каталог версии."""
+    ts = str(int(time.time() * 1000))
+    if "p2.timestamp" not in xml_text:
+        return xml_text
+    return re.sub(
+        r"<property name='p2.timestamp' value='[^']*'/>",
+        f"<property name='p2.timestamp' value='{ts}'/>",
+        xml_text,
+        count=1,
+    )
+
+
+def fix_repository_references(xml_text: str, version: str) -> str:
+    """Ссылки metadata/artifacts — на каталог версии, не на composite-корень."""
+    repo_url = f"{SITE_BASE_URL}{version}/"
+    return re.sub(
+        r"<repository uri='[^']*' url='[^']*' type='([01])' options='0'/>",
+        lambda m: (
+            f"<repository uri='{repo_url}' url='{repo_url}' "
+            f"type='{m.group(1)}' options='0'/>"
+        ),
+        xml_text,
+    )
+
+
 def fix_content_xml(xml_text: str) -> str:
     """Переименовать только category-IU, если его id совпал с bundle id."""
     if "p2.type.category" not in xml_text:
@@ -51,14 +77,20 @@ def publish_p2_files(target_dir: str) -> None:
     if not os.path.isfile(content_jar):
         return
 
+    version = os.path.basename(target_dir.rstrip("/\\"))
+
     with zipfile.ZipFile(content_jar, "r") as zin:
         content_xml = fix_content_xml(zin.read("content.xml").decode("utf-8"))
+    content_xml = fix_repository_references(content_xml, version)
+    content_xml = bump_p2_timestamp(content_xml)
 
     artifacts_xml = None
     if os.path.isfile(artifacts_jar):
         with zipfile.ZipFile(artifacts_jar, "r") as zin:
             if "artifacts.xml" in zin.namelist():
                 artifacts_xml = zin.read("artifacts.xml").decode("utf-8")
+        if artifacts_xml:
+            artifacts_xml = bump_p2_timestamp(artifacts_xml)
 
     with open(os.path.join(target_dir, "content.xml"), "w", encoding="utf-8", newline="\n") as f:
         f.write(content_xml)

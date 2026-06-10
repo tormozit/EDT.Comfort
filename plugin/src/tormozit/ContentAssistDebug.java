@@ -6,8 +6,7 @@ import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
 
 /**
- * Логи Content Assist в окне {@link ContentAssistLogView}.
- * Включение: Параметры → Комфорт → «Журнал Content Assist».
+ * Логи Content Assist в общем журнале {@link ContentAssistLogView}.
  */
 public final class ContentAssistDebug
 {
@@ -17,14 +16,12 @@ public final class ContentAssistDebug
 
     public static boolean isEnabled()
     {
-        return ComfortSettings.isContentAssistLogEnabled();
+        return ComfortDebug.isEnabled();
     }
 
     public static void log(String msg)
     {
-        if (!isEnabled())
-            return;
-        ContentAssistLog.append(msg);
+        ComfortDebug.log("contentAssist", msg); //$NON-NLS-1$
     }
 
     public static void logValidate(boolean accepted, String filter, ICompletionProposal proposal, int offset)

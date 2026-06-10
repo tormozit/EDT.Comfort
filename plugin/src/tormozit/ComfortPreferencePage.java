@@ -106,14 +106,14 @@ public class ComfortPreferencePage
         timeoutField.setValidRange(0, 10_000);
         addField(timeoutField);
 
-        BooleanFieldEditor contentAssistLogField = new BooleanFieldEditor(
-            ComfortSettings.PREF_CONTENT_ASSIST_LOG,
-            "Журнал Content Assist (отладка фильтра)",
+        BooleanFieldEditor debugLogField = new BooleanFieldEditor(
+            ComfortSettings.PREF_DEBUG_LOG,
+            "Общее логирование",
             codeEditorGroup);
-        addField(contentAssistLogField);
-        setFieldTooltip(contentAssistLogField,
-            "Показывает окно с логом фильтра и popupSync.\n"
-            + "Окно: Показать представление → Прочее → Журнал Content Assist"); //$NON-NLS-1$
+        addField(debugLogField);
+        setFieldTooltip(debugLogField,
+            "Журнал отладки: content assist, установщик «Сменить»/«Обновить» и др.\n"
+            + "Окно: Показать представление → Прочее → Журнал Комфорт"); //$NON-NLS-1$
 
         // Поле «Символы» намеренно не добавляется:
         // значение задано константой ContentAssistSettings.CHARSET_VALUE

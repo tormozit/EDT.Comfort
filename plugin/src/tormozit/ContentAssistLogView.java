@@ -11,7 +11,7 @@ import org.eclipse.swt.widgets.Display;
 import org.eclipse.ui.part.ViewPart;
 
 /**
- * Окно журнала Content Assist (фильтр, popupSync, filterTrace).
+ * Общий отладочный журнал плагина (content assist, установщик и др.).
  */
 public final class ContentAssistLogView extends ViewPart
 {
@@ -24,7 +24,7 @@ public final class ContentAssistLogView extends ViewPart
         logText = new StyledText(parent,
             SWT.MULTI | SWT.READ_ONLY | SWT.V_SCROLL | SWT.H_SCROLL | SWT.BORDER);
         logText.setEditable(false);
-        logText.setText(ComfortSettings.isContentAssistLogEnabled()
+        logText.setText(ComfortSettings.isDebugLogEnabled()
             ? ContentAssistLog.getFullText()
             : ""); //$NON-NLS-1$
         if (logText.getLineCount() > 0)
@@ -70,7 +70,7 @@ public final class ContentAssistLogView extends ViewPart
             logText.setText(""); //$NON-NLS-1$
             return;
         }
-        if (!ComfortSettings.isContentAssistLogEnabled())
+        if (!ComfortSettings.isDebugLogEnabled())
             return;
 
         String existing = logText.getText();
@@ -92,6 +92,8 @@ public final class ContentAssistLogView extends ViewPart
             display.getSystemColor(SWT.COLOR_DARK_RED));
         highlightToken(line, lineOffset, "ERROR", //$NON-NLS-1$
             display.getSystemColor(SWT.COLOR_DARK_RED));
+        highlightToken(line, lineOffset, "[install]", //$NON-NLS-1$
+            display.getSystemColor(SWT.COLOR_DARK_BLUE));
     }
 
     private void highlightToken(String line, int lineOffset, String token, Color color)

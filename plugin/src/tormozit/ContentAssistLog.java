@@ -11,7 +11,7 @@ import org.eclipse.ui.PartInitException;
 import org.eclipse.ui.PlatformUI;
 
 /**
- * Кольцевой буфер строк журнала Content Assist для {@link ContentAssistLogView}.
+ * Кольцевой буфер общего отладочного журнала ({@link ContentAssistLogView}).
  */
 public final class ContentAssistLog
 {
@@ -112,7 +112,7 @@ public final class ContentAssistLog
 
     private static void requestShowView()
     {
-        if (!ComfortSettings.isContentAssistLogEnabled())
+        if (!ComfortSettings.isDebugLogEnabled())
             return;
         Display display = getDisplay();
         if (display == null)

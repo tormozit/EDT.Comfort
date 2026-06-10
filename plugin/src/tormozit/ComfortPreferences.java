@@ -152,15 +152,25 @@ public final class ComfortPreferences
 
         Runnable open = () -> {
 
+            ComfortDebug.log("install", "openInstallNewSoftware site=" + siteUrl); //$NON-NLS-1$ //$NON-NLS-2$
+
             if (tryOpenInstallWizardForSite(siteUrl))
 
+            {
+
+                ComfortDebug.log("install", "мастер установки открыт"); //$NON-NLS-1$ //$NON-NLS-2$
+
                 return;
+
+            }
 
             String message = isP2SelfUpdateAvailable()
 
                 ? "Не удалось открыть окно «Установить новое ПО»." //$NON-NLS-1$
 
                 : "Установщик недоступен в этой среде (нет p2-профиля). Проверьте в установленном EDT."; //$NON-NLS-1$
+
+            ComfortDebug.log("install", "FAIL: " + message); //$NON-NLS-1$ //$NON-NLS-2$
 
             ToastNotification.show("EDT Comfort", message, 8_000); //$NON-NLS-1$
 
@@ -230,6 +240,8 @@ public final class ComfortPreferences
 
         URI siteUri = URI.create(normalizeSiteUrl(siteUrl));
 
+        ComfortDebug.log("install", "siteUri=" + siteUri); //$NON-NLS-1$ //$NON-NLS-2$
+
 
 
         Class<?> uiClass = loadBundleClass(BUNDLE_P2_UI,
@@ -248,6 +260,8 @@ public final class ComfortPreferences
 
         registerUpdateSite(ui, uiClass, siteUri);
 
+        logKnownRepositories(ui, uiClass, "after registerUpdateSite"); //$NON-NLS-1$
+
 
 
         Class<?> jobClass = loadBundleClass(BUNDLE_P2_UI,
@@ -259,6 +273,8 @@ public final class ComfortPreferences
         configureLoadJob(job, jobClass);
 
         runLoadJobModal(job, jobClass);
+
+        logLoadJobStatus(job, jobClass);
 
 
 
@@ -294,6 +310,8 @@ public final class ComfortPreferences
 
         dialogClass.getMethod("create").invoke(dialog); //$NON-NLS-1$
 
+        ComfortDebug.log("install", "ProvisioningWizardDialog.create() OK"); //$NON-NLS-1$ //$NON-NLS-2$
+
         selectInstallSiteInDialog(dialog, siteUri);
 
         dialogClass.getMethod("open").invoke(dialog); //$NON-NLS-1$
@@ -328,6 +346,12 @@ public final class ComfortPreferences
 
         IProgressMonitor monitor = new NullProgressMonitor();
 
+        cancelRepositoryLoadJobs();
+
+        forceRemoveRepository(ui, uiClass, siteUri);
+
+        forceRemoveRepository(ui, uiClass, URI.create(ComfortUpdateChecker.UPDATE_SITE_URL));
+
         uiClass.getMethod("loadMetadataRepository", //$NON-NLS-1$
 
             URI.class, boolean.class, IProgressMonitor.class)
@@ -341,6 +365,82 @@ public final class ComfortPreferences
             .invoke(ui, siteUri, Boolean.TRUE, monitor);
 
         setRepositoryNickname(ui, uiClass, siteUri);
+
+        ComfortDebug.log("install", "registerUpdateSite OK uri=" + siteUri); //$NON-NLS-1$ //$NON-NLS-2$
+
+    }
+
+
+
+    private static void cancelRepositoryLoadJobs() throws Exception
+
+    {
+
+        Class<?> jobClass = Class.forName("org.eclipse.core.runtime.jobs.Job"); //$NON-NLS-1$
+
+        Class<?> loadJobClass = loadBundleClass(BUNDLE_P2_UI,
+
+            "org.eclipse.equinox.p2.ui.LoadMetadataRepositoryJob"); //$NON-NLS-1$
+
+        Object loadFamily = loadJobClass.getField("LOAD_FAMILY").get(null); //$NON-NLS-1$
+
+        Object jobManager = jobClass.getMethod("getJobManager").invoke(null); //$NON-NLS-1$
+
+        jobManager.getClass().getMethod("cancel", Object.class).invoke(jobManager, loadFamily); //$NON-NLS-1$
+
+    }
+
+
+
+    private static void forceRemoveRepository(Object ui, Class<?> uiClass, URI siteUri)
+
+    {
+
+        if (siteUri == null)
+
+            return;
+
+        try
+
+        {
+
+            Object session = uiClass.getMethod("getSession").invoke(ui); //$NON-NLS-1$
+
+            Class<?> provUIClass = loadBundleClass(BUNDLE_P2_UI,
+
+                "org.eclipse.equinox.internal.p2.ui.ProvUI"); //$NON-NLS-1$
+
+            for (String managerMethod : new String[] {
+
+                "getMetadataRepositoryManager", //$NON-NLS-1$
+
+                "getArtifactRepositoryManager" //$NON-NLS-1$
+
+            })
+
+            {
+
+                Object manager = provUIClass.getMethod(managerMethod, session.getClass())
+
+                    .invoke(null, session);
+
+                manager.getClass().getMethod("removeRepository", URI.class) //$NON-NLS-1$
+
+                    .invoke(manager, siteUri);
+
+            }
+
+            ComfortDebug.log("install", "removeRepository " + siteUri); //$NON-NLS-1$ //$NON-NLS-2$
+
+        }
+
+        catch (Exception e)
+
+        {
+
+            ComfortDebug.logError("install", "forceRemoveRepository " + siteUri, e); //$NON-NLS-1$ //$NON-NLS-2$
+
+        }
 
     }
 
@@ -378,7 +478,7 @@ public final class ComfortPreferences
 
         {
 
-            Global.log("Никнейм сайта обновления: " + formatError(e)); //$NON-NLS-1$
+            ComfortDebug.logError("install", "setRepositoryNickname", e); //$NON-NLS-1$ //$NON-NLS-2$
 
         }
 
@@ -400,7 +500,15 @@ public final class ComfortPreferences
 
             if (pages == null)
 
+            {
+
+                ComfortDebug.log("install", "selectSite: wizard.getPages()=null"); //$NON-NLS-1$ //$NON-NLS-2$
+
                 return;
+
+            }
+
+            ComfortDebug.log("install", "selectSite: pages=" + pages.length); //$NON-NLS-1$ //$NON-NLS-2$
 
 
 
@@ -432,7 +540,15 @@ public final class ComfortPreferences
 
                 if (repoSelector == null)
 
-                    continue;
+                {
+
+                    ComfortDebug.log("install", "selectSite: repoSelector=null"); //$NON-NLS-1$ //$NON-NLS-2$
+
+                    return;
+
+                }
+
+                logInstallRepoCombo(repoSelector, "before setRepositorySelection"); //$NON-NLS-1$
 
                 repoSelector.getClass().getMethod( //$NON-NLS-1$
 
@@ -440,9 +556,17 @@ public final class ComfortPreferences
 
                     .invoke(repoSelector, specifiedScope, siteUri);
 
+                ComfortDebug.log("install", //$NON-NLS-1$
+
+                    "setRepositorySelection(scope=AVAILABLE_SPECIFIED, uri=" + siteUri + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+
+                logInstallRepoCombo(repoSelector, "after setRepositorySelection"); //$NON-NLS-1$
+
                 return;
 
             }
+
+            ComfortDebug.log("install", "selectSite: AvailableIUsPage not found"); //$NON-NLS-1$ //$NON-NLS-2$
 
         }
 
@@ -450,7 +574,7 @@ public final class ComfortPreferences
 
         {
 
-            Global.log("Предвыбор сайта в установщике: " + formatError(e)); //$NON-NLS-1$
+            ComfortDebug.logError("install", "selectInstallSiteInDialog", e); //$NON-NLS-1$ //$NON-NLS-2$
 
         }
 
@@ -564,7 +688,15 @@ public final class ComfortPreferences
 
             if (agent == null || profileId == null || profileId.isBlank())
 
+            {
+
+                ComfortDebug.log("install", "p2 profile missing: profileId=" + profileId //$NON-NLS-1$ //$NON-NLS-2$
+
+                    + " agent=" + (agent != null)); //$NON-NLS-1$
+
                 return false;
+
+            }
 
 
 
@@ -588,7 +720,11 @@ public final class ComfortPreferences
 
                 .invoke(registry, profileId);
 
-            return profile != null;
+            boolean ok = profile != null;
+
+            ComfortDebug.log("install", "p2 profileId=" + profileId + " ok=" + ok); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+
+            return ok;
 
         }
 
@@ -596,7 +732,7 @@ public final class ComfortPreferences
 
         {
 
-            Global.log("Проверка p2-профиля: " + formatError(e)); //$NON-NLS-1$
+            ComfortDebug.logError("install", "ensureP2ProfileAvailable", e); //$NON-NLS-1$ //$NON-NLS-2$
 
             return false;
 
@@ -712,7 +848,147 @@ public final class ComfortPreferences
 
         Global.log(text);
 
+        ComfortDebug.logError("install", message, t); //$NON-NLS-1$
+
         getLog().log(new Status(IStatus.ERROR, Activator.PLUGIN_ID, text, root));
+
+    }
+
+
+
+    private static void logKnownRepositories(Object ui, Class<?> uiClass, String stage)
+
+    {
+
+        try
+
+        {
+
+            Object session = uiClass.getMethod("getSession").invoke(ui); //$NON-NLS-1$
+
+            Object tracker = uiClass.getMethod("getRepositoryTracker").invoke(ui); //$NON-NLS-1$
+
+            URI[] repos = (URI[]) tracker.getClass().getMethod( //$NON-NLS-1$
+
+                "getKnownRepositories", session.getClass()) //$NON-NLS-1$
+
+                .invoke(tracker, session);
+
+            int count = repos != null ? repos.length : 0;
+
+            ComfortDebug.log("install", stage + ": knownRepositories=" + count); //$NON-NLS-1$ //$NON-NLS-2$
+
+            if (repos != null)
+
+            {
+
+                for (URI repo : repos)
+
+                    ComfortDebug.log("install", "  repo " + repo); //$NON-NLS-1$ //$NON-NLS-2$
+
+            }
+
+        }
+
+        catch (Exception e)
+
+        {
+
+            ComfortDebug.logError("install", "logKnownRepositories " + stage, e); //$NON-NLS-1$ //$NON-NLS-2$
+
+        }
+
+    }
+
+
+
+    private static void logLoadJobStatus(Object job, Class<?> jobClass)
+
+    {
+
+        try
+
+        {
+
+            Class<?> statusClass = Class.forName("org.eclipse.core.runtime.IStatus"); //$NON-NLS-1$
+
+            Object status = jobClass.getMethod("getStatus").invoke(job); //$NON-NLS-1$
+
+            if (status == null)
+
+            {
+
+                ComfortDebug.log("install", "LoadMetadataRepositoryJob: status=null"); //$NON-NLS-1$ //$NON-NLS-2$
+
+                return;
+
+            }
+
+            boolean ok = (Boolean) statusClass.getMethod("isOK").invoke(status); //$NON-NLS-1$
+
+            int severity = (Integer) statusClass.getMethod("getSeverity").invoke(status); //$NON-NLS-1$
+
+            String msg = (String) statusClass.getMethod("getMessage").invoke(status); //$NON-NLS-1$
+
+            ComfortDebug.log("install", "LoadMetadataRepositoryJob: ok=" + ok //$NON-NLS-1$ //$NON-NLS-2$
+
+                + " severity=" + severity + " msg=" + msg); //$NON-NLS-1$ //$NON-NLS-2$
+
+        }
+
+        catch (Exception e)
+
+        {
+
+            ComfortDebug.logError("install", "logLoadJobStatus", e); //$NON-NLS-1$ //$NON-NLS-2$
+
+        }
+
+    }
+
+
+
+    private static void logInstallRepoCombo(Object repoSelector, String stage)
+
+    {
+
+        try
+
+        {
+
+            Field comboField = repoSelector.getClass().getDeclaredField("repoCombo"); //$NON-NLS-1$
+
+            comboField.setAccessible(true);
+
+            Object combo = comboField.get(repoSelector);
+
+            if (combo == null)
+
+            {
+
+                ComfortDebug.log("install", stage + ": repoCombo=null"); //$NON-NLS-1$ //$NON-NLS-2$
+
+                return;
+
+            }
+
+            String text = (String) combo.getClass().getMethod("getText").invoke(combo); //$NON-NLS-1$
+
+            int sel = (Integer) combo.getClass().getMethod("getSelectionIndex").invoke(combo); //$NON-NLS-1$
+
+            ComfortDebug.log("install", stage + ": combo text=\"" + text //$NON-NLS-1$ //$NON-NLS-2$
+
+                + "\" selectionIndex=" + sel); //$NON-NLS-1$
+
+        }
+
+        catch (Exception e)
+
+        {
+
+            ComfortDebug.logError("install", "logInstallRepoCombo " + stage, e); //$NON-NLS-1$ //$NON-NLS-2$
+
+        }
 
     }
 

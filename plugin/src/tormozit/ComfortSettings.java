@@ -11,8 +11,11 @@ public final class ComfortSettings
     /** Ключ булевой настройки «Заменять фильтры в списках». */
     public static final String PREF_REPLACE_LIST_FILTERS = "comfort.replaceListFilters"; //$NON-NLS-1$
 
-    /** Ключ: журнал Content Assist в окне {@link ContentAssistLogView}. */
-    public static final String PREF_CONTENT_ASSIST_LOG = "comfort.contentAssistLog"; //$NON-NLS-1$
+    /** Ключ: общий отладочный журнал ({@link ContentAssistLogView}). */
+    public static final String PREF_DEBUG_LOG = "comfort.debugLog"; //$NON-NLS-1$
+
+    /** Устаревший ключ; читается при миграции настроек. */
+    private static final String PREF_CONTENT_ASSIST_LOG_LEGACY = "comfort.contentAssistLog"; //$NON-NLS-1$
 
     /** Время последней проверки обновления (мс с эпохи). */
     public static final String PREF_LAST_UPDATE_CHECK_MS = "comfort.update.lastCheckMs"; //$NON-NLS-1$
@@ -29,8 +32,8 @@ public final class ComfortSettings
     /** Значение «Заменять фильтры в списках» по умолчанию. */
     public static final boolean DEFAULT_REPLACE_LIST_FILTERS = true;
 
-    /** Журнал Content Assist выключен по умолчанию. */
-    public static final boolean DEFAULT_CONTENT_ASSIST_LOG = false;
+    /** Общее логирование выключено по умолчанию. */
+    public static final boolean DEFAULT_DEBUG_LOG = false;
 
     private static ComfortSettings instance;
 
@@ -67,11 +70,16 @@ public final class ComfortSettings
         return settings.preferenceStore.getBoolean(PREF_REPLACE_LIST_FILTERS);
     }
 
-    public static boolean isContentAssistLogEnabled()
+    public static boolean isDebugLogEnabled()
     {
         ComfortSettings settings = instance;
         if (settings == null)
-            return DEFAULT_CONTENT_ASSIST_LOG;
-        return settings.preferenceStore.getBoolean(PREF_CONTENT_ASSIST_LOG);
+            return DEFAULT_DEBUG_LOG;
+        var store = settings.preferenceStore;
+        if (store.contains(PREF_DEBUG_LOG))
+            return store.getBoolean(PREF_DEBUG_LOG);
+        if (store.contains(PREF_CONTENT_ASSIST_LOG_LEGACY))
+            return store.getBoolean(PREF_CONTENT_ASSIST_LOG_LEGACY);
+        return DEFAULT_DEBUG_LOG;
     }
 }

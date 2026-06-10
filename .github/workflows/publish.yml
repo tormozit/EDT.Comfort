@@ -92,6 +92,14 @@ jobs:
           grep -q "<child location='$VER/'/>" deploy/compositeContent.xml || (echo "ERROR: $VER missing from compositeContent.xml" && exit 1)
           test ! -f deploy/content.jar || (echo "ERROR: root content.jar must not exist (use composite repo)" && exit 1)
           grep -q "unit id='tormozit.comfort'" "deploy/$VER/content.xml" || (echo "ERROR: bundle IU missing from deploy/$VER/content.xml" && exit 1)
+          mkdir -p /tmp/site-ver-check
+          jar xf site/content.jar -C /tmp/site-ver-check content.xml
+          SITE_VER=$(grep -o "id='tormozit.comfort' version='[^']*'" /tmp/site-ver-check/content.xml | head -1 | sed "s/.*version='\\([^']*\\)'.*/\\1/")
+          DEPLOY_VER=$(grep -o "id='tormozit.comfort' version='[^']*'" "deploy/$VER/content.xml" | head -1 | sed "s/.*version='\\([^']*\\)'.*/\\1/")
+          echo "site/content.jar version: $SITE_VER"
+          echo "deploy/$VER/content.xml version: $DEPLOY_VER"
+          test -n "$SITE_VER" && test -n "$DEPLOY_VER" || (echo "ERROR: cannot read bundle version from site/deploy content" && exit 1)
+          test "$SITE_VER" = "$DEPLOY_VER" || (echo "ERROR: deploy version ($DEPLOY_VER) != committed site ($SITE_VER). Push site/ and re-run workflow." && exit 1)
           echo "deploy tree:"
           find deploy -maxdepth 3 -type f | head -30
 
