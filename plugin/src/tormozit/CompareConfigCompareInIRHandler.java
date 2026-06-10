@@ -70,9 +70,6 @@ import com._1c.g5.v8.dt.export.IExportStrategy;
  * 5. Открываем через OpenHelper
  */
 public class CompareConfigCompareInIRHandler extends AbstractHandler {
-    @Inject
-    private static IExportOperationFactory exportOperationFactory;
-    
     @Override
     public Object execute(ExecutionEvent event) throws ExecutionException {
         runCompare(HandlerUtil.getActiveEditor(event), HandlerUtil.getActiveShell(event));

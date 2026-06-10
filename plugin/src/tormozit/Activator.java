@@ -57,6 +57,8 @@ public class Activator extends AbstractUIPlugin
 
         // Подключаем персистентное хранилище последних мест.
         RecentPlaces.getInstance().init(PLUGIN_ID);
+
+        ComfortUpdateChecker.startDailyScheduler();
     }
 
     @Override

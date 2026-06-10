@@ -82,15 +82,16 @@ jobs:
           VER="${{ steps.ver.outputs.version }}"
           test -d "deploy/$VER/features" || (echo "ERROR: deploy/$VER/features missing" && exit 1)
           test -d "deploy/$VER/plugins" || (echo "ERROR: deploy/$VER/plugins missing" && exit 1)
-          test -d deploy/features || (echo "ERROR: deploy/features missing at root" && exit 1)
-          test -f deploy/content.jar || (echo "ERROR: deploy/content.jar missing at root" && exit 1)
-          test -f deploy/content.xml || (echo "ERROR: deploy/content.xml missing at root" && exit 1)
+          test -f deploy/compositeContent.jar || (echo "ERROR: deploy/compositeContent.jar missing at root" && exit 1)
+          test -f deploy/compositeContent.xml || (echo "ERROR: deploy/compositeContent.xml missing at root" && exit 1)
+          test -f deploy/compositeArtifacts.jar || (echo "ERROR: deploy/compositeArtifacts.jar missing at root" && exit 1)
           test -f deploy/p2.index || (echo "ERROR: deploy/p2.index missing" && exit 1)
           test -f "deploy/$VER/p2.index" || (echo "ERROR: deploy/$VER/p2.index missing" && exit 1)
           test -f deploy/.nojekyll || (echo "ERROR: deploy/.nojekyll missing" && exit 1)
-          grep -q content.xml deploy/p2.index || (echo "ERROR: root p2.index must reference content.xml" && exit 1)
-          grep -q "unit id='tormozit.comfort'" deploy/content.xml || (echo "ERROR: bundle IU tormozit.comfort missing from content.xml" && exit 1)
-          test -f deploy/artifacts.xml || (echo "ERROR: deploy/artifacts.xml missing" && exit 1)
+          grep -q compositeContent deploy/p2.index || (echo "ERROR: root p2.index must reference compositeContent" && exit 1)
+          grep -q "<child location='$VER/'/>" deploy/compositeContent.xml || (echo "ERROR: $VER missing from compositeContent.xml" && exit 1)
+          test ! -f deploy/content.jar || (echo "ERROR: root content.jar must not exist (use composite repo)" && exit 1)
+          grep -q "unit id='tormozit.comfort'" "deploy/$VER/content.xml" || (echo "ERROR: bundle IU missing from deploy/$VER/content.xml" && exit 1)
           echo "deploy tree:"
           find deploy -maxdepth 3 -type f | head -30
 

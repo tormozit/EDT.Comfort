@@ -2,16 +2,23 @@ import io
 import os
 import re
 import shutil
+import time
 import zipfile
 
 deploy_dir = "deploy"
 latest = os.environ.get("LATEST_VERSION", "")
 CATEGORY_ID = "comfort"
 BUNDLE_ID = "tormozit.comfort"
+SITE_BASE_URL = "https://tormozit.github.io/EDT.Comfort/"
 
 simple_p2_index = """version=1
 metadata.repository.factory.order=content.xml,content.jar,!
 artifact.repository.factory.order=artifacts.xml,artifacts.jar,!
+"""
+
+composite_p2_index = """version=1
+metadata.repository.factory.order=compositeContent.xml,compositeContent.jar,!
+artifact.repository.factory.order=compositeArtifacts.xml,compositeArtifacts.jar,!
 """
 
 
@@ -75,6 +82,73 @@ def publish_p2_files(target_dir: str) -> None:
         f.write(simple_p2_index)
 
 
+def remove_root_simple_repository() -> None:
+    """Удалить простой p2-репозиторий из корня (устаревший вариант деплоя)."""
+    for item in (
+        "features",
+        "plugins",
+        "content.jar",
+        "content.xml",
+        "artifacts.jar",
+        "artifacts.xml",
+    ):
+        path = os.path.join(deploy_dir, item)
+        if os.path.isdir(path):
+            shutil.rmtree(path)
+        elif os.path.isfile(path):
+            os.remove(path)
+
+
+def write_composite_repository(children: list[str]) -> None:
+    """
+    Корень сайта — composite-репозиторий со ссылками на каталоги версий.
+    EDT «Показывать только последние версии»: снята — все версии, включена — одна.
+    """
+    timestamp = str(int(time.time() * 1000))
+    children_xml = "\n".join(f"    <child location='{child}/'/>" for child in children)
+
+    def composite_xml(repo_kind: str, repo_type: str) -> str:
+        return f"""<?xml version='1.0' encoding='UTF-8'?>
+<?composite{repo_kind}Repository version='1.0.0'?>
+<repository name='EDT Comfort' type='{repo_type}' version='1.0.0'>
+  <properties size='1'>
+    <property name='p2.timestamp' value='{timestamp}'/>
+  </properties>
+  <children size='{len(children)}'>
+{children_xml}
+  </children>
+</repository>
+"""
+
+    composites = (
+        (
+            "compositeContent",
+            "Metadata",
+            "org.eclipse.equinox.internal.p2.metadata.repository.CompositeMetadataRepository",
+        ),
+        (
+            "compositeArtifacts",
+            "Artifact",
+            "org.eclipse.equinox.internal.p2.artifact.repository.CompositeArtifactRepository",
+        ),
+    )
+
+    for base_name, repo_kind, repo_type in composites:
+        xml = composite_xml(repo_kind, repo_type)
+        xml_path = os.path.join(deploy_dir, f"{base_name}.xml")
+        jar_path = os.path.join(deploy_dir, f"{base_name}.jar")
+        with open(xml_path, "w", encoding="utf-8", newline="\n") as f:
+            f.write(xml)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zout:
+            zout.writestr(f"{base_name}.xml", xml.encode("utf-8"))
+        with open(jar_path, "wb") as f:
+            f.write(buf.getvalue())
+
+    with open(os.path.join(deploy_dir, "p2.index"), "w", encoding="utf-8") as f:
+        f.write(composite_p2_index)
+
+
 def main() -> None:
     global latest
     children = [
@@ -98,7 +172,7 @@ def main() -> None:
 <body>
   <h1>EDT Comfort — версия {child}</h1>
   <p>URL для EDT «Установить новое ПО»:</p>
-  <p><code>https://tormozit.github.io/EDT.Comfort/{child}/</code></p>
+  <p><code>{SITE_BASE_URL}{child}/</code></p>
   <p><a href="../">← Все версии</a></p>
 </body>
 </html>
@@ -106,25 +180,9 @@ def main() -> None:
         with open(os.path.join(child_dir, "index.html"), "w", encoding="utf-8") as f:
             f.write(version_index)
 
-    if latest:
-        latest_dir = os.path.join(deploy_dir, latest)
-        for item in ("features", "plugins", "content.jar", "artifacts.jar", "content.xml", "artifacts.xml", "p2.index"):
-            src = os.path.join(latest_dir, item)
-            dst = os.path.join(deploy_dir, item)
-            if not os.path.exists(src):
-                continue
-            if os.path.isdir(src):
-                if os.path.exists(dst):
-                    shutil.rmtree(dst)
-                shutil.copytree(src, dst)
-            else:
-                shutil.copy2(src, dst)
-        publish_p2_files(deploy_dir)
-
-    for old in ("compositeContent.jar", "compositeArtifacts.jar"):
-        path = os.path.join(deploy_dir, old)
-        if os.path.exists(path):
-            os.remove(path)
+    remove_root_simple_repository()
+    if children:
+        write_composite_repository(children)
 
     open(os.path.join(deploy_dir, ".nojekyll"), "w").close()
 
@@ -136,9 +194,9 @@ def main() -> None:
 <head><meta charset="utf-8"><title>EDT Comfort p2</title></head>
 <body>
   <h1>EDT Comfort — p2 update site</h1>
-  <p>Установить новое ПО (последняя версия):<br>
-  <code>https://tormozit.github.io/EDT.Comfort/</code></p>
-  <p>Архивные версии:</p>
+  <p>Установить новое ПО (все версии, composite):<br>
+  <code>{SITE_BASE_URL}</code></p>
+  <p>Архивные версии (отдельный каталог):</p>
   <ul>
 {version_links}
   </ul>
@@ -148,8 +206,8 @@ def main() -> None:
     with open(os.path.join(deploy_dir, "index.html"), "w", encoding="utf-8") as f:
         f.write(index_html)
 
-    print("Latest at root:", latest)
-    print("Version folders:", children)
+    print("Latest version:", latest)
+    print("Composite children:", children)
 
 
 if __name__ == "__main__":

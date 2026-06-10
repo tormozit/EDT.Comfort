@@ -14,6 +14,18 @@ public final class ComfortSettings
     /** Ключ: журнал Content Assist в окне {@link ContentAssistLogView}. */
     public static final String PREF_CONTENT_ASSIST_LOG = "comfort.contentAssistLog"; //$NON-NLS-1$
 
+    /** Время последней проверки обновления (мс с эпохи). */
+    public static final String PREF_LAST_UPDATE_CHECK_MS = "comfort.update.lastCheckMs"; //$NON-NLS-1$
+
+    /** Кэш: актуальная версия на сайте обновления. */
+    public static final String PREF_LATEST_VERSION = "comfort.update.latestVersion"; //$NON-NLS-1$
+
+    /** Кэш: дата публикации актуальной версии. */
+    public static final String PREF_LATEST_VERSION_DATE = "comfort.update.latestVersionDate"; //$NON-NLS-1$
+
+    /** Версия, о которой уже показано уведомление. */
+    public static final String PREF_LAST_NOTIFIED_VERSION = "comfort.update.lastNotifiedVersion"; //$NON-NLS-1$
+
     /** Значение «Заменять фильтры в списках» по умолчанию. */
     public static final boolean DEFAULT_REPLACE_LIST_FILTERS = true;
 

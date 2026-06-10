@@ -9,6 +9,7 @@ import org.eclipse.jface.preference.IntegerFieldEditor;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.ControlAdapter;
 import org.eclipse.swt.events.ControlEvent;
+import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Composite;
@@ -16,6 +17,7 @@ import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Group;
 import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Link;
+import org.eclipse.swt.widgets.Text;
 import org.eclipse.ui.IWorkbench;
 import org.eclipse.ui.IWorkbenchPreferencePage;
 import org.eclipse.ui.preferences.IWorkbenchPreferenceContainer;
@@ -31,6 +33,14 @@ public class ComfortPreferencePage
         extends FieldEditorPreferencePage
         implements IWorkbenchPreferencePage
 {
+    private Text installedVersionText;
+    private Text installedDateText;
+    private Text latestVersionText;
+    private Text latestDateText;
+    private Link installedChangesLink;
+    private Link latestChangesLink;
+    private Link updateLink;
+
     private static final String REPLACE_LIST_FILTERS_TOOLTIP =
             "Текст фильтра будет дробиться на фрагменты пробелами и будет требоваться и подсвечиваться вхождение каждого фрагмента с мягким учетом порядка.\n"
             + "Влияет на навигатор, список баз, быструю схему модуля, диалоги выбора типа и открытия объекта метаданных, список автодополнения"; //$NON-NLS-1$
@@ -49,8 +59,17 @@ public class ComfortPreferencePage
     }
 
     @Override
+    public void createControl(Composite parent)
+    {
+        super.createControl(parent);
+        refreshVersionSection();
+        ComfortUpdateChecker.checkAsync(true, this::refreshVersionSection);
+    }
+
+    @Override
     protected void createFieldEditors()
     {
+        createVersionSection();
         createKeysLink();
 
         BooleanFieldEditor replaceListFiltersField = new BooleanFieldEditor(
@@ -98,6 +117,146 @@ public class ComfortPreferencePage
 
         // Поле «Символы» намеренно не добавляется:
         // значение задано константой ContentAssistSettings.CHARSET_VALUE
+    }
+
+    private void createVersionSection()
+    {
+        Composite versionSection = new Composite(getFieldEditorParent(), SWT.NONE);
+        GridData sectionData = new GridData(SWT.FILL, SWT.TOP, true, false);
+        sectionData.horizontalSpan = 2;
+        sectionData.verticalIndent = 4;
+        versionSection.setLayoutData(sectionData);
+
+        GridLayout layout = new GridLayout(5, false);
+        layout.marginWidth = 0;
+        layout.marginHeight = 0;
+        layout.horizontalSpacing = 8;
+        layout.verticalSpacing = 6;
+        versionSection.setLayout(layout);
+
+        createVersionRow(versionSection,
+            "Используемая версия:", true); //$NON-NLS-1$
+        createVersionRow(versionSection,
+            "Актуальная версия:", false); //$NON-NLS-1$
+    }
+
+    private void createVersionRow(Composite parent, String labelText, boolean installedRow)
+    {
+        Label label = new Label(parent, SWT.NONE);
+        label.setText(labelText);
+        label.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false));
+
+        Text versionText = new Text(parent, SWT.BORDER | SWT.READ_ONLY);
+        versionText.setEditable(false);
+        versionText.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false));
+
+        Text dateText = new Text(parent, SWT.BORDER | SWT.READ_ONLY);
+        GridData dateData = new GridData(SWT.LEFT, SWT.CENTER, false, false);
+        dateData.widthHint = convertHorizontalDLUsToPixels(40);
+        dateText.setLayoutData(dateData);
+        dateText.setEditable(false);
+
+        Link changesLink = new Link(parent, SWT.NONE);
+        changesLink.setText("<a>Изменения</a>"); //$NON-NLS-1$
+        changesLink.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false));
+        changesLink.addListener(SWT.Selection, e -> {
+            if (!"Изменения".equals(e.text)) //$NON-NLS-1$
+                return;
+            String url = installedRow
+                ? ComfortUpdateChecker.getInstalledVersion().getChangesUrl()
+                : resolveLatestChangesUrl();
+            ComfortPreferences.openChangesUrl(url);
+        });
+
+        Link rowUpdateLink = new Link(parent, SWT.NONE);
+        rowUpdateLink.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false));
+        rowUpdateLink.addListener(SWT.Selection, e -> {
+            if (!"Обновить".equals(e.text) && !"Сменить".equals(e.text)) //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            ComfortPreferences.openInstallNewSoftware();
+        });
+
+        if (installedRow)
+        {
+            installedVersionText = versionText;
+            installedDateText = dateText;
+            installedChangesLink = changesLink;
+            updateLink = rowUpdateLink;
+        }
+        else
+        {
+            latestVersionText = versionText;
+            latestDateText = dateText;
+            latestChangesLink = changesLink;
+            rowUpdateLink.setVisible(false);
+        }
+    }
+
+    private void refreshVersionSection()
+    {
+        if (installedVersionText == null || installedVersionText.isDisposed())
+            return;
+
+        ComfortVersionInfo installed = ComfortUpdateChecker.getInstalledVersion();
+        setVersionText(installedVersionText, installed.getDisplayVersion());
+        installedDateText.setText(installed.getDisplayDate());
+
+        ComfortVersionInfo latest = ComfortUpdateChecker.getCachedLatestVersion();
+        if (latest == null)
+        {
+            setVersionText(latestVersionText,
+                ComfortUpdateChecker.isCheckInProgress() ? "…" : "—"); //$NON-NLS-1$ //$NON-NLS-2$
+            latestDateText.setText(
+                ComfortUpdateChecker.isCheckInProgress() ? "…" : "—"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        else
+        {
+            setVersionText(latestVersionText, latest.getDisplayVersion());
+            latestDateText.setText(latest.getDisplayDate());
+        }
+
+        updateChangesLink(installedChangesLink, installed.getChangesUrl());
+        updateChangesLink(latestChangesLink, resolveLatestChangesUrl()); //$NON-NLS-1$
+        updateVersionActionLink(latest);
+    }
+
+    private static void setVersionText(Text field, String text)
+    {
+        if (field == null || field.isDisposed())
+            return;
+        field.setText(text != null ? text : ""); //$NON-NLS-1$
+        GridData gd = (GridData) field.getLayoutData();
+        if (gd == null)
+            gd = new GridData(SWT.LEFT, SWT.CENTER, false, false);
+        Point size = field.computeSize(SWT.DEFAULT, SWT.DEFAULT);
+        gd.widthHint = size.x;
+        gd.horizontalAlignment = SWT.LEFT;
+        gd.grabExcessHorizontalSpace = false;
+        field.setLayoutData(gd);
+    }
+
+    private void updateVersionActionLink(ComfortVersionInfo latest)
+    {
+        if (updateLink == null || updateLink.isDisposed())
+            return;
+        boolean newerAvailable = latest != null && ComfortUpdateChecker.isUpdateAvailable();
+        String label = newerAvailable ? "Обновить" : "Сменить"; //$NON-NLS-1$ //$NON-NLS-2$
+        updateLink.setText("<a>" + label + "</a>"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static void updateChangesLink(Link link, String url)
+    {
+        if (link == null || link.isDisposed())
+            return;
+        boolean enabled = url != null && !url.isBlank();
+        link.setEnabled(enabled);
+        link.setText(enabled ? "<a>Изменения</a>" : "Изменения"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static String resolveLatestChangesUrl()
+    {
+        ComfortVersionInfo latest = ComfortUpdateChecker.getCachedLatestVersion();
+        return latest != null ? latest.getChangesUrl() : ""; //$NON-NLS-1$
     }
 
     private void createKeysLink()
