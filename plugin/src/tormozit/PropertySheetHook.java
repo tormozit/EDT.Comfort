@@ -26,7 +26,7 @@ public final class PropertySheetHook implements IStartup
             // Отключено, т.к. не доделано. 
             return;
         }
-        Display.getDefault().asyncExec(() -> {
+        ComfortEarlyStartup.defer(() -> {
             IWorkbench wb = PlatformUI.getWorkbench();
             if (wb == null)
                 return;

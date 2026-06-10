@@ -76,6 +76,40 @@ public final class ContentAssistLog
         listeners.remove(listener);
     }
 
+    /** Открывает и активирует представление «Журнал Комфорт». */
+    public static void showView()
+    {
+        showView(IWorkbenchPage.VIEW_ACTIVATE);
+    }
+
+    private static void showView(int mode)
+    {
+        Display display = getDisplay();
+        if (display == null)
+            return;
+        Runnable open = () -> {
+            try
+            {
+                if (!PlatformUI.isWorkbenchRunning())
+                    return;
+                var window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+                if (window == null)
+                    return;
+                IWorkbenchPage page = window.getActivePage();
+                if (page == null)
+                    return;
+                var view = page.showView(VIEW_ID, null, mode);
+                if (view != null)
+                    page.bringToTop(view);
+            }
+            catch (PartInitException ignored) {}
+        };
+        if (display.getThread() == Thread.currentThread())
+            open.run();
+        else
+            display.asyncExec(open);
+    }
+
     private static void trimOldestHalf()
     {
         String text = buffer.toString();
@@ -114,24 +148,7 @@ public final class ContentAssistLog
     {
         if (!ComfortSettings.isDebugLogEnabled())
             return;
-        Display display = getDisplay();
-        if (display == null)
-            return;
-        display.asyncExec(() -> {
-            try
-            {
-                if (!PlatformUI.isWorkbenchRunning())
-                    return;
-                var window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
-                if (window == null)
-                    return;
-                IWorkbenchPage page = window.getActivePage();
-                if (page == null)
-                    return;
-                page.showView(VIEW_ID, null, IWorkbenchPage.VIEW_VISIBLE);
-            }
-            catch (PartInitException ignored) {}
-        });
+        showView(IWorkbenchPage.VIEW_VISIBLE);
     }
 
     private static Display getDisplay()

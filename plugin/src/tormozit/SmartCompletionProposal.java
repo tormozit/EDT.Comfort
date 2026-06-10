@@ -32,15 +32,28 @@ public class SmartCompletionProposal implements
     ICompletionProposalExtension6
 {
     private final ICompletionProposal delegate;
+    /** Индекс в штатном списке delegate; {@code -1} — неизвестен. */
+    private final int delegateOrder;
 
     public SmartCompletionProposal(ICompletionProposal delegate)
     {
+        this(delegate, -1);
+    }
+
+    public SmartCompletionProposal(ICompletionProposal delegate, int delegateOrder)
+    {
         this.delegate = delegate;
+        this.delegateOrder = delegateOrder;
     }
 
     public ICompletionProposal getDelegate()
     {
         return delegate;
+    }
+
+    public int getDelegateOrder()
+    {
+        return delegateOrder;
     }
 
     // ---- ICompletionProposal ------------------------------------------------

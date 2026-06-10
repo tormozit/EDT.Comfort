@@ -30,7 +30,7 @@ public class TextEditorRightClickCaretHook implements IStartup
     @Override
     public void earlyStartup()
     {
-        Display.getDefault().asyncExec(() -> install(Display.getDefault()));
+        ComfortEarlyStartup.defer(() -> install(Display.getDefault()));
     }
 
     public static void install(Display display)

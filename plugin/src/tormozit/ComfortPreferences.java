@@ -312,7 +312,7 @@ public final class ComfortPreferences
 
         ComfortDebug.log("install", "ProvisioningWizardDialog.create() OK"); //$NON-NLS-1$ //$NON-NLS-2$
 
-        selectInstallSiteInDialog(dialog, siteUri);
+        selectInstallSiteInDialog(wizard, siteUri);
 
         dialogClass.getMethod("open").invoke(dialog); //$NON-NLS-1$
 
@@ -486,7 +486,12 @@ public final class ComfortPreferences
 
 
 
-    private static void selectInstallSiteInDialog(Object dialog, URI siteUri)
+    /** {@code AvailableIUGroup.AVAILABLE_SPECIFIED} — выбор одного update site. */
+    private static final int AVAILABLE_SPECIFIED_SCOPE = 4;
+
+
+
+    private static int resolveAvailableSpecifiedScope()
 
     {
 
@@ -494,7 +499,37 @@ public final class ComfortPreferences
 
         {
 
-            Object wizard = dialog.getClass().getMethod("getWizard").invoke(dialog); //$NON-NLS-1$
+            Class<?> availableIUGroupClass = loadBundleClass(BUNDLE_P2_UI,
+
+                "org.eclipse.equinox.internal.p2.ui.dialogs.AvailableIUGroup"); //$NON-NLS-1$
+
+            return availableIUGroupClass.getField("AVAILABLE_SPECIFIED").getInt(null); //$NON-NLS-1$
+
+        }
+
+        catch (Exception e)
+
+        {
+
+            ComfortDebug.log("install", //$NON-NLS-1$
+
+                "AVAILABLE_SPECIFIED fallback=" + AVAILABLE_SPECIFIED_SCOPE); //$NON-NLS-1$
+
+            return AVAILABLE_SPECIFIED_SCOPE;
+
+        }
+
+    }
+
+
+
+    private static void selectInstallSiteInDialog(Object wizard, URI siteUri)
+
+    {
+
+        try
+
+        {
 
             Object[] pages = (Object[]) wizard.getClass().getMethod("getPages").invoke(wizard); //$NON-NLS-1$
 
@@ -516,11 +551,7 @@ public final class ComfortPreferences
 
                 "org.eclipse.equinox.internal.p2.ui.dialogs.AvailableIUsPage"); //$NON-NLS-1$
 
-            Class<?> availableIUGroupClass = loadBundleClass(BUNDLE_P2_UI,
-
-                "org.eclipse.equinox.internal.p2.ui.viewers.AvailableIUGroup"); //$NON-NLS-1$
-
-            int specifiedScope = availableIUGroupClass.getField("AVAILABLE_SPECIFIED").getInt(null); //$NON-NLS-1$
+            int specifiedScope = resolveAvailableSpecifiedScope();
 
 
 
@@ -912,7 +943,9 @@ public final class ComfortPreferences
 
             Class<?> statusClass = Class.forName("org.eclipse.core.runtime.IStatus"); //$NON-NLS-1$
 
-            Object status = jobClass.getMethod("getStatus").invoke(job); //$NON-NLS-1$
+            Class<?> jobBaseClass = Class.forName("org.eclipse.core.runtime.jobs.Job"); //$NON-NLS-1$
+
+            Object status = jobBaseClass.getMethod("getResult").invoke(job); //$NON-NLS-1$
 
             if (status == null)
 

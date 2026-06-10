@@ -12,6 +12,7 @@ import org.eclipse.swt.events.ControlEvent;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
+import org.eclipse.swt.layout.RowLayout;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Group;
@@ -106,17 +107,66 @@ public class ComfortPreferencePage
         timeoutField.setValidRange(0, 10_000);
         addField(timeoutField);
 
+        createLoggingGroup();
+
+        // Поле «Символы» намеренно не добавляется:
+        // значение задано константой ContentAssistSettings.CHARSET_VALUE
+    }
+
+    private void createLoggingGroup()
+    {
+        Group loggingGroup = new Group(getFieldEditorParent(), SWT.NONE);
+        loggingGroup.setText("Логирование");
+        GridData groupData = new GridData(SWT.FILL, SWT.TOP, true, false);
+        groupData.horizontalSpan = 2;
+        groupData.verticalIndent = 8;
+        loggingGroup.setLayoutData(groupData);
+
+        GridLayout groupLayout = new GridLayout(2, false);
+        groupLayout.marginWidth = 10;
+        groupLayout.marginHeight = 8;
+        groupLayout.horizontalSpacing = 8;
+        groupLayout.verticalSpacing = 4;
+        loggingGroup.setLayout(groupLayout);
+
+        Composite logRow = new Composite(loggingGroup, SWT.NONE);
+        GridData logRowData = new GridData(SWT.FILL, SWT.CENTER, true, false);
+        logRowData.horizontalSpan = 2;
+        logRow.setLayoutData(logRowData);
+        GridLayout logRowLayout = new GridLayout(1, false);
+        logRowLayout.marginWidth = 0;
+        logRowLayout.marginHeight = 0;
+        logRow.setLayout(logRowLayout);
+
+        Composite logControls = new Composite(logRow, SWT.NONE);
+        logControls.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false));
+        RowLayout controlsLayout = new RowLayout(SWT.HORIZONTAL);
+        controlsLayout.spacing = 8;
+        controlsLayout.marginWidth = 0;
+        controlsLayout.marginHeight = 0;
+        controlsLayout.center = true;
+        logControls.setLayout(controlsLayout);
+
+        // BooleanFieldEditor.createControl() заменяет layout родителя на GridLayout —
+        // поэтому чекбокс в отдельном composite, а «Журнал» — сосед в RowLayout.
+        Composite checkboxHost = new Composite(logControls, SWT.NONE);
         BooleanFieldEditor debugLogField = new BooleanFieldEditor(
             ComfortSettings.PREF_DEBUG_LOG,
             "Общее логирование",
-            codeEditorGroup);
+            checkboxHost);
         addField(debugLogField);
         setFieldTooltip(debugLogField,
             "Журнал отладки: content assist, установщик «Сменить»/«Обновить» и др.\n"
             + "Окно: Показать представление → Прочее → Журнал Комфорт"); //$NON-NLS-1$
 
-        // Поле «Символы» намеренно не добавляется:
-        // значение задано константой ContentAssistSettings.CHARSET_VALUE
+        Link logViewLink = new Link(logControls, SWT.NONE);
+        logViewLink.setText("<a>Журнал</a>"); //$NON-NLS-1$
+        logViewLink.setToolTipText("Открыть представление «Журнал Комфорт»"); //$NON-NLS-1$
+        logViewLink.addListener(SWT.Selection, e -> {
+            if (!"Журнал".equals(e.text)) //$NON-NLS-1$
+                return;
+            ContentAssistLog.showView();
+        });
     }
 
     private void createVersionSection()

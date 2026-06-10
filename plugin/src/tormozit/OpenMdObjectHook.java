@@ -26,9 +26,7 @@ public class OpenMdObjectHook implements IStartup {
     @Override
     public void earlyStartup()
     {
-        Display.getDefault().asyncExec(() -> {
-            install(Display.getDefault());
-        });
+        ComfortEarlyStartup.defer(() -> install(Display.getDefault()));
     }
 
     private static final String PATCHED_KEY = "tormozit.mdObjectPatched";

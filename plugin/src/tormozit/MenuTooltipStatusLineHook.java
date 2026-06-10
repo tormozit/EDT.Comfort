@@ -30,7 +30,7 @@ public class MenuTooltipStatusLineHook implements IStartup
     @Override
     public void earlyStartup()
     {
-        Display.getDefault().asyncExec(() ->
+        ComfortEarlyStartup.defer(() ->
         {
 //          Activator.getDefault().getInjector().injectMembers(this); // Слишком рано?
 //          install(Display.getDefault()); // Пока отключил, т.к. польза сопоставима с вредом

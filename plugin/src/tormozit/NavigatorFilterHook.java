@@ -49,7 +49,7 @@ public final class NavigatorFilterHook implements IStartup
     @Override
     public void earlyStartup()
     {
-        Display.getDefault().asyncExec(() -> {
+        ComfortEarlyStartup.defer(() -> {
             IWorkbench wb = PlatformUI.getWorkbench();
             if (wb == null)
                 return;

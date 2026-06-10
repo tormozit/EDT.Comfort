@@ -59,7 +59,7 @@ public class ApplicationEditorHook implements IStartup
     @Override
     public void earlyStartup()
     {
-        Display.getDefault().asyncExec(() ->
+        ComfortEarlyStartup.defer(() ->
         {
             PlatformUI.getWorkbench().addWindowListener(new org.eclipse.ui.IWindowListener()
             {
