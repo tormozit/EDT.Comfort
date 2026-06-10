@@ -288,11 +288,7 @@ public final class ComfortPreferences
 
         Shell parent = (Shell) provUIClass.getMethod("getDefaultParentShell").invoke(null); //$NON-NLS-1$
 
-        Class<?> iWizardClass = Class.forName("org.eclipse.jface.wizard.IWizard"); //$NON-NLS-1$
-
-        Object dialog = dialogClass.getConstructor(Shell.class, iWizardClass)
-
-            .newInstance(parent, wizard);
+        Object dialog = newProvisioningWizardDialog(dialogClass, parent, wizard);
 
 
 
@@ -305,6 +301,24 @@ public final class ComfortPreferences
     }
 
 
+
+    private static Object newProvisioningWizardDialog(
+            Class<?> dialogClass, Shell parent, Object wizard) throws Exception
+    {
+        Class<?> opWizardClass = loadBundleClass(BUNDLE_P2_UI,
+            "org.eclipse.equinox.internal.p2.ui.dialogs.ProvisioningOperationWizard"); //$NON-NLS-1$
+        try
+        {
+            return dialogClass.getConstructor(Shell.class, opWizardClass)
+                .newInstance(parent, wizard);
+        }
+        catch (NoSuchMethodException e)
+        {
+            Class<?> iWizardClass = Class.forName("org.eclipse.jface.wizard.IWizard"); //$NON-NLS-1$
+            return dialogClass.getConstructor(Shell.class, iWizardClass)
+                .newInstance(parent, wizard);
+        }
+    }
 
     private static void registerUpdateSite(Object ui, Class<?> uiClass, URI siteUri)
 
