@@ -24,10 +24,6 @@ public final class NavigatorTreeElementLabels
     private static final String EXTERNAL_FOLDER_ADAPTER =
             "com._1c.g5.v8.dt.navigator.adapters.ExternalObjectFolderNavigatorAdapterBase"; //$NON-NLS-1$
 
-    private static final String[] MODEL_METHODS = {
-            "getModel", "getMdObject", "getEObject", "getElement" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-    };
-
     private static final String[] TEXT_FEATURES = {
             "getToolTip", "getTooltip", "getExplanation", "getHelp" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
     };
@@ -60,7 +56,7 @@ public final class NavigatorTreeElementLabels
         if (isGroupNode(element))
             return ""; //$NON-NLS-1$
 
-        Object model = resolveModel(element);
+        Object model = NavigatorElementModels.resolveModel(element);
         if (model instanceof MdObject)
             return NavigatorFuzzySearch.joinSearchTexts((MdObject) model);
         if (model instanceof EObject)
@@ -73,29 +69,8 @@ public final class NavigatorTreeElementLabels
 
     public static MdObject resolveMdObject(Object element)
     {
-        Object model = resolveModel(element);
+        Object model = NavigatorElementModels.resolveModel(element);
         return model instanceof MdObject ? (MdObject) model : null;
-    }
-
-    private static Object resolveModel(Object element)
-    {
-        if (element == null)
-            return null;
-        if (element instanceof MdObject || element instanceof EObject)
-            return element;
-
-        for (String method : MODEL_METHODS)
-        {
-            Object value = Global.invoke(element, method);
-            if (value instanceof MdObject || value instanceof EObject)
-                return value;
-        }
-
-        Object nested = Global.invoke(element, "getElement"); //$NON-NLS-1$
-        if (nested != null && nested != element)
-            return resolveModel(nested);
-
-        return null;
     }
 
     private static String buildEObjectSearchText(EObject eObject)

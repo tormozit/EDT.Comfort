@@ -15,7 +15,6 @@ import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IResource;
-import org.eclipse.core.runtime.Adapters;
 import org.eclipse.core.runtime.Path;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
@@ -495,18 +494,23 @@ public class GetRef extends AbstractHandler
 
     private static String refFromElement(Object element)
     {
-        if (element == null) return null;
-        if (element instanceof EObject) { String r = eObjectToFullName((EObject) element); if (r != null) return r; }
-        IFile file = Adapters.adapt(element, IFile.class);
-        if (file != null) { String r = pathToFullName(file.getProjectRelativePath().toString()); if (r != null) return r; }
-        IResource resource = Adapters.adapt(element, IResource.class);
-        if (resource != null && resource.getType() != IResource.PROJECT)
-        { String r = pathToFullName(resource.getProjectRelativePath().toString()); if (r != null) return r; }
-        for (String getter : new String[]{ "getFile", "getResource", "getMdObject" }) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        if (element == null)
+            return null;
+
+        EObject model = NavigatorElementModels.resolveEObject(element);
+        if (model != null)
         {
-            Object result = Global.call(element, getter);
-            if (result instanceof EObject) { String r = eObjectToFullName((EObject) result); if (r != null) return r; }
-            if (result instanceof IFile) { String r = pathToFullName(((IFile) result).getProjectRelativePath().toString()); if (r != null) return r; }
+            String r = eObjectToFullName(model);
+            if (r != null)
+                return r;
+        }
+
+        IResource resource = NavigatorResourceResolver.resolve(element);
+        if (resource != null && resource.getType() != IResource.PROJECT)
+        {
+            String r = pathToFullName(resource.getProjectRelativePath().toString());
+            if (r != null)
+                return r;
         }
         return null;
     }

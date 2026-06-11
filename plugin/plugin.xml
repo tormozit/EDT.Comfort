@@ -13,6 +13,7 @@
     <startup class="tormozit.FormEditorHook"/>
     <startup class="tormozit.SmartOutlineHook"/> 
     <startup class="tormozit.NavigatorFilterHook"/>
+    <startup class="tormozit.NavigatorShowInExplorerMenuHook"/>
     <startup class="tormozit.InfobasesViewHook"/>
     <startup class="tormozit.OpenMdObjectHook"/>
     <startup class="tormozit.MenuTooltipStatusLineHook"/>
@@ -90,6 +91,11 @@
         name="Последние места"
         categoryId="tormozit.commands.global"
         description="Открыть список последних посещённых методов и объектов метаданных (Комфорт)"/>
+    <command
+        id="tormozit.navigator.showInExplorer"
+        name="Показать в проводнике"
+        categoryId="tormozit.commands.global"
+        description="Открыть проводник ОС на файле или папке выбранного элемента навигатора (Комфорт)"/>
   </extension>
 
   <extension point="org.eclipse.ui.handlers">
@@ -127,6 +133,15 @@
         class="tormozit.ExecutableExtensionFactory:tormozit.RecentPlacesHandler"
         commandId="tormozit.RecentPlaces">
      </handler>
+    <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.NavigatorShowInExplorerHandler"
+        commandId="tormozit.navigator.showInExplorer">
+      <activeWhen>
+        <with variable="activePartId">
+          <equals value="com._1c.g5.v8.dt.ui2.navigator"/>
+        </with>
+      </activeWhen>
+    </handler>
   </extension>
 
   <extension point="org.eclipse.ui.menus">
