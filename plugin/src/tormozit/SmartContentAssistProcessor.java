@@ -22,6 +22,7 @@ import org.eclipse.xtext.nodemodel.INode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.resource.EObjectAtOffsetHelper;
 import org.eclipse.xtext.resource.XtextResource;
+import org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.util.concurrent.IUnitOfWork;
 
@@ -53,8 +54,11 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     private ICompletionProposal[] fullListCache = EMPTY;
     /** Порядок элементов в {@link #fullListCache} для tie-break при равном рейтинге. */
     private IdentityHashMap<ICompletionProposal, Integer> delegateOrderMap;
-    /** Последний непустой список при пустом фильтре (delegate иногда мигает). */
+    /** Последний алфавитный список при выключенном smart-фильтре. */
     private ICompletionProposal[] lastStableEmptyList = EMPTY;
+    /** Последний список в порядке delegate при smart-фильтре и пустом префиксе. */
+    private ICompletionProposal[] lastStableDelegateList = EMPTY;
+    private Runnable pendingEagerLoadTask;
     private boolean fullListReady = false;
     /** Полный список delegate загружен; иначе только interim с каретки. */
     private boolean fullListComplete = false;
@@ -142,10 +146,12 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         fullListComplete = false;
         assignFullListCache(EMPTY);
         lastStableEmptyList = EMPTY;
+        lastStableDelegateList = EMPTY;
         fullListContextKey = Integer.MIN_VALUE;
         memberAccessReloadSeq++;
         memberAccessReloadScheduledSeq = -1;
         cancelIdleFullListLoad();
+        pendingEagerLoadTask = null;
         lastTrackedFilter = ""; //$NON-NLS-1$
         ContentAssistDebug.log("invalidateCache"); //$NON-NLS-1$
     }
@@ -189,6 +195,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         {
             processor.onFilterPrefixChanged(viewer, caret, previous,
                 SmartFilterTracker.getCurrentFilter());
+            processor.scheduleEagerFullListLoad(viewer);
             processor.rescheduleIdleFullListLoad(viewer, false);
         }
     }
@@ -270,13 +277,42 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
     private void invalidateInterimListCache(ITextViewer viewer)
     {
-        fullListReady = false;
-        fullListComplete = false;
-        assignFullListCache(EMPTY);
         lastStableEmptyList = EMPTY;
-        cancelIdleFullListLoad();
-        if (viewer != null && SmartFilterTracker.getCurrentFilter().isEmpty())
-            rescheduleIdleFullListLoad(viewer, false);
+        lastStableDelegateList = EMPTY;
+        if (viewer != null && !fullListComplete)
+            scheduleEagerFullListLoad(viewer);
+    }
+
+    /** Полный список у якоря (без префикса) — для delegateOrderMap и штатного priority. */
+    void scheduleEagerFullListLoad(ITextViewer viewer)
+    {
+        if (viewer == null || fullListComplete)
+            return;
+        if (!SmartAssistFilterState.isSmartFilterEnabled())
+            return;
+        org.eclipse.swt.widgets.Control widget = viewer.getTextWidget()
+            instanceof org.eclipse.swt.widgets.Control
+            ? (org.eclipse.swt.widgets.Control) viewer.getTextWidget()
+            : null;
+        if (widget == null || widget.isDisposed())
+            return;
+        org.eclipse.swt.widgets.Display display = widget.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        if (pendingEagerLoadTask != null)
+            return;
+
+        final int contextKey = fullListContextKey;
+        pendingEagerLoadTask = () -> {
+            pendingEagerLoadTask = null;
+            if (widget.isDisposed() || fullListComplete || contextKey != fullListContextKey)
+                return;
+            ContentAssistDebug.log("loadFullList eager"); //$NON-NLS-1$
+            loadFullList(viewer, false);
+            if (fullListReady)
+                ContentAssistSessionReloader.refreshPopupIfOpen();
+        };
+        display.asyncExec(pendingEagerLoadTask);
     }
 
     /** Отложенная загрузка полного списка на UI-потоке (не в hot path ввода). */
@@ -400,10 +436,13 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         if (doc != null && caret >= 0)
             filter = computeIdentifierFilter(doc, caret);
 
-        // Пустой префикс — полный список delegate (как без флажка), не усечённый interim-кэш
-        if (!smartEnabled || filter.isEmpty())
-            return resolveUnfilteredList(viewer, offset, caret);
+        if (!smartEnabled)
+            return resolveAlphabeticalList(viewer, offset, caret);
+        if (filter.isEmpty())
+            return resolveDelegateOrderedList(viewer, offset, caret);
 
+        ensureAnchorCacheForFilter(viewer, offset, caret);
+        scheduleEagerFullListLoad(viewer);
         if (isCacheValidForCaret(doc, caret))
             return filterAndSort(fullListCache, filter);
 
@@ -432,6 +471,8 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     private void absorbInterimIntoCache(ITextViewer viewer, int caret, ICompletionProposal[] raw)
     {
         if (fullListComplete || raw == null || raw.length == 0)
+            return;
+        if (!SmartFilterTracker.getCurrentFilter().isEmpty())
             return;
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         if (doc == null || caret < 0)
@@ -474,8 +515,8 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         return idx != null ? idx.intValue() : -1;
     }
 
-    /** Алфавитный список без smart-фильтра; при пустом delegate — кэш / lastStable. */
-    private ICompletionProposal[] resolveUnfilteredList(ITextViewer viewer, int offset, int caret)
+    /** Алфавитный список при выключенном smart-фильтре. */
+    private ICompletionProposal[] resolveAlphabeticalList(ITextViewer viewer, int offset, int caret)
     {
         if (fullListReady && fullListCache.length > 0)
         {
@@ -500,6 +541,64 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         if (fullListCache.length > 0)
             return buildUnfilteredList(fullListCache);
         return EMPTY;
+    }
+
+    /** Порядок delegate при smart-фильтре и пустом префиксе (штатный priority, не алфавит). */
+    private ICompletionProposal[] resolveDelegateOrderedList(ITextViewer viewer, int offset,
+                                                             int caret)
+    {
+        scheduleEagerFullListLoad(viewer);
+        if (fullListReady && fullListCache.length > 0)
+        {
+            ICompletionProposal[] built = buildDelegateOrderedList(fullListCache);
+            if (built.length > 0)
+            {
+                lastStableDelegateList = built;
+                return built;
+            }
+        }
+        if (lastStableDelegateList.length > 0)
+            return lastStableDelegateList;
+
+        ICompletionProposal[] raw = fetchFullDelegateListAtAnchor(viewer, offset, caret);
+        if (raw.length > 0)
+        {
+            ICompletionProposal[] built = buildDelegateOrderedList(raw);
+            lastStableDelegateList = built;
+            return built;
+        }
+        if (fullListCache.length > 0)
+            return buildDelegateOrderedList(fullListCache);
+        return EMPTY;
+    }
+
+    private ICompletionProposal[] fetchFullDelegateListAtAnchor(ITextViewer viewer, int offset,
+                                                                int caret)
+    {
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        int anchor = caret >= 0 ? computeIdentifierWordStart(doc, caret) : offset;
+        if (anchor < 0)
+            anchor = caret >= 0 ? caret : offset;
+        if (doc != null && caret >= 0
+            && computeFullListContextKey(doc, caret) != fullListContextKey)
+            return EMPTY;
+        ICompletionProposal[] nativeList = delegate.computeCompletionProposals(viewer, anchor);
+        ICompletionProposal[] raw = unwrapProposals(nativeList != null ? nativeList : EMPTY);
+        if (raw.length > 0)
+        {
+            assignFullListCache(raw);
+            fullListReady = true;
+            fullListComplete = true;
+        }
+        return raw;
+    }
+
+    /** Синхронная загрузка полного списка у якоря для сортировки с непустым префиксом. */
+    private void ensureAnchorCacheForFilter(ITextViewer viewer, int offset, int caret)
+    {
+        if (fullListComplete || viewer == null)
+            return;
+        fetchFullDelegateListAtAnchor(viewer, offset, caret);
     }
 
     private ICompletionProposal[] filterSmartWithFallback(ITextViewer viewer, int offset, int caret,
@@ -707,6 +806,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             fullListComplete = false;
             assignFullListCache(EMPTY);
             lastStableEmptyList = EMPTY;
+            lastStableDelegateList = EMPTY;
             lastTrackedFilter = ""; //$NON-NLS-1$
             memberAccessReloadSeq++;
             memberAccessReloadScheduledSeq = -1;
@@ -1054,6 +1154,20 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     }
 
     /**
+     * Полный список при smart-фильтре и пустом префиксе: порядок delegate с индексами.
+     */
+    private ICompletionProposal[] buildDelegateOrderedList(ICompletionProposal[] raw)
+    {
+        if (raw == null || raw.length == 0)
+            return EMPTY;
+
+        ICompletionProposal[] result = new ICompletionProposal[raw.length];
+        for (int i = 0; i < raw.length; i++)
+            result[i] = wrapProposal(unwrapProposal(raw[i]), i);
+        return result;
+    }
+
+    /**
      * Полный список при выключенном smart-фильтре: все элементы, алфавит;
      * {@link SmartCompletionProposal#validate} пропускает всё, подсветка по {@link SmartFilterTracker}.
      */
@@ -1110,20 +1224,11 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
         SmartCodeMatcher matcher = new SmartCodeMatcher(filter);
         List<ICompletionProposal> filtered = new ArrayList<>(raw.length);
-        int[] scores = new int[raw.length];
-        int[] rawIndices = new int[raw.length];
 
-        for (int i = 0; i < raw.length; i++)
+        for (ICompletionProposal p : raw)
         {
-            ICompletionProposal p = raw[i];
-            int score = computeScore(matcher, p);
-            if (score > 0)
-            {
-                int fi = filtered.size();
-                scores[fi] = score;
-                rawIndices[fi] = i;
+            if (computeScore(matcher, p) > 0)
                 filtered.add(unwrapProposal(p));
-            }
         }
 
         if (filtered.isEmpty())
@@ -1133,19 +1238,15 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         for (int i = 0; i < idx.length; i++)
             idx[i] = i;
 
-        final int[] s = Arrays.copyOf(scores, filtered.size());
-        final int[] order = Arrays.copyOf(rawIndices, filtered.size());
-        Arrays.sort(idx, (a, b) -> {
-            if (s[a] != s[b])
-                return Integer.compare(s[b], s[a]);
-            return Integer.compare(order[a], order[b]);
-        });
+        Arrays.sort(idx, (a, b) -> compareProposals(matcher,
+            filtered.get(a), filtered.get(b)));
 
         ICompletionProposal[] result = new ICompletionProposal[idx.length];
         for (int i = 0; i < idx.length; i++)
         {
-            int pos = idx[i];
-            result[i] = wrapProposal(filtered.get(pos), order[pos]);
+            ICompletionProposal p = filtered.get(idx[i]);
+            int order = delegateOrderOf(p);
+            result[i] = wrapProposal(p, order >= 0 ? order : idx[i]);
         }
         return result;
     }
@@ -1182,11 +1283,38 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                                        ICompletionProposal p1,
                                        ICompletionProposal p2)
     {
-        int s1 = computeScore(matcher, p1);
-        int s2 = computeScore(matcher, p2);
-        if (s1 != s2)
-            return Integer.compare(s2, s1);
-        return compareDelegateOrder(p1, p2);
+        int n1 = computeNameScore(matcher, p1);
+        int n2 = computeNameScore(matcher, p2);
+        if (n1 != n2)
+            return Integer.compare(n2, n1);
+
+        int pr1 = resolveNativePriority(p1);
+        int pr2 = resolveNativePriority(p2);
+        if (pr1 != pr2)
+            return Integer.compare(pr2, pr1);
+
+        if (matcher.isEmpty)
+            return compareDelegateOrder(p1, p2);
+        return compareDisplayStrings(p1, p2);
+    }
+
+    static int computeNameScore(SmartCodeMatcher matcher, ICompletionProposal proposal)
+    {
+        if (matcher.isEmpty)
+            return 1;
+        String display = displayString(unwrapProposal(proposal));
+        if (display == null || display.isEmpty())
+            return 0;
+        int name = matcher.computeNamePremium(display);
+        return name <= 0 ? 0 : name * NAME_WEIGHT;
+    }
+
+    static int resolveNativePriority(ICompletionProposal proposal)
+    {
+        ICompletionProposal p = unwrapProposal(proposal);
+        if (p instanceof ConfigurableCompletionProposal)
+            return ((ConfigurableCompletionProposal) p).getPriority();
+        return Integer.MIN_VALUE;
     }
 
     private static int compareDelegateOrder(ICompletionProposal p1, ICompletionProposal p2)

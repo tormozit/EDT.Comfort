@@ -127,7 +127,7 @@ public class FormEditorHook implements IStartup
     @Override
     public void earlyStartup()
     {
-        ComfortEarlyStartup.defer(() -> install(Display.getDefault()));
+        Display.getDefault().asyncExec(() -> install(Display.getDefault()));
     }
 
     public static void install(Display display)

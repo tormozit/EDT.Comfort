@@ -371,6 +371,13 @@ public final class ContentAssistPopupSync
                     popupDisplayLimit = Math.min(list.size(),
                         targetIdx + POPUP_LOAD_MORE_MARGIN + 1);
             }
+            else if (!smartEnabled && !filter.isEmpty())
+            {
+                int prefixIdx = findFirstPrefixMatchIndex(list, filter);
+                if (prefixIdx >= 0 && prefixIdx >= popupDisplayLimit)
+                    popupDisplayLimit = Math.min(list.size(),
+                        prefixIdx + POPUP_LOAD_MORE_MARGIN + 1);
+            }
             ArrayList<ICompletionProposal> displayList = list;
             if (list.size() > popupDisplayLimit)
                 displayList = new ArrayList<>(list.subList(0, popupDisplayLimit));
@@ -1250,7 +1257,18 @@ public final class ContentAssistPopupSync
         if (list == null || list.isEmpty() || selectProposalMethod == null)
             return;
         if (resetToFirst)
-            selectFirstProposal(popup, list);
+            selectProposalAtIndex(popup, 0);
+        else if (!SmartAssistFilterState.isSmartFilterEnabled())
+        {
+            String prefix = SmartFilterTracker.getCurrentFilter();
+            if (prefix != null && !prefix.isEmpty())
+            {
+                int idx = findFirstPrefixMatchIndex(list, prefix);
+                selectProposalAtIndex(popup, idx >= 0 ? idx : 0);
+            }
+            else
+                restoreSelection(popup, saved, list);
+        }
         else
             restoreSelection(popup, saved, list);
     }
@@ -1266,16 +1284,7 @@ public final class ContentAssistPopupSync
             index = saved.index;
         if (index < 0)
             index = 0;
-
-        Table table = getProposalTable(popup);
-        if (table != null && !table.isDisposed() && table.getItemCount() > 0)
-        {
-            if (index >= table.getItemCount())
-                index = table.getItemCount() - 1;
-            table.setSelection(index);
-            table.showSelection();
-        }
-        selectProposalMethod.invoke(popup, index, Boolean.FALSE);
+        selectProposalAtIndex(popup, index);
     }
 
     private static int findProposalIndex(List<ICompletionProposal> list, SavedSelection saved)
@@ -1298,17 +1307,56 @@ public final class ContentAssistPopupSync
         return p != null ? p.getDisplayString() : null;
     }
 
-    private static void selectFirstProposal(Object popup, List<ICompletionProposal> list)
-            throws Exception
+    private static void selectProposalAtIndex(Object popup, int index) throws Exception
     {
-        if (list == null || list.isEmpty() || selectProposalMethod == null)
+        if (selectProposalMethod == null)
             return;
         Table table = getProposalTable(popup);
         if (table != null && !table.isDisposed() && table.getItemCount() > 0)
         {
-            table.setSelection(0);
+            if (index < 0)
+                index = 0;
+            if (index >= table.getItemCount())
+                index = table.getItemCount() - 1;
+            table.setSelection(index);
             table.showSelection();
         }
-        selectProposalMethod.invoke(popup, 0, Boolean.FALSE);
+        else if (index < 0)
+            index = 0;
+        selectProposalMethod.invoke(popup, index, Boolean.FALSE);
+    }
+
+    /** Первый элемент, чьё имя (до «(» / «:») начинается с префикса; список алфавитный. */
+    private static int findFirstPrefixMatchIndex(List<ICompletionProposal> list, String prefix)
+    {
+        if (list == null || list.isEmpty() || prefix == null || prefix.isEmpty())
+            return -1;
+        for (int i = 0; i < list.size(); i++)
+        {
+            if (proposalNameStartsWithPrefix(list.get(i), prefix))
+                return i;
+        }
+        return -1;
+    }
+
+    private static boolean proposalNameStartsWithPrefix(ICompletionProposal proposal, String prefix)
+    {
+        if (proposal == null || prefix == null || prefix.isEmpty())
+            return false;
+        ICompletionProposal p = SmartContentAssistProcessor.unwrapProposal(proposal);
+        String display = p != null ? p.getDisplayString() : null;
+        if (display == null || display.isEmpty())
+            return false;
+        String name = extractProposalName(display);
+        return name.length() >= prefix.length()
+            && name.regionMatches(true, 0, prefix, 0, prefix.length());
+    }
+
+    private static String extractProposalName(String display)
+    {
+        int parenIdx = display.indexOf('(');
+        String withoutParams = parenIdx >= 0 ? display.substring(0, parenIdx).trim() : display.trim();
+        int colonIdx = withoutParams.indexOf(':');
+        return colonIdx >= 0 ? withoutParams.substring(0, colonIdx).trim() : withoutParams;
     }
 }

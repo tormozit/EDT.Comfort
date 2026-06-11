@@ -20,10 +20,6 @@ public class SmartCodeProposalSorter implements ICompletionProposalSorter
             return compareDisplay(p1, p2);
 
         String filter = SmartFilterTracker.getCurrentFilter();
-        if (filter.isEmpty())
-            return compareDisplay(p1, p2);
-
-        // Кешируем matcher на один UI-цикл — не создаём при каждом compare()
         SmartCodeMatcher matcher = matcherCache.get();
         if (matcher == null || !filter.equals(lastFilter.get()))
         {

@@ -61,10 +61,9 @@ public class CompareConfigMenuHook implements IStartup
     @Override
     public void earlyStartup()
     {
-        ComfortEarlyStartup.defer(() ->
+        Display.getDefault().asyncExec(() ->
         {
 //          Activator.getDefault().getInjector().injectMembers(this); // Слишком рано?
-            ComfortUpdateChecker.startDailyScheduler();
             CompareConfigSearchDialogHook.install(Display.getDefault());
 
             IWorkbench wb = PlatformUI.getWorkbench();

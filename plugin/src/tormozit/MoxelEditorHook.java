@@ -70,7 +70,7 @@ public class MoxelEditorHook implements IStartup
     @Override
     public void earlyStartup()
     {
-        ComfortEarlyStartup.defer(() ->
+        Display.getDefault().asyncExec(() ->
         {
             PlatformUI.getWorkbench().addWindowListener(new org.eclipse.ui.IWindowListener()
             {

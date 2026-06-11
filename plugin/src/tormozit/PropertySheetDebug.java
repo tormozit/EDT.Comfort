@@ -4,57 +4,46 @@ import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.widgets.Control;
 
 /**
- * Логи хука панели «Свойства»: {@code Global.log} → {@code [PropertySheet] …}.
- *
- * <ul>
- *   <li>Отключить всё: {@code -Dtormozit.propertySheet.debug=false}</li>
- *   <li>По умолчанию — только проблемы ({@code INCOMPLETE}, {@code GIVE UP}, {@code FAIL})</li>
- *   <li>Подробный scan/ui/sync: {@code -Dtormozit.propertySheet.debug.verbose=true}</li>
- *   <li>Resolve/trace (очень шумно): {@code -Dtormozit.propertySheet.debug.trace=true}</li>
- * </ul>
+ * Логи хука панели «Свойства» через {@link Global}.
+ * Включение: Параметры → Комфорт → «Общее логирование».
  */
 public final class PropertySheetDebug
 {
-    private static final boolean ENABLED =
-            !"false".equalsIgnoreCase(System.getProperty("tormozit.propertySheet.debug", "true")); //$NON-NLS-1$ //$NON-NLS-2$
-    private static final boolean VERBOSE =
-            "true".equalsIgnoreCase(System.getProperty("tormozit.propertySheet.debug.verbose", "false")); //$NON-NLS-1$ //$NON-NLS-2$
-    private static final boolean TRACE =
-            "true".equalsIgnoreCase(System.getProperty("tormozit.propertySheet.debug.trace", "false")); //$NON-NLS-1$ //$NON-NLS-2$
+    private static final String TAG = "PropertySheet"; //$NON-NLS-1$
 
     private PropertySheetDebug() {}
 
     static boolean isEnabled()
     {
-        return ENABLED;
+        return Global.isLogEnabled();
     }
 
     static boolean isVerbose()
     {
-        return ENABLED && VERBOSE;
+        return Global.isLogEnabled();
     }
 
     static boolean isTrace()
     {
-        return ENABLED && TRACE;
+        return Global.isLogEnabled();
     }
 
     static String flags()
     {
-        return "enabled=" + ENABLED + " verbose=" + VERBOSE + " trace=" + TRACE; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        return "enabled=" + Global.isLogEnabled(); //$NON-NLS-1$
     }
 
     public static void log(String msg)
     {
-        if (ENABLED)
-            Global.log("[PropertySheet] " + msg); //$NON-NLS-1$
+        if (Global.isLogEnabled())
+            Global.log(TAG, msg);
     }
 
-    /** Проблема / нештатная ситуация — всегда при включённом debug. */
+    /** Проблема / нештатная ситуация. */
     static void problem(String msg)
     {
-        if (ENABLED)
-            Global.log("[PropertySheet] [!] " + msg); //$NON-NLS-1$
+        if (Global.isLogEnabled())
+            Global.log(TAG, "[!] " + msg); //$NON-NLS-1$
     }
 
     static void scanProblem(String msg)
@@ -69,69 +58,60 @@ public final class PropertySheetDebug
 
     static void valueControl(String msg)
     {
-        if (ENABLED)
-            Global.log("[PropertySheet] [value] " + msg); //$NON-NLS-1$
+        if (Global.isLogEnabled())
+            Global.log(TAG, "[value] " + msg); //$NON-NLS-1$
     }
 
     static void valueControlVerbose(String msg)
     {
-        if (isVerbose())
-            valueControl(msg);
+        valueControl(msg);
     }
 
-    /** Синхронизация «Новая» ↔ «Старая» — всегда при включённом debug. */
+    /** Синхронизация «Новая» ↔ «Старая». */
     static void sync(String msg)
     {
-        if (ENABLED)
-            Global.log("[PropertySheet] [sync] " + msg); //$NON-NLS-1$
+        if (Global.isLogEnabled())
+            Global.log(TAG, "[sync] " + msg); //$NON-NLS-1$
     }
 
     static void syncVerbose(String msg)
     {
-        if (isVerbose())
-            sync(msg);
+        sync(msg);
     }
 
     static void scan(String msg)
     {
-        if (isVerbose())
-            log("[scan] " + msg); //$NON-NLS-1$
+        log("[scan] " + msg); //$NON-NLS-1$
     }
 
     static void scanVerbose(String msg)
     {
-        if (isTrace())
-            log("[scan] " + msg); //$NON-NLS-1$
+        log("[scan] " + msg); //$NON-NLS-1$
     }
 
     static void resolve(String msg)
     {
-        if (isTrace())
-            log("[resolve] " + msg); //$NON-NLS-1$
+        log("[resolve] " + msg); //$NON-NLS-1$
     }
 
     static void resolveVerbose(String msg)
     {
-        if (isTrace())
-            resolve(msg);
+        resolve(msg);
     }
 
     static void ui(String msg)
     {
-        if (isVerbose())
-            log("[ui] " + msg); //$NON-NLS-1$
+        log("[ui] " + msg); //$NON-NLS-1$
     }
 
     static void uiVerbose(String msg)
     {
-        if (isTrace())
-            log("[ui] " + msg); //$NON-NLS-1$
+        log("[ui] " + msg); //$NON-NLS-1$
     }
 
     static void feature(String msg)
     {
-        if (isTrace())
-            log("[feature] " + msg); //$NON-NLS-1$
+        log("[feature] " + msg); //$NON-NLS-1$
     }
 
     public static String safe(Object o)

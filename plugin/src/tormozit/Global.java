@@ -2,6 +2,8 @@ package tormozit;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.PrintWriter;
+import java.io.StringWriter;
 import java.lang.reflect.Field;
 import java.nio.file.Files;
 
@@ -298,15 +300,77 @@ public final class Global
     }
 
     // =========================================================================
-    // Вспомогательные
+    // Логирование (журнал «Журнал Комфорт», {@link ContentAssistLogView})
     // =========================================================================
 
-    public static void log(String msg)
+    /** Включение: Параметры → Комфорт → «Общее логирование». */
+    public static boolean isLogEnabled()
     {
-        String ts = java.time.LocalTime.now()
-            .format(java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")); //$NON-NLS-1$
-        System.out.println("[Tormozit " + ts + "] " + msg); //$NON-NLS-1$ //$NON-NLS-2$
+        return ComfortSettings.isDebugLogEnabled();
     }
+
+    public static void log(String message)
+    {
+        log(null, message);
+    }
+
+    public static void log(String tag, String message)
+    {
+        if (!isLogEnabled() || message == null)
+            return;
+        ContentAssistLog.append(formatLogTag(tag) + message);
+    }
+
+    public static void logError(String tag, String message, Throwable error)
+    {
+        if (!isLogEnabled())
+            return;
+        String text = message != null ? message : ""; //$NON-NLS-1$
+        Throwable root = unwrapLogCause(error);
+        if (root != null)
+        {
+            String detail = root.getClass().getSimpleName();
+            if (root.getMessage() != null && !root.getMessage().isBlank())
+                detail += ": " + root.getMessage(); //$NON-NLS-1$
+            text = text.isBlank() ? detail : text + ": " + detail; //$NON-NLS-1$
+        }
+        ContentAssistLog.append(formatLogTag(tag) + "ERROR " + text); //$NON-NLS-1$
+        if (root != null)
+            appendLogStackTrace(root);
+    }
+
+    private static void appendLogStackTrace(Throwable error)
+    {
+        StringWriter sw = new StringWriter();
+        error.printStackTrace(new PrintWriter(sw));
+        for (String line : sw.toString().split("\n")) //$NON-NLS-1$
+        {
+            if (line.isBlank())
+                continue;
+            ContentAssistLog.append("    " + line); //$NON-NLS-1$
+        }
+    }
+
+    private static String formatLogTag(String tag)
+    {
+        if (tag == null || tag.isBlank())
+            return ""; //$NON-NLS-1$
+        return "[" + tag + "] "; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static Throwable unwrapLogCause(Throwable error)
+    {
+        if (error == null)
+            return null;
+        Throwable root = error;
+        while (root.getCause() != null && root.getCause() != root)
+            root = root.getCause();
+        return root;
+    }
+
+    // =========================================================================
+    // Вспомогательные
+    // =========================================================================
 
     public static String readTextFromFile(File file) throws IOException
     {

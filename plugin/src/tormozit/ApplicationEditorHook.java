@@ -59,7 +59,7 @@ public class ApplicationEditorHook implements IStartup
     @Override
     public void earlyStartup()
     {
-        ComfortEarlyStartup.defer(() ->
+        Display.getDefault().asyncExec(() ->
         {
             PlatformUI.getWorkbench().addWindowListener(new org.eclipse.ui.IWindowListener()
             {
@@ -180,8 +180,7 @@ public class ApplicationEditorHook implements IStartup
         }
         catch (PartInitException e)
         {
-            // TODO Auto-generated catch block
-            e.printStackTrace();
+            Global.logError("ApplicationEditor", "open InfobaseEditor", e); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 }

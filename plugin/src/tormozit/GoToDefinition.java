@@ -165,7 +165,7 @@ public class GoToDefinition extends AbstractHandler
                 session = IRApplication.getSession(PID);
                 project = session.project;
             }
-            catch (IOException e) { e.printStackTrace(); }
+            catch (IOException e) { Global.logError("GoToDefinition", "read transport command", e); } //$NON-NLS-1$ //$NON-NLS-2$
             newFile = new File(transportFolder + "\\НовыйТекст.txt"); //$NON-NLS-1$
             oldFile = new File(transportFolder + "\\СтарыйТекст.txt"); //$NON-NLS-1$
         }
@@ -234,7 +234,7 @@ public class GoToDefinition extends AbstractHandler
                         else
                             notifyDenyReplaceObject(newFile, command);
                     }
-                    catch (Exception e) { e.printStackTrace(); }
+                    catch (Exception e) { Global.logError("GoToDefinition", "import DCS from file", e); } //$NON-NLS-1$ //$NON-NLS-2$
                 }
                 else
                 {
@@ -265,7 +265,7 @@ public class GoToDefinition extends AbstractHandler
                     notifyDenyReplaceObject(newFile, command);
                 }
             } catch (Exception e) {
-                e.printStackTrace();
+                Global.logError("GoToDefinition", "sync from IR", e); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
         return null;

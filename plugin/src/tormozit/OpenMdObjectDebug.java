@@ -3,25 +3,24 @@ package tormozit;
 import org.eclipse.core.runtime.jobs.Job;
 
 /**
- * Логи диалога «Открыть объект метаданных»: {@code Global.log} → {@code [OpenMdObject] …}.
- * Отключить: {@code -Dtormozit.openMdObject.debug=false}.
+ * Логи диалога «Открыть объект метаданных» через {@link Global}.
+ * Включение: Параметры → Комфорт → «Общее логирование».
  */
 public final class OpenMdObjectDebug
 {
-    private static final boolean ENABLED =
-        !"false".equalsIgnoreCase(System.getProperty("tormozit.openMdObject.debug", "true")); //$NON-NLS-1$ //$NON-NLS-2$
+    private static final String TAG = "OpenMdObject"; //$NON-NLS-1$
 
     private OpenMdObjectDebug() {}
 
     public static boolean isEnabled()
     {
-        return ENABLED;
+        return Global.isLogEnabled();
     }
 
     public static void log(String msg)
     {
-        if (ENABLED)
-            Global.log("[OpenMdObject] " + msg); //$NON-NLS-1$
+        if (Global.isLogEnabled())
+            Global.log(TAG, msg);
     }
 
     public static String filterDesc(Object filter)

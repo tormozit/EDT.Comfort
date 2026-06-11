@@ -31,7 +31,7 @@ final class PropertySheetRowSelectionFeature implements PropertySheetUiFeature
 
     private static void log(String msg)
     {
-        ComfortDebug.log(LOG_TAG, "[rowSelect] " + msg); //$NON-NLS-1$
+        Global.log(LOG_TAG, "[rowSelect] " + msg); //$NON-NLS-1$
     }
 
     @Override

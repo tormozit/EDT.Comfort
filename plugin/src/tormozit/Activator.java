@@ -26,9 +26,9 @@ import com.google.inject.Injector;
  *
  * <p><b>Важно:</b> В {@code start()} выполняется ТОЛЬКО инициализация
  * синглтонов без UI-кода — никакого {@code syncExec} или обращений к
- * Workbench. {@link ContentAssistManager#start()} и планировщик обновлений
- * вызываются позже из {@code CompareConfigMenuHook.earlyStartup()} через
- * {@link ComfortEarlyStartup}, когда платформа EDT готова.
+ * Workbench. {@link ContentAssistManager#start()} вызывается
+ * позже из {@code CompareConfigMenuHook.earlyStartup()}, когда Workbench
+ * гарантированно инициализирован.
  */
 public class Activator extends AbstractUIPlugin
 {
@@ -57,6 +57,8 @@ public class Activator extends AbstractUIPlugin
 
         // Подключаем персистентное хранилище последних мест.
         RecentPlaces.getInstance().init(PLUGIN_ID);
+
+        ComfortUpdateChecker.startDailyScheduler();
     }
 
     @Override

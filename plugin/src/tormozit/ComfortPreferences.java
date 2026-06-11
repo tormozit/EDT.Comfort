@@ -152,13 +152,13 @@ public final class ComfortPreferences
 
         Runnable open = () -> {
 
-            ComfortDebug.log("install", "openInstallNewSoftware site=" + siteUrl); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.log("install", "openInstallNewSoftware site=" + siteUrl); //$NON-NLS-1$ //$NON-NLS-2$
 
             if (tryOpenInstallWizardForSite(siteUrl))
 
             {
 
-                ComfortDebug.log("install", "мастер установки открыт"); //$NON-NLS-1$ //$NON-NLS-2$
+                Global.log("install", "мастер установки открыт"); //$NON-NLS-1$ //$NON-NLS-2$
 
                 return;
 
@@ -170,7 +170,7 @@ public final class ComfortPreferences
 
                 : "Установщик недоступен в этой среде (нет p2-профиля). Проверьте в установленном EDT."; //$NON-NLS-1$
 
-            ComfortDebug.log("install", "FAIL: " + message); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.log("install", "FAIL: " + message); //$NON-NLS-1$ //$NON-NLS-2$
 
             ToastNotification.show("EDT Comfort", message, 8_000); //$NON-NLS-1$
 
@@ -240,7 +240,7 @@ public final class ComfortPreferences
 
         URI siteUri = URI.create(normalizeSiteUrl(siteUrl));
 
-        ComfortDebug.log("install", "siteUri=" + siteUri); //$NON-NLS-1$ //$NON-NLS-2$
+        Global.log("install", "siteUri=" + siteUri); //$NON-NLS-1$ //$NON-NLS-2$
 
 
 
@@ -310,7 +310,7 @@ public final class ComfortPreferences
 
         dialogClass.getMethod("create").invoke(dialog); //$NON-NLS-1$
 
-        ComfortDebug.log("install", "ProvisioningWizardDialog.create() OK"); //$NON-NLS-1$ //$NON-NLS-2$
+        Global.log("install", "ProvisioningWizardDialog.create() OK"); //$NON-NLS-1$ //$NON-NLS-2$
 
         selectInstallSiteInDialog(wizard, siteUri);
 
@@ -366,7 +366,7 @@ public final class ComfortPreferences
 
         setRepositoryNickname(ui, uiClass, siteUri);
 
-        ComfortDebug.log("install", "registerUpdateSite OK uri=" + siteUri); //$NON-NLS-1$ //$NON-NLS-2$
+        Global.log("install", "registerUpdateSite OK uri=" + siteUri); //$NON-NLS-1$ //$NON-NLS-2$
 
     }
 
@@ -430,7 +430,7 @@ public final class ComfortPreferences
 
             }
 
-            ComfortDebug.log("install", "removeRepository " + siteUri); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.log("install", "removeRepository " + siteUri); //$NON-NLS-1$ //$NON-NLS-2$
 
         }
 
@@ -438,7 +438,7 @@ public final class ComfortPreferences
 
         {
 
-            ComfortDebug.logError("install", "forceRemoveRepository " + siteUri, e); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.logError("install", "forceRemoveRepository " + siteUri, e); //$NON-NLS-1$ //$NON-NLS-2$
 
         }
 
@@ -478,7 +478,7 @@ public final class ComfortPreferences
 
         {
 
-            ComfortDebug.logError("install", "setRepositoryNickname", e); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.logError("install", "setRepositoryNickname", e); //$NON-NLS-1$ //$NON-NLS-2$
 
         }
 
@@ -511,7 +511,7 @@ public final class ComfortPreferences
 
         {
 
-            ComfortDebug.log("install", //$NON-NLS-1$
+            Global.log("install", //$NON-NLS-1$
 
                 "AVAILABLE_SPECIFIED fallback=" + AVAILABLE_SPECIFIED_SCOPE); //$NON-NLS-1$
 
@@ -537,13 +537,13 @@ public final class ComfortPreferences
 
             {
 
-                ComfortDebug.log("install", "selectSite: wizard.getPages()=null"); //$NON-NLS-1$ //$NON-NLS-2$
+                Global.log("install", "selectSite: wizard.getPages()=null"); //$NON-NLS-1$ //$NON-NLS-2$
 
                 return;
 
             }
 
-            ComfortDebug.log("install", "selectSite: pages=" + pages.length); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.log("install", "selectSite: pages=" + pages.length); //$NON-NLS-1$ //$NON-NLS-2$
 
 
 
@@ -573,7 +573,7 @@ public final class ComfortPreferences
 
                 {
 
-                    ComfortDebug.log("install", "selectSite: repoSelector=null"); //$NON-NLS-1$ //$NON-NLS-2$
+                    Global.log("install", "selectSite: repoSelector=null"); //$NON-NLS-1$ //$NON-NLS-2$
 
                     return;
 
@@ -587,7 +587,7 @@ public final class ComfortPreferences
 
                     .invoke(repoSelector, specifiedScope, siteUri);
 
-                ComfortDebug.log("install", //$NON-NLS-1$
+                Global.log("install", //$NON-NLS-1$
 
                     "setRepositorySelection(scope=AVAILABLE_SPECIFIED, uri=" + siteUri + ")"); //$NON-NLS-1$ //$NON-NLS-2$
 
@@ -597,7 +597,7 @@ public final class ComfortPreferences
 
             }
 
-            ComfortDebug.log("install", "selectSite: AvailableIUsPage not found"); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.log("install", "selectSite: AvailableIUsPage not found"); //$NON-NLS-1$ //$NON-NLS-2$
 
         }
 
@@ -605,7 +605,7 @@ public final class ComfortPreferences
 
         {
 
-            ComfortDebug.logError("install", "selectInstallSiteInDialog", e); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.logError("install", "selectInstallSiteInDialog", e); //$NON-NLS-1$ //$NON-NLS-2$
 
         }
 
@@ -721,7 +721,7 @@ public final class ComfortPreferences
 
             {
 
-                ComfortDebug.log("install", "p2 profile missing: profileId=" + profileId //$NON-NLS-1$ //$NON-NLS-2$
+                Global.log("install", "p2 profile missing: profileId=" + profileId //$NON-NLS-1$ //$NON-NLS-2$
 
                     + " agent=" + (agent != null)); //$NON-NLS-1$
 
@@ -753,7 +753,7 @@ public final class ComfortPreferences
 
             boolean ok = profile != null;
 
-            ComfortDebug.log("install", "p2 profileId=" + profileId + " ok=" + ok); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            Global.log("install", "p2 profileId=" + profileId + " ok=" + ok); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
             return ok;
 
@@ -763,7 +763,7 @@ public final class ComfortPreferences
 
         {
 
-            ComfortDebug.logError("install", "ensureP2ProfileAvailable", e); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.logError("install", "ensureP2ProfileAvailable", e); //$NON-NLS-1$ //$NON-NLS-2$
 
             return false;
 
@@ -877,9 +877,7 @@ public final class ComfortPreferences
 
         String text = detail.isBlank() ? message : message + ": " + detail; //$NON-NLS-1$
 
-        Global.log(text);
-
-        ComfortDebug.logError("install", message, t); //$NON-NLS-1$
+        Global.logError("install", message, t); //$NON-NLS-1$
 
         getLog().log(new Status(IStatus.ERROR, Activator.PLUGIN_ID, text, root));
 
@@ -907,7 +905,7 @@ public final class ComfortPreferences
 
             int count = repos != null ? repos.length : 0;
 
-            ComfortDebug.log("install", stage + ": knownRepositories=" + count); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.log("install", stage + ": knownRepositories=" + count); //$NON-NLS-1$ //$NON-NLS-2$
 
             if (repos != null)
 
@@ -915,7 +913,7 @@ public final class ComfortPreferences
 
                 for (URI repo : repos)
 
-                    ComfortDebug.log("install", "  repo " + repo); //$NON-NLS-1$ //$NON-NLS-2$
+                    Global.log("install", "  repo " + repo); //$NON-NLS-1$ //$NON-NLS-2$
 
             }
 
@@ -925,7 +923,7 @@ public final class ComfortPreferences
 
         {
 
-            ComfortDebug.logError("install", "logKnownRepositories " + stage, e); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.logError("install", "logKnownRepositories " + stage, e); //$NON-NLS-1$ //$NON-NLS-2$
 
         }
 
@@ -951,7 +949,7 @@ public final class ComfortPreferences
 
             {
 
-                ComfortDebug.log("install", "LoadMetadataRepositoryJob: status=null"); //$NON-NLS-1$ //$NON-NLS-2$
+                Global.log("install", "LoadMetadataRepositoryJob: status=null"); //$NON-NLS-1$ //$NON-NLS-2$
 
                 return;
 
@@ -963,7 +961,7 @@ public final class ComfortPreferences
 
             String msg = (String) statusClass.getMethod("getMessage").invoke(status); //$NON-NLS-1$
 
-            ComfortDebug.log("install", "LoadMetadataRepositoryJob: ok=" + ok //$NON-NLS-1$ //$NON-NLS-2$
+            Global.log("install", "LoadMetadataRepositoryJob: ok=" + ok //$NON-NLS-1$ //$NON-NLS-2$
 
                 + " severity=" + severity + " msg=" + msg); //$NON-NLS-1$ //$NON-NLS-2$
 
@@ -973,7 +971,7 @@ public final class ComfortPreferences
 
         {
 
-            ComfortDebug.logError("install", "logLoadJobStatus", e); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.logError("install", "logLoadJobStatus", e); //$NON-NLS-1$ //$NON-NLS-2$
 
         }
 
@@ -999,7 +997,7 @@ public final class ComfortPreferences
 
             {
 
-                ComfortDebug.log("install", stage + ": repoCombo=null"); //$NON-NLS-1$ //$NON-NLS-2$
+                Global.log("install", stage + ": repoCombo=null"); //$NON-NLS-1$ //$NON-NLS-2$
 
                 return;
 
@@ -1009,7 +1007,7 @@ public final class ComfortPreferences
 
             int sel = (Integer) combo.getClass().getMethod("getSelectionIndex").invoke(combo); //$NON-NLS-1$
 
-            ComfortDebug.log("install", stage + ": combo text=\"" + text //$NON-NLS-1$ //$NON-NLS-2$
+            Global.log("install", stage + ": combo text=\"" + text //$NON-NLS-1$ //$NON-NLS-2$
 
                 + "\" selectionIndex=" + sel); //$NON-NLS-1$
 
@@ -1019,7 +1017,7 @@ public final class ComfortPreferences
 
         {
 
-            ComfortDebug.logError("install", "logInstallRepoCombo " + stage, e); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.logError("install", "logInstallRepoCombo " + stage, e); //$NON-NLS-1$ //$NON-NLS-2$
 
         }
 

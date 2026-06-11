@@ -62,7 +62,7 @@ public class DataCompositionSchemaEditorHook implements IStartup
     @Override
     public void earlyStartup()
     {
-        ComfortEarlyStartup.defer(() ->
+        Display.getDefault().asyncExec(() ->
         {
 //          Activator.getDefault().getInjector().injectMembers(this); // Слишком рано?
             for (IWorkbenchWindow w : PlatformUI.getWorkbench().getWorkbenchWindows())
@@ -243,7 +243,7 @@ public class DataCompositionSchemaEditorHook implements IStartup
         }
         catch (Exception e)
         {
-            e.printStackTrace();
+            Global.logError("DataCompositionSchema", "reload schema", e); //$NON-NLS-1$ //$NON-NLS-2$
         }
         return true;
     }

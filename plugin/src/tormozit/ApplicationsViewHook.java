@@ -126,7 +126,7 @@ public class ApplicationsViewHook implements IStartup
     @Override
     public void earlyStartup()
     {
-        ComfortEarlyStartup.defer(() ->
+        Display.getDefault().asyncExec(() ->
         {
 //          Activator.getDefault().getInjector().injectMembers(this); // Слишком рано?
             IWorkbench wb = PlatformUI.getWorkbench();

@@ -258,8 +258,7 @@ public final class IRApplication
             }
             catch (IOException e)
             {
-                // TODO Auto-generated catch block
-                e.printStackTrace();
+                Global.logError("IRApplication", "createTempDirectory", e); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }       
         String key = sessionKey(infobase);
@@ -308,7 +307,7 @@ public final class IRApplication
                 }
                 if (low.contains("0x800706be")) //$NON-NLS-1$
                 {
-                    showError("Ошибка инициации приложения. Подробности в Error Log."); //$NON-NLS-1$
+                    showError("Ошибка инициации приложения. Подробности в журнале регистрации."); //$NON-NLS-1$
                     sessions.remove(key); notifyListeners(); return;
                 }
                 if (attempt == 2)
@@ -602,10 +601,8 @@ public final class IRApplication
                     reason = " Поэтому запускаем установщик расширения."; //$NON-NLS-1$
                     if (!installerPath.isEmpty())
                     {
-                        try { 
-                            ComBridge.invoke(comDispatch, "ЗапуститьСистему", //$NON-NLS-1$
-                            "/Execute\"" + installerPath + "\""); } //$NON-NLS-1$
-                        catch (Exception ignored) {}
+                        ComBridge.invoke(comDispatch, "ЗапуститьСистему", //$NON-NLS-1$
+                        "/Execute\"" + installerPath + "\""); 
                     }
                 }
                 ToastNotification.show(toastTitle(), 

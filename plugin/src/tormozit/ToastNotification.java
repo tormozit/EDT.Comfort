@@ -90,7 +90,7 @@ public final class ToastNotification
         Display display = Display.getDefault();
         if (display == null || display.isDisposed()) return null;
         Shell[] holder = new Shell[1];
-        Global.log(title + ": "+ message);
+        logNotification(title, message);
 
         display.syncExec(() ->
         {
@@ -323,6 +323,26 @@ public final class ToastNotification
         {
             display.asyncExec(() -> { if (!shell.isDisposed()) shell.dispose(); });
         }
+    }
+
+    private static void logNotification(String title, String message)
+    {
+        String text = formatNotificationText(title, message);
+        if (!text.isBlank())
+            Global.log("Уведомление", text); //$NON-NLS-1$
+    }
+
+    private static String formatNotificationText(String title, String message)
+    {
+        boolean hasTitle = title != null && !title.isEmpty();
+        boolean hasMessage = message != null && !message.isEmpty();
+        if (hasTitle && hasMessage)
+            return title + ": " + message; //$NON-NLS-1$
+        if (hasTitle)
+            return title;
+        if (hasMessage)
+            return message;
+        return ""; //$NON-NLS-1$
     }
 
     // =======================================================================

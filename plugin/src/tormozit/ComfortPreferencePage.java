@@ -116,7 +116,7 @@ public class ComfortPreferencePage
     private void createLoggingGroup()
     {
         Group loggingGroup = new Group(getFieldEditorParent(), SWT.NONE);
-        loggingGroup.setText("Логирование");
+        loggingGroup.setText("Журнал");
         GridData groupData = new GridData(SWT.FILL, SWT.TOP, true, false);
         groupData.horizontalSpan = 2;
         groupData.verticalIndent = 8;
@@ -152,7 +152,7 @@ public class ComfortPreferencePage
         Composite checkboxHost = new Composite(logControls, SWT.NONE);
         BooleanFieldEditor debugLogField = new BooleanFieldEditor(
             ComfortSettings.PREF_DEBUG_LOG,
-            "Общее логирование",
+            "Вести журнал",
             checkboxHost);
         addField(debugLogField);
         setFieldTooltip(debugLogField,

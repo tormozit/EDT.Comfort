@@ -4,25 +4,24 @@ import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.ui.navigator.CommonViewer;
 
 /**
- * Логи хука «Информационные базы»: {@code Global.log} → {@code [InfobasesView] …}.
- * Отключить: {@code -Dtormozit.infobasesView.debug=false}.
+ * Логи хука «Информационные базы» через {@link Global}.
+ * Включение: Параметры → Комфорт → «Общее логирование».
  */
 public final class InfobasesViewDebug
 {
-    private static final boolean ENABLED =
-            !"false".equalsIgnoreCase(System.getProperty("tormozit.infobasesView.debug", "true")); //$NON-NLS-1$ //$NON-NLS-2$
+    private static final String TAG = "InfobasesView"; //$NON-NLS-1$
 
     private InfobasesViewDebug() {}
 
     public static boolean isEnabled()
     {
-        return ENABLED;
+        return Global.isLogEnabled();
     }
 
     public static void log(String msg)
     {
-        if (ENABLED)
-            Global.log("[InfobasesView] " + msg); //$NON-NLS-1$
+        if (Global.isLogEnabled())
+            Global.log(TAG, msg);
     }
 
     public static String safe(Object o)

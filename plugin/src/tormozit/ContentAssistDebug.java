@@ -16,12 +16,12 @@ public final class ContentAssistDebug
 
     public static boolean isEnabled()
     {
-        return ComfortDebug.isEnabled();
+        return Global.isLogEnabled();
     }
 
     public static void log(String msg)
     {
-        ComfortDebug.log("contentAssist", msg); //$NON-NLS-1$
+        Global.log("contentAssist", msg); //$NON-NLS-1$
     }
 
     public static void logValidate(boolean accepted, String filter, ICompletionProposal proposal, int offset)

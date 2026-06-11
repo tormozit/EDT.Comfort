@@ -4,25 +4,24 @@ import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.ui.navigator.CommonViewer;
 
 /**
- * Логи навигатора EDT: {@code Global.log} → {@code [NavigatorFilter] …}.
- * Отключить: {@code -Dtormozit.navigatorFilter.debug=false}.
+ * Логи навигатора EDT через {@link Global}.
+ * Включение: Параметры → Комфорт → «Общее логирование».
  */
 public final class NavigatorFilterDebug
 {
-    private static final boolean ENABLED =
-            !"false".equalsIgnoreCase(System.getProperty("tormozit.navigatorFilter.debug", "true")); //$NON-NLS-1$ //$NON-NLS-2$
+    private static final String TAG = "NavigatorFilter"; //$NON-NLS-1$
 
     private NavigatorFilterDebug() {}
 
     public static boolean isEnabled()
     {
-        return ENABLED;
+        return Global.isLogEnabled();
     }
 
     public static void log(String msg)
     {
-        if (ENABLED)
-            Global.log("[NavigatorFilter] " + msg); //$NON-NLS-1$
+        if (Global.isLogEnabled())
+            Global.log(TAG, msg);
     }
 
     public static String safe(Object o)

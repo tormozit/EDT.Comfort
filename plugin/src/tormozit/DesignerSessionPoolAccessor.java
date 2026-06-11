@@ -1,6 +1,5 @@
 package tormozit;
 
-
 import java.io.File;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
@@ -308,8 +307,7 @@ public final class DesignerSessionPoolAccessor
         }
         catch (InvalidSyntaxException e)
         {
-            // TODO Auto-generated catch block
-            e.printStackTrace();
+            Global.logError("DesignerSessionPool", "getAllServiceReferences", e); //$NON-NLS-1$ //$NON-NLS-2$
         }
         if (refs == null) return;
         Set<Object> visited = Collections.newSetFromMap(new IdentityHashMap<>());

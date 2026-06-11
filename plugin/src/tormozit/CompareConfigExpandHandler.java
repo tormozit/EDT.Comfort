@@ -77,7 +77,7 @@ public class CompareConfigExpandHandler extends AbstractHandler
         catch (Exception e)
         {
             // https://github.com/tormozit/EDT-Tormozit/issues/8
-            e.printStackTrace();
+            Global.logError("CompareConfig", "getChildren", e); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         for (Object child : children)
@@ -101,7 +101,7 @@ public class CompareConfigExpandHandler extends AbstractHandler
         }
         catch (Exception e)
         {
-            e.printStackTrace();
+            Global.logError("CompareConfig", "isChecked", e); //$NON-NLS-1$ //$NON-NLS-2$
         }
         boolean is = false;
         if (isChecked)
@@ -143,7 +143,7 @@ public class CompareConfigExpandHandler extends AbstractHandler
         }
         catch (Exception e)
         {
-            e.printStackTrace();
+            Global.logError("CompareConfig", "isCheckable", e); //$NON-NLS-1$ //$NON-NLS-2$
         }
         boolean is = true;
         if (isCheckable)
