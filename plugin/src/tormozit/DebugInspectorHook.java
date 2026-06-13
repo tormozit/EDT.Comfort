@@ -1,6 +1,5 @@
 package tormozit;
 
-import java.lang.reflect.Constructor;
 import java.net.URL;
 
 import org.eclipse.jface.resource.ImageDescriptor;
@@ -196,7 +195,6 @@ public final class DebugInspectorHook implements IStartup
             return false;
 
         InspectorTargets targets = resolveTargets(shell);
-        Object hoverManager = resolveHoverManagerForShell(shell, targets);
 
         InspectorPatchSession existing = (InspectorPatchSession) shell.getData(SESSION_KEY);
         final InspectorPatchSession session;
@@ -236,13 +234,13 @@ public final class DebugInspectorHook implements IStartup
         boolean headerOk = session.installHeaderControls(menuBar);
         session.scheduleHeaderMaintenance(menuBar);
 
-        if (headerOk && session.tryFinalizePatch(menuBar, attempt, hoverManager))
+        if (headerOk && session.tryFinalizePatch(menuBar, attempt))
             return true;
 
         if (headerOk)
         {
             DebugInspectorDebug.step("header", "defer finalize a=" + attempt); //$NON-NLS-1$ //$NON-NLS-2$
-            session.scheduleFinalizePatch(menuBar, attempt, hoverManager);
+            session.scheduleFinalizePatch(menuBar, attempt);
             return false;
         }
 
@@ -250,7 +248,6 @@ public final class DebugInspectorHook implements IStartup
             "miss a=" + attempt //$NON-NLS-1$
                 + " headerOk=" + headerOk //$NON-NLS-1$
                 + " installed=" + session.isHeaderInstalled() //$NON-NLS-1$
-                + " live=" + session.isHeaderLive() //$NON-NLS-1$
                 + " menu=" + describeToolBar(menuBar)); //$NON-NLS-1$
         return false;
     }
@@ -287,7 +284,6 @@ public final class DebugInspectorHook implements IStartup
     {
         HoverBinding binding = findHoverBindingForShell(shell);
         Object infoControl = binding != null ? binding.infoControl() : null;
-        Object hoverManager = binding != null ? binding.textHoverManager() : null;
         Object dialog = resolveElementDialog(shell, infoControl);
         if (!isElementDialog(dialog))
             dialog = findElementDialogByShellMatch(shell);
@@ -297,15 +293,7 @@ public final class DebugInspectorHook implements IStartup
             dialog = resolveHoverInspectProxy(shell, infoControl);
         if (!isPatchTarget(dialog) && isHoverInspectControl(infoControl) && hasInspectorTableMarker(shell))
             dialog = infoControl;
-        return new InspectorTargets(dialog, infoControl, hoverManager);
-    }
-
-    private static Object resolveHoverManagerForShell(Shell shell, InspectorTargets targets)
-    {
-        if (targets != null && targets.hoverManager != null)
-            return targets.hoverManager;
-        HoverBinding binding = findHoverBindingForShell(shell);
-        return binding != null ? binding.textHoverManager() : null;
+        return new InspectorTargets(dialog, infoControl);
     }
 
     /** Диалог с деревом и toolBar (DebugElementDialog / PendingAwareInspectPopupDialog). */
@@ -691,7 +679,7 @@ public final class DebugInspectorHook implements IStartup
         {
             Object replacerControl = Global.getField(replacer, "fInformationControl"); //$NON-NLS-1$
             if (infoControlShellEquals(replacerControl, shell))
-                return new HoverBinding(replacerControl, replacer, textHoverManager);
+                return new HoverBinding(replacerControl);
         }
 
         Object infoControl = Global.getField(textHoverManager, "fInformationControl"); //$NON-NLS-1$
@@ -712,16 +700,14 @@ public final class DebugInspectorHook implements IStartup
             return null;
 
         Object activeControl = infoControl;
-        Object closerOwner = textHoverManager;
         if (replacer != null)
         {
-            closerOwner = replacer;
             Object replacerControl = Global.getField(replacer, "fInformationControl"); //$NON-NLS-1$
             if (replacerControl != null)
                 activeControl = replacerControl;
         }
 
-        return new HoverBinding(activeControl, closerOwner, textHoverManager);
+        return new HoverBinding(activeControl);
     }
 
     private static IEditorPart findEditorForHoverShell(Shell shell)
@@ -757,11 +743,6 @@ public final class DebugInspectorHook implements IStartup
             }
         }
         return editor;
-    }
-
-    private static IBslStackFrame resolveInspectStackFrame(IEditorPart editor)
-    {
-        return BslInspectSupport.resolveInspectStackFrame(editor);
     }
 
     private static Object resolveHoverMonitoringManager(Object infoControl)
@@ -845,7 +826,7 @@ public final class DebugInspectorHook implements IStartup
         if (watch == null)
             watch = BslInspectSupport.newWatchExpression(exprText);
 
-        IBslStackFrame frame = resolveInspectStackFrame(editor);
+        IBslStackFrame frame = BslInspectSupport.resolveInspectStackFrame(editor);
         if (frame == null)
         {
             DebugInspectorDebug.problem("inspect: no suspended frame"); //$NON-NLS-1$
@@ -904,41 +885,6 @@ public final class DebugInspectorHook implements IStartup
         return null;
     }
 
-    private static Object findTextHoverManagerFromActiveEditor()
-    {
-        IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
-        if (window == null)
-            return null;
-        IWorkbenchPage page = window.getActivePage();
-        if (page == null)
-            return null;
-        return getTextHoverManagerFromEditor(page.getActiveEditor());
-    }
-
-    private static Object getTextHoverManagerFromEditor(IEditorPart editor)
-    {
-        if (editor instanceof BslXtextEditor bsl)
-            return getTextHoverManagerFromSourceViewer(bsl.getInternalSourceViewer());
-        if (editor instanceof DtGranularEditor<?> granular)
-        {
-            IFormPage activePage = granular.getActivePageInstance();
-            if (activePage instanceof DtGranularEditorXtextEditorPage<?> xtextPage)
-            {
-                IEditorPart embedded = xtextPage.getEmbeddedEditor();
-                if (embedded instanceof BslXtextEditor bsl)
-                    return getTextHoverManagerFromSourceViewer(bsl.getInternalSourceViewer());
-            }
-        }
-        return null;
-    }
-
-    private static Object getTextHoverManagerFromSourceViewer(ISourceViewer viewer)
-    {
-        if (!(viewer instanceof SourceViewer sourceViewer))
-            return null;
-        return Global.getField(sourceViewer, "fTextHoverManager"); //$NON-NLS-1$
-    }
-
     private static boolean infoControlShellEquals(Object infoControl, Shell shell)
     {
         if (infoControl == null)
@@ -984,9 +930,9 @@ public final class DebugInspectorHook implements IStartup
         return false;
     }
 
-    private record HoverBinding(Object infoControl, Object closerOwner, Object textHoverManager) {}
+    private record HoverBinding(Object infoControl) {}
 
-    private record InspectorTargets(Object dialog, Object infoControl, Object hoverManager) {}
+    private record InspectorTargets(Object dialog, Object infoControl) {}
 
     private static final class InspectorPatchSession
     {
@@ -1019,7 +965,7 @@ public final class DebugInspectorHook implements IStartup
             if (!isPatchTarget(dialog))
                 dialog = resolveElementDialog(shell, fresh.infoControl);
             if (isPatchTarget(dialog))
-                targets = new InspectorTargets(dialog, fresh.infoControl, fresh.hoverManager);
+                targets = new InspectorTargets(dialog, fresh.infoControl);
         }
 
         void refresh()
@@ -1056,7 +1002,7 @@ public final class DebugInspectorHook implements IStartup
                 schedulePatchAttempt(shell.getDisplay(), shell, 0);
                 return;
             }
-            if (!isHeaderLive())
+            if (!isHeaderInstalled())
             {
                 DebugInspectorDebug.step("hover", "patch aborted zombie shell=" + shell); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
@@ -1066,16 +1012,6 @@ public final class DebugInspectorHook implements IStartup
             applyInspectorModeForTargets();
             DebugInspectorDebug.step("refresh", "OK dialog=" + targets.dialog.getClass().getSimpleName() //$NON-NLS-1$ //$NON-NLS-2$
                 + " menu=" + describeToolBar(menuBar));
-        }
-
-        boolean isHoverSession()
-        {
-            return isHoverMode();
-        }
-
-        private void registerHoverShellAfterPatch()
-        {
-            // hover lifecycle — у EDT, без регистрации/retire
         }
 
         void requestClose()
@@ -1204,16 +1140,15 @@ public final class DebugInspectorHook implements IStartup
                     + " titleArea=" + describeTitleAreaGrid(titleArea)); //$NON-NLS-1$
         }
 
-        boolean tryFinalizePatch(ToolBar menuBar, int attempt, Object hoverManager)
+        boolean tryFinalizePatch(ToolBar menuBar, int attempt)
         {
             if (shell.isDisposed() || menuBar == null || menuBar.isDisposed())
                 return false;
-            if (!isHeaderLive())
+            if (!isHeaderInstalled())
                 return false;
             if (Boolean.TRUE.equals(shell.getData(PATCHED_KEY)))
                 return true;
             shell.setData(PATCHED_KEY, Boolean.TRUE);
-            registerHoverShellAfterPatch();
             applyInspectorModeForTargets();
             maintainHeaderControls(menuBar);
             if (!shell.isDisposed())
@@ -1230,7 +1165,7 @@ public final class DebugInspectorHook implements IStartup
             return true;
         }
 
-        void scheduleFinalizePatch(ToolBar menuBar, int attempt, Object hoverManager)
+        void scheduleFinalizePatch(ToolBar menuBar, int attempt)
         {
             if (shell.isDisposed())
                 return;
@@ -1246,7 +1181,7 @@ public final class DebugInspectorHook implements IStartup
                     InspectorTargets latest = resolveTargets(shell);
                     updateTargets(latest);
                     ToolBar bar = resolveToolBar(targets.dialog, shell);
-                    if (bar != null && !bar.isDisposed() && tryFinalizePatch(bar, attempt, hoverManager))
+                    if (bar != null && !bar.isDisposed() && tryFinalizePatch(bar, attempt))
                         return;
                     schedulePatchAttempt(display, shell, attempt + 1);
                 }
@@ -1261,11 +1196,6 @@ public final class DebugInspectorHook implements IStartup
                 return true;
             return leftInspectToolBar != null && !leftInspectToolBar.isDisposed()
                 && leftInspectToolBar.getItemCount() > 0;
-        }
-
-        boolean isHeaderLive()
-        {
-            return isHeaderInstalled();
         }
 
         boolean installHeaderControls(ToolBar menuBar)
@@ -1338,11 +1268,11 @@ public final class DebugInspectorHook implements IStartup
                 closeToolBar.setBackground(titleBg);
                 closeToolBar.setLayoutData(closeButtonGridData(true));
                 ToolItem closeItem = new ToolItem(closeToolBar, SWT.PUSH);
-                closeItem.setText("\u2715"); //$NON-NLS-1$
+                closeItem.setText("✕"); //$NON-NLS-1$
                 closeItem.setToolTipText(
                     "Закрыть окно инспектора" //$NON-NLS-1$
                         + Global.pluginSignForTooltip());
-                closeItem.addListener(SWT.Selection, e -> closeInspector());
+                closeItem.addListener(SWT.Selection, e -> requestClose());
 
                 layoutHoverHeader(titleArea, menuBar, menuBarLayout);
             }
@@ -1355,11 +1285,11 @@ public final class DebugInspectorHook implements IStartup
                 closeToolBar.setBackground(titleBg);
                 closeToolBar.setLayoutData(closeButtonGridData(false));
                 ToolItem closeItem = new ToolItem(closeToolBar, SWT.PUSH);
-                closeItem.setText("\u2715"); //$NON-NLS-1$
+                closeItem.setText("✕"); //$NON-NLS-1$
                 closeItem.setToolTipText(
                     "Закрыть окно инспектора" //$NON-NLS-1$
                         + Global.pluginSignForTooltip());
-                closeItem.addListener(SWT.Selection, e -> closeInspector());
+                closeItem.addListener(SWT.Selection, e -> requestClose());
 
                 if (menuBar.getParent() == titleArea)
                     closeToolBar.moveBelow(menuBar);
@@ -1508,10 +1438,28 @@ public final class DebugInspectorHook implements IStartup
 
         void applyInspectorModeForTargets()
         {
-            if (!isHoverMode())
-                applyInspectorMode(false);
+            if (isHoverMode() || shell.isDisposed())
+                return;
+            if (!isPatchTarget(targets.dialog))
+            {
+                Object dialog = resolveElementDialog(shell, targets.infoControl);
+                if (isPatchTarget(dialog))
+                    targets = new InspectorTargets(dialog, targets.infoControl);
+            }
+            if (!isPatchTarget(targets.dialog))
+            {
+                DebugInspectorDebug.step("inspector", "skip dialog=null"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            if (isElementDialog(targets.dialog))
+            {
+                Global.setField(targets.dialog, "listenToDeactivate", Boolean.FALSE); //$NON-NLS-1$
+                Global.setField(targets.dialog, "listenToParentDeactivate", Boolean.FALSE); //$NON-NLS-1$
+                installKeepDeactivateOffListener();
+            }
+            restoreShellOnTop(true);
+            DebugInspectorDebug.step("standalone", "close OFF"); //$NON-NLS-1$ //$NON-NLS-2$
         }
-
 
         private void configureInspectToolItem(ToolItem inspectItem)
         {
@@ -1555,46 +1503,6 @@ public final class DebugInspectorHook implements IStartup
         private boolean isHoverMode()
         {
             return isHoverInspectControl(targets.dialog) || targets.infoControl != null;
-        }
-
-
-        void applyInspectorMode(boolean enabled)
-        {
-            if (shell.isDisposed())
-                return;
-            if (!isPatchTarget(targets.dialog))
-            {
-                Object dialog = resolveElementDialog(shell, targets.infoControl);
-                if (isPatchTarget(dialog))
-                    targets = new InspectorTargets(dialog, targets.infoControl, targets.hoverManager);
-            }
-            if (!isPatchTarget(targets.dialog))
-            {
-                DebugInspectorDebug.step("inspector", "skip dialog=null enabled=" + enabled); //$NON-NLS-1$ //$NON-NLS-2$
-                return;
-            }
-            applyStandaloneAutoClose(enabled);
-        }
-
-        private void applyStandaloneAutoClose(boolean autoClose)
-        {
-            if (autoClose)
-            {
-                removeKeepDeactivateOffListener();
-                restoreShellOnTop(false);
-                DebugInspectorDebug.step("standalone", "close ON"); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            else
-            {
-                if (isElementDialog(targets.dialog))
-                {
-                    Global.setField(targets.dialog, "listenToDeactivate", Boolean.FALSE); //$NON-NLS-1$
-                    Global.setField(targets.dialog, "listenToParentDeactivate", Boolean.FALSE); //$NON-NLS-1$
-                    installKeepDeactivateOffListener();
-                }
-                restoreShellOnTop(true);
-                DebugInspectorDebug.step("standalone", "close OFF"); //$NON-NLS-1$ //$NON-NLS-2$
-            }
         }
 
         private void installKeepDeactivateOffListener()
@@ -1711,11 +1619,6 @@ public final class DebugInspectorHook implements IStartup
             if (active != null && !active.isDisposed() && active != shell)
                 return active;
             return null;
-        }
-
-        private void closeInspector()
-        {
-            requestClose();
         }
 
         void dispose()

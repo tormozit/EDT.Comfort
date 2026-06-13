@@ -67,18 +67,6 @@ public final class PropertySheetDebug
         valueControl(msg);
     }
 
-    /** Синхронизация «Новая» ↔ «Старая». */
-    static void sync(String msg)
-    {
-        if (Global.isLogEnabled())
-            Global.log(TAG, "[sync] " + msg); //$NON-NLS-1$
-    }
-
-    static void syncVerbose(String msg)
-    {
-        sync(msg);
-    }
-
     static void scan(String msg)
     {
         log("[scan] " + msg); //$NON-NLS-1$
