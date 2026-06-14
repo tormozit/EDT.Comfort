@@ -1,6 +1,9 @@
 package tormozit;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.Collection;
 import java.util.Locale;
 import java.util.Optional;
@@ -33,8 +36,38 @@ import com.e1c.g5.dt.applications.IApplication;
 public final class DebugSessionHelper
 {
     private static final String THICK_CLIENT_MARKER = "Толстый клиент"; //$NON-NLS-1$
+    private static final Path AGENT_LOG = Path.of("C:/VC/EDT.Comfort/debug-28d3bb.log"); //$NON-NLS-1$
 
     private DebugSessionHelper() {}
+
+    static void agentLog(String location, String message, String hypothesisId, String dataJson)
+    {
+        // #region agent log
+        try
+        {
+            String line = "{\"sessionId\":\"28d3bb\",\"timestamp\":" + System.currentTimeMillis() //$NON-NLS-1$
+                + ",\"location\":\"" + jsonEscape(location) + "\"" //$NON-NLS-1$
+                + ",\"message\":\"" + jsonEscape(message) + "\"" //$NON-NLS-1$
+                + ",\"hypothesisId\":\"" + hypothesisId + "\"" //$NON-NLS-1$
+                + ",\"runId\":\"pre-fix\"" //$NON-NLS-1$
+                + (dataJson != null ? ",\"data\":" + dataJson : "") //$NON-NLS-1$
+                + "}\n"; //$NON-NLS-1$
+            Files.writeString(AGENT_LOG, line, StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        }
+        catch (Exception ignored)
+        {
+            // debug instrumentation
+        }
+        // #endregion
+    }
+
+    private static String jsonEscape(String text)
+    {
+        if (text == null)
+            return ""; //$NON-NLS-1$
+        return text.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+    }
 
     public static final class SuspendedContext
     {
@@ -90,6 +123,10 @@ public final class DebugSessionHelper
 
     public static EvalResult evaluateExpression(IBslStackFrame frame, String expression, long timeoutMs)
     {
+        agentLog("DebugSessionHelper.java:evaluateExpression:entry", "evaluate requested", "D", //$NON-NLS-1$
+            "{\"frameNull\":" + (frame == null) //$NON-NLS-1$
+                + ",\"exprLen\":" + (expression != null ? expression.length() : 0) + "}"); //$NON-NLS-1$
+
         if (frame == null || expression == null || expression.isBlank())
             return new EvalResult(null, null, "empty expression"); //$NON-NLS-1$
 
@@ -97,6 +134,32 @@ public final class DebugSessionHelper
         debugTarget = frame.getDebugTarget();
         if (!(debugTarget instanceof IRuntimeDebugClientTarget target))
             return new EvalResult(null, null, "no runtime debug target"); //$NON-NLS-1$
+
+        boolean threadSuspended = false;
+        boolean targetListed = false;
+        try
+        {
+            for (IRuntimeDebugTargetThread thread : target.getThreads())
+            {
+                if (thread != null && thread.isSuspended())
+                {
+                    threadSuspended = true;
+                    break;
+                }
+            }
+            IRuntimeDebugClientTargetManager manager =
+                Global.getOsgiService(IRuntimeDebugClientTargetManager.class);
+            if (manager != null && manager.listDebugTargets() != null)
+                targetListed = manager.listDebugTargets().contains(target);
+        }
+        catch (Exception ignored)
+        {
+            // diagnostics only
+        }
+        agentLog("DebugSessionHelper.java:evaluateExpression:preEngine", "before getEvaluationEngine", "B", //$NON-NLS-1$
+            "{\"threadSuspended\":" + threadSuspended //$NON-NLS-1$
+                + ",\"targetListed\":" + targetListed //$NON-NLS-1$
+                + ",\"target\":\"" + jsonEscape(String.valueOf(target)) + "\"}"); //$NON-NLS-1$
 
         CountDownLatch latch = new CountDownLatch(1);
         AtomicReference<EvalResult> holder = new AtomicReference<>(new EvalResult(null, null, "timeout")); //$NON-NLS-1$
@@ -106,10 +169,15 @@ public final class DebugSessionHelper
             try
             {
                 holder.set(extractResult(result));
+                agentLog("DebugSessionHelper.java:evaluateExpression:listener", "evaluation result", "E", //$NON-NLS-1$
+                    "{\"hasValue\":" + holder.get().hasValue() //$NON-NLS-1$
+                        + ",\"error\":\"" + jsonEscape(holder.get().error) + "\"}"); //$NON-NLS-1$
             }
             catch (DebugException e)
             {
                 holder.set(new EvalResult(null, null, e.getMessage()));
+                agentLog("DebugSessionHelper.java:evaluateExpression:listener", "evaluation DebugException", "E", //$NON-NLS-1$
+                    "{\"error\":\"" + jsonEscape(e.getMessage()) + "\"}"); //$NON-NLS-1$
             }
             finally
             {
@@ -127,16 +195,30 @@ public final class DebugSessionHelper
                 .setEvaluationListener(listener)
                 .build();
             target.getEvaluationEngine().evaluateExpression(request);
+            agentLog("DebugSessionHelper.java:evaluateExpression:submitted", "evaluateExpression submitted", "E", //$NON-NLS-1$
+                "{\"timeoutMs\":" + timeoutMs + "}"); //$NON-NLS-1$
         }
         catch (DebugException e)
         {
+            agentLog("DebugSessionHelper.java:evaluateExpression:submitFail", "evaluateExpression DebugException", "B", //$NON-NLS-1$
+                "{\"error\":\"" + jsonEscape(e.getMessage()) + "\"}"); //$NON-NLS-1$
+            return new EvalResult(null, null, e.getMessage());
+        }
+        catch (RuntimeException e)
+        {
+            agentLog("DebugSessionHelper.java:evaluateExpression:submitFail", "evaluateExpression RuntimeException", "B", //$NON-NLS-1$
+                "{\"error\":\"" + jsonEscape(e.getMessage()) + "\"}"); //$NON-NLS-1$
             return new EvalResult(null, null, e.getMessage());
         }
 
         try
         {
             if (!latch.await(timeoutMs, TimeUnit.MILLISECONDS))
+            {
+                agentLog("DebugSessionHelper.java:evaluateExpression:timeout", "latch timeout", "E", //$NON-NLS-1$
+                    "{\"timeoutMs\":" + timeoutMs + "}"); //$NON-NLS-1$
                 return new EvalResult(null, null, "timeout"); //$NON-NLS-1$
+            }
         }
         catch (InterruptedException e)
         {

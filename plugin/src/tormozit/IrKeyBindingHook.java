@@ -68,6 +68,7 @@ public final class IrKeyBindingHook implements org.eclipse.ui.IStartup
     private static boolean applyingSuppress;
 
     private static Boolean lastPresent;
+    private static String lastLoggedProject;
     private static Runnable pendingSyncTask;
 
     /**
@@ -100,6 +101,7 @@ public final class IrKeyBindingHook implements org.eclipse.ui.IStartup
     private static void onIrApplicationChanged()
     {
         lastPresent = null;
+        lastLoggedProject = null;
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
@@ -232,11 +234,13 @@ public final class IrKeyBindingHook implements org.eclipse.ui.IStartup
 
         PriorityGlobalKeyBindingHook.syncOverrides();
 
-        if (!Boolean.valueOf(present).equals(lastPresent) || Global.isLogEnabled())
+        IDtProject dtProject = resolveActiveDtProject();
+        IProject project = dtProject != null ? dtProject.getWorkspaceProject() : null;
+        String projectName = project != null ? project.getName() : "—"; //$NON-NLS-1$
+        boolean presentChanged = !Boolean.valueOf(present).equals(lastPresent);
+        boolean projectChanged = !projectName.equals(lastLoggedProject);
+        if (presentChanged || projectChanged)
         {
-            IDtProject dtProject = resolveActiveDtProject();
-            IProject project = dtProject != null ? dtProject.getWorkspaceProject() : null;
-            String projectName = project != null ? project.getName() : "—"; //$NON-NLS-1$
             IrKeyBindingDebug.step("sync", //$NON-NLS-1$
                     "present=" + present //$NON-NLS-1$
                         + " project=" + projectName //$NON-NLS-1$
@@ -247,10 +251,10 @@ public final class IrKeyBindingHook implements org.eclipse.ui.IStartup
                                 + " activeBindings=" + countActiveIrBindings() //$NON-NLS-1$
                             : "")); //$NON-NLS-1$
             lastPresent = present;
+            lastLoggedProject = projectName;
+            if (present)
+                IrKeyBindingDebug.logIrMirrorSummary();
         }
-
-        if (present)
-            IrKeyBindingDebug.logIrMirrorSummary();
     }
 
     private static boolean shouldIrBindingsBePresent()

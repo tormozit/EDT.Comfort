@@ -91,8 +91,8 @@ public class RecentPlacesTracker implements IStartup
             if (ref == null || ref.isBlank()) return;
             String ownName = lastSegment(ref);
             String projectName = resolveProjectName(page, null);
-            RecentPlaces.getInstance().add(ref, ref, ref, ownName, projectName);
-            Global.log("RecentPlaces add (MD): " + ref); //$NON-NLS-1$
+            if (RecentPlaces.getInstance().add(ref, ref, ref, ownName, projectName))
+                Global.log("RecentPlaces add (MD): " + ref); //$NON-NLS-1$
         }
     }
 
@@ -199,8 +199,8 @@ public class RecentPlacesTracker implements IStartup
         String navRef = GetRef.buildExtendedRefForMethod(bslEditor, methodName);
         String key = modulePath + ": " + methodName; //$NON-NLS-1$
         String projectName = resolveProjectName(null, file);
-        RecentPlaces.getInstance().add(key, navRef != null ? navRef : key, key, methodName, projectName);
-        Global.log("RecentPlaces add (Outline): " + key); //$NON-NLS-1$
+        if (RecentPlaces.getInstance().add(key, navRef != null ? navRef : key, key, methodName, projectName))
+            Global.log("RecentPlaces add (Outline): " + key); //$NON-NLS-1$
     }
 
     private static void recordBslPlace(BslXtextEditor bslEditor)
@@ -248,9 +248,9 @@ public class RecentPlacesTracker implements IStartup
             navRef      = moduleRef.toRefPrefix();
         }
 
-        RecentPlaces.getInstance().add(key, navRef != null ? navRef : key,
-                                        displayName, ownName, resolveProjectName(null, file));
-        Global.log("RecentPlaces add (BSL): " + displayName); //$NON-NLS-1$
+        if (RecentPlaces.getInstance().add(key, navRef != null ? navRef : key,
+                                        displayName, ownName, resolveProjectName(null, file)))
+            Global.log("RecentPlaces add (BSL): " + displayName); //$NON-NLS-1$
     }
 
     private static String resolveProjectName(IWorkbenchPage page,

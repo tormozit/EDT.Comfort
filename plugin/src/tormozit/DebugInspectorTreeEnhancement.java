@@ -48,6 +48,7 @@ final class DebugInspectorTreeEnhancement
     private int activeColumn;
     private String findText = ""; //$NON-NLS-1$
     private int findGeneration;
+    private int pendingFocusGeneration;
 
     private Listener eraseItemListener;
     private Listener paintItemListener;
@@ -723,5 +724,93 @@ final class DebugInspectorTreeEnhancement
             keyFilter = null;
         }
         findGeneration++;
+        pendingFocusGeneration++;
+    }
+
+    void schedulePendingPropertyFocus()
+    {
+        String propertyName = InspectorPendingFocus.take();
+        if (propertyName == null || propertyName.isBlank())
+            return;
+
+        final int generation = ++pendingFocusGeneration;
+        long sessionStart = DebugValuesDebug.begin();
+        int[] delays = { 0, 100, 300, 600, 1200 };
+        Display display = tree.getDisplay();
+        for (int attempt = 0; attempt < delays.length; attempt++)
+        {
+            final int delay = delays[attempt];
+            final int attemptNo = attempt;
+            display.timerExec(delay, () ->
+            {
+                if (!isAttached() || generation != pendingFocusGeneration)
+                    return;
+
+                long attemptStart = DebugValuesDebug.begin();
+                TreeItem[] roots = tree.getItems();
+                if (roots.length == 0)
+                {
+                    DebugValuesDebug.step("pendingFocus", "attempt=" + attemptNo + " no roots"); //$NON-NLS-1$ //$NON-NLS-2$
+                    if (attemptNo == delays.length - 1)
+                        DebugValuesDebug.perfSlow("pendingFocus", sessionStart, "fail no roots"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
+
+                TreeItem match = findChildProperty(roots[0], propertyName);
+                if (match == null)
+                {
+                    DebugValuesDebug.step("pendingFocus", "attempt=" + attemptNo //$NON-NLS-1$
+                        + " miss children=" + roots[0].getItemCount()); //$NON-NLS-1$
+                    if (attemptNo == delays.length - 1)
+                        DebugValuesDebug.perfSlow("pendingFocus", sessionStart, //$NON-NLS-1$
+                            "fail property=" + DebugValuesDebug.quote(propertyName)); //$NON-NLS-1$
+                    return;
+                }
+
+                pendingFocusGeneration++;
+                int valueColumn = resolveInspectorValueColumn();
+                expandTo(match);
+                selectCell(match, valueColumn);
+                DebugValuesDebug.perf("pendingFocus.attempt", attemptStart, //$NON-NLS-1$
+                    "ok attempt=" + attemptNo + " col=" + valueColumn); //$NON-NLS-1$ //$NON-NLS-2$
+                DebugValuesDebug.perfSlow("pendingFocus", sessionStart, //$NON-NLS-1$
+                    "ok property=" + DebugValuesDebug.quote(propertyName)); //$NON-NLS-1$
+            });
+        }
+    }
+
+    private TreeItem findChildProperty(TreeItem root, String propertyName)
+    {
+        if (root == null || root.isDisposed() || propertyName == null || propertyName.isBlank())
+            return null;
+        String needle = propertyName.trim();
+        for (TreeItem child : root.getItems())
+        {
+            if (child == null || child.isDisposed())
+                continue;
+            String name = child.getText(0);
+            if (name != null && name.trim().equalsIgnoreCase(needle))
+                return child;
+        }
+        return null;
+    }
+
+    private int resolveInspectorValueColumn()
+    {
+        int columns = tree.getColumnCount();
+        for (int i = 0; i < columns; i++)
+        {
+            org.eclipse.swt.widgets.TreeColumn column = tree.getColumn(i);
+            if (column == null || column.isDisposed())
+                continue;
+            String text = column.getText();
+            if (text == null)
+                continue;
+            String header = text.trim();
+            if ("Значение".equalsIgnoreCase(header) //$NON-NLS-1$
+                || "Value".equalsIgnoreCase(header)) //$NON-NLS-1$
+                return i;
+        }
+        return columns > 1 ? 1 : 0;
     }
 }

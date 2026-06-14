@@ -7,6 +7,7 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 import org.eclipse.core.runtime.preferences.InstanceScope;
 import org.eclipse.ui.preferences.ScopedPreferenceStore;
@@ -143,13 +144,27 @@ public final class RecentPlaces
      * @param displayName строка для отображения
      * @param ownName     собственное имя для фильтрации
      * @param projectName имя проекта EDT
+     * @return {@code true}, если после добавления голова списка (самое свежее место) сменила ключ
      */
-    public synchronized void add(String key, String navRef,
+    public synchronized boolean add(String key, String navRef,
                                   String displayName, String ownName, String projectName)
     {
-        if (key == null || key.isBlank()) return;
+        if (key == null || key.isBlank()) return false;
+        String prevHeadKey = headKey();
         map.put(key, new Entry(key, navRef, displayName, ownName, projectName, LocalDateTime.now()));
         save();
+        return !Objects.equals(key, prevHeadKey);
+    }
+
+    /** Ключ самой свежей записи (голова списка «новейшие первыми»). */
+    private String headKey()
+    {
+        if (map.isEmpty())
+            return null;
+        String head = null;
+        for (String k : map.keySet())
+            head = k;
+        return head;
     }
 
     /** Возвращает список записей «новейшие первыми». */

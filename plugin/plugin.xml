@@ -28,6 +28,7 @@
     <startup class="tormozit.ChoiceParametersHook"/>
     <startup class="tormozit.PredefinedSelectionDialogHook"/>
     <startup class="tormozit.DebugViewsMenuHook"/>
+    <startup class="tormozit.DebugValuesInspectHook"/>
     <startup class="tormozit.DebugInspectorHook"/>
     <startup class="tormozit.InfobaseSyncQuestionDialogHook"/>
   </extension>

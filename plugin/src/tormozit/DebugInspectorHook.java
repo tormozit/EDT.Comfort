@@ -1,8 +1,5 @@
 package tormozit;
 
-import java.net.URL;
-
-import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.swt.SWT;
@@ -63,8 +60,6 @@ public final class DebugInspectorHook implements IStartup
         "com._1c.g5.v8.dt.internal.debug.ui.hover.DebugElementInformationControlCreator$ExpressionInformationControl$DebugExpressionInformationControl"; //$NON-NLS-1$
     private static final String CLASS_DEBUG_ELEMENT_DIALOG =
         "com._1c.g5.v8.dt.internal.debug.ui.hover.DebugElementDialog"; //$NON-NLS-1$
-    private static final String BUNDLE_DEBUG_UI = "com._1c.g5.v8.dt.debug.ui"; //$NON-NLS-1$
-    private static final String ICON_INSPECT_EDT = "icons/etool16/insp_sbook.gif"; //$NON-NLS-1$
     private static final String COLUMN_MARKER_RU = "Фактический тип"; //$NON-NLS-1$
     private static final String COLUMN_MARKER_EN = "Actual type"; //$NON-NLS-1$
     /** Подъём блока кнопок в hover-шапке. */
@@ -1133,11 +1128,6 @@ public final class DebugInspectorHook implements IStartup
             if (headerRow instanceof Composite row && !row.isDisposed()
                 && row != titleArea && row.getLayout() instanceof GridLayout)
                 row.layout(true, true);
-
-            DebugInspectorDebug.step("header-layout", //$NON-NLS-1$
-                "left=" + describeToolBar(leftInspectToolBar) //$NON-NLS-1$
-                    + " menu=" + describeToolBar(menuBar) //$NON-NLS-1$
-                    + " titleArea=" + describeTitleAreaGrid(titleArea)); //$NON-NLS-1$
         }
 
         boolean tryFinalizePatch(ToolBar menuBar, int attempt)
@@ -1252,7 +1242,7 @@ public final class DebugInspectorHook implements IStartup
                 leftInspectToolBar.setBackground(titleBg);
                 leftInspectToolBar.setLayoutData(leftInspectToolBarGridData());
                 ToolItem inspectItem = new ToolItem(leftInspectToolBar, SWT.PUSH);
-                Image inspectImage = loadInspectCommandImage();
+                Image inspectImage = BslInspectSupport.loadInspectCommandImage();
                 if (inspectImage != null)
                 {
                     inspectItem.setImage(inspectImage);
@@ -1321,6 +1311,8 @@ public final class DebugInspectorHook implements IStartup
             if (treeEnhancement == null)
                 DebugInspectorDebug.step("tree", "install failed dialog=" //$NON-NLS-1$ //$NON-NLS-2$
                     + DebugInspectorDebug.cn(targets.dialog));
+            else
+                treeEnhancement.schedulePendingPropertyFocus();
         }
 
         private static void ensureMenuBarInParent(
@@ -1467,7 +1459,7 @@ public final class DebugInspectorHook implements IStartup
                 return;
             if (inspectItem.getImage() == null)
             {
-                Image img = loadInspectCommandImage();
+                Image img = BslInspectSupport.loadInspectCommandImage();
                 if (img != null)
                 {
                     inspectItem.setImage(img);
@@ -1772,24 +1764,6 @@ public final class DebugInspectorHook implements IStartup
         if (closeToolBar == null || closeToolBar.isDisposed())
             return;
         closeToolBar.setLayoutData(closeButtonGridData(menuBar, hover));
-    }
-
-    private static Image loadInspectCommandImage()
-    {
-        try
-        {
-            org.osgi.framework.Bundle bundle = Platform.getBundle(BUNDLE_DEBUG_UI);
-            if (bundle == null)
-                return null;
-            URL url = bundle.getEntry(ICON_INSPECT_EDT);
-            if (url != null)
-                return ImageDescriptor.createFromURL(url).createImage(false);
-        }
-        catch (RuntimeException ignored)
-        {
-            // иконка опциональна
-        }
-        return null;
     }
 
     private static String describeToolBar(ToolBar bar)

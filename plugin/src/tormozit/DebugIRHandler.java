@@ -98,7 +98,7 @@ public final class DebugIRHandler
                 }
                 String expression = exprText.startsWith(textCall) ? exprText : buildDebugExpression(textCall, exprText, moduleRef);
                 IBslStackFrame frame = DebugSessionHelper.findSuspendedStackFrame(wsProject);
-                runDebugEvaluation(frame, expression, wsProject, irSession);
+                runDebugEvaluation("debugObject", frame, expression, wsProject, irSession); //$NON-NLS-1$
             }
             catch (Exception e)
             {
@@ -143,11 +143,20 @@ public final class DebugIRHandler
 
         String evalExpr = "ирОбщий.ОтлКс(" + expr + ")"; //$NON-NLS-1$ //$NON-NLS-2$
         DebugViewsDebug.log("debugVariable evalExpr=" + evalExpr); //$NON-NLS-1$
+        DebugSessionHelper.agentLog("DebugIRHandler.java:debugVariable:submit", "queued on IR executor", "A", //$NON-NLS-1$
+            "{\"suspendedNow\":" + DebugSessionHelper.isDebugSuspended(project) //$NON-NLS-1$
+                + ",\"frameAtSubmit\":\"" + System.identityHashCode(frame) + "\"}"); //$NON-NLS-1$
         irSession.executor.submit(() ->
         {
             try
             {
-                runDebugEvaluation(frame, evalExpr, project, irSession);
+                IBslStackFrame currentFrame = DebugSessionHelper.findSuspendedStackFrame(project);
+                DebugSessionHelper.agentLog("DebugIRHandler.java:debugVariable:run", "executor task start", "A", //$NON-NLS-1$
+                    "{\"suspendedNow\":" + DebugSessionHelper.isDebugSuspended(project) //$NON-NLS-1$
+                        + ",\"frameAtSubmit\":\"" + System.identityHashCode(frame) //$NON-NLS-1$
+                        + "\",\"frameAtRun\":\"" + System.identityHashCode(currentFrame) //$NON-NLS-1$
+                        + "\",\"sameFrame\":" + (frame == currentFrame) + "}"); //$NON-NLS-1$
+                runDebugEvaluation("debugVariable", frame, evalExpr, project, irSession); //$NON-NLS-1$
             }
             catch (Exception e)
             {
@@ -173,10 +182,19 @@ public final class DebugIRHandler
         if (exprText == null || exprText.isBlank())
             return;
 
+        DebugSessionHelper.agentLog("DebugIRHandler.java:debugWatchExpression:submit", "queued on IR executor", "A", //$NON-NLS-1$
+            "{\"suspendedNow\":" + DebugSessionHelper.isDebugSuspended(project) //$NON-NLS-1$
+                + ",\"frameAtSubmit\":\"" + System.identityHashCode(frame) + "\"}"); //$NON-NLS-1$
         irSession.executor.submit(() ->
         {
             try
             {
+                IBslStackFrame currentFrame = DebugSessionHelper.findSuspendedStackFrame(project);
+                DebugSessionHelper.agentLog("DebugIRHandler.java:debugWatchExpression:run", "executor task start", "A", //$NON-NLS-1$
+                    "{\"suspendedNow\":" + DebugSessionHelper.isDebugSuspended(project) //$NON-NLS-1$
+                        + ",\"frameAtSubmit\":\"" + System.identityHashCode(frame) //$NON-NLS-1$
+                        + "\",\"frameAtRun\":\"" + System.identityHashCode(currentFrame) //$NON-NLS-1$
+                        + "\",\"sameFrame\":" + (frame == currentFrame) + "}"); //$NON-NLS-1$
                 if (isHierarchicalLogicalExpression(exprText))
                 {
                     handleHierarchicalExpression(irSession, project, exprText, ""); //$NON-NLS-1$
@@ -204,7 +222,7 @@ public final class DebugIRHandler
                 String expression = exprText.startsWith(textCall)
                     ? exprText
                     : buildDebugExpression(textCall, exprText, moduleRef);
-                runDebugEvaluation(frame, expression, project, irSession);
+                runDebugEvaluation("debugWatchExpression", frame, expression, project, irSession); //$NON-NLS-1$
             }
             catch (Exception e)
             {
@@ -215,13 +233,27 @@ public final class DebugIRHandler
     }
 
     private static void runDebugEvaluation(
-        IBslStackFrame frame, String expression, IProject wsProject, IRSession irSession) throws Exception
+        String source, IBslStackFrame frame, String expression, IProject wsProject, IRSession irSession) throws Exception
     {
+        DebugSessionHelper.agentLog("DebugIRHandler.java:runDebugEvaluation", "enter", "C", //$NON-NLS-1$
+            "{\"source\":\"" + source //$NON-NLS-1$
+                + "\",\"suspendedNow\":" + DebugSessionHelper.isDebugSuspended(wsProject) //$NON-NLS-1$
+                + ",\"frameNull\":" + (frame == null) //$NON-NLS-1$
+                + ",\"exprLen\":" + (expression != null ? expression.length() : 0) + "}"); //$NON-NLS-1$
         boolean isThickClient = DebugSessionHelper.isThickClientDebug(wsProject);
         long thickPid = 0;
         if (isThickClient)
+        {
+            DebugSessionHelper.agentLog("DebugIRHandler.java:runDebugEvaluation", "thick client PID eval", "C", //$NON-NLS-1$
+                "{\"suspendedNow\":" + DebugSessionHelper.isDebugSuspended(wsProject) + "}"); //$NON-NLS-1$
             thickPid = evaluateThickClientOsPid(wsProject);
+        }
         DebugSessionHelper.EvalResult evalResult = evaluateOnUiThread(frame, expression);
+        DebugSessionHelper.agentLog("DebugIRHandler.java:runDebugEvaluation", "main eval done", "C", //$NON-NLS-1$
+            "{\"source\":\"" + source //$NON-NLS-1$
+                + "\",\"hasValue\":" + (evalResult != null && evalResult.hasValue()) //$NON-NLS-1$
+                + ",\"error\":\"" + (evalResult != null && evalResult.error != null ? evalResult.error : "") //$NON-NLS-1$
+                + "\",\"suspendedNow\":" + DebugSessionHelper.isDebugSuspended(wsProject) + "}"); //$NON-NLS-1$
         processEvalResult(irSession, evalResult, thickPid);
     }
 

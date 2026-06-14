@@ -526,12 +526,6 @@ public class PriorityGlobalKeyBindingHook implements IStartup
             if (existing != null)
             {
                 bindingServiceInternal.addBinding(existing);
-                if (Global.isLogEnabled())
-                {
-                    Global.log(TAG, "reactivated FormatAction ctx=" + contextId //$NON-NLS-1$
-                            + " scheme=" + DESIGNER_SCHEME_ID //$NON-NLS-1$
-                            + " seq=" + designerFormatSequence.format()); //$NON-NLS-1$
-                }
                 continue;
             }
 
@@ -545,13 +539,6 @@ public class PriorityGlobalKeyBindingHook implements IStartup
                     null,
                     Binding.SYSTEM);
             bindingServiceInternal.addBinding(binding);
-
-            if (Global.isLogEnabled())
-            {
-                Global.log(TAG, "restored FormatAction ctx=" + contextId //$NON-NLS-1$
-                        + " scheme=" + DESIGNER_SCHEME_ID //$NON-NLS-1$
-                        + " seq=" + designerFormatSequence.format()); //$NON-NLS-1$
-            }
         }
     }
 
