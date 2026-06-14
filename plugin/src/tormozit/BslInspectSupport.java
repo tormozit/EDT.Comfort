@@ -56,6 +56,7 @@ public final class BslInspectSupport
             Object dialog = ctor.newInstance(parent, anchor, CMD_INSPECT_EDT, watch, monitoringManager);
             watch.setExpressionContext(frame);
             Global.invoke(dialog, "open"); //$NON-NLS-1$
+            registerInspectShell(dialog, watch);
         }
         catch (Exception e)
         {
@@ -120,6 +121,33 @@ public final class BslInspectSupport
             + " selectionPath=" + DebugValuesDebug.quote(fromSelectionPath) //$NON-NLS-1$
             + " delegateInput=" + DebugValuesDebug.quote(fromDelegateInput)); //$NON-NLS-1$
         return ""; //$NON-NLS-1$
+    }
+
+    /**
+     * Watch-выражение для переменной без контекста ValuesView (окно «Коллекция»).
+     */
+    static String resolveVariableInspectExpression(IBslVariable variable)
+    {
+        String toWatch = safeToWatchExpression(variable);
+        if (!toWatch.isBlank())
+            return toWatch;
+        return pathTextFromVariable(variable);
+    }
+
+    private static void registerInspectShell(Object dialog, IWatchExpression watch)
+    {
+        if (dialog == null || watch == null)
+            return;
+        try
+        {
+            Object shellObj = Global.invoke(dialog, "getShell"); //$NON-NLS-1$
+            if (shellObj instanceof Shell shell && !shell.isDisposed())
+                InspectorRegistry.register(watchExpressionText(watch), shell);
+        }
+        catch (Exception ignored)
+        {
+            // регистрация опциональна
+        }
     }
 
     private static String pathTextFromVariable(IBslVariable variable)

@@ -539,4 +539,33 @@ public final class Global
     {
         return " (Комфорт)";
     }
+
+    /** Заголовок кастомного окна/диалога плагина (не дублирует суффикс). */
+    public static String withPluginWindowTitle(String base)
+    {
+        return withPluginWindowTitle(base, null);
+    }
+
+    /**
+     * Заголовок с суффиксом плагина у {@code basePrefix}, далее — {@code titleSuffix}.
+     * Пример: {@code ("Коллекция", "Массив")} → «Коллекция (Комфорт) Массив».
+     */
+    public static String withPluginWindowTitle(String basePrefix, String titleSuffix)
+    {
+        if (basePrefix == null || basePrefix.isBlank())
+            return basePrefix;
+        String sign = pluginSignForTooltip();
+        String prefix = basePrefix.trim();
+        if (prefix.endsWith(sign))
+        {
+            if (titleSuffix == null || titleSuffix.isBlank())
+                return prefix;
+            return prefix + ' ' + titleSuffix.trim();
+        }
+        StringBuilder sb = new StringBuilder(prefix);
+        sb.append(sign);
+        if (titleSuffix != null && !titleSuffix.isBlank())
+            sb.append(' ').append(titleSuffix.trim());
+        return sb.toString();
+    }
 }

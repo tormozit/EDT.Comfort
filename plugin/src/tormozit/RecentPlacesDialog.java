@@ -87,7 +87,7 @@ public class RecentPlacesDialog extends Dialog
     protected void configureShell(Shell shell)
     {
         super.configureShell(shell);
-        shell.setText("Последние места"); //$NON-NLS-1$
+        shell.setText(Global.withPluginWindowTitle("Последние места")); //$NON-NLS-1$
     }
 
     @Override

@@ -29,6 +29,7 @@
     <startup class="tormozit.PredefinedSelectionDialogHook"/>
     <startup class="tormozit.DebugViewsMenuHook"/>
     <startup class="tormozit.DebugValuesInspectHook"/>
+    <startup class="tormozit.ComfortCollectionSessionHook"/>
     <startup class="tormozit.DebugInspectorHook"/>
     <startup class="tormozit.InfobaseSyncQuestionDialogHook"/>
   </extension>
@@ -107,6 +108,12 @@
           schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
           sequence="M3+M2+F">
     </key>
+    <key
+          commandId="tormozit.CollectionSkeleton"
+          contextId="org.eclipse.ui.contexts.window"
+          schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
+          sequence="M1+M2+M3+K">
+    </key>
   </extension>
 
   <extension point="org.eclipse.ui.commands">
@@ -134,6 +141,11 @@
         name="Копировать ссылку"
         categoryId="tormozit.commands.global"
         description="Копировать ссылку на объект или строку модуля. Приоритет над EDT. Настраивайте только «В окнах». Остальные контексты не редактируйте. (Комфорт)"/>
+    <command
+        id="tormozit.CollectionSkeleton"
+        name="Открыть скелет коллекции"
+        categoryId="tormozit.commands.global"
+        description="Тестовая таблица 1000×50 без сервера отладки (Комфорт)"/>
     <command
         id="tormozit.RecentPlaces"
         name="Последние места"
@@ -174,6 +186,16 @@
         name="Форматировать текст ИР"
         categoryId="tormozit.commands.global"
         description="Форматировать выделенный текст модуля или текст запроса через приложение ИР. Активно только при подключённом ИР. Настраивайте только «Редактирование источника Xtext». Остальные контексты не редактируйте. (Комфорт)"/>
+    <command
+        id="tormozit.showCollection"
+        name="Показать коллекцию"
+        categoryId="tormozit.commands.global"
+        description="Открыть коллекцию в отдельном окне (Комфорт)"/>
+    <command
+        id="tormozit.showCollectionFromExpression"
+        name="Показать коллекцию"
+        categoryId="tormozit.commands.global"
+        description="Открыть коллекцию выражения в отдельном окне (Комфорт)"/>
   </extension>
 
   <extension point="org.eclipse.ui.handlers">
@@ -265,6 +287,10 @@
         class="tormozit.ExecutableExtensionFactory:tormozit.IrFormatTextCommandHandler"
         commandId="tormozit.IrFormatText">
     </handler>
+    <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.ComfortCollectionSkeletonHandler"
+        commandId="tormozit.CollectionSkeleton">
+    </handler>
   </extension>
 
   <extension point="org.eclipse.ui.menus">
@@ -315,6 +341,43 @@
   <extension point="org.eclipse.core.runtime.preferences">
     <initializer
         class="tormozit.ComfortInitializer"/>
+  </extension>
+
+  <extension point="org.eclipse.ui.popupMenus">
+    <objectContribution
+        adaptable="false"
+        id="tormozit.showCollectionContribution"
+        objectClass="com._1c.g5.v8.dt.debug.core.model.IBslVariable">
+      <action
+          class="tormozit.ComfortCollectionShowActionDelegate"
+          definitionId="tormozit.showCollection"
+          enablesFor="1"
+          id="tormozit.showCollection"
+          label="Показать коллекцию"
+          menubarPath="emptyNavigationGroup"
+          tooltip="Открыть коллекцию в отдельном окне (Комфорт)">
+      </action>
+      <visibility>
+        <objectState
+              name="activePart"
+              value="Values">
+        </objectState>
+      </visibility>
+    </objectContribution>
+    <objectContribution
+        adaptable="false"
+        id="tormozit.showCollectionExpressionsContribution"
+        objectClass="org.eclipse.debug.core.model.IWatchExpression">
+      <action
+          class="tormozit.ComfortCollectionShowActionDelegate"
+          definitionId="tormozit.showCollectionFromExpression"
+          enablesFor="1"
+          id="tormozit.showCollectionFromExpression"
+          label="Показать коллекцию"
+          menubarPath="emptyNavigationGroup"
+          tooltip="Открыть коллекцию выражения в отдельном окне (Комфорт)">
+      </action>
+    </objectContribution>
   </extension>
 
 </plugin>

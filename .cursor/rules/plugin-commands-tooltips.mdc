@@ -1,21 +1,51 @@
 ---
-description: Тултипы команд плагина с общей подписью «(Комфорт)» в конце
+description: Подпись «(Комфорт)» — заголовки кастомных окон и тултипы внешних команд
 alwaysApply: true
 ---
 
-# Тултипы команд плагина
-
-Все команды плагина **Комфорт** должны иметь тултип с общей подписью в конце — ` (Комфорт)` — чтобы их можно было отличить от штатных команд EDT.
+# Подпись «(Комфорт)» в UI плагина
 
 ## Подпись
 
-Используй `Global.pluginSignForTooltip()` — не дублируй строку вручную.
+Используй `Global.pluginSignForTooltip()` и `Global.withPluginWindowTitle()` — не дублируй строку ` (Комфорт)` вручную.
 
-## Где задавать
+## Заголовки кастомных окон
 
-- **`plugin.xml`**: атрибуты `description` у `<command>` и `tooltip` у `<command>` в меню/тулбаре — текст + ` (Комфорт)` в конце.
+Суффикс ` (Комфорт)` в **title shell/dialog** — только для UI, **полностью описанного в коде плагина**: отдельные `Shell` / `Dialog`, которых **нет в штатном EDT**.
+
+```java
+shell.setText(Global.withPluginWindowTitle("Коллекция " + typeTitle));
+// InputDialog: Global.withPluginWindowTitle("Поиск")
+```
+
+**Не добавлять суффикс в заголовок:**
+
+- Eclipse View (workbench-вкладки, в т.ч. «Журнал Комфорт»);
+- страницы Preferences;
+- тосты;
+- окна и диалоги EDT (в т.ч. с нашими хуками).
+
+## Тултипы и description команд
+
+### Вне кастомных окон плагина
+
+Меню EDT, хуки в штатных view/редакторах, `plugin.xml`, toolbar Eclipse View — тултип/description **с** суффиксом:
+
+- **`plugin.xml`**: атрибуты `description` у `<command>` и `tooltip` у пунктов меню/тулбара.
 - **Динамические пункты меню** (SWT `MenuItem`): `item.setToolTipText("…" + Global.pluginSignForTooltip())`.
-- **Действия в хуках редакторов/представлений**: тот же шаблон для `setToolTipText`.
+- **Действия в хуках** редакторов/представлений EDT: тот же шаблон для `setToolTipText`.
+
+### Внутри кастомных окон плагина
+
+Окно коллекции, скелет, их toolbar и контекстное меню — тултип **без** суффикса:
+
+```java
+item.setToolTipText("Видимость и порядок колонок");
+```
+
+## Текст команды
+
+`name`, `label`, `setText` у кнопок и пунктов меню — **без** подписи; подпись только в заголовке окна или в тултипе/description (см. правила выше).
 
 ## Примеры
 
@@ -25,8 +55,9 @@ tooltip="Последние посещённые методы и объекты 
 ```
 
 ```java
-item.setToolTipText("Открыть проводник ОС на файле или папке выбранного элемента навигатора"
-        + Global.pluginSignForTooltip());
-```
+// Values → «Показать коллекцию» (внешняя команда EDT)
+item.setToolTipText("Открыть коллекцию в отдельном окне" + Global.pluginSignForTooltip());
 
-Текст команды (`name`, `label`, `setText`) — без подписи; подпись только в тултипе/description.
+// Toolbar внутри ComfortCollectionWindow
+settings.setToolTipText("Видимость и порядок колонок");
+```

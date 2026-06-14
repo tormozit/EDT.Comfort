@@ -59,8 +59,13 @@ public final class DebugValuesInspectHook implements IStartup
     private static final String LAST_PERF_LOG_KEY = "tormozit.valuesLastPerfLog"; //$NON-NLS-1$
 
     private static final String ITEM_TEXT = "Инспектировать"; //$NON-NLS-1$
+    private static final String COLLECTION_ITEM_TEXT = "Показать коллекцию"; //$NON-NLS-1$
     private static final String ITEM_TOOLTIP =
         "Открыть элемент коллекции в инспекторе" //$NON-NLS-1$
+            + Global.pluginSignForTooltip();
+
+    private static final String COLLECTION_TOOLTIP =
+        "Открыть коллекцию в отдельном окне" //$NON-NLS-1$
             + Global.pluginSignForTooltip();
 
     private static final String INDEX_HEADER_RU = "Индекс"; //$NON-NLS-1$
@@ -173,9 +178,12 @@ public final class DebugValuesInspectHook implements IStartup
             return;
         }
 
-        MenuItem item = createInspectMenuItem(menu, view, table);
-        if (item == null)
+        MenuItem inspectItem = createInspectMenuItem(menu, view, table);
+        if (inspectItem == null)
             return;
+
+        if (isIndexedValuesTable(table))
+            createShowCollectionMenuItem(menu, view);
 
         markMenuAugmented(menu);
         DebugValuesDebug.perf("menuAugment", start, DebugValuesDebug.tableBrief(table) //$NON-NLS-1$
@@ -243,6 +251,50 @@ public final class DebugValuesInspectHook implements IStartup
         return item;
     }
 
+    private static MenuItem createShowCollectionMenuItem(Menu menu, AbstractDebugView view)
+    {
+        MenuItem item = new MenuItem(menu, SWT.PUSH, 0);
+        item.setText(COLLECTION_ITEM_TEXT);
+        item.setToolTipText(COLLECTION_TOOLTIP);
+        item.addSelectionListener(new SelectionAdapter()
+        {
+            @Override
+            public void widgetSelected(SelectionEvent ev)
+            {
+                runShowCollection(view);
+            }
+        });
+        return item;
+    }
+
+    private static void runShowCollection(AbstractDebugView view)
+    {
+        if (view == null)
+            return;
+        try
+        {
+            Object delegate = Global.getField(view, "delegate"); //$NON-NLS-1$
+            Object inputValue = Global.getField(delegate, "value"); //$NON-NLS-1$
+            if (inputValue instanceof com._1c.g5.v8.dt.debug.core.model.values.IBslIndexedValue indexed)
+            {
+                com._1c.g5.v8.dt.debug.core.model.values.IBslValue bslValue =
+                    (com._1c.g5.v8.dt.debug.core.model.values.IBslValue) inputValue;
+                IBslStackFrame frame = indexed.getStackFrame();
+                if (frame == null)
+                    frame = DebugSessionHelper.findSuspendedStackFrame(null);
+                ComfortCollectionOpener.open(
+                    indexed,
+                    frame,
+                    bslValue.getPath(),
+                    ComfortCollectionOpener.OpenMode.NORMAL);
+            }
+        }
+        catch (Exception e)
+        {
+            DebugValuesDebug.step("showCollection", e.getMessage()); //$NON-NLS-1$
+        }
+    }
+
     private static void selectRowAt(Table table, Point loc)
     {
         if (table == null || table.isDisposed() || loc == null)
@@ -291,6 +343,8 @@ public final class DebugValuesInspectHook implements IStartup
 
                 MenuItem item = createInspectMenuItem(menu, view, table);
                 addedItems.add(item);
+                if (isIndexedValuesTable(table))
+                    addedItems.add(createShowCollectionMenuItem(menu, view));
                 markMenuAugmented(menu);
                 DebugValuesDebug.perf("menuShown", start, DebugValuesDebug.tableBrief(table) //$NON-NLS-1$
                     + " " + variableBrief(variable)); //$NON-NLS-1$

@@ -50,7 +50,7 @@ public class MdObjectPickDialog extends Dialog
     protected void configureShell(Shell shell)
     {
         super.configureShell(shell);
-        shell.setText("Выберите объект"); //$NON-NLS-1$
+        shell.setText(Global.withPluginWindowTitle("Выберите объект")); //$NON-NLS-1$
     }
 
     @Override
