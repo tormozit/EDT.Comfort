@@ -26,6 +26,11 @@ public final class ComfortCollectionShowHandler extends AbstractHandler
     @Override
     public void setEnabled(Object evaluationContext)
     {
+        if (CollectionWindowRegistry.isCollectionWindowFocused())
+        {
+            setBaseEnabled(false);
+            return;
+        }
         boolean enabled = false;
         try
         {
@@ -47,6 +52,10 @@ public final class ComfortCollectionShowHandler extends AbstractHandler
     @Override
     public Object execute(ExecutionEvent event) throws ExecutionException
     {
+        if (CollectionWindowRegistry.isCollectionWindowFocused())
+            return null;
+        if (DebugInspectorCollectionMenuHook.handleWorkbenchF2InInspector())
+            return null;
         ComfortCollectionShowSupport.tryOpenFromHandler(
             HandlerUtil.getActivePart(event),
             HandlerUtil.getCurrentSelection(event));

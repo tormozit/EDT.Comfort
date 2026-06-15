@@ -357,6 +357,17 @@ public class GetRef extends AbstractHandler
     // Поиск объемлющего метода
     // =========================================================================
 
+    /**
+     * Имя процедуры/функции, объемлющей строку {@code line1Based}, или {@code null}.
+     */
+    static String findEnclosingMethodName(IDocument doc, int line1Based)
+    {
+        if (doc == null || line1Based < 1)
+            return null;
+        MethodInfo info = findEnclosingMethod(doc, line1Based - 1);
+        return info != null ? info.name : null;
+    }
+
     private static MethodInfo findEnclosingMethod(IDocument doc, int cursorLine0)
     {
         for (int line = cursorLine0; line >= 0; line--)

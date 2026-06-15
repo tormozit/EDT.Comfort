@@ -22,6 +22,7 @@ final class CollectionCloneSnapshot
     private final int selectedDisplayIndex;
     private final int selectedVisibleColumn;
     private final String presentationHeader;
+    private final boolean filterByPresentation;
 
     private CollectionCloneSnapshot(
         IBslIndexedValue indexedValue,
@@ -34,7 +35,8 @@ final class CollectionCloneSnapshot
         int topIndex,
         int selectedDisplayIndex,
         int selectedVisibleColumn,
-        String presentationHeader)
+        String presentationHeader,
+        boolean filterByPresentation)
     {
         this.indexedValue = indexedValue;
         this.frame = frame;
@@ -47,6 +49,7 @@ final class CollectionCloneSnapshot
         this.selectedDisplayIndex = selectedDisplayIndex;
         this.selectedVisibleColumn = selectedVisibleColumn;
         this.presentationHeader = presentationHeader;
+        this.filterByPresentation = filterByPresentation;
     }
 
     static CollectionCloneSnapshot capture(ComfortCollectionWindow source)
@@ -80,6 +83,8 @@ final class CollectionCloneSnapshot
         if (presentation != null && !presentation.isBlank())
             columnsSnapshot.applyPresentationHeader(presentation);
 
+        boolean filterByPresentation = source.filterByPresentationForClone();
+
         return new CollectionCloneSnapshot(
             source.indexedValueForClone(),
             source.stackFrameForClone(),
@@ -91,7 +96,8 @@ final class CollectionCloneSnapshot
             top,
             displayIndex,
             visibleColumn,
-            presentation);
+            presentation,
+            filterByPresentation);
     }
 
     IBslIndexedValue indexedValue()
@@ -124,7 +130,9 @@ final class CollectionCloneSnapshot
 
     CollectionRowFilter toRowFilter()
     {
-        return CollectionRowFilter.copyFrom(sourceFilter, filterText);
+        CollectionRowFilter filter = CollectionRowFilter.copyFrom(sourceFilter, filterText);
+        filter.setPresentationOnly(filterByPresentation);
+        return filter;
     }
 
     String filterText()
@@ -150,5 +158,10 @@ final class CollectionCloneSnapshot
     String presentationHeader()
     {
         return presentationHeader;
+    }
+
+    boolean filterByPresentation()
+    {
+        return filterByPresentation;
     }
 }

@@ -65,6 +65,7 @@ final class CollectionColumnModel
     {
         List<Column> cols = new ArrayList<>();
         cols.add(new Column(Kind.INDEX, INDEX_HEADER, null, 0));
+        cols.add(new Column(Kind.TYPE, TYPE_HEADER, null, 1));
         return withVisibleAll(cols);
     }
 
@@ -124,7 +125,7 @@ final class CollectionColumnModel
         }
         else if (!hasType && !hasValue)
         {
-            // property-колонки из EDT уже покрывают структуру — «Тип»/«Значение» не дублируем
+            cols.add(new Column(Kind.TYPE, TYPE_HEADER, null, cols.size()));
         }
         else
         {
@@ -169,17 +170,52 @@ final class CollectionColumnModel
         return visibleToModel.length;
     }
 
-    /** Число колонок в фиксированной панели: «Индекс» + опционально «Представление». */
+    /** Число колонок в фиксированной панели: «Индекс» + «Тип» + опционально «Представление». */
     int fixedColumnCount()
     {
-        if (presentationModelIndex <= 0)
-            return 1;
-        for (int modelIdx : visibleToModel)
+        int count = 1;
+        if (typeModelIndex() >= 0)
+            count++;
+        if (presentationModelIndex > 0)
         {
-            if (modelIdx == presentationModelIndex)
-                return 2;
+            for (int modelIdx : visibleToModel)
+            {
+                if (modelIdx == presentationModelIndex)
+                    return count + 1;
+            }
         }
-        return 1;
+        return count;
+    }
+
+    int typeModelIndex()
+    {
+        for (Column col : columns)
+        {
+            if (col.kind == Kind.TYPE)
+                return col.modelIndex;
+        }
+        for (Column col : columns)
+        {
+            if (isTypePropertyColumn(col))
+                return col.modelIndex;
+        }
+        return -1;
+    }
+
+    static boolean isTypeColumn(Column col)
+    {
+        if (col == null)
+            return false;
+        if (col.kind == Kind.TYPE)
+            return true;
+        return isTypePropertyColumn(col);
+    }
+
+    private static boolean isTypePropertyColumn(Column col)
+    {
+        return col.kind == Kind.PROPERTY
+            && col.header != null
+            && (TYPE_HEADER.equalsIgnoreCase(col.header) || "Type".equalsIgnoreCase(col.header)); //$NON-NLS-1$
     }
 
     int dataColumnCount()
@@ -346,6 +382,13 @@ final class CollectionColumnModel
         if (mapped.isEmpty())
             mapped.add(0);
 
+        int indexModel = indexModelIndex();
+        if (!mapped.contains(indexModel))
+            mapped.add(indexModel);
+        int typeModel = typeModelIndex();
+        if (typeModel >= 0 && !mapped.contains(typeModel))
+            mapped.add(typeModel);
+
         int hidden = hiddenModelIndicesInOrder(visibleFlags, order).length;
         if (columns.size() > MAX_DEFAULT_VISIBLE_COLUMNS && hidden > 0)
             hiddenColumnCount = hidden;
@@ -356,13 +399,14 @@ final class CollectionColumnModel
         pinFixedColumns();
     }
 
-    /** Слот 0 — «Индекс», слот 1 — «Представление»; остальные — порядок пользователя. */
+    /** Слот 0 — «Индекс», слот 1 — «Тип», слот 2 — «Представление»; остальные — порядок пользователя. */
     private void pinFixedColumns()
     {
         if (visibleToModel == null || visibleToModel.length == 0)
             return;
 
         int indexModel = indexModelIndex();
+        int typeModel = typeModelIndex();
         Set<Integer> pinned = new HashSet<>();
         List<Integer> result = new ArrayList<>();
 
@@ -379,6 +423,19 @@ final class CollectionColumnModel
         {
             result.add(indexModel);
             pinned.add(indexModel);
+        }
+
+        if (typeModel >= 0)
+        {
+            for (int modelIdx : visibleToModel)
+            {
+                if (modelIdx == typeModel)
+                {
+                    result.add(typeModel);
+                    pinned.add(typeModel);
+                    break;
+                }
+            }
         }
 
         if (presentationModelIndex > 0)
@@ -430,7 +487,7 @@ final class CollectionColumnModel
         syncSplitTables(null, table);
     }
 
-    /** {@code indexTable} — только «Индекс»; {@code dataTable} — остальные видимые колонки. */
+    /** {@code indexTable} — «Индекс», «Тип», опционально «Представление»; {@code dataTable} — остальные. */
     void syncSplitTables(org.eclipse.swt.widgets.Table indexTable, org.eclipse.swt.widgets.Table dataTable)
     {
         if (indexTable != null && !indexTable.isDisposed())
@@ -450,9 +507,7 @@ final class CollectionColumnModel
             Column col = columnAt(i);
             org.eclipse.swt.widgets.TableColumn tc = table.getColumn(i);
             tc.setText(col != null ? col.header : ""); //$NON-NLS-1$
-            tc.setWidth(i == 0
-                ? CollectionIndexColumnWidthStore.load()
-                : CollectionPresentationColumnWidthStore.load());
+            tc.setWidth(fixedColumnWidth(col));
             tc.setResizable(true);
             tc.setMoveable(false);
         }
@@ -480,6 +535,17 @@ final class CollectionColumnModel
             existing[i].dispose();
     }
 
+    private static int fixedColumnWidth(Column col)
+    {
+        if (col == null)
+            return 80;
+        if (col.kind == Kind.INDEX)
+            return CollectionIndexColumnWidthStore.load();
+        if (isTypeColumn(col))
+            return CollectionTypeColumnWidthStore.load();
+        return CollectionPresentationColumnWidthStore.load();
+    }
+
     private static int defaultWidth(Column col)
     {
         if (col == null)
@@ -487,7 +553,7 @@ final class CollectionColumnModel
         return switch (col.kind)
         {
             case INDEX -> 60;
-            case TYPE -> 120;
+            case TYPE -> CollectionTypeColumnWidthStore.DEFAULT_WIDTH;
             case VALUE -> 200;
             case PROPERTY -> 140;
         };

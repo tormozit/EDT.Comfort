@@ -12,6 +12,7 @@ import org.eclipse.debug.core.model.IExpression;
 import org.eclipse.debug.core.model.IWatchExpression;
 import org.eclipse.debug.ui.AbstractDebugView;
 import org.eclipse.jface.resource.ImageDescriptor;
+import org.eclipse.swt.SWT;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.widgets.Shell;
@@ -26,6 +27,8 @@ import com._1c.g5.v8.dt.debug.core.model.values.BslValuePath;
 import com._1c.g5.v8.dt.debug.core.model.values.IBslValue;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 
+import org.eclipse.debug.core.DebugException;
+
 /**
  * Хелперы открытия popup-инспектора EDT для {@link DebugInspectorHook} (hover «Инспектировать»).
  */
@@ -36,6 +39,36 @@ public final class BslInspectSupport
     private static final String CLASS_INSPECT_POPUP =
         "com._1c.g5.v8.dt.internal.debug.ui.dialogs.PendingAwareInspectPopupDialog"; //$NON-NLS-1$
     private static final String CMD_INSPECT_EDT = "com._1c.g5.v8.dt.debug.ui.commands.Inspect"; //$NON-NLS-1$
+
+    /** Результат построения пути для инспектора строки коллекции. */
+    static final class InspectPathResolution
+    {
+        enum Source
+        {
+            PRESENTATION, VAR_NAME, FICTITIOUS, WATCH
+        }
+
+        final String path;
+        final boolean fictitious;
+        final Source source;
+
+        private InspectPathResolution(String path, boolean fictitious, Source source)
+        {
+            this.path = path != null ? path : ""; //$NON-NLS-1$
+            this.fictitious = fictitious;
+            this.source = source;
+        }
+
+        static InspectPathResolution real(String path, Source source)
+        {
+            return new InspectPathResolution(path, false, source);
+        }
+
+        static InspectPathResolution fictitious(String path)
+        {
+            return new InspectPathResolution(path, true, Source.FICTITIOUS);
+        }
+    }
 
     private BslInspectSupport() {}
 
@@ -132,6 +165,329 @@ public final class BslInspectSupport
         if (!toWatch.isBlank())
             return toWatch;
         return pathTextFromVariable(variable);
+    }
+
+    /**
+     * Единая точка инспекта из окна «Коллекция» или «Значения».
+     */
+    static void openInspectForVariable(
+        Shell parent,
+        Point anchor,
+        IBslVariable variable,
+        IBslStackFrame frame,
+        IDebugMonitoringManager monitoringManager,
+        Shell keepVisibleShell,
+        String columnHeader,
+        ComfortCollectionTableModel collectionModel,
+        int logicalRow,
+        AbstractDebugView valuesView)
+    {
+        if (variable == null || parent == null || parent.isDisposed())
+            return;
+
+        if (frame == null)
+            frame = variable.getStackFrame();
+        if (frame == null)
+            frame = DebugSessionHelper.findSuspendedStackFrame(null);
+        if (frame == null)
+            return;
+
+        InspectPathResolution resolution = null;
+        String exprText;
+        if (needsInspectPathResolution(variable))
+        {
+            if (collectionModel != null && logicalRow >= 0)
+                resolution = resolveCollectionRowInspectPath(collectionModel, logicalRow, variable);
+            else if (valuesView != null)
+                resolution = resolveValuesInspectPath(valuesView, variable);
+            else
+                resolution = resolveVariableInspectPath(variable);
+            exprText = resolution.path;
+            logInspectPathResolution(resolution, valuesView != null);
+        }
+        else
+        {
+            exprText = valuesView != null
+                ? resolveValuesInspectExpression(valuesView, variable)
+                : resolveVariableInspectExpression(variable);
+        }
+
+        if (exprText.isBlank())
+        {
+            if (valuesView != null)
+                DebugValuesDebug.step("inspect", "empty expression"); //$NON-NLS-1$ //$NON-NLS-2$
+            else
+                ComfortCollectionDebug.problem("inspect: empty expression"); //$NON-NLS-1$
+            return;
+        }
+
+        InspectorPendingFocus.set(columnHeader);
+
+        if (InspectorRegistry.activateExisting(exprText, keepVisibleShell))
+        {
+            InspectorRegistry.schedulePendingFocus(exprText);
+            return;
+        }
+
+        if (resolution != null && resolution.fictitious)
+        {
+            openInspectPopupForVariable(parent, anchor, variable, exprText, monitoringManager);
+            if (valuesView != null)
+                DebugValuesDebug.step("inspect.direct", exprText + " fictitious"); //$NON-NLS-1$ //$NON-NLS-2$
+            else
+                ComfortCollectionDebug.step("inspect.direct", exprText); //$NON-NLS-1$
+        }
+        else
+        {
+            IWatchExpression watch = newWatchExpression(exprText);
+            if (watch == null)
+                return;
+            openInspectPopup(parent, anchor, watch, frame, monitoringManager);
+            if (valuesView != null)
+                DebugValuesDebug.step("inspect.expr", exprText); //$NON-NLS-1$ //$NON-NLS-2$
+            else
+                ComfortCollectionDebug.step("inspect", exprText); //$NON-NLS-1$
+        }
+
+        InspectorRegistry.raiseAbove(exprText, keepVisibleShell);
+    }
+
+    static InspectPathResolution resolveCollectionRowInspectPath(
+        ComfortCollectionTableModel model,
+        int logicalRow,
+        IBslVariable variable)
+    {
+        if (model == null || variable == null)
+            return resolveVariableInspectPath(variable);
+
+        String base = collectionBasePath(model);
+        if (!base.isBlank())
+        {
+            String presentationKey = presentationKeyFromModel(model, logicalRow);
+            if (!presentationKey.isBlank())
+            {
+                String path = base + formatBracketKeySuffix(presentationKey);
+                return InspectPathResolution.real(path, InspectPathResolution.Source.PRESENTATION);
+            }
+
+            String fromName = pathFromVariableNameSuffix(base, variable);
+            if (!fromName.isBlank())
+                return InspectPathResolution.real(fromName, InspectPathResolution.Source.VAR_NAME);
+        }
+
+        return fictitiousPathFromVariable(variable);
+    }
+
+    static InspectPathResolution resolveValuesInspectPath(AbstractDebugView view, IBslVariable variable)
+    {
+        if (view == null || variable == null)
+            return resolveVariableInspectPath(variable);
+
+        String fromDelegate = expressionFromDelegateInput(view, variable);
+        if (!fromDelegate.isBlank())
+            return InspectPathResolution.real(fromDelegate, InspectPathResolution.Source.VAR_NAME);
+
+        return fictitiousPathFromVariable(variable);
+    }
+
+    static InspectPathResolution resolveVariableInspectPath(IBslVariable variable)
+    {
+        return fictitiousPathFromVariable(variable);
+    }
+
+    static String formatBracketKeySuffix(String rawKey)
+    {
+        String key = stripPresentationKey(rawKey);
+        if (key.isEmpty())
+            return ""; //$NON-NLS-1$
+        if (isIntegerKey(key))
+            return '[' + key + ']';
+        return "[\"" + escapeBslStringKey(key) + "\"]"; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    static void openInspectPopupForVariable(
+        Shell parent,
+        Point anchor,
+        IBslVariable variable,
+        String displayPath,
+        IDebugMonitoringManager monitoringManager)
+    {
+        if (parent == null || parent.isDisposed() || variable == null)
+            return;
+
+        String pathText = displayPath != null ? displayPath.trim() : ""; //$NON-NLS-1$
+        if (pathText.isEmpty())
+            return;
+
+        IWatchExpression watch = newWatchExpression(pathText);
+        if (watch == null)
+            return;
+
+        IBslStackFrame frame = variable.getStackFrame();
+        if (frame == null)
+            frame = DebugSessionHelper.findSuspendedStackFrame(null);
+        if (frame == null)
+            return;
+
+        try
+        {
+            Class<?> dialogClass = loadDebugUiClass(CLASS_INSPECT_POPUP);
+            Constructor<?> ctor = dialogClass.getConstructor(
+                Shell.class, Point.class, String.class, IWatchExpression.class, IDebugMonitoringManager.class);
+            Object dialog = ctor.newInstance(parent, anchor, CMD_INSPECT_EDT, watch, monitoringManager);
+            watch.setExpressionContext(frame);
+            Global.invoke(dialog, "open"); //$NON-NLS-1$
+            Global.invoke(dialog, "setInput", variable); //$NON-NLS-1$
+            disableFictitiousInspectExpressionCombo(dialog);
+            registerInspectShell(dialog, watch);
+        }
+        catch (Exception e)
+        {
+            DebugInspectorDebug.problem("openInspectPopupForVariable: " + e.getMessage()); //$NON-NLS-1$
+        }
+    }
+
+    /** Combo «Выражение» — только просмотр фиктивного пути (поле {@code searchCombo} в EDT). */
+    private static void disableFictitiousInspectExpressionCombo(Object inspectDialog)
+    {
+        if (inspectDialog == null)
+            return;
+        try
+        {
+            Object comboObj = Global.getField(inspectDialog, "searchCombo"); //$NON-NLS-1$
+            if (!(comboObj instanceof org.eclipse.swt.widgets.Combo combo) || combo.isDisposed())
+                return;
+            removeComboListeners(combo, SWT.KeyDown);
+            removeComboListeners(combo, SWT.Selection);
+            removeComboListeners(combo, SWT.FocusIn);
+            removeComboListeners(combo, SWT.FocusOut);
+        }
+        catch (Exception ignored)
+        {
+            // опционально
+        }
+    }
+
+    private static void removeComboListeners(org.eclipse.swt.widgets.Combo combo, int eventType)
+    {
+        for (org.eclipse.swt.widgets.Listener listener : combo.getListeners(eventType))
+            combo.removeListener(eventType, listener);
+    }
+
+    private static boolean needsInspectPathResolution(IBslVariable variable)
+    {
+        if (variable == null)
+            return false;
+        try
+        {
+            String toWatch = safeToWatchExpression(variable);
+            if (!toWatch.isBlank())
+                return false;
+            IBslValue value = variable.getValue();
+            if (value == null)
+                return false;
+            BslValuePath path = value.getPath();
+            return path != null && !path.canEvaluate();
+        }
+        catch (Exception e)
+        {
+            return false;
+        }
+    }
+
+    private static InspectPathResolution fictitiousPathFromVariable(IBslVariable variable)
+    {
+        String path = pathTextFromVariable(variable);
+        if (path.isBlank())
+            path = safeToWatchExpression(variable);
+        return InspectPathResolution.fictitious(path);
+    }
+
+    private static String collectionBasePath(ComfortCollectionTableModel model)
+    {
+        if (model == null || model.path == null)
+            return ""; //$NON-NLS-1$
+        BslValuePath path = model.path;
+        String expr = path.getExpression();
+        if (expr != null && !expr.isBlank())
+            return expr.trim();
+        String text = path.toString();
+        return text != null ? text.trim() : ""; //$NON-NLS-1$
+    }
+
+    private static String presentationKeyFromModel(ComfortCollectionTableModel model, int logicalRow)
+    {
+        int presModel = model.columns.presentationModelIndex();
+        if (presModel <= 0)
+            return ""; //$NON-NLS-1$
+        int visibleCol = model.columns.visibleIndexOfModelColumn(presModel);
+        if (visibleCol < 0)
+            return ""; //$NON-NLS-1$
+        try
+        {
+            String text = model.extractCellTextInJob(logicalRow, visibleCol);
+            return text != null ? text.trim() : ""; //$NON-NLS-1$
+        }
+        catch (DebugException e)
+        {
+            ComfortCollectionDebug.problem("inspect.presentation: " + e.getMessage()); //$NON-NLS-1$
+            return ""; //$NON-NLS-1$
+        }
+    }
+
+    private static String pathFromVariableNameSuffix(String base, IBslVariable variable)
+    {
+        if (base == null || base.isBlank() || variable == null)
+            return ""; //$NON-NLS-1$
+        String name = variable.getName();
+        if (name == null || name.isBlank())
+            return ""; //$NON-NLS-1$
+        name = name.trim();
+        if (!name.startsWith("[")) //$NON-NLS-1$
+            return ""; //$NON-NLS-1$
+        return base + name;
+    }
+
+    private static String stripPresentationKey(String raw)
+    {
+        if (raw == null)
+            return ""; //$NON-NLS-1$
+        String key = raw.trim();
+        if (key.length() >= 2 && key.startsWith("\"") && key.endsWith("\"")) //$NON-NLS-1$ //$NON-NLS-2$
+            key = key.substring(1, key.length() - 1);
+        return key.trim();
+    }
+
+    private static boolean isIntegerKey(String key)
+    {
+        if (key == null || key.isEmpty())
+            return false;
+        int start = key.charAt(0) == '-' ? 1 : 0;
+        if (start >= key.length())
+            return false;
+        for (int i = start; i < key.length(); i++)
+        {
+            if (!Character.isDigit(key.charAt(i)))
+                return false;
+        }
+        return true;
+    }
+
+    private static String escapeBslStringKey(String key)
+    {
+        return key.replace("\"", "\"\""); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static void logInspectPathResolution(InspectPathResolution resolution, boolean valuesView)
+    {
+        if (resolution == null)
+            return;
+        String msg = resolution.path + " fictitious=" + resolution.fictitious //$NON-NLS-1$
+            + " source=" + resolution.source; //$NON-NLS-1$
+        if (valuesView)
+            DebugValuesDebug.step("inspect.path", msg); //$NON-NLS-1$
+        else
+            ComfortCollectionDebug.step("inspect.path", msg); //$NON-NLS-1$
     }
 
     private static void registerInspectShell(Object dialog, IWatchExpression watch)

@@ -61,7 +61,9 @@ final class CollectionRowContextSupport
         String columnHeader,
         org.eclipse.swt.widgets.Table anchorTable,
         Point anchor,
-        Shell keepVisibleShell)
+        Shell keepVisibleShell,
+        ComfortCollectionTableModel model,
+        int logicalRow)
     {
         if (variable == null)
             return;
@@ -73,49 +75,29 @@ final class CollectionRowContextSupport
         if (keepVisibleShell != null && !keepVisibleShell.isDisposed())
             CollectionShellPinHelper.refresh(keepVisibleShell);
 
-        String exprText = BslInspectSupport.resolveVariableInspectExpression(variable);
-        if (exprText.isBlank())
-        {
-            ComfortCollectionDebug.problem("inspect: empty expression"); //$NON-NLS-1$
-            return;
-        }
-
-        if (InspectorRegistry.activateExisting(exprText))
-            return;
-
-        IWatchExpression watch = BslInspectSupport.newWatchExpression(exprText);
-        if (watch == null)
-            return;
-
-        if (frame == null)
-            frame = variable.getStackFrame();
-        if (frame == null)
-            frame = DebugSessionHelper.findSuspendedStackFrame(null);
-        if (frame == null)
-            return;
-
-        InspectorPendingFocus.set(columnHeader);
         IDebugMonitoringManager monitoringManager = Global.getOsgiService(IDebugMonitoringManager.class);
-        BslInspectSupport.openInspectPopup(parent, anchor, watch, frame, monitoringManager);
-        if (keepVisibleShell != null && !keepVisibleShell.isDisposed())
-        {
-            keepVisibleShell.setMinimized(false);
-            keepVisibleShell.setVisible(true);
-            CollectionShellPinHelper.refresh(keepVisibleShell);
-            org.eclipse.swt.widgets.Display display = keepVisibleShell.getDisplay();
-            if (display != null && !display.isDisposed())
-            {
-                display.asyncExec(() -> {
-                    if (!keepVisibleShell.isDisposed())
-                    {
-                        keepVisibleShell.setMinimized(false);
-                        keepVisibleShell.setVisible(true);
-                        CollectionShellPinHelper.refresh(keepVisibleShell);
-                    }
-                });
-            }
-        }
-        ComfortCollectionDebug.step("inspect", exprText); //$NON-NLS-1$
+        BslInspectSupport.openInspectForVariable(
+            parent,
+            anchor,
+            variable,
+            frame,
+            monitoringManager,
+            keepVisibleShell,
+            columnHeader,
+            model,
+            logicalRow,
+            null);
+    }
+
+    static void runInspect(
+        IBslVariable variable,
+        IBslStackFrame frame,
+        String columnHeader,
+        org.eclipse.swt.widgets.Table anchorTable,
+        Point anchor,
+        Shell keepVisibleShell)
+    {
+        runInspect(variable, frame, columnHeader, anchorTable, anchor, keepVisibleShell, null, -1);
     }
 
     /** Обёртка для refresh pin без доступа к полю окна. */
@@ -140,7 +122,7 @@ final class CollectionRowContextSupport
         org.eclipse.swt.widgets.Table anchorTable,
         Point anchor)
     {
-        runInspect(variable, frame, columnHeader, anchorTable, anchor, null);
+        runInspect(variable, frame, columnHeader, anchorTable, anchor, null, null, -1);
     }
 
     private static org.eclipse.swt.widgets.Shell inspectParentShell()

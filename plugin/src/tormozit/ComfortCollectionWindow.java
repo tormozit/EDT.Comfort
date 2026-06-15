@@ -8,6 +8,9 @@ import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
 import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.events.SelectionEvent;
+import org.eclipse.swt.dnd.Clipboard;
+import org.eclipse.swt.dnd.TextTransfer;
+import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
@@ -24,11 +27,16 @@ import org.eclipse.swt.widgets.ScrollBar;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableItem;
+import org.eclipse.swt.widgets.Text;
 import org.eclipse.swt.widgets.Combo;
+import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.ToolBar;
 import org.eclipse.swt.widgets.ToolItem;
 import org.eclipse.ui.ISharedImages;
+import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.contexts.IContextActivation;
+import org.eclipse.ui.contexts.IContextService;
 
 import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
 
@@ -52,7 +60,10 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
     private Shell shell;
     private CollectionSplitTable splitTable;
     private SearchBox filterField;
+    private Button filterByPresentationCheckbox;
+    private boolean updatingFilterByPresentationCheckbox;
     private Combo presentationField;
+    private Text collectionPathField;
     private boolean applyingPresentation;
     private Label progressLabel;
     private ComfortCollectionTableModel model;
@@ -67,8 +78,13 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
     private ToolItem columnSettingsItem;
     private ToolItem cloneItem;
     private Runnable viewportDebounce;
+    private Runnable rowsReadyDebounce;
+    private int rowsReadyClearFirst = -1;
+    private int rowsReadyClearLast = -1;
     private Listener filterEraseListenerIndex;
     private Listener filterEraseListenerData;
+    private IContextActivation keyContextActivation;
+    private Listener collectionKeyFilter;
 
     public ComfortCollectionWindow(
         IBslIndexedValue indexedValue,
@@ -133,11 +149,13 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
         hookContextMenu();
         hookFilterHighlight();
         hookShellEvents();
+        installKeyContext();
+        installCollectionKeyFilter();
 
         if (cloneSnapshot != null && cloneSnapshot.schemaResolved())
             prepareCloneWindowBeforeOpen();
         else
-            updateTableItemCount(1);
+            updateTableItemCount(0);
 
         shell.pack();
         CollectionWindowGeometryStore.applyToShell(shell);
@@ -175,6 +193,11 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
     CollectionRowFilter rowFilterForClone()
     {
         return rowFilter;
+    }
+
+    boolean filterByPresentationForClone()
+    {
+        return isFilterByPresentationSelected();
     }
 
     String filterTextForClone()
@@ -215,18 +238,19 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
         applyClonePresentationState();
         syncSplitTableColumns();
         updateColumnSettingsButton();
-        int total = model.totalSize > 0 ? model.totalSize : 1;
+        int total = model.totalSize >= 0 ? model.totalSize : 0;
         updateTableItemCount(total);
         if (filterField != null && !filterField.isDisposed())
             filterField.setText(cloneSnapshot.filterText());
         refreshPresentationCombo();
         selectPresentationInCombo(cloneSnapshot.presentationHeader());
-        if (model.totalSize > 0)
+        applyCloneFilterByPresentationCheckbox();
+        if (model.totalSize >= 0)
             onProgress(model.loadedRowCount, model.totalSize, "rows"); //$NON-NLS-1$
         updateCloneButtonState();
     }
 
-    /** Восстановить «Представление» в фиксированной панели (слот 1 после «Индекс»). */
+    /** Восстановить «Представление» в фиксированной панели (слот 2 после «Индекс» и «Тип»). */
     private void applyClonePresentationState()
     {
         if (cloneSnapshot == null || model == null)
@@ -394,6 +418,8 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
             shellPin.dispose();
             shellPin = null;
         }
+        deactivateKeyContext();
+        removeCollectionKeyFilter();
         if (indexInteraction != null)
             indexInteraction.dispose();
         if (dataInteraction != null)
@@ -454,46 +480,70 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
             dataInteraction.selectCell(dataItem, Math.max(0, visibleColumn - fixed));
     }
 
-    @Override
-    public void onProgress(int loaded, int total, String phase)
+    private static String loadedProgressText(String detail)
     {
-        if (progressLabel == null || progressLabel.isDisposed())
-            return;
+        return "Загружено " + detail; //$NON-NLS-1$
+    }
+
+    private static String percentProgressDetail(int loaded, int total)
+    {
+        int percent = total > 0 ? (int) ((long) loaded * 100L / total) : 0;
+        return percent + "% (" + loaded + "/" + total + ")"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    /**
+     * Текст детализации прогресса без префикса «Загружено».
+     * {@code null} — промежуточное «Загрузка…».
+     */
+    private String formatProgressDetail(int loaded, int total, String phase)
+    {
         if (total <= 0 && !"rows".equals(phase)) //$NON-NLS-1$
-        {
-            progressLabel.setText("Загрузка…"); //$NON-NLS-1$
-            return;
-        }
-        if ("size".equals(phase) && total > 0) //$NON-NLS-1$
-        {
-            progressLabel.setText("100% (" + total + "/" + total + ")"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            updateTableItemCount(total);
-            return;
-        }
+            return null;
+
+        if ("size".equals(phase)) //$NON-NLS-1$
+            return total == 0 ? "100% (0/0)" : "100% (" + total + "/" + total + ")"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+
         if ("filter".equals(phase)) //$NON-NLS-1$
-        {
-            int percent = (int) ((long) loaded * 100L / total);
-            progressLabel.setText(percent + "% (" + loaded + "/" + total + ")"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            return;
-        }
+            return percentProgressDetail(loaded, total);
+
         if ("rows".equals(phase)) //$NON-NLS-1$
         {
             int collectionTotal = model != null && model.totalSize > 0 ? model.totalSize : total;
             int autoLimit = CollectionLoadScheduler.AUTO_LOAD_ROW_LIMIT;
             if (collectionTotal > autoLimit)
-                progressLabel.setText(loaded + "/" + collectionTotal + " (авто до " + autoLimit + ")"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            else if (collectionTotal > 0)
-            {
-                int percent = (int) ((long) loaded * 100L / collectionTotal);
-                progressLabel.setText(percent + "% (" + loaded + "/" + collectionTotal + ")"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            }
-            else
-                progressLabel.setText(loaded + " строк"); //$NON-NLS-1$
-            updateCloneButtonState();
+                return loaded + "/" + collectionTotal + " (авто до " + autoLimit + ")"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            if (collectionTotal > 0)
+                return percentProgressDetail(loaded, collectionTotal);
+            if (model != null && model.totalSize == 0)
+                return "100% (0/0)"; //$NON-NLS-1$
+            return loaded + " строк"; //$NON-NLS-1$
+        }
+
+        return percentProgressDetail(loaded, total);
+    }
+
+    @Override
+    public void onProgress(int loaded, int total, String phase)
+    {
+        if (progressLabel == null || progressLabel.isDisposed())
+            return;
+
+        String detail = formatProgressDetail(loaded, total, phase);
+        if (detail == null)
+        {
+            progressLabel.setText("Загрузка…"); //$NON-NLS-1$
             return;
         }
-        int percent = total > 0 ? (int) ((long) loaded * 100L / total) : 0;
-        progressLabel.setText(percent + "% (" + loaded + "/" + total + ")"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        progressLabel.setText(loadedProgressText(detail));
+
+        if ("size".equals(phase)) //$NON-NLS-1$
+        {
+            updateTableItemCount(total);
+            if (total == 0)
+                updateCloneButtonState();
+        }
+        else if ("rows".equals(phase)) //$NON-NLS-1$
+            updateCloneButtonState();
     }
 
     @Override
@@ -501,7 +551,35 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
     {
         if (splitTable == null)
             return;
-        splitTable.clear(first, Math.min(first + count, splitTable.getItemCount()) - 1);
+        int last = Math.min(first + count, splitTable.getItemCount()) - 1;
+        if (last < first)
+            return;
+        if (rowsReadyClearFirst < 0)
+        {
+            rowsReadyClearFirst = first;
+            rowsReadyClearLast = last;
+        }
+        else
+        {
+            rowsReadyClearFirst = Math.min(rowsReadyClearFirst, first);
+            rowsReadyClearLast = Math.max(rowsReadyClearLast, last);
+        }
+        Table data = dataTable();
+        if (data == null || data.isDisposed())
+            return;
+        if (rowsReadyDebounce != null)
+            data.getDisplay().timerExec(-1, rowsReadyDebounce);
+        rowsReadyDebounce = () -> {
+            rowsReadyDebounce = null;
+            int clearFirst = rowsReadyClearFirst;
+            int clearLast = rowsReadyClearLast;
+            rowsReadyClearFirst = -1;
+            rowsReadyClearLast = -1;
+            if (splitTable == null || clearFirst < 0 || clearLast < clearFirst)
+                return;
+            splitTable.clear(clearFirst, clearLast);
+        };
+        data.getDisplay().timerExec(50, rowsReadyDebounce);
     }
 
     private void onContextColumnsReady(com._1c.g5.v8.dt.debug.core.model.IBslVariable[] context)
@@ -519,6 +597,8 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
                 ? CollectionColumnVisibilityStore.orderWithPreferred(model.columns)
                 : CollectionColumnVisibilityStore.orderFor(pathKey, count));
         applyStoredPresentation(pathKey);
+        if (scheduler != null)
+            scheduler.resetLoadJobForSchemaChange();
         model.clearCellCache();
         if (splitTable != null)
         {
@@ -541,11 +621,10 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
         }
         if (splitTable != null)
             splitTable.clearAll();
-        if (model.totalSize > 0)
+        if (model.totalSize >= 0)
             updateTableItemCount(model.totalSize);
         if (scheduler != null)
         {
-            scheduler.resetLoadJobForSchemaChange();
             Table data = dataTable();
             if (data != null && !data.isDisposed())
             {
@@ -631,11 +710,14 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
         updateCloneButtonState();
 
         ToolItem inspect = new ToolItem(bar, SWT.PUSH);
-        inspect.setText(CollectionRowContextSupport.inspectMenuLabel());
+        inspect.setText(ComfortSubmenuHelper.toolbarItemTextWithKeyBinding(
+            CollectionRowContextSupport.inspectMenuLabel(),
+            ComfortCollectionInspectHandler.COMMAND_ID,
+            ComfortCollectionInspectHandler.BINDING_CONTEXT_ID));
         inspectImage = BslInspectSupport.loadInspectCommandImage();
         if (inspectImage != null)
             inspect.setImage(inspectImage);
-        inspect.setToolTipText("Открыть выбранный элемент в инспекторе"); //$NON-NLS-1$
+        inspect.setToolTipText("Открыть выбранный элемент в инспекторе" + Global.pluginSignForTooltip()); //$NON-NLS-1$
         inspect.addSelectionListener(new SelectionAdapter()
         {
             @Override
@@ -659,7 +741,7 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
 
         ToolItem skeleton = new ToolItem(bar, SWT.PUSH);
         skeleton.setText("Скелет"); //$NON-NLS-1$
-        skeleton.setToolTipText("Открыть тестовую таблицу 1000×50 без отладки"); //$NON-NLS-1$
+        skeleton.setToolTipText("Открыть тестовую таблицу 1000×100 без отладки"); //$NON-NLS-1$
         skeleton.addSelectionListener(new SelectionAdapter()
         {
             @Override
@@ -670,10 +752,73 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
         });
     }
 
+    private static void installReadOnlyTextCopySupport(Text text)
+    {
+        if (text == null || text.isDisposed())
+            return;
+
+        Menu menu = new Menu(text);
+        MenuItem copyItem = new MenuItem(menu, SWT.PUSH);
+        copyItem.setText("Копировать"); //$NON-NLS-1$
+        copyItem.addSelectionListener(new SelectionAdapter()
+        {
+            @Override
+            public void widgetSelected(SelectionEvent e)
+            {
+                copyReadOnlyTextSelection(text);
+            }
+        });
+        text.setMenu(menu);
+
+        text.addListener(SWT.KeyDown, e ->
+        {
+            if (!(e instanceof Event evt))
+                return;
+            boolean ctrl = (evt.stateMask & SWT.CTRL) != 0;
+            if (!ctrl)
+                return;
+            if (evt.keyCode == 'a' || evt.keyCode == 'A')
+            {
+                text.selectAll();
+                evt.doit = false;
+            }
+            else if (evt.keyCode == 'c' || evt.keyCode == 'C')
+            {
+                copyReadOnlyTextSelection(text);
+                evt.doit = false;
+            }
+        });
+
+        text.addListener(SWT.MouseDown, e ->
+        {
+            if (e.button == 1 && e.count == 2)
+                text.selectAll();
+        });
+    }
+
+    private static void copyReadOnlyTextSelection(Text text)
+    {
+        if (text == null || text.isDisposed())
+            return;
+        String value = text.getSelectionText();
+        if (value == null || value.isEmpty())
+            value = text.getText();
+        if (value == null || value.isEmpty())
+            return;
+        Display display = text.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        Clipboard clipboard = new Clipboard(display);
+        clipboard.setContents(
+            new Object[] { value },
+            new Transfer[] { TextTransfer.getInstance() });
+        clipboard.dispose();
+    }
+
     private void createFilterRow(Composite parent)
     {
         Composite row = new Composite(parent, SWT.NONE);
-        GridLayout layout = new GridLayout(4, false);
+        GridLayout layout = new GridLayout(6, false);
         layout.marginHeight = 0;
         layout.marginWidth = 0;
         layout.marginTop = 3;
@@ -684,7 +829,19 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
         row.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
 
         filterField = CollectionFilterHistory.createSearchBox(row, this::applyFilterNow);
-        CollectionFilterHistory.addFieldTrailingSpacer(row);
+
+        filterByPresentationCheckbox = new Button(row, SWT.CHECK);
+        filterByPresentationCheckbox.setText("По представлению"); //$NON-NLS-1$
+        filterByPresentationCheckbox.setToolTipText("Фильтровать только по представлению"); //$NON-NLS-1$
+        filterByPresentationCheckbox.addSelectionListener(new SelectionAdapter()
+        {
+            @Override
+            public void widgetSelected(SelectionEvent e)
+            {
+                onFilterByPresentationChanged();
+            }
+        });
+        updateFilterByPresentationCheckbox();
 
         Label presentationLabel = new Label(row, SWT.NONE);
         presentationLabel.setText("Представление:"); //$NON-NLS-1$
@@ -703,6 +860,18 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
                 onPresentationSelected();
             }
         });
+
+        Label pathLabel = new Label(row, SWT.NONE);
+        pathLabel.setText("Путь:"); //$NON-NLS-1$
+
+        collectionPathField = new Text(row, SWT.READ_ONLY | SWT.BORDER | SWT.SINGLE);
+        GridData pathGd = new GridData(SWT.BEGINNING, SWT.CENTER, false, false);
+        pathGd.widthHint = 240;
+        pathGd.minimumWidth = 120;
+        collectionPathField.setLayoutData(pathGd);
+        collectionPathField.setText(pathKeyFromPath());
+        collectionPathField.setToolTipText("Путь к коллекции; выделите текст и Ctrl+C"); //$NON-NLS-1$
+        installReadOnlyTextCopySupport(collectionPathField);
     }
 
     private void clearFilter()
@@ -767,13 +936,130 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
     {
         progressLabel = new Label(parent, SWT.NONE);
         progressLabel.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
-        progressLabel.setText("0% (0/0)"); //$NON-NLS-1$
+        progressLabel.setText(loadedProgressText(percentProgressDetail(0, 0)));
     }
 
     private void hookShellEvents()
     {
         shell.addListener(SWT.Show, e -> scheduleViewportLoadDebounced());
         shell.addListener(SWT.Deiconify, e -> scheduleViewportLoadDebounced());
+    }
+
+    private void installKeyContext()
+    {
+        shell.addListener(SWT.Activate, e -> activateKeyContext());
+        shell.addListener(SWT.Deactivate, e -> deactivateKeyContext());
+        activateKeyContext();
+    }
+
+    /**
+     * Перехват F2 и Esc до workbench: F2 «Показать коллекцию» не должен срабатывать
+     * в standalone-shell окна «Коллекция»; Esc закрывает окно.
+     */
+    private void installCollectionKeyFilter()
+    {
+        if (collectionKeyFilter != null || shell == null || shell.isDisposed())
+            return;
+        Display display = shell.getDisplay();
+        collectionKeyFilter = event -> {
+            if (!(event instanceof Event e) || e.type != SWT.KeyDown)
+                return;
+            if (shell.isDisposed() || display.getActiveShell() != shell)
+                return;
+            int mods = e.stateMask & (SWT.MOD1 | SWT.MOD2 | SWT.MOD3 | SWT.MOD4);
+            if (e.keyCode == SWT.F2 && mods == 0)
+            {
+                runInspectOnSelection();
+                e.doit = false;
+                return;
+            }
+            if (e.keyCode == SWT.ESC && mods == 0)
+            {
+                if (tryClearFilterOnEsc())
+                {
+                    e.doit = false;
+                    return;
+                }
+                closeAndDispose();
+                e.doit = false;
+            }
+        };
+        display.addFilter(SWT.KeyDown, collectionKeyFilter);
+    }
+
+    /** Esc в непустом поле фильтра — сначала очистка, повторный Esc закроет окно. */
+    private boolean tryClearFilterOnEsc()
+    {
+        if (filterField == null || filterField.isDisposed() || !filterField.isFocusControl())
+            return false;
+        String text = filterField.getText();
+        if (text == null || text.isEmpty())
+            return false;
+        clearFilter();
+        return true;
+    }
+
+    private void removeCollectionKeyFilter()
+    {
+        if (collectionKeyFilter == null)
+            return;
+        Display display = shell != null && !shell.isDisposed() ? shell.getDisplay() : null;
+        if (display == null)
+            display = Display.getCurrent();
+        if (display != null && !display.isDisposed())
+            display.removeFilter(SWT.KeyDown, collectionKeyFilter);
+        collectionKeyFilter = null;
+    }
+
+    private void activateKeyContext()
+    {
+        if (keyContextActivation != null || shell == null || shell.isDisposed())
+            return;
+        IContextService contextService = resolveContextService();
+        if (contextService == null)
+            return;
+        keyContextActivation = contextService.activateContext(ComfortCollectionInspectHandler.BINDING_CONTEXT_ID);
+    }
+
+    private void deactivateKeyContext()
+    {
+        if (keyContextActivation == null)
+            return;
+        IContextService contextService = resolveContextService();
+        if (contextService != null)
+            contextService.deactivateContext(keyContextActivation);
+        keyContextActivation = null;
+    }
+
+    private static IContextService resolveContextService()
+    {
+        try
+        {
+            IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            if (window == null)
+            {
+                IWorkbenchWindow[] windows = PlatformUI.getWorkbench().getWorkbenchWindows();
+                if (windows != null && windows.length > 0)
+                    window = windows[0];
+            }
+            if (window != null)
+                return window.getService(IContextService.class);
+        }
+        catch (Exception ignored)
+        {
+            // команда остаётся без контекста
+        }
+        return null;
+    }
+
+    void inspectSelection()
+    {
+        runInspectOnSelection();
+    }
+
+    boolean canInspectSelection()
+    {
+        return selectedVariable() != null;
     }
 
     private void hookTableEvents()
@@ -840,11 +1126,16 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
             filterEraseListenerIndex = e -> {
                 if (e.type != SWT.EraseItem || !(e.item instanceof TableItem item))
                     return;
+                if (isFilterByPresentationSelected() && e.index != 1)
+                    return;
+                SmartMatcher matcher = activeFilterMatcher();
+                if (matcher == null)
+                    return;
                 CollectionFilterEraseSupport.handleEraseItem(
                     index,
                     item,
                     e,
-                    activeFilterMatcher(),
+                    matcher,
                     filterSkipItem(item),
                     this,
                     0);
@@ -856,6 +1147,8 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
         {
             filterEraseListenerData = e -> {
                 if (e.type != SWT.EraseItem || !(e.item instanceof TableItem item))
+                    return;
+                if (isFilterByPresentationSelected())
                     return;
                 CollectionFilterEraseSupport.handleEraseItem(
                     data,
@@ -907,7 +1200,7 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
             String text = model.getCellDisplayText(logical, col);
             item.setText(col, text != null ? text : ""); //$NON-NLS-1$
         }
-        requestRowLoadIfNeeded(logical);
+        requestRowLoadIfNeeded(logical, index);
     }
 
     private void onSetDataData(Event event)
@@ -928,15 +1221,27 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
             String text = model.getCellDisplayText(logical, visibleCol);
             item.setText(dataCol, text != null ? text : ""); //$NON-NLS-1$
         }
-        requestRowLoadIfNeeded(logical);
+        requestRowLoadIfNeeded(logical, data);
     }
 
-    private void requestRowLoadIfNeeded(int logical)
+    private void requestRowLoadIfNeeded(int logical, Table table)
     {
-        if (scheduler == null || model == null)
+        if (scheduler == null || model == null || table == null || table.isDisposed())
             return;
-        int maxCol = Math.max(0, model.columns.columnCount() - 1);
-        if (model.needsRowLoad(logical, 0, maxCol))
+        if (scheduler.isLoadActive())
+            return;
+        int colFrom = 0;
+        int colTo = Math.max(0, model.columns.columnCount() - 1);
+        if (table == dataTable())
+        {
+            int[] cols = CollectionViewportTracker.visibleModelColumnRange(
+                table, model.columns.columnCount(), model.columns.fixedColumnCount());
+            colFrom = cols[0];
+            colTo = cols[1];
+        }
+        else if (table == indexTable())
+            colTo = Math.max(0, model.columns.fixedColumnCount() - 1);
+        if (model.needsRowLoad(logical, colFrom, colTo))
             scheduleViewportLoadDebounced();
     }
 
@@ -951,6 +1256,12 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
         if (event.keyCode == SWT.F3)
         {
             findSession.findNext((event.stateMask & SWT.SHIFT) == 0);
+            event.doit = false;
+            return;
+        }
+        if (event.keyCode == SWT.F2 && (event.stateMask & (SWT.MOD1 | SWT.MOD2 | SWT.MOD3 | SWT.MOD4)) == 0)
+        {
+            runInspectOnSelection();
             event.doit = false;
         }
     }
@@ -1031,8 +1342,11 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
         });
 
         MenuItem inspect = new MenuItem(menu, SWT.PUSH);
-        inspect.setText(CollectionRowContextSupport.inspectMenuLabel());
-        inspect.setToolTipText("Открыть элемент коллекции в инспекторе"); //$NON-NLS-1$
+        inspect.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
+            CollectionRowContextSupport.inspectMenuLabel(),
+            ComfortCollectionInspectHandler.COMMAND_ID,
+            ComfortCollectionInspectHandler.BINDING_CONTEXT_ID));
+        inspect.setToolTipText("Открыть элемент коллекции в инспекторе" + Global.pluginSignForTooltip()); //$NON-NLS-1$
         if (inspectImage != null)
             inspect.setImage(inspectImage);
         inspect.addSelectionListener(new SelectionAdapter()
@@ -1051,10 +1365,12 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
         Table data = dataTable();
         if (variable == null || shell == null || shell.isDisposed() || data == null || data.isDisposed())
             return;
+        int logicalRow = selectedLogicalRow();
         CollectionTableInteraction interaction = activeInteraction();
         String header = columnHeader(interaction != null ? interaction.modelVisibleColumn() : 0);
         Point anchor = inspectAnchor(data);
-        CollectionRowContextSupport.runInspect(variable, frame, header, data, anchor, shell);
+        CollectionRowContextSupport.runInspect(
+            variable, frame, header, data, anchor, shell, model, logicalRow);
     }
 
     private static Point inspectAnchor(Table table)
@@ -1087,6 +1403,26 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
         if (logical < 0)
             return null;
         return model.getRowVariable(logical);
+    }
+
+    private int selectedLogicalRow()
+    {
+        Table data = dataTable();
+        if (data == null || data.isDisposed())
+            return -1;
+        TableItem[] sel = data.getSelection();
+        if (sel == null || sel.length == 0)
+        {
+            Table index = indexTable();
+            if (index != null && !index.isDisposed())
+                sel = index.getSelection();
+        }
+        if (sel == null || sel.length == 0)
+            return -1;
+        int displayIndex = CollectionTableItemKeys.displayIndex(sel[0], sel[0].getParent());
+        if (displayIndex < 0)
+            displayIndex = data.indexOf(sel[0]);
+        return displayIndexToLogical(displayIndex);
     }
 
     private String columnHeader(int visibleCol)
@@ -1138,6 +1474,7 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
         if (scheduler != null)
             scheduler.cancelFilterScan();
         rowFilter = new CollectionRowFilter(text);
+        rowFilter.setPresentationOnly(isFilterByPresentationSelected());
         int total = effectiveTotalSize();
         if (!rowFilter.isActive())
         {
@@ -1197,9 +1534,11 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
 
     private int effectiveTotalSize()
     {
-        if (splitTable == null)
-            return 1;
-        return model.totalSize > 0 ? model.totalSize : Math.max(splitTable.getItemCount(), 1);
+        if (splitTable == null || model == null)
+            return 0;
+        if (model.totalSize >= 0)
+            return model.totalSize;
+        return splitTable.getItemCount();
     }
 
     private void updateTableItemCount(int count)
@@ -1359,6 +1698,7 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
         scheduleViewportLoad();
         updateColumnSettingsButton();
         refreshPresentationCombo();
+        applyFilterIfNonEmpty();
     }
 
     private void applyStoredPresentation(String pathKey)
@@ -1424,8 +1764,88 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
         model.remapCellCacheForVisibleLayout(oldVisible);
         syncSplitTableColumns();
         refreshVisibleTableRows();
+        updateFilterByPresentationCheckbox();
         if (needsVisibilityUpdate)
             scheduleViewportLoadDebounced();
+        else
+            applyFilterIfNonEmpty();
+    }
+
+    private void applyFilterIfNonEmpty()
+    {
+        if (filterField == null || filterField.isDisposed())
+            return;
+        String text = filterField.getText();
+        if (text != null && !text.isBlank())
+            applyFilterNow();
+    }
+
+    private boolean isFilterByPresentationSelected()
+    {
+        if (filterByPresentationCheckbox == null || filterByPresentationCheckbox.isDisposed())
+            return false;
+        if (!filterByPresentationCheckbox.getEnabled())
+            return false;
+        return filterByPresentationCheckbox.getSelection();
+    }
+
+    private void onFilterByPresentationChanged()
+    {
+        if (updatingFilterByPresentationCheckbox || model == null)
+            return;
+        if (filterByPresentationCheckbox == null || filterByPresentationCheckbox.isDisposed())
+            return;
+        CollectionColumnVisibilityStore.saveFilterByPresentation(
+            model.pathKey(), filterByPresentationCheckbox.getSelection());
+        applyFilterIfNonEmpty();
+    }
+
+    private void updateFilterByPresentationCheckbox()
+    {
+        if (filterByPresentationCheckbox == null || filterByPresentationCheckbox.isDisposed() || model == null)
+            return;
+        boolean hasPresentation = model.columns.presentationModelIndex() > 0;
+        String pathKey = model.pathKey();
+        updatingFilterByPresentationCheckbox = true;
+        try
+        {
+            filterByPresentationCheckbox.setEnabled(hasPresentation);
+            if (!hasPresentation)
+            {
+                if (filterByPresentationCheckbox.getSelection())
+                {
+                    filterByPresentationCheckbox.setSelection(false);
+                    CollectionColumnVisibilityStore.saveFilterByPresentation(pathKey, false);
+                    applyFilterIfNonEmpty();
+                }
+            }
+            else
+                filterByPresentationCheckbox.setSelection(
+                    CollectionColumnVisibilityStore.filterByPresentationFor(pathKey));
+        }
+        finally
+        {
+            updatingFilterByPresentationCheckbox = false;
+        }
+    }
+
+    private void applyCloneFilterByPresentationCheckbox()
+    {
+        if (filterByPresentationCheckbox == null || filterByPresentationCheckbox.isDisposed()
+            || model == null || cloneSnapshot == null)
+            return;
+        boolean hasPresentation = model.columns.presentationModelIndex() > 0;
+        updatingFilterByPresentationCheckbox = true;
+        try
+        {
+            filterByPresentationCheckbox.setEnabled(hasPresentation);
+            filterByPresentationCheckbox.setSelection(
+                hasPresentation && cloneSnapshot.filterByPresentation());
+        }
+        finally
+        {
+            updatingFilterByPresentationCheckbox = false;
+        }
     }
 
     private void refreshVisibleTableRows()
@@ -1472,6 +1892,7 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
         finally
         {
             applyingPresentation = false;
+            updateFilterByPresentationCheckbox();
         }
     }
 

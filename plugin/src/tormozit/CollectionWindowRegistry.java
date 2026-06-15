@@ -5,6 +5,7 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
+import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Shell;
 
 /**
@@ -47,8 +48,24 @@ final class CollectionWindowRegistry
 
     static boolean isCollectionShell(Shell shell)
     {
-        if (shell == null || shell.isDisposed())
+        return windowForShell(shell) != null;
+    }
+
+    /** Фокус в одном из окон «Коллекция» — отладочные привязки клавиш не должны срабатывать. */
+    static boolean isCollectionWindowFocused()
+    {
+        Display display = Display.getCurrent();
+        if (display == null)
+            display = Display.getDefault();
+        if (display == null)
             return false;
+        return isCollectionShell(display.getActiveShell());
+    }
+
+    static ComfortCollectionWindow windowForShell(Shell shell)
+    {
+        if (shell == null || shell.isDisposed())
+            return null;
         purgeDisposed();
         for (WeakReference<ComfortCollectionWindow> ref : OPEN.values())
         {
@@ -57,9 +74,9 @@ final class CollectionWindowRegistry
                 continue;
             Shell collectionShell = window.collectionShell();
             if (shell == collectionShell)
-                return true;
+                return window;
         }
-        return false;
+        return null;
     }
 
     static void disposeAll()

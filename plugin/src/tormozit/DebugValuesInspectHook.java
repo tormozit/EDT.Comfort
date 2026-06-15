@@ -3,7 +3,6 @@ package tormozit;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.eclipse.debug.core.model.IWatchExpression;
 import org.eclipse.debug.ui.AbstractDebugView;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.ISelectionProvider;
@@ -362,17 +361,6 @@ public final class DebugValuesInspectHook implements IStartup
         int column = clickColumn(table);
         String columnHeader = columnHeader(table, column);
 
-        String exprText = BslInspectSupport.resolveValuesInspectExpression(view, variable);
-        IWatchExpression watch = BslInspectSupport.newWatchExpression(exprText);
-        if (watch == null)
-        {
-            String toWatch = safeToWatchBrief(variable);
-            DebugValuesDebug.step("inspect", "watch=null expr=" + DebugValuesDebug.quote(exprText) //$NON-NLS-1$ //$NON-NLS-2$
-                + " toWatch=" + DebugValuesDebug.quote(toWatch) //$NON-NLS-1$
-                + " " + variableBrief(variable)); //$NON-NLS-1$
-            return;
-        }
-
         IBslStackFrame frame = variable.getStackFrame();
         if (frame == null)
             frame = DebugSessionHelper.findSuspendedStackFrame(null);
@@ -389,17 +377,24 @@ public final class DebugValuesInspectHook implements IStartup
             return;
 
         Point anchor = inspectAnchor(table);
-        InspectorPendingFocus.set(columnHeader);
 
         long popupStart = DebugValuesDebug.begin();
-        BslInspectSupport.openInspectPopup(parent, anchor, watch, frame, monitoringManager);
+        BslInspectSupport.openInspectForVariable(
+            parent,
+            anchor,
+            variable,
+            frame,
+            monitoringManager,
+            null,
+            columnHeader,
+            null,
+            -1,
+            view);
         DebugValuesDebug.perfSlow("inspect.popup", popupStart, DebugValuesDebug.tableBrief(table)); //$NON-NLS-1$
 
-        String expr = BslInspectSupport.watchExpressionText(watch);
         DebugValuesDebug.perfSlow("inspect.run", start, DebugValuesDebug.tableBrief(table) //$NON-NLS-1$
             + " column=" + column //$NON-NLS-1$
             + " header=" + DebugValuesDebug.quote(columnHeader) //$NON-NLS-1$
-            + " exprLen=" + expr.length() //$NON-NLS-1$
             + " " + variableBrief(variable)); //$NON-NLS-1$
     }
 

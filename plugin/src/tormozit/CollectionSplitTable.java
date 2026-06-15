@@ -6,6 +6,7 @@ import org.eclipse.swt.events.ControlAdapter;
 import org.eclipse.swt.events.ControlEvent;
 import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.events.SelectionEvent;
+import org.eclipse.jface.layout.TableColumnLayout;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Composite;
@@ -25,6 +26,7 @@ final class CollectionSplitTable
     private final SashForm sash;
     private final Composite indexPane;
     private final Label indexBottomSpacer;
+    private final Composite indexTableStack;
     private final Table indexTable;
     private final Table dataTable;
     private boolean syncingScroll;
@@ -36,12 +38,13 @@ final class CollectionSplitTable
     private boolean initialSashWeightsApplied;
 
     private CollectionSplitTable(Composite panel, SashForm sash, Composite indexPane,
-        Label indexBottomSpacer, Table indexTable, Table dataTable)
+        Label indexBottomSpacer, Composite indexTableStack, Table indexTable, Table dataTable)
     {
         this.panel = panel;
         this.sash = sash;
         this.indexPane = indexPane;
         this.indexBottomSpacer = indexBottomSpacer;
+        this.indexTableStack = indexTableStack;
         this.indexTable = indexTable;
         this.dataTable = dataTable;
     }
@@ -66,8 +69,14 @@ final class CollectionSplitTable
         indexPaneLayout.marginHeight = 0;
         indexPane.setLayout(indexPaneLayout);
 
-        Table indexTable = new Table(indexPane, style);
-        indexTable.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+        Composite indexTableStack = new Composite(indexPane, SWT.NONE);
+        indexTableStack.setLayout(null);
+        indexTableStack.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+
+        Composite indexColumnHost = new Composite(indexTableStack, SWT.NONE);
+        indexColumnHost.setLayout(new TableColumnLayout(true));
+
+        Table indexTable = new Table(indexColumnHost, style);
         indexTable.setHeaderVisible(true);
         indexTable.setLinesVisible(true);
 
@@ -76,12 +85,18 @@ final class CollectionSplitTable
         spacerGd.heightHint = 0;
         indexBottomSpacer.setLayoutData(spacerGd);
 
-        Table dataTable = new Table(sash, style);
+        Composite dataTableStack = new Composite(sash, SWT.NONE);
+        dataTableStack.setLayout(null);
+
+        Composite dataColumnHost = new Composite(dataTableStack, SWT.NONE);
+        dataColumnHost.setLayout(new TableColumnLayout(true));
+
+        Table dataTable = new Table(dataColumnHost, style);
         dataTable.setHeaderVisible(true);
         dataTable.setLinesVisible(true);
 
         CollectionSplitTable split = new CollectionSplitTable(panel, sash, indexPane,
-            indexBottomSpacer, indexTable, dataTable);
+            indexBottomSpacer, indexTableStack, indexTable, dataTable);
         split.installVerticalScrollSync();
         split.installSelectionSync();
         split.installSashSizing();
@@ -115,7 +130,7 @@ final class CollectionSplitTable
         syncRowAreaAlignment();
     }
 
-    /** Сохранить ширину левой панели и колонок «Индекс» / «Представление» (при закрытии окна). */
+    /** Сохранить ширину левой панели и колонок «Индекс» / «Тип» / «Представление» (при закрытии окна). */
     void persistFixedPaneWidth()
     {
         persistIndexColumnWidthsFromUi();
@@ -137,7 +152,13 @@ final class CollectionSplitTable
             CollectionIndexColumnWidthStore.save(indexW);
         if (indexTable.getColumnCount() > 1)
         {
-            int presW = indexTable.getColumn(1).getWidth();
+            int typeW = indexTable.getColumn(1).getWidth();
+            if (typeW > 0)
+                CollectionTypeColumnWidthStore.save(typeW);
+        }
+        if (indexTable.getColumnCount() > 2)
+        {
+            int presW = indexTable.getColumn(2).getWidth();
             if (presW > 0)
                 CollectionPresentationColumnWidthStore.save(presW);
         }
@@ -168,28 +189,59 @@ final class CollectionSplitTable
         }
         int paneW = fixedPaneInnerWidth();
         int indexW = CollectionIndexColumnWidthStore.load();
-        int presW = CollectionPresentationColumnWidthStore.load();
-        int minPres = CollectionPresentationColumnWidthStore.MIN_WIDTH;
-        int maxIndex = Math.max(CollectionIndexColumnWidthStore.MIN_WIDTH, paneW - minPres);
-        if (indexW > maxIndex)
+        int typeW = CollectionTypeColumnWidthStore.load();
+        int colCount = indexTable.getColumnCount();
+        if (colCount == 2)
         {
-            indexW = maxIndex;
-            CollectionIndexColumnWidthStore.save(indexW);
+            int maxIndex = Math.max(CollectionIndexColumnWidthStore.MIN_WIDTH,
+                paneW - CollectionTypeColumnWidthStore.MIN_WIDTH);
+            if (indexW > maxIndex)
+            {
+                indexW = maxIndex;
+                CollectionIndexColumnWidthStore.save(indexW);
+            }
+            typeW = Math.max(CollectionTypeColumnWidthStore.MIN_WIDTH, paneW - indexW);
         }
-        int total = indexW + presW;
-        if (total > paneW)
-            presW = Math.max(minPres, paneW - indexW);
-        else if (total < paneW)
-            presW += paneW - total;
+        else
+        {
+            int presW = CollectionPresentationColumnWidthStore.load();
+            int minPres = CollectionPresentationColumnWidthStore.MIN_WIDTH;
+            int minReserved = CollectionIndexColumnWidthStore.MIN_WIDTH
+                + CollectionTypeColumnWidthStore.MIN_WIDTH;
+            int maxReserved = Math.max(minReserved, paneW - minPres);
+            int reserved = indexW + typeW;
+            if (reserved > maxReserved)
+            {
+                int overflow = reserved - maxReserved;
+                int typeShrink = Math.min(overflow, typeW - CollectionTypeColumnWidthStore.MIN_WIDTH);
+                typeW -= typeShrink;
+                overflow -= typeShrink;
+                if (overflow > 0)
+                {
+                    indexW = Math.max(CollectionIndexColumnWidthStore.MIN_WIDTH, indexW - overflow);
+                    CollectionIndexColumnWidthStore.save(indexW);
+                }
+            }
+            presW = Math.max(minPres, paneW - indexW - typeW);
+            syncingIndexLayout = true;
+            try
+            {
+                indexTable.getColumn(0).setWidth(indexW);
+                indexTable.getColumn(1).setWidth(typeW);
+                indexTable.getColumn(2).setWidth(presW);
+                CollectionPresentationColumnWidthStore.save(presW);
+            }
+            finally
+            {
+                syncingIndexLayout = false;
+            }
+            return;
+        }
         syncingIndexLayout = true;
         try
         {
             indexTable.getColumn(0).setWidth(indexW);
-            if (indexTable.getColumnCount() > 1)
-            {
-                indexTable.getColumn(1).setWidth(presW);
-                CollectionPresentationColumnWidthStore.save(presW);
-            }
+            indexTable.getColumn(1).setWidth(typeW);
         }
         finally
         {
@@ -221,7 +273,7 @@ final class CollectionSplitTable
             int dataHeader = dataTable.getHeaderVisible() ? dataTable.getHeaderHeight() : 0;
             int indexHeader = indexTable.getHeaderVisible() ? indexTable.getHeaderHeight() : 0;
             int topInset = Math.max(0, dataHeader - indexHeader);
-            GridData indexGd = (GridData) indexTable.getLayoutData();
+            GridData indexGd = (GridData) indexTableStack.getLayoutData();
             if (indexGd.verticalIndent != topInset)
             {
                 indexGd.verticalIndent = topInset;
@@ -439,7 +491,7 @@ final class CollectionSplitTable
             indexTable.getDisplay().asyncExec(this::syncFixedPaneLayout);
     }
 
-    /** Одна колонка — «Индекс» на всю панель; две — «Индекс» + «Представление» с сохранёнными ширинами. */
+    /** Две колонки — «Индекс» + «Тип»; три — + «Представление» с сохранёнными ширинами. */
     private void syncFixedPaneLayout()
     {
         if (indexTable.isDisposed() || indexTable.getColumnCount() <= 0)
@@ -466,8 +518,14 @@ final class CollectionSplitTable
         }
         else if (columnIndex == 1)
         {
-            CollectionPresentationColumnWidthStore.save(column.getWidth());
+            CollectionTypeColumnWidthStore.save(column.getWidth());
             if (indexTable.getColumnCount() > 1)
+                syncFixedPaneColumnWidths();
+        }
+        else if (columnIndex == 2)
+        {
+            CollectionPresentationColumnWidthStore.save(column.getWidth());
+            if (indexTable.getColumnCount() > 2)
                 syncFixedPaneColumnWidths();
         }
         if (indexTable.getColumnCount() <= 1)
@@ -516,7 +574,9 @@ final class CollectionSplitTable
         if (indexTable.getColumnCount() > 1)
         {
             int maxFixed = CollectionIndexColumnWidthStore.MAX_WIDTH
-                + CollectionPresentationColumnWidthStore.MAX_WIDTH;
+                + CollectionTypeColumnWidthStore.MAX_WIDTH;
+            if (indexTable.getColumnCount() > 2)
+                maxFixed += CollectionPresentationColumnWidthStore.MAX_WIDTH;
             columnWidth = Math.min(maxFixed, Math.max(CollectionIndexColumnWidthStore.MIN_WIDTH, columnWidth));
         }
         else

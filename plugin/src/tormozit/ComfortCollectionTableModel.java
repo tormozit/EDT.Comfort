@@ -61,7 +61,18 @@ final class ComfortCollectionTableModel
         UNKNOWN, PENDING, READY, NA
     }
 
-    private static final int CELL_CACHE_LIMIT = 12000;
+    private static final int CELL_CACHE_LIMIT_MIN = 12000;
+
+    /** Ёмкость под автоподгрузку browse: rows×cols + запас; иначе LRU вытесняет viewport и цикл 0→N→0. */
+    int cellCacheCapacity()
+    {
+        int rows = totalSize > 0
+            ? Math.min(totalSize, CollectionLoadScheduler.AUTO_LOAD_ROW_LIMIT)
+            : 512;
+        int cols = Math.max(1, columns.columnCount());
+        long need = (long) rows * cols + 512L;
+        return (int) Math.min(Integer.MAX_VALUE, Math.max(CELL_CACHE_LIMIT_MIN, need));
+    }
     private static final int ROW_CHILDREN_CACHE_LIMIT = 2000;
 
     final IBslIndexedValue indexedValue;
@@ -93,7 +104,7 @@ final class ComfortCollectionTableModel
             @Override
             protected boolean removeEldestEntry(Map.Entry<CellKey, CellData> eldest)
             {
-                return size() > CELL_CACHE_LIMIT;
+                return size() > cellCacheCapacity();
             }
         };
 
@@ -232,8 +243,6 @@ final class ComfortCollectionTableModel
     {
         if (row < 0)
             return false;
-        if (getRowVariable(row) == null)
-            return true;
         colFrom = Math.max(0, colFrom);
         colTo = Math.min(colTo, columns.columnCount() - 1);
         for (int c = colFrom; c <= colTo; c++)
@@ -258,7 +267,7 @@ final class ComfortCollectionTableModel
         return count;
     }
 
-    private boolean isCellFilled(int row, int col)
+    boolean isCellFilled(int row, int col)
     {
         CellKey key = new CellKey(row, col);
         CellData data;
@@ -307,6 +316,11 @@ final class ComfortCollectionTableModel
         }
     }
 
+    private static String cellTextWithNestedSize(String baseText, int size)
+    {
+        return "(" + size + ") " + baseText; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
     void setCellText(int logicalRow, int visibleCol, String baseText)
     {
         CellData data = cellData(logicalRow, visibleCol);
@@ -317,7 +331,7 @@ final class ComfortCollectionTableModel
                 baseText = ""; //$NON-NLS-1$
             data.baseText = baseText;
             if (data.sizeState == SizeState.READY && data.nestedSize >= 0)
-                data.displayText = data.baseText + " [" + data.nestedSize + "]"; //$NON-NLS-1$ //$NON-NLS-2$
+                data.displayText = cellTextWithNestedSize(data.baseText, data.nestedSize);
             else if (PLACEHOLDER.equals(baseText))
                 data.displayText = PLACEHOLDER;
             else
@@ -333,7 +347,7 @@ final class ComfortCollectionTableModel
             data.nestedSize = size;
             data.sizeState = SizeState.READY;
             if (data.baseText != null && !data.baseText.isEmpty())
-                data.displayText = data.baseText + " [" + size + "]"; //$NON-NLS-1$ //$NON-NLS-2$
+                data.displayText = cellTextWithNestedSize(data.baseText, size);
         }
     }
 
@@ -373,6 +387,22 @@ final class ComfortCollectionTableModel
 
     String rowFilterText(int logicalRow) throws DebugException
     {
+        return rowFilterText(logicalRow, false);
+    }
+
+    String rowFilterText(int logicalRow, boolean presentationOnly) throws DebugException
+    {
+        if (presentationOnly)
+        {
+            int modelIdx = columns.presentationModelIndex();
+            if (modelIdx <= 0)
+                return ""; //$NON-NLS-1$
+            int visibleCol = columns.visibleIndexOfModelColumn(modelIdx);
+            if (visibleCol < 0)
+                return ""; //$NON-NLS-1$
+            String text = extractCellTextInJob(logicalRow, visibleCol);
+            return text != null ? text : ""; //$NON-NLS-1$
+        }
         StringBuilder sb = new StringBuilder();
         for (int c = 0; c < columns.columnCount(); c++)
         {
@@ -466,7 +496,7 @@ final class ComfortCollectionTableModel
         return formatPropertyValueString(child);
     }
 
-    /** Как EDT: pass 1 — тип/краткое представление; pass 2 — {@code (N)} в {@link CollectionSizeResolver}. */
+    /** Как EDT: pass 1 — тип/краткое представление; pass 2 — {@code (N) тип} в {@link CollectionSizeResolver}. */
     private static String formatPropertyValueString(IBslVariable child) throws DebugException
     {
         if (child == null)

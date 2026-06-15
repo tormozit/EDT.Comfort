@@ -1,350 +1,69 @@
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":0,"cols":0,0},"timestamp":1781502997023}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":0,"cols":0,0},"timestamp":1781502997028}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.scheduleSizePass","message":"sizePass","data":{"rows":0,32,"cols":0,0},"timestamp":1781502997044}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.scheduleSizePass","message":"sizePass","data":{"rows":0,32,"cols":0,0},"timestamp":1781502997099}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":0,"cols":0,49},"timestamp":1781502997197}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":1,"cols":0,49},"timestamp":1781502997197}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":2,"cols":0,49},"timestamp":1781502997197}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":3,"cols":0,49},"timestamp":1781502997198}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":4,"cols":0,49},"timestamp":1781502997198}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":5,"cols":0,49},"timestamp":1781502997198}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":6,"cols":0,49},"timestamp":1781502997199}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":7,"cols":0,49},"timestamp":1781502997199}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":8,"cols":0,49},"timestamp":1781502997199}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":9,"cols":0,49},"timestamp":1781502997200}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":10,"cols":0,49},"timestamp":1781502997200}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":11,"cols":0,49},"timestamp":1781502997200}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":12,"cols":0,49},"timestamp":1781502997201}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":13,"cols":0,49},"timestamp":1781502997201}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":14,"cols":0,49},"timestamp":1781502997202}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":15,"cols":0,49},"timestamp":1781502997202}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":16,"cols":0,49},"timestamp":1781502997202}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":17,"cols":0,49},"timestamp":1781502997202}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":18,"cols":0,49},"timestamp":1781502997203}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":19,"cols":0,49},"timestamp":1781502997203}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":20,"cols":0,49},"timestamp":1781502997204}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":21,"cols":0,49},"timestamp":1781502997204}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":22,"cols":0,49},"timestamp":1781502997205}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":23,"cols":0,49},"timestamp":1781502997205}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":24,"cols":0,49},"timestamp":1781502997205}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":25,"cols":0,49},"timestamp":1781502997206}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":26,"cols":0,49},"timestamp":1781502997206}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":27,"cols":0,49},"timestamp":1781502997206}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":28,"cols":0,49},"timestamp":1781502997207}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":29,"cols":0,49},"timestamp":1781502997207}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":0,"cols":0,49},"timestamp":1781502997207}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":1,"cols":0,49},"timestamp":1781502997208}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":2,"cols":0,49},"timestamp":1781502997208}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":3,"cols":0,49},"timestamp":1781502997208}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":4,"cols":0,49},"timestamp":1781502997209}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":5,"cols":0,49},"timestamp":1781502997209}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":6,"cols":0,49},"timestamp":1781502997209}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":7,"cols":0,49},"timestamp":1781502997210}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":8,"cols":0,49},"timestamp":1781502997210}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":9,"cols":0,49},"timestamp":1781502997210}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":10,"cols":0,49},"timestamp":1781502997210}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":11,"cols":0,49},"timestamp":1781502997211}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":12,"cols":0,49},"timestamp":1781502997211}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":13,"cols":0,49},"timestamp":1781502997211}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":14,"cols":0,49},"timestamp":1781502997213}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":15,"cols":0,49},"timestamp":1781502997213}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":16,"cols":0,49},"timestamp":1781502997213}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":17,"cols":0,49},"timestamp":1781502997213}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":18,"cols":0,49},"timestamp":1781502997214}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":19,"cols":0,49},"timestamp":1781502997214}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":20,"cols":0,49},"timestamp":1781502997214}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":21,"cols":0,49},"timestamp":1781502997215}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":22,"cols":0,49},"timestamp":1781502997215}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":23,"cols":0,49},"timestamp":1781502997215}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":24,"cols":0,49},"timestamp":1781502997215}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":25,"cols":0,49},"timestamp":1781502997216}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":26,"cols":0,49},"timestamp":1781502997216}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":27,"cols":0,49},"timestamp":1781502997216}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":28,"cols":0,49},"timestamp":1781502997216}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":29,"cols":0,49},"timestamp":1781502997217}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.requestViewport","message":"viewport","data":{"rows":0,40,"cols":0,49,"colCount":50},"timestamp":1781502998326}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.scheduleSizePass","message":"sizePass","data":{"rows":0,40,"cols":2,8},"timestamp":1781502998328}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":24,"cols":0,49},"timestamp":1781502998345}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":25,"cols":0,49},"timestamp":1781502998345}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":26,"cols":0,49},"timestamp":1781502998346}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":27,"cols":0,49},"timestamp":1781502998346}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":28,"cols":0,49},"timestamp":1781502998347}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":29,"cols":0,49},"timestamp":1781502998347}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":24,"cols":0,49},"timestamp":1781502998348}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":25,"cols":0,49},"timestamp":1781502998349}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":26,"cols":0,49},"timestamp":1781502998349}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":27,"cols":0,49},"timestamp":1781502998350}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":28,"cols":0,49},"timestamp":1781502998350}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":29,"cols":0,49},"timestamp":1781502998351}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.scheduleSizePass","message":"sizePass","data":{"rows":0,40,"cols":2,8},"timestamp":1781502998381}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.requestViewport","message":"viewport","data":{"rows":0,40,"cols":0,49,"colCount":50},"timestamp":1781502998474}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.requestViewport","message":"viewport","data":{"rows":0,40,"cols":0,49,"colCount":50},"timestamp":1781502998768}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":0,"cols":2,8},"timestamp":1781503015972}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":1,"cols":2,8},"timestamp":1781503015973}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":2,"cols":2,8},"timestamp":1781503015974}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":3,"cols":2,8},"timestamp":1781503015976}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":4,"cols":2,8},"timestamp":1781503015977}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":5,"cols":2,8},"timestamp":1781503015979}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":6,"cols":2,8},"timestamp":1781503015980}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":7,"cols":2,8},"timestamp":1781503015981}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":8,"cols":2,8},"timestamp":1781503015983}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":9,"cols":2,8},"timestamp":1781503015984}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":10,"cols":2,8},"timestamp":1781503015985}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":11,"cols":2,8},"timestamp":1781503015986}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":12,"cols":2,8},"timestamp":1781503015988}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":13,"cols":2,8},"timestamp":1781503015989}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":14,"cols":2,8},"timestamp":1781503015991}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":15,"cols":2,8},"timestamp":1781503015992}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":16,"cols":2,8},"timestamp":1781503015993}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":17,"cols":2,8},"timestamp":1781503015996}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":18,"cols":2,8},"timestamp":1781503015998}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":19,"cols":2,8},"timestamp":1781503016001}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":20,"cols":2,8},"timestamp":1781503016003}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":21,"cols":2,8},"timestamp":1781503016005}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":22,"cols":2,8},"timestamp":1781503016007}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":23,"cols":2,8},"timestamp":1781503016010}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":24,"cols":2,8},"timestamp":1781503016012}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":25,"cols":2,8},"timestamp":1781503016015}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":26,"cols":2,8},"timestamp":1781503016017}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":27,"cols":2,8},"timestamp":1781503016018}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":28,"cols":2,8},"timestamp":1781503016020}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":29,"cols":2,8},"timestamp":1781503016022}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":0,"cols":2,8},"timestamp":1781503016023}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":1,"cols":2,8},"timestamp":1781503016026}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":2,"cols":2,8},"timestamp":1781503016027}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":3,"cols":2,8},"timestamp":1781503016028}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":4,"cols":2,8},"timestamp":1781503016029}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":5,"cols":2,8},"timestamp":1781503016030}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":6,"cols":2,8},"timestamp":1781503016032}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":7,"cols":2,8},"timestamp":1781503016033}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":8,"cols":2,8},"timestamp":1781503016034}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":9,"cols":2,8},"timestamp":1781503016035}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":10,"cols":2,8},"timestamp":1781503016036}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":11,"cols":2,8},"timestamp":1781503016038}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":12,"cols":2,8},"timestamp":1781503016039}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":13,"cols":2,8},"timestamp":1781503016040}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":14,"cols":2,8},"timestamp":1781503016041}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":15,"cols":2,8},"timestamp":1781503016043}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":16,"cols":2,8},"timestamp":1781503016044}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":17,"cols":2,8},"timestamp":1781503016045}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":18,"cols":2,8},"timestamp":1781503016046}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":19,"cols":2,8},"timestamp":1781503016047}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":20,"cols":2,8},"timestamp":1781503016049}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":21,"cols":2,8},"timestamp":1781503016050}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":22,"cols":2,8},"timestamp":1781503016051}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":23,"cols":2,8},"timestamp":1781503016052}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":24,"cols":2,8},"timestamp":1781503016053}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":25,"cols":2,8},"timestamp":1781503016054}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":26,"cols":2,8},"timestamp":1781503016056}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":27,"cols":2,8},"timestamp":1781503016058}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":28,"cols":2,8},"timestamp":1781503016060}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":29,"cols":2,8},"timestamp":1781503016061}
-{"sessionId":"74d17f","hypothesisId":"H5","location":"ComfortCollectionWindow.applyColumnDialogResult","message":"columns","data":{"visibleCols":146,"hidden":0},"timestamp":1781503016062}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.requestViewport","message":"viewport","data":{"rows":0,40,"cols":0,16,"colCount":146},"timestamp":1781503017141}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.scheduleSizePass","message":"sizePass","data":{"rows":0,40,"cols":2,8},"timestamp":1781503017142}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.scheduleSizePass","message":"sizePass","data":{"rows":0,40,"cols":2,8},"timestamp":1781503017243}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.requestViewport","message":"viewport","data":{"rows":0,40,"cols":0,16,"colCount":146},"timestamp":1781503032865}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":48,"cols":2,8},"timestamp":1781503052905}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":49,"cols":2,8},"timestamp":1781503052930}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":50,"cols":2,8},"timestamp":1781503052952}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":51,"cols":2,8},"timestamp":1781503052974}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":52,"cols":2,8},"timestamp":1781503052998}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":53,"cols":2,8},"timestamp":1781503053020}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":54,"cols":2,8},"timestamp":1781503053043}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":55,"cols":2,8},"timestamp":1781503053068}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":56,"cols":2,8},"timestamp":1781503053090}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":57,"cols":2,8},"timestamp":1781503053113}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":58,"cols":2,8},"timestamp":1781503053140}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":59,"cols":2,8},"timestamp":1781503053185}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":60,"cols":2,8},"timestamp":1781503053239}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":61,"cols":2,8},"timestamp":1781503053508}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":62,"cols":2,8},"timestamp":1781503053660}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":63,"cols":2,8},"timestamp":1781503053771}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":64,"cols":2,8},"timestamp":1781503053827}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":65,"cols":2,8},"timestamp":1781503053905}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":66,"cols":2,8},"timestamp":1781503053973}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":67,"cols":2,8},"timestamp":1781503054026}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":68,"cols":2,8},"timestamp":1781503054064}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":69,"cols":2,8},"timestamp":1781503054105}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":70,"cols":2,8},"timestamp":1781503054145}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":71,"cols":2,8},"timestamp":1781503054184}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":72,"cols":2,8},"timestamp":1781503054224}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":73,"cols":2,8},"timestamp":1781503054373}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":74,"cols":2,8},"timestamp":1781503054527}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":75,"cols":2,8},"timestamp":1781503054695}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":76,"cols":2,8},"timestamp":1781503054788}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":77,"cols":2,8},"timestamp":1781503054876}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":48,"cols":2,8},"timestamp":1781503056749}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":49,"cols":2,8},"timestamp":1781503056752}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":50,"cols":2,8},"timestamp":1781503056755}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":51,"cols":2,8},"timestamp":1781503056758}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":52,"cols":2,8},"timestamp":1781503056760}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":53,"cols":2,8},"timestamp":1781503056763}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":54,"cols":2,8},"timestamp":1781503056767}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":55,"cols":2,8},"timestamp":1781503056770}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":56,"cols":2,8},"timestamp":1781503056773}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":57,"cols":2,8},"timestamp":1781503056776}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":58,"cols":2,8},"timestamp":1781503056779}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":59,"cols":2,8},"timestamp":1781503056782}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":60,"cols":2,8},"timestamp":1781503056784}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":61,"cols":2,8},"timestamp":1781503056787}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":62,"cols":2,8},"timestamp":1781503056790}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":63,"cols":2,8},"timestamp":1781503056793}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":64,"cols":2,8},"timestamp":1781503056796}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":65,"cols":2,8},"timestamp":1781503056799}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":66,"cols":2,8},"timestamp":1781503056802}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":67,"cols":2,8},"timestamp":1781503056805}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":68,"cols":2,8},"timestamp":1781503056808}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":69,"cols":2,8},"timestamp":1781503056811}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":70,"cols":2,8},"timestamp":1781503056814}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":71,"cols":2,8},"timestamp":1781503056817}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":72,"cols":2,8},"timestamp":1781503056820}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":73,"cols":2,8},"timestamp":1781503056824}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":74,"cols":2,8},"timestamp":1781503056826}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":75,"cols":2,8},"timestamp":1781503056829}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":76,"cols":2,8},"timestamp":1781503056832}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":77,"cols":2,8},"timestamp":1781503056835}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.requestViewport","message":"viewport","data":{"rows":40,88,"cols":0,16,"colCount":146},"timestamp":1781503056981}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.scheduleSizePass","message":"sizePass","data":{"rows":40,83,"cols":2,8},"timestamp":1781503056982}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.scheduleSizePass","message":"sizePass","data":{"rows":40,83,"cols":2,8},"timestamp":1781503057034}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.requestViewport","message":"viewport","data":{"rows":40,88,"cols":0,16,"colCount":146},"timestamp":1781503062747}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.requestViewport","message":"viewport","data":{"rows":0,48,"cols":0,16,"colCount":146},"timestamp":1781503069881}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.requestViewport","message":"viewport","data":{"rows":26,74,"cols":0,16,"colCount":146},"timestamp":1781503079553}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.requestViewport","message":"viewport","data":{"rows":47,91,"cols":0,16,"colCount":146},"timestamp":1781503083889}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.requestViewport","message":"viewport","data":{"rows":47,91,"cols":0,16,"colCount":146},"timestamp":1781503088170}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":0,"cols":0,0},"timestamp":1781503157424}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":0,"cols":0,0},"timestamp":1781503157426}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.scheduleSizePass","message":"sizePass","data":{"rows":0,32,"cols":0,0},"timestamp":1781503157429}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.scheduleSizePass","message":"sizePass","data":{"rows":0,32,"cols":0,0},"timestamp":1781503157482}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":0,"cols":2,8},"timestamp":1781503157558}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":1,"cols":2,8},"timestamp":1781503157560}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":2,"cols":2,8},"timestamp":1781503157562}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":3,"cols":2,8},"timestamp":1781503157563}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":4,"cols":2,8},"timestamp":1781503157564}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":5,"cols":2,8},"timestamp":1781503157565}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":6,"cols":2,8},"timestamp":1781503157567}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":7,"cols":2,8},"timestamp":1781503157568}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":8,"cols":2,8},"timestamp":1781503157570}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":9,"cols":2,8},"timestamp":1781503157570}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.scheduleSizePass","message":"sizePass","data":{"rows":0,32,"cols":0,0},"timestamp":1781503157572}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":10,"cols":2,8},"timestamp":1781503157573}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":11,"cols":2,8},"timestamp":1781503157574}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":12,"cols":2,8},"timestamp":1781503157575}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":13,"cols":2,8},"timestamp":1781503157576}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":14,"cols":2,8},"timestamp":1781503157577}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":15,"cols":2,8},"timestamp":1781503157579}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":16,"cols":2,8},"timestamp":1781503157581}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":17,"cols":2,8},"timestamp":1781503157582}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":18,"cols":2,8},"timestamp":1781503157583}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":19,"cols":2,8},"timestamp":1781503157584}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":20,"cols":2,8},"timestamp":1781503157585}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":21,"cols":2,8},"timestamp":1781503157587}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":22,"cols":2,8},"timestamp":1781503157588}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":23,"cols":2,8},"timestamp":1781503157589}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":24,"cols":2,8},"timestamp":1781503157590}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":25,"cols":2,8},"timestamp":1781503157592}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":26,"cols":2,8},"timestamp":1781503157593}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":27,"cols":2,8},"timestamp":1781503157594}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":28,"cols":2,8},"timestamp":1781503157595}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":29,"cols":2,8},"timestamp":1781503157597}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":0,"cols":2,8},"timestamp":1781503157598}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":1,"cols":2,8},"timestamp":1781503157601}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":2,"cols":2,8},"timestamp":1781503157602}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":3,"cols":2,8},"timestamp":1781503157604}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":4,"cols":2,8},"timestamp":1781503157605}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":5,"cols":2,8},"timestamp":1781503157607}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":6,"cols":2,8},"timestamp":1781503157608}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":7,"cols":2,8},"timestamp":1781503157610}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":8,"cols":2,8},"timestamp":1781503157611}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":9,"cols":2,8},"timestamp":1781503157612}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":10,"cols":2,8},"timestamp":1781503157614}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":11,"cols":2,8},"timestamp":1781503157615}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":12,"cols":2,8},"timestamp":1781503157616}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":13,"cols":2,8},"timestamp":1781503157618}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":14,"cols":2,8},"timestamp":1781503157620}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":15,"cols":2,8},"timestamp":1781503157621}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":16,"cols":2,8},"timestamp":1781503157623}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":17,"cols":2,8},"timestamp":1781503157624}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":18,"cols":2,8},"timestamp":1781503157625}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":19,"cols":2,8},"timestamp":1781503157627}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":20,"cols":2,8},"timestamp":1781503157628}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":21,"cols":2,8},"timestamp":1781503157629}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":22,"cols":2,8},"timestamp":1781503157631}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":23,"cols":2,8},"timestamp":1781503157632}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":24,"cols":2,8},"timestamp":1781503157633}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":25,"cols":2,8},"timestamp":1781503157635}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":26,"cols":2,8},"timestamp":1781503157636}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":27,"cols":2,8},"timestamp":1781503157637}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":28,"cols":2,8},"timestamp":1781503157639}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":29,"cols":2,8},"timestamp":1781503157641}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.requestViewport","message":"viewport","data":{"rows":0,40,"cols":0,16,"colCount":146},"timestamp":1781503158716}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.scheduleSizePass","message":"sizePass","data":{"rows":0,40,"cols":2,8},"timestamp":1781503158717}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.scheduleSizePass","message":"sizePass","data":{"rows":0,40,"cols":2,8},"timestamp":1781503158769}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.requestViewport","message":"viewport","data":{"rows":0,40,"cols":88,110,"colCount":146},"timestamp":1781503164509}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.scheduleSizePass","message":"sizePass","data":{"rows":0,40,"cols":96,102},"timestamp":1781503164511}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.requestViewport","message":"viewport","data":{"rows":0,40,"cols":88,110,"colCount":146},"timestamp":1781503164527}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.scheduleSizePass","message":"sizePass","data":{"rows":0,40,"cols":96,102},"timestamp":1781503164529}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.requestViewport","message":"viewport","data":{"rows":0,40,"cols":122,145,"colCount":146},"timestamp":1781503170809}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.scheduleSizePass","message":"sizePass","data":{"rows":0,40,"cols":130,137},"timestamp":1781503170810}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.scheduleSizePass","message":"sizePass","data":{"rows":0,40,"cols":130,137},"timestamp":1781503170866}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":55,"cols":130,137},"timestamp":1781503177739}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":56,"cols":130,137},"timestamp":1781503177765}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":57,"cols":130,137},"timestamp":1781503177789}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":58,"cols":130,137},"timestamp":1781503177815}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":59,"cols":130,137},"timestamp":1781503177840}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":60,"cols":130,137},"timestamp":1781503177865}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":61,"cols":130,137},"timestamp":1781503177891}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":62,"cols":130,137},"timestamp":1781503177915}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":63,"cols":130,137},"timestamp":1781503177939}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":64,"cols":130,137},"timestamp":1781503177963}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":65,"cols":130,137},"timestamp":1781503177989}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":66,"cols":130,137},"timestamp":1781503178013}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":67,"cols":130,137},"timestamp":1781503178037}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":68,"cols":130,137},"timestamp":1781503178066}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":69,"cols":130,137},"timestamp":1781503178091}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":70,"cols":130,137},"timestamp":1781503178116}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":71,"cols":130,137},"timestamp":1781503178143}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":72,"cols":130,137},"timestamp":1781503178168}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":73,"cols":130,137},"timestamp":1781503178194}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":74,"cols":130,137},"timestamp":1781503178221}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":75,"cols":130,137},"timestamp":1781503178248}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":76,"cols":130,137},"timestamp":1781503178296}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":77,"cols":130,137},"timestamp":1781503178345}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":78,"cols":130,137},"timestamp":1781503178376}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":79,"cols":130,137},"timestamp":1781503178402}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":80,"cols":130,137},"timestamp":1781503178553}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":81,"cols":130,137},"timestamp":1781503178722}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":82,"cols":130,137},"timestamp":1781503178831}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":83,"cols":130,137},"timestamp":1781503178944}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":55,"cols":130,137},"timestamp":1781503180499}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":56,"cols":130,137},"timestamp":1781503180502}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":57,"cols":130,137},"timestamp":1781503180505}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":58,"cols":130,137},"timestamp":1781503180508}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":59,"cols":130,137},"timestamp":1781503180511}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":60,"cols":130,137},"timestamp":1781503180513}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":61,"cols":130,137},"timestamp":1781503180516}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":62,"cols":130,137},"timestamp":1781503180520}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":63,"cols":130,137},"timestamp":1781503180523}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":64,"cols":130,137},"timestamp":1781503180525}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":65,"cols":130,137},"timestamp":1781503180529}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":66,"cols":130,137},"timestamp":1781503180532}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":67,"cols":130,137},"timestamp":1781503180535}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":68,"cols":130,137},"timestamp":1781503180537}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":69,"cols":130,137},"timestamp":1781503180541}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":70,"cols":130,137},"timestamp":1781503180545}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":71,"cols":130,137},"timestamp":1781503180547}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":72,"cols":130,137},"timestamp":1781503180550}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":73,"cols":130,137},"timestamp":1781503180553}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":74,"cols":130,137},"timestamp":1781503180556}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":75,"cols":130,137},"timestamp":1781503180559}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":76,"cols":130,137},"timestamp":1781503180562}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":77,"cols":130,137},"timestamp":1781503180565}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":78,"cols":130,137},"timestamp":1781503180568}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":79,"cols":130,137},"timestamp":1781503180571}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":80,"cols":130,137},"timestamp":1781503180574}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":81,"cols":130,137},"timestamp":1781503180577}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":82,"cols":130,137},"timestamp":1781503180580}
-{"sessionId":"74d17f","hypothesisId":"H2","location":"ComfortCollectionWindow.requestRowLoadIfNeeded","message":"setData","data":{"row":83,"cols":130,137},"timestamp":1781503180584}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.requestViewport","message":"viewport","data":{"rows":47,91,"cols":122,145,"colCount":146},"timestamp":1781503180744}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.scheduleSizePass","message":"sizePass","data":{"rows":47,83,"cols":130,137},"timestamp":1781503180744}
-{"sessionId":"74d17f","hypothesisId":"H3","location":"CollectionLoadScheduler.scheduleSizePass","message":"sizePass","data":{"rows":47,83,"cols":130,137},"timestamp":1781503180797}
+{"sessionId":"74d17f","hypothesisId":"H5","location":"DebugInspectorCollectionMenuHook.onMenuDetect","message":"menuDetect row","data":{"detail":"item=null x=630 y=433"},"timestamp":1781513864433}
+{"sessionId":"74d17f","hypothesisId":"H1","location":"DebugInspectorCollectionMenuHook.resolveSelectedElement","message":"sources","data":{"detail":"tree=WatchExpression viewer=null"},"timestamp":1781513864438}
+{"sessionId":"74d17f","hypothesisId":"H3","location":"DebugInspectorCollectionMenuHook.menuShown","message":"resolve","data":{"detail":"WatchExpression value=BslContextValue evaluated=true pending=false indexed=false canOpen=false"},"timestamp":1781513864441}
+{"sessionId":"74d17f","hypothesisId":"H5","location":"DebugInspectorCollectionMenuHook.onMenuDetect","message":"menuDetect row","data":{"detail":"item=null x=585 y=919"},"timestamp":1781514212763}
+{"sessionId":"74d17f","hypothesisId":"H1","location":"DebugInspectorCollectionMenuHook.resolveSelectedElement","message":"sources","data":{"detail":"tree=WatchExpression viewer=null"},"timestamp":1781514212776}
+{"sessionId":"74d17f","hypothesisId":"H3","location":"DebugInspectorCollectionMenuHook.menuShown","message":"resolve","data":{"detail":"WatchExpression value=BslEnumValue evaluated=true pending=false indexed=true canOpen=true"},"timestamp":1781514212779}
+{"sessionId":"74d17f","hypothesisId":"H5","location":"DebugInspectorCollectionMenuHook.onMenuDetect","message":"menuDetect row","data":{"detail":"item=null x=677 y=957"},"timestamp":1781514260929}
+{"sessionId":"74d17f","hypothesisId":"H1","location":"DebugInspectorCollectionMenuHook.resolveSelectedElement","message":"sources","data":{"detail":"tree=WatchExpression viewer=null"},"timestamp":1781514260935}
+{"sessionId":"74d17f","hypothesisId":"H3","location":"DebugInspectorCollectionMenuHook.menuShown","message":"resolve","data":{"detail":"WatchExpression value=BslEnumValue evaluated=true pending=false indexed=true canOpen=true"},"timestamp":1781514260936}
+{"sessionId":"74d17f","hypothesisId":"H5","location":"DebugInspectorCollectionMenuHook.onMenuDetect","message":"menuDetect row","data":{"detail":"item=null x=630 y=901"},"timestamp":1781514457243}
+{"sessionId":"74d17f","hypothesisId":"H1","location":"DebugInspectorCollectionMenuHook.resolveSelectedElement","message":"sources","data":{"detail":"tree=WatchExpression viewer=null"},"timestamp":1781514457248}
+{"sessionId":"74d17f","hypothesisId":"H3","location":"DebugInspectorCollectionMenuHook.menuShown","message":"resolve","data":{"detail":"WatchExpression value=BslEnumValue evaluated=true pending=false indexed=true canOpen=true"},"timestamp":1781514457249}
+{"sessionId":"74d17f","hypothesisId":"H5","location":"DebugInspectorCollectionMenuHook.onMenuDetect","message":"menuDetect row","data":{"detail":"item=null x=630 y=958"},"timestamp":1781514475807}
+{"sessionId":"74d17f","hypothesisId":"H1","location":"DebugInspectorCollectionMenuHook.resolveSelectedElement","message":"sources","data":{"detail":"tree=WatchExpression viewer=null"},"timestamp":1781514475814}
+{"sessionId":"74d17f","hypothesisId":"H3","location":"DebugInspectorCollectionMenuHook.menuShown","message":"resolve","data":{"detail":"WatchExpression value=BslEnumValue evaluated=true pending=false indexed=true canOpen=true"},"timestamp":1781514475814}
+{"sessionId":"74d17f","hypothesisId":"H5","location":"DebugInspectorCollectionMenuHook.onMenuDetect","message":"menuDetect row","data":{"detail":"item=null x=651 y=964"},"timestamp":1781514476834}
+{"sessionId":"74d17f","hypothesisId":"H1","location":"DebugInspectorCollectionMenuHook.resolveSelectedElement","message":"sources","data":{"detail":"tree=WatchExpression viewer=null"},"timestamp":1781514476839}
+{"sessionId":"74d17f","hypothesisId":"H3","location":"DebugInspectorCollectionMenuHook.menuShown","message":"resolve","data":{"detail":"WatchExpression value=BslEnumValue evaluated=true pending=false indexed=true canOpen=true"},"timestamp":1781514476839}
+{"sessionId":"74d17f","hypothesisId":"H5","location":"DebugInspectorCollectionMenuHook.onMenuDetect","message":"menuDetect row","data":{"detail":"item=null x=1665 y=732"},"timestamp":1781528371185}
+{"sessionId":"74d17f","hypothesisId":"H1","location":"DebugInspectorCollectionMenuHook.resolveSelectedElement","message":"sources","data":{"detail":"tree=BslVariable viewer=BslVariable"},"timestamp":1781528371194}
+{"sessionId":"74d17f","hypothesisId":"H3","location":"DebugInspectorCollectionMenuHook.menuShown","message":"resolve","data":{"detail":"BslVariable value=BslPrimitiveValue evaluated=true pending=false indexed=false canOpen=false"},"timestamp":1781528371196}
+{"sessionId":"74d17f","hypothesisId":"H5","location":"DebugInspectorCollectionMenuHook.onMenuDetect","message":"menuDetect row","data":{"detail":"item=null x=1615 y=624"},"timestamp":1781528383721}
+{"sessionId":"74d17f","hypothesisId":"H1","location":"DebugInspectorCollectionMenuHook.resolveSelectedElement","message":"sources","data":{"detail":"tree=BslVariable viewer=BslVariable"},"timestamp":1781528383727}
+{"sessionId":"74d17f","hypothesisId":"H3","location":"DebugInspectorCollectionMenuHook.menuShown","message":"resolve","data":{"detail":"BslVariable value=BslPrimitiveValue evaluated=true pending=false indexed=false canOpen=false"},"timestamp":1781528383728}
+{"sessionId":"74d17f","hypothesisId":"H5","location":"DebugInspectorCollectionMenuHook.onMenuDetect","message":"menuDetect row","data":{"detail":"item=null x=1332 y=629"},"timestamp":1781528461092}
+{"sessionId":"74d17f","hypothesisId":"H1","location":"DebugInspectorCollectionMenuHook.resolveSelectedElement","message":"sources","data":{"detail":"tree=BslVariable viewer=BslVariable"},"timestamp":1781528461101}
+{"sessionId":"74d17f","hypothesisId":"H3","location":"DebugInspectorCollectionMenuHook.menuShown","message":"resolve","data":{"detail":"BslVariable value=BslPrimitiveValue evaluated=true pending=false indexed=false canOpen=false"},"timestamp":1781528461101}
+{"sessionId":"74d17f","hypothesisId":"H5","location":"DebugInspectorCollectionMenuHook.onMenuDetect","message":"menuDetect row","data":{"detail":"item=null x=1347 y=628"},"timestamp":1781528471838}
+{"sessionId":"74d17f","hypothesisId":"H1","location":"DebugInspectorCollectionMenuHook.resolveSelectedElement","message":"sources","data":{"detail":"tree=BslVariable viewer=BslVariable"},"timestamp":1781528471844}
+{"sessionId":"74d17f","hypothesisId":"H3","location":"DebugInspectorCollectionMenuHook.menuShown","message":"resolve","data":{"detail":"BslVariable value=BslPrimitiveValue evaluated=true pending=false indexed=false canOpen=false"},"timestamp":1781528471844}
+{"sessionId":"74d17f","hypothesisId":"H5","location":"DebugInspectorCollectionMenuHook.onMenuDetect","message":"menuDetect row","data":{"detail":"item=null x=1312 y=627"},"timestamp":1781528478270}
+{"sessionId":"74d17f","hypothesisId":"H1","location":"DebugInspectorCollectionMenuHook.resolveSelectedElement","message":"sources","data":{"detail":"tree=BslVariable viewer=BslVariable"},"timestamp":1781528478277}
+{"sessionId":"74d17f","hypothesisId":"H3","location":"DebugInspectorCollectionMenuHook.menuShown","message":"resolve","data":{"detail":"BslVariable value=BslPrimitiveValue evaluated=true pending=false indexed=false canOpen=false"},"timestamp":1781528478277}
+{"sessionId":"74d17f","hypothesisId":"H5","location":"DebugInspectorCollectionMenuHook.onMenuDetect","message":"menuDetect row","data":{"detail":"item=null x=647 y=891"},"timestamp":1781528838422}
+{"sessionId":"74d17f","hypothesisId":"H1","location":"DebugInspectorCollectionMenuHook.resolveSelectedElement","message":"sources","data":{"detail":"tree=WatchExpression viewer=null"},"timestamp":1781528838431}
+{"sessionId":"74d17f","hypothesisId":"H3","location":"DebugInspectorCollectionMenuHook.menuShown","message":"resolve","data":{"detail":"WatchExpression value=BslEnumValue evaluated=true pending=false indexed=true canOpen=true"},"timestamp":1781528838433}
+{"sessionId":"74d17f","hypothesisId":"H5","location":"DebugInspectorCollectionMenuHook.onMenuDetect","message":"menuDetect row","data":{"detail":"item=null x=1161 y=692"},"timestamp":1781529810460}
+{"sessionId":"74d17f","hypothesisId":"H1","location":"DebugInspectorCollectionMenuHook.resolveSelectedElement","message":"sources","data":{"detail":"tree=BslVariable viewer=BslVariable"},"timestamp":1781529810469}
+{"sessionId":"74d17f","hypothesisId":"H3","location":"DebugInspectorCollectionMenuHook.menuShown","message":"resolve","data":{"detail":"BslVariable value=BslPrimitiveValue evaluated=true pending=false indexed=false canOpen=false"},"timestamp":1781529810473}
+{"sessionId":"74d17f","hypothesisId":"H5","location":"DebugInspectorCollectionMenuHook.onMenuDetect","message":"menuDetect row","data":{"detail":"item=null x=1251 y=496"},"timestamp":1781530167446}
+{"sessionId":"74d17f","hypothesisId":"H1","location":"DebugInspectorCollectionMenuHook.resolveSelectedElement","message":"sources","data":{"detail":"tree=BslVariable viewer=BslVariable"},"timestamp":1781530167453}
+{"sessionId":"74d17f","hypothesisId":"H3","location":"DebugInspectorCollectionMenuHook.menuShown","message":"resolve","data":{"detail":"BslVariable value=BslPrimitiveValue evaluated=true pending=false indexed=false canOpen=false"},"timestamp":1781530167455}
+{"sessionId":"74d17f","hypothesisId":"H5","location":"DebugInspectorCollectionMenuHook.onMenuDetect","message":"menuDetect row","data":{"detail":"item=null x=589 y=915"},"timestamp":1781531213292}
+{"sessionId":"74d17f","hypothesisId":"H1","location":"DebugInspectorCollectionMenuHook.resolveSelectedElement","message":"sources","data":{"detail":"tree=WatchExpression viewer=null"},"timestamp":1781531213300}
+{"sessionId":"74d17f","hypothesisId":"H3","location":"DebugInspectorCollectionMenuHook.menuShown","message":"resolve","data":{"detail":"WatchExpression value=BslEnumValue evaluated=true pending=false indexed=true canOpen=true"},"timestamp":1781531213303}
+{"sessionId":"74d17f","hypothesisId":"H5","location":"DebugInspectorCollectionMenuHook.onMenuDetect","message":"menuDetect row","data":{"detail":"item=null x=675 y=603"},"timestamp":1781532200491}
+{"sessionId":"74d17f","hypothesisId":"H1","location":"DebugInspectorCollectionMenuHook.resolveSelectedElement","message":"sources","data":{"detail":"tree=BslVariable viewer=null"},"timestamp":1781532200498}
+{"sessionId":"74d17f","hypothesisId":"H3","location":"DebugInspectorCollectionMenuHook.menuShown","message":"resolve","data":{"detail":"BslVariable value=BslArrayValue evaluated=true pending=false indexed=true canOpen=true"},"timestamp":1781532200500}
+{"sessionId":"74d17f","hypothesisId":"H5","location":"DebugInspectorCollectionMenuHook.onMenuDetect","message":"menuDetect row","data":{"detail":"item=null x=613 y=905"},"timestamp":1781532209458}
+{"sessionId":"74d17f","hypothesisId":"H1","location":"DebugInspectorCollectionMenuHook.resolveSelectedElement","message":"sources","data":{"detail":"tree=WatchExpression viewer=null"},"timestamp":1781532209463}
+{"sessionId":"74d17f","hypothesisId":"H3","location":"DebugInspectorCollectionMenuHook.menuShown","message":"resolve","data":{"detail":"WatchExpression value=BslEnumValue evaluated=true pending=false indexed=true canOpen=true"},"timestamp":1781532209464}
+{"sessionId":"74d17f","hypothesisId":"H5","location":"DebugInspectorCollectionMenuHook.onMenuDetect","message":"menuDetect row","data":{"detail":"item=null x=601 y=869"},"timestamp":1781532628264}
+{"sessionId":"74d17f","hypothesisId":"H1","location":"DebugInspectorCollectionMenuHook.resolveSelectedElement","message":"sources","data":{"detail":"tree=WatchExpression viewer=null"},"timestamp":1781532628271}
+{"sessionId":"74d17f","hypothesisId":"H3","location":"DebugInspectorCollectionMenuHook.menuShown","message":"resolve","data":{"detail":"WatchExpression value=BslEnumValue evaluated=true pending=false indexed=true canOpen=true"},"timestamp":1781532628274}
+{"sessionId":"74d17f","hypothesisId":"H5","location":"DebugInspectorCollectionMenuHook.onMenuDetect","message":"menuDetect row","data":{"detail":"item=null x=564 y=893"},"timestamp":1781532739325}
+{"sessionId":"74d17f","hypothesisId":"H1","location":"DebugInspectorCollectionMenuHook.resolveSelectedElement","message":"sources","data":{"detail":"tree=WatchExpression viewer=null"},"timestamp":1781532739333}
+{"sessionId":"74d17f","hypothesisId":"H3","location":"DebugInspectorCollectionMenuHook.menuShown","message":"resolve","data":{"detail":"WatchExpression value=BslEnumValue evaluated=true pending=false indexed=true canOpen=true"},"timestamp":1781532739336}
+{"sessionId":"74d17f","hypothesisId":"H5","location":"DebugInspectorCollectionMenuHook.onMenuDetect","message":"menuDetect row","data":{"detail":"item=null x=1380 y=899"},"timestamp":1781533414950}
+{"sessionId":"74d17f","hypothesisId":"H1","location":"DebugInspectorCollectionMenuHook.resolveSelectedElement","message":"sources","data":{"detail":"tree=BslVariable viewer=BslVariable"},"timestamp":1781533414957}
+{"sessionId":"74d17f","hypothesisId":"H3","location":"DebugInspectorCollectionMenuHook.menuShown","message":"resolve","data":{"detail":"BslVariable value=BslArrayValue evaluated=true pending=false indexed=true canOpen=true"},"timestamp":1781533414959}
+{"sessionId":"74d17f","hypothesisId":"H5","location":"DebugInspectorCollectionMenuHook.onMenuDetect","message":"menuDetect row","data":{"detail":"item=null x=1337 y=900"},"timestamp":1781533424098}
+{"sessionId":"74d17f","hypothesisId":"H1","location":"DebugInspectorCollectionMenuHook.resolveSelectedElement","message":"sources","data":{"detail":"tree=BslVariable viewer=BslVariable"},"timestamp":1781533424105}
+{"sessionId":"74d17f","hypothesisId":"H3","location":"DebugInspectorCollectionMenuHook.menuShown","message":"resolve","data":{"detail":"BslVariable value=BslArrayValue evaluated=true pending=false indexed=true canOpen=true"},"timestamp":1781533424105}
+{"sessionId":"74d17f","hypothesisId":"H5","location":"DebugInspectorCollectionMenuHook.onMenuDetect","message":"menuDetect row","data":{"detail":"item=null x=1373 y=901"},"timestamp":1781533429980}
+{"sessionId":"74d17f","hypothesisId":"H1","location":"DebugInspectorCollectionMenuHook.resolveSelectedElement","message":"sources","data":{"detail":"tree=BslVariable viewer=BslVariable"},"timestamp":1781533429987}
+{"sessionId":"74d17f","hypothesisId":"H3","location":"DebugInspectorCollectionMenuHook.menuShown","message":"resolve","data":{"detail":"BslVariable value=BslArrayValue evaluated=true pending=false indexed=true canOpen=true"},"timestamp":1781533429987}
+{"sessionId":"74d17f","hypothesisId":"H5","location":"DebugInspectorCollectionMenuHook.onMenuDetect","message":"menuDetect row","data":{"detail":"item=null x=1363 y=897"},"timestamp":1781533433364}
+{"sessionId":"74d17f","hypothesisId":"H1","location":"DebugInspectorCollectionMenuHook.resolveSelectedElement","message":"sources","data":{"detail":"tree=BslVariable viewer=BslVariable"},"timestamp":1781533433368}
+{"sessionId":"74d17f","hypothesisId":"H3","location":"DebugInspectorCollectionMenuHook.menuShown","message":"resolve","data":{"detail":"BslVariable value=BslArrayValue evaluated=true pending=false indexed=true canOpen=true"},"timestamp":1781533433369}

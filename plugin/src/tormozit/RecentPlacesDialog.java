@@ -38,6 +38,7 @@ import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableColumn;
+import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.Text;
 
 /**
@@ -48,6 +49,8 @@ import org.eclipse.swt.widgets.Text;
  */
 public class RecentPlacesDialog extends Dialog
 {
+    private static final String NAV_REF_COPY_MENU_KEY = "tormozit.recentPlacesNavRefCopy"; //$NON-NLS-1$
+
     private static final DateTimeFormatter TIME_FMT =
         DateTimeFormatter.ofPattern("dd.MM HH:mm:ss"); //$NON-NLS-1$
 
@@ -55,6 +58,7 @@ public class RecentPlacesDialog extends Dialog
     private static final String KEY_COL_NAME_WIDTH    = "colNameWidth";    //$NON-NLS-1$
     private static final String KEY_COL_PROJECT_WIDTH = "colProjectWidth"; //$NON-NLS-1$
     private static final String KEY_COL_DATE_WIDTH    = "colDateWidth";    //$NON-NLS-1$
+    private static final String KEY_COL_ORDER         = "columnOrder";     //$NON-NLS-1$
 
     private static final int DEFAULT_NAME_COL_WIDTH    = 120;
     private static final int DEFAULT_PROJECT_COL_WIDTH = 90;
@@ -67,9 +71,11 @@ public class RecentPlacesDialog extends Dialog
     private Text        filterText;
     private TableViewer listViewer;
     private NameLabelProvider nameLabelProvider;
+    private TableColumn placeColumn;
     private TableColumn nameColumn;
     private TableColumn projectColumn;
     private TableColumn dateColumn;
+    private FormTableInteraction tableInteraction;
 
     private List<RecentPlaces.Entry> allEntries;
     private List<RecentPlaces.Entry> filtered;
@@ -136,12 +142,15 @@ public class RecentPlacesDialog extends Dialog
         int dateWidth = readColWidth(settings, KEY_COL_DATE_WIDTH,
             DEFAULT_DATE_COL_WIDTH, MIN_DATE_COL_WIDTH);
 
-        Composite tableHost = new Composite(area, SWT.NONE);
-        TableColumnLayout columnLayout = new TableColumnLayout(true);
-        tableHost.setLayout(columnLayout);
-        tableHost.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+        Composite tableStack = new Composite(area, SWT.NONE);
+        tableStack.setLayout(null);
+        tableStack.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
 
-        listViewer = new TableViewer(tableHost,
+        Composite columnHost = new Composite(tableStack, SWT.NONE);
+        TableColumnLayout columnLayout = new TableColumnLayout(true);
+        columnHost.setLayout(columnLayout);
+
+        listViewer = new TableViewer(columnHost,
             SWT.BORDER | SWT.SINGLE | SWT.FULL_SELECTION | SWT.V_SCROLL);
         Table table = listViewer.getTable();
         table.setHeaderVisible(true);
@@ -149,6 +158,7 @@ public class RecentPlacesDialog extends Dialog
 
         TableViewerColumn colPlace = new TableViewerColumn(listViewer, SWT.NONE);
         TableColumn placeColumn = colPlace.getColumn();
+        this.placeColumn = placeColumn;
         placeColumn.setText("Путь"); //$NON-NLS-1$
         colPlace.setLabelProvider(new ColumnLabelProvider()
         {
@@ -207,17 +217,24 @@ public class RecentPlacesDialog extends Dialog
         columnLayout.setColumnData(dateColumn,
             new ColumnPixelData(dateWidth, true, true));
 
+        FormTableColumnOrder.load(settings, KEY_COL_ORDER, table);
+
         listViewer.setContentProvider(ArrayContentProvider.getInstance());
 
         allEntries = RecentPlaces.getInstance().getAll();
         filtered   = new ArrayList<>(allEntries);
         listViewer.setInput(filtered);
+
+        tableInteraction = new FormTableInteraction(table, this::cellText);
+        tableInteraction.setSelectionSync(item ->
+            listViewer.setSelection(new StructuredSelection(item.getData())));
+        tableInteraction.install();
         selectFirst();
 
         installFilterListener();
         installKeyListeners(table);
         installDoubleClick(table);
-        installContextMenu(table);
+        installNavRefCopyMenu(table);
 
         filterText.setFocus();
         return area;
@@ -285,6 +302,7 @@ public class RecentPlacesDialog extends Dialog
         settings.put(KEY_COL_NAME_WIDTH, Integer.toString(nameColumn.getWidth()));
         settings.put(KEY_COL_PROJECT_WIDTH, Integer.toString(projectColumn.getWidth()));
         settings.put(KEY_COL_DATE_WIDTH, Integer.toString(dateColumn.getWidth()));
+        FormTableColumnOrder.save(settings, KEY_COL_ORDER, listViewer.getTable());
     }
 
     /** Префикс пути в колонке «Путь» (всё до последнего фрагмента — {@code ownName}). */
@@ -425,12 +443,43 @@ public class RecentPlacesDialog extends Dialog
 
     private void selectFirst()
     {
-        if (!filtered.isEmpty())
-            listViewer.setSelection(new StructuredSelection(filtered.get(0)));
+        if (filtered.isEmpty())
+            return;
+        listViewer.setSelection(new StructuredSelection(filtered.get(0)));
+        if (tableInteraction == null)
+            return;
+        Table table = listViewer.getTable();
+        if (table.isDisposed())
+            return;
+        TableItem first = table.getItem(0);
+        if (first != null)
+            tableInteraction.selectCell(first, 0);
+    }
+
+    private String cellText(TableItem item, int column)
+    {
+        if (!(item.getData() instanceof RecentPlaces.Entry entry))
+            return ""; //$NON-NLS-1$
+        Table table = item.getParent();
+        if (column < 0 || column >= table.getColumnCount())
+            return ""; //$NON-NLS-1$
+        TableColumn col = table.getColumn(column);
+        if (col == placeColumn)
+            return placePrefix(entry.displayName, entry.ownName);
+        if (col == nameColumn)
+            return entry.ownName != null ? entry.ownName : ""; //$NON-NLS-1$
+        if (col == projectColumn)
+        {
+            String name = entry.projectName;
+            return name != null && !name.isBlank() ? name : "\u2014"; //$NON-NLS-1$
+        }
+        if (col == dateColumn)
+            return entry.visitedAt != null ? entry.visitedAt.format(TIME_FMT) : ""; //$NON-NLS-1$
+        return ""; //$NON-NLS-1$
     }
 
     // =========================================================================
-    // Клавиатура и меню
+    // Клавиатура
     // =========================================================================
 
     private void installKeyListeners(Table table)
@@ -465,8 +514,6 @@ public class RecentPlacesDialog extends Dialog
             {
                 if (e.keyCode == SWT.CR || e.keyCode == SWT.KEYPAD_CR)
                     okPressed();
-                else if (e.keyCode == 'c' && (e.stateMask & SWT.MOD1) != 0)
-                    copySelectedToClipboard();
             }
         });
     }
@@ -476,32 +523,55 @@ public class RecentPlacesDialog extends Dialog
         table.addListener(SWT.MouseDoubleClick, event -> okPressed());
     }
 
-    private void installContextMenu(Table table)
+    private void installNavRefCopyMenu(Table table)
     {
-        Menu menu = new Menu(table);
-        table.setMenu(menu);
-        MenuItem copyItem = new MenuItem(menu, SWT.PUSH);
-        copyItem.setText("Копировать в буфер обмена\tCtrl+C"); //$NON-NLS-1$
-        copyItem.addListener(SWT.Selection, e -> copySelectedToClipboard());
-        menu.addListener(SWT.Show, e ->
-            copyItem.setEnabled(!listViewer.getStructuredSelection().isEmpty()));
+        table.addListener(SWT.MenuDetect, e ->
+        {
+            Display display = table.getDisplay();
+            if (display == null || display.isDisposed())
+                return;
+            display.asyncExec(() -> ensureNavRefCopyMenuItem(table));
+        });
     }
 
-    private void copySelectedToClipboard()
+    private void ensureNavRefCopyMenuItem(Table table)
+    {
+        Menu menu = table.getMenu();
+        if (menu == null || menu.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(menu.getData(NAV_REF_COPY_MENU_KEY)))
+            return;
+        menu.setData(NAV_REF_COPY_MENU_KEY, Boolean.TRUE);
+
+        new MenuItem(menu, SWT.SEPARATOR);
+        MenuItem copyRef = new MenuItem(menu, SWT.PUSH);
+        copyRef.setText("Копировать ссылку в буфер обмена"); //$NON-NLS-1$
+        copyRef.addListener(SWT.Selection, ev -> copyNavRefToClipboard());
+        menu.addListener(SWT.Show, ev ->
+            copyRef.setEnabled(!listViewer.getStructuredSelection().isEmpty()));
+    }
+
+    private void copyNavRefToClipboard()
     {
         IStructuredSelection sel = listViewer.getStructuredSelection();
-        if (sel.isEmpty()) return;
+        if (sel.isEmpty())
+            return;
         RecentPlaces.Entry entry = (RecentPlaces.Entry) sel.getFirstElement();
         String text = entry.navRef;
-        Clipboard cb = new Clipboard(listViewer.getControl().getDisplay());
+        if (text == null || text.isEmpty())
+            return;
+        Clipboard clipboard = new Clipboard(listViewer.getControl().getDisplay());
         try
         {
-            cb.setContents(
-                new Object[]  { text },
-                new Transfer[]{ TextTransfer.getInstance() });
+            clipboard.setContents(
+                new Object[] { text },
+                new Transfer[] { TextTransfer.getInstance() });
         }
-        finally { cb.dispose(); }
-        ToastNotification.show("Скопировано", text, 4000);
+        finally
+        {
+            clipboard.dispose();
+        }
+        ToastNotification.show("Скопировано", text, 4000); //$NON-NLS-1$
     }
 
     public RecentPlaces.Entry getSelectedEntry()

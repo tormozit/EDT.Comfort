@@ -67,8 +67,11 @@ public class RecentPlacesHandler extends AbstractHandler
 
         if (!GoToDefinition.jump(entry.navRef, shell, page, project))
         {
-            ToastNotification.show("Последние места",
-                "Не удалось перейти к:\n" + entry.displayName, 5000);
+            if (!GoToDefinition.consumeJumpCancelled())
+            {
+                ToastNotification.show("Последние места",
+                    "Не удалось перейти к:\n" + entry.displayName, 5000);
+            }
         }
 
         return null;

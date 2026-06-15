@@ -254,6 +254,12 @@ public final class DebugInspectorHook implements IStartup
         return isInspectorCandidateShell(shell);
     }
 
+    /** Shell popup/hover-инспектора EDT (для маршрутизации F2). */
+    static boolean isInspectorShell(Shell shell)
+    {
+        return isInspectorCandidateShell(shell);
+    }
+
     /** F9 / debug hover — не штатный doc-hover редактора (описание метода и т.п.). */
     private static boolean isInspectorCandidateShell(Shell shell)
     {

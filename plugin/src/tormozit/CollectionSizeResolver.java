@@ -62,9 +62,7 @@ final class CollectionSizeResolver
             if (cancelled.get() || monitor.isCanceled())
                 return org.eclipse.core.runtime.Status.OK_STATUS;
             int resolved = 0;
-            int skipped = 0;
             int pending = 0;
-            int na = 0;
             for (int row = rowFrom; row < rowFrom + rowCount; row++)
             {
                 if (monitor.isCanceled() || cancelled.get())
@@ -81,8 +79,7 @@ final class CollectionSizeResolver
                         {
                             case "size" -> resolved++; //$NON-NLS-1$
                             case "pending" -> pending++; //$NON-NLS-1$
-                            case "na" -> na++; //$NON-NLS-1$
-                            default -> skipped++;
+                            default -> { }
                         }
                     }
                 }
@@ -95,7 +92,7 @@ final class CollectionSizeResolver
                 });
                 retry.schedule(PENDING_RETRY_DELAY_MS);
             }
-            if (onRowsReady != null && !display.isDisposed() && !cancelled.get())
+            if ((resolved > 0 || pending > 0) && onRowsReady != null && !display.isDisposed() && !cancelled.get())
                 display.asyncExec(onRowsReady);
             return org.eclipse.core.runtime.Status.OK_STATUS;
         }).schedule();
@@ -119,7 +116,13 @@ final class CollectionSizeResolver
                     || data.sizeState == ComfortCollectionTableModel.SizeState.NA)
                     return "skip"; //$NON-NLS-1$
                 if (!data.contentLoaded)
-                    return "skip"; //$NON-NLS-1$
+                {
+                    synchronized (data)
+                    {
+                        data.sizeState = ComfortCollectionTableModel.SizeState.UNKNOWN;
+                    }
+                    return "pending"; //$NON-NLS-1$
+                }
             }
             model.markCellSizePending(row, col);
             IBslValue value = model.resolveCellValue(row, col);
@@ -165,9 +168,9 @@ final class CollectionSizeResolver
             }
             synchronized (data)
             {
-                data.sizeState = ComfortCollectionTableModel.SizeState.NA;
+                data.sizeState = ComfortCollectionTableModel.SizeState.UNKNOWN;
             }
-            return "na"; //$NON-NLS-1$
+            return "pending"; //$NON-NLS-1$
         }
         catch (DebugException e)
         {

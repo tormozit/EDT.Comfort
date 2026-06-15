@@ -2,6 +2,8 @@ package tormozit;
 
 import java.io.File;
 import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -21,7 +23,7 @@ import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
-import org.eclipse.jface.dialogs.MessageDialog;
+import org.eclipse.jface.text.Document;
 import org.eclipse.jface.window.Window;
 import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.IDocument;
@@ -221,8 +223,11 @@ public class GoToDefinition extends AbstractHandler
         
         if (!jump(command, shell, page, project))
         {
-            ToastNotification.show("Перейти к определению",
-                "В проекте " + project.getName() + " не найдена ссылка:\n" + truncate(command, 120), 5000);
+            if (!consumeJumpCancelled())
+            {
+                ToastNotification.show("Перейти к определению",
+                    "В проекте " + project.getName() + " не найдена ссылка:\n" + truncate(command, 120), 5000);
+            }
             return null;
         }
 
@@ -294,9 +299,20 @@ public class GoToDefinition extends AbstractHandler
             + "Загрузка не выполнена. " + details, 10000); //$NON-NLS-1$
     }
 
+    private static boolean jumpCancelled;
+
+    /** {@code true}, если последний {@link #jump} прерван отменой диалога выбора строки стека. */
+    static boolean consumeJumpCancelled()
+    {
+        boolean cancelled = jumpCancelled;
+        jumpCancelled = false;
+        return cancelled;
+    }
+
     public static boolean jump(String raw, Shell shell, IWorkbenchPage page, IProject project)
     {
-        if (raw == null) 
+        jumpCancelled = false;
+        if (raw == null)
             return false;
         String ref = raw.strip();
         if (ref.isEmpty()) 
@@ -354,17 +370,86 @@ public class GoToDefinition extends AbstractHandler
         }
         else
         {
-            String[] labels = refs.stream().map(ModuleLineRef::displayLabel).toArray(String[]::new);
-            MessageDialog dlg = new MessageDialog(shell,
-                "Выберите строку стека", null, //$NON-NLS-1$
-                "Найдено несколько ссылок. Выберите строку для перехода:", //$NON-NLS-1$
-                MessageDialog.QUESTION, labels, 0);
-            int idx = dlg.open();
+            List<ModuleLinePickDialog.Row> rows = new ArrayList<>();
+            for (ModuleLineRef r : refs)
+                rows.add(toPickRow(r, page, project));
+            ModuleLinePickDialog dlg = new ModuleLinePickDialog(shell, rows);
+            if (dlg.open() != Window.OK || !dlg.wasConfirmed())
+            {
+                jumpCancelled = true;
+                return false;
+            }
+            int idx = dlg.getSelectedIndex();
             if (idx < 0 || idx >= refs.size())
                 return false;
             chosen = refs.get(idx);
         }
         return openModuleLineRef(chosen, page, shell, project);
+    }
+
+    private static ModuleLinePickDialog.Row toPickRow(ModuleLineRef r, IWorkbenchPage page, IProject project)
+    {
+        return new ModuleLinePickDialog.Row(
+            moduleLabelForRef(r),
+            resolveMethodName(r, page, project),
+            r.line,
+            r.lineText != null ? r.lineText : ""); //$NON-NLS-1$
+    }
+
+    private static String moduleLabelForRef(ModuleLineRef r)
+    {
+        if (r.moduleWithExtension != null)
+            return r.moduleWithExtension;
+        if (r.modulePath != null)
+            return r.modulePath;
+        return r.file != null ? r.file : ""; //$NON-NLS-1$
+    }
+
+    private static String resolveMethodName(ModuleLineRef r, IWorkbenchPage page, IProject project)
+    {
+        if (r.method != null && !r.method.isEmpty())
+        {
+            if (r.methodParam != null && !r.methodParam.isEmpty())
+                return r.method + "." + r.methodParam; //$NON-NLS-1$
+            return r.method;
+        }
+
+        IFile file = findFileForModuleLineRef(r, page, project);
+        if (file == null)
+        {
+            if (Global.isLogEnabled())
+                Global.log("GoToDefinition: BSL-файл не найден для " + moduleLabelForRef(r)); //$NON-NLS-1$
+            return ""; //$NON-NLS-1$
+        }
+
+        try (InputStream is = file.getContents())
+        {
+            String text = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+            Document doc = new Document(text);
+            String name = GetRef.findEnclosingMethodName(doc, r.line);
+            return name != null ? name : ""; //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+            if (Global.isLogEnabled())
+                Global.log("GoToDefinition: не удалось прочитать " + file.getFullPath() + ": " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
+            return ""; //$NON-NLS-1$
+        }
+    }
+
+    private static IFile findFileForModuleLineRef(ModuleLineRef r, IWorkbenchPage page, IProject project)
+    {
+        if (r.file != null)
+        {
+            IFile file = findFileInWorkspace(r.file, page, project);
+            if (file == null && !r.file.startsWith("src/")) //$NON-NLS-1$
+                file = findFileInWorkspace("src/" + r.file, page, project); //$NON-NLS-1$
+            return file;
+        }
+        if (r.modulePath == null)
+            return null;
+        String bslPath = moduleToBslPath(r.modulePath, r.extension);
+        return bslPath != null ? findFileInWorkspace(bslPath, page, project) : null;
     }
 
     /**
@@ -1007,10 +1092,7 @@ public class GoToDefinition extends AbstractHandler
     {
         ModuleLineRef r = new ModuleLineRef();
         r.refText = m.group();
-
-        int textMarkerPos = fullText.indexOf("}: "); //$NON-NLS-1$
-        if (textMarkerPos >= 0)
-            r.lineText = fullText.substring(textMarkerPos + 3);
+        r.lineText = extractStackLineCode(fullText, m.end());
 
         String moduleRaw = m.group(2);
         if (moduleRaw != null)
@@ -1024,6 +1106,32 @@ public class GoToDefinition extends AbstractHandler
             return r;
         }
         return null;
+    }
+
+    /** Исходный код строки из стека — текст после {@code {...}:} до конца строки. */
+    private static String extractStackLineCode(String fullText, int afterRefEnd)
+    {
+        if (fullText == null || afterRefEnd < 0 || afterRefEnd >= fullText.length())
+            return ""; //$NON-NLS-1$
+
+        int pos = afterRefEnd;
+        if (fullText.charAt(pos) == ':')
+            pos++;
+
+        while (pos < fullText.length())
+        {
+            char ch = fullText.charAt(pos);
+            if (ch == '\n' || ch == '\r')
+                break;
+            if (ch != ' ' && ch != '\t')
+                break;
+            pos++;
+        }
+
+        int lineEnd = fullText.indexOf('\n', pos);
+        if (lineEnd < 0)
+            lineEnd = fullText.length();
+        return fullText.substring(pos, lineEnd).strip();
     }
 
     /** Нативная ветка {@code ирОбщий.СтруктураСсылкиСтрокиМодуляЛкс} (формат {@code {...}}). */

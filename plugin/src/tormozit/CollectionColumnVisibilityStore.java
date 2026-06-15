@@ -27,6 +27,7 @@ final class CollectionColumnVisibilityStore
     private static final Map<String, boolean[]> VISIBILITY = new HashMap<>();
     private static final Map<String, int[]> ORDER = new HashMap<>();
     private static final Map<String, String> PRESENTATION = new HashMap<>();
+    private static final Map<String, Boolean> FILTER_BY_PRESENTATION = new HashMap<>();
 
     /** Приоритет колонки «Представление» по умолчанию (рус / англ). */
     private static final String[][] DEFAULT_PRESENTATION_PRIORITY = {
@@ -92,6 +93,13 @@ final class CollectionColumnVisibilityStore
                 used.add(i);
                 break;
             }
+        }
+
+        int typeModel = columns.typeModelIndex();
+        if (typeModel >= 0 && !used.contains(typeModel))
+        {
+            ordered.add(typeModel);
+            used.add(typeModel);
         }
 
         for (String preferred : PREFERRED_PROPERTY_HEADERS)
@@ -172,6 +180,23 @@ final class CollectionColumnVisibilityStore
         save(pathKey, null, null, presentationHeader);
     }
 
+    static boolean filterByPresentationFor(String pathKey)
+    {
+        if (pathKey == null || pathKey.isBlank())
+            return false;
+        return Boolean.TRUE.equals(FILTER_BY_PRESENTATION.get(pathKey));
+    }
+
+    static void saveFilterByPresentation(String pathKey, boolean value)
+    {
+        if (pathKey == null || pathKey.isBlank())
+            return;
+        if (value)
+            FILTER_BY_PRESENTATION.put(pathKey, Boolean.TRUE);
+        else
+            FILTER_BY_PRESENTATION.remove(pathKey);
+    }
+
     static String presentationFor(String pathKey, CollectionColumnModel columns)
     {
         String stored = PRESENTATION.get(pathKey);
@@ -210,7 +235,8 @@ final class CollectionColumnVisibilityStore
         for (int i = 0; i < count; i++)
         {
             CollectionColumnModel.Column col = columns.allColumns().get(i);
-            vis[i] = col.kind == CollectionColumnModel.Kind.INDEX;
+            vis[i] = col.kind == CollectionColumnModel.Kind.INDEX
+                || CollectionColumnModel.isTypeColumn(col);
         }
 
         int propertyShown = 0;

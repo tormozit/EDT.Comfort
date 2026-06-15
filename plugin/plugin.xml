@@ -39,6 +39,10 @@
         id="tormozit.compareConf.context"
         name="Редактор сравнения EDT"
         parentId="org.eclipse.ui.contexts.window"/>
+    <context
+        id="tormozit.collection.context"
+        name="Окно коллекции"
+        parentId="org.eclipse.ui.contexts.window"/>
   </extension>
 
   <extension point="org.eclipse.ui.bindings">
@@ -117,6 +121,12 @@
     <key
           commandId="tormozit.showCollection"
           contextId="com._1c.g5.v8.dt.debug.ui.debugging"
+          schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
+          sequence="F2">
+    </key>
+    <key
+          commandId="tormozit.collectionInspect"
+          contextId="tormozit.collection.context"
           schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
           sequence="F2">
     </key>
@@ -202,6 +212,11 @@
         name="Показать коллекцию"
         categoryId="tormozit.commands.global"
         description="Открыть коллекцию выражения в отдельном окне. По умолчанию F2 в контексте отладки 1С; сочетание настраивается в Клавиши → Комфорт (Комфорт)"/>
+    <command
+        id="tormozit.collectionInspect"
+        name="Инспектировать"
+        categoryId="tormozit.commands.global"
+        description="Открыть выбранный элемент коллекции в инспекторе. По умолчанию F2 в окне «Коллекция»; сочетание настраивается в Клавиши → Комфорт (Комфорт)"/>
   </extension>
 
   <extension point="org.eclipse.ui.handlers">
@@ -304,6 +319,10 @@
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.ComfortCollectionShowHandler"
         commandId="tormozit.showCollectionFromExpression">
+    </handler>
+    <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.ComfortCollectionInspectHandler"
+        commandId="tormozit.collectionInspect">
     </handler>
   </extension>
 

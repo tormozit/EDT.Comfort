@@ -11,9 +11,11 @@ final class CollectionFixedPaneWidthStore
 {
     private static final String PREF_WIDTH = "comfort.collection.fixedPane.width"; //$NON-NLS-1$
     static final int DEFAULT_WIDTH = CollectionIndexColumnWidthStore.DEFAULT_WIDTH
-        + CollectionPresentationColumnWidthStore.DEFAULT_WIDTH / 2;
-    static final int MIN_WIDTH = CollectionIndexColumnWidthStore.MIN_WIDTH;
+        + CollectionTypeColumnWidthStore.DEFAULT_WIDTH;
+    static final int MIN_WIDTH = CollectionIndexColumnWidthStore.MIN_WIDTH
+        + CollectionTypeColumnWidthStore.MIN_WIDTH;
     static final int MAX_WIDTH = CollectionIndexColumnWidthStore.MAX_WIDTH
+        + CollectionTypeColumnWidthStore.MAX_WIDTH
         + CollectionPresentationColumnWidthStore.MAX_WIDTH;
 
     private static ScopedPreferenceStore prefs;
@@ -55,7 +57,7 @@ final class CollectionFixedPaneWidthStore
 
     private static int fallbackWidth()
     {
-        return clamp(CollectionIndexColumnWidthStore.load());
+        return clamp(CollectionIndexColumnWidthStore.load() + CollectionTypeColumnWidthStore.load());
     }
 
     private static ScopedPreferenceStore prefs()

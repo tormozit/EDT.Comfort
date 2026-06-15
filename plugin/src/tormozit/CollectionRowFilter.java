@@ -14,6 +14,7 @@ final class CollectionRowFilter
     private volatile int progressTotal;
     private volatile boolean scanning;
     private volatile boolean cancelled;
+    private volatile boolean presentationOnly;
     private volatile CollectionDisplayIndexMap displayIndexMap = CollectionDisplayIndexMap.empty();
 
     CollectionRowFilter(String pattern)
@@ -25,10 +26,26 @@ final class CollectionRowFilter
     {
         String pattern = filterText != null ? filterText : ""; //$NON-NLS-1$
         if (source == null || !source.isActive())
-            return new CollectionRowFilter(""); //$NON-NLS-1$
+        {
+            CollectionRowFilter copy = new CollectionRowFilter(pattern);
+            if (source != null)
+                copy.presentationOnly = source.presentationOnly;
+            return copy;
+        }
         CollectionRowFilter copy = new CollectionRowFilter(pattern);
+        copy.presentationOnly = source.presentationOnly;
         copy.importFinishedState(source.matches(), source.progressTotal());
         return copy;
+    }
+
+    void setPresentationOnly(boolean presentationOnly)
+    {
+        this.presentationOnly = presentationOnly;
+    }
+
+    boolean isPresentationOnly()
+    {
+        return presentationOnly;
     }
 
     private void importFinishedState(BitSet sourceMatches, int total)

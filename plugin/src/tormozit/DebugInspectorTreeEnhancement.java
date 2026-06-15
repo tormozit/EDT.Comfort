@@ -6,8 +6,11 @@ import java.util.List;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.IAction;
 import org.eclipse.jface.dialogs.InputDialog;
+import org.eclipse.debug.core.model.IValueModification;
+import org.eclipse.jface.viewers.ColumnViewerEditorActivationEvent;
 import org.eclipse.jface.viewers.TreePath;
 import org.eclipse.jface.viewers.TreeSelection;
+import org.eclipse.jface.viewers.ViewerCell;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.BusyIndicator;
 import org.eclipse.swt.dnd.Clipboard;
@@ -39,6 +42,9 @@ final class DebugInspectorTreeEnhancement
     private static final String COPY_ACTION_SUFFIX = ".VirtualCopyToClipboardAction"; //$NON-NLS-1$
     private static final String COLUMN_MARKER_RU = "Фактический тип"; //$NON-NLS-1$
     private static final String COLUMN_MARKER_EN = "Actual type"; //$NON-NLS-1$
+    private static final String CLASS_STANDALONE_INSPECTOR_DIALOG =
+        "com._1c.g5.v8.dt.internal.debug.ui.hover.DebugElementDialog"; //$NON-NLS-1$
+    private static final String EDITOR_CANCEL_LISTENER_SUFFIX = ".DebugElementDialog$6"; //$NON-NLS-1$
 
     private final Tree tree;
     private final Object viewer;
@@ -49,6 +55,13 @@ final class DebugInspectorTreeEnhancement
     private String findText = ""; //$NON-NLS-1$
     private int findGeneration;
     private int pendingFocusGeneration;
+    private String pendingPropertyName;
+    private long pendingFocusStartedAt;
+    private long pendingFocusSessionStart;
+    private Object viewerUpdateListener;
+
+    private static final int[] PENDING_FOCUS_DELAYS_MS =
+        { 0, 50, 100, 200, 400, 800, 1500, 2500, 4000 };
 
     private Listener eraseItemListener;
     private Listener paintItemListener;
@@ -97,6 +110,36 @@ final class DebugInspectorTreeEnhancement
         DebugInspectorDebug.step("tree", "OK columns=" + tree.getColumnCount() //$NON-NLS-1$ //$NON-NLS-2$
             + " dialog=" + DebugInspectorDebug.cn(dialog));
         return enhancement;
+    }
+
+    static void schedulePendingFocusForShell(Shell shell)
+    {
+        if (shell == null || shell.isDisposed())
+            return;
+        Tree inspectorTree = findInspectorTreeOnShell(shell);
+        if (inspectorTree == null || inspectorTree.isDisposed())
+            return;
+        Object data = inspectorTree.getData(ENHANCED_KEY);
+        if (data instanceof DebugInspectorTreeEnhancement enhancement)
+            enhancement.schedulePendingPropertyFocus();
+    }
+
+    static Tree findInspectorTreeOnShell(Shell shell)
+    {
+        return findTreeWithInspectorColumns(shell);
+    }
+
+    static Object viewerForTree(Tree tree)
+    {
+        if (tree == null || tree.isDisposed())
+            return null;
+        Object data = tree.getData(ENHANCED_KEY);
+        if (data instanceof DebugInspectorTreeEnhancement enhancement)
+            return enhancement.viewer;
+        Shell shell = tree.getShell();
+        if (shell == null || shell.isDisposed())
+            return null;
+        return resolveViewer(shell.getData());
     }
 
     private static Tree resolveInspectorTree(Object dialog, Shell shell)
@@ -184,6 +227,12 @@ final class DebugInspectorTreeEnhancement
                     column = 0;
                 selectCell(item, column);
             }
+
+            @Override
+            public void mouseDoubleClick(MouseEvent e)
+            {
+                onMouseDoubleClick(e);
+            }
         };
         tree.addMouseListener(mouseListener);
 
@@ -214,6 +263,8 @@ final class DebugInspectorTreeEnhancement
 
         treeKeyListener = this::onTreeKeyDown;
         tree.addListener(SWT.KeyDown, treeKeyListener);
+
+        DebugInspectorCollectionMenuHook.install(tree, viewer);
 
         return true;
     }
@@ -374,7 +425,7 @@ final class DebugInspectorTreeEnhancement
 
     private void onKeyFilter(Event e)
     {
-        if (tree.isDisposed() || !tree.isVisible() || !isInspectorShellFocused())
+        if (tree.isDisposed() || !tree.isVisible() || !isInspectorKeyContext())
             return;
         if (handleCopyKey(e))
         {
@@ -392,6 +443,24 @@ final class DebugInspectorTreeEnhancement
             e.doit = false;
             findNext((e.stateMask & SWT.SHIFT) == 0);
         }
+        if (e.keyCode == SWT.F2 && (e.stateMask & (SWT.MOD1 | SWT.MOD2 | SWT.MOD3 | SWT.MOD4)) == 0)
+        {
+            e.doit = false;
+            DebugInspectorCollectionMenuHook.tryOpenCollectionFromTree(tree, viewer);
+        }
+    }
+
+    private boolean isInspectorKeyContext()
+    {
+        if (tree.isDisposed() || !tree.isVisible())
+            return false;
+        Shell inspector = tree.getShell();
+        if (inspector == null || inspector.isDisposed())
+            return false;
+        Display display = tree.getDisplay();
+        if (display != null && !display.isDisposed() && display.getActiveShell() == inspector)
+            return true;
+        return isInspectorShellFocused();
     }
 
     private boolean handleCopyKey(Event e)
@@ -411,6 +480,113 @@ final class DebugInspectorTreeEnhancement
         applyViewerSelection(item);
         fireSelectionEvent(item);
         tree.redraw();
+    }
+
+    private void onMouseDoubleClick(MouseEvent e)
+    {
+        if (e.button != 1 || tree.isDisposed() || !isIndependentElementDialog())
+            return;
+
+        TreeItem item = itemAt(tree, e.x, e.y);
+        if (item == null)
+            return;
+
+        int valueColumn = resolveInspectorValueColumn();
+        int column = columnAt(tree, e.x, e.y, item);
+        if (column != valueColumn)
+            return;
+
+        if (!isEditableVariable(item))
+            return;
+
+        selectCell(item, column);
+        tree.setFocus();
+        if (!activateInlineValueEditor(e))
+            logValueEditFailure("activate failed"); //$NON-NLS-1$
+    }
+
+    /** Независимое окно инспектора: {@link DebugElementDialog} или наследник (попап F9/Инспектировать), не hover. */
+    private boolean isIndependentElementDialog()
+    {
+        if (dialog == null)
+            return false;
+        for (Class<?> c = dialog.getClass(); c != null; c = c.getSuperclass())
+        {
+            if (CLASS_STANDALONE_INSPECTOR_DIALOG.equals(c.getName()))
+                return true;
+        }
+        return false;
+    }
+
+    private static boolean isEditableVariable(TreeItem item)
+    {
+        if (item == null || item.isDisposed())
+            return false;
+        Object data = item.getData();
+        if (!(data instanceof IValueModification modification))
+            return false;
+        return modification.supportsValueModification();
+    }
+
+    private boolean activateInlineValueEditor(MouseEvent e)
+    {
+        if (viewer == null || tree.isDisposed())
+            return false;
+
+        Object cellObj = Global.invoke(viewer, "getCell", new Point(e.x, e.y)); //$NON-NLS-1$
+        if (!(cellObj instanceof ViewerCell cell))
+            return false;
+
+        Object columnEditor = Global.invoke(viewer, "getColumnViewerEditor"); //$NON-NLS-1$
+        if (columnEditor == null)
+            return false;
+
+        removeEditorActivationCancelListeners(columnEditor);
+
+        ColumnViewerEditorActivationEvent activationEvent = new ColumnViewerEditorActivationEvent(cell, e);
+        if (!Global.invokeVoid(columnEditor, "handleEditorActivationEvent", activationEvent)) //$NON-NLS-1$
+            return false;
+
+        Object active = Global.invoke(columnEditor, "isCellEditorActive"); //$NON-NLS-1$
+        return Boolean.TRUE.equals(active);
+    }
+
+    /**
+     * {@code PendingAwareInspectPopupDialog} вызывает {@code disableTreeElementsEditing()} —
+     * listener {@code DebugElementDialog$6} отменяет inline-активацию.
+     */
+    private static int removeEditorActivationCancelListeners(Object columnEditor)
+    {
+        if (columnEditor == null)
+            return 0;
+        Object listenerList = Global.getField(columnEditor, "editorActivationListener"); //$NON-NLS-1$
+        if (listenerList == null)
+            return 0;
+        Object[] listeners = null;
+        Object raw = Global.invoke(listenerList, "getListeners"); //$NON-NLS-1$
+        if (raw instanceof Object[] array)
+            listeners = array;
+        if (listeners == null || listeners.length == 0)
+            return 0;
+        int removed = 0;
+        for (Object listener : listeners)
+        {
+            if (listener == null)
+                continue;
+            String name = listener.getClass().getName();
+            if (!name.endsWith(EDITOR_CANCEL_LISTENER_SUFFIX))
+                continue;
+            if (Global.invokeVoid(columnEditor, "removeEditorActivationListener", listener)) //$NON-NLS-1$
+                removed++;
+        }
+        return removed;
+    }
+
+    private void logValueEditFailure(String reason)
+    {
+        DebugInspectorDebug.step("valueEdit", reason //$NON-NLS-1$
+            + " viewer=" + (viewer != null) //$NON-NLS-1$
+            + " dialog=" + DebugInspectorDebug.cn(dialog)); //$NON-NLS-1$
     }
 
     private void syncFromTreeSelection()
@@ -695,6 +871,7 @@ final class DebugInspectorTreeEnhancement
 
     void dispose()
     {
+        clearPendingFocusSession();
         if (tree != null && !tree.isDisposed())
         {
             if (mouseListener != null)
@@ -712,6 +889,7 @@ final class DebugInspectorTreeEnhancement
                 tree.removeListener(SWT.Selection, selectionListener);
             if (treeKeyListener != null)
                 tree.removeListener(SWT.KeyDown, treeKeyListener);
+            DebugInspectorCollectionMenuHook.uninstall(tree);
             tree.setData(ENHANCED_KEY, null);
             tree.setData(COPY_HOOKED_KEY, null);
         }
@@ -729,54 +907,185 @@ final class DebugInspectorTreeEnhancement
 
     void schedulePendingPropertyFocus()
     {
-        String propertyName = InspectorPendingFocus.take();
-        if (propertyName == null || propertyName.isBlank())
+        String requested = InspectorPendingFocus.peek();
+        if (requested == null || requested.isBlank())
             return;
 
-        final int generation = ++pendingFocusGeneration;
-        long sessionStart = DebugValuesDebug.begin();
-        int[] delays = { 0, 100, 300, 600, 1200 };
-        Display display = tree.getDisplay();
-        for (int attempt = 0; attempt < delays.length; attempt++)
+        if (requested.equals(pendingPropertyName) && pendingFocusStartedAt > 0
+            && System.currentTimeMillis() - pendingFocusStartedAt < InspectorPendingFocus.TTL_MS)
         {
-            final int delay = delays[attempt];
+            tryApplyPendingPropertyFocus(-1, pendingFocusSessionStart, pendingFocusGeneration);
+            return;
+        }
+
+        clearPendingFocusSession();
+        pendingPropertyName = requested;
+        pendingFocusStartedAt = System.currentTimeMillis();
+        pendingFocusSessionStart = DebugValuesDebug.begin();
+        final int generation = ++pendingFocusGeneration;
+
+        installViewerUpdateListener(generation, pendingFocusSessionStart);
+
+        Display display = tree.getDisplay();
+        for (int attempt = 0; attempt < PENDING_FOCUS_DELAYS_MS.length; attempt++)
+        {
+            final int delay = PENDING_FOCUS_DELAYS_MS[attempt];
             final int attemptNo = attempt;
             display.timerExec(delay, () ->
-            {
-                if (!isAttached() || generation != pendingFocusGeneration)
-                    return;
-
-                long attemptStart = DebugValuesDebug.begin();
-                TreeItem[] roots = tree.getItems();
-                if (roots.length == 0)
-                {
-                    DebugValuesDebug.step("pendingFocus", "attempt=" + attemptNo + " no roots"); //$NON-NLS-1$ //$NON-NLS-2$
-                    if (attemptNo == delays.length - 1)
-                        DebugValuesDebug.perfSlow("pendingFocus", sessionStart, "fail no roots"); //$NON-NLS-1$ //$NON-NLS-2$
-                    return;
-                }
-
-                TreeItem match = findChildProperty(roots[0], propertyName);
-                if (match == null)
-                {
-                    DebugValuesDebug.step("pendingFocus", "attempt=" + attemptNo //$NON-NLS-1$
-                        + " miss children=" + roots[0].getItemCount()); //$NON-NLS-1$
-                    if (attemptNo == delays.length - 1)
-                        DebugValuesDebug.perfSlow("pendingFocus", sessionStart, //$NON-NLS-1$
-                            "fail property=" + DebugValuesDebug.quote(propertyName)); //$NON-NLS-1$
-                    return;
-                }
-
-                pendingFocusGeneration++;
-                int valueColumn = resolveInspectorValueColumn();
-                expandTo(match);
-                selectCell(match, valueColumn);
-                DebugValuesDebug.perf("pendingFocus.attempt", attemptStart, //$NON-NLS-1$
-                    "ok attempt=" + attemptNo + " col=" + valueColumn); //$NON-NLS-1$ //$NON-NLS-2$
-                DebugValuesDebug.perfSlow("pendingFocus", sessionStart, //$NON-NLS-1$
-                    "ok property=" + DebugValuesDebug.quote(propertyName)); //$NON-NLS-1$
-            });
+                tryApplyPendingPropertyFocus(attemptNo, pendingFocusSessionStart, generation));
         }
+    }
+
+    private void tryApplyPendingPropertyFocus(int attemptNo, long sessionStart, int generation)
+    {
+        if (!isAttached() || generation != pendingFocusGeneration)
+            return;
+        if (pendingPropertyName == null || pendingPropertyName.isBlank())
+            return;
+
+        long elapsed = System.currentTimeMillis() - pendingFocusStartedAt;
+        if (pendingFocusStartedAt <= 0 || elapsed > InspectorPendingFocus.TTL_MS)
+        {
+            DebugValuesDebug.perfSlow("pendingFocus", sessionStart, //$NON-NLS-1$
+                "fail ttl property=" + DebugValuesDebug.quote(pendingPropertyName)); //$NON-NLS-1$
+            clearPendingFocusSession();
+            pendingFocusGeneration++;
+            return;
+        }
+
+        long attemptStart = DebugValuesDebug.begin();
+        TreeItem[] roots = tree.getItems();
+        if (roots.length == 0)
+        {
+            String tag = attemptNo < 0 ? "update" : "attempt=" + attemptNo; //$NON-NLS-1$ //$NON-NLS-2$
+            DebugValuesDebug.step("pendingFocus", tag + " no roots elapsed=" + elapsed + "ms"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            if (attemptNo == PENDING_FOCUS_DELAYS_MS.length - 1)
+            {
+                DebugValuesDebug.perfSlow("pendingFocus", sessionStart, "fail no roots"); //$NON-NLS-1$ //$NON-NLS-2$
+                clearPendingFocusSession();
+                pendingFocusGeneration++;
+            }
+            return;
+        }
+
+        expandRootForPendingFocus(roots[0]);
+
+        TreeItem match = findChildProperty(roots[0], pendingPropertyName);
+        if (match == null)
+        {
+            String tag = attemptNo < 0 ? "update" : "attempt=" + attemptNo; //$NON-NLS-1$ //$NON-NLS-2$
+            DebugValuesDebug.step("pendingFocus", tag //$NON-NLS-1$
+                + " miss children=" + roots[0].getItemCount() //$NON-NLS-1$
+                + " elapsed=" + elapsed + "ms"); //$NON-NLS-1$ //$NON-NLS-2$
+            if (attemptNo == PENDING_FOCUS_DELAYS_MS.length - 1)
+            {
+                DebugValuesDebug.perfSlow("pendingFocus", sessionStart, //$NON-NLS-1$
+                    "fail property=" + DebugValuesDebug.quote(pendingPropertyName)); //$NON-NLS-1$
+                clearPendingFocusSession();
+                pendingFocusGeneration++;
+            }
+            return;
+        }
+
+        pendingFocusGeneration++;
+        clearPendingFocusSession();
+        InspectorPendingFocus.complete();
+        int valueColumn = resolveInspectorValueColumn();
+        expandTo(match);
+        selectCell(match, valueColumn);
+        String okTag = attemptNo < 0 ? "update" : "attempt=" + attemptNo; //$NON-NLS-1$ //$NON-NLS-2$
+        DebugValuesDebug.perf("pendingFocus.attempt", attemptStart, //$NON-NLS-1$
+            "ok " + okTag + " col=" + valueColumn); //$NON-NLS-1$ //$NON-NLS-2$
+        DebugValuesDebug.perfSlow("pendingFocus", sessionStart, //$NON-NLS-1$
+            "ok property=" + DebugValuesDebug.quote(pendingPropertyName)); //$NON-NLS-1$
+    }
+
+    private void expandRootForPendingFocus(TreeItem root)
+    {
+        if (root == null || root.isDisposed())
+            return;
+        root.setExpanded(true);
+        Object element = root.getData();
+        if (viewer == null || element == null)
+            return;
+        try
+        {
+            Global.invoke(viewer, "setExpandedState", element, Boolean.TRUE); //$NON-NLS-1$
+        }
+        catch (Exception ignored)
+        {
+            // опционально
+        }
+    }
+
+    private void installViewerUpdateListener(int generation, long sessionStart)
+    {
+        removeViewerUpdateListener();
+        if (viewer == null)
+            return;
+        try
+        {
+            Class<?> iface = Class.forName(
+                "org.eclipse.debug.internal.ui.viewers.model.provisional.IViewerUpdateListener"); //$NON-NLS-1$
+            DebugInspectorTreeEnhancement self = this;
+            viewerUpdateListener = java.lang.reflect.Proxy.newProxyInstance(
+                iface.getClassLoader(), new Class<?>[] { iface },
+                (proxy, method, args) ->
+                {
+                    String methodName = method.getName();
+                    if ("viewerUpdatesComplete".equals(methodName) //$NON-NLS-1$
+                        || "updateComplete".equals(methodName)) //$NON-NLS-1$
+                    {
+                        Display display = tree.getDisplay();
+                        if (display != null && !display.isDisposed())
+                            display.asyncExec(() ->
+                                self.tryApplyPendingPropertyFocus(-1, sessionStart, generation));
+                    }
+                    return proxyDefaultReturn(method.getReturnType());
+                });
+            Global.invoke(viewer, "addViewerUpdateListener", viewerUpdateListener); //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+            DebugValuesDebug.step("pendingFocus", "listener failed: " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
+            viewerUpdateListener = null;
+        }
+    }
+
+    private void removeViewerUpdateListener()
+    {
+        if (viewerUpdateListener == null || viewer == null)
+            return;
+        try
+        {
+            Global.invoke(viewer, "removeViewerUpdateListener", viewerUpdateListener); //$NON-NLS-1$
+        }
+        catch (Exception ignored)
+        {
+            // опционально
+        }
+        viewerUpdateListener = null;
+    }
+
+    private static Object proxyDefaultReturn(Class<?> returnType)
+    {
+        if (returnType == null || returnType == void.class || returnType == Void.class)
+            return null;
+        if (returnType == boolean.class || returnType == Boolean.class)
+            return Boolean.FALSE;
+        if (returnType == int.class || returnType == Integer.class)
+            return Integer.valueOf(0);
+        if (returnType == long.class || returnType == Long.class)
+            return Long.valueOf(0L);
+        return null;
+    }
+
+    private void clearPendingFocusSession()
+    {
+        removeViewerUpdateListener();
+        pendingPropertyName = null;
+        pendingFocusStartedAt = 0L;
+        pendingFocusSessionStart = 0L;
     }
 
     private TreeItem findChildProperty(TreeItem root, String propertyName)
@@ -789,7 +1098,7 @@ final class DebugInspectorTreeEnhancement
             if (child == null || child.isDisposed())
                 continue;
             String name = child.getText(0);
-            if (name != null && name.trim().equalsIgnoreCase(needle))
+            if (InspectorPendingFocus.matchesPropertyLabel(name, needle))
                 return child;
         }
         return null;

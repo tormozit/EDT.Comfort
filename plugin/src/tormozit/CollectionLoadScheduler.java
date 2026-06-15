@@ -57,6 +57,11 @@ final class CollectionLoadScheduler
     private volatile Job contextJob;
     private final java.util.concurrent.atomic.AtomicInteger contextResolveAttempts =
         new java.util.concurrent.atomic.AtomicInteger();
+    private final java.util.concurrent.atomic.AtomicInteger sizePassGeneration =
+        new java.util.concurrent.atomic.AtomicInteger();
+    /** Инкремент при смене схемы — устаревшие батчи не трогают UI. */
+    private final java.util.concurrent.atomic.AtomicInteger loadGeneration =
+        new java.util.concurrent.atomic.AtomicInteger();
 
     CollectionLoadScheduler(
         ComfortCollectionTableModel model,
@@ -197,6 +202,20 @@ final class CollectionLoadScheduler
     {
         if (disposed.get() || !isShellActiveForLoad())
             return;
+        if (model.totalSize == 0)
+            return;
+        if (display == null || display.isDisposed())
+            return;
+        int gen = sizePassGeneration.incrementAndGet();
+        display.asyncExec(() -> {
+            if (disposed.get() || gen != sizePassGeneration.get())
+                return;
+            executeSizePass();
+        });
+    }
+
+    private void executeSizePass()
+    {
         int rowFrom = sizeRowFrom.get();
         int rowTo = sizeRowTo.get();
         int colFrom = sizeColFrom.get();
@@ -210,6 +229,11 @@ final class CollectionLoadScheduler
             "size rows=" + rowFrom + ".." + rowTo + " cols=" + colFrom + ".." + colTo); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         CollectionSizeResolver.scheduleBatch(model, rowFrom, rowCount, colFrom, colTo, display,
             () -> fireRowsReady(readyFrom, readyCount));
+    }
+
+    boolean isLoadActive()
+    {
+        return loadPending.get() || isLoadJobBusy();
     }
 
     void scheduleFilterScan(CollectionRowFilter filter, Runnable onDone)
@@ -233,6 +257,7 @@ final class CollectionLoadScheduler
     /** После смены схемы колонок — отменить текущий load, иначе батч пишет в старую модель. */
     void resetLoadJobForSchemaChange()
     {
+        loadGeneration.incrementAndGet();
         cancelJob(loadJob);
         loadPending.set(false);
     }
@@ -241,6 +266,7 @@ final class CollectionLoadScheduler
     {
         disposed.set(true);
         shellVisible.set(false);
+        sizePassGeneration.incrementAndGet();
         removeShellStateListener();
         CollectionSizeResolver.cancelAll();
         cancelJob(loadJob);
@@ -339,6 +365,8 @@ final class CollectionLoadScheduler
                 int size = model.indexedValue.getSize();
                 model.totalSize = size;
                 fireProgress(0, size, "size"); //$NON-NLS-1$
+                if (size == 0)
+                    fireProgress(0, 0, "rows"); //$NON-NLS-1$
             }
             catch (DebugException e)
             {
@@ -377,7 +405,8 @@ final class CollectionLoadScheduler
             boolean more = batch.more;
             int cellsWritten = batch.cellsWritten;
 
-            if ((more || loadPending.get()) && !disposed.get() && isShellActiveForLoad() && loadJob != null)
+            boolean canRetry = model.totalSize != 0 && ((more && cellsWritten > 0) || loadPending.get());
+            if (canRetry && !disposed.get() && isShellActiveForLoad() && loadJob != null)
             {
                 int delay = cellsWritten > 0 ? 50 : 150;
                 loadJob.schedule(delay);
@@ -405,9 +434,12 @@ final class CollectionLoadScheduler
 
     private LoadBatchResult runLoadBatch(org.eclipse.core.runtime.IProgressMonitor monitor)
     {
+        final int batchGeneration = loadGeneration.get();
         int total = model.totalSize;
         if (total < 0)
-            total = Math.max(model.loadedRowCount + BATCH_SIZE, BATCH_SIZE);
+            return new LoadBatchResult(false, 0);
+        if (total == 0)
+            return new LoadBatchResult(false, 0);
 
         int colFrom = viewportColFrom.get();
         int colTo = viewportColTo.get();
@@ -441,14 +473,20 @@ final class CollectionLoadScheduler
             }
             int cellsWritten = fillCellsInBatch(from, count, colFrom, colTo);
             boolean more = hasMoreWork(colFrom, colTo, total, browseBound);
+            if (isAutoPrefetchComplete())
+                more = false;
             if (cellsWritten <= 0)
             {
                 ComfortCollectionDebug.step("load", //$NON-NLS-1$
                     "batch deferred rows=" + from + "+" + count //$NON-NLS-1$ //$NON-NLS-2$
                         + " cols=" + colFrom + ".." + colTo); //$NON-NLS-1$ //$NON-NLS-2$
             }
+            if (batchGeneration != loadGeneration.get())
+                return new LoadBatchResult(hasMoreWork(colFrom, colTo, total, browseBound), 0);
+
             fireBrowseProgress(colFrom, colTo, browseBound, total);
-            fireRowsReady(from, count);
+            if (cellsWritten > 0 && batchIntersectsRowViewport(from, count))
+                fireRowsReady(from, count);
             if (cellsWritten > 0 && batchIntersectsSizeViewport(from, count))
                 scheduleSizePass();
             return new LoadBatchResult(more, cellsWritten);
@@ -458,6 +496,19 @@ final class CollectionLoadScheduler
             ComfortCollectionDebug.problem("getVariables: " + e.getMessage()); //$NON-NLS-1$
             return new LoadBatchResult(hasMoreWork(colFrom, colTo, total, browseBound), 0);
         }
+    }
+
+    private boolean batchIntersectsRowViewport(int batchFrom, int batchCount)
+    {
+        int vpFirst = Math.max(0, viewportFirst.get());
+        int vpLast = viewportLast.get();
+        int total = model.totalSize;
+        if (total > 0 && vpLast >= total)
+            vpLast = total - 1;
+        if (vpLast < vpFirst || batchCount <= 0)
+            return false;
+        int batchTo = batchFrom + batchCount - 1;
+        return batchFrom <= vpLast && batchTo >= vpFirst;
     }
 
     private boolean batchIntersectsSizeViewport(int batchFrom, int batchCount)
@@ -473,7 +524,7 @@ final class CollectionLoadScheduler
     private static int browseUpperBound(int total)
     {
         if (total <= 0)
-            return AUTO_LOAD_ROW_LIMIT;
+            return 0;
         return Math.min(total, AUTO_LOAD_ROW_LIMIT);
     }
 
@@ -495,6 +546,11 @@ final class CollectionLoadScheduler
 
     private int resolveNextWorkRow(int colFrom, int colTo, int total, int browseBound)
     {
+        if (total == 0)
+            return -1;
+        if (browseBound <= 0)
+            return -1;
+
         int vpFirst = Math.max(0, viewportFirst.get());
         int vpLast = viewportLast.get();
         if (total > 0 && vpLast >= total)
@@ -502,12 +558,18 @@ final class CollectionLoadScheduler
         if (vpLast < vpFirst)
             vpLast = Math.min(vpFirst + BATCH_SIZE - 1, total > 0 ? total - 1 : vpFirst + BATCH_SIZE - 1);
 
-        int from = findNextWork(vpFirst, vpLast, colFrom, colTo);
-        if (from >= 0)
-            return from;
+        int vpWork = findNextWork(vpFirst, vpLast, colFrom, colTo);
+        int frontier = Math.min(browseBound, model.loadedRowCount);
+        int beyondWork = frontier < browseBound
+            ? findNextWork(frontier, browseBound - 1, colFrom, colTo)
+            : -1;
 
-        if (browseBound <= 0)
-            return -1;
+        // Не зацикливаться на viewport 0..N, пока дальше по коллекции ещё нет переменных/ячеек.
+        if (beyondWork >= 0 && (vpWork < 0 || beyondWork >= frontier && vpWork < frontier))
+            return beyondWork;
+        if (vpWork >= 0)
+            return vpWork;
+
         return findNextWork(0, browseBound - 1, colFrom, colTo);
     }
 
@@ -544,12 +606,13 @@ final class CollectionLoadScheduler
         {
             for (int col = colFrom; col <= colTo; col++)
             {
+                if (model.isCellFilled(row, col))
+                    continue;
                 String text = model.extractCellTextInJob(row, col);
-                if (text != null)
-                {
-                    model.setCellText(row, col, text);
-                    written++;
-                }
+                if (text == null)
+                    text = ComfortCollectionTableModel.PLACEHOLDER;
+                model.setCellText(row, col, text);
+                written++;
             }
         }
         return written;
@@ -589,7 +652,7 @@ final class CollectionLoadScheduler
                 for (int i = 0; i < count; i++)
                 {
                     int row = from + i;
-                    String text = model.rowFilterText(row);
+                    String text = model.rowFilterText(row, filter.isPresentationOnly());
                     if (filter.matcher().matches(text))
                         matches.set(row);
                 }

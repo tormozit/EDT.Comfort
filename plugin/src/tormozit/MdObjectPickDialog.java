@@ -5,6 +5,7 @@ import java.util.List;
 
 import org.eclipse.jface.dialogs.Dialog;
 import org.eclipse.jface.dialogs.IDialogConstants;
+import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.layout.TableColumnLayout;
 import org.eclipse.jface.viewers.ArrayContentProvider;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
@@ -25,6 +26,7 @@ import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableColumn;
+import org.eclipse.swt.widgets.TableItem;
 
 /**
  * Диалог выбора объекта метаданных при переходе к определению
@@ -32,11 +34,17 @@ import org.eclipse.swt.widgets.TableColumn;
  */
 public class MdObjectPickDialog extends Dialog
 {
+    private static final String SETTINGS_SECTION = "MdObjectPickDialog"; //$NON-NLS-1$
+    private static final String KEY_COL_ORDER = "columnOrder"; //$NON-NLS-1$
+
     private static final int MIN_TYPE_COL_WIDTH = 100;
     private static final int MIN_NAME_COL_WIDTH = 120;
 
     private final List<String> fullNames;
     private TableViewer listViewer;
+    private TableColumn typeColumn;
+    private TableColumn nameColumn;
+    private FormTableInteraction tableInteraction;
     private String selectedFullName;
 
     public MdObjectPickDialog(Shell parentShell, List<String> fullNames)
@@ -75,12 +83,15 @@ public class MdObjectPickDialog extends Dialog
         message.setText("Найдено несколько объектов. Выберите для перехода:"); //$NON-NLS-1$
         message.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
 
-        Composite tableHost = new Composite(area, SWT.NONE);
-        TableColumnLayout columnLayout = new TableColumnLayout(true);
-        tableHost.setLayout(columnLayout);
-        tableHost.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+        Composite tableStack = new Composite(area, SWT.NONE);
+        tableStack.setLayout(null);
+        tableStack.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
 
-        listViewer = new TableViewer(tableHost,
+        Composite columnHost = new Composite(tableStack, SWT.NONE);
+        TableColumnLayout columnLayout = new TableColumnLayout(true);
+        columnHost.setLayout(columnLayout);
+
+        listViewer = new TableViewer(columnHost,
             SWT.BORDER | SWT.SINGLE | SWT.FULL_SELECTION | SWT.V_SCROLL);
         Table table = listViewer.getTable();
         table.setHeaderVisible(true);
@@ -88,6 +99,7 @@ public class MdObjectPickDialog extends Dialog
 
         TableViewerColumn colType = new TableViewerColumn(listViewer, SWT.NONE);
         TableColumn typeColumn = colType.getColumn();
+        this.typeColumn = typeColumn;
         typeColumn.setText("Тип"); //$NON-NLS-1$
         colType.setLabelProvider(new ColumnLabelProvider()
         {
@@ -100,6 +112,7 @@ public class MdObjectPickDialog extends Dialog
 
         TableViewerColumn colName = new TableViewerColumn(listViewer, SWT.NONE);
         TableColumn nameColumn = colName.getColumn();
+        this.nameColumn = nameColumn;
         nameColumn.setText("Имя"); //$NON-NLS-1$
         colName.setLabelProvider(new ColumnLabelProvider()
         {
@@ -115,8 +128,15 @@ public class MdObjectPickDialog extends Dialog
         columnLayout.setColumnData(nameColumn,
             new ColumnWeightData(2, MIN_NAME_COL_WIDTH, true));
 
+        FormTableColumnOrder.load(dialogSettings(), KEY_COL_ORDER, table);
+
         listViewer.setContentProvider(ArrayContentProvider.getInstance());
         listViewer.setInput(fullNames);
+
+        tableInteraction = new FormTableInteraction(table, this::cellText);
+        tableInteraction.setSelectionSync(item ->
+            listViewer.setSelection(new StructuredSelection(item.getData())));
+        tableInteraction.install();
         selectFirst();
 
         installDoubleClick(table);
@@ -142,6 +162,13 @@ public class MdObjectPickDialog extends Dialog
         super.okPressed();
     }
 
+    @Override
+    public boolean close()
+    {
+        saveColumnLayout();
+        return super.close();
+    }
+
     public String getSelectedFullName()
     {
         return selectedFullName;
@@ -149,8 +176,50 @@ public class MdObjectPickDialog extends Dialog
 
     private void selectFirst()
     {
-        if (!fullNames.isEmpty())
-            listViewer.setSelection(new StructuredSelection(fullNames.get(0)));
+        if (fullNames.isEmpty())
+            return;
+        listViewer.setSelection(new StructuredSelection(fullNames.get(0)));
+        Table table = listViewer.getTable();
+        if (tableInteraction != null && !table.isDisposed())
+        {
+            TableItem first = table.getItem(0);
+            if (first != null)
+                tableInteraction.selectCell(first, 0);
+        }
+    }
+
+    private String cellText(TableItem item, int column)
+    {
+        if (!(item.getData() instanceof String fullName))
+            return ""; //$NON-NLS-1$
+        Table table = item.getParent();
+        if (column < 0 || column >= table.getColumnCount())
+            return ""; //$NON-NLS-1$
+        TableColumn col = table.getColumn(column);
+        if (col == typeColumn)
+            return typeOf(fullName);
+        if (col == nameColumn)
+            return nameOf(fullName);
+        return ""; //$NON-NLS-1$
+    }
+
+    private void saveColumnLayout()
+    {
+        if (listViewer == null)
+            return;
+        Table table = listViewer.getTable();
+        if (table == null || table.isDisposed())
+            return;
+        FormTableColumnOrder.save(dialogSettings(), KEY_COL_ORDER, table);
+    }
+
+    private static IDialogSettings dialogSettings()
+    {
+        IDialogSettings top = Activator.getDefault().getDialogSettings();
+        IDialogSettings section = top.getSection(SETTINGS_SECTION);
+        if (section == null)
+            section = top.addNewSection(SETTINGS_SECTION);
+        return section;
     }
 
     private void installDoubleClick(Table table)

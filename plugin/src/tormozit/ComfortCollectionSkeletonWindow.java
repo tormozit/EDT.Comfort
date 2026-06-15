@@ -5,6 +5,7 @@ import java.util.Arrays;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.events.SelectionEvent;
+import org.eclipse.jface.layout.TableColumnLayout;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Composite;
@@ -27,7 +28,7 @@ public final class ComfortCollectionSkeletonWindow implements CollectionTableHos
 {
     public static final int ROW_COUNT = 1000;
     /** Видимых колонок в таблице (включая «Индекс»). */
-    public static final int VISIBLE_COLUMN_COUNT = 50;
+    public static final int VISIBLE_COLUMN_COUNT = 100;
 
     private Shell shell;
     private Table table;
@@ -92,7 +93,7 @@ public final class ComfortCollectionSkeletonWindow implements CollectionTableHos
 
         ToolItem reopen = new ToolItem(bar, SWT.PUSH);
         reopen.setText("Скелет"); //$NON-NLS-1$
-        reopen.setToolTipText("Открыть ещё одно окно-скелет 1000×50"); //$NON-NLS-1$
+        reopen.setToolTipText("Открыть ещё одно окно-скелет 1000×100"); //$NON-NLS-1$
         reopen.addSelectionListener(new SelectionAdapter()
         {
             @Override
@@ -128,8 +129,14 @@ public final class ComfortCollectionSkeletonWindow implements CollectionTableHos
 
     private void createTable(Composite parent)
     {
-        table = new Table(parent, SWT.VIRTUAL | SWT.FULL_SELECTION | SWT.BORDER | SWT.MULTI);
-        table.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+        Composite tableStack = new Composite(parent, SWT.NONE);
+        tableStack.setLayout(null);
+        tableStack.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+
+        Composite columnHost = new Composite(tableStack, SWT.NONE);
+        columnHost.setLayout(new TableColumnLayout(true));
+
+        table = new Table(columnHost, SWT.VIRTUAL | SWT.FULL_SELECTION | SWT.BORDER | SWT.MULTI);
         table.setHeaderVisible(true);
         table.setLinesVisible(true);
         columns.syncTableHeaders(table);

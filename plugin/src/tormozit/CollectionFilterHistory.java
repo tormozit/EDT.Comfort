@@ -23,7 +23,7 @@ final class CollectionFilterHistory
     private static final String PREF_COUNT = "comfort.collection.filter.history.count"; //$NON-NLS-1$
     private static final String PREF_ITEM_PREFIX = "comfort.collection.filter.history."; //$NON-NLS-1$
     /** Максимальная ширина поля smart-фильтра в окне «Коллекция». */
-    static final int FILTER_FIELD_MAX_WIDTH = 400;
+    static final int FILTER_FIELD_MAX_WIDTH = 267;
     /** Отступ справа от поля фильтра до следующего элемента строки. */
     static final int FILTER_FIELD_RIGHT_MARGIN = 10;
 
@@ -35,7 +35,7 @@ final class CollectionFilterHistory
     {
         GridData gd = new GridData(SWT.BEGINNING, SWT.CENTER, false, false);
         gd.widthHint = FILTER_FIELD_MAX_WIDTH;
-        gd.minimumWidth = 120;
+        gd.minimumWidth = 80;
         return gd;
     }
 
