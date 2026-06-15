@@ -38,7 +38,6 @@ import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.contexts.IContextActivation;
 import org.eclipse.ui.contexts.IContextService;
 
-import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
 
 import com._1c.g5.v8.dt.debug.core.model.IBslStackFrame;
 import com._1c.g5.v8.dt.debug.core.model.IBslVariable;
@@ -59,7 +58,7 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
 
     private Shell shell;
     private CollectionSplitTable splitTable;
-    private SearchBox filterField;
+    private FilterInputBox filterInput;
     private Button filterByPresentationCheckbox;
     private boolean updatingFilterByPresentationCheckbox;
     private Combo presentationField;
@@ -202,9 +201,9 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
 
     String filterTextForClone()
     {
-        if (filterField == null || filterField.isDisposed())
+        if (filterInput == null || filterInput.isDisposed())
             return ""; //$NON-NLS-1$
-        String text = filterField.getText();
+        String text = filterInput.getText();
         return text != null ? text : ""; //$NON-NLS-1$
     }
 
@@ -240,8 +239,8 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
         updateColumnSettingsButton();
         int total = model.totalSize >= 0 ? model.totalSize : 0;
         updateTableItemCount(total);
-        if (filterField != null && !filterField.isDisposed())
-            filterField.setText(cloneSnapshot.filterText());
+        if (filterInput != null && !filterInput.isDisposed())
+            filterInput.setText(cloneSnapshot.filterText());
         refreshPresentationCombo();
         selectPresentationInCombo(cloneSnapshot.presentationHeader());
         applyCloneFilterByPresentationCheckbox();
@@ -828,7 +827,7 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
         row.setLayout(layout);
         row.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
 
-        filterField = CollectionFilterHistory.createSearchBox(row, this::applyFilterNow);
+        filterInput = FilterInputBox.forCollection(row, this::applyFilterNow);
 
         filterByPresentationCheckbox = new Button(row, SWT.CHECK);
         filterByPresentationCheckbox.setText("По представлению"); //$NON-NLS-1$
@@ -876,9 +875,9 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
 
     private void clearFilter()
     {
-        if (filterField == null || filterField.isDisposed())
+        if (filterInput == null || filterInput.isDisposed())
             return;
-        filterField.setText(""); //$NON-NLS-1$
+        filterInput.setText(""); //$NON-NLS-1$
         cancelFilterScan();
     }
 
@@ -990,9 +989,9 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
     /** Esc в непустом поле фильтра — сначала очистка, повторный Esc закроет окно. */
     private boolean tryClearFilterOnEsc()
     {
-        if (filterField == null || filterField.isDisposed() || !filterField.isFocusControl())
+        if (filterInput == null || filterInput.isDisposed() || !filterInput.isFocusControl())
             return false;
-        String text = filterField.getText();
+        String text = filterInput.getText();
         if (text == null || text.isEmpty())
             return false;
         clearFilter();
@@ -1461,9 +1460,9 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
 
     private void applyFilterNow()
     {
-        if (filterField == null || filterField.isDisposed())
+        if (filterInput == null || filterInput.isDisposed())
             return;
-        String text = filterField.getText();
+        String text = filterInput.getText();
         if (text == null || text.isBlank())
         {
             cancelFilterScan();
@@ -1773,9 +1772,9 @@ public final class ComfortCollectionWindow implements CollectionLoadScheduler.Pr
 
     private void applyFilterIfNonEmpty()
     {
-        if (filterField == null || filterField.isDisposed())
+        if (filterInput == null || filterInput.isDisposed())
             return;
-        String text = filterField.getText();
+        String text = filterInput.getText();
         if (text != null && !text.isBlank())
             applyFilterNow();
     }

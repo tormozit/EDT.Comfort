@@ -26,8 +26,6 @@ import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.swt.events.KeyAdapter;
 import org.eclipse.swt.events.KeyEvent;
-import org.eclipse.swt.events.ModifyEvent;
-import org.eclipse.swt.events.ModifyListener;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.widgets.Composite;
@@ -39,7 +37,6 @@ import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableColumn;
 import org.eclipse.swt.widgets.TableItem;
-import org.eclipse.swt.widgets.Text;
 
 /**
  * Диалог «Последние места».
@@ -68,7 +65,7 @@ public class RecentPlacesDialog extends Dialog
     private static final int MIN_PROJECT_COL_WIDTH     = 40;
     private static final int MIN_DATE_COL_WIDTH        = 70;
 
-    private Text        filterText;
+    private FilterInputBox filterInput;
     private TableViewer listViewer;
     private NameLabelProvider nameLabelProvider;
     private TableColumn placeColumn;
@@ -80,8 +77,6 @@ public class RecentPlacesDialog extends Dialog
     private List<RecentPlaces.Entry> allEntries;
     private List<RecentPlaces.Entry> filtered;
     private RecentPlaces.Entry selectedEntry;
-
-    private final Runnable[] pendingFilter = { null };
 
     public RecentPlacesDialog(Shell parentShell)
     {
@@ -130,9 +125,7 @@ public class RecentPlacesDialog extends Dialog
         Composite area = (Composite) super.createDialogArea(parent);
         area.setLayout(new org.eclipse.swt.layout.GridLayout(1, false));
 
-        filterText = new Text(area, SWT.BORDER | SWT.SEARCH | SWT.ICON_CANCEL);
-        filterText.setMessage("Фильтр по имени метода или объекта (колонка «Имя»)..."); //$NON-NLS-1$
-        filterText.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+        filterInput = FilterInputBox.forRecentPlaces(area, this::applyFilterFromField);
 
         IDialogSettings settings = dialogSettings();
         int nameWidth = readColWidth(settings, KEY_COL_NAME_WIDTH,
@@ -231,12 +224,11 @@ public class RecentPlacesDialog extends Dialog
         tableInteraction.install();
         selectFirst();
 
-        installFilterListener();
         installKeyListeners(table);
         installDoubleClick(table);
         installNavRefCopyMenu(table);
 
-        filterText.setFocus();
+        filterInput.setFocus();
         return area;
     }
 
@@ -401,24 +393,11 @@ public class RecentPlacesDialog extends Dialog
     // Фильтрация
     // =========================================================================
 
-    private void installFilterListener()
+    private void applyFilterFromField()
     {
-        filterText.addModifyListener(new ModifyListener()
-        {
-            @Override
-            public void modifyText(ModifyEvent e)
-            {
-                Display display = filterText.getDisplay();
-                if (pendingFilter[0] != null)
-                    display.timerExec(-1, pendingFilter[0]);
-                pendingFilter[0] = () ->
-                {
-                    pendingFilter[0] = null;
-                    applyFilter(filterText.getText());
-                };
-                display.timerExec(100, pendingFilter[0]);
-            }
-        });
+        if (filterInput == null || filterInput.isDisposed())
+            return;
+        applyFilter(filterInput.getText());
     }
 
     private void applyFilter(String pattern)
@@ -484,7 +463,10 @@ public class RecentPlacesDialog extends Dialog
 
     private void installKeyListeners(Table table)
     {
-        filterText.addKeyListener(new KeyAdapter()
+        Control filterKeys = filterInput.inputControl();
+        if (filterKeys == null)
+            filterKeys = filterInput.widget();
+        filterKeys.addKeyListener(new KeyAdapter()
         {
             @Override
             public void keyPressed(KeyEvent e)
@@ -501,7 +483,7 @@ public class RecentPlacesDialog extends Dialog
             }
         });
 
-        FilterFieldListNavigation.installTableNavigation(filterText, table, newIdx ->
+        FilterFieldListNavigation.installTableNavigation(filterKeys, table, newIdx ->
         {
             if (newIdx < filtered.size())
                 listViewer.setSelection(new StructuredSelection(filtered.get(newIdx)));

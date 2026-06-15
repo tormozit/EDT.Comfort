@@ -1,5 +1,6 @@
 package tormozit;
 
+import java.util.Objects;
 import java.util.function.Consumer;
 
 import org.eclipse.swt.SWT;
@@ -16,6 +17,7 @@ import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.events.SelectionEvent;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Device;
+import org.eclipse.swt.graphics.GC;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.graphics.Rectangle;
@@ -38,8 +40,11 @@ final class FormTableInteraction
 {
     private static final String COPY_MENU_KEY = "tormozit.formTableCopyMenu"; //$NON-NLS-1$
     private static final String COLUMN_HEADER_KEY = "tormozit.formTableColHeader"; //$NON-NLS-1$
+    private static final String AUTO_HEADER_TOOLTIP_KEY = "tormozit.formTableColAutoHeaderTip"; //$NON-NLS-1$
     private static final int HEADER_ACCENT_HEIGHT = 2;
     private static final int HEADER_SEPARATOR_HEIGHT = 1;
+    /** Горизонтальный запас шапки Win32 (отступы без sort-иконки). */
+    private static final int HEADER_TEXT_INSET = 16;
 
     @FunctionalInterface
     interface FormTableCellAccess
@@ -405,6 +410,64 @@ final class FormTableInteraction
                 continue;
             column.removeControlListener(columnHeaderListener);
             column.setData(COLUMN_HEADER_KEY, null);
+            column.setData(AUTO_HEADER_TOOLTIP_KEY, null);
+        }
+    }
+
+    private void updateColumnHeaderTooltips()
+    {
+        if (table == null || table.isDisposed() || !table.getHeaderVisible())
+            return;
+        for (TableColumn column : table.getColumns())
+        {
+            if (column.isDisposed())
+                continue;
+            String header = column.getText();
+            if (header == null || header.isEmpty())
+            {
+                clearAutoHeaderTooltip(column);
+                continue;
+            }
+            String current = column.getToolTipText();
+            boolean auto = Boolean.TRUE.equals(column.getData(AUTO_HEADER_TOOLTIP_KEY));
+            if (current != null && !current.isEmpty() && (!auto || !current.equals(header)))
+                continue;
+            String desired = isHeaderTextTruncated(column, header) ? header : null;
+            if (!Objects.equals(current, desired))
+            {
+                column.setToolTipText(desired);
+                column.setData(AUTO_HEADER_TOOLTIP_KEY, desired != null ? Boolean.TRUE : null);
+            }
+        }
+    }
+
+    private void clearAutoHeaderTooltip(TableColumn column)
+    {
+        if (column.isDisposed() || !Boolean.TRUE.equals(column.getData(AUTO_HEADER_TOOLTIP_KEY)))
+            return;
+        String current = column.getToolTipText();
+        if (current != null && !current.isEmpty())
+            column.setToolTipText(null);
+        column.setData(AUTO_HEADER_TOOLTIP_KEY, null);
+    }
+
+    private boolean isHeaderTextTruncated(TableColumn column, String text)
+    {
+        if (column.isDisposed() || text == null || text.isEmpty())
+            return false;
+        int available = column.getWidth() - HEADER_TEXT_INSET;
+        if (available <= 0)
+            return false;
+        GC gc = new GC(table);
+        try
+        {
+            gc.setFont(table.getFont());
+            int textWidth = gc.textExtent(text, SWT.DRAW_TRANSPARENT).x;
+            return textWidth > available;
+        }
+        finally
+        {
+            gc.dispose();
         }
     }
 
@@ -489,6 +552,7 @@ final class FormTableInteraction
     private void updateHeaderOverlays()
     {
         installColumnHeaderListeners();
+        updateColumnHeaderTooltips();
         updateHeaderSeparatorBounds();
         updateHeaderHighlightBounds();
     }

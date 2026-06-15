@@ -43,7 +43,7 @@ public final class FilterFieldListNavigation
         installTableNavigation((Control) filterText, table, onIndexChanged);
     }
 
-    private static void installTableNavigation(Control filterControl, Table table, TableIndexListener onIndexChanged)
+    public static void installTableNavigation(Control filterControl, Table table, TableIndexListener onIndexChanged)
     {
         if (filterControl == null || table == null)
             return;

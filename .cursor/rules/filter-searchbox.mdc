@@ -15,7 +15,7 @@ alwaysApply: true
 
 - Визуал как в окне «Значения» EDT: лупа слева, ✕ очистки и ▼ истории **внутри** одного поля с рамкой.
 - **Без** отдельного `Label` «Фильтр:» / «Поиск:» слева — назначение через placeholder и tooltip.
-- Эталон фабрики: `CollectionFilterHistory.createSearchBox()` в `plugin/src/tormozit/CollectionFilterHistory.java`:
+- Эталон фабрики: `FilterInputBox.forCollection()` / `FilterInputBox.forRecentPlaces()` / `FilterInputBox.create()` в `plugin/src/tormozit/FilterInputBox.java`:
   - `setMessage("Поиск...")`
   - `setToolTipText(...)` — пояснение синтаксиса фильтра при необходимости
   - `setMinimumSearchTextLength(0)` — фильтрация с первого символа
@@ -35,5 +35,4 @@ alwaysApply: true
 
 ## Переиспользование
 
-- Общую настройку и историю выносить в хелпер по образцу `CollectionFilterHistory`.
-- Для других окон — свой `ISearchHistory` (prefs плагина или `EclipsePreferencesPersistableSearchHistory`).
+- Все поля фильтра в окнах плагина — через `FilterInputBox`; для нового окна задать свой `FilterInputBox.Scope` (prefs) в `Options`.

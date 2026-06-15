@@ -3,7 +3,6 @@ package tormozit;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 
@@ -72,10 +71,6 @@ public final class ComfortKeysPreferences
     /** Категория команд плагина ({@code plugin.xml}, {@code name="Комфорт"}). */
     public static final String COMMAND_CATEGORY_ID =
             "tormozit.commands.global"; //$NON-NLS-1$
-
-    /** Заголовок блока про глобальные горячие клавиши на странице «Комфорт». */
-    public static final String GLOBAL_KEYS_SECTION_TITLE =
-            "Глобальные горячие клавиши"; //$NON-NLS-1$
 
     /**
      * Пояснение: дубли в Keys — runtime-зеркала; канон настройки — «В окнах» или Xtext для ИР.
@@ -461,11 +456,19 @@ public final class ComfortKeysPreferences
     private static final class LocalConflictUi
     {
         private static final String ANALYSIS_JOB_NAME =
-                "Локальные пересечения клавиш"; //$NON-NLS-1$
+                "Анализ пересечений клавиш"; //$NON-NLS-1$
 
-        private static final String TAB_GLOBAL_BASE = "Конфликты глобальные"; //$NON-NLS-1$
+        private static final String TAB_RESOLVABLE_BASE = "Конфликты устранимые"; //$NON-NLS-1$
 
-        private static final String TAB_LOCAL_BASE = "Локальные"; //$NON-NLS-1$
+        private static final String TAB_UNRESOLVABLE_BASE = "Неустранимые"; //$NON-NLS-1$
+
+        private static final String TAB_RESOLVABLE_TOOLTIP =
+                "Конкуренты, чьё назначение можно изменить в Keys "
+                + "(снять U или задать другую клавишу, в т.ч. вместо S)."; //$NON-NLS-1$
+
+        private static final String TAB_UNRESOLVABLE_TOOLTIP =
+                "Конкуренты, чьё назначение в Keys изменить нельзя — "
+                + "остаётся только сменить клавишу у своей команды."; //$NON-NLS-1$
 
         private static final String COLUMN_COMMAND = "Команда"; //$NON-NLS-1$
 
@@ -751,7 +754,7 @@ public final class ComfortKeysPreferences
             return gd;
         }
 
-        private static final int BINDING_VISIBILITY_MAX_ATTEMPTS = 30;
+        private static final int BINDING_VISIBILITY_MAX_ATTEMPTS = 60;
         private static final int BINDING_VISIBILITY_POLL_MS = 50;
 
         private static final class PendingConflictHighlight
@@ -775,10 +778,11 @@ public final class ComfortKeysPreferences
         private CTabItem localTab;
         private TableViewer localConflictViewer;
 
-        private List<Object> eclipseConflicts = Collections.emptyList();
+        private List<ComfortKeysLocalConflictRow> globalRows = Collections.emptyList();
         private List<ComfortKeysLocalConflictRow> localRows = Collections.emptyList();
 
         private Job analysisJob;
+        private int analysisGeneration;
         private boolean disposed;
 
         private PendingConflictHighlight pendingHighlight;
@@ -814,6 +818,7 @@ public final class ComfortKeysPreferences
             tabFolder.moveAbove(table);
 
             globalTab = new CTabItem(tabFolder, SWT.NONE);
+            globalTab.setToolTipText(TAB_RESOLVABLE_TOOLTIP);
             Composite globalComposite = new Composite(tabFolder, SWT.NONE);
             globalComposite.setLayout(tightGridLayout(1));
             globalTab.setControl(globalComposite);
@@ -822,8 +827,11 @@ public final class ComfortKeysPreferences
             GridData tableGd = new GridData(SWT.FILL, SWT.FILL, true, true);
             table.setLayoutData(tableGd);
             applyConflictTableColumnLayout(table);
+            conflictViewer.setContentProvider(ArrayContentProvider.getInstance());
+            conflictViewer.setLabelProvider(new LocalConflictLabelProvider());
 
             localTab = new CTabItem(tabFolder, SWT.NONE);
+            localTab.setToolTipText(TAB_UNRESOLVABLE_TOOLTIP);
             Composite localComposite = new Composite(tabFolder, SWT.NONE);
             localComposite.setLayout(tightGridLayout(1));
             localTab.setControl(localComposite);
@@ -842,9 +850,8 @@ public final class ComfortKeysPreferences
             table.addListener(SWT.Dispose, e -> dispose());
             tabFolder.addListener(SWT.Dispose, e -> dispose());
 
-            captureEclipseConflicts();
+            refreshGlobalViewer();
             refreshLocalViewer();
-            updateTabTitles();
             scheduleAutoAnalysis();
 
             parent.layout(true, true);
@@ -1062,11 +1069,11 @@ public final class ComfortKeysPreferences
             });
 
             viewer.addDoubleClickListener((IDoubleClickListener) event -> {
-                if (!(event.getSelection() instanceof IStructuredSelection structuredSelection)
-                        || structuredSelection.isEmpty()
-                        || !(structuredSelection.getFirstElement() instanceof BindingElement binding))
+                ComfortKeysLocalConflictRow row = getSelectedGlobalConflictRow(viewer);
+                if (row == null)
                     return;
-                navigateFromConflictDoubleClick(binding, getSelectedBinding(), false);
+                BindingElement target = resolveLocalConflictBinding(row);
+                navigateFromConflictDoubleClick(target, getSelectedBinding(), false);
             });
         }
 
@@ -1106,28 +1113,33 @@ public final class ComfortKeysPreferences
             return true;
         }
 
-        private boolean copyGlobalConflictSelection(TableViewer viewer)
+        private ComfortKeysLocalConflictRow getSelectedGlobalConflictRow(TableViewer viewer)
         {
             ISelection selection = viewer.getSelection();
             if (!(selection instanceof IStructuredSelection structuredSelection)
-                    || structuredSelection.isEmpty()
-                    || !(structuredSelection.getFirstElement() instanceof BindingElement binding))
+                    || structuredSelection.isEmpty())
+                return null;
+            Object element = structuredSelection.getFirstElement();
+            if (element instanceof ComfortKeysLocalConflictRow row)
+                return row;
+            return null;
+        }
+
+        private boolean copyGlobalConflictSelection(TableViewer viewer)
+        {
+            ComfortKeysLocalConflictRow row = getSelectedGlobalConflictRow(viewer);
+            if (row == null)
                 return false;
 
             Table table = viewer.getTable();
             if (table == null || table.isDisposed())
                 return false;
 
-            String command = binding.getName() != null ? binding.getName() : ""; //$NON-NLS-1$
-            String context = ""; //$NON-NLS-1$
-            if (binding.getContext() != null && binding.getContext().getName() != null)
-                context = binding.getContext().getName();
-
             Clipboard clipboard = new Clipboard(table.getDisplay());
             try
             {
                 clipboard.setContents(
-                        new Object[] { command + '\t' + context },
+                        new Object[] { row.copyText() },
                         new Transfer[] { TextTransfer.getInstance() });
             }
             finally
@@ -1146,7 +1158,7 @@ public final class ComfortKeysPreferences
                 return;
 
             pendingHighlight = new PendingConflictHighlight(source, localTab);
-            navigateToBindingWithFilterWait(target, this::scheduleApplyPendingHighlight);
+            navigateToBindingWithFilterWait(target, null);
         }
 
         private void navigateToBindingWithFilterWait(BindingElement binding, Runnable onDone)
@@ -1167,7 +1179,9 @@ public final class ComfortKeysPreferences
             if (!isBindingVisibleInTree(filteredTree, binding))
             {
                 ComfortKeysPreferences.setFilterText(filteredTree, ""); //$NON-NLS-1$
-                filteredTree.getViewer().refresh();
+                TreeViewer viewer = filteredTree.getViewer();
+                viewer.refresh();
+                viewer.reveal(binding);
                 waitForBindingVisible(filteredTree, binding, 0, () -> {
                     selectBindingInTree(filteredTree, binding);
                     if (onDone != null)
@@ -1208,15 +1222,9 @@ public final class ComfortKeysPreferences
         {
             BindingModel bindingModel = keyController.getBindingModel();
             bindingModel.setSelectedElement(binding);
-            filteredTree.getViewer().setSelection(new StructuredSelection(binding), true);
-        }
-
-        private void scheduleApplyPendingHighlight()
-        {
-            Display display = Display.getDefault();
-            if (display == null || display.isDisposed())
-                return;
-            display.asyncExec(this::applyPendingConflictHighlight);
+            TreeViewer viewer = filteredTree.getViewer();
+            viewer.reveal(binding);
+            viewer.setSelection(new StructuredSelection(binding), true);
         }
 
         private void applyPendingConflictHighlight()
@@ -1241,15 +1249,100 @@ public final class ComfortKeysPreferences
                 return;
             }
 
-            BindingElement match = findGlobalConflictForBinding(source);
-            if (match == null)
+            ComfortKeysLocalConflictRow row = findGlobalRowForBinding(source);
+            if (row == null)
                 return;
 
-            conflictViewer.setSelection(new StructuredSelection(match));
+            conflictViewer.setSelection(new StructuredSelection(row));
             Table table = conflictViewer.getTable();
             if (table != null && !table.isDisposed())
+            {
                 table.setFocus();
+                showSelectedConflictRow(conflictViewer);
+            }
             pendingHighlight = null;
+        }
+
+        private static void showSelectedConflictRow(TableViewer viewer)
+        {
+            Table table = viewer.getTable();
+            if (table == null || table.isDisposed())
+                return;
+
+            ISelection selection = viewer.getSelection();
+            if (!(selection instanceof IStructuredSelection structuredSelection)
+                    || structuredSelection.isEmpty())
+                return;
+
+            Object element = structuredSelection.getFirstElement();
+            for (TableItem item : table.getItems())
+            {
+                if (element.equals(item.getData()))
+                {
+                    table.showItem(item);
+                    return;
+                }
+            }
+        }
+
+        private ComfortKeysLocalConflictRow findGlobalRowMatching(ComfortKeysLocalConflictRow pattern)
+        {
+            if (pattern == null)
+                return null;
+
+            for (ComfortKeysLocalConflictRow row : globalRows)
+            {
+                if (!pattern.commandId.equals(row.commandId))
+                    continue;
+                if (pattern.contextId == null
+                        ? row.contextId != null
+                        : !pattern.contextId.equals(row.contextId))
+                    continue;
+                if (pattern.bindingType == row.bindingType)
+                    return row;
+            }
+
+            for (ComfortKeysLocalConflictRow row : globalRows)
+            {
+                if (!pattern.commandId.equals(row.commandId))
+                    continue;
+                if (pattern.contextId == null
+                        ? row.contextId != null
+                        : !pattern.contextId.equals(row.contextId))
+                    continue;
+                return row;
+            }
+            return null;
+        }
+
+        private ComfortKeysLocalConflictRow findLocalRowMatching(ComfortKeysLocalConflictRow pattern)
+        {
+            if (pattern == null)
+                return null;
+
+            for (ComfortKeysLocalConflictRow row : localRows)
+            {
+                if (!pattern.commandId.equals(row.commandId))
+                    continue;
+                if (pattern.contextId == null
+                        ? row.contextId != null
+                        : !pattern.contextId.equals(row.contextId))
+                    continue;
+                if (pattern.bindingType == row.bindingType)
+                    return row;
+            }
+
+            for (ComfortKeysLocalConflictRow row : localRows)
+            {
+                if (!pattern.commandId.equals(row.commandId))
+                    continue;
+                if (pattern.contextId == null
+                        ? row.contextId != null
+                        : !pattern.contextId.equals(row.contextId))
+                    continue;
+                return row;
+            }
+            return null;
         }
 
         private ComfortKeysLocalConflictRow findLocalRowForBinding(BindingElement source)
@@ -1257,6 +1350,16 @@ public final class ComfortKeysPreferences
             if (source == null)
                 return null;
 
+            ComfortKeysLocalConflictRow strict = findLocalRowForBinding(source, true);
+            if (strict != null)
+                return strict;
+            return findLocalRowForBinding(source, false);
+        }
+
+        private ComfortKeysLocalConflictRow findLocalRowForBinding(
+                BindingElement source,
+                boolean requireBindingType)
+        {
             String commandId = source.getId();
             String contextId = resolveBindingElementContextId(source);
             for (ComfortKeysLocalConflictRow row : localRows)
@@ -1265,23 +1368,43 @@ public final class ComfortKeysPreferences
                     continue;
                 if (contextId == null ? row.contextId != null : !contextId.equals(row.contextId))
                     continue;
-                if (!matchesBindingType(source, row.bindingType))
+                if (requireBindingType && !matchesBindingType(source, row.bindingType))
                     continue;
                 return row;
             }
             return null;
         }
 
-        private BindingElement findGlobalConflictForBinding(BindingElement source)
+        private ComfortKeysLocalConflictRow findGlobalRowForBinding(BindingElement source)
         {
             if (source == null)
                 return null;
 
-            for (Object item : eclipseConflicts)
+            ComfortKeysLocalConflictRow strict = findGlobalRowForBinding(source, true);
+            if (strict != null)
+                return strict;
+            return findGlobalRowForBinding(source, false);
+        }
+
+        private ComfortKeysLocalConflictRow findGlobalRowForBinding(
+                BindingElement source,
+                boolean requireBindingType)
+        {
+            for (ComfortKeysLocalConflictRow row : globalRows)
             {
-                if (item instanceof BindingElement bindingElement
-                        && sameBindingElement(source, bindingElement))
-                    return bindingElement;
+                if (row.bindingElement != null
+                        && sameBindingElement(source, row.bindingElement))
+                    return row;
+
+                String commandId = source.getId();
+                String contextId = resolveBindingElementContextId(source);
+                if (commandId == null || !commandId.equals(row.commandId))
+                    continue;
+                if (contextId == null ? row.contextId != null : !contextId.equals(row.contextId))
+                    continue;
+                if (requireBindingType && !matchesBindingType(source, row.bindingType))
+                    continue;
+                return row;
             }
             return null;
         }
@@ -1364,11 +1487,24 @@ public final class ComfortKeysPreferences
         {
             for (TreeItem item : filteredTree.getViewer().getTree().getItems())
             {
-                Object data = item.getData();
-                if (binding.equals(data))
+                if (treeItemMatchesBinding(item, binding))
                     return true;
-                if (data instanceof BindingElement treeBinding
-                        && sameBindingElement(binding, treeBinding))
+            }
+            return false;
+        }
+
+        private static boolean treeItemMatchesBinding(TreeItem item, BindingElement binding)
+        {
+            Object data = item.getData();
+            if (binding.equals(data))
+                return true;
+            if (data instanceof BindingElement treeBinding
+                    && sameBindingElement(binding, treeBinding))
+                return true;
+
+            for (TreeItem child : item.getItems())
+            {
+                if (treeItemMatchesBinding(child, binding))
                     return true;
             }
             return false;
@@ -1395,61 +1531,64 @@ public final class ComfortKeysPreferences
                     && CommonModel.PROP_SELECTED_ELEMENT.equals(property))
             {
                 scheduleAutoAnalysis();
-                scheduleRefreshFromEclipse();
+            }
+            else if (source instanceof BindingElement bindingElement
+                    && BindingElement.PROP_TRIGGER.equals(property)
+                    && bindingElement == getSelectedBinding())
+            {
+                scheduleAutoAnalysis();
             }
         }
 
         private void scheduleRefreshFromEclipse()
         {
-            Display display = Display.getDefault();
-            if (display == null || display.isDisposed())
-                return;
-            display.asyncExec(() -> {
-                if (disposed)
-                    return;
-                captureEclipseConflicts();
-                updateTabTitles();
-                scheduleConflictTablesRelayout();
-            });
+            scheduleAutoAnalysis();
         }
 
-        private void captureEclipseConflicts()
+        private void clearAnalysisRows()
         {
-            Object input = conflictViewer.getInput();
-            if (!(input instanceof Collection<?> collection))
-            {
-                eclipseConflicts = Collections.emptyList();
-                if (!disposed && conflictViewer != null)
-                    conflictViewer.setInput(eclipseConflicts);
-                scheduleConflictTablesRelayout();
+            globalRows = Collections.emptyList();
+            localRows = Collections.emptyList();
+            refreshGlobalViewer();
+            refreshLocalViewer();
+        }
+
+        private void refreshGlobalViewer()
+        {
+            if (disposed || conflictViewer == null)
                 return;
-            }
+            Table table = conflictViewer.getTable();
+            if (table == null || table.isDisposed())
+                return;
 
-            BindingElement selected = getSelectedBinding();
-            String selectedCommandId = selected != null ? selected.getId() : null;
-
-            List<Object> items = new ArrayList<>(collection.size());
-            for (Object item : collection)
+            ComfortKeysLocalConflictRow restoreRow = null;
+            if (pendingHighlight != null && !pendingHighlight.localTab)
+                restoreRow = findGlobalRowForBinding(pendingHighlight.source);
+            else
             {
-                if (!(item instanceof BindingElement bindingElement))
-                    continue;
-                if (selected != null && sameBindingElement(selected, bindingElement))
-                    continue;
-                if (selectedCommandId != null && selectedCommandId.equals(bindingElement.getId()))
-                    continue;
-                items.add(bindingElement);
+                ComfortKeysLocalConflictRow selected = getSelectedGlobalConflictRow(conflictViewer);
+                if (selected != null)
+                    restoreRow = selected;
             }
-            eclipseConflicts = items;
-            conflictViewer.setInput(items);
+
+            conflictViewer.setInput(globalRows);
+            updateTabTitles();
             scheduleConflictTablesRelayout();
             if (pendingHighlight != null && !pendingHighlight.localTab)
+            {
                 applyPendingConflictHighlight();
-        }
+                return;
+            }
 
-        private void clearLocalRows()
-        {
-            localRows = Collections.emptyList();
-            refreshLocalViewer();
+            if (restoreRow != null)
+            {
+                ComfortKeysLocalConflictRow row = findGlobalRowMatching(restoreRow);
+                if (row != null)
+                {
+                    conflictViewer.setSelection(new StructuredSelection(row));
+                    showSelectedConflictRow(conflictViewer);
+                }
+            }
         }
 
         private void refreshLocalViewer()
@@ -1459,11 +1598,35 @@ public final class ComfortKeysPreferences
             Table localTable = localConflictViewer.getTable();
             if (localTable == null || localTable.isDisposed())
                 return;
+
+            ComfortKeysLocalConflictRow restoreRow = null;
+            if (pendingHighlight != null && pendingHighlight.localTab)
+                restoreRow = findLocalRowForBinding(pendingHighlight.source);
+            else
+            {
+                ComfortKeysLocalConflictRow selected = getSelectedLocalConflictRow(localConflictViewer);
+                if (selected != null)
+                    restoreRow = selected;
+            }
+
             localConflictViewer.setInput(localRows);
             updateTabTitles();
             scheduleConflictTablesRelayout();
             if (pendingHighlight != null && pendingHighlight.localTab)
+            {
                 applyPendingConflictHighlight();
+                return;
+            }
+
+            if (restoreRow != null)
+            {
+                ComfortKeysLocalConflictRow row = findLocalRowMatching(restoreRow);
+                if (row != null)
+                {
+                    localConflictViewer.setSelection(new StructuredSelection(row));
+                    showSelectedConflictRow(localConflictViewer);
+                }
+            }
         }
 
         private void updateTabTitles()
@@ -1471,9 +1634,9 @@ public final class ComfortKeysPreferences
             if (tabFolder == null || tabFolder.isDisposed())
                 return;
             if (globalTab != null && !globalTab.isDisposed())
-                globalTab.setText(TAB_GLOBAL_BASE + " (" + eclipseConflicts.size() + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+                globalTab.setText(TAB_RESOLVABLE_BASE + " (" + globalRows.size() + ")"); //$NON-NLS-1$ //$NON-NLS-2$
             if (localTab != null && !localTab.isDisposed())
-                localTab.setText(TAB_LOCAL_BASE + " (" + localRows.size() + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+                localTab.setText(TAB_UNRESOLVABLE_BASE + " (" + localRows.size() + ")"); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         private void scheduleAutoAnalysis()
@@ -1482,22 +1645,30 @@ public final class ComfortKeysPreferences
                 return;
 
             BindingElement selected = getSelectedBinding();
-            if (selected == null || selected.getTrigger() == null)
+            if (!ComfortKeysLocalConflictAnalyzer.hasAssignedKey(selected))
             {
-                clearLocalRows();
+                if (analysisJob != null)
+                {
+                    analysisJob.cancel();
+                    analysisJob = null;
+                }
+                if (pendingHighlight == null)
+                    clearAnalysisRows();
                 return;
             }
 
             if (analysisJob != null)
                 analysisJob.cancel();
 
+            analysisGeneration++;
+            final int generation = analysisGeneration;
             final BindingElement selectedBinding = selected;
             analysisJob = new Job(ANALYSIS_JOB_NAME)
             {
                 @Override
                 protected IStatus run(IProgressMonitor monitor)
                 {
-                    List<ComfortKeysLocalConflictRow> rows =
+                    ComfortKeysAnalysisResult result =
                             ComfortKeysLocalConflictAnalyzer.analyze(
                                     keyController, selectedBinding, monitor);
 
@@ -1508,9 +1679,13 @@ public final class ComfortKeysPreferences
                     display.asyncExec(() -> {
                         if (disposed)
                             return;
+                        if (generation != analysisGeneration)
+                            return;
                         if (getSelectedBinding() != selectedBinding)
                             return;
-                        localRows = rows;
+                        globalRows = result.globalRows;
+                        localRows = result.localRows;
+                        refreshGlobalViewer();
                         refreshLocalViewer();
                     });
                     return monitor.isCanceled()

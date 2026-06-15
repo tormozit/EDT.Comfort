@@ -313,30 +313,13 @@ public class ComfortPreferencePage
     {
         Composite parent = getFieldEditorParent();
 
-        Label keysSectionTitle = new Label(parent, SWT.NONE);
-        keysSectionTitle.setText(ComfortKeysPreferences.GLOBAL_KEYS_SECTION_TITLE);
-        GridData titleGd = new GridData(SWT.LEFT, SWT.CENTER, false, false);
-        titleGd.horizontalSpan = 2;
-        titleGd.verticalIndent = 8;
-        keysSectionTitle.setLayoutData(titleGd);
-
-        Label keysHint = new Label(parent, SWT.WRAP);
-        keysHint.setText(ComfortKeysPreferences.GLOBAL_KEYS_HINT);
-        GridData hintGd = new GridData(SWT.FILL, SWT.CENTER, true, false);
-        hintGd.horizontalSpan = 2;
-        hintGd.widthHint = 480;
-        hintGd.verticalIndent = 2;
-        keysHint.setLayoutData(hintGd);
-
         Link keysLink = new Link(parent, SWT.NONE);
         keysLink.setText("<a>Клавиши</a>"); //$NON-NLS-1$
         GridData gd = new GridData(SWT.LEFT, SWT.CENTER, false, false);
         gd.horizontalSpan = 2;
-        gd.verticalIndent = 4;
+        gd.verticalIndent = 8;
         keysLink.setLayoutData(gd);
-        keysLink.setToolTipText(
-            "Keys с фильтром «Комфорт». "
-            + ComfortKeysPreferences.GLOBAL_KEYS_HINT); //$NON-NLS-1$
+        keysLink.setToolTipText("Keys с фильтром «Комфорт»"); //$NON-NLS-1$
         keysLink.addListener(SWT.Selection, e -> {
             if (!"Клавиши".equals(e.text)) //$NON-NLS-1$
                 return;

@@ -19,7 +19,6 @@ import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.ToolBar;
 import org.eclipse.swt.widgets.ToolItem;
 
-import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
 
 /**
  * Окно-скелет «Коллекция» для теста UI: виртуальная таблица без dbgs.
@@ -32,7 +31,7 @@ public final class ComfortCollectionSkeletonWindow implements CollectionTableHos
 
     private Shell shell;
     private Table table;
-    private SearchBox filterField;
+    private FilterInputBox filterInput;
     private Label progressLabel;
     private CollectionColumnModel columns;
     private CollectionShellPin shellPin;
@@ -116,14 +115,14 @@ public final class ComfortCollectionSkeletonWindow implements CollectionTableHos
         row.setLayout(layout);
         row.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
 
-        filterField = CollectionFilterHistory.createSearchBox(row, this::applyFilterNow);
+        filterInput = FilterInputBox.forCollection(row, this::applyFilterNow);
     }
 
     private void clearFilter()
     {
-        if (filterField == null || filterField.isDisposed())
+        if (filterInput == null || filterInput.isDisposed())
             return;
-        filterField.setText(""); //$NON-NLS-1$
+        filterInput.setText(""); //$NON-NLS-1$
         applyFilterNow();
     }
 
@@ -235,7 +234,7 @@ public final class ComfortCollectionSkeletonWindow implements CollectionTableHos
 
     private void applyFilterNow()
     {
-        String text = filterField.getText();
+        String text = filterInput.getText();
         if (text == null || text.isBlank())
         {
             int anchorLogical = -1;

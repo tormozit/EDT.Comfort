@@ -3,11 +3,19 @@ package tormozit;
 import org.eclipse.ui.internal.keys.model.BindingElement;
 
 /**
- * Строка «локального пересечения» для списка конфликтов на странице «Клавиши».
- * Команда EDT в узком контексте редактора с тем же сочетанием, что у выбранной привязки.
+ * Строка пересечения на вкладках конфликтов страницы «Клавиши».
  */
 final class ComfortKeysLocalConflictRow
 {
+    enum Kind
+    {
+        /** Назначение конкурента можно изменить в Keys. */
+        RESOLVABLE,
+        /** Назначение конкурента в Keys изменить нельзя. */
+        UNRESOLVABLE
+    }
+
+    final Kind kind;
     final String commandId;
     final String commandName;
     final String contextId;
@@ -17,6 +25,7 @@ final class ComfortKeysLocalConflictRow
     final BindingElement bindingElement;
 
     ComfortKeysLocalConflictRow(
+            Kind kind,
             String commandId,
             String commandName,
             String contextId,
@@ -25,6 +34,7 @@ final class ComfortKeysLocalConflictRow
             int bindingType,
             BindingElement bindingElement)
     {
+        this.kind = kind;
         this.commandId = commandId;
         this.commandName = commandName;
         this.contextId = contextId;
