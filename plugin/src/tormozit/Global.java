@@ -28,7 +28,9 @@ import org.osgi.framework.BundleContext;
 import org.osgi.framework.FrameworkUtil;    
 import org.eclipse.swt.widgets.*;
 
+import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
+import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.wiring.IManagedService;
 
@@ -295,6 +297,84 @@ public final class Global
         {
             Object p = Global.getField(context, "project"); //$NON-NLS-1$
             if (p instanceof IDtProject) return (IDtProject) p;
+        }
+        return null;
+    }
+
+    /**
+     * {@link IDtProject} для BSL-редактора: поле редактора / context, затем IFile → workspace.
+     */
+    public static IDtProject getDtProjectFromBslEditor(BslXtextEditor editor)
+    {
+        if (editor == null)
+            return null;
+
+        IDtProject fromField = getProjectFromEditor(editor);
+        if (fromField != null)
+            return fromField;
+
+        try
+        {
+            IEditorInput input = editor.getEditorInput();
+            if (input == null)
+                return null;
+
+            IFile file = input.getAdapter(IFile.class);
+            if (file == null)
+                return null;
+
+            return getDtProjectFromWorkspaceProject(file.getProject());
+        }
+        catch (Exception e)
+        {
+            log("Global.getDtProjectFromBslEditor: " + e); //$NON-NLS-1$
+        }
+        return null;
+    }
+
+    /** {@link IDtProject} по {@link IProject} воркспейса. */
+    public static IDtProject getDtProjectFromWorkspaceProject(IProject iProject)
+    {
+        if (iProject == null)
+            return null;
+        try
+        {
+            IV8ProjectManager projectManager =
+                (IV8ProjectManager) getServiceByClass(IV8ProjectManager.class);
+            if (projectManager == null)
+                return null;
+
+            Object result = invoke(projectManager, "getDtProject", iProject); //$NON-NLS-1$
+            if (result instanceof IDtProject)
+                return (IDtProject) result;
+
+            Object allProjects = call(projectManager, "getProjects"); //$NON-NLS-1$
+            if (allProjects instanceof Iterable<?>)
+            {
+                for (Object proj : (Iterable<?>) allProjects)
+                {
+                    IDtProject candidate = toDtProject(proj);
+                    if (candidate != null && iProject.equals(candidate.getWorkspaceProject()))
+                        return candidate;
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            log("Global.getDtProjectFromWorkspaceProject: " + e); //$NON-NLS-1$
+        }
+        return null;
+    }
+
+    private static IDtProject toDtProject(Object proj)
+    {
+        if (proj instanceof IDtProject)
+            return (IDtProject) proj;
+        if (proj instanceof IV8Project)
+        {
+            Object dt = call(proj, "getDtProject"); //$NON-NLS-1$
+            if (dt instanceof IDtProject)
+                return (IDtProject) dt;
         }
         return null;
     }

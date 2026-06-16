@@ -412,6 +412,8 @@ public final class ContentAssistPopupSync
         }
         finally
         {
+            if (viewer != null && isPopupVisible(assistant))
+                ContentAssistPopupUi.updateContextTypeLabel(viewer);
             RECOMPUTE_GUARD.set(Boolean.FALSE);
         }
     }

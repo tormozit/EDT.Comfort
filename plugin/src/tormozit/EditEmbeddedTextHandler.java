@@ -1,24 +1,13 @@
 package tormozit;
 
-import java.io.File;
-
-import org.eclipse.core.resources.IFile;
-import org.eclipse.core.resources.IProject;
 import org.eclipse.jface.text.BadLocationException;
-import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.IRegion;
 import org.eclipse.jface.text.ITextSelection;
 import org.eclipse.jface.text.source.ISourceViewer;
-import org.eclipse.ui.IEditorInput;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
-import com._1c.g5.v8.dt.core.platform.IV8Project;
-import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
-import com._1c.g5.v8.dt.bsl.qw.utils.BslQueryWizardUtils;
-import com._1c.g5.v8.dt.bsl.qw.utils.BslQueryWizardUtils.QueryTextInfo;
-
 /**
  * Обработчик команды «Вложенный текст» в контекстном меню BSL-редактора.
  *
@@ -80,7 +69,7 @@ public final class EditEmbeddedTextHandler
      */
     public static void editEmbeddedText(BslXtextEditor editor)
     {
-        IDtProject dtProject = getProjectFromBslEditor(editor);
+        IDtProject dtProject = Global.getDtProjectFromBslEditor(editor);
         IRSession irSession = IRApplication.getSession(dtProject);
         if (irSession == null || irSession.executor == null)
         {
@@ -210,86 +199,5 @@ public final class EditEmbeddedTextHandler
         {
             return null;
         }
-    }
-
-    // =========================================================================
-    // Получение IDtProject из BslXtextEditor
-    // =========================================================================
-
-    /**
-     * Возвращает {@link IDtProject} для файла, открытого в BSL-редакторе.
-     *
-     * <p>Стратегии (в порядке убывания надёжности):
-     * <ol>
-     *   <li>Рефлексия по полю {@code project} — некоторые редакторы хранят его напрямую.</li>
-     *   <li>{@code IEditorInput → IFile → IProject → IV8ProjectManager.getDtProject()}.</li>
-     *   <li>Перебор всех известных проектов по {@code IProject.equals()}.</li>
-     * </ol>
-     */
-    private static IDtProject getProjectFromBslEditor(BslXtextEditor editor)
-    {
-        // Стратегия 1: прямое поле
-        Object p = Global.getField(editor, "project"); //$NON-NLS-1$
-        if (p instanceof IDtProject) 
-            return (IDtProject) p;
-
-        try
-        {
-            // Стратегия 2: через IFile
-            IEditorInput input = editor.getEditorInput();
-            if (input == null) 
-                return null;
-
-            IFile file = input.getAdapter(IFile.class);
-            if (file == null) 
-                return null;
-
-            IProject iProject = file.getProject();
-
-            IV8ProjectManager projectManager =
-                (IV8ProjectManager) Global.getServiceByClass(IV8ProjectManager.class);
-            if (projectManager == null)
-                return null;
-
-            // Пробуем getDtProject(IProject) — наиболее вероятное имя метода
-            Object result = Global.invoke(projectManager, "getDtProject", iProject); //$NON-NLS-1$
-            if (result instanceof IDtProject) 
-                return (IDtProject) result;
-
-            // Стратегия 3: перебор всех проектов
-            Object allProjects = Global.call(projectManager, "getProjects"); //$NON-NLS-1$
-            if (allProjects instanceof Iterable<?>)
-            {
-                for (Object proj : (Iterable<?>) allProjects)
-                {
-                    IDtProject candidate = toDtProject(proj);
-                    if (candidate != null
-                        && iProject.equals(candidate.getWorkspaceProject()))
-                        return candidate;
-                }
-            }
-        }
-        catch (Exception e)
-        {
-            Global.log("EditEmbeddedTextHandler.getProjectFromBslEditor: " + e); //$NON-NLS-1$
-        }
-
-        return null;
-    }
-
-    /**
-     * Приводит объект к {@link IDtProject}:
-     * напрямую или через {@link IV8Project#getDtProject()}.
-     */
-    private static IDtProject toDtProject(Object proj)
-    {
-        if (proj instanceof IDtProject) return (IDtProject) proj;
-        if (proj instanceof IV8Project)
-        {
-            Object dt = Global.call(proj, "getDtProject"); //$NON-NLS-1$
-            if (dt instanceof IDtProject)
-                return (IDtProject) dt;
-        }
-        return null;
     }
 }

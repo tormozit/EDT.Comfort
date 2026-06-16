@@ -2,7 +2,6 @@ package tormozit;
 
 import java.lang.reflect.Field;
 import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -180,9 +179,9 @@ final class ComfortKeysLocalConflictAnalyzer
         String signature = commandId + '|' + contextId;
         String commandName = resolveCommandName(ctx.commandService, commandId);
         String contextName = resolveContextName(ctx.keyController, contextId);
-        String sequenceFormatted = ctx.targetSequence.format();
         BindingElement bindingElement =
                 resolveBindingElementForCatalogBinding(ctx.keyController, binding);
+        String sequenceFormatted = formatEffectiveSequence(bindingElement, binding);
 
         ComfortKeysLocalConflictRow candidate = new ComfortKeysLocalConflictRow(
                 kind,
@@ -210,20 +209,72 @@ final class ComfortKeysLocalConflictAnalyzer
             Map<String, ComfortKeysLocalConflictRow> byCommandContext)
     {
         List<ComfortKeysLocalConflictRow> result = new ArrayList<>(byCommandContext.values());
-        result.sort(Comparator
-                .comparing((ComfortKeysLocalConflictRow r) -> r.contextName,
-                        String.CASE_INSENSITIVE_ORDER)
-                .thenComparing(r -> r.commandName, String.CASE_INSENSITIVE_ORDER));
+        ComfortKeysLocalConflictRow.sortByCommandThenContext(result);
         return result;
     }
 
     private static boolean matchesCatalogBinding(ScanContext ctx, Binding binding)
     {
-        if (binding == null || !matchesSequence(binding, ctx.targetSequence))
+        if (binding == null)
             return false;
+
         if (!schemeMatches(binding.getSchemeId(), ctx.activeScheme))
             return false;
-        return matchesPlatformLocale(binding, ctx.platform, ctx.locale);
+        if (!matchesPlatformLocale(binding, ctx.platform, ctx.locale))
+            return false;
+
+        KeySequence effectiveKey = resolveEffectiveKeyForMatch(ctx.keyController, binding);
+        if (effectiveKey == null)
+            return false;
+
+        return matchesSequenceKey(effectiveKey, ctx.targetSequence);
+    }
+
+    /** Эффективная клавиша из строки Keys (U вместо устаревшей S в каталоге). */
+    private static KeySequence resolveEffectiveKeyForMatch(
+            KeyController keyController,
+            Binding binding)
+    {
+        ParameterizedCommand pc = binding.getParameterizedCommand();
+        String commandId = pc != null ? pc.getId() : null;
+        if (commandId == null || commandId.isBlank() || binding == null)
+            return null;
+
+        String contextId = binding.getContextId();
+        int bindingType = binding.getType();
+
+        BindingElement keysRow = findBindingElementInModel(
+                keyController, commandId, contextId, bindingType);
+        if (keysRow == null && bindingType == Binding.SYSTEM)
+            keysRow = findBindingElementInModel(
+                    keyController, commandId, contextId, Binding.USER);
+
+        if (keysRow != null)
+        {
+            TriggerSequence effective = keysRow.getTrigger();
+            if (effective instanceof KeySequence keySequence && !effective.isEmpty())
+                return keySequence;
+        }
+
+        TriggerSequence catalogTrigger = binding.getTriggerSequence();
+        if (catalogTrigger instanceof KeySequence keySequence && !catalogTrigger.isEmpty())
+            return keySequence;
+
+        return null;
+    }
+
+    private static String formatEffectiveSequence(BindingElement bindingElement, Binding binding)
+    {
+        if (bindingElement != null)
+        {
+            TriggerSequence effective = bindingElement.getTrigger();
+            if (effective != null && !effective.isEmpty())
+                return effective.format();
+        }
+        TriggerSequence catalogTrigger = binding.getTriggerSequence();
+        if (catalogTrigger != null && !catalogTrigger.isEmpty())
+            return catalogTrigger.format();
+        return ""; //$NON-NLS-1$
     }
 
     /**
@@ -238,12 +289,12 @@ final class ComfortKeysLocalConflictAnalyzer
         if (binding == null)
             return false;
 
-        if (binding.getType() == Binding.USER)
-            return true;
-
         ParameterizedCommand pc = binding.getParameterizedCommand();
         String commandId = pc != null ? pc.getId() : null;
-        if (commandId == null || commandId.isBlank() || commandService == null)
+        if (commandId == null || commandId.isBlank())
+            return false;
+
+        if (commandService == null)
             return false;
 
         Command command = commandService.getCommand(commandId);
@@ -547,15 +598,6 @@ final class ComfortKeysLocalConflictAnalyzer
         }
 
         return null;
-    }
-
-    private static boolean matchesSequence(Binding binding, KeySequence target)
-    {
-        TriggerSequence trigger = binding.getTriggerSequence();
-        if (!(trigger instanceof KeySequence keySequence))
-            return false;
-
-        return matchesSequenceKey(keySequence, target);
     }
 
     private static boolean matchesSequenceKey(KeySequence keySequence, KeySequence target)

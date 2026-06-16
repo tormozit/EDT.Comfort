@@ -102,7 +102,7 @@ public final class BslInspectSupport
         IProject project = null;
         if (editor instanceof BslXtextEditor bsl)
         {
-            IDtProject dtProject = DebugIRHandler.getDtProjectFromBslEditor(bsl);
+            IDtProject dtProject = Global.getDtProjectFromBslEditor(bsl);
             if (dtProject != null)
                 project = dtProject.getWorkspaceProject();
         }

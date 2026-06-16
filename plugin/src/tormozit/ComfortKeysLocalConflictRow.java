@@ -1,5 +1,10 @@
 package tormozit;
 
+import java.text.Collator;
+import java.util.Comparator;
+import java.util.List;
+import java.util.Locale;
+
 import org.eclipse.ui.internal.keys.model.BindingElement;
 
 /**
@@ -7,6 +12,8 @@ import org.eclipse.ui.internal.keys.model.BindingElement;
  */
 final class ComfortKeysLocalConflictRow
 {
+    private static final Collator SORT_COLLATOR = Collator.getInstance(Locale.getDefault());
+
     enum Kind
     {
         /** Назначение конкурента можно изменить в Keys. */
@@ -68,5 +75,26 @@ final class ComfortKeysLocalConflictRow
     String copyText()
     {
         return commandColumnText() + '\t' + contextColumnText();
+    }
+
+    static void sortByCommandThenContext(List<ComfortKeysLocalConflictRow> rows)
+    {
+        rows.sort(Comparator
+                .comparing(ComfortKeysLocalConflictRow::sortKeyCommand, SORT_COLLATOR)
+                .thenComparing(ComfortKeysLocalConflictRow::sortKeyContext, SORT_COLLATOR));
+    }
+
+    private String sortKeyCommand()
+    {
+        if (commandName != null && !commandName.isBlank())
+            return commandName;
+        return commandId != null ? commandId : ""; //$NON-NLS-1$
+    }
+
+    private String sortKeyContext()
+    {
+        if (contextName != null && !contextName.isBlank())
+            return contextName;
+        return contextId != null ? contextId : ""; //$NON-NLS-1$
     }
 }

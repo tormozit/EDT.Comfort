@@ -70,7 +70,7 @@ public final class IRModuleChangeCollector
             return result;
         }
 
-        IDtProject dtProject = DebugIRHandler.getDtProjectFromWorkspaceProject(project);
+        IDtProject dtProject = Global.getDtProjectFromWorkspaceProject(project);
         if (dtProject == null)
         {
             IRModuleSyncDebug.problem("IDtProject не найден для " + project.getName()); //$NON-NLS-1$

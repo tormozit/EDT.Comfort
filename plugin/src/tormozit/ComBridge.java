@@ -282,6 +282,54 @@ public final class ComBridge
         try { return (String) methodVariantToString.invoke(variant); }
         catch (Exception e) { return ""; }
     }
+
+    /**
+     * Поле 1С:Структура / Соответствие — через {@code Свойство()}, не {@link #getProperty}.
+     * Без исключений: при ошибке возвращает {@code null}.
+     */
+    public static String structureField(Object structure, String key)
+    {
+        if (structure == null || key == null || key.isEmpty())
+            return null;
+        if (structure instanceof Boolean)
+            return null;
+
+        try
+        {
+            Object val = invoke(structure, "Свойство", key); //$NON-NLS-1$
+            String s = structureFieldValueToString(val);
+            if (s != null)
+                return s;
+        }
+        catch (Exception ignored)
+        {
+            // 1С:Структура — читаем через Свойство(); fallback ниже
+        }
+        return structureFieldViaProperty(structure, key);
+    }
+
+    private static String structureFieldViaProperty(Object structure, String key)
+    {
+        try
+        {
+            Object val = methodDispatchGet.invoke(null, getRealDispatch(structure), key);
+            return structureFieldValueToString(val);
+        }
+        catch (Exception ignored)
+        {
+            return null;
+        }
+    }
+
+    private static String structureFieldValueToString(Object val)
+    {
+        if (val == null)
+            return null;
+        if (val instanceof Boolean b && !b)
+            return null;
+        String s = toString(val);
+        return s != null && !s.isEmpty() ? s : null;
+    }
     
     public static long toLong(Object variant)
     {

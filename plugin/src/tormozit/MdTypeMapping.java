@@ -3,6 +3,7 @@ package tormozit;
 import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Единственный источник правды для маппинга имён типов метаданных 1С
@@ -113,6 +114,7 @@ public final class MdTypeMapping
         add("Ресурс",              "Resource",        null);
         add("Перерасчет",          "Recalculation",   null);
         add("ПризнакУчета",        "AccountingFlag",  null);
+        add("ЗначениеПеречисления", "EnumValue",       null);
 
         SUB_OBJECT_TO_EMF_FEATURE.put("Attribute",      "attributes");
         SUB_OBJECT_TO_EMF_FEATURE.put("TabularSection", "tabularSections");
@@ -121,6 +123,7 @@ public final class MdTypeMapping
         SUB_OBJECT_TO_EMF_FEATURE.put("Command",        "commands");
         SUB_OBJECT_TO_EMF_FEATURE.put("Dimension",      "dimensions");
         SUB_OBJECT_TO_EMF_FEATURE.put("Resource",       "resources");
+        SUB_OBJECT_TO_EMF_FEATURE.put("EnumValue",      "enumValues");
 
         // ── RU ед.ч. → RU мн.ч. для менеджеров ─────────────────────────────
         // Используется в ПрямоеИмяМодуляИзПолного: МодульМенеджера → «Справочники.Валюты»
@@ -201,6 +204,59 @@ public final class MdTypeMapping
         if (categoryType == null) return null;
         String en = anyToEnSing(categoryType);
         return en != null ? SUB_OBJECT_TO_EMF_FEATURE.get(en) : null;
+    }
+
+    /** Число точек в полном имени — аналог {@code СтрЧислоВхождений(…, ".")} в RDT. */
+    public static int countDots(String fullName)
+    {
+        if (fullName == null || fullName.isEmpty())
+            return 0;
+        int count = 0;
+        for (int i = 0; i < fullName.length(); i++)
+            if (fullName.charAt(i) == '.')
+                count++;
+        return count;
+    }
+
+    /** Первый сегмент полного имени — аналог {@code ПервыйФрагментЛкс}. */
+    public static String firstSegment(String fullName)
+    {
+        if (fullName == null)
+            return null;
+        int dot = fullName.indexOf('.');
+        return dot < 0 ? fullName : fullName.substring(0, dot);
+    }
+
+    private static final Set<String> REFERENCE_TYPES_WITH_PREDEFINED = Set.of(
+        "Справочник",                   //$NON-NLS-1$
+        "Документ",                     //$NON-NLS-1$
+        "ПланВидовХарактеристик",       //$NON-NLS-1$
+        "ПланСчетов",                   //$NON-NLS-1$
+        "ПланВидовРасчета",             //$NON-NLS-1$
+        "ПланОбмена",                   //$NON-NLS-1$
+        "БизнесПроцесс",                //$NON-NLS-1$
+        "Задача",                       //$NON-NLS-1$
+        "Catalog",                      //$NON-NLS-1$
+        "Document",                     //$NON-NLS-1$
+        "ChartOfCharacteristicTypes",   //$NON-NLS-1$
+        "ChartOfAccounts",              //$NON-NLS-1$
+        "ChartOfCalculationTypes",      //$NON-NLS-1$
+        "ExchangePlan",                 //$NON-NLS-1$
+        "BusinessProcess",              //$NON-NLS-1$
+        "Task");                        //$NON-NLS-1$
+
+    /** Порт {@code ЛиКорневойТипОбъектаСПредопределеннымЛкс} для нормализации 3-сегментных ссылок. */
+    public static boolean isReferenceTypeWithPredefined(String rootType)
+    {
+        if (rootType == null || rootType.isEmpty())
+            return false;
+        if (REFERENCE_TYPES_WITH_PREDEFINED.contains(rootType))
+            return true;
+        String ru = anyToRu(rootType);
+        if (ru != null && REFERENCE_TYPES_WITH_PREDEFINED.contains(ru))
+            return true;
+        String en = anyToEnSing(rootType);
+        return en != null && REFERENCE_TYPES_WITH_PREDEFINED.contains(en);
     }
 
     // =========================================================================

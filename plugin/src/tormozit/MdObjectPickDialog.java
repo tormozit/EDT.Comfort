@@ -29,29 +29,101 @@ import org.eclipse.swt.widgets.TableColumn;
 import org.eclipse.swt.widgets.TableItem;
 
 /**
- * Диалог выбора объекта метаданных при переходе к определению
- * (несколько кандидатов из описания типов).
+ * Диалог выбора объекта при переходе к определению
+ * (несколько кандидатов из описания типов или списка ИР).
  */
 public class MdObjectPickDialog extends Dialog
 {
     private static final String SETTINGS_SECTION = "MdObjectPickDialog"; //$NON-NLS-1$
     private static final String KEY_COL_ORDER = "columnOrder"; //$NON-NLS-1$
 
-    private static final int MIN_TYPE_COL_WIDTH = 100;
-    private static final int MIN_NAME_COL_WIDTH = 120;
+    private static final int MIN_PRESENTATION_COL_WIDTH = 100;
+    private static final int MIN_LINK_COL_WIDTH = 120;
 
-    private final List<String> fullNames;
+    /** Строка таблицы: колонки «Представление» и «Ссылка». */
+    public static final class Entry
+    {
+        enum Kind { METADATA_NAME, IR_VALUE_PRESENTATION }
+
+        private final Kind kind;
+        private final String jumpTarget;
+        private final String presentationText;
+        private final String linkText;
+
+        private Entry(Kind kind, String jumpTarget, String presentationText)
+        {
+            this.kind = kind;
+            this.jumpTarget = jumpTarget != null ? jumpTarget : ""; //$NON-NLS-1$
+            this.presentationText = presentationText != null ? presentationText : ""; //$NON-NLS-1$
+            this.linkText = this.jumpTarget;
+        }
+
+        /** Локальный список полных имён метаданных ({@code Справочник.Валюты}). */
+        public static Entry metadataName(String fullName)
+        {
+            String name = fullName != null ? fullName : ""; //$NON-NLS-1$
+            return new Entry(Kind.METADATA_NAME, name, metadataObjectName(name));
+        }
+
+        /** Элемент списка ИР: COM {@code Значение} + {@code Представление}. */
+        public static Entry irItem(String link, String presentation)
+        {
+            String l = link != null ? link : ""; //$NON-NLS-1$
+            String p = presentation != null ? presentation.strip() : ""; //$NON-NLS-1$
+            return new Entry(Kind.IR_VALUE_PRESENTATION, l, p);
+        }
+
+        Kind kind()
+        {
+            return kind;
+        }
+
+        /** Цель перехода ({@link #getSelectedFullName()}). */
+        String jumpTarget()
+        {
+            return jumpTarget;
+        }
+
+        String presentationText()
+        {
+            return presentationText;
+        }
+
+        String linkText()
+        {
+            return linkText;
+        }
+    }
+
+    private final List<Entry> entries;
     private TableViewer listViewer;
-    private TableColumn typeColumn;
-    private TableColumn nameColumn;
+    private TableColumn presentationColumn;
+    private TableColumn linkColumn;
     private FormTableInteraction tableInteraction;
     private String selectedFullName;
 
-    public MdObjectPickDialog(Shell parentShell, List<String> fullNames)
+    public MdObjectPickDialog(Shell parentShell, List<Entry> entries)
     {
         super(parentShell);
-        this.fullNames = new ArrayList<>(fullNames);
+        this.entries = new ArrayList<>(entries);
         setShellStyle(SWT.DIALOG_TRIM | SWT.RESIZE | SWT.APPLICATION_MODAL);
+    }
+
+    /** Локальный список полных имён метаданных (отдельно от {@link List}&lt;{@link Entry}&gt; из‑за erasure). */
+    public static MdObjectPickDialog forMetadataNames(Shell parentShell, List<String> fullNames)
+    {
+        return new MdObjectPickDialog(parentShell, toMetadataEntries(fullNames));
+    }
+
+    private static List<Entry> toMetadataEntries(List<String> fullNames)
+    {
+        List<Entry> rows = new ArrayList<>();
+        if (fullNames != null)
+        {
+            for (String name : fullNames)
+                rows.add(Entry.metadataName(name));
+        }
+        return rows;
     }
 
     @Override
@@ -97,41 +169,41 @@ public class MdObjectPickDialog extends Dialog
         table.setHeaderVisible(true);
         table.setLinesVisible(true);
 
-        TableViewerColumn colType = new TableViewerColumn(listViewer, SWT.NONE);
-        TableColumn typeColumn = colType.getColumn();
-        this.typeColumn = typeColumn;
-        typeColumn.setText("Тип"); //$NON-NLS-1$
-        colType.setLabelProvider(new ColumnLabelProvider()
+        TableViewerColumn colPresentation = new TableViewerColumn(listViewer, SWT.NONE);
+        TableColumn presentationColumn = colPresentation.getColumn();
+        this.presentationColumn = presentationColumn;
+        presentationColumn.setText("Представление"); //$NON-NLS-1$
+        colPresentation.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
             public String getText(Object element)
             {
-                return typeOf((String) element);
+                return ((Entry) element).presentationText();
             }
         });
 
-        TableViewerColumn colName = new TableViewerColumn(listViewer, SWT.NONE);
-        TableColumn nameColumn = colName.getColumn();
-        this.nameColumn = nameColumn;
-        nameColumn.setText("Имя"); //$NON-NLS-1$
-        colName.setLabelProvider(new ColumnLabelProvider()
+        TableViewerColumn colLink = new TableViewerColumn(listViewer, SWT.NONE);
+        TableColumn linkColumn = colLink.getColumn();
+        this.linkColumn = linkColumn;
+        linkColumn.setText("Ссылка"); //$NON-NLS-1$
+        colLink.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
             public String getText(Object element)
             {
-                return nameOf((String) element);
+                return ((Entry) element).linkText();
             }
         });
 
-        columnLayout.setColumnData(typeColumn,
-            new ColumnWeightData(1, MIN_TYPE_COL_WIDTH, true));
-        columnLayout.setColumnData(nameColumn,
-            new ColumnWeightData(2, MIN_NAME_COL_WIDTH, true));
+        columnLayout.setColumnData(presentationColumn,
+            new ColumnWeightData(1, MIN_PRESENTATION_COL_WIDTH, true));
+        columnLayout.setColumnData(linkColumn,
+            new ColumnWeightData(2, MIN_LINK_COL_WIDTH, true));
 
         FormTableColumnOrder.load(dialogSettings(), KEY_COL_ORDER, table);
 
         listViewer.setContentProvider(ArrayContentProvider.getInstance());
-        listViewer.setInput(fullNames);
+        listViewer.setInput(entries);
 
         tableInteraction = new FormTableInteraction(table, this::cellText);
         tableInteraction.setSelectionSync(item ->
@@ -157,8 +229,8 @@ public class MdObjectPickDialog extends Dialog
     protected void okPressed()
     {
         IStructuredSelection sel = listViewer.getStructuredSelection();
-        if (!sel.isEmpty())
-            selectedFullName = (String) sel.getFirstElement();
+        if (!sel.isEmpty() && sel.getFirstElement() instanceof Entry entry)
+            selectedFullName = entry.jumpTarget();
         super.okPressed();
     }
 
@@ -176,9 +248,9 @@ public class MdObjectPickDialog extends Dialog
 
     private void selectFirst()
     {
-        if (fullNames.isEmpty())
+        if (entries.isEmpty())
             return;
-        listViewer.setSelection(new StructuredSelection(fullNames.get(0)));
+        listViewer.setSelection(new StructuredSelection(entries.get(0)));
         Table table = listViewer.getTable();
         if (tableInteraction != null && !table.isDisposed())
         {
@@ -190,16 +262,16 @@ public class MdObjectPickDialog extends Dialog
 
     private String cellText(TableItem item, int column)
     {
-        if (!(item.getData() instanceof String fullName))
+        if (!(item.getData() instanceof Entry entry))
             return ""; //$NON-NLS-1$
         Table table = item.getParent();
         if (column < 0 || column >= table.getColumnCount())
             return ""; //$NON-NLS-1$
         TableColumn col = table.getColumn(column);
-        if (col == typeColumn)
-            return typeOf(fullName);
-        if (col == nameColumn)
-            return nameOf(fullName);
+        if (col == presentationColumn)
+            return entry.presentationText();
+        if (col == linkColumn)
+            return entry.linkText();
         return ""; //$NON-NLS-1$
     }
 
@@ -240,15 +312,8 @@ public class MdObjectPickDialog extends Dialog
         });
     }
 
-    private static String typeOf(String fullName)
-    {
-        if (fullName == null)
-            return ""; //$NON-NLS-1$
-        int dot = fullName.indexOf('.');
-        return dot < 0 ? fullName : fullName.substring(0, dot);
-    }
-
-    private static String nameOf(String fullName)
+    /** Имя объекта метаданных — часть полного имени после первой точки. */
+    private static String metadataObjectName(String fullName)
     {
         if (fullName == null)
             return ""; //$NON-NLS-1$

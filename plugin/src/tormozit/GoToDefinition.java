@@ -30,6 +30,7 @@ import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.ITextSelection;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.viewers.ISelection;
+import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.graphics.Point;
@@ -63,7 +64,9 @@ import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorEmbeddedEditorPage;
+import com._1c.g5.v8.dt.md.PredefinedItemUtil;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
+import com._1c.g5.v8.dt.metadata.mdclass.PredefinedItem;
 import com._1c.g5.v8.dt.moxel.Cell;
 import com._1c.g5.v8.dt.moxel.sheet.CellsSelection;
 import com._1c.g5.v8.dt.moxel.sheet.Selection;
@@ -220,7 +223,20 @@ public class GoToDefinition extends AbstractHandler
             ToastNotification.show("Переход к определению", "Проект " + project.getName() + " не открыт");
             return null;
         }
-        
+
+        boolean fromClipboard = event.getCommand().getId().equals("tormozit.JumpFromClipboard"); //$NON-NLS-1$
+        if (!fromClipboard && session == null)
+        {
+            BslXtextEditor bslEditor = GetRef.getActiveBslEditor(page.getActiveEditor());
+            if (bslEditor != null)
+            {
+                int irResult = IrGoToDefinitionSupport.tryFromBslEditor(bslEditor, shell, page, project);
+                if (irResult == IrGoToDefinitionSupport.RESULT_OK
+                    || irResult == IrGoToDefinitionSupport.RESULT_WAIT_CONNECT)
+                    return null;
+            }
+        }
+
         if (!jump(command, shell, page, project))
         {
             if (!consumeJumpCancelled())
@@ -309,6 +325,12 @@ public class GoToDefinition extends AbstractHandler
         return cancelled;
     }
 
+    /** Отмена перехода из диалога выбора (ИР / локальный). */
+    static void markJumpCancelled()
+    {
+        jumpCancelled = true;
+    }
+
     public static boolean jump(String raw, Shell shell, IWorkbenchPage page, IProject project)
     {
         jumpCancelled = false;
@@ -331,9 +353,6 @@ public class GoToDefinition extends AbstractHandler
             return openGitFileRef(gitM.group(1), parseInt(gitM.group(2)), page, shell, project);
 
         if (ref.startsWith("БД.")) ref = ref.substring(3); //$NON-NLS-1$
-
-        if (ref.startsWith("ПакетXDTO.")) //$NON-NLS-1$
-            return openXdtoRef(ref, shell, page, project);
 
         if (ref.contains(",")) //$NON-NLS-1$
         {
@@ -628,18 +647,6 @@ public class GoToDefinition extends AbstractHandler
     }
 
     // =======================================================================
-    // XDTO
-    // =======================================================================
-
-    private static boolean openXdtoRef(String ref, Shell shell, IWorkbenchPage page, IProject project)
-    {
-        String[] parts = ref.split("\\.", 3); //$NON-NLS-1$
-        if (parts.length < 2) 
-            return false;
-        return openMdObjectByFullName("ПакетXDTO." + parts[1], shell, page, project); //$NON-NLS-1$
-    }
-
-    // =======================================================================
     // ПОЛНОЕ ИМЯ МД
     // =======================================================================
 
@@ -680,15 +687,19 @@ public class GoToDefinition extends AbstractHandler
         {
             return false;
         }
-        EObject eObject = resolveEObjectByQualifiedName(fullName, v8Project);
-        if (eObject instanceof MdObject
-                && openMdObjectViaOpenHelper((MdObject) eObject, fullName, page))
+
+        IRSession irSession = resolveConnectedIrSession(project);
+        MdLinkNormalizer.Result norm = MdLinkNormalizer.normalize(fullName, irSession);
+        String normalizedRef = norm.normalizedRef();
+
+        EObject eObject = resolveEObjectByQualifiedName(normalizedRef, v8Project);
+        if (openResolvedMdEObject(eObject, norm, page))
             return true;
 
-        String mdoPath = mdNameToMdoPath(fullName);
+        String mdoPath = mdNameToMdoPath(normalizedRef);
         if (mdoPath == null)
         {
-            Global.log("GoToDefinition: не могу построить .mdo-путь для: " + fullName); //$NON-NLS-1$
+            Global.log("GoToDefinition: не могу построить .mdo-путь для: " + normalizedRef); //$NON-NLS-1$
             return false;
         }
         IFile mdoFile = findFileInWorkspace(mdoPath, page, project);
@@ -698,8 +709,7 @@ public class GoToDefinition extends AbstractHandler
             return false;
         }
         eObject = resolveEObjectViaResourceSet(mdoFile, v8Project);
-        if (eObject instanceof MdObject
-                && openMdObjectViaOpenHelper((MdObject) eObject, fullName, page))
+        if (openResolvedMdEObject(eObject, norm, page))
             return true;
 
         Global.log("GoToDefinition: EObject не получен, открываем .mdo напрямую"); //$NON-NLS-1$
@@ -714,6 +724,52 @@ public class GoToDefinition extends AbstractHandler
         }
     }
 
+    private static IRSession resolveConnectedIrSession(IProject project)
+    {
+        IDtProject dtProject = Global.getDtProjectFromWorkspaceProject(project);
+        if (dtProject == null)
+            return null;
+        return IRApplication.getConnectedSession(dtProject);
+    }
+
+    /**
+     * Открывает резолвленный EObject: top-level {@link MdObject}, дочерний элемент
+     * (значение перечисления) или предопределённый элемент с выделением в редакторе.
+     */
+    private static boolean openResolvedMdEObject(EObject eObject, MdLinkNormalizer.Result norm, IWorkbenchPage page)
+    {
+        if (eObject == null || norm == null)
+            return false;
+
+        if (eObject instanceof MdObject mdObject)
+        {
+            ISelection selection = null;
+            if (norm.predefinedLeafName() != null)
+            {
+                PredefinedItem item =
+                    PredefinedItemUtil.findPredefinedItemByName(mdObject, norm.predefinedLeafName());
+                if (item != null)
+                    selection = new StructuredSelection(item);
+            }
+            return openMdObjectViaOpenHelper(mdObject, norm.normalizedRef(), page, selection);
+        }
+
+        MdObject parent = findContainingMdObject(eObject);
+        if (parent == null)
+            return false;
+        return openMdObjectViaOpenHelper(parent, norm.normalizedRef(), page, new StructuredSelection(eObject));
+    }
+
+    private static MdObject findContainingMdObject(EObject eObject)
+    {
+        for (EObject p = eObject.eContainer(); p != null; p = p.eContainer())
+        {
+            if (p instanceof MdObject mdObject)
+                return mdObject;
+        }
+        return null;
+    }
+
     /**
      * Открывает объект МД через {@link OpenHelper}.
      * Из редактора табличного документа (MOXEL) {@code openEditor} может бросить NPE
@@ -721,15 +777,30 @@ public class GoToDefinition extends AbstractHandler
      * с неинициализированной сценой — в этом случае возвращаем {@code false},
      * чтобы сработал fallback на {@code IDE.openEditor(.mdo)}.
      */
-    private static boolean openMdObjectViaOpenHelper(MdObject mdObject, String fullName, IWorkbenchPage page)
+    private static boolean openMdObjectViaOpenHelper(
+        MdObject mdObject, String fullName, IWorkbenchPage page, ISelection selection)
     {
         if (page == null || mdObject == null)
             return false;
+        OpenHelper helper = new OpenHelper(page);
+        boolean hasSelection = selection != null && !selection.isEmpty();
         if (isSameGranularEditorTarget(page, fullName))
-            return true;
+        {
+            if (!hasSelection)
+                return true;
+            org.eclipse.emf.ecore.EStructuralFeature feature = selectionFeature(selection);
+            return helper.activateEditor(mdObject, feature, selection);
+        }
         try
         {
-            IEditorPart editor = new OpenHelper(page).openEditor(mdObject, null);
+            IEditorPart editor;
+            if (!hasSelection)
+                editor = helper.openEditor(mdObject);
+            else
+            {
+                org.eclipse.emf.ecore.EStructuralFeature feature = selectionFeature(selection);
+                editor = helper.openEditor(mdObject, feature, selection);
+            }
             return editor != null;
         }
         catch (RuntimeException e)
@@ -737,6 +808,16 @@ public class GoToDefinition extends AbstractHandler
             Global.log("GoToDefinition: OpenHelper.openEditor: " + e.getMessage()); //$NON-NLS-1$
             return false;
         }
+    }
+
+    private static org.eclipse.emf.ecore.EStructuralFeature selectionFeature(ISelection selection)
+    {
+        if (!(selection instanceof StructuredSelection structured) || structured.isEmpty())
+            return null;
+        Object element = structured.getFirstElement();
+        if (!(element instanceof EObject child))
+            return null;
+        return child.eContainmentFeature();
     }
 
     /** Целевой объект уже открыт в активном {@link DtGranularEditor}. */
@@ -1040,7 +1121,7 @@ public class GoToDefinition extends AbstractHandler
 
     private static boolean pickAndOpen(List<String> names, Shell shell, IWorkbenchPage page, IProject project)
     {
-        MdObjectPickDialog dlg = new MdObjectPickDialog(shell, names);
+        MdObjectPickDialog dlg = MdObjectPickDialog.forMetadataNames(shell, names);
         if (dlg.open() != Window.OK)
             return false;
         String chosen = dlg.getSelectedFullName();
@@ -1300,7 +1381,7 @@ public class GoToDefinition extends AbstractHandler
         {
             String text = getTextFromBslEditor(bslEditor);
             if (text != null && !text.isBlank())
-                return text.substring(0, 1000);
+                return text.length() <= 1000 ? text : text.substring(0, 1000);
         }
 
         // 2. Активный SWT-виджет (ячейка таблицы, поле ввода формы МД и т. п.)

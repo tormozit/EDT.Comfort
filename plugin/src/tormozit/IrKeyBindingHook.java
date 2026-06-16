@@ -389,7 +389,7 @@ public final class IrKeyBindingHook implements org.eclipse.ui.IStartup
         if (bslEditor == null)
             return null;
 
-        return DebugIRHandler.getDtProjectFromBslEditor(bslEditor);
+        return Global.getDtProjectFromBslEditor(bslEditor);
     }
 
     private static boolean isIrCommandBinding(Binding binding)

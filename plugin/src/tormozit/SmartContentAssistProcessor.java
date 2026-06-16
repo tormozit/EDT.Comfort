@@ -98,21 +98,11 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
      */
     public String resolveReceiverTypeLabel()
     {
-        ICompletionProposal[] cache = fullListCache;
-        if (cache == null || cache.length == 0)
-            return ""; //$NON-NLS-1$
-
-        // Собираем уникальные типы родителя, сохраняя порядок первого вхождения
-        java.util.LinkedHashSet<String> types = new java.util.LinkedHashSet<>();
-        for (ICompletionProposal p : cache)
-        {
-            String display = displayString(unwrapProposal(p));
-            if (display == null)
-                continue;
-            String parentType = extractParentType(display);
-            if (parentType != null && !parentType.isEmpty())
-                types.add(parentType);
-        }
+        java.util.LinkedHashSet<String> types = collectParentTypesFromProposals(fullListCache);
+        if (types.isEmpty() && !SmartAssistFilterState.isSmartFilterEnabled())
+            types = collectParentTypesFromProposals(lastStableEmptyList);
+        if (types.isEmpty())
+            types = collectParentTypesFromProposals(lastStableDelegateList);
 
         if (types.isEmpty())
             return ""; //$NON-NLS-1$
@@ -121,8 +111,26 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         if (types.size() == 1)
             return types.iterator().next();
 
-        // Несколько типов — счётчик + первый (D основной) тип
+        // Несколько типов — счётчик + первый (основной) тип
         return "(" + types.size() + ") " + types.iterator().next(); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static java.util.LinkedHashSet<String> collectParentTypesFromProposals(
+            ICompletionProposal[] proposals)
+    {
+        java.util.LinkedHashSet<String> types = new java.util.LinkedHashSet<>();
+        if (proposals == null || proposals.length == 0)
+            return types;
+        for (ICompletionProposal p : proposals)
+        {
+            String display = displayString(unwrapProposal(p));
+            if (display == null)
+                continue;
+            String parentType = extractParentType(display);
+            if (parentType != null && !parentType.isEmpty())
+                types.add(parentType);
+        }
+        return types;
     }
 
     /**

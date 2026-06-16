@@ -49,7 +49,7 @@ public final class IRApplication
     // -----------------------------------------------------------------------
     // Синглтон
     // -----------------------------------------------------------------------
-    static String MINIMUM_IR_VERSION = "8.18";
+    static String MINIMUM_IR_VERSION = "8.19";
 
     public static String toastTitle()
     {
@@ -445,21 +445,21 @@ public final class IRApplication
         IRSession connectingSession = sessions.get(key);
         ExecutorService currentExecutor = connectingSession != null ? connectingSession.executor : null;
 
-        IRSession IRSession = new IRSession(
+        IRSession irSession = new IRSession(
             State.CONNECTING, LocalDateTime.now(), pid, platformVersion,
             comDispatch, processObj, title, project, currentExecutor, infobase);
-        sessions.put(key, IRSession);
+        sessions.put(key, irSession);
         notifyListeners();
 
-        if (!resolveIrModules(comDispatch, IRSession))
+        if (!resolveIrModules(comDispatch, irSession))
         {
             // МодулиИР = Неопределено → выхПодключеноНоНетПодсистемы = Истина
             sessions.remove(key);
             notifyListeners();
             return;
         }
-        Object irCache  = IRSession.getModule("ирКэш");  //$NON-NLS-1$
-        Object irClient = IRSession.getModule("ирКлиент"); //$NON-NLS-1$
+        Object irCache  = irSession.getModule("ирКэш");  //$NON-NLS-1$
+        Object irClient = irSession.getModule("ирКлиент"); //$NON-NLS-1$
         long irSubsystemVersion = 0;
         try
         {
@@ -472,6 +472,7 @@ public final class IRApplication
             String versionMsg = String.format(
                 "Обнаружена несовместимая версия подсистемы " + irSubsystemTitle() + ". Необходима версия %s и выше", MINIMUM_IR_VERSION);
             ToastNotification.show(toastTitle(), versionMsg, 5_000); //$NON-NLS-1$
+            irSession.showWindow();
             try { ComBridge.invoke(irClient, "ОткрытьСправкуПоПодсистемеЛкс"); } //$NON-NLS-1$
             catch (Exception ignored) {}
         }
@@ -501,7 +502,7 @@ public final class IRApplication
         catch (Exception ignored) {}
 
         ComBridge.invoke(irClient, "УстановитьГитРепозиторийЛкс", resolveGitRepositoryPath(project)); //$NON-NLS-1$
-        performInitialIrModuleSync(irCache, IRSession);
+        performInitialIrModuleSync(irCache, irSession);
 
         long ping = 0;
         String pingText = ""; //$NON-NLS-1$
@@ -512,11 +513,11 @@ public final class IRApplication
         catch (Exception ignored) { ping = 0; } // ИР 8.06-
 
         IRSession connectedSession = new IRSession(
-            State.CONNECTED, LocalDateTime.now(), IRSession.pid, IRSession.platformVersion,
-            IRSession.root, IRSession.processObj, IRSession.appTitle, IRSession.project,
-            IRSession.executor, IRSession.infobase);
-        connectedSession.moduleRoot = IRSession.moduleRoot;
-        connectedSession.codeEditor = IRSession.codeEditor;
+            State.CONNECTED, LocalDateTime.now(), irSession.pid, irSession.platformVersion,
+            irSession.root, irSession.processObj, irSession.appTitle, irSession.project,
+            irSession.executor, irSession.infobase);
+        connectedSession.moduleRoot = irSession.moduleRoot;
+        connectedSession.codeEditor = irSession.codeEditor;
         sessions.put(key, connectedSession);
         notifyListeners();
 
@@ -1247,6 +1248,24 @@ public final class IRApplication
                 return true;
         }
         return false;
+    }
+
+    /**
+     * Возвращает уже подключённую сессию ИР для проекта, не инициируя подключение.
+     */
+    public static IRSession getConnectedSession(IDtProject dtProject)
+    {
+        if (dtProject == null)
+            return null;
+        IProject wsProject = dtProject.getWorkspaceProject();
+        for (IRSession session : sessions.values())
+        {
+            if (session.project != wsProject)
+                continue;
+            if (session.state == State.CONNECTED && checkAlive(session))
+                return session;
+        }
+        return null;
     }
 
     /**

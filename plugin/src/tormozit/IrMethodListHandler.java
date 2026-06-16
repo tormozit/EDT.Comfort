@@ -57,7 +57,7 @@ public final class IrMethodListHandler
             return;
         }
 
-        IDtProject dtProject = getDtProject(editor);
+        IDtProject dtProject = Global.getDtProjectFromBslEditor(editor);
         if (dtProject == null)
             return;
 
@@ -121,14 +121,6 @@ public final class IrMethodListHandler
         if (!(sel instanceof ITextSelection textSel) || textSel.getLength() == 0)
             return ""; //$NON-NLS-1$
         return textSel.getText();
-    }
-
-    private static IDtProject getDtProject(BslXtextEditor editor)
-    {
-        Object p = Global.getField(editor, "project"); //$NON-NLS-1$
-        if (p instanceof IDtProject)
-            return (IDtProject) p;
-        return DebugIRHandler.getDtProjectFromBslEditor(editor);
     }
 
     private static void ensureCodeEditor(IRSession irSession)

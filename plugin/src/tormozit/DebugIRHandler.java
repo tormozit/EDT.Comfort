@@ -4,7 +4,6 @@ import java.util.Locale;
 import java.util.Optional;
 import java.util.regex.Pattern;
 
-import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.debug.core.DebugException;
 import org.eclipse.debug.core.model.IDebugTarget;
@@ -13,14 +12,11 @@ import org.eclipse.debug.core.model.IWatchExpression;
 import org.eclipse.jface.text.ITextSelection;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.swt.widgets.Display;
-import org.eclipse.ui.IEditorInput;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.PlatformUI;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
-import com._1c.g5.v8.dt.core.platform.IV8Project;
-import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.debug.core.model.IBslStackFrame;
 import com._1c.g5.v8.dt.debug.core.model.IBslVariable;
 import com._1c.g5.v8.dt.debug.core.model.IRuntimeDebugClientTarget;
@@ -56,7 +52,7 @@ public final class DebugIRHandler
 
     public static void debugObject(BslXtextEditor editor)
     {
-        IDtProject dtProject = getDtProjectFromBslEditor(editor);
+        IDtProject dtProject = Global.getDtProjectFromBslEditor(editor);
         if (dtProject == null)
             return;
 
@@ -131,7 +127,7 @@ public final class DebugIRHandler
             return;
         }
 
-        IDtProject dtProject = getDtProjectFromWorkspaceProject(project);
+        IDtProject dtProject = Global.getDtProjectFromWorkspaceProject(project);
         IRSession irSession = IRApplication.getSession(dtProject);
         if (irSession == null || irSession.executor == null)
             return;
@@ -164,7 +160,7 @@ public final class DebugIRHandler
         if (!isApplicableForDebugView(project))
             return;
 
-        IDtProject dtProject = getDtProjectFromWorkspaceProject(project);
+        IDtProject dtProject = Global.getDtProjectFromWorkspaceProject(project);
         IRSession irSession = IRApplication.getSession(dtProject);
         if (irSession == null || irSession.executor == null)
             return;
@@ -417,79 +413,8 @@ public final class DebugIRHandler
 
     private static IProject getWorkspaceProject(BslXtextEditor editor)
     {
-        IDtProject dt = getDtProjectFromBslEditor(editor);
+        IDtProject dt = Global.getDtProjectFromBslEditor(editor);
         return dt != null ? dt.getWorkspaceProject() : null;
-    }
-
-    static IDtProject getDtProjectFromWorkspaceProject(IProject iProject)
-    {
-        if (iProject == null)
-            return null;
-        try
-        {
-            IV8ProjectManager projectManager =
-                (IV8ProjectManager) Global.getServiceByClass(IV8ProjectManager.class);
-            if (projectManager == null)
-                return null;
-
-            Object result = Global.invoke(projectManager, "getDtProject", iProject); //$NON-NLS-1$
-            if (result instanceof IDtProject)
-                return (IDtProject) result;
-
-            Object allProjects = Global.call(projectManager, "getProjects"); //$NON-NLS-1$
-            if (allProjects instanceof Iterable<?>)
-            {
-                for (Object proj : (Iterable<?>) allProjects)
-                {
-                    IDtProject candidate = toDtProject(proj);
-                    if (candidate != null && iProject.equals(candidate.getWorkspaceProject()))
-                        return candidate;
-                }
-            }
-        }
-        catch (Exception e)
-        {
-            Global.log("DebugIRHandler.getDtProjectFromWorkspaceProject: " + e); //$NON-NLS-1$
-        }
-        return null;
-    }
-
-    static IDtProject getDtProjectFromBslEditor(BslXtextEditor editor)
-    {
-        Object p = Global.getField(editor, "project"); //$NON-NLS-1$
-        if (p instanceof IDtProject)
-            return (IDtProject) p;
-
-        try
-        {
-            IEditorInput input = editor.getEditorInput();
-            if (input == null)
-                return null;
-
-            IFile file = input.getAdapter(IFile.class);
-            if (file == null)
-                return null;
-
-            return getDtProjectFromWorkspaceProject(file.getProject());
-        }
-        catch (Exception e)
-        {
-            Global.log("DebugIRHandler.getDtProjectFromBslEditor: " + e); //$NON-NLS-1$
-        }
-        return null;
-    }
-
-    private static IDtProject toDtProject(Object proj)
-    {
-        if (proj instanceof IDtProject)
-            return (IDtProject) proj;
-        if (proj instanceof IV8Project)
-        {
-            Object dt = Global.call(proj, "getDtProject"); //$NON-NLS-1$
-            if (dt instanceof IDtProject)
-                return (IDtProject) dt;
-        }
-        return null;
     }
 
     private static void toast(String title, String message)

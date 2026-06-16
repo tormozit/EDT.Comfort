@@ -157,6 +157,9 @@ public final class ContentAssistPopupUi
             if (label != null && !label.isEmpty())
                 return "Родитель: " + label;
         }
+        String fallback = SmartContentAssistProcessor.ReceiverTypeLabel.resolve(viewer);
+        if (fallback != null && !fallback.isEmpty())
+            return "Родитель: " + fallback;
         return "Родитель: —"; //$NON-NLS-1$
     }
 
