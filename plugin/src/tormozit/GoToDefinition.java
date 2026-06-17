@@ -75,6 +75,28 @@ import com._1c.g5.v8.dt.moxel.ui.editor.MoxelControl;
 import com._1c.g5.v8.dt.moxel.ui.editor.MoxelEditor;
 import com._1c.g5.v8.dt.ui.editor.IDtGranularEditor;
 import com._1c.g5.v8.dt.ui.util.OpenHelper;
+import org.eclipse.jface.dialogs.Dialog;
+import org.eclipse.jface.dialogs.IDialogConstants;
+import org.eclipse.jface.dialogs.IDialogSettings;
+import org.eclipse.jface.layout.TableColumnLayout;
+import org.eclipse.jface.viewers.ArrayContentProvider;
+import org.eclipse.jface.viewers.ColumnLabelProvider;
+import org.eclipse.jface.viewers.ColumnPixelData;
+import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.TableViewer;
+import org.eclipse.jface.viewers.TableViewerColumn;
+import org.eclipse.swt.events.KeyAdapter;
+import org.eclipse.swt.events.KeyEvent;
+import org.eclipse.swt.layout.GridData;
+import org.eclipse.swt.layout.GridLayout;
+import org.eclipse.swt.SWT;
+import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Control;
+import org.eclipse.swt.widgets.Label;
+import org.eclipse.swt.widgets.Table;
+import org.eclipse.swt.widgets.TableColumn;
+import org.eclipse.swt.widgets.TableItem;
+import java.util.Collections;
 
 /**
  * Глобальная команда «Перейти к определению».
@@ -1621,4 +1643,901 @@ public class GoToDefinition extends AbstractHandler
     {
         return s.length() <= max ? s : s.substring(0, max) + "\u2026"; //$NON-NLS-1$
     }
+
+    /**
+     * Порт ветки «текстовый документ» из {@code ПерейтиКОпределению} RDT:
+     * {@code ПолеТекстаПрограммы.ПерейтиКОпределению} после sync в codeEditor.
+     */
+    private static final class IrGoToDefinitionSupport
+    {
+
+        public static final int RESULT_OK = 1;
+        public static final int RESULT_WAIT_CONNECT = 2;
+        public static final int RESULT_NOT_HANDLED = 3;
+        private IrGoToDefinitionSupport() {}
+
+        /**
+         * Единственная точка {@link IRApplication#getSession} для команды «Перейти к определению».
+         */
+        public static int tryFromBslEditor(
+            BslXtextEditor editor, Shell shell, IWorkbenchPage page, IProject project)
+        {
+
+            if (editor == null || shell == null || page == null || project == null)
+                return RESULT_NOT_HANDLED;
+            IDtProject dtProject = Global.getDtProjectFromBslEditor(editor);
+            if (dtProject == null)
+            {
+
+                debugProblem("IDtProject не найден"); //$NON-NLS-1$
+                return RESULT_NOT_HANDLED;
+            }
+
+            IRSession session = IRApplication.getSession(dtProject);
+            if (session == null || session.executor == null)
+            {
+
+                debugStep("session", "ожидание подключения ИР"); //$NON-NLS-1$ //$NON-NLS-2$
+                return RESULT_WAIT_CONNECT;
+            }
+
+            session.syncCodeEditorToIR(editor);
+            GotoDefOutcome outcome;
+            try
+            {
+
+                outcome = session.executeOnComThread(() ->
+                {
+
+                    ensureCodeEditor(session);
+                    ComBridge.invoke(session.codeEditor, "РазобратьТекущийКонтекст"); //$NON-NLS-1$
+                    ComBridge.invoke(session.codeEditor, "ЗапомнитьИсточникПерехода"); //$NON-NLS-1$
+                    Object raw = ComBridge.invoke(session.codeEditor, "ПерейтиКОпределению", null, null, false); //$NON-NLS-1$
+                    return marshalOutcome(raw);
+                });
+            }
+
+            catch (Exception e)
+            {
+
+                debugProblem("COM: " + e.getMessage()); //$NON-NLS-1$
+                return RESULT_NOT_HANDLED;
+            }
+
+            debugLog("ПерейтиКОпределению → " + describeOutcome(outcome)); //$NON-NLS-1$
+            return handleOutcome(outcome, session, editor, shell, page, project);
+        }
+
+        /** Plain Java-результат после маршалинга в COM-потоке. */
+        private static final class GotoDefOutcome
+        {
+
+            enum Kind { NOT_HANDLED, IR_SYNC, TARGET, PICK_LIST }
+
+            final Kind kind;
+            final String value;
+            final String presentation;
+            final List<GotoDefItem> items;
+            private GotoDefOutcome(Kind kind, String value, String presentation, List<GotoDefItem> items)
+            {
+
+                this.kind = kind;
+                this.value = value;
+                this.presentation = presentation;
+                this.items = items;
+            }
+
+            static GotoDefOutcome notHandled()
+            {
+
+                return new GotoDefOutcome(Kind.NOT_HANDLED, "", "", Collections.emptyList()); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+
+            static GotoDefOutcome irSync()
+            {
+
+                return new GotoDefOutcome(Kind.IR_SYNC, "", "", Collections.emptyList()); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+
+            static GotoDefOutcome target(String value, String presentation)
+            {
+
+                return new GotoDefOutcome(Kind.TARGET, value, presentation, Collections.emptyList());
+            }
+
+            static GotoDefOutcome pickList(List<GotoDefItem> items)
+            {
+
+                return new GotoDefOutcome(Kind.PICK_LIST, "", "", items); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+
+        }
+
+        private static final class GotoDefItem
+        {
+
+            final String value;
+            final String presentation;
+            GotoDefItem(String value, String presentation)
+            {
+
+                this.value = value;
+                this.presentation = presentation;
+            }
+
+        }
+
+        /** Только COM-поток: разбор сырого результата {@code ПерейтиКОпределению}. */
+        private static GotoDefOutcome marshalOutcome(Object raw)
+        {
+
+            if (raw == null)
+                return GotoDefOutcome.notHandled();
+            if (isValueList(raw))
+            {
+
+                long count = valueListCount(raw);
+                if (count <= 0)
+                    return GotoDefOutcome.notHandled();
+                List<GotoDefItem> items = new ArrayList<>();
+                for (int i = 0; i < count; i++)
+                {
+
+                    Object item = valueListItem(raw, i);
+                    if (item == null)
+                        continue;
+                    String value = ComBridge.toString(ComBridge.getProperty(item, "Значение")).strip(); //$NON-NLS-1$
+                    String presentation = ComBridge.toString(ComBridge.getProperty(item, "Представление")).strip(); //$NON-NLS-1$
+                    if (!value.isEmpty())
+                        items.add(new GotoDefItem(value, presentation));
+                }
+
+                if (items.isEmpty())
+                    return GotoDefOutcome.notHandled();
+                if (items.size() == 1)
+                {
+
+                    GotoDefItem single = items.get(0);
+                    return GotoDefOutcome.target(single.value, single.presentation);
+                }
+
+                return GotoDefOutcome.pickList(items);
+            }
+
+            if (isTrue(raw))
+                return GotoDefOutcome.irSync();
+            String text = ComBridge.toString(raw).strip();
+            if (text.isEmpty())
+                return GotoDefOutcome.notHandled();
+            return GotoDefOutcome.target(text, ""); //$NON-NLS-1$
+        }
+
+        private static int handleOutcome(
+            GotoDefOutcome outcome, IRSession session, BslXtextEditor editor,
+            Shell shell, IWorkbenchPage page, IProject project)
+        {
+
+            switch (outcome.kind)
+            {
+
+                case NOT_HANDLED:
+                    return RESULT_NOT_HANDLED;
+                case IR_SYNC:
+                    session.syncCodeEditorFromIR(editor);
+                    return RESULT_OK;
+                case TARGET:
+                    return resolveTarget(outcome.value, outcome.presentation, session, editor, shell, page, project);
+                case PICK_LIST:
+                    return handlePickList(outcome.items, shell, page, project);
+                default:
+                    return RESULT_NOT_HANDLED;
+            }
+
+        }
+
+        private static int handlePickList(
+            List<GotoDefItem> items, Shell shell, IWorkbenchPage page, IProject project)
+        {
+
+            List<MdObjectPickDialog.Entry> rows = new ArrayList<>();
+            for (GotoDefItem item : items)
+                rows.add(MdObjectPickDialog.Entry.irItem(item.value, item.presentation));
+            MdObjectPickDialog dlg = new MdObjectPickDialog(shell, rows);
+            if (dlg.open() != Window.OK)
+            {
+
+                GoToDefinition.markJumpCancelled();
+                return RESULT_OK;
+            }
+
+            String chosen = dlg.getSelectedFullName();
+            if (chosen == null || chosen.isBlank())
+                return RESULT_NOT_HANDLED;
+            return GoToDefinition.jump(chosen, shell, page, project) ? RESULT_OK : RESULT_NOT_HANDLED;
+        }
+
+        private static int resolveTarget(
+            String value, String presentation, IRSession session, BslXtextEditor editor,
+            Shell shell, IWorkbenchPage page, IProject project)
+        {
+
+            if (presentation.startsWith("Создать метод")) //$NON-NLS-1$
+            {
+
+                IrMethodConstructorHandler.openMethodConstructor(editor);
+                return RESULT_OK;
+            }
+
+            if (presentation.startsWith("ГиперСсылка")) //$NON-NLS-1$
+            {
+
+                openUrl(value);
+                return RESULT_OK;
+            }
+
+            if (presentation.startsWith("Колонка БД")) //$NON-NLS-1$
+            {
+
+                openIrClientMethod(session, "ОткрытьКолонкуБДЛкс", value); //$NON-NLS-1$
+                return RESULT_OK;
+            }
+
+            if (presentation.startsWith("Цвет") || presentation.startsWith("Шрифт")) //$NON-NLS-1$ //$NON-NLS-2$
+            {
+
+                openIrClientMethod(session, "ОткрытьЦветИлиШрифтПоПолномуИмениЛкс", value); //$NON-NLS-1$
+                return RESULT_OK;
+            }
+
+            if (value.isEmpty())
+                return RESULT_NOT_HANDLED;
+            return GoToDefinition.jump(value, shell, page, project) ? RESULT_OK : RESULT_NOT_HANDLED;
+        }
+
+        private static void openIrClientMethod(IRSession session, String method, String arg)
+        {
+
+            try
+            {
+
+                session.executeOnComThread(() ->
+                {
+
+                    Object irClient = session.getModule("ирКлиент"); //$NON-NLS-1$
+                    ComBridge.invoke(irClient, method, arg);
+                    return null;
+                });
+                session.showWindow();
+            }
+
+            catch (Exception e)
+            {
+
+                debugProblem(method + ": " + e.getMessage()); //$NON-NLS-1$
+            }
+
+        }
+
+        private static boolean isValueList(Object obj)
+        {
+
+            if (obj == null || obj instanceof String || obj instanceof Boolean || obj instanceof Number)
+                return false;
+            try
+            {
+
+                ComBridge.invoke(obj, "Количество"); //$NON-NLS-1$
+                return true;
+            }
+
+            catch (Exception e)
+            {
+
+                return false;
+            }
+
+        }
+
+        private static long valueListCount(Object list)
+        {
+
+            return ComBridge.toLong(ComBridge.invoke(list, "Количество")); //$NON-NLS-1$
+        }
+
+        private static Object valueListItem(Object list, int index)
+        {
+
+            return ComBridge.invoke(list, "Получить", index); //$NON-NLS-1$
+        }
+
+        private static boolean isTrue(Object result)
+        {
+
+            if (result == null || result instanceof String)
+                return false;
+            if (result instanceof Boolean)
+                return (Boolean) result;
+            if (isValueList(result))
+                return false;
+            return ComBridge.toBoolean(result);
+        }
+
+        private static String describeOutcome(GotoDefOutcome outcome)
+        {
+
+            switch (outcome.kind)
+            {
+
+                case NOT_HANDLED:
+                    return "null"; //$NON-NLS-1$
+                case IR_SYNC:
+                    return "true"; //$NON-NLS-1$
+                case TARGET:
+                    return "string:" + truncate(outcome.value, 80); //$NON-NLS-1$
+                case PICK_LIST:
+                    return "list:" + outcome.items.size(); //$NON-NLS-1$
+                default:
+                    return outcome.kind.name();
+            }
+
+        }
+
+        private static String truncate(String s, int max)
+        {
+
+            return s.length() <= max ? s : s.substring(0, max) + "\u2026"; //$NON-NLS-1$
+        }
+
+        private static void openUrl(String url)
+        {
+
+            try
+            {
+
+                org.eclipse.swt.program.Program.launch(url);
+            }
+
+            catch (Exception e)
+            {
+
+                debugProblem("openUrl: " + e.getMessage()); //$NON-NLS-1$
+            }
+
+        }
+
+        private static void ensureCodeEditor(IRSession session)
+        {
+
+            if (session.codeEditor != null)
+                return;
+            Object irCache = session.getModule("ирКэш"); //$NON-NLS-1$
+            session.codeEditor = ComBridge.invoke(irCache, "ПолеТекстаПрограммы", 0); //$NON-NLS-1$
+        }
+
+        private static final String DEBUG_TAG = "IrGoToDef"; //$NON-NLS-1$
+        private static void debugLog(String msg)
+        {
+
+            if (Global.isLogEnabled())
+                Global.log(DEBUG_TAG, msg);
+        }
+
+        private static void debugStep(String phase, String detail)
+        {
+
+            if (Global.isLogEnabled())
+                Global.log(DEBUG_TAG, phase + ": " + detail); //$NON-NLS-1$
+        }
+
+        private static void debugProblem(String msg)
+        {
+
+            if (Global.isLogEnabled())
+                Global.log(DEBUG_TAG, "[!] " + msg); //$NON-NLS-1$
+        }
+
+    }
+
+
+    /**
+     * Порт блока нормализации ссылки МД из {@code ПерейтиПоСсылкеМД} (RDT, ~2221–2264).
+     * Без привязки к окнам конфигуратора — только преобразование строки и побочные поля.
+     */
+    private static final class MdLinkNormalizer
+    {
+        private static final String MARKER_STANDARD = ".Стандартный."; //$NON-NLS-1$
+
+        private MdLinkNormalizer() {}
+
+        /**
+         * Результат нормализации: строка для резолва/открытия и побочные поля RDT.
+         */
+        public record Result(
+            String normalizedRef,
+            String formElementPath,
+            String templateElementPath,
+            String standardAttributeName,
+            String xdtoTypeName,
+            String propertyName,
+            String predefinedLeafName)
+        {
+            static Result plain(String ref)
+            {
+                return new Result(ref, null, null, null, null, null, null);
+            }
+        }
+
+        public static Result normalize(String ref)
+        {
+            return normalize(ref, null);
+        }
+
+        /**
+         * @param session уже подключённая сессия ИР ({@link IRApplication#getConnectedSession});
+         *                иначе ветки формы/макета пропускаются
+         */
+        public static Result normalize(String ref, IRSession session)
+        {
+            if (ref == null || ref.isBlank())
+                return Result.plain(ref);
+            final String linkRef = ref.strip();
+
+            if (session != null && session.state == IRApplication.State.CONNECTED)
+            {
+                Result ir = session.executeOnComThread(() ->
+                {
+                    try
+                    {
+                        return tryIrFormOrTemplate(linkRef, session);
+                    }
+                    catch (Exception e)
+                    {
+                        if (Global.isLogEnabled())
+                            Global.log("MdLinkNormalizer", "IR: " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
+                        return null;
+                    }
+                });
+                if (ir != null)
+                    return ir;
+            }
+            return normalizeWithoutIr(linkRef);
+        }
+
+        private static Result tryIrFormOrTemplate(String ref, IRSession session)
+        {
+            Object codeEditor = session.codeEditor;
+            if (codeEditor == null)
+            {
+                Object irCache = session.getModule("ирКэш"); //$NON-NLS-1$
+                codeEditor = ComBridge.invoke(irCache, "ПолеТекстаПрограммы", "//"); //$NON-NLS-1$ //$NON-NLS-2$
+                if (codeEditor == null)
+                    codeEditor = ComBridge.invoke(irCache, "ПолеТекстаПрограммы", 0); //$NON-NLS-1$
+            }
+
+            Object formParts = ComBridge.invoke(codeEditor, "ЧастиПолногоИмениЭлементаФормы", ref); //$NON-NLS-1$
+            String formName = ComBridge.structureField(formParts, "ИмяФормы"); //$NON-NLS-1$
+            if (formName != null && !formName.isEmpty())
+            {
+                String path = ComBridge.structureField(formParts, "ПутьКЭлементу"); //$NON-NLS-1$
+                return new Result(formName, path, null, null, null, null, null);
+            }
+
+            Object maketParts = ComBridge.invoke(codeEditor, "ЧастиПолногоИмениЭлементаМакета", ref); //$NON-NLS-1$
+            String maketName = ComBridge.structureField(maketParts, "ИмяМакета"); //$NON-NLS-1$
+            if (maketName != null && !maketName.isEmpty())
+            {
+                String path = ComBridge.structureField(maketParts, "ПутьКЭлементу"); //$NON-NLS-1$
+                return new Result(maketName, null, path, null, null, null, null);
+            }
+            return null;
+        }
+
+        /** Ветки без ИР — порядок как в RDT (if-elif). */
+        static Result normalizeWithoutIr(String ref)
+        {
+            String link = ref;
+
+            if (MdTypeMapping.countDots(link) == 2 && link.startsWith("Перечисление.")) //$NON-NLS-1$
+            {
+                String[] fragments = link.split("\\.", -1); //$NON-NLS-1$
+                String[] expanded  = new String[fragments.length + 1];
+                System.arraycopy(fragments, 0, expanded, 0, 2);
+                expanded[2] = "ЗначениеПеречисления"; //$NON-NLS-1$
+                System.arraycopy(fragments, 2, expanded, 3, fragments.length - 2);
+                link = String.join(".", expanded); //$NON-NLS-1$
+                return Result.plain(link);
+            }
+
+            if (MdTypeMapping.countDots(link) == 2
+                    && MdTypeMapping.isReferenceTypeWithPredefined(MdTypeMapping.firstSegment(link)))
+            {
+                String[] fragments = link.split("\\.", -1); //$NON-NLS-1$
+                String leaf        = fragments[2];
+                link = fragments[0] + "." + fragments[1]; //$NON-NLS-1$
+                return new Result(link, null, null, null, null, null, leaf);
+            }
+
+            int stdIdx = link.indexOf(MARKER_STANDARD);
+            if (stdIdx > 0)
+            {
+                String attribute = link.substring(stdIdx + MARKER_STANDARD.length());
+                link = link.substring(0, stdIdx);
+                return new Result(link, null, null, attribute, null, null, null);
+            }
+
+            if (link.startsWith("ПакетXDTO.")) //$NON-NLS-1$
+            {
+                int lastDot = link.lastIndexOf('.');
+                String xdtoType = null;
+                if (lastDot > "ПакетXDTO.".length()) //$NON-NLS-1$
+                {
+                    xdtoType = link.substring(lastDot + 1);
+                    link     = link.substring(0, lastDot);
+                }
+                return new Result(link, null, null, null, xdtoType, null, null);
+            }
+
+            if (link.startsWith("ПодпискаНаСобытие.")) //$NON-NLS-1$
+                return normalizeWithProperty(link, "Обработчик"); //$NON-NLS-1$
+
+            if (link.startsWith("РегламентноеЗадание.")) //$NON-NLS-1$
+                return normalizeWithProperty(link, "Имя метода"); //$NON-NLS-1$
+
+            return Result.plain(link);
+        }
+
+        private static Result normalizeWithProperty(String link, String propertyName)
+        {
+            String[] fragments = link.split("\\."); //$NON-NLS-1$
+            if (fragments.length > 2)
+                link = joinSkippingIndex(fragments, 2);
+            return new Result(link, null, null, null, null, propertyName, null);
+        }
+
+        private static String joinSkippingIndex(String[] fragments, int skipIndex)
+        {
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < fragments.length; i++)
+            {
+                if (i == skipIndex)
+                    continue;
+                if (sb.length() > 0)
+                    sb.append('.');
+                sb.append(fragments[i]);
+            }
+            return sb.toString();
+        }
+    }
+
+
+    /**
+     * Диалог выбора строки стека при переходе по ссылке из буфера
+     * (несколько кадров {@code {Модуль(строка)}} в тексте).
+     *
+     * <p>Размер, положение окна и ширины колонок — {@link #getDialogBoundsSettings()}.
+     */
+    private static class ModuleLinePickDialog extends Dialog
+    {
+        private static final String SETTINGS_SECTION = "ModuleLinePickDialog"; //$NON-NLS-1$
+        private static final String KEY_COL_MODULE_WIDTH = "colModuleWidth"; //$NON-NLS-1$
+        private static final String KEY_COL_METHOD_WIDTH = "colMethodWidth"; //$NON-NLS-1$
+        private static final String KEY_COL_LINE_WIDTH = "colLineWidth"; //$NON-NLS-1$
+
+        private static final String KEY_COL_CODE_WIDTH = "colCodeWidth"; //$NON-NLS-1$
+        private static final String KEY_COL_ORDER = "columnOrder"; //$NON-NLS-1$
+
+        private static final int DEFAULT_MODULE_COL_WIDTH = 200;
+        private static final int DEFAULT_METHOD_COL_WIDTH = 140;
+        private static final int DEFAULT_LINE_COL_WIDTH = 90;
+        private static final int DEFAULT_CODE_COL_WIDTH = 300;
+        private static final int MIN_MODULE_COL_WIDTH = 120;
+        private static final int MIN_METHOD_COL_WIDTH = 100;
+        private static final int MIN_LINE_COL_WIDTH = 70;
+        private static final int MIN_CODE_COL_WIDTH = 120;
+
+        private final List<Row> rows;
+        private TableViewer listViewer;
+        private TableColumn moduleColumn;
+        private TableColumn methodColumn;
+        private TableColumn lineColumn;
+        private TableColumn codeColumn;
+        private FormTableInteraction tableInteraction;
+        private int selectedIndex = -1;
+        private boolean confirmed;
+
+        public static final class Row
+        {
+            public final String module;
+            public final String method;
+            public final int lineNumber;
+            public final String code;
+
+            public Row(String module, String method, int lineNumber, String code)
+            {
+                this.module = module != null ? module : ""; //$NON-NLS-1$
+                this.method = method != null ? method : ""; //$NON-NLS-1$
+                this.lineNumber = lineNumber;
+                this.code = code != null ? code : ""; //$NON-NLS-1$
+            }
+        }
+
+        public ModuleLinePickDialog(Shell parentShell, List<Row> rows)
+        {
+            super(parentShell);
+            this.rows = new ArrayList<>(rows);
+            setShellStyle(SWT.DIALOG_TRIM | SWT.RESIZE | SWT.APPLICATION_MODAL);
+        }
+
+        @Override
+        protected void configureShell(Shell shell)
+        {
+            super.configureShell(shell);
+            shell.setText(Global.withPluginWindowTitle("Выберите строку стека")); //$NON-NLS-1$
+        }
+
+        @Override
+        protected Point getInitialSize()
+        {
+            IDialogSettings settings = dialogSettings();
+            if (settings.get("DIALOG_WIDTH") == null) //$NON-NLS-1$
+                return new Point(650, 350);
+            return super.getInitialSize();
+        }
+
+        @Override
+        protected IDialogSettings getDialogBoundsSettings()
+        {
+            return dialogSettings();
+        }
+
+        @Override
+        protected int getDialogBoundsStrategy()
+        {
+            return DIALOG_PERSISTSIZE | DIALOG_PERSISTLOCATION;
+        }
+
+        @Override
+        protected boolean isResizable()
+        {
+            return true;
+        }
+
+        @Override
+        protected Control createDialogArea(Composite parent)
+        {
+            Composite area = (Composite) super.createDialogArea(parent);
+            area.setLayout(new GridLayout(1, false));
+
+            Label message = new Label(area, SWT.WRAP);
+            message.setText("Найдено несколько ссылок. Выберите строку для перехода:"); //$NON-NLS-1$
+            message.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+
+            IDialogSettings settings = dialogSettings();
+            int moduleWidth = readColWidth(settings, KEY_COL_MODULE_WIDTH,
+                DEFAULT_MODULE_COL_WIDTH, MIN_MODULE_COL_WIDTH);
+            int methodWidth = readColWidth(settings, KEY_COL_METHOD_WIDTH,
+                DEFAULT_METHOD_COL_WIDTH, MIN_METHOD_COL_WIDTH);
+            int lineWidth = readColWidth(settings, KEY_COL_LINE_WIDTH,
+                DEFAULT_LINE_COL_WIDTH, MIN_LINE_COL_WIDTH);
+            int codeWidth = readColWidth(settings, KEY_COL_CODE_WIDTH,
+                DEFAULT_CODE_COL_WIDTH, MIN_CODE_COL_WIDTH);
+
+            Composite tableStack = new Composite(area, SWT.NONE);
+            tableStack.setLayout(null);
+            tableStack.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+
+            Composite columnHost = new Composite(tableStack, SWT.NONE);
+            TableColumnLayout columnLayout = new TableColumnLayout(true);
+            columnHost.setLayout(columnLayout);
+
+            listViewer = new TableViewer(columnHost,
+                SWT.BORDER | SWT.SINGLE | SWT.FULL_SELECTION | SWT.V_SCROLL);
+            Table table = listViewer.getTable();
+            table.setHeaderVisible(true);
+            table.setLinesVisible(true);
+
+            TableViewerColumn colModule = new TableViewerColumn(listViewer, SWT.NONE);
+            moduleColumn = colModule.getColumn();
+            moduleColumn.setText("Модуль"); //$NON-NLS-1$
+            colModule.setLabelProvider(new ColumnLabelProvider()
+            {
+                @Override
+                public String getText(Object element)
+                {
+                    return ((Row) element).module;
+                }
+            });
+
+            TableViewerColumn colMethod = new TableViewerColumn(listViewer, SWT.NONE);
+            methodColumn = colMethod.getColumn();
+            methodColumn.setText("Метод"); //$NON-NLS-1$
+            colMethod.setLabelProvider(new ColumnLabelProvider()
+            {
+                @Override
+                public String getText(Object element)
+                {
+                    return ((Row) element).method;
+                }
+            });
+
+            TableViewerColumn colLine = new TableViewerColumn(listViewer, SWT.NONE);
+            lineColumn = colLine.getColumn();
+            lineColumn.setText("НомерСтроки"); //$NON-NLS-1$
+            colLine.setLabelProvider(new ColumnLabelProvider()
+            {
+                @Override
+                public String getText(Object element)
+                {
+                    return String.valueOf(((Row) element).lineNumber);
+                }
+            });
+
+            TableViewerColumn colCode = new TableViewerColumn(listViewer, SWT.NONE);
+            codeColumn = colCode.getColumn();
+            codeColumn.setText("Код"); //$NON-NLS-1$
+            colCode.setLabelProvider(new ColumnLabelProvider()
+            {
+                @Override
+                public String getText(Object element)
+                {
+                    return ((Row) element).code;
+                }
+            });
+
+            columnLayout.setColumnData(moduleColumn,
+                new ColumnPixelData(moduleWidth, true, true));
+            columnLayout.setColumnData(methodColumn,
+                new ColumnPixelData(methodWidth, true, true));
+            columnLayout.setColumnData(lineColumn,
+                new ColumnPixelData(lineWidth, true, true));
+            columnLayout.setColumnData(codeColumn,
+                new ColumnPixelData(codeWidth, true, true));
+
+            FormTableColumnOrder.load(settings, KEY_COL_ORDER, table);
+
+            listViewer.setContentProvider(ArrayContentProvider.getInstance());
+            listViewer.setInput(rows);
+
+            tableInteraction = new FormTableInteraction(table, this::cellText);
+            tableInteraction.setSelectionSync(item ->
+                listViewer.setSelection(new StructuredSelection(item.getData())));
+            tableInteraction.install();
+            if (!rows.isEmpty())
+            {
+                TableItem first = table.getItem(0);
+                if (first != null)
+                    tableInteraction.selectCell(first, 0);
+            }
+
+            installDoubleClick(table);
+            installKeyListener(table);
+
+            table.setFocus();
+            return area;
+        }
+
+        @Override
+        protected void createButtonsForButtonBar(Composite parent)
+        {
+            createButton(parent, IDialogConstants.OK_ID, "Перейти", true); //$NON-NLS-1$
+            createButton(parent, IDialogConstants.CANCEL_ID, IDialogConstants.CANCEL_LABEL, false);
+        }
+
+        @Override
+        protected void okPressed()
+        {
+            IStructuredSelection sel = listViewer.getStructuredSelection();
+            if (sel.isEmpty())
+                return;
+            int idx = rows.indexOf(sel.getFirstElement());
+            if (idx < 0)
+                return;
+            selectedIndex = idx;
+            confirmed = true;
+            super.okPressed();
+        }
+
+        @Override
+        protected void cancelPressed()
+        {
+            confirmed = false;
+            selectedIndex = -1;
+            super.cancelPressed();
+        }
+
+        @Override
+        public boolean close()
+        {
+            saveColumnWidths();
+            return super.close();
+        }
+
+        public int getSelectedIndex()
+        {
+            return selectedIndex;
+        }
+
+        boolean wasConfirmed()
+        {
+            return confirmed;
+        }
+
+        private static IDialogSettings dialogSettings()
+        {
+            IDialogSettings top = Activator.getDefault().getDialogSettings();
+            IDialogSettings section = top.getSection(SETTINGS_SECTION);
+            if (section == null)
+                section = top.addNewSection(SETTINGS_SECTION);
+            return section;
+        }
+
+        private static int readColWidth(IDialogSettings settings, String key,
+            int defaultWidth, int minWidth)
+        {
+            String raw = settings.get(key);
+            if (raw == null || raw.isEmpty())
+                return defaultWidth;
+            try
+            {
+                int w = Integer.parseInt(raw);
+                return w >= minWidth ? w : defaultWidth;
+            }
+            catch (NumberFormatException ex)
+            {
+                return defaultWidth;
+            }
+        }
+
+        private void saveColumnWidths()
+        {
+            if (moduleColumn == null || methodColumn == null || lineColumn == null || codeColumn == null
+                    || moduleColumn.isDisposed() || methodColumn.isDisposed()
+                    || lineColumn.isDisposed() || codeColumn.isDisposed())
+                return;
+            IDialogSettings settings = dialogSettings();
+            settings.put(KEY_COL_MODULE_WIDTH, Integer.toString(moduleColumn.getWidth()));
+            settings.put(KEY_COL_METHOD_WIDTH, Integer.toString(methodColumn.getWidth()));
+            settings.put(KEY_COL_LINE_WIDTH, Integer.toString(lineColumn.getWidth()));
+            settings.put(KEY_COL_CODE_WIDTH, Integer.toString(codeColumn.getWidth()));
+            FormTableColumnOrder.save(settings, KEY_COL_ORDER, listViewer.getTable());
+        }
+
+        private String cellText(TableItem item, int column)
+        {
+            if (!(item.getData() instanceof Row row))
+                return ""; //$NON-NLS-1$
+            Table table = item.getParent();
+            if (column < 0 || column >= table.getColumnCount())
+                return ""; //$NON-NLS-1$
+            TableColumn col = table.getColumn(column);
+            if (col == moduleColumn)
+                return row.module;
+            if (col == methodColumn)
+                return row.method;
+            if (col == lineColumn)
+                return String.valueOf(row.lineNumber);
+            if (col == codeColumn)
+                return row.code;
+            return ""; //$NON-NLS-1$
+        }
+
+        private void installDoubleClick(Table table)
+        {
+            table.addListener(SWT.MouseDoubleClick, event -> okPressed());
+        }
+
+        private void installKeyListener(Table table)
+        {
+            table.addKeyListener(new KeyAdapter()
+            {
+                @Override
+                public void keyPressed(KeyEvent e)
+                {
+                    if (e.keyCode == SWT.CR || e.keyCode == SWT.KEYPAD_CR)
+                        okPressed();
+                }
+            });
+        }
+    }
+
 }

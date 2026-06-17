@@ -1,115 +1,71 @@
 package tormozit;
 
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
-
 import org.eclipse.jface.viewers.ILabelProvider;
-
 import org.eclipse.jface.viewers.LabelProvider;
-
 import org.eclipse.jface.viewers.StyledString;
-
 import org.eclipse.swt.graphics.Image;
-
 import java.util.function.Function;
 import java.util.function.Predicate;
 
-
-
 public class SmartOutlineLabelProvider extends LabelProvider implements IStyledLabelProvider, SmartLabelHighlight {
 
-    
-
     private final IStyledLabelProvider baseStyled;
-
     private final ILabelProvider basePlain;
-
     private final Object imageSource;
-
     private final Function<Object, String> matchTextFn;
-
     private final Predicate<Object> skipHighlight;
-
     private SmartMatcher highlightMatcher = new SmartMatcher(""); //$NON-NLS-1$
-
-    
-
     public SmartOutlineLabelProvider(IStyledLabelProvider baseStyled) {
 
         this(baseStyled, null);
-
     }
-
-
 
     public SmartOutlineLabelProvider(IStyledLabelProvider baseStyled, ILabelProvider basePlain) {
 
         this(baseStyled, basePlain, null);
-
     }
-
-
 
     public SmartOutlineLabelProvider(IStyledLabelProvider baseStyled, ILabelProvider basePlain,
             Predicate<Object> skipHighlight) {
 
         this(baseStyled, basePlain, skipHighlight, null);
-
     }
 
     public SmartOutlineLabelProvider(IStyledLabelProvider baseStyled, ILabelProvider basePlain,
             Predicate<Object> skipHighlight, Object imageSource) {
 
         this(baseStyled, basePlain, skipHighlight, imageSource, null);
-
     }
 
     public SmartOutlineLabelProvider(IStyledLabelProvider baseStyled, ILabelProvider basePlain,
             Predicate<Object> skipHighlight, Object imageSource, Function<Object, String> matchTextFn) {
 
         this.baseStyled = baseStyled;
-
         this.basePlain = basePlain;
-
         this.imageSource = imageSource;
-
         this.matchTextFn = matchTextFn;
-
         this.skipHighlight = skipHighlight;
-
     }
 
-
-
     @Override
-
     public void setHighlightPattern(String pattern) {
 
         highlightMatcher = new SmartMatcher(pattern != null ? pattern : ""); //$NON-NLS-1$
-
     }
 
-
-
     /** @deprecated use {@link #setHighlightPattern} */
-
     public void setPattern(String pattern) {
 
         setHighlightPattern(pattern);
-
     }
 
-
-
     @Override
-
     public StyledString getStyledText(Object element) {
 
         StyledString styledString = obtainBaseStyledText(element);
-
         applyHighlightIfNeeded(element, styledString);
-
         return styledString;
-
     }
 
     protected StyledString obtainBaseStyledText(Object element)
@@ -133,7 +89,6 @@ public class SmartOutlineLabelProvider extends LabelProvider implements IStyledL
         if (styledString == null || highlightMatcher.isEmpty
                 || (skipHighlight != null && skipHighlight.test(element)))
             return;
-
         String plainText = styledString.getString();
         String matchText = resolveMatchText(element, plainText);
         if (highlightMatcher.matches(matchText))
@@ -149,10 +104,7 @@ public class SmartOutlineLabelProvider extends LabelProvider implements IStyledL
         return plainText;
     }
 
-
-
     @Override
-
     public Image getImage(Object element) {
 
         // basePlain (filterLabels) — только текст поиска; getImage через него даёт цикл с Decorating.
@@ -167,7 +119,6 @@ public class SmartOutlineLabelProvider extends LabelProvider implements IStyledL
         if (basePlain != null)
             return resolveLabelImage(basePlain, element);
         return null;
-
     }
 
     private static Image resolveLabelImage(Object source, Object element)
@@ -180,20 +131,13 @@ public class SmartOutlineLabelProvider extends LabelProvider implements IStyledL
         return img instanceof Image ? (Image) img : null;
     }
 
-
-
     @Override
-
     public void dispose() {
 
         if (baseStyled != null)
-
             baseStyled.dispose();
-
         super.dispose();
-
     }
 
 }
-
 

@@ -58,6 +58,6 @@ tooltip="Последние посещённые методы и объекты 
 // Values → «Показать коллекцию» (внешняя команда EDT)
 item.setToolTipText("Открыть коллекцию в отдельном окне" + Global.pluginSignForTooltip());
 
-// Toolbar внутри ComfortCollectionWindow
+// Toolbar внутри DebugCollectionWindow
 settings.setToolTipText("Видимость и порядок колонок");
 ```

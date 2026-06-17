@@ -46,6 +46,31 @@ public class SmartOutlineFilter extends ViewerFilter {
         paramPremiumCache.clear();
         subtreeMatchMemo.clear();
         setPattern(newPattern);
+        if (flatContentProvider != null)
+            flatContentProvider.invalidateFilterResultCache();
+    }
+
+    /** Кэш премий при плоском списке — заполняется content provider, не label provider. */
+    public void recordMatchPremiums(Object element, String text) {
+        if (element == null || text == null)
+            return;
+        namePremiumCache.put(element, matcher.computeNamePremium(text));
+        paramPremiumCache.put(element, matcher.computeParamPremium(text));
+    }
+
+    private SmartOutlineFlatContentProvider flatContentProvider;
+
+    void bindFlatContentProvider(SmartOutlineFlatContentProvider flatContentProvider) {
+        this.flatContentProvider = flatContentProvider;
+    }
+
+    private String resolveFilterText(Object element) {
+        if (flatContentProvider != null && flattenWhenFiltered && !matcher.isEmpty) {
+            String cached = flatContentProvider.getFilterText(element);
+            if (cached != null)
+                return cached;
+        }
+        return labelProvider.getText(element);
     }
 
     public Map<Object, Integer> getNamePremiumCache() {
@@ -67,6 +92,10 @@ public class SmartOutlineFilter extends ViewerFilter {
 
     public boolean isFiltering() {
         return !matcher.isEmpty;
+    }
+
+    public String getPattern() {
+        return matcher != null ? matcher.fullPattern : ""; //$NON-NLS-1$
     }
 
     public boolean matchesText(String text) {
@@ -158,7 +187,15 @@ public class SmartOutlineFilter extends ViewerFilter {
                 hasChildren = ((ITreeContentProvider) cp).hasChildren(element);
         }
 
-        String text = labelProvider.getText(element);
+        if (flattenWhenFiltered && !matcher.isEmpty && flatContentProvider != null && !hasChildren) {
+            String text = resolveFilterText(element);
+            if (!matcher.matches(text))
+                return false;
+            recordMatchPremiums(element, text);
+            return true;
+        }
+
+        String text = resolveFilterText(element);
 
         if (!hasChildren) {
             if (!matcher.matches(text))
@@ -187,7 +224,7 @@ public class SmartOutlineFilter extends ViewerFilter {
         if (memo != null)
             return memo.booleanValue();
 
-        String text = labelProvider.getText(element);
+        String text = resolveFilterText(element);
         boolean self = matcher.matches(text);
         if (!cp.hasChildren(element))
         {

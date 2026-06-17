@@ -24,6 +24,10 @@ import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.navigator.CommonViewer;
+import org.eclipse.jface.viewers.ILabelProviderListener;
+import org.eclipse.jface.viewers.ViewerCell;
+import org.eclipse.swt.graphics.Image;
+import org.eclipse.jface.viewers.ViewerFilter;
 
 /**
  * Умный фильтр и подсветка вхождений в панели «Информационные базы»
@@ -250,7 +254,7 @@ public final class InfobasesViewHook implements IStartup
 
         if (focusControl != null)
         {
-            FilterFieldListNavigation.installTreeNavigation(focusControl, tree);
+            FilterInputBoxListNavigation.installTreeNavigation(focusControl, tree);
             focusControl.addDisposeListener(e -> {
                 if (pending[0] != null && !focusControl.getDisplay().isDisposed())
                     focusControl.getDisplay().timerExec(-1, pending[0]);
@@ -688,4 +692,136 @@ public final class InfobasesViewHook implements IStartup
         }
         return sb.append('}').toString();
     }
+
+    /**
+     * Подсветка для {@link CellLabelProvider}/{@link org.eclipse.jface.viewers.ColumnLabelProvider}
+     * (панель «Информационные базы», диалоги без styled label provider).
+     */
+    private static final class CellLabelHighlightWrapper extends StyledCellLabelProvider
+            implements SmartLabelHighlight, ILabelProvider
+    {
+        private final CellLabelProvider base;
+        private SmartMatcher highlightMatcher = new SmartMatcher(""); //$NON-NLS-1$
+
+        public CellLabelHighlightWrapper(CellLabelProvider base)
+        {
+            this.base = base;
+        }
+
+        @Override
+        public void setHighlightPattern(String pattern)
+        {
+            highlightMatcher = new SmartMatcher(pattern != null ? pattern : ""); //$NON-NLS-1$
+        }
+
+        @Override
+        public void update(ViewerCell cell)
+        {
+            if (base != null)
+                base.update(cell);
+            if (cell == null || highlightMatcher.isEmpty)
+                return;
+            String text = cell.getText();
+            if (text == null || text.isEmpty())
+                return;
+            SmartMatchHighlight.appendMatchRanges(cell, highlightMatcher.getHighlightRanges(text));
+        }
+
+        @Override
+        public String getText(Object element)
+        {
+            if (base instanceof ILabelProvider)
+                return ((ILabelProvider) base).getText(element);
+            Object text = Global.invoke(base, "getText", element); //$NON-NLS-1$
+            return text instanceof String ? (String) text : ""; //$NON-NLS-1$
+        }
+
+        @Override
+        public Image getImage(Object element)
+        {
+            if (base instanceof ILabelProvider)
+                return ((ILabelProvider) base).getImage(element);
+            Object img = Global.invoke(base, "getImage", element); //$NON-NLS-1$
+            return img instanceof Image ? (Image) img : null;
+        }
+
+        @Override
+        public String getToolTipText(Object element)
+        {
+            Object tip = Global.invoke(base, "getToolTipText", element); //$NON-NLS-1$
+            return tip instanceof String ? (String) tip : null;
+        }
+
+        @Override
+        public void addListener(ILabelProviderListener listener)
+        {
+            base.addListener(listener);
+        }
+
+        @Override
+        public void removeListener(ILabelProviderListener listener)
+        {
+            base.removeListener(listener);
+        }
+
+        @Override
+        public boolean isLabelProperty(Object element, String property)
+        {
+            return base.isLabelProperty(element, property);
+        }
+
+        @Override
+        public void dispose()
+        {
+            base.dispose();
+        }
+    }
+
+
+    /**
+     * Логи хука «Информационные базы» через {@link Global}.
+     * Включение: Параметры → Комфорт → «Общее логирование».
+     */
+    private static final class InfobasesViewDebug
+    {
+        private static final String TAG = "InfobasesView"; //$NON-NLS-1$
+
+        private InfobasesViewDebug() {}
+
+        public static boolean isEnabled()
+        {
+            return Global.isLogEnabled();
+        }
+
+        public static void log(String msg)
+        {
+            if (Global.isLogEnabled())
+                Global.log(TAG, msg);
+        }
+
+        public static String safe(Object o)
+        {
+            if (o == null)
+                return "<null>"; //$NON-NLS-1$
+            return o.getClass().getName();
+        }
+
+        public static String filtersDesc(CommonViewer viewer)
+        {
+            if (viewer == null)
+                return "viewer=null"; //$NON-NLS-1$
+            ViewerFilter[] filters = viewer.getFilters();
+            if (filters.length == 0)
+                return "filters=[]"; //$NON-NLS-1$
+            StringBuilder sb = new StringBuilder("filters=["); //$NON-NLS-1$
+            for (int i = 0; i < filters.length; i++)
+            {
+                if (i > 0)
+                    sb.append(", "); //$NON-NLS-1$
+                sb.append(filters[i].getClass().getSimpleName());
+            }
+            return sb.append(']').toString();
+        }
+    }
+
 }

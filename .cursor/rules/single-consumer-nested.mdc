@@ -1,0 +1,53 @@
+---
+description: Вспомогательные типы с одним Java-потребителем — вложенные классы, не отдельные файлы
+alwaysApply: true
+---
+
+# Один потребитель — вложенный класс
+
+В `plugin/src/tormozit/` **не выносить** в отдельный `.java` тип, который используется **только одним** другим классом плагина (по ссылкам в исходниках, без `plugin.xml`).
+
+## Норма
+
+- Такой тип — **`private static`** (или `private static final`) **вложенный класс** единственного потребителя.
+- Имя вложенного класса — как у бывшего top-level (`InspectorRegistry` → `Host.InspectorRegistry`).
+- Импорты вложенного типа добавлять в **внешний** класс; `package` у вложенного типа не пишется.
+- Цепочки: сначала вложить «лист» (тип, который сам никого не тянет), затем родителя с уже вложенными детьми (пример: `EditableStringCompareElement` → `StringFragmentCompareInput` → `PasteWithCompareActions`).
+
+```java
+public final class BslInspectSupport
+{
+    // ...
+
+    private static final class InspectorRegistry
+    {
+        // ...
+    }
+}
+```
+
+## Когда оставлять отдельный файл
+
+- **Точка входа OSGi** — класс указан в `plugin.xml` (`IStartup`, `AbstractHandler` в extension, `ExecutableExtensionFactory` и т.п.), даже если из Java он больше нигде не импортируется.
+- **Два и больше** разных top-level потребителей в `plugin/src`.
+- Тип — **публичный API** плагина для других бандлов (редко; осознанное решение).
+- Файл **сильно раздувает** потребителя (ориентир — порядка **~800+** строк вложенного кода в одном host); тогда отдельный файл допустим по согласованию.
+
+## При появлении второго потребителя
+
+Если вложенный тип начали использовать из другого top-level класса — **вынести** в отдельный `.java` (обратная операция).
+
+## Эталоны после рефакторинга
+
+| Было (отдельный файл) | Стало |
+|---|---|
+| `InspectorRegistry.java` | `BslInspectSupport.InspectorRegistry` |
+| `RecentPlacesDialog.java` | `RecentPlacesHandler.RecentPlacesDialog` |
+| `IrGoToDefinitionSupport.java` | `GoToDefinition.IrGoToDefinitionSupport` |
+| `DebugCollectionSplitTable.java` | `DebugCollectionWindow.DebugCollectionSplitTable` |
+
+## Запрещено
+
+- Новый `FooHelper.java`, если `FooHelper` вызывается только из `FooHook.java`.
+- Держать отдельный файл «на вырост», пока потребитель один.
+- Плодить `*Support` / `*Util` в отдельных файлах без второго потребителя или записи в `plugin.xml`.

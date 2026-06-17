@@ -58,7 +58,7 @@ Table table = new Table(columnHost, ...);
 ### 5. Перестановка колонок и сохранение порядка
 
 - Form-таблицы (диалоги): **`TableColumn.setMoveable(true)`** — через `FormTableInteraction` (по умолчанию включено).
-- **Opt-out** для коллекции: `interaction.setColumnReorderEnabled(false)` в `CollectionTableInteraction` (порядок index/data там другой).
+- **Opt-out** для коллекции: `interaction.setColumnReorderEnabled(false)` в `DebugCollectionTableInteraction` (порядок index/data там другой).
 - После reorder `activeColumn` — **ссылка на `TableColumn`**, не визуальный индекс; `cellText` в диалогах — по `col == nameColumn`, не `switch (column)`.
 - Порядок колонок — **`Table.getColumnOrder()` / `setColumnOrder(int[])`**; persist в `IDialogSettings` через `FormTableColumnOrder` (формат `"0,2,1,3"`, creation indices).
 - **Load** после создания всех колонок, **до** `FormTableInteraction.install()`; **save** в `close()` вместе с ширинами. Ширины привязаны к `TableColumn` — после reorder не ломаются.
@@ -74,24 +74,24 @@ FormTableColumnOrder.save(settings, KEY_COL_ORDER, table);
 | Контрол | Класс |
 |---------|--------|
 | `Table` (диалоги, «Последние места») | `FormTableInteraction` + `tableStack` |
-| `Table` (коллекция, скелет) | `CollectionTableInteraction` + `CollectionTableHost` + `tableStack` |
+| `Table` (коллекция, скелет) | `DebugCollectionTableInteraction` + `DebugCollectionTableHost` + `tableStack` |
 | `Tree` (инспектор отладки) | `DebugInspectorTreeEnhancement` |
 
 Подключение таблицы:
 
 ```java
-interaction = new CollectionTableInteraction(table, host);
+interaction = new DebugCollectionTableInteraction(table, host);
 interaction.install();
 ```
 
-Окна: `ComfortCollectionWindow`, `ComfortCollectionSkeletonWindow`.
+Окна: `DebugCollectionWindow`, `DebugCollectionSkeletonWindow`.
 
 ## Запрещено
 
 - Копировать строку / несколько колонок по Ctrl+C или «Копировать», если пользователь выделил одну ячейку.
 - Оставлять выбор только по первой колонке при `FULL_SELECTION`.
 - Полагаться на штатный clipboard EDT без перехвата, если он копирует не ту ячейку.
-- Дублировать логику подсветки/копирования в каждом окне — выносить в общий interaction-хелпер по образцу `CollectionTableInteraction`.
+- Дублировать логику подсветки/копирования в каждом окне — выносить в общий interaction-хелпер по образцу `DebugCollectionTableInteraction`.
 
 ## Когда допустимо отступить
 
@@ -101,5 +101,5 @@ interaction.install();
 
 ## Связанные правила
 
-- Подсветка совпадений фильтра в таблице коллекции — `CollectionFilterEraseSupport` (не перекрывать подсветку выбранной строки; `filterSkipItem`).
+- Подсветка совпадений фильтра в таблице коллекции — `DebugCollectionFilterEraseSupport` (не перекрывать подсветку выбранной строки; `filterSkipItem`).
 - Тултипы пунктов меню вне кастомного окна — `plugin-commands-tooltips.mdc`.

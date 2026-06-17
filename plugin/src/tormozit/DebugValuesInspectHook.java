@@ -255,8 +255,8 @@ public final class DebugValuesInspectHook implements IStartup
         MenuItem item = new MenuItem(menu, SWT.PUSH, 0);
         item.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
             COLLECTION_ITEM_TEXT,
-            ComfortCollectionShowHandler.COMMAND_ID,
-            ComfortCollectionShowHandler.BINDING_CONTEXT_ID));
+            DebugCollectionShowHandler.COMMAND_ID,
+            DebugCollectionShowHandler.BINDING_CONTEXT_ID));
         item.setToolTipText(COLLECTION_TOOLTIP);
         item.addSelectionListener(new SelectionAdapter()
         {
@@ -271,7 +271,7 @@ public final class DebugValuesInspectHook implements IStartup
 
     private static void runShowCollection(AbstractDebugView view)
     {
-        ComfortCollectionShowSupport.openFromValuesView(view);
+        DebugCollectionShowSupport.openFromValuesView(view);
     }
 
     private static void selectRowAt(Table table, Point loc)

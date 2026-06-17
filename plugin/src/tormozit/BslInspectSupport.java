@@ -28,6 +28,10 @@ import com._1c.g5.v8.dt.debug.core.model.values.IBslValue;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 
 import org.eclipse.debug.core.DebugException;
+import java.lang.ref.WeakReference;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.Iterator;
+import java.util.Map;
 
 /**
  * Хелперы открытия popup-инспектора EDT для {@link DebugInspectorHook} (hover «Инспектировать»).
@@ -178,7 +182,7 @@ public final class BslInspectSupport
         IDebugMonitoringManager monitoringManager,
         Shell keepVisibleShell,
         String columnHeader,
-        ComfortCollectionTableModel collectionModel,
+        DebugCollectionTableModel collectionModel,
         int logicalRow,
         AbstractDebugView valuesView)
     {
@@ -217,7 +221,7 @@ public final class BslInspectSupport
             if (valuesView != null)
                 DebugValuesDebug.step("inspect", "empty expression"); //$NON-NLS-1$ //$NON-NLS-2$
             else
-                ComfortCollectionDebug.problem("inspect: empty expression"); //$NON-NLS-1$
+                DebugCollectionDebug.problem("inspect: empty expression"); //$NON-NLS-1$
             return;
         }
 
@@ -235,7 +239,7 @@ public final class BslInspectSupport
             if (valuesView != null)
                 DebugValuesDebug.step("inspect.direct", exprText + " fictitious"); //$NON-NLS-1$ //$NON-NLS-2$
             else
-                ComfortCollectionDebug.step("inspect.direct", exprText); //$NON-NLS-1$
+                DebugCollectionDebug.step("inspect.direct", exprText); //$NON-NLS-1$
         }
         else
         {
@@ -246,14 +250,14 @@ public final class BslInspectSupport
             if (valuesView != null)
                 DebugValuesDebug.step("inspect.expr", exprText); //$NON-NLS-1$ //$NON-NLS-2$
             else
-                ComfortCollectionDebug.step("inspect", exprText); //$NON-NLS-1$
+                DebugCollectionDebug.step("inspect", exprText); //$NON-NLS-1$
         }
 
         InspectorRegistry.raiseAbove(exprText, keepVisibleShell);
     }
 
     static InspectPathResolution resolveCollectionRowInspectPath(
-        ComfortCollectionTableModel model,
+        DebugCollectionTableModel model,
         int logicalRow,
         IBslVariable variable)
     {
@@ -403,7 +407,7 @@ public final class BslInspectSupport
         return InspectPathResolution.fictitious(path);
     }
 
-    private static String collectionBasePath(ComfortCollectionTableModel model)
+    private static String collectionBasePath(DebugCollectionTableModel model)
     {
         if (model == null || model.path == null)
             return ""; //$NON-NLS-1$
@@ -415,7 +419,7 @@ public final class BslInspectSupport
         return text != null ? text.trim() : ""; //$NON-NLS-1$
     }
 
-    private static String presentationKeyFromModel(ComfortCollectionTableModel model, int logicalRow)
+    private static String presentationKeyFromModel(DebugCollectionTableModel model, int logicalRow)
     {
         int presModel = model.columns.presentationModelIndex();
         if (presModel <= 0)
@@ -430,7 +434,7 @@ public final class BslInspectSupport
         }
         catch (DebugException e)
         {
-            ComfortCollectionDebug.problem("inspect.presentation: " + e.getMessage()); //$NON-NLS-1$
+            DebugCollectionDebug.problem("inspect.presentation: " + e.getMessage()); //$NON-NLS-1$
             return ""; //$NON-NLS-1$
         }
     }
@@ -487,7 +491,7 @@ public final class BslInspectSupport
         if (valuesView)
             DebugValuesDebug.step("inspect.path", msg); //$NON-NLS-1$
         else
-            ComfortCollectionDebug.step("inspect.path", msg); //$NON-NLS-1$
+            DebugCollectionDebug.step("inspect.path", msg); //$NON-NLS-1$
     }
 
     private static void registerInspectShell(Object dialog, IWatchExpression watch)
@@ -740,4 +744,108 @@ public final class BslInspectSupport
         }
         return bundle.loadClass(className);
     }
+
+    /**
+     * Dedup popup-инспекторов по полному watch-выражению.
+     */
+    private static final class InspectorRegistry
+    {
+        private static final Map<String, WeakReference<Shell>> OPEN = new ConcurrentHashMap<>();
+
+        private InspectorRegistry() {}
+
+        static boolean activateExisting(String expression)
+        {
+            return activateExisting(expression, null);
+        }
+
+        /**
+         * Активировать уже открытый инспектор.
+         *
+         * @param aboveShell если задан (окно «Коллекция» с pin), поднять инспектор поверх него
+         */
+        static boolean activateExisting(String expression, Shell aboveShell)
+        {
+            Shell shell = shellFor(expression);
+            if (shell == null)
+                return false;
+            raiseShell(shell, aboveShell);
+            DebugCollectionDebug.step("inspect", "activate existing " + expression); //$NON-NLS-1$ //$NON-NLS-2$
+            return true;
+        }
+
+        /** Запланировать фокус свойства в уже открытом инспекторе (после {@link InspectorPendingFocus#set}). */
+        static void schedulePendingFocus(String expression)
+        {
+            Shell shell = shellFor(expression);
+            if (shell == null || shell.isDisposed())
+                return;
+            shell.getDisplay().asyncExec(() ->
+            {
+                if (!shell.isDisposed())
+                    DebugInspectorTreeEnhancement.schedulePendingFocusForShell(shell);
+            });
+        }
+
+        /** Поднять инспектор по выражению (после {@code openInspectPopup}). */
+        static void raiseAbove(String expression, Shell aboveShell)
+        {
+            Shell shell = shellFor(expression);
+            if (shell != null)
+                raiseShell(shell, aboveShell);
+        }
+
+        static void register(String expression, Shell shell)
+        {
+            if (expression == null || expression.isBlank() || shell == null || shell.isDisposed())
+                return;
+            OPEN.put(expression, new WeakReference<>(shell));
+            shell.addDisposeListener(e -> OPEN.remove(expression));
+        }
+
+        private static Shell shellFor(String expression)
+        {
+            if (expression == null || expression.isBlank())
+                return null;
+            purgeDisposed();
+            WeakReference<Shell> ref = OPEN.get(expression);
+            if (ref == null)
+                return null;
+            Shell shell = ref.get();
+            if (shell == null || shell.isDisposed())
+            {
+                OPEN.remove(expression);
+                return null;
+            }
+            return shell;
+        }
+
+        private static void raiseShell(Shell shell, Shell aboveShell)
+        {
+            if (shell == null || shell.isDisposed())
+                return;
+            shell.getDisplay().asyncExec(() -> {
+                if (shell.isDisposed())
+                    return;
+                shell.setMinimized(false);
+                if (aboveShell != null && !aboveShell.isDisposed())
+                    WinWindowActivator.setShellAboveOwner(shell, aboveShell, true);
+                shell.forceActive();
+                shell.forceFocus();
+            });
+        }
+
+        private static void purgeDisposed()
+        {
+            Iterator<Map.Entry<String, WeakReference<Shell>>> it = OPEN.entrySet().iterator();
+            while (it.hasNext())
+            {
+                Map.Entry<String, WeakReference<Shell>> e = it.next();
+                Shell shell = e.getValue().get();
+                if (shell == null || shell.isDisposed())
+                    it.remove();
+            }
+        }
+    }
+
 }

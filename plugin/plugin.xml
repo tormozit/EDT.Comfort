@@ -14,6 +14,7 @@
     <startup class="tormozit.QueryTextEditDialogHook"/>
     <startup class="tormozit.FormEditorHook"/>
     <startup class="tormozit.IrKeyBindingHook"/>
+    <startup class="tormozit.IrBslEditorHoverHook"/>
     <startup class="tormozit.PriorityGlobalKeyBindingHook"/>
     <startup class="tormozit.ComfortKeysPageHook"/>
     <startup class="tormozit.IrFormatTextKeyDiagHook"/>
@@ -29,7 +30,7 @@
     <startup class="tormozit.PredefinedSelectionDialogHook"/>
     <startup class="tormozit.DebugViewsMenuHook"/>
     <startup class="tormozit.DebugValuesInspectHook"/>
-    <startup class="tormozit.ComfortCollectionSessionHook"/>
+    <startup class="tormozit.DebugCollectionSessionHook"/>
     <startup class="tormozit.DebugInspectorHook"/>
     <startup class="tormozit.InfobaseSyncQuestionDialogHook"/>
   </extension>
@@ -309,19 +310,19 @@
         commandId="tormozit.IrFormatText">
     </handler>
     <handler
-        class="tormozit.ExecutableExtensionFactory:tormozit.ComfortCollectionSkeletonHandler"
+        class="tormozit.ExecutableExtensionFactory:tormozit.DebugCollectionSkeletonHandler"
         commandId="tormozit.CollectionSkeleton">
     </handler>
     <handler
-        class="tormozit.ExecutableExtensionFactory:tormozit.ComfortCollectionShowHandler"
+        class="tormozit.ExecutableExtensionFactory:tormozit.DebugCollectionShowHandler"
         commandId="tormozit.showCollection">
     </handler>
     <handler
-        class="tormozit.ExecutableExtensionFactory:tormozit.ComfortCollectionShowHandler"
+        class="tormozit.ExecutableExtensionFactory:tormozit.DebugCollectionShowHandler"
         commandId="tormozit.showCollectionFromExpression">
     </handler>
     <handler
-        class="tormozit.ExecutableExtensionFactory:tormozit.ComfortCollectionInspectHandler"
+        class="tormozit.ExecutableExtensionFactory:tormozit.DebugCollectionInspectHandler"
         commandId="tormozit.collectionInspect">
     </handler>
   </extension>
@@ -382,7 +383,7 @@
         id="tormozit.showCollectionContribution"
         objectClass="com._1c.g5.v8.dt.debug.core.model.IBslVariable">
       <action
-          class="tormozit.ComfortCollectionShowActionDelegate"
+          class="tormozit.DebugCollectionShowActionDelegate"
           definitionId="tormozit.showCollection"
           enablesFor="1"
           id="tormozit.showCollection"
@@ -402,7 +403,7 @@
         id="tormozit.showCollectionExpressionsContribution"
         objectClass="org.eclipse.debug.core.model.IWatchExpression">
       <action
-          class="tormozit.ComfortCollectionShowActionDelegate"
+          class="tormozit.DebugCollectionShowActionDelegate"
           definitionId="tormozit.showCollectionFromExpression"
           enablesFor="1"
           id="tormozit.showCollectionFromExpression"

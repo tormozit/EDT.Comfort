@@ -36,6 +36,57 @@ import org.eclipse.ui.contexts.IContextService;
 
 import com._1c.g5.v8.dt.compare.model.MatchedObjectsComparisonNode;
 import com._1c.g5.v8.dt.compare.ui.editor.DtComparisonView;
+import com._1c.g5.v8.dt.compare.core.ComparisonUtils;
+import com._1c.g5.v8.dt.compare.core.IComparisonManager;
+import com._1c.g5.v8.dt.compare.core.IComparisonSession;
+import com._1c.g5.v8.dt.compare.datasource.IActiveComparisonDataSource;
+import com._1c.g5.v8.dt.compare.datasource.IComparisonDataSource;
+import com._1c.g5.v8.dt.compare.merge.ExternalPropertyUtils;
+import com._1c.g5.v8.dt.compare.model.ComparisonNode;
+import com._1c.g5.v8.dt.compare.model.ComparisonSide;
+import com._1c.g5.v8.dt.compare.model.ExternalPropertyComparisonNode;
+import com._1c.g5.v8.dt.compare.model.SolidResourceComparisonNode;
+import com._1c.g5.v8.dt.compare.ui.editor.ComparisonTreeControl;
+import com._1c.g5.v8.dt.compare.ui.util.MergeUiUtils;
+import com._1c.g5.v8.dt.core.filesystem.IQualifiedNameFilePathConverter;
+import com._1c.g5.v8.dt.export.IExportOperation;
+import com._1c.g5.v8.dt.export.IExportOperationFactory;
+import com._1c.g5.v8.dt.export.IExportStrategy;
+import com.google.common.net.HttpHeaders.ReferrerPolicyValues;
+import com.google.inject.Inject;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.io.IOException;
+import java.lang.reflect.Field;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Set;
+import javafx.scene.control.TreeView;
+import org.eclipse.compare.internal.CompareEditorSelectionProvider;
+import org.eclipse.core.commands.AbstractHandler;
+import org.eclipse.core.commands.ExecutionEvent;
+import org.eclipse.core.commands.ExecutionException;
+import org.eclipse.core.resources.IProject;
+import org.eclipse.core.runtime.IPath;
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.NullProgressMonitor;
+import org.eclipse.emf.common.util.URI;
+import org.eclipse.emf.ecore.EObject;
+import org.eclipse.jface.dialogs.MessageDialog;
+import org.eclipse.jface.viewers.ISelection;
+import org.eclipse.jface.viewers.TreeViewer;
+import org.eclipse.swt.widgets.Shell;
+import org.eclipse.ui.handlers.HandlerUtil;
+import org.osgi.framework.BundleContext;
+import org.osgi.framework.ServiceReference;
+import com._1c.g5.v8.dt.compare.ui.partialmodel.node.AbstractDirectPartialModelNode;
+import com._1c.g5.v8.dt.compare.ui.partialmodel.node.ProjectPartialModelNode;
+import java.util.HashSet;
+import org.eclipse.jface.viewers.ITreeContentProvider;
 
 /**
  * Добавляет пункты в контекстное меню и командную панель редактора сравнения EDT.
@@ -390,4 +441,336 @@ public class CompareConfigMenuHook implements IStartup
             return (MatchedObjectsComparisonNode) element;
         return null;
     }
+
+    /**
+     * Открывает объект конфигурации выбранный в дереве сравнения EDT.
+     *
+     * Алгоритм:
+     * 1. Получаем IComparisonSession из поля comparisonArtifactsList редактора
+     * 2. Получаем MatchedObjectsComparisonNode из comparisonView
+     * 3. Берём mainObjectId (bmId) из узла
+     * 4. Получаем EObject через IActiveComparisonDataSource.getObjectById()
+     * 5. Открываем через OpenHelper
+     */
+    private static class CompareConfigCompareInIRHandler extends AbstractHandler {
+        @Override
+        public Object execute(ExecutionEvent event) throws ExecutionException {
+            runCompare(HandlerUtil.getActiveEditor(event), HandlerUtil.getActiveShell(event));
+            return null;
+        }
+
+        public static void runCompare(IEditorPart editor, Shell shell) {
+            ISelection selection = getSelection(editor);
+            Object element = ((IStructuredSelection) selection).getFirstElement();
+            if (element == null)
+                return;
+            Path pathMain = getPropertySideFile(editor, element, ComparisonSide.MAIN); // mxlx
+            if (pathMain == null)
+            {
+                ToastNotification.show("Сравнение метаданных ИР", "Поддерживаются свойства: ТабличныйДокумент.Макет");
+                return;
+            }
+            Path pathOther = getPropertySideFile(editor, element, ComparisonSide.OTHER); // mxlx
+            Path pathAncestor = getPropertySideFile(editor, element, ComparisonSide.COMMON_ANCESTOR); // mxlx
+            IComparisonSession compSession = CompareConfigSelectionListener.getSession(editor);
+            IRSession irSession = IRApplication.getSession(compSession.getDataSource(ComparisonSide.MAIN).getDtProject());
+            if (irSession == null || irSession.executor == null) {
+                return;
+            }
+            String ancestor = pathAncestor != null ?pathAncestor.toString() : null;
+            irSession.executor.submit(() -> {
+                try 
+                {
+                    // Здесь мы находимся в родном потоке для этого COM-объекта. 
+                    Object irClient = irSession.getModule("ирКлиент");
+                    irSession.showWindow();
+                    ComBridge.invoke(irClient, "СравнитьТабличныеДокументыИмпортЛкс", pathMain.toString(), pathOther.toString(), ancestor);
+                } 
+                catch (Exception e) 
+                {
+                    Global.log("Ошибка вызова ИР: " + e.getMessage());
+                }
+            });
+        }
+
+        /**
+         * Читает содержимое xmxl-файла через {@link ExternalPropertyUtils#getContentStream},
+         * сохраняет его во временный файл и возвращает путь к нему.
+         * <p>Имя временного файла строится по шаблону {@code tormozit_<side>_<имяФайла>.xmxl},
+         * где имя файла берётся из относительного пути, полученного от
+         * {@link ComparisonUtils#getFilePathBySymlink}. Это упрощает отладку.
+         * @return абсолютный путь к временному файлу, или {@code null} если поток недоступен
+         */
+        public static Path getPropertySideFile(IEditorPart editor, Object element, ComparisonSide side)
+        {
+            IComparisonSession session = CompareConfigSelectionListener.getSession(editor);
+            MatchedObjectsComparisonNode matchedNode = CompareConfigSelectionListener.resolveMatchedNode(element);
+            ExternalPropertyComparisonNode properyNode;
+            try
+            {
+                properyNode = (ExternalPropertyComparisonNode) matchedNode;
+            }
+            catch (Exception e)
+            {
+                return null;
+            }
+            BundleContext ctx = Global.ourContext();
+            ServiceReference<?> ref = ctx.getServiceReference(IComparisonManager.class);
+            Object manager = ctx.getService(ref);
+            IQualifiedNameFilePathConverter filePathConverter = (IQualifiedNameFilePathConverter) Global.getField(manager, "qualifiedNameFilePathConverter");
+            InputStream stream = ExternalPropertyUtils.getContentStream(properyNode, session, side, filePathConverter);
+            if (stream == null)
+                return null;
+            String symlink = properyNode.getSymlink(side);
+            String qualifyingType = ((SolidResourceComparisonNode) properyNode).getQualifyingType(side);
+            Path relativePath = (Path) ComparisonUtils.getFilePathBySymlink(symlink, qualifyingType, filePathConverter);
+            String fileName = relativePath != null ? relativePath.getFileName().toString() : "content.xmxl"; //$NON-NLS-1$
+            String prefix = "tormozit_" + side.name().toLowerCase() + "_"; //$NON-NLS-1$ //$NON-NLS-2$
+            String suffix = "_" + fileName; //$NON-NLS-1$
+            try {
+                Path tempFile = Files.createTempFile(prefix, suffix);
+                Files.copy(stream, tempFile, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                return tempFile;
+            } catch (IOException e) {
+                Global.log("getSideFile: не удалось записать временный файл: " + e.getMessage()); //$NON-NLS-1$
+                return null;
+            } finally {
+                try { stream.close(); } catch (IOException ignored) {}
+            }
+        }
+
+        public static ISelection getSelection(IEditorPart editor) {
+            ISelection sel = null;
+            DtComparisonView view = (DtComparisonView) Global.getField(editor, "comparisonView");
+            if (view != null) {
+                ComparisonTreeControl treeControl = view.getTreeControl();
+                if (treeControl != null) {
+                    TreeViewer viewer = treeControl.getTreeViewer();
+                    if (viewer != null)
+                    {
+                        sel = viewer.getSelection();
+                    }
+                }
+            }
+            return sel;
+        }
+    }
+
+
+    private static class CompareConfigExpandHandler extends AbstractHandler
+    {
+        private static Method retrieveMethodCache = null;
+
+        @Override
+        public Object execute(ExecutionEvent event) throws ExecutionException
+        {
+            return null;
+        }
+
+        public static Object expand(IEditorPart editor, CompareConfigExpandMode mode)
+        {
+            AbstractTreeViewer viewer = getTreeViewer(editor);
+            if (viewer == null) return null;
+
+            ITreeContentProvider cp = (ITreeContentProvider) viewer.getContentProvider();
+            if (cp == null) return null;
+
+            ISelection selection = viewer.getSelection();
+
+            Set<Object> toExpand = new HashSet<>();
+
+            viewer.collapseAll();
+            for (Object root : cp.getElements(viewer.getInput()))
+            {
+                collectElementsToExpand(cp, root, mode, toExpand, viewer);
+            }
+            viewer.setExpandedElements(toExpand.toArray());
+
+            if (selection != null && !selection.isEmpty())
+            {
+                viewer.setSelection(selection, true);
+            }
+            return null;
+        }
+
+        /**
+         * Рекурсивно собирает список узлов для раскрытия.
+         * Никаких вызовов вьювера внутри!
+         */
+        private static void collectElementsToExpand(ITreeContentProvider cp, Object element, CompareConfigExpandMode mode, Set<Object> toExpand, AbstractTreeViewer viewer)
+        {
+            if (false
+                    || !cp.hasChildren(element)
+                    || mode == CompareConfigExpandMode.toBothElement && isAddedOrDeleted(element)
+                    || mode == CompareConfigExpandMode.toObject      && isObject(element)
+                    || mode == CompareConfigExpandMode.toMarked      && !isMarked(element))
+                return;
+
+            toExpand.add(element);
+            Object[] children;
+            try
+            {
+                children = cp.getChildren(element);
+            }
+            catch (Exception e)
+            {
+                // https://github.com/tormozit/EDT-Tormozit/issues/8
+                Global.logError("CompareConfig", "getChildren", e); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            for (Object child : children)
+            {
+                if (CompareConfigSearchDialogHook.isNodeMatchFilters(child, viewer));
+                    collectElementsToExpand(cp, child, mode, toExpand, viewer);
+            }
+        }
+
+        /**
+         * Возвращает {@code true} если у узла установлен чекбокс в дереве сравнения.
+         */
+        private static boolean isMarked(Object element)
+        {
+            boolean isChecked = false;
+            try
+            {
+                Method methodDesc = element.getClass().getMethod("isChecked"); //$NON-NLS-1$
+                isChecked = (Boolean) methodDesc.invoke(element);
+    //            return isChecked;
+            }
+            catch (Exception e)
+            {
+                Global.logError("CompareConfig", "isChecked", e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            boolean is = false;
+            if (isChecked)
+            {
+                MatchedObjectsComparisonNode node = extractMatchedNode(element);
+                is = !(node == null || node.getNodeSide() == null)
+                    || (node != null && !node.getComparisonFlags().hasDiffsMainOther());
+                is = !is;
+            }
+            return is;
+        }
+
+        /**
+         * Возвращает {@code true} если элемент является узлом объекта конфигурации.
+         */
+        private static boolean isObject(Object element)
+        {
+            MatchedObjectsComparisonNode node = extractMatchedNode(element);
+            if (node == null)
+                return false;
+
+            Long mainId  = node.getMainObjectId();
+            Long otherId = node.getOtherObjectId();
+            return (mainId  != null && mainId  != -1L)
+                || (otherId != null && otherId != -1L);
+        }
+
+        /**
+         * Возвращает {@code true} если объект присутствует только в одной стороне
+         * сравнения (добавлен или удалён).
+         */
+        private static boolean isAddedOrDeleted(Object element)
+        {
+            boolean isCheckable = true;
+            try
+            {
+                Method methodDesc = element.getClass().getMethod("isCheckable"); //$NON-NLS-1$
+                isCheckable = (Boolean) methodDesc.invoke(element);
+            }
+            catch (Exception e)
+            {
+                Global.logError("CompareConfig", "isCheckable", e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            boolean is = true;
+            if (isCheckable)
+            {
+                MatchedObjectsComparisonNode node = extractMatchedNode(element);
+                is = !(node == null || node.getNodeSide() == null)
+                    || (node != null && !node.getComparisonFlags().hasDiffsMainOther());
+            }
+            return is;
+        }
+
+        /**
+         * Извлекает {@link MatchedObjectsComparisonNode} из обёртки элемента дерева.
+         */
+        private static MatchedObjectsComparisonNode extractMatchedNode(Object element)
+        {
+            if (retrieveMethodCache == null)
+            {
+                try
+                {
+                    retrieveMethodCache = element.getClass().getMethod("retrieveComparisonNode"); //$NON-NLS-1$
+                }
+                catch (NoSuchMethodException e)
+                {
+                    return null;
+                }
+            }
+            Object raw;
+            try
+            {
+                raw = retrieveMethodCache.invoke(element);
+            }
+            catch (Exception e)
+            {
+                return null;
+            }
+            if (raw instanceof MatchedObjectsComparisonNode)
+                return (MatchedObjectsComparisonNode) raw;
+            if (element instanceof MatchedObjectsComparisonNode)
+                return (MatchedObjectsComparisonNode) element;
+            return null;
+        }
+
+        // ---- Утилиты рефлексии ----
+
+        private static AbstractTreeViewer getTreeViewer(IEditorPart editor)
+        {
+            Object view = getField(editor, "comparisonView"); //$NON-NLS-1$
+            if (!(view instanceof DtComparisonView))
+                return null;
+
+            Object treeControl = ((DtComparisonView) view).getTreeControl();
+            if (treeControl == null)
+                return null;
+
+            Object viewer = invokeNoArg(treeControl, "getTreeViewer"); //$NON-NLS-1$
+            return (viewer instanceof AbstractTreeViewer)
+                ? (AbstractTreeViewer) viewer : null;
+        }
+
+        static Object getField(Object obj, String name)
+        {
+            Class<?> cls = obj.getClass();
+            while (cls != null)
+            {
+                try
+                {
+                    Field f = cls.getDeclaredField(name);
+                    f.setAccessible(true);
+                    return f.get(obj);
+                }
+                catch (NoSuchFieldException ignored) { cls = cls.getSuperclass(); }
+                catch (Exception ignored)            { return null; }
+            }
+            return null;
+        }
+
+        static Object invokeNoArg(Object o, String name)
+        {
+            if (o == null) return null;
+            try
+            {
+                return o.getClass().getMethod(name).invoke(o);
+            }
+            catch (Exception ignored)
+            {
+                return null;
+            }
+        }
+    }
+
 }

@@ -544,6 +544,15 @@ public final class ContentAssistPopupSync
                 processor, table);
             table.addListener(SWT.Selection, listener);
             POPUP_SCROLL_LISTENERS.put(popup, listener);
+            FilterListMouseCurrentSync.installForTable(table,
+                idx -> isRecomputeInProgress(),
+                idx -> {
+                    try
+                    {
+                        selectProposalAtIndex(popup, idx);
+                    }
+                    catch (Exception ignored) {}
+                });
         }
         catch (Exception ignored) {}
     }
@@ -551,13 +560,15 @@ public final class ContentAssistPopupSync
     private static void uninstallPopupScrollWatcher(Object popup)
     {
         Listener listener = POPUP_SCROLL_LISTENERS.remove(popup);
-        if (listener == null)
-            return;
         try
         {
             Table table = getProposalTable(popup);
             if (table != null && !table.isDisposed())
-                table.removeListener(SWT.Selection, listener);
+            {
+                if (listener != null)
+                    table.removeListener(SWT.Selection, listener);
+                FilterListMouseCurrentSync.uninstall(table);
+            }
         }
         catch (Exception ignored) {}
     }

@@ -6,7 +6,6 @@ import com._1c.g5.v8.dt.platform.services.model.InfobaseReference;
 public final class IRModuleSyncDebug
 {
     private static final String TAG = "IRModuleSync"; //$NON-NLS-1$
-
     private IRModuleSyncDebug() {}
 
     static void log(String msg)

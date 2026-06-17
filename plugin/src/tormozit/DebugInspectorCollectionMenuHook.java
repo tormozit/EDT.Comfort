@@ -76,16 +76,16 @@ public final class DebugInspectorCollectionMenuHook
 
     /**
      * F2 в дереве инспектора: открыть коллекцию выделенной строки (как пункт контекстного меню),
-     * не полагаясь на workbench-selection команды {@link ComfortCollectionShowHandler}.
+     * не полагаясь на workbench-selection команды {@link DebugCollectionShowHandler}.
      */
     static boolean tryOpenCollectionFromTree(Tree tree, Object viewer)
     {
         if (tree == null || tree.isDisposed() || !DebugSessionHelper.isDebugSuspended(null))
             return false;
         Object element = resolveSelectedElement(tree, viewer);
-        if (!ComfortCollectionShowSupport.canOpenFrom(element))
+        if (!DebugCollectionShowSupport.canOpenFrom(element))
             return false;
-        ComfortCollectionShowSupport.openFromElement(element);
+        DebugCollectionShowSupport.openFromElement(element);
         return true;
     }
 
@@ -280,7 +280,7 @@ public final class DebugInspectorCollectionMenuHook
 
                 Object element = resolveSelectedElement();
                 logMenuShownDiagnostics(element);
-                if (!ComfortCollectionShowSupport.canOpenFrom(element))
+                if (!DebugCollectionShowSupport.canOpenFrom(element))
                 {
                     DebugInspectorDebug.step("collectionMenu", "skip not indexed " //$NON-NLS-1$ //$NON-NLS-2$
                         + elementBrief(element));
@@ -323,7 +323,7 @@ public final class DebugInspectorCollectionMenuHook
     private void logMenuShownDiagnostics(Object element)
     {
         String valueInfo = valueDiagnostics(element);
-        boolean canOpen = ComfortCollectionShowSupport.canOpenFrom(element);
+        boolean canOpen = DebugCollectionShowSupport.canOpenFrom(element);
         DebugInspectorDebug.step("collectionMenu", "diag " + elementBrief(element) //$NON-NLS-1$ //$NON-NLS-2$
             + " value=" + valueInfo + " canOpen=" + canOpen); //$NON-NLS-1$ //$NON-NLS-2$
     }
@@ -384,15 +384,15 @@ public final class DebugInspectorCollectionMenuHook
         MenuItem item = new MenuItem(menu, SWT.PUSH, 0);
         item.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
             COLLECTION_ITEM_TEXT,
-            ComfortCollectionShowHandler.COMMAND_ID,
-            ComfortCollectionShowHandler.BINDING_CONTEXT_ID));
+            DebugCollectionShowHandler.COMMAND_ID,
+            DebugCollectionShowHandler.BINDING_CONTEXT_ID));
         item.setToolTipText(COLLECTION_TOOLTIP);
         item.addSelectionListener(new SelectionAdapter()
         {
             @Override
             public void widgetSelected(SelectionEvent ev)
             {
-                ComfortCollectionShowSupport.openFromElement(element);
+                DebugCollectionShowSupport.openFromElement(element);
             }
         });
         return item;

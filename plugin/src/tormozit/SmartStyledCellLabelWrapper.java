@@ -1,8 +1,11 @@
 package tormozit;
 
+import org.eclipse.jface.viewers.ColumnViewer;
+import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.jface.viewers.ILabelProviderListener;
 import org.eclipse.jface.viewers.StyledCellLabelProvider;
+import org.eclipse.jface.viewers.ViewerColumn;
 import org.eclipse.jface.viewers.ViewerCell;
 import org.eclipse.swt.graphics.Image;
 
@@ -16,10 +19,29 @@ public final class SmartStyledCellLabelWrapper extends StyledCellLabelProvider
 {
     private final StyledCellLabelProvider base;
     private SmartMatcher highlightMatcher = new SmartMatcher(""); //$NON-NLS-1$
+    private SmartOutlineFilter bslFlatFilter;
+    private IBaseLabelProvider bslFlatLabelSource;
+    private BslOutlineEventsSupport.SubscriptionFlatLabels bslSubscriptionFlatLabels;
 
     public SmartStyledCellLabelWrapper(StyledCellLabelProvider base)
     {
         this.base = base;
+    }
+
+    /** Плоский Quick Outline BSL: подпись обработчика подписки (дерево или плоский список). */
+    public void setBslFlatSubscriptionLabels(SmartOutlineFilter filter, IBaseLabelProvider labelSource,
+            BslOutlineEventsSupport.SubscriptionFlatLabels subscriptionFlatLabels)
+    {
+        this.bslFlatFilter = filter;
+        this.bslFlatLabelSource = labelSource;
+        this.bslSubscriptionFlatLabels = subscriptionFlatLabels;
+    }
+
+    @Override
+    public void initialize(ColumnViewer viewer, ViewerColumn column)
+    {
+        super.initialize(viewer, column);
+        Global.invoke(base, "initialize", viewer, column); //$NON-NLS-1$
     }
 
     @Override
@@ -32,6 +54,15 @@ public final class SmartStyledCellLabelWrapper extends StyledCellLabelProvider
     public void update(ViewerCell cell)
     {
         base.update(cell);
+        if (cell != null)
+        {
+            String text = cell.getText();
+            String flat = resolveSubscriptionLabelOverride(cell.getElement());
+            if (flat != null)
+                text = flat;
+            if (text != null)
+                cell.setText(text);
+        }
         if (cell == null || highlightMatcher.isEmpty)
             return;
         String text = cell.getText();
@@ -46,10 +77,27 @@ public final class SmartStyledCellLabelWrapper extends StyledCellLabelProvider
     @Override
     public String getText(Object element)
     {
+        String baseText;
         if (base instanceof ILabelProvider)
-            return ((ILabelProvider) base).getText(element);
-        Object text = Global.invoke(base, "getText", element); //$NON-NLS-1$
-        return text instanceof String ? (String) text : ""; //$NON-NLS-1$
+            baseText = ((ILabelProvider) base).getText(element);
+        else
+        {
+            Object text = Global.invoke(base, "getText", element); //$NON-NLS-1$
+            baseText = text instanceof String ? (String) text : ""; //$NON-NLS-1$
+        }
+        String flat = resolveSubscriptionLabelOverride(element);
+        return flat != null ? flat : baseText;
+    }
+
+    private String resolveSubscriptionLabelOverride(Object element)
+    {
+        if (bslFlatLabelSource == null || bslSubscriptionFlatLabels == null)
+            return null;
+        if (bslFlatFilter != null && bslFlatFilter.isFlattenWhenFiltered() && bslFlatFilter.isFiltering())
+            return BslOutlineEventsSupport.resolveFlatDisplayLabel(element, bslFlatLabelSource,
+                    bslSubscriptionFlatLabels);
+        return BslOutlineEventsSupport.resolveTreeSubscriptionHandlerLabel(element, bslFlatLabelSource,
+                bslSubscriptionFlatLabels);
     }
 
     @Override

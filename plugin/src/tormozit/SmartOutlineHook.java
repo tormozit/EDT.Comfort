@@ -24,7 +24,10 @@ import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.layout.RowLayout;
+import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Image;
+import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
@@ -34,11 +37,13 @@ import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.swt.widgets.ToolBar;
+import org.eclipse.swt.widgets.ToolItem;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.IStartup;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import org.eclipse.jface.viewers.StyledString;
 
 /**
  * Перехватчик окон с деревом и полем поиска: Quick Outline, «Редактирование типа данных» (SelectTypeDialog).
@@ -50,12 +55,15 @@ public class SmartOutlineHook implements IStartup {
         Display.getDefault().asyncExec(() -> {
 //          Activator.getDefault().getInjector().injectMembers(this); // Слишком рано?
             install(Display.getDefault());
+            BslOutlineEventsSupport.installOutlinePageListener();
         });
     }
     
     private static final String PATCHED_KEY = "tormozit.outlinePatched";
     private static final String CLEAR_BUTTON_KEY = "tormozit.outlineClearButton"; //$NON-NLS-1$
     private static final String HEADER_BUTTON_KEY = "tormozit.outlineHeaderButton"; //$NON-NLS-1$
+    private static final String OUTLINE_COMFORT_HEADER_KEY = "tormozit.outlineComfortHeader"; //$NON-NLS-1$
+    private static final String OUTLINE_MENU_LAYOUT_KEY = "tormozit.outlineMenuBarOriginalLayout"; //$NON-NLS-1$
     private static final String CLEAR_INSTALLED_KEY = "tormozit.outlineClearInstalled"; //$NON-NLS-1$
     private static final String LAST_PATTERN_KEY = "tormozit.outlineLastPattern"; //$NON-NLS-1$
     private static final String PENDING_CLEAR_SELECTION_KEY = "tormozit.outlinePendingClearSelection"; //$NON-NLS-1$
@@ -92,13 +100,16 @@ public class SmartOutlineHook implements IStartup {
     private static void schedulePatchAttempt(Display display, Shell shell, int attempt)
     {
         if (!ComfortSettings.isReplaceListFiltersEnabled())
+        {
             return;
+        }
         if (shell.isDisposed() || shell.getData(PATCHED_KEY) != null)
             return;
         int delay = attempt == 0 ? 0 : 80;
         display.timerExec(delay, () -> {
             if (shell.isDisposed() || shell.getData(PATCHED_KEY) != null)
                 return;
+            tryInstallOutlineHeaderButtons(shell);
             if (tryPatchOutline(shell, attempt))
                 return;
             if (attempt < 12)
@@ -119,18 +130,24 @@ public class SmartOutlineHook implements IStartup {
         Tree treeWidget = findTreeWidget(shell);
 
         if (filterControl == null || treeWidget == null)
+        {
             return false;
+        }
 
         TreeViewer viewer = findTreeViewer(treeWidget, shell, dialog);
         if (viewer == null || viewer.getContentProvider() == null)
+        {
             return false;
+        }
 
         String lpName = viewer.getLabelProvider() != null ? viewer.getLabelProvider().getClass().getName() : "";
         String cpName = viewer.getContentProvider().getClass().getName();
         String shellName = shell.getClass().getName();
 
         if (!isSmartFilterTarget(shell, shellTitle, lpName, cpName, shellName, dialogName))
+        {
             return false;
+        }
 
         shell.setData(PATCHED_KEY, Boolean.TRUE);
 
@@ -355,15 +372,59 @@ private static void applySmartSearch(TreeViewer viewer, Control filterControl, S
         IBaseLabelProvider rawLp = resolveNativeLabelProvider(viewer, dialog, viewer.getLabelProvider());
         restoreCheckStateProvider(viewer, dialog);
 
-        ILabelProvider baseLp = createLabelProviderAdapter(rawLp);
+        boolean bslQuickOutline = dialogName != null && dialogName.contains("BslQuickOutlinePopup"); //$NON-NLS-1$
+        IBaseLabelProvider labelSourceForFilter = rawLp;
+        if (bslQuickOutline)
+        {
+            IBaseLabelProvider bslInner = BslOutlineEventsSupport.getBslOutlineInnerLabelProvider(dialog);
+            if (bslInner != null)
+                labelSourceForFilter = bslInner;
+        }
+        ILabelProvider innerFilterLp = createLabelProviderAdapter(labelSourceForFilter);
+        BslOutlineEventsSupport.FlatSubscriptionHandlerLabelProvider flatFilterLp = null;
+        if (bslQuickOutline)
+            flatFilterLp = BslOutlineEventsSupport.createFlatSubscriptionHandlerLabelProvider(
+                    innerFilterLp, labelSourceForFilter);
+        ILabelProvider baseLp = flatFilterLp != null ? flatFilterLp : innerFilterLp;
 
         boolean typeTree = isTypeTreeDialog(shellTitle, dialogName);
         SmartOutlineFilter smartFilter = new SmartOutlineFilter(baseLp, typeTree, typeTree);
+        if (flatFilterLp != null)
+            flatFilterLp.bindFilter(smartFilter);
         if (!typeTree)
             smartFilter.setFlattenWhenFiltered(true);
         smartFilter.setPattern(getFilterPattern(filterControl));
 
         wrapContentProviderForFlatOutline(viewer, smartFilter, baseLp, typeTree);
+
+        BslOutlineEventsSupport.SubscriptionFlatLabels subscriptionFlatLabels = null;
+        if (bslQuickOutline)
+        {
+            BslOutlineEventsSupport.showEventsInQuickOutline(dialog, viewer);
+            subscriptionFlatLabels = BslOutlineEventsSupport.createSubscriptionFlatLabels();
+            if (flatFilterLp != null)
+                flatFilterLp.bindSubscriptionFlatLabels(subscriptionFlatLabels);
+        }
+
+        SmartOutlineFlatContentProvider flatContentProvider = null;
+        Object outlineCp = viewer.getContentProvider();
+        if (outlineCp instanceof SmartOutlineFlatContentProvider)
+        {
+            flatContentProvider = (SmartOutlineFlatContentProvider) outlineCp;
+            if (bslQuickOutline)
+            {
+                flatContentProvider.bindFlatLabelContext(subscriptionFlatLabels, labelSourceForFilter,
+                        innerFilterLp, viewer, dialog);
+            }
+            flatContentProvider.rebuildLeafIndex(viewer.getInput());
+            if (bslQuickOutline && subscriptionFlatLabels != null)
+            {
+                BslOutlineEventsSupport.enrichSubscriptionFlatLabels(subscriptionFlatLabels, viewer, dialog,
+                        flatContentProvider.getIndexedLeaves(), labelSourceForFilter);
+            }
+        }
+        if (flatContentProvider != null && !typeTree)
+            smartFilter.bindFlatContentProvider(flatContentProvider);
 
         IStyledLabelProvider innerStyledLp = null;
         if (rawLp instanceof DelegatingStyledCellLabelProvider) {
@@ -371,11 +432,20 @@ private static void applySmartSearch(TreeViewer viewer, Control filterControl, S
         } else if (rawLp instanceof IStyledLabelProvider) {
             innerStyledLp = (IStyledLabelProvider) rawLp;
         }
+        if (bslQuickOutline && innerStyledLp == null)
+        {
+            IBaseLabelProvider bslInner = BslOutlineEventsSupport.getBslOutlineInnerLabelProvider(dialog);
+            if (bslInner instanceof IStyledLabelProvider)
+                innerStyledLp = (IStyledLabelProvider) bslInner;
+        }
 
+        final SmartOutlineFlatContentProvider flatContentProviderRef = flatContentProvider;
         final SmartLabelHighlight highlightControl = installHighlightProvider(viewer, rawLp, baseLp,
-                innerStyledLp, getFilterPattern(filterControl), dialogName);
+                innerStyledLp, getFilterPattern(filterControl), dialogName, dialog, smartFilter,
+                labelSourceForFilter, subscriptionFlatLabels);
         final boolean aefTree = highlightControl instanceof AefTreeItemHighlight;
-        viewer.addFilter(smartFilter);
+        if (flatContentProviderRef == null || typeTree)
+            viewer.addFilter(smartFilter);
         if (aefTree)
         {
             AefTreeItemHighlight aef = (AefTreeItemHighlight) highlightControl;
@@ -385,7 +455,7 @@ private static void applySmartSearch(TreeViewer viewer, Control filterControl, S
 
         // ОПТИМИЗАЦИЯ 1: Устанавливаем компаратор ОДИН раз при инициализации.
         // Переданные кэш-карты обновляются внутри smartFilter, компаратор увидит изменения автоматически.
-        viewer.setComparator(new SmartOutlineComparator(smartFilter.getNamePremiumCache(), smartFilter.getParamPremiumCache(), baseLp));
+        viewer.setComparator(new SmartOutlineComparator(smartFilter.getNamePremiumCache(), smartFilter.getParamPremiumCache(), baseLp, flatContentProvider));
 
         // Контейнер для хранения ссылки на текущую отложенную задачу (дебаунс)
         final Runnable[] pendingFilterTask = new Runnable[1];
@@ -410,8 +480,9 @@ private static void applySmartSearch(TreeViewer viewer, Control filterControl, S
                         Tree tree = viewer.getTree();
                         if (tree == null || tree.isDisposed()) return;
                         
+                        BslSideHintOutlineInstall.cancelPendingHintUpdate(tree);
+                        tree.setData(BslSideHintOutlineInstall.SUPPRESS_SELECTION_KEY, Boolean.TRUE);
                         // ОПТИМИЗАЦИЯ 3: Полностью блокируем перерисовку дерева на уровне ОС.
-                        // Никаких промежуточных прыжков скроллбара и старых выделений пользователь не увидит.
                         tree.setRedraw(false);
                         try {
                             String lastPattern = tree.getData(LAST_PATTERN_KEY) instanceof String
@@ -430,8 +501,8 @@ private static void applySmartSearch(TreeViewer viewer, Control filterControl, S
                             if (highlightControl != null)
                                 highlightControl.setHighlightPattern(pattern);
 
-                            // 3. Выполняем ровно ОДИН refresh дерева
-                            viewer.refresh();
+                            // 3. Обновляем только видимые элементы — плоский список уже пересобран в content provider
+                            viewer.refresh(true);
 
                             if (highlightControl instanceof AefTreeItemHighlight)
                                 ((AefTreeItemHighlight) highlightControl).apply(viewer, patchedShell);
@@ -442,13 +513,16 @@ private static void applySmartSearch(TreeViewer viewer, Control filterControl, S
                                     () -> restoreOutlineSelection(viewer, smartFilter, savedSelection));
                             else if (!pattern.isEmpty() && !aefTree)
                                 runSuppressingOutlineRecent(tree,
-                                    () -> selectFirstVisibleItem(tree, smartFilter));
+                                    () -> keepOrSelectFirstVisibleItem(viewer, smartFilter));
 
                             tree.setData(LAST_PATTERN_KEY, pattern);
                         } finally {
+                            tree.setData(BslSideHintOutlineInstall.SUPPRESS_SELECTION_KEY, null);
                             // Включаем отрисовку обратно. ОС мгновенно отобразит финальный готовый результат
                             tree.setRedraw(true);
                         }
+                        if (bslQuickOutline)
+                            BslSideHintOutlineInstall.refreshAfterFilter(viewer, dialog);
                     }
                 };
                 
@@ -457,13 +531,20 @@ private static void applySmartSearch(TreeViewer viewer, Control filterControl, S
             }
         });
 
-        FilterFieldListNavigation.installTreeNavigation(filterControl, viewer.getTree());
+        FilterInputBoxListNavigation.installTreeNavigation(filterControl, viewer.getTree(),
+                () -> tryActivateEventFromFilter(viewer, dialog));
 
         if (!typeTree)
         {
             installQuickOutlineHeaderButtons(filterControl, viewer, patchedShell, dialog, dialogName);
             installOutlineRecentPlacesTracking(viewer, baseLp);
         }
+
+        if (bslQuickOutline)
+            BslOutlineEventsSupport.installEventHandlerActivation(viewer, dialog, filterControl);
+
+        if (!typeTree)
+            BslSideHintOutlineInstall.installIfBsl(viewer, dialog, dialogName);
 
         Display display = filterControl.getDisplay();
         filterControl.addDisposeListener(e -> {
@@ -538,6 +619,31 @@ private static void applySmartSearch(TreeViewer viewer, Control filterControl, S
         return null;
     }
 
+    private static void tryInstallOutlineHeaderButtons(Shell shell)
+    {
+        if (shell == null || shell.isDisposed())
+            return;
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+            return;
+        Object dialog = findDialog(shell);
+        if (dialog == null)
+            return;
+        String dialogName = dialog.getClass().getName();
+        String shellTitle = shell.getText();
+        if (!mightBeSmartFilterShell(shell, shellTitle))
+            return;
+        if (isTypeTreeDialog(shellTitle, dialogName))
+            return;
+        Control filterControl = findFilterControl(shell, dialog);
+        if (filterControl == null || Boolean.TRUE.equals(filterControl.getData(CLEAR_INSTALLED_KEY)))
+            return;
+        if (resolveOutlineToolBar(dialog, filterControl) == null)
+            return;
+        Tree tree = findTreeWidget(shell);
+        TreeViewer viewer = tree != null ? findTreeViewer(tree, shell, dialog) : null;
+        installQuickOutlineHeaderButtons(filterControl, viewer, shell, dialog, dialogName);
+    }
+
     private static void installQuickOutlineHeaderButtons(Control filterControl, TreeViewer viewer, Shell shell,
             Object dialog, String dialogName)
     {
@@ -550,6 +656,189 @@ private static void applySmartSearch(TreeViewer viewer, Control filterControl, S
         if (parent == null || parent.isDisposed())
             return;
 
+        ToolBar menuBar = resolveOutlineToolBar(dialog, filterControl);
+        if (menuBar != null)
+        {
+            Composite titleArea = findOutlineTitleArea(menuBar);
+            if (hasOutlineComfortToolBar(titleArea))
+            {
+                filterControl.setData(CLEAR_INSTALLED_KEY, Boolean.TRUE);
+                return;
+            }
+            installQuickOutlineHeaderComfortToolBar(filterControl, viewer, shell, dialog, dialogName, menuBar);
+            return;
+        }
+
+        installQuickOutlineHeaderButtonsFallback(filterControl, viewer, shell, dialog, dialogName, parent);
+    }
+
+    /** Отдельный тулбар слева от штатного ▼ ({@link DebugInspectorHook} — не в menuBar: на нём MouseDown → showDialogMenu). */
+    private static void installQuickOutlineHeaderComfortToolBar(Control filterControl, TreeViewer viewer, Shell shell,
+            Object dialog, String dialogName, ToolBar menuBar)
+    {
+        Composite titleArea = findOutlineTitleArea(menuBar);
+        if (titleArea == null || titleArea.isDisposed())
+            return;
+
+        stripComfortItemsFromMenuBar(menuBar);
+
+        boolean bslQuickOutline = dialogName != null && dialogName.contains("BslQuickOutlinePopup"); //$NON-NLS-1$
+        Color titleBg = titleArea.getBackground();
+        Object menuBarLayout = menuBar.getLayoutData();
+
+        ToolBar comfortBar = new ToolBar(titleArea, SWT.FLAT | SWT.LEFT);
+        markOutlineComfortHeader(comfortBar);
+        comfortBar.setBackground(titleBg);
+        comfortBar.setLayoutData(outlineComfortToolBarGridData());
+
+        Image clearImg = loadClearImage();
+        ToolItem clearItem = new ToolItem(comfortBar, SWT.PUSH);
+        if (clearImg != null)
+        {
+            clearItem.setImage(clearImg);
+            clearItem.setToolTipText("Очистить фильтр"); //$NON-NLS-1$
+            comfortBar.addDisposeListener(e -> clearImg.dispose());
+        }
+        else
+        {
+            clearItem.setText("✕"); //$NON-NLS-1$
+            clearItem.setToolTipText("Очистить фильтр"); //$NON-NLS-1$
+        }
+
+        ToolItem commonItem = null;
+        ToolItem detailedItem = null;
+        if (bslQuickOutline)
+        {
+            commonItem = new ToolItem(comfortBar, SWT.PUSH);
+            commonItem.setText("Общие ИР"); //$NON-NLS-1$
+            commonItem.setToolTipText("Список общих методов в ИР" + Global.pluginSignForTooltip()); //$NON-NLS-1$
+
+            detailedItem = new ToolItem(comfortBar, SWT.PUSH);
+            detailedItem.setText("Подробно ИР"); //$NON-NLS-1$
+            detailedItem.setToolTipText("Список методов модуля в ИР" + Global.pluginSignForTooltip()); //$NON-NLS-1$
+        }
+
+        filterControl.setData(CLEAR_INSTALLED_KEY, Boolean.TRUE);
+        comfortBar.setData(CLEAR_BUTTON_KEY, clearItem);
+        clearItem.addListener(SWT.Selection, e -> {
+            if (viewer != null && viewer.getSelection() instanceof IStructuredSelection)
+                filterControl.setData(PENDING_CLEAR_SELECTION_KEY, viewer.getSelection());
+            setFilterText(filterControl, ""); //$NON-NLS-1$
+            if (!filterControl.isDisposed())
+                filterControl.forceFocus();
+        });
+
+        if (commonItem != null)
+        {
+            commonItem.addListener(SWT.Selection, e -> {
+                BslXtextEditor editor = IrMethodListHandler.resolveBslEditor(dialog);
+                IrMethodListHandler.openCommonMethods(editor, getFilterPattern(filterControl));
+                if (!filterControl.isDisposed())
+                    filterControl.forceFocus();
+            });
+        }
+        if (detailedItem != null)
+        {
+            detailedItem.addListener(SWT.Selection, e -> {
+                BslXtextEditor editor = IrMethodListHandler.resolveBslEditor(dialog);
+                IrMethodListHandler.openModuleMethods(editor, getFilterPattern(filterControl));
+                if (!filterControl.isDisposed())
+                    filterControl.forceFocus();
+            });
+        }
+
+        if (menuBar.getParent() == titleArea)
+            comfortBar.moveAbove(menuBar);
+
+        applyOutlineMenuBarGridData(menuBar, menuBarLayout);
+
+        if (titleArea.getLayout() instanceof GridLayout gridLayout)
+            gridLayout.numColumns = Math.max(gridLayout.numColumns, bslQuickOutline ? 4 : 3);
+
+        titleArea.layout(true, true);
+    }
+
+    private static Composite findOutlineTitleArea(ToolBar menuBar)
+    {
+        if (menuBar == null || menuBar.isDisposed())
+            return null;
+        for (Composite parent = menuBar.getParent(); parent != null; parent = parent.getParent())
+        {
+            if (parent.getLayout() instanceof GridLayout)
+                return parent;
+        }
+        return menuBar.getParent();
+    }
+
+    private static boolean hasOutlineComfortToolBar(Composite titleArea)
+    {
+        if (titleArea == null || titleArea.isDisposed())
+            return false;
+        for (Control child : titleArea.getChildren())
+        {
+            if (isOutlineComfortHeader(child))
+                return true;
+        }
+        return false;
+    }
+
+    private static void markOutlineComfortHeader(Control control)
+    {
+        control.setData(OUTLINE_COMFORT_HEADER_KEY, Boolean.TRUE);
+    }
+
+    private static boolean isOutlineComfortHeader(Control control)
+    {
+        return control != null && !control.isDisposed()
+            && Boolean.TRUE.equals(control.getData(OUTLINE_COMFORT_HEADER_KEY));
+    }
+
+    private static GridData outlineComfortToolBarGridData()
+    {
+        return new GridData(SWT.BEGINNING, SWT.CENTER, false, false);
+    }
+
+    private static void stripComfortItemsFromMenuBar(ToolBar menuBar)
+    {
+        if (menuBar == null || menuBar.isDisposed())
+            return;
+        for (ToolItem item : menuBar.getItems())
+        {
+            if (item.isDisposed())
+                continue;
+            if (Boolean.TRUE.equals(item.getData(HEADER_BUTTON_KEY)))
+                item.dispose();
+        }
+    }
+
+    private static void saveOutlineMenuBarLayout(ToolBar menuBar, Object menuBarLayout)
+    {
+        if (menuBar == null || menuBar.isDisposed() || menuBarLayout == null)
+            return;
+        if (menuBar.getData(OUTLINE_MENU_LAYOUT_KEY) == null)
+            menuBar.setData(OUTLINE_MENU_LAYOUT_KEY, menuBarLayout);
+    }
+
+    private static void applyOutlineMenuBarGridData(ToolBar menuBar, Object originalLayout)
+    {
+        if (menuBar == null || menuBar.isDisposed())
+            return;
+        Object layoutSource = originalLayout;
+        if (layoutSource == null)
+            layoutSource = menuBar.getData(OUTLINE_MENU_LAYOUT_KEY);
+        saveOutlineMenuBarLayout(menuBar, layoutSource);
+        GridData gd = new GridData(SWT.BEGINNING, SWT.CENTER, false, false);
+        if (layoutSource instanceof GridData src)
+            gd.verticalIndent = src.verticalIndent;
+        else if (menuBar.getLayoutData() instanceof GridData current)
+            gd.verticalIndent = current.verticalIndent;
+        gd.widthHint = computeToolBarContentWidth(menuBar);
+        menuBar.setLayoutData(gd);
+    }
+
+    private static void installQuickOutlineHeaderButtonsFallback(Control filterControl, TreeViewer viewer, Shell shell,
+            Object dialog, String dialogName, Composite parent)
+    {
         boolean bslQuickOutline = dialogName != null && dialogName.contains("BslQuickOutlinePopup"); //$NON-NLS-1$
         int extraButtons = bslQuickOutline ? 2 : 0;
 
@@ -647,6 +936,47 @@ private static void applySmartSearch(TreeViewer viewer, Control filterControl, S
             shell.layout(true, true);
     }
 
+    private static ToolBar resolveOutlineToolBar(Object dialog, Control filterControl)
+    {
+        if (dialog != null)
+        {
+            Object bar = Global.getField(dialog, "toolBar"); //$NON-NLS-1$
+            if (bar instanceof ToolBar toolBar && !toolBar.isDisposed())
+                return toolBar;
+        }
+        if (filterControl != null && !filterControl.isDisposed())
+        {
+            Composite parent = filterControl.getParent();
+            if (parent != null && !parent.isDisposed())
+            {
+                Control found = findViewMenuControl(parent, filterControl);
+                if (found instanceof ToolBar toolBar && !toolBar.isDisposed())
+                    return toolBar;
+            }
+        }
+        return null;
+    }
+
+    private static int computeToolBarContentWidth(ToolBar toolBar)
+    {
+        if (toolBar == null || toolBar.isDisposed())
+            return SWT.DEFAULT;
+        toolBar.pack();
+        Point size = toolBar.getSize();
+        if (size.x > 0)
+            return size.x;
+        int width = 0;
+        for (ToolItem item : toolBar.getItems())
+        {
+            if (item.isDisposed())
+                continue;
+            Rectangle bounds = item.getBounds();
+            if (bounds.width > 0)
+                width += bounds.width;
+        }
+        return width > 0 ? width : SWT.DEFAULT;
+    }
+
     private static void configureOutlineHeaderButton(Button button)
     {
         button.addListener(SWT.MouseDown, e -> e.doit = false);
@@ -676,6 +1006,8 @@ private static void applySmartSearch(TreeViewer viewer, Control filterControl, S
             if (child == filterControl || child.isDisposed())
                 continue;
             if (Boolean.TRUE.equals(child.getData(HEADER_BUTTON_KEY)))
+                continue;
+            if (isOutlineComfortHeader(child))
                 continue;
             if (child instanceof ToolBar)
                 return child;
@@ -750,9 +1082,59 @@ private static void applySmartSearch(TreeViewer viewer, Control filterControl, S
         else if (filterControl instanceof StyledText)
             ((StyledText) filterControl).addModifyListener(listener);
     }
-    private static void selectFirstVisibleItem(Control control, SmartOutlineFilter smartFilter) {
-        if (control == null || control.isDisposed()) return;
-        if (!(control instanceof Tree))
+    private static void keepOrSelectFirstVisibleItem(TreeViewer viewer, SmartOutlineFilter smartFilter)
+    {
+        if (viewer == null)
+            return;
+        if (isCurrentSelectionStillVisible(viewer))
+        {
+            Tree tree = viewer.getTree();
+            if (tree != null && !tree.isDisposed())
+            {
+                TreeItem[] selection = tree.getSelection();
+                if (selection != null && selection.length > 0 && !selection[0].isDisposed())
+                    tree.showItem(selection[0]);
+            }
+            return;
+        }
+        selectFirstVisibleItem(viewer, smartFilter);
+    }
+
+    private static boolean isCurrentSelectionStillVisible(TreeViewer viewer)
+    {
+        if (viewer == null)
+            return false;
+        if (!(viewer.getSelection() instanceof IStructuredSelection sel) || sel.isEmpty())
+            return false;
+        Object element = sel.getFirstElement();
+        Tree tree = viewer.getTree();
+        if (tree == null || tree.isDisposed())
+            return false;
+        return findTreeItemForElement(tree.getItems(), element) != null;
+    }
+
+    private static TreeItem findTreeItemForElement(TreeItem[] items, Object element)
+    {
+        if (items == null || element == null)
+            return null;
+        for (TreeItem item : items)
+        {
+            if (item == null || item.isDisposed())
+                continue;
+            if (element.equals(item.getData()))
+                return item;
+            TreeItem nested = findTreeItemForElement(item.getItems(), element);
+            if (nested != null)
+                return nested;
+        }
+        return null;
+    }
+
+    private static void selectFirstVisibleItem(TreeViewer viewer, SmartOutlineFilter smartFilter) {
+        if (viewer == null)
+            return;
+        Control control = viewer.getControl();
+        if (control == null || control.isDisposed() || !(control instanceof Tree))
             return;
         Tree tree = (Tree) control;
         if (tree.getItemCount() <= 0)
@@ -767,12 +1149,12 @@ private static void applySmartSearch(TreeViewer viewer, Control filterControl, S
                 terminal = getFirstTerminalItem(first);
             if (terminal == null || terminal.isDisposed())
                 return;
-            tree.setSelection(terminal);
+            Object element = terminal.getData();
+            if (element != null)
+                viewer.setSelection(new StructuredSelection(element), true);
+            else
+                tree.setSelection(terminal);
             tree.showItem(terminal);
-            Event selectionEvent = new Event();
-            selectionEvent.widget = tree;
-            selectionEvent.item = terminal;
-            tree.notifyListeners(SWT.Selection, selectionEvent);
         }
         catch (RuntimeException ignored) {}
     }
@@ -854,9 +1236,44 @@ private static void applySmartSearch(TreeViewer viewer, Control filterControl, S
         return AefTreeItemHighlight.isAefTreeItem(roots[0]);
     }
 
-    private static SmartLabelHighlight installHighlightProvider(TreeViewer viewer, IBaseLabelProvider rawLp,
-            ILabelProvider baseLp, IStyledLabelProvider innerStyledLp, String initialPattern, String dialogName)
+    private static boolean tryActivateEventFromFilter(TreeViewer viewer, Object dialog)
     {
+        return BslOutlineEventsSupport.tryActivateSelectedEvent(viewer, dialog);
+    }
+
+    private static SmartLabelHighlight installHighlightProvider(TreeViewer viewer, IBaseLabelProvider rawLp,
+            ILabelProvider baseLp, IStyledLabelProvider innerStyledLp, String initialPattern, String dialogName,
+            Object dialog, SmartOutlineFilter smartFilter, IBaseLabelProvider bslLabelSourceForFlat,
+            BslOutlineEventsSupport.SubscriptionFlatLabels subscriptionFlatLabels)
+    {
+        boolean bslQuickOutline = dialogName != null && dialogName.contains("BslQuickOutlinePopup"); //$NON-NLS-1$
+        if (bslQuickOutline && innerStyledLp != null && rawLp instanceof DelegatingStyledCellLabelProvider)
+        {
+            IStyledLabelProvider styledForTree = new BslFlatSubscriptionStyledLabelWrapper(innerStyledLp,
+                    smartFilter, bslLabelSourceForFlat, subscriptionFlatLabels);
+            SmartOutlineLabelProvider smartLabelProvider = new SmartOutlineLabelProvider(styledForTree, baseLp);
+            smartLabelProvider.setHighlightPattern(initialPattern);
+            injectStyledStringProvider((DelegatingStyledCellLabelProvider) rawLp, smartLabelProvider);
+            return smartLabelProvider;
+        }
+        if (bslQuickOutline && dialog != null)
+        {
+            StyledCellLabelProvider rebuilt =
+                    BslOutlineEventsSupport.rebuildBslQuickOutlineLabelProvider(dialog);
+            StyledCellLabelProvider styledBase = rebuilt;
+            if (styledBase == null && rawLp instanceof StyledCellLabelProvider)
+                styledBase = (StyledCellLabelProvider) rawLp;
+            if (styledBase != null)
+            {
+                SmartStyledCellLabelWrapper wrapper = new SmartStyledCellLabelWrapper(styledBase);
+                wrapper.setHighlightPattern(initialPattern);
+                if (smartFilter != null && bslLabelSourceForFlat != null)
+                    wrapper.setBslFlatSubscriptionLabels(smartFilter, bslLabelSourceForFlat, subscriptionFlatLabels);
+                viewer.setLabelProvider(wrapper);
+                return wrapper;
+            }
+        }
+
         if (isAefRenderedTree(viewer, dialogName, rawLp))
             return new AefTreeItemHighlight(initialPattern);
 
@@ -1000,4 +1417,72 @@ private static void applySmartSearch(TreeViewer viewer, Control filterControl, S
         }
         return null;
     }
+
+    /**
+     * Обёртка над штатным {@code BslOutlineLabelProvider} внутри {@code DelegatingStyledCellLabelProvider}
+
+     * Quick Outline — здесь реально рисуется текст ячеек.
+     */
+    private static final class BslFlatSubscriptionStyledLabelWrapper extends LabelProvider implements IStyledLabelProvider
+    {
+
+        private final IStyledLabelProvider delegate;
+        private final SmartOutlineFilter filter;
+        private final IBaseLabelProvider labelSource;
+        private final BslOutlineEventsSupport.SubscriptionFlatLabels flatLabels;
+        BslFlatSubscriptionStyledLabelWrapper(IStyledLabelProvider delegate, SmartOutlineFilter filter,
+                IBaseLabelProvider labelSource, BslOutlineEventsSupport.SubscriptionFlatLabels flatLabels)
+        {
+
+            this.delegate = delegate;
+            this.filter = filter;
+            this.labelSource = labelSource;
+            this.flatLabels = flatLabels;
+        }
+
+        @Override
+        public StyledString getStyledText(Object element)
+        {
+
+            StyledString styled = delegate != null ? delegate.getStyledText(element) : null;
+            String text = styled != null ? styled.getString() : ""; //$NON-NLS-1$
+            if (filter != null && filter.isFlattenWhenFiltered() && filter.isFiltering())
+            {
+
+                String flat = BslOutlineEventsSupport.resolveFlatDisplayLabel(element, labelSource, flatLabels);
+                if (flat != null)
+                    text = flat;
+            }
+
+            else if (flatLabels != null)
+            {
+
+                String tree = BslOutlineEventsSupport.resolveTreeSubscriptionHandlerLabel(element, labelSource, flatLabels);
+                if (tree != null)
+                    text = tree;
+            }
+
+            if (styled != null && text.equals(styled.getString()))
+                return styled;
+            return new StyledString(text != null ? text : ""); //$NON-NLS-1$
+        }
+
+        @Override
+        public Image getImage(Object element)
+        {
+
+            return delegate != null ? delegate.getImage(element) : null;
+        }
+
+        @Override
+        public void dispose()
+        {
+
+            if (delegate != null)
+                delegate.dispose();
+            super.dispose();
+        }
+
+    }
+
 }

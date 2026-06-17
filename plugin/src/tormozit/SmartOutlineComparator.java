@@ -10,16 +10,25 @@ public class SmartOutlineComparator extends ViewerComparator {
     private Map<Object, Integer> namePremiumCache;
     private Map<Object, Integer> paramPremiumCache;
     private SmartMatcher matcher;
+    private final SmartOutlineFlatContentProvider flatContentProvider;
 
-    public SmartOutlineComparator(Map<Object, Integer> namePremiumCache, Map<Object, Integer> paramPremiumCache, ILabelProvider labelProvider) {
+    public SmartOutlineComparator(Map<Object, Integer> namePremiumCache, Map<Object, Integer> paramPremiumCache,
+            ILabelProvider labelProvider) {
+        this(namePremiumCache, paramPremiumCache, labelProvider, null);
+    }
+
+    public SmartOutlineComparator(Map<Object, Integer> namePremiumCache, Map<Object, Integer> paramPremiumCache,
+            ILabelProvider labelProvider, SmartOutlineFlatContentProvider flatContentProvider) {
         this.namePremiumCache = namePremiumCache;
         this.paramPremiumCache = paramPremiumCache;
         this.labelProvider = labelProvider;
+        this.flatContentProvider = flatContentProvider;
     }
 
     public SmartOutlineComparator(SmartMatcher matcher, ILabelProvider labelProvider) {
         this.matcher = matcher;
         this.labelProvider = labelProvider;
+        this.flatContentProvider = null;
     }
 
     @Override
@@ -33,8 +42,8 @@ public class SmartOutlineComparator extends ViewerComparator {
             pp1 = paramPremiumCache.getOrDefault(e1, 0);
             pp2 = paramPremiumCache.getOrDefault(e2, 0);
         } else if (matcher != null) {
-            String t1 = labelProvider.getText(e1);
-            String t2 = labelProvider.getText(e2);
+            String t1 = displayText(e1);
+            String t2 = displayText(e2);
             np1 = matcher.computeNamePremium(t1);
             np2 = matcher.computeNamePremium(t2);
             pp1 = matcher.computeParamPremium(t1);
@@ -52,12 +61,21 @@ public class SmartOutlineComparator extends ViewerComparator {
         }
 
         // ПРИОРИТЕТ 3: Алфавитный порядок (без учета регистра)
-        String t1 = labelProvider.getText(e1);
-        String t2 = labelProvider.getText(e2);
+        String t1 = displayText(e1);
+        String t2 = displayText(e2);
         
         if (t1 == null) return t2 == null ? 0 : 1;
         if (t2 == null) return -1;
         
         return t1.compareToIgnoreCase(t2);
+    }
+
+    private String displayText(Object element) {
+        if (flatContentProvider != null) {
+            String cached = flatContentProvider.getFilterText(element);
+            if (cached != null && !cached.isEmpty())
+                return cached;
+        }
+        return labelProvider.getText(element);
     }
 }

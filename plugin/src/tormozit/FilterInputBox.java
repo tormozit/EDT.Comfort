@@ -31,8 +31,8 @@ final class FilterInputBox
     enum Scope
     {
         COLLECTION(
-            "comfort.collection.filter.history.count", //$NON-NLS-1$
-            "comfort.collection.filter.history."), //$NON-NLS-1$
+            "debug.collection.filter.history.count", //$NON-NLS-1$
+            "debug.collection.filter.history."), //$NON-NLS-1$
         RECENT_PLACES(
             "comfort.recentPlaces.filter.history.count", //$NON-NLS-1$
             "comfort.recentPlaces.filter.history."); //$NON-NLS-1$
@@ -159,7 +159,7 @@ final class FilterInputBox
         return input != null && !input.isDisposed() && input.isFocusControl();
     }
 
-    /** Для {@link FilterFieldListNavigation} и {@code KeyListener}. */
+    /** Для {@link FilterInputBoxListNavigation} и {@code KeyListener}. */
     Control inputControl()
     {
         return findTextControl(searchBox);

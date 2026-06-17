@@ -20,6 +20,12 @@ import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.dialogs.FilteredItemsSelectionDialog;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.Map;
+import org.eclipse.jface.viewers.LabelProvider;
+import org.eclipse.jface.viewers.StyledString;
+import org.eclipse.swt.graphics.Image;
 
 public class OpenMdObjectHook implements IStartup {
 
@@ -116,7 +122,7 @@ public class OpenMdObjectHook implements IStartup {
 
             Table listTable = getDialogTable(dialog, shell);
             if (listTable != null) {
-                FilterFieldListNavigation.installTableNavigation(filterText, listTable);
+                FilterInputBoxListNavigation.installTableNavigation(filterText, listTable);
                 OpenMdObjectDebug.log("tableNav OK items=" + listTable.getItemCount());
             } else {
                 OpenMdObjectDebug.log("tableNav SKIP table not found");
@@ -246,4 +252,173 @@ public class OpenMdObjectHook implements IStartup {
             OpenMdObjectDebug.log("setField FAIL " + exactClass.getName() + "." + fieldName + ": " + e.getMessage());
         }
     }
+
+    private static class OpenMdObjectComparator implements Comparator<Object> {
+
+        private final ILabelProvider labelProvider;
+        private SmartMatcher matcher;
+        private final Map<Object, Integer> premiumCache = new HashMap<>();
+        public OpenMdObjectComparator(ILabelProvider labelProvider) {
+            this.labelProvider = labelProvider;
+        }
+
+        public void setMatcher(SmartMatcher matcher) {
+            this.matcher = matcher;
+            this.premiumCache.clear();
+        }
+
+        @Override
+        public int compare(Object o1, Object o2) {
+            if (matcher == null || matcher.fullPattern.isEmpty()) {
+                return compareAlphabetically(o1, o2);
+            }
+
+            int p1 = premiumCache.computeIfAbsent(o1,
+                    k -> matcher.computeNamePremium(getObjectName(labelProvider.getText(k))));
+            int p2 = premiumCache.computeIfAbsent(o2,
+                    k -> matcher.computeNamePremium(getObjectName(labelProvider.getText(k))));
+            if (p1 != p2) {
+                return Integer.compare(p2, p1);
+            }
+            return compareAlphabetically(o1, o2);
+        }
+
+        private String getObjectName(String fullText) {
+            return org.eclipse.ui.dialogs.OpenMdObjectItemsFilter.getObjectName(fullText);
+        }
+
+        private int compareAlphabetically(Object o1, Object o2) {
+            String t1 = labelProvider.getText(o1);
+            String t2 = labelProvider.getText(o2);
+            if (t1 == null) return t2 == null ? 0 : 1;
+            if (t2 == null) return -1;
+            return t1.compareToIgnoreCase(t2);
+        }
+    }
+
+
+    /**
+     * Логи диалога «Открыть объект метаданных» через {@link Global}.
+     * Включение: Параметры → Комфорт → «Общее логирование».
+     */
+    private static final class OpenMdObjectDebug
+    {
+        private static final String TAG = "OpenMdObject"; //$NON-NLS-1$
+
+        private OpenMdObjectDebug() {}
+
+        public static boolean isEnabled()
+        {
+            return Global.isLogEnabled();
+        }
+
+        public static void log(String msg)
+        {
+            if (Global.isLogEnabled())
+                Global.log(TAG, msg);
+        }
+
+        public static String filterDesc(Object filter)
+        {
+            if (filter == null)
+                return "null";
+            String type = filter.getClass().getSimpleName();
+            if (filter instanceof org.eclipse.ui.dialogs.OpenMdObjectItemsFilter) {
+                org.eclipse.ui.dialogs.OpenMdObjectItemsFilter f =
+                        (org.eclipse.ui.dialogs.OpenMdObjectItemsFilter) filter;
+                return type + "@" + Integer.toHexString(System.identityHashCode(filter))
+                        + " pat=\"" + f.getPattern() + "\""; //$NON-NLS-1$
+            }
+            try {
+                Object pat = Global.invoke(filter, "getPattern");
+                return type + " pat=\"" + pat + "\""; //$NON-NLS-1$
+            } catch (Exception e) {
+                return type;
+            }
+        }
+
+        public static String jobState(Job job)
+        {
+            if (job == null)
+                return "null";
+            switch (job.getState()) {
+                case Job.RUNNING: return "RUNNING";
+                case Job.WAITING: return "WAITING";
+                case Job.SLEEPING: return "SLEEPING";
+                default: return "NONE";
+            }
+        }
+    }
+
+
+    private static class OpenMdObjectLabelProvider extends LabelProvider implements IStyledLabelProvider, ILabelDecorator {
+
+        private final ILabelProvider baseProvider;
+        private final IStyledLabelProvider baseStyled;
+        private final ILabelDecorator baseDecorator;
+        private SmartMatcher matcher;
+
+        public OpenMdObjectLabelProvider(ILabelProvider baseProvider,
+                                          IStyledLabelProvider baseStyled,
+                                          ILabelDecorator baseDecorator) {
+            this.baseProvider = baseProvider;
+            this.baseStyled = baseStyled;
+            this.baseDecorator = baseDecorator;
+            this.matcher = new SmartMatcher("");
+        }
+
+        public void setPattern(String pattern) {
+            this.matcher = new SmartMatcher(pattern);
+        }
+
+        @Override
+        public String getText(Object element) {
+            return baseProvider != null ? baseProvider.getText(element) : super.getText(element);
+        }
+
+        @Override
+        public Image getImage(Object element) {
+            return baseProvider != null ? baseProvider.getImage(element) : super.getImage(element);
+        }
+
+        @Override
+        public StyledString getStyledText(Object element) {
+            StyledString styledString;
+            if (baseStyled != null) {
+                styledString = baseStyled.getStyledText(element);
+                if (styledString == null) styledString = new StyledString(getText(element));
+            } else {
+                styledString = new StyledString(getText(element));
+            }
+
+            String plainText = styledString.getString();
+            // === ПОДСВЕТКА ТОЛЬКО В ЧИСТОМ ИМЕНИ ===
+            String objectName = org.eclipse.ui.dialogs.OpenMdObjectItemsFilter.getObjectName(plainText);
+            int nameOffset = plainText.indexOf(objectName);
+            if (nameOffset < 0) nameOffset = 0;
+
+            for (SmartMatcher.HighlightRange range : matcher.getHighlightRanges(objectName)) {
+                styledString.setStyle(nameOffset + range.offset, range.length, SmartMatchHighlight.styler());
+            }
+            return styledString;
+        }
+
+        @Override
+        public Image decorateImage(Image image, Object element) {
+            return baseDecorator != null ? baseDecorator.decorateImage(image, element) : image;
+        }
+
+        @Override
+        public String decorateText(String text, Object element) {
+            return baseDecorator != null ? baseDecorator.decorateText(text, element) : text;
+        }
+
+        @Override
+        public void dispose() {
+            if (baseDecorator != null) baseDecorator.dispose();
+            if (baseProvider != null) baseProvider.dispose();
+            super.dispose();
+        }
+    }
+
 }

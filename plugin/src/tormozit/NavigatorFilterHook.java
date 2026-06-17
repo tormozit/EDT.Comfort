@@ -20,6 +20,18 @@ import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.navigator.CommonViewer;
+import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
+import java.util.function.Function;
+import java.util.function.Predicate;
+import org.eclipse.jface.viewers.StyledString;
+import com._1c.g5.v8.dt.core.platform.IBmModelManager;
+import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
+import com._1c.g5.v8.dt.search.core.IModelObjectTreeSearchEngine;
+import org.eclipse.jface.viewers.ViewerFilter;
+import org.eclipse.ui.navigator.CommonNavigator;
+import org.eclipse.ui.navigator.ICommonFilterDescriptor;
+import org.eclipse.ui.navigator.INavigatorContentService;
+import org.eclipse.ui.navigator.INavigatorFilterService;
 
 /**
  * Умный фильтр и подсветка в навигаторе EDT ({@code com._1c.g5.v8.dt.ui2.navigator}).
@@ -302,7 +314,7 @@ public final class NavigatorFilterHook implements IStartup
         NavigatorFilterDebug.log("patternListener attached=" + listenerOk + " mode=" + input.mode()); //$NON-NLS-1$ //$NON-NLS-2$
 
         if (focusControl != null)
-            FilterFieldListNavigation.installTreeNavigation(focusControl, tree);
+            FilterInputBoxListNavigation.installTreeNavigation(focusControl, tree);
 
         storeNavigatorHookState(tree, viewer, highlight, rawLp);
         tree.setData(PATCHED_KEY, Boolean.TRUE);
@@ -548,6 +560,191 @@ public final class NavigatorFilterHook implements IStartup
     {
         Object viewer = Global.invoke(navigator, "getCommonViewer"); //$NON-NLS-1$
         return viewer instanceof CommonViewer ? (CommonViewer) viewer : null;
+    }
+
+
+    /**
+     * Подсветка + серый квалификатор справа для inject-пути ({@code NavigatorDecoratingLabelProvider}).
+     * Родной git-суффикс добавляет внешний Decorating после {@link #getStyledText}.
+     */
+    private static final class NavigatorHighlightStyledProvider extends SmartOutlineLabelProvider
+    {
+        private final NavigatorSearchTextCache searchCache;
+        private String highlightPattern = ""; //$NON-NLS-1$
+
+        NavigatorHighlightStyledProvider(IStyledLabelProvider baseStyled, ILabelProvider basePlain,
+                Predicate<Object> skipHighlight, Object labelSource, Function<Object, String> matchTextFn,
+                NavigatorSearchTextCache searchCache)
+        {
+            super(baseStyled, basePlain, skipHighlight, labelSource, matchTextFn);
+            this.searchCache = searchCache;
+        }
+
+        @Override
+        public void setHighlightPattern(String pattern)
+        {
+            highlightPattern = pattern != null ? pattern : ""; //$NON-NLS-1$
+            super.setHighlightPattern(highlightPattern);
+            if (searchCache != null)
+                searchCache.onPatternChanged(highlightPattern);
+        }
+
+        @Override
+        public StyledString getStyledText(Object element)
+        {
+            StyledString styled = obtainBaseStyledText(element);
+            if (highlightPattern.isEmpty() || NavigatorTreeElementLabels.isGroupNode(element))
+                return styled;
+
+            SmartMatcher matcher = new SmartMatcher(highlightPattern);
+            String plainText = styled.getString();
+            if (!matcher.matches(resolveMatchText(element, plainText)))
+                return styled;
+
+            NavigatorFuzzySearch.QualifierMatch qualifier = resolveQualifier(element);
+            if (qualifier != null)
+                return NavigatorLabelQualifier.applyToStyledString(styled, element, qualifier, matcher);
+
+            applyHighlightIfNeeded(element, styled);
+            return styled;
+        }
+
+        private NavigatorFuzzySearch.QualifierMatch resolveQualifier(Object element)
+        {
+            MdObject mdObject = NavigatorTreeElementLabels.resolveMdObject(element);
+            if (mdObject == null)
+                return null;
+
+            String name = mdObject.getName() != null ? mdObject.getName() : ""; //$NON-NLS-1$
+            return searchCache != null
+                    ? searchCache.qualifier(mdObject, highlightPattern, name)
+                    : NavigatorFuzzySearch.findQualifierMatch(mdObject, highlightPattern, name);
+        }
+    }
+
+
+    /**
+     * Встраивание умного matcher в штатный {@code NavigatorSearchFilter}: подмена только
+     * {@code searchEngine}. Фильтрация, SearchJob, {@code applyFilterNonBlockingUi} и
+     * {@code expandTreeViewerStepByStep} остаются нативными — ввод не блокируется.
+     */
+    private static final class NavigatorNativeSearchBridge
+    {
+        private static final String NATIVE_ENGINE_KEY = "tormozit.nativeSearchEngine"; //$NON-NLS-1$
+        private static final String COMFORT_ENGINE_KEY = "tormozit.comfortSearchEngine"; //$NON-NLS-1$
+        private static final String NATIVE_FILTER_ID =
+                "com._1c.g5.v8.dt.internal.navigator.ui.filters.NavigatorSearchFilter"; //$NON-NLS-1$
+
+        private NavigatorNativeSearchBridge() {}
+
+        public static boolean install(IViewPart navigator, CommonViewer viewer, Tree tree)
+        {
+            if (navigator == null || viewer == null || tree == null || tree.isDisposed())
+                return false;
+            restoreStoredNativeFilters(viewer, tree);
+
+            Object navFilter = resolveNavigatorSearchFilter(navigator);
+            if (navFilter == null)
+            {
+                NavigatorFilterDebug.log("nativeBridge SKIP NavigatorSearchFilter not found"); //$NON-NLS-1$
+                return false;
+            }
+
+            IModelObjectTreeSearchEngine nativeDelegate = resolveNativeDelegate(navFilter, tree);
+            if (tree.getData(COMFORT_ENGINE_KEY) != null)
+            {
+                Object current = Global.getField(navFilter, "searchEngine"); //$NON-NLS-1$
+                if (current instanceof ComfortNavigatorSearchEngine)
+                    return true;
+            }
+
+            if (nativeDelegate == null)
+            {
+                NavigatorFilterDebug.log("nativeBridge SKIP searchEngine=null"); //$NON-NLS-1$
+                return false;
+            }
+
+            Object v8ProjectManager = Global.getField(navFilter, "v8ProjectManager"); //$NON-NLS-1$
+            IV8ProjectManager projectManager = v8ProjectManager instanceof IV8ProjectManager
+                    ? (IV8ProjectManager) v8ProjectManager : null;
+            Object bmModelManager = Global.getField(navFilter, "modelManager"); //$NON-NLS-1$
+            IBmModelManager modelManager = bmModelManager instanceof IBmModelManager
+                    ? (IBmModelManager) bmModelManager : Global.getOsgiService(IBmModelManager.class);
+
+            ComfortNavigatorSearchEngine comfortEngine =
+                    new ComfortNavigatorSearchEngine(nativeDelegate, projectManager, modelManager);
+            Global.setField(navFilter, "searchEngine", comfortEngine); //$NON-NLS-1$
+            tree.setData(NATIVE_ENGINE_KEY, nativeDelegate);
+            tree.setData(COMFORT_ENGINE_KEY, comfortEngine);
+            ensureNativeFilterOnViewer(viewer, navFilter);
+            NavigatorFilterDebug.log("nativeBridge installed comfortEngine on NavigatorSearchFilter"); //$NON-NLS-1$
+            return true;
+        }
+
+        public static void restoreStoredNativeFilters(CommonViewer viewer, Tree tree)
+        {
+            if (viewer == null || tree == null)
+                return;
+            Object stored = tree.getData("tormozit.storedNavFilters"); //$NON-NLS-1$
+            if (!(stored instanceof ViewerFilter[]))
+                return;
+            for (ViewerFilter filter : (ViewerFilter[]) stored)
+            {
+                if (filter != null)
+                    viewer.addFilter(filter);
+            }
+            tree.setData("tormozit.storedNavFilters", null); //$NON-NLS-1$
+            NavigatorFilterDebug.log("nativeBridge restored stored NavigatorSearchFilter(s)"); //$NON-NLS-1$
+        }
+
+        private static void ensureNativeFilterOnViewer(CommonViewer viewer, Object navFilter)
+        {
+            if (viewer == null || !(navFilter instanceof ViewerFilter filter))
+                return;
+            for (ViewerFilter existing : viewer.getFilters())
+            {
+                if (existing != null && existing.getClass().getName().contains("NavigatorSearchFilter")) //$NON-NLS-1$
+                    return;
+            }
+            viewer.addFilter(filter);
+        }
+
+        private static Object resolveNavigatorSearchFilter(IViewPart navigator)
+        {
+            if (!(navigator instanceof CommonNavigator commonNavigator))
+                return null;
+            INavigatorContentService contentService = commonNavigator.getNavigatorContentService();
+            if (contentService == null)
+                return null;
+            INavigatorFilterService filterService = contentService.getFilterService();
+            if (filterService == null)
+                return null;
+            ICommonFilterDescriptor[] descriptors = filterService.getVisibleFilterDescriptors();
+            if (descriptors == null)
+                return null;
+            for (ICommonFilterDescriptor descriptor : descriptors)
+            {
+                if (descriptor == null || !NATIVE_FILTER_ID.equals(descriptor.getId()))
+                    continue;
+                ViewerFilter filter = filterService.getViewerFilter(descriptor);
+                return filter;
+            }
+            return null;
+        }
+
+        private static IModelObjectTreeSearchEngine resolveNativeDelegate(Object navFilter, Tree tree)
+        {
+            Object stored = tree != null ? tree.getData(NATIVE_ENGINE_KEY) : null;
+            if (stored instanceof IModelObjectTreeSearchEngine engine)
+                return engine;
+
+            Object fromFilter = Global.getField(navFilter, "searchEngine"); //$NON-NLS-1$
+            if (fromFilter instanceof ComfortNavigatorSearchEngine)
+                return null;
+            if (fromFilter instanceof IModelObjectTreeSearchEngine engine)
+                return engine;
+            return null;
+        }
     }
 
 }

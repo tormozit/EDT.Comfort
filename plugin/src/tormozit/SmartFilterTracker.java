@@ -8,10 +8,10 @@ public final class SmartFilterTracker
 {
     private static final ThreadLocal<String> currentFilter = new ThreadLocal<>();
 
-    public static void setCurrentFilter(String filter)
-    {
-        currentFilter.set(filter == null ? "" : filter);
-    }
+	public static void setCurrentFilter(String filter)
+	{
+		currentFilter.set(filter == null ? "" : filter);
+	}
 
     public static String getCurrentFilter()
     {

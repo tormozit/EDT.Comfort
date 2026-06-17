@@ -1,0 +1,9 @@
+#!/bin/sh
+# Repair double EOL (CR+CRLF) on staged files before commit.
+ROOT=$(git rev-parse --show-toplevel) || exit 1
+HOOK_PS1="$ROOT/.cursor/scripts/pre-commit-repair-eol.ps1"
+if [ ! -f "$HOOK_PS1" ]; then
+  echo "pre-commit: missing $HOOK_PS1" >&2
+  exit 1
+fi
+exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$HOOK_PS1"
