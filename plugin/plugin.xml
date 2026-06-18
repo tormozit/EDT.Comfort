@@ -3,6 +3,7 @@
 <plugin>
 
   <extension point="org.eclipse.ui.startup">
+    <startup class="tormozit.ActiveProjectTracker"/>
     <startup class="tormozit.CompareConfigMenuHook"/>
     <startup class="tormozit.ApplicationsViewHook"/>
     <startup class="tormozit.ApplicationEditorHook"/>
@@ -43,6 +44,10 @@
     <context
         id="tormozit.collection.context"
         name="Окно коллекции"
+        parentId="org.eclipse.ui.contexts.window"/>
+    <context
+        id="tormozit.recentPlaces.context"
+        name="Панель «Последние места»"
         parentId="org.eclipse.ui.contexts.window"/>
   </extension>
 
@@ -131,6 +136,12 @@
           schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
           sequence="F2">
     </key>
+    <key
+          commandId="tormozit.recentPlaces.showInNavigator"
+          contextId="tormozit.recentPlaces.context"
+          schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
+          sequence="M1+T">
+    </key>
   </extension>
 
   <extension point="org.eclipse.ui.commands">
@@ -167,7 +178,12 @@
         id="tormozit.RecentPlaces"
         name="Последние места"
         categoryId="tormozit.commands.global"
-        description="Открыть список последних посещённых методов и объектов метаданных (Комфорт)"/>
+        description="Открыть панель последних посещённых методов и объектов метаданных (Комфорт)"/>
+    <command
+        id="tormozit.recentPlaces.showInNavigator"
+        name="Показать в навигаторе"
+        categoryId="tormozit.commands.global"
+        description="Показать выбранный объект из панели «Последние места» в навигаторе (Комфорт)"/>
     <command
         id="tormozit.OpenConfigurationObject"
         name="Открыть объект конфигурации"
@@ -255,6 +271,15 @@
         class="tormozit.ExecutableExtensionFactory:tormozit.RecentPlacesHandler"
         commandId="tormozit.RecentPlaces">
      </handler>
+    <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.RecentPlacesShowInNavigatorHandler"
+        commandId="tormozit.recentPlaces.showInNavigator">
+      <activeWhen>
+        <with variable="activePartId">
+          <equals value="tormozit.RecentPlacesView"/>
+        </with>
+      </activeWhen>
+    </handler>
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.OpenConfigurationObjectHandler"
         commandId="tormozit.OpenConfigurationObject">
@@ -359,9 +384,16 @@
     <view
         allowMultiple="false"
         category="tormozit.views"
-        class="tormozit.ContentAssistLogView"
-        id="tormozit.ContentAssistLogView"
+        class="tormozit.GlobalLogView"
+        id="tormozit.GlobalLogView"
         name="Журнал Комфорт"
+        restorable="true"/>
+    <view
+        allowMultiple="false"
+        category="tormozit.views"
+        class="tormozit.RecentPlacesView"
+        id="tormozit.RecentPlacesView"
+        name="Последние места"
         restorable="true"/>
   </extension>
 

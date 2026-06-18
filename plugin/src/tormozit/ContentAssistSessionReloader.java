@@ -15,7 +15,13 @@ import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Widget;
 
+import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+
+import java.util.ArrayList;
 import java.util.IdentityHashMap;
+import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Сессия assist: prepend к {@code fFilterRunnable} для {@link SmartFilterTracker},
@@ -32,17 +38,34 @@ public final class ContentAssistSessionReloader
     private static final ThreadLocal<SourceViewer> ACTIVE_VIEWER = new ThreadLocal<>();
     private static final ThreadLocal<SmartContentAssistProcessor> ACTIVE_PROCESSOR =
         new ThreadLocal<>();
+    private static final ThreadLocal<ContentAssistSessionReloader> ACTIVE_RELOADER =
+        new ThreadLocal<>();
+
+    /** Текущая сессия assist (не ThreadLocal — {@code AdditionalInfoController} с фонового потока). */
+    private static volatile ContentAssistSessionReloader openSessionReloader;
 
     private final SourceViewer viewer;
     private final ContentAssistant assistant;
     private final SmartContentAssistProcessor processor;
+    private final BslXtextEditor bslEditor;
     private final CtrlSpaceFilter ctrlSpaceFilter;
     private final String displayFilterKey;
     private final ICompletionListener completionListener;
+    private final AtomicInteger irFetchGeneration = new AtomicInteger();
+    private final AtomicInteger wordsTableDebounceGen = new AtomicInteger();
+    private final List<Runnable> pendingAfterWordsTable = new ArrayList<>();
     private CaretListener sessionCaretListener;
+    private volatile boolean wordsTableReady;
+    private volatile int wordsTableCaret = -1;
+    private volatile String activeIrDisplayKey;
+    private volatile long irSelectionEpochMs;
+    private final AtomicInteger repinScheduleId = new AtomicInteger();
+    private final ConcurrentHashMap<String, String> irMergedHtmlByDisplay = new ConcurrentHashMap<>();
+
+    private static final int WORDS_TABLE_DEBOUNCE_MS = 200;
 
     public static void install(SourceViewer viewer, ContentAssistant assistant,
-                               SmartContentAssistProcessor processor)
+                               SmartContentAssistProcessor processor, BslXtextEditor editor)
     {
         if (!ComfortSettings.isReplaceListFiltersEnabled())
             return;
@@ -53,7 +76,7 @@ public final class ContentAssistSessionReloader
             return;
 
         ContentAssistSessionReloader reloader =
-            new ContentAssistSessionReloader(viewer, assistant, processor);
+            new ContentAssistSessionReloader(viewer, assistant, processor, editor);
         INSTALLED.put(viewer, reloader);
         control.setData(DATA_KEY, Boolean.TRUE);
         ContentAssistDebug.log("install completionListener"); //$NON-NLS-1$
@@ -70,11 +93,13 @@ public final class ContentAssistSessionReloader
     }
 
     private ContentAssistSessionReloader(SourceViewer viewer, ContentAssistant assistant,
-                                         SmartContentAssistProcessor processor)
+                                         SmartContentAssistProcessor processor,
+                                         BslXtextEditor editor)
     {
         this.viewer = viewer;
         this.assistant = assistant;
         this.processor = processor;
+        this.bslEditor = editor;
         this.ctrlSpaceFilter = new CtrlSpaceFilter(assistant);
         this.displayFilterKey = "tormozit.ctrlSpaceFilter." + System.identityHashCode(viewer); //$NON-NLS-1$
 
@@ -91,6 +116,16 @@ public final class ContentAssistSessionReloader
                 ACTIVE_ASSISTANT.set(assistant);
                 ACTIVE_VIEWER.set(viewer);
                 ACTIVE_PROCESSOR.set(processor);
+                ACTIVE_RELOADER.set(ContentAssistSessionReloader.this);
+                openSessionReloader = ContentAssistSessionReloader.this;
+                wordsTableReady = false;
+                wordsTableCaret = -1;
+                activeIrDisplayKey = null;
+                irMergedHtmlByDisplay.clear();
+                synchronized (pendingAfterWordsTable)
+                {
+                    pendingAfterWordsTable.clear();
+                }
 
                 int caret = ContentAssistPopupSync.syncSessionOffsets(assistant, viewer);
                 if (viewer.getDocument() != null && caret >= 0)
@@ -112,6 +147,7 @@ public final class ContentAssistSessionReloader
                     ContentAssistPopupSync.installFilterTrackerPrepend(assistant, viewer);
                     installCtrlSpaceFilter();
                     installSessionCaretListener();
+                    scheduleWordsTablePreparation(caret);
                 }
 
                 if (comfortListFilter)
@@ -138,6 +174,17 @@ public final class ContentAssistSessionReloader
                 ACTIVE_ASSISTANT.remove();
                 ACTIVE_VIEWER.remove();
                 ACTIVE_PROCESSOR.remove();
+                ACTIVE_RELOADER.remove();
+                if (openSessionReloader == ContentAssistSessionReloader.this)
+                    openSessionReloader = null;
+                wordsTableReady = false;
+                wordsTableCaret = -1;
+                activeIrDisplayKey = null;
+                irMergedHtmlByDisplay.clear();
+                synchronized (pendingAfterWordsTable)
+                {
+                    pendingAfterWordsTable.clear();
+                }
 
                 ContentAssistPopupSync.uninstallFilterTrackerPrepend(assistant);
                 ContentAssistPopupSync.clearPendingFilterToggleSelection();
@@ -201,7 +248,36 @@ public final class ContentAssistSessionReloader
         SmartContentAssistProcessor.primeFilterTrackerOnly(viewer, caret);
         if (!ContentAssistPopupSync.isPopupVisible(assistant))
             return;
+        scheduleWordsTablePreparationDebounced(caret);
         ContentAssistPopupSync.scheduleRecomputeOnCaretChange(assistant, viewer, processor);
+    }
+
+    private void scheduleWordsTablePreparationDebounced(int caret)
+    {
+        if (caret < 0)
+            return;
+        int gen = wordsTableDebounceGen.incrementAndGet();
+        Control c = (Control) viewer.getTextWidget();
+        if (c == null || c.isDisposed())
+            return;
+        Display display = c.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        display.timerExec(WORDS_TABLE_DEBOUNCE_MS, () -> {
+            if (gen != wordsTableDebounceGen.get())
+                return;
+            if (!ContentAssistPopupSync.isPopupVisible(assistant))
+                return;
+            StyledText text = viewer.getTextWidget() instanceof StyledText st ? st : null;
+            if (text == null || text.isDisposed())
+                return;
+            int liveCaret = text.getCaretOffset();
+            if (liveCaret < 0)
+                return;
+            if (wordsTableReady && liveCaret == wordsTableCaret)
+                return;
+            scheduleWordsTablePreparation(liveCaret);
+        });
     }
 
     private void installCtrlSpaceFilter()
@@ -234,17 +310,142 @@ public final class ContentAssistSessionReloader
 
     public static ContentAssistant getActiveAssistant()
     {
-        return ACTIVE_ASSISTANT.get();
+        ContentAssistant fromThread = ACTIVE_ASSISTANT.get();
+        if (fromThread != null)
+            return fromThread;
+        ContentAssistSessionReloader reloader = getActiveReloader();
+        return reloader != null ? reloader.assistant : null;
     }
 
     public static SourceViewer getActiveViewer()
     {
-        return ACTIVE_VIEWER.get();
+        SourceViewer fromThread = ACTIVE_VIEWER.get();
+        if (fromThread != null)
+            return fromThread;
+        ContentAssistSessionReloader reloader = getActiveReloader();
+        return reloader != null ? reloader.viewer : null;
     }
 
     public static SmartContentAssistProcessor getActiveProcessor()
     {
-        return ACTIVE_PROCESSOR.get();
+        SmartContentAssistProcessor fromThread = ACTIVE_PROCESSOR.get();
+        if (fromThread != null)
+            return fromThread;
+        ContentAssistSessionReloader reloader = getActiveReloader();
+        return reloader != null ? reloader.processor : null;
+    }
+
+    public static ContentAssistSessionReloader getActiveReloader()
+    {
+        ContentAssistSessionReloader fromThread = ACTIVE_RELOADER.get();
+        if (fromThread != null)
+            return fromThread;
+        return openSessionReloader;
+    }
+
+    public BslXtextEditor getBslEditor()
+    {
+        return bslEditor;
+    }
+
+    public boolean isWordsTableReady()
+    {
+        return wordsTableReady;
+    }
+
+    public int getWordsTableCaret()
+    {
+        return wordsTableCaret;
+    }
+
+    public int nextIrFetchGeneration()
+    {
+        return irFetchGeneration.incrementAndGet();
+    }
+
+    /** Новый gen только при смене элемента списка — иначе repin/apply не отменяются зря. */
+    public int beginIrFetchForDisplay(String displayKey)
+    {
+        if (displayKey != null && displayKey.equals(activeIrDisplayKey))
+            return irFetchGeneration.get();
+        activeIrDisplayKey = displayKey;
+        irSelectionEpochMs = System.currentTimeMillis();
+        return irFetchGeneration.incrementAndGet();
+    }
+
+    public long getIrSelectionEpochMs()
+    {
+        return irSelectionEpochMs;
+    }
+
+    public int getIrFetchGeneration()
+    {
+        return irFetchGeneration.get();
+    }
+
+    public String getIrMergedHtml(String displayKey)
+    {
+        if (displayKey == null || displayKey.isEmpty())
+            return null;
+        return irMergedHtmlByDisplay.get(displayKey);
+    }
+
+    public void putIrMergedHtml(String displayKey, String mergedHtml)
+    {
+        if (displayKey == null || displayKey.isEmpty()
+            || mergedHtml == null || mergedHtml.isEmpty())
+            return;
+        irMergedHtmlByDisplay.put(displayKey, mergedHtml);
+    }
+
+    /** Отменяет отложенные repin предыдущего элемента. */
+    public int nextRepinScheduleId()
+    {
+        return repinScheduleId.incrementAndGet();
+    }
+
+    public boolean isCurrentRepinSchedule(int scheduleId)
+    {
+        return scheduleId == repinScheduleId.get();
+    }
+
+    public void runWhenWordsTableReady(Runnable task)
+    {
+        if (task == null)
+            return;
+        if (wordsTableReady)
+        {
+            task.run();
+            return;
+        }
+        synchronized (pendingAfterWordsTable)
+        {
+            pendingAfterWordsTable.add(task);
+        }
+    }
+
+    private void scheduleWordsTablePreparation(int caret)
+    {
+        if (bslEditor == null || caret < 0)
+            return;
+        IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(bslEditor);
+        if (session == null)
+            return;
+        wordsTableReady = false;
+        wordsTableCaret = caret;
+        irMergedHtmlByDisplay.clear();
+        IrBslExpressionHtmlSupport.prepareWordsTableAsync(session, bslEditor, caret, () -> {
+            wordsTableReady = true;
+            BslSideHintDebug.log("wordsTable ready caret=" + caret); //$NON-NLS-1$
+            List<Runnable> pending;
+            synchronized (pendingAfterWordsTable)
+            {
+                pending = new ArrayList<>(pendingAfterWordsTable);
+                pendingAfterWordsTable.clear();
+            }
+            for (Runnable task : pending)
+                task.run();
+        });
     }
 
     /** Повторная загрузка списка после reconcile (member-access после точки). */

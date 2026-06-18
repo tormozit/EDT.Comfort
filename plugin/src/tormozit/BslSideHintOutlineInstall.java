@@ -285,35 +285,12 @@ public final class BslSideHintOutlineInstall
         if (session == null || session.executor == null || session.executor.isShutdown())
             return;
         tree.setData(WORDS_TABLE_READY_KEY, Boolean.FALSE);
-        try
-        {
-            session.syncCodeEditorToIR(editor, WORDS_TABLE_SYNC_CARET_OFFSET);
-        }
-        catch (Exception e)
-        {
-            BslSideHintDebug.problem("wordsTable sync: " + e.getMessage()); //$NON-NLS-1$
-            return;
-        }
-        session.executor.submit(() -> {
-            try
-            {
-                IrOutlineSideHintSupport.ensureCodeEditor(session);
-                ComBridge.invoke(session.codeEditor, "РазобратьТекущийКонтекст"); //$NON-NLS-1$
-                ComBridge.invoke(session.codeEditor, "ЗаполнитьТаблицуСлов"); //$NON-NLS-1$
-                Display display = Display.getDefault();
-                if (display != null && !display.isDisposed())
-                    display.asyncExec(() -> {
-                        if (tree.isDisposed())
-                            return;
-                        tree.setData(WORDS_TABLE_READY_KEY, Boolean.TRUE);
-                        BslSideHintDebug.log("wordsTable ready"); //$NON-NLS-1$
-                        retryIrMethodEnrichmentIfNeeded(tree);
-                    });
-            }
-            catch (Exception e)
-            {
-                BslSideHintDebug.problem("wordsTable: " + e.getMessage()); //$NON-NLS-1$
-            }
+        IrBslExpressionHtmlSupport.prepareWordsTableAsync(session, editor, WORDS_TABLE_SYNC_CARET_OFFSET, () -> {
+            if (tree.isDisposed())
+                return;
+            tree.setData(WORDS_TABLE_READY_KEY, Boolean.TRUE);
+            BslSideHintDebug.log("wordsTable ready"); //$NON-NLS-1$
+            retryIrMethodEnrichmentIfNeeded(tree);
         });
     }
 
@@ -331,7 +308,7 @@ public final class BslSideHintOutlineInstall
             return;
         }
         BslXtextEditor editor = IrMethodListHandler.resolveBslEditor(contextHost);
-        IRSession session = IrOutlineSideHintSupport.resolveConnectedSession(editor);
+        IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(editor);
         if (session == null)
             return;
         final int irGen = resolveGeneration(tree, gen);
@@ -339,7 +316,8 @@ public final class BslSideHintOutlineInstall
         final IInformationControlCreator creator = baseHint.getControlCreator();
         final int sourceOffset = baseHint.getSourceOffset();
         session.executor.submit(() -> {
-            String irHtml = IrOutlineSideHintSupport.fetchMethodDescriptionHtml(session, methodName);
+            String irHtml = IrBslExpressionHtmlSupport.fetchDescriptionHtml(session, methodName,
+                IrBslExpressionHtmlSupport.KIND_METHOD);
             if (irHtml == null || irHtml.isBlank())
                 return;
             Display display = Display.getDefault();
@@ -1226,19 +1204,6 @@ public final class BslSideHintOutlineInstall
     {
         private IrOutlineSideHintSupport() {}
 
-        static IRSession resolveConnectedSession(BslXtextEditor editor)
-        {
-            if (editor == null)
-                return null;
-            IDtProject dtProject = Global.getDtProjectFromBslEditor(editor);
-            if (dtProject == null || !IRApplication.hasConnectedSessionForKeys(dtProject))
-                return null;
-            IRSession session = IRApplication.getSession(dtProject);
-            if (session == null || session.executor == null || session.executor.isShutdown())
-                return null;
-            return session;
-        }
-
         static String resolveOutlineMethodName(Object element)
         {
             if (element == null)
@@ -1266,29 +1231,6 @@ public final class BslSideHintOutlineInstall
             if (formItemEvent instanceof Boolean && (Boolean) formItemEvent)
                 return null;
             return name;
-        }
-
-        static String fetchMethodDescriptionHtml(IRSession session, String methodName)
-        {
-            if (session == null || methodName == null || methodName.isEmpty())
-                return null;
-            try
-            {
-                ensureCodeEditor(session);
-                Object raw = ComBridge.invoke(session.codeEditor, "ОписаниеХТМЛВыражения", methodName, "Метод"); //$NON-NLS-1$ //$NON-NLS-2$
-                String html = ComBridge.toString(raw);
-                if (html == null || html.isBlank())
-                {
-                    BslSideHintDebug.step("ir fetch", "пустой ответ method=" + methodName); //$NON-NLS-1$ //$NON-NLS-2$
-                    return null;
-                }
-                return html;
-            }
-            catch (Exception e)
-            {
-                BslSideHintDebug.problem("ir fetch method=" + methodName + ": " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
-                return null;
-            }
         }
 
         private static boolean isOutlineMethodElement(Object element)
@@ -1327,13 +1269,6 @@ public final class BslSideHintOutlineInstall
             return fromField instanceof String fieldName && !fieldName.isEmpty() ? fieldName : null;
         }
 
-        static void ensureCodeEditor(IRSession session)
-        {
-            if (session.codeEditor != null)
-                return;
-            Object irCache = session.getModule("ирКэш"); //$NON-NLS-1$
-            session.codeEditor = ComBridge.invoke(irCache, "ПолеТекстаПрограммы", 0); //$NON-NLS-1$
-        }
     }
 
 }

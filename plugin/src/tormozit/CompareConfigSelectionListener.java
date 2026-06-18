@@ -1,21 +1,13 @@
 package tormozit;
-import java.lang.reflect.Method;
 import java.util.List;
 
-import org.eclipse.e4.ui.model.application.ui.basic.MPart;
-import org.eclipse.e4.ui.workbench.modeling.EPartService;
-import org.eclipse.e4.ui.workbench.modeling.ESelectionService;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.viewers.AbstractTreeViewer;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.ISelectionChangedListener;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.SelectionChangedEvent;
-import org.eclipse.jface.viewers.StructuredSelection;
-import org.eclipse.swt.widgets.Display;
 import org.eclipse.ui.IEditorPart;
-import org.eclipse.ui.IViewPart;
-import org.eclipse.ui.navigator.CommonNavigator;
 
 import com._1c.g5.v8.dt.compare.core.IComparisonSession;
 import com._1c.g5.v8.dt.compare.model.ComparisonSide;
@@ -52,60 +44,10 @@ public class CompareConfigSelectionListener implements ISelectionChangedListener
     public void showObjectInNavigator(ISelection selection, boolean ifForced)
     {
         EObject eObject = resolveEObject(selection, null, true);
-        
-        if (eObject != null && editor != null) {
-            
-            // Опционально: можно пушить EObject в глобальную E4 шину
-            ESelectionService selectionService = editor.getSite().getService(ESelectionService.class);
-            if (selectionService != null) {
-                selectionService.setSelection(eObject);
-            }
-            
-            // Оповещаем навигатор
-            IViewPart view = Global.getViewById(Global.NAVIGATOR_VIEW_ID);
-            if (view instanceof CommonNavigator) {
-                CommonNavigator navigator = (CommonNavigator) view;
-                 if (ifForced || isLinkingEnabled(navigator)) {
-                    Display.getDefault().asyncExec(() -> {
-                        // Формируем выделение для навигатора
-                        StructuredSelection navSelection = new StructuredSelection(eObject);
-                        
-                        // 1. Показываем объект в дереве навигатора
-                        navigator.selectReveal(navSelection);
-                        
-                        Class<?> classMPart = MPart.class;
-                        Class<?> classEPartService = EPartService.class;
-                        Object partService = navigator.getSite().getService(classEPartService);
-                        Object mPart = navigator.getSite().getService(classMPart);
-                        if (partService != null && mPart != null) 
-                        {
-                            try
-                            {
-                                // Ищем метод activate именно в EPartService
-                                Method activateMethod = partService.getClass().getMethod("activate", classMPart, boolean.class);
-                                
-                                // Вызываем активацию с параметром false (без перехвата фокуса OS)
-                                activateMethod.invoke(partService, mPart, false);
-                                activateMethod.invoke(partService, editor.getSite().getService(classMPart), false);
-                            }
-                            catch (Exception ignored)
-                            {
-                            }
-                        }
-                    });
-                }
-            }
-        }
+        if (eObject != null && editor != null)
+            NavigatorReveal.reveal(eObject, ifForced, editor);
     }
-    
-    private boolean isLinkingEnabled(CommonNavigator navigator)
-    {
-        Object result = Global.call(navigator, "isLinkingEnabled");
-        if (result instanceof Boolean) return (Boolean) result;
-        result = Global.getField(navigator, "isLinkingEnabled");
-        return result instanceof Boolean && (Boolean) result;
-    }
-    
+
     public EObject resolveEObject(ISelection selection, ComparisonSide side, boolean allowNearestParent)
     {
         if (!(selection instanceof IStructuredSelection))

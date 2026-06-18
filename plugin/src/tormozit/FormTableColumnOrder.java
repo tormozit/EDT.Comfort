@@ -2,6 +2,7 @@ package tormozit;
 
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.swt.widgets.Table;
+import org.eclipse.ui.IMemento;
 
 /**
  * Сохранение и восстановление порядка колонок таблицы ({@link Table#getColumnOrder()}).
@@ -24,6 +25,18 @@ final class FormTableColumnOrder
             table.setColumnOrder(order);
     }
 
+    static void load(IMemento memento, String key, Table table)
+    {
+        if (memento == null || key == null || table == null || table.isDisposed())
+            return;
+        int count = table.getColumnCount();
+        if (count <= 0)
+            return;
+        int[] order = parseOrder(memento.getString(key), count);
+        if (order != null)
+            table.setColumnOrder(order);
+    }
+
     static void save(IDialogSettings settings, String key, Table table)
     {
         if (settings == null || key == null || table == null || table.isDisposed())
@@ -31,6 +44,13 @@ final class FormTableColumnOrder
         if (table.getColumnCount() <= 0)
             return;
         settings.put(key, formatOrder(table.getColumnOrder()));
+    }
+
+    static String formatOrder(Table table)
+    {
+        if (table == null || table.isDisposed() || table.getColumnCount() <= 0)
+            return ""; //$NON-NLS-1$
+        return formatOrder(table.getColumnOrder());
     }
 
     private static int[] parseOrder(String raw, int columnCount)

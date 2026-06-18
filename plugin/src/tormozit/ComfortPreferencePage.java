@@ -165,7 +165,7 @@ public class ComfortPreferencePage
         logViewLink.addListener(SWT.Selection, e -> {
             if (!"Журнал".equals(e.text)) //$NON-NLS-1$
                 return;
-            ContentAssistLog.showView();
+            GlobalLog.showView();
         });
     }
 

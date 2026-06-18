@@ -8,6 +8,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import org.eclipse.core.runtime.preferences.InstanceScope;
 import org.eclipse.ui.preferences.ScopedPreferenceStore;
@@ -119,6 +120,8 @@ public final class RecentPlaces
 
     private ScopedPreferenceStore prefs;
 
+    private final List<Runnable> changeListeners = new CopyOnWriteArrayList<>();
+
     private RecentPlaces() {}
 
     // =========================================================================
@@ -153,7 +156,34 @@ public final class RecentPlaces
         String prevHeadKey = headKey();
         map.put(key, new Entry(key, navRef, displayName, ownName, projectName, LocalDateTime.now()));
         save();
+        notifyChanged();
         return !Objects.equals(key, prevHeadKey);
+    }
+
+    public void addChangeListener(Runnable listener)
+    {
+        if (listener != null)
+            changeListeners.add(listener);
+    }
+
+    public void removeChangeListener(Runnable listener)
+    {
+        changeListeners.remove(listener);
+    }
+
+    private void notifyChanged()
+    {
+        for (Runnable listener : changeListeners)
+        {
+            try
+            {
+                listener.run();
+            }
+            catch (Exception ex)
+            {
+                Global.log("RecentPlaces listener error: " + ex); //$NON-NLS-1$
+            }
+        }
     }
 
     /** Ключ самой свежей записи (голова списка «новейшие первыми»). */
@@ -179,6 +209,7 @@ public final class RecentPlaces
     {
         map.clear();
         save();
+        notifyChanged();
     }
 
     public synchronized int size()

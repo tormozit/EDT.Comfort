@@ -11,11 +11,11 @@ import org.eclipse.ui.PartInitException;
 import org.eclipse.ui.PlatformUI;
 
 /**
- * Кольцевой буфер общего отладочного журнала ({@link ContentAssistLogView}).
+ * Кольцевой буфер общего отладочного журнала ({@link GlobalLogView}).
  */
-public final class ContentAssistLog
+public final class GlobalLog
 {
-    public static final String VIEW_ID = "tormozit.ContentAssistLogView"; //$NON-NLS-1$
+    public static final String VIEW_ID = "tormozit.GlobalLogView"; //$NON-NLS-1$
 
     /** Сигнал представлению перечитать {@link #getFullText()} после обрезки буфера. */
     static final String RESYNC = "\u0000"; //$NON-NLS-1$
@@ -30,7 +30,7 @@ public final class ContentAssistLog
     private static final CopyOnWriteArrayList<Consumer<String>> listeners =
         new CopyOnWriteArrayList<>();
 
-    private ContentAssistLog() {}
+    private GlobalLog() {}
 
     public static void append(String message)
     {

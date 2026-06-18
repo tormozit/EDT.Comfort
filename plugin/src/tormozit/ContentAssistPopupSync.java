@@ -11,8 +11,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.IInformationControlExtension5;
 import org.eclipse.jface.text.contentassist.ContentAssistant;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
+import org.eclipse.xtext.ui.editor.hover.html.IXtextBrowserInformationControl;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.widgets.Control;
@@ -96,6 +98,8 @@ public final class ContentAssistPopupSync
     private static Method selectProposalMethod;
     private static Method configureAndMakeVisibleMethod;
     private static Method handleTableSelectionChangedMethod;
+    private static Field fAdditionalInfoProposalField;
+    private static Field fAdditionalInfoInformationField;
 
     private ContentAssistPopupSync() {}
 
@@ -1045,6 +1049,14 @@ public final class ContentAssistPopupSync
         handleTableSelectionChangedMethod.setAccessible(true);
         try
         {
+            fAdditionalInfoProposalField = controllerClass.getDeclaredField("fProposal"); //$NON-NLS-1$
+            fAdditionalInfoProposalField.setAccessible(true);
+            fAdditionalInfoInformationField = controllerClass.getDeclaredField("fInformation"); //$NON-NLS-1$
+            fAdditionalInfoInformationField.setAccessible(true);
+        }
+        catch (NoSuchFieldException ignored) {}
+        try
+        {
             fMessageTextField = popupClass.getDeclaredField("fMessageText"); //$NON-NLS-1$
             fMessageTextField.setAccessible(true);
             setStatusLineVisibleMethod =
@@ -1094,6 +1106,174 @@ public final class ContentAssistPopupSync
     {
         try { hideProposalPopup(getPopup(assistant)); }
         catch (Exception ignored) {}
+    }
+
+    public static Object resolveAdditionalInfoController(ContentAssistant assistant)
+    {
+        if (assistant == null)
+            return null;
+        try
+        {
+            Object popup = getPopup(assistant);
+            if (popup == null)
+                return null;
+            initPopupReflection(popup);
+            if (fAdditionalInfoControllerField == null)
+                return null;
+            return fAdditionalInfoControllerField.get(popup);
+        }
+        catch (Exception ignored)
+        {
+            return null;
+        }
+    }
+
+    public static IXtextBrowserInformationControl resolveVisibleBrowserControl(ContentAssistant assistant)
+    {
+        Object controller = resolveAdditionalInfoController(assistant);
+        if (controller == null)
+            return null;
+        Object control = Global.invoke(controller, "getCurrentInformationControl2"); //$NON-NLS-1$
+        return control instanceof IXtextBrowserInformationControl browser ? browser : null;
+    }
+
+    private static Method additionalInfoShowInformationMethod;
+
+    /** Подменяет {@code fInformation} до штатного {@code showInformation} контроллера. */
+    public static void patchAdditionalInfoPayload(ContentAssistant assistant, Object payload)
+    {
+        if (assistant == null || payload == null)
+            return;
+        try
+        {
+            Object controller = resolveAdditionalInfoController(assistant);
+            if (controller == null || fAdditionalInfoInformationField == null)
+                return;
+            fAdditionalInfoInformationField.set(controller, payload);
+        }
+        catch (Exception e)
+        {
+            ContentAssistDebug.log("patchAdditionalInfoPayload: " + e.getMessage()); //$NON-NLS-1$
+        }
+    }
+
+    /** Повторно показывает merged HTML через штатный AdditionalInfoController. */
+    public static void pinMergedAdditionalInfo(
+        ContentAssistant assistant, String displayKey, Object mergedInfo)
+    {
+        if (assistant == null || mergedInfo == null)
+            return;
+        try
+        {
+            Object controller = resolveAdditionalInfoController(assistant);
+            if (controller == null)
+                return;
+            Object popup = getPopupObject(assistant);
+            if (popup == null)
+                return;
+            initPopupReflection(popup);
+            ICompletionProposal proposal = resolveProposalByDisplay(popup, displayKey);
+            if (proposal == null)
+                return;
+            if (additionalInfoShowInformationMethod == null)
+            {
+                additionalInfoShowInformationMethod = controller.getClass().getDeclaredMethod(
+                    "showInformation", ICompletionProposal.class, Object.class); //$NON-NLS-1$
+                additionalInfoShowInformationMethod.setAccessible(true);
+            }
+            additionalInfoShowInformationMethod.invoke(controller, proposal, mergedInfo);
+        }
+        catch (Exception e)
+        {
+            ContentAssistDebug.log("pinMergedAdditionalInfo: " + e.getMessage()); //$NON-NLS-1$
+        }
+    }
+
+    private static ICompletionProposal resolveProposalByDisplay(Object popup, String displayKey)
+    {
+        if (popup == null || fFilteredProposalsField == null)
+            return null;
+        try
+        {
+            @SuppressWarnings("unchecked")
+            List<ICompletionProposal> list =
+                (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+            if (list == null)
+                return null;
+            if (displayKey != null)
+            {
+                for (ICompletionProposal proposal : list)
+                {
+                    if (proposal != null && displayKey.equals(proposal.getDisplayString()))
+                        return proposal;
+                }
+            }
+            Table table = getProposalTable(popup);
+            if (table != null && !table.isDisposed())
+            {
+                int idx = table.getSelectionIndex();
+                if (idx >= 0 && idx < list.size())
+                    return list.get(idx);
+            }
+        }
+        catch (Exception ignored) {}
+        return null;
+    }
+
+    public static boolean isSelectedDisplay(ContentAssistant assistant, String displayKey)
+    {
+        if (assistant == null || displayKey == null || displayKey.isEmpty())
+            return false;
+        try
+        {
+            Object popup = getPopupObject(assistant);
+            if (popup == null)
+                return false;
+            initPopupReflection(popup);
+            Table table = getProposalTable(popup);
+            if (table == null || table.isDisposed())
+                return false;
+            int idx = table.getSelectionIndex();
+            if (idx < 0 || fFilteredProposalsField == null)
+                return false;
+            @SuppressWarnings("unchecked")
+            List<ICompletionProposal> list =
+                (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+            if (list == null || idx >= list.size())
+                return false;
+            ICompletionProposal selected = list.get(idx);
+            return selected != null && displayKey.equals(selected.getDisplayString());
+        }
+        catch (Exception e)
+        {
+            return false;
+        }
+    }
+
+    public static boolean isShowingProposal(ContentAssistant assistant, ICompletionProposal proposal)
+    {
+        if (assistant == null || proposal == null)
+            return false;
+        try
+        {
+            Object controller = resolveAdditionalInfoController(assistant);
+            if (controller == null || fAdditionalInfoProposalField == null)
+                return false;
+            Object current = fAdditionalInfoProposalField.get(controller);
+            if (!(current instanceof ICompletionProposal currentProposal))
+                return false;
+            ICompletionProposal expected = SmartContentAssistProcessor.unwrapProposal(proposal);
+            ICompletionProposal actual = SmartContentAssistProcessor.unwrapProposal(currentProposal);
+            if (expected == null || actual == null)
+                return false;
+            String d1 = expected.getDisplayString();
+            String d2 = actual.getDisplayString();
+            return d1 != null && d1.equals(d2);
+        }
+        catch (Exception ignored)
+        {
+            return false;
+        }
     }
 
     private static boolean shouldCloseOnPendingDocumentEvents(Object popup)
@@ -1368,16 +1548,10 @@ public final class ContentAssistPopupSync
         String display = p != null ? p.getDisplayString() : null;
         if (display == null || display.isEmpty())
             return false;
-        String name = extractProposalName(display);
+        String name = BslCompletionSideHintResolver.extractProposalName(display);
+        if (name == null)
+            return false;
         return name.length() >= prefix.length()
             && name.regionMatches(true, 0, prefix, 0, prefix.length());
-    }
-
-    private static String extractProposalName(String display)
-    {
-        int parenIdx = display.indexOf('(');
-        String withoutParams = parenIdx >= 0 ? display.substring(0, parenIdx).trim() : display.trim();
-        int colonIdx = withoutParams.indexOf(':');
-        return colonIdx >= 0 ? withoutParams.substring(0, colonIdx).trim() : withoutParams;
     }
 }

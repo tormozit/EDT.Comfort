@@ -7,7 +7,7 @@ alwaysApply: true
 
 Весь плагин пишет логи **единообразно**:
 
-- **Куда:** только журнал «Комфорт» (`ContentAssistLog` / вид «Журнал Комфорт»).
+- **Куда:** только журнал «Комфорт» (`GlobalLog` / вид «Журнал Комфорт»).
 - **Когда:** только если пользователь включил **«Общее логирование»** (Параметры → Комфорт → `ComfortSettings.isDebugLogEnabled()` → `Global.isLogEnabled()`).
 
 Других каналов и обходных путей нет.
@@ -28,7 +28,7 @@ public static void log(String msg)
 
 ## Запрещено
 
-- Прямой **`ContentAssistLog.append(...)`** в обход `Global.isLogEnabled()`.
+- Прямой **`GlobalLog.append(...)`** в обход `Global.isLogEnabled()`.
 - **`System.out.println`** / `System.err` без явной договорённости с пользователем.
 - JVM-флаги вида **`-Dtormozit.*.debug`** / **`-Dtormozit.*.verbose`** для включения логов — единственный выключатель у пользователя в настройках.
 - Дублировать запись в Eclipse Error Log, если это не отдельная осознанная задача.

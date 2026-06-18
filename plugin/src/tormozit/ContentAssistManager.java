@@ -202,7 +202,7 @@ public final class ContentAssistManager
 
         // --- автооткрытие и символы-триггеры ---
         boolean ok = ContentAssistPatcher.applyPatch(
-            sourceViewer, settings.getTimeout(), settings.getCharset());
+            sourceViewer, settings.getTimeout(), settings.getCharset(), editor);
         ContentAssistDebug.log("BslEditor patch " + (ok ? "OK" : "FAIL") //$NON-NLS-1$
             + " editor=" + editor.getTitle()); //$NON-NLS-1$
     }

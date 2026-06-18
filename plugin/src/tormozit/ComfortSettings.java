@@ -12,10 +12,10 @@ public final class ComfortSettings
     /** Ключ булевой настройки «Заменять фильтры в списках». */
     public static final String PREF_REPLACE_LIST_FILTERS = "comfort.replaceListFilters"; //$NON-NLS-1$
 
-    /** Ключ: общий отладочный журнал ({@link ContentAssistLogView}). */
+    /** Ключ: общий отладочный журнал ({@link GlobalLogView}). */
     public static final String PREF_DEBUG_LOG = "comfort.debugLog"; //$NON-NLS-1$
 
-    /** Ключ: автопрокрутка журнала к последней строке ({@link ContentAssistLogView}). */
+    /** Ключ: автопрокрутка журнала к последней строке ({@link GlobalLogView}). */
     public static final String PREF_LOG_AUTOSCROLL = "comfort.log.autoscroll"; //$NON-NLS-1$
 
     /** Устаревший ключ; читается при миграции настроек. */

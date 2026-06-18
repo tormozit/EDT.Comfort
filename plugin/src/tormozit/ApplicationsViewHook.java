@@ -10,9 +10,7 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.WeakHashMap;
 
-import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResourceChangeListener;
 import org.eclipse.core.resources.ResourcesPlugin;
@@ -43,7 +41,6 @@ import org.eclipse.swt.events.SelectionEvent;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.widgets.Event;
-import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Menu;
@@ -52,14 +49,9 @@ import org.eclipse.swt.widgets.ToolBar;
 import org.eclipse.swt.widgets.ToolItem;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
-import org.eclipse.jface.viewers.ISelection;
-import org.eclipse.jface.viewers.TreeSelection;
 import org.eclipse.ui.IActionBars;
-import org.eclipse.ui.IEditorInput;
 import org.eclipse.ui.IEditorPart;
-import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
-import org.eclipse.ui.ISelectionListener;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.IViewReference;
@@ -69,11 +61,9 @@ import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
-import org.eclipse.ui.navigator.CommonNavigator;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.ServiceReference;
 
-import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.platform.services.core.runtimes.environments.IResolvableRuntimeInstallation;
 import com._1c.g5.v8.dt.platform.services.model.InfobaseReference;
 import com._1c.g5.v8.dt.platform.services.model.RuntimeInstallation;
@@ -148,24 +138,14 @@ public class ApplicationsViewHook implements IStartup
     private static final Set<IWorkbenchWindow> PROJECT_SYNC_HOOKED_WINDOWS =
         Collections.newSetFromMap(new IdentityHashMap<>());
 
-    private static final Set<IWorkbenchWindow> FOCUS_GUARD_WINDOWS =
+    private static final Set<IWorkbenchPage> APPS_CONTEXT_LISTENERS =
         Collections.newSetFromMap(new IdentityHashMap<>());
 
     private static final int PROJECT_SYNC_MAX_ATTEMPTS = 25;
 
     private static final int HOOK_VIEW_MAX_ATTEMPTS = 25;
 
-    private static final int NAV_SELECTION_CORRECTION_MAX = 8;
-
-    private static final int NAV_PROJECT_SYNC_MAX_ATTEMPTS = 12;
-
     private static final int STOCK_OVERWRITE_CORRECTION_MAX = 6;
-
-    private static final int STARTUP_PROJECT_SYNC_GRACE_MS = 2500;
-
-    private static final int GRACE_PROJECT_CORRECTION_MAX = 50;
-
-    private static final Map<IWorkbenchPage, Long> PROJECT_SYNC_GRACE_UNTIL = new WeakHashMap<>();
 
     private static final Set<IWorkbenchPage> PAGE_SYNC_BOOTSTRAPPED =
         Collections.newSetFromMap(new IdentityHashMap<>());
@@ -217,9 +197,6 @@ public class ApplicationsViewHook implements IStartup
         if (window == null || !PROJECT_SYNC_HOOKED_WINDOWS.add(window))
             return;
 
-        installEditorFocusProjectGuard(window);
-        installNavigatorSelectionGuard(window);
-
         IWorkbenchPage page = window.getActivePage();
         if (page != null)
             bootstrapPageProjectSync(page);
@@ -238,26 +215,14 @@ public class ApplicationsViewHook implements IStartup
                     detachStockNavigatorSelectionListener((IViewPart) part);
                     if (p != null)
                     {
-                        syncApplicationsProjectForPage(p);
                         bootstrapPageProjectSync(p);
                         scheduleProjectSyncForPage(p, 0);
                         scheduleStockOverwriteCorrection(p, 0);
                     }
                     scheduleHookApplicationsView((IViewPart) part, 0);
                 }
-                else if (ref instanceof IEditorReference)
-                {
-                    IWorkbenchPage p = ref.getPage();
-                    IEditorPart ed = ((IEditorReference) ref).getEditor(false);
-                    if (p != null)
-                    {
-                        if (ed != null && p.getActiveEditor() == ed)
-                            syncActiveEditorProject(p);
-                        scheduleProjectSyncForPage(p, 0);
-                        if (ed != null)
-                            scheduleEditorReadyProjectSync(p, ed, 0);
-                    }
-                }
+                else if (ref.getPage() != null)
+                    bootstrapPageProjectSync(ref.getPage());
             }
 
             @Override
@@ -267,35 +232,10 @@ public class ApplicationsViewHook implements IStartup
                 if (part == null)
                     return;
                 IWorkbenchPage p = part.getSite().getPage();
-                if (p == null)
-                    return;
-                bootstrapPageProjectSync(p);
-                syncApplicationsProjectForActivatedPart(p, part);
+                if (p != null)
+                    bootstrapPageProjectSync(p);
             }
 
-            @Override
-            public void partInputChanged(IWorkbenchPartReference ref)
-            {
-                if (!(ref instanceof IEditorReference))
-                    return;
-                IEditorPart editor = ((IEditorReference) ref).getEditor(false);
-                if (editor == null)
-                    return;
-                IWorkbenchPage p = ref.getPage();
-                if (p == null || p.getActiveEditor() != editor)
-                    return;
-                applyApplicationsProject(p, resolveEditorProject(editor));
-            }
-
-            @Override public void partBroughtToTop(IWorkbenchPartReference ref)
-            {
-                if (!(ref instanceof IEditorReference))
-                    return;
-                IEditorPart editor = ((IEditorReference) ref).getEditor(false);
-                IWorkbenchPage p = ref.getPage();
-                if (p != null && editor != null && p.getActiveEditor() == editor)
-                    syncActiveEditorProject(p);
-            }
             @Override public void partClosed(IWorkbenchPartReference ref)
             {
                 IWorkbenchPart part = ref.getPart(false);
@@ -304,6 +244,8 @@ public class ApplicationsViewHook implements IStartup
             }
             @Override public void partDeactivated(IWorkbenchPartReference r)  {}
             @Override public void partHidden(IWorkbenchPartReference r)       {}
+            @Override public void partInputChanged(IWorkbenchPartReference r) {}
+            @Override public void partBroughtToTop(IWorkbenchPartReference r) {}
             @Override
             public void partVisible(IWorkbenchPartReference ref)
             {
@@ -314,51 +256,14 @@ public class ApplicationsViewHook implements IStartup
         });
     }
 
-    /** Клик в уже активном редакторе не вызывает partActivated — синхронизируем по FocusIn и MouseDown. */
-    private static void installEditorFocusProjectGuard(IWorkbenchWindow window)
+    private static void ensureApplicationsContextListener(IWorkbenchPage page)
     {
-        if (window == null || !FOCUS_GUARD_WINDOWS.add(window))
+        if (page == null || !APPS_CONTEXT_LISTENERS.add(page))
             return;
-        Display display = window.getShell().getDisplay();
-        final Runnable[] pending = { null };
-        Runnable syncIfEditorActive = () -> syncActiveEditorProject(window.getActivePage());
-        Listener focusListener = event ->
+        ActiveProjectTracker.addListener(page, (p, previous, current) ->
         {
-            IWorkbenchPage page = window.getActivePage();
-            if (page == null || page.getActiveEditor() == null)
-                return;
-            if (pending[0] != null)
-                display.timerExec(-1, pending[0]);
-            pending[0] = () ->
-            {
-                pending[0] = null;
-                syncIfEditorActive.run();
-            };
-            display.timerExec(50, pending[0]);
-        };
-        Listener mouseListener = event ->
-        {
-            if (event.type != SWT.MouseDown)
-                return;
-            IWorkbenchPage page = window.getActivePage();
-            if (page == null || page.getActiveEditor() == null)
-                return;
-            if (isNavigatorPart(page.getActivePart()))
-                return;
-            syncIfEditorActive.run();
-        };
-        display.addFilter(SWT.FocusIn, focusListener);
-        display.addFilter(SWT.MouseDown, mouseListener);
-        window.getShell().addDisposeListener(e ->
-        {
-            FOCUS_GUARD_WINDOWS.remove(window);
-            if (!display.isDisposed())
-            {
-                if (pending[0] != null)
-                    display.timerExec(-1, pending[0]);
-                display.removeFilter(SWT.FocusIn, focusListener);
-                display.removeFilter(SWT.MouseDown, mouseListener);
-            }
+            syncApplicationsProjectForPage(page);
+            scheduleStockOverwriteCorrection(page, 0);
         });
     }
 
@@ -366,17 +271,11 @@ public class ApplicationsViewHook implements IStartup
     {
         if (page == null || !PAGE_SYNC_BOOTSTRAPPED.add(page))
             return;
+        ActiveProjectTracker.bootstrapPage(page);
+        ensureApplicationsContextListener(page);
         scheduleHookApplicationsViewsForPage(page);
-        for (IEditorReference ref : page.getEditorReferences())
-        {
-            IEditorPart editor = ref.getEditor(false);
-            if (editor != null)
-                scheduleEditorReadyProjectSync(page, editor, 0);
-        }
         scheduleProjectSyncForPage(page, 0);
         scheduleStockOverwriteCorrection(page, 0);
-        if (page.getActiveEditor() != null || page.getEditorReferences().length > 0)
-            beginStartupProjectSyncGrace(page);
     }
 
     private static void schedulePageProjectBootstrap(IWorkbenchWindow window, int attempt)
@@ -399,53 +298,15 @@ public class ApplicationsViewHook implements IStartup
         });
     }
 
-    private static void scheduleEditorReadyProjectSync(IWorkbenchPage page, IEditorPart editor, int attempt)
-    {
-        if (page == null || editor == null)
-            return;
-        Display display = Display.getDefault();
-        if (display == null || display.isDisposed())
-            return;
-        int delay = attempt == 0 ? 100 : 100;
-        display.timerExec(delay, () ->
-        {
-            IProject project = resolveEditorProject(editor);
-            if (project != null)
-            {
-                applyApplicationsProjectIfMismatch(page);
-                return;
-            }
-            if (attempt < 40)
-                scheduleEditorReadyProjectSync(page, editor, attempt + 1);
-        });
-    }
-
-    /** Синхронизация проекта активного редактора; при null — retry, без отката к навигатору. */
-    private static void syncActiveEditorProject(IWorkbenchPage page)
-    {
-        if (page == null || !shouldPreferEditorProject(page))
-            return;
-        IEditorPart editor = page.getActiveEditor();
-        if (editor == null)
-            return;
-        IProject project = resolveEditorProject(editor);
-        if (project != null)
-        {
-            applyApplicationsProject(page, project);
-            return;
-        }
-        scheduleEditorReadyProjectSync(page, editor, 0);
-    }
-
     private static void applyApplicationsProjectIfMismatch(IWorkbenchPage page)
     {
         if (page == null)
             return;
-        IProject expected = expectedProjectForPage(page);
+        IProject expected = ActiveProjectTracker.resolveContextProject(page);
         if (expected == null)
         {
-            if (shouldPreferEditorProject(page))
-                syncActiveEditorProject(page);
+            if (ActiveProjectTracker.shouldPreferEditorProject(page))
+                syncApplicationsProjectForPage(page);
             return;
         }
         IViewPart appsView = findApplicationsView(page);
@@ -455,155 +316,6 @@ public class ApplicationsViewHook implements IStartup
         if (expected.equals(current))
             return;
         applyApplicationsProject(page, expected);
-    }
-
-    /**
-     * EDT «Приложения» слушает выделение навигатора даже без фокуса в нём.
-     * Если фокус в редакторе или другой view (в т.ч. «Приложения») — возвращаем проект редактора.
-     */
-    private static void installNavigatorSelectionGuard(IWorkbenchWindow window)
-    {
-        if (window == null)
-            return;
-        ISelectionListener guard = (IWorkbenchPart part, ISelection selection) ->
-        {
-            if (!isNavigatorPart(part))
-                return;
-            IWorkbenchPage activePage = window.getActivePage();
-            if (activePage == null)
-                return;
-            IWorkbenchPart active = activePage.getActivePart();
-            IProject navProject = projectFromNavigatorSelection(selection);
-            if (navProject == null && isNavigatorPart(active))
-                navProject = getNavigatorProject(activePage);
-            if (shouldPreferEditorProject(activePage))
-            {
-                applyApplicationsProjectIfMismatch(activePage);
-                scheduleStockOverwriteCorrection(activePage, 0);
-                return;
-            }
-            if (isNavigatorPart(active))
-            {
-                if (navProject != null)
-                    applyApplicationsProject(activePage, navProject);
-                return;
-            }
-            scheduleProjectCorrectionAfterNavigator(activePage, 0);
-            scheduleStockOverwriteCorrection(activePage, 0);
-        };
-        window.getSelectionService().addPostSelectionListener(guard);
-    }
-
-    private static IProject projectFromNavigatorSelection(ISelection selection)
-    {
-        if (selection instanceof TreeSelection)
-        {
-            TreeSelection sel = (TreeSelection) selection;
-            if (sel.isEmpty())
-                return null;
-            for (org.eclipse.jface.viewers.TreePath path : sel.getPaths())
-            {
-                for (int i = 0; i < path.getSegmentCount(); i++)
-                {
-                    Object segment = path.getSegment(i);
-                    if (segment instanceof IProject)
-                        return (IProject) segment;
-                    if (segment instanceof IFile)
-                        return ((IFile) segment).getProject();
-                }
-            }
-            return null;
-        }
-        if (!(selection instanceof IStructuredSelection))
-            return null;
-        IStructuredSelection sel = (IStructuredSelection) selection;
-        if (sel.isEmpty())
-            return null;
-        Object first = sel.getFirstElement();
-        if (first instanceof IProject)
-            return (IProject) first;
-        if (first instanceof IFile)
-            return ((IFile) first).getProject();
-        return null;
-    }
-
-    private static void scheduleProjectCorrectionAfterNavigator(IWorkbenchPage page, int attempt)
-    {
-        if (page == null)
-            return;
-        Display display = Display.getDefault();
-        if (display == null || display.isDisposed())
-            return;
-        int delay = attempt == 0 ? 1 : 50;
-        display.timerExec(delay, () ->
-        {
-            IWorkbenchWindow window = page.getWorkbenchWindow();
-            if (window == null || window.getShell().isDisposed())
-                return;
-            if (isNavigatorPart(page.getActivePart()))
-                return;
-            applyApplicationsProjectPreferEditor(page);
-            if (attempt >= NAV_SELECTION_CORRECTION_MAX)
-                return;
-            IViewPart appsView = findApplicationsView(page);
-            IProject expected = expectedProjectForPage(page);
-            if (appsView == null || expected == null)
-                return;
-            Object current = Global.invoke(appsView, "getCurrentProject"); //$NON-NLS-1$
-            if (!expected.equals(current))
-                scheduleProjectCorrectionAfterNavigator(page, attempt + 1);
-        });
-    }
-
-    private static void syncApplicationsProjectForActivatedPart(IWorkbenchPage page, IWorkbenchPart activated)
-    {
-        if (page == null || activated == null)
-            return;
-        if (activated instanceof IEditorPart)
-        {
-            IEditorPart editor = (IEditorPart) activated;
-            IProject project = resolveEditorProject(editor);
-            if (project != null)
-                applyApplicationsProject(page, project);
-            else
-                scheduleEditorReadyProjectSync(page, editor, 0);
-        }
-        else if (isNavigatorPart(activated))
-        {
-            IProject navProject = getNavigatorProject(page);
-            if (navProject != null)
-                applyApplicationsProject(page, navProject);
-            else
-                scheduleNavigatorProjectSync(page, 0);
-        }
-        else
-            applyApplicationsProjectPreferEditor(page);
-    }
-
-    private static void scheduleNavigatorProjectSync(IWorkbenchPage page, int attempt)
-    {
-        if (page == null)
-            return;
-        Display display = Display.getDefault();
-        if (display == null || display.isDisposed())
-            return;
-        display.timerExec(attempt == 0 ? 0 : 50, () ->
-        {
-            if (isStartupProjectSyncGrace(page))
-                return;
-            if (!isNavigatorPart(page.getActivePart()))
-                return;
-            IProject navProject = getNavigatorProject(page);
-            if (navProject != null)
-            {
-                applyApplicationsProject(page, navProject);
-                return;
-            }
-            if (attempt < NAV_PROJECT_SYNC_MAX_ATTEMPTS)
-                scheduleNavigatorProjectSync(page, attempt + 1);
-            else
-                applyApplicationsProjectFromNavigator(page);
-        });
     }
 
     /** Штатный ApplicationsView слушает selection навигатора без учёта фокуса — откатываем перезапись. */
@@ -617,9 +329,9 @@ public class ApplicationsViewHook implements IStartup
         int delay = attempt == 0 ? 0 : 50;
         display.timerExec(delay, () ->
         {
-            if (!shouldPreferEditorProject(page))
+            if (!ActiveProjectTracker.shouldPreferEditorProject(page))
                 return;
-            IProject expected = expectedProjectForPage(page);
+            IProject expected = ActiveProjectTracker.resolveContextProject(page);
             if (expected == null)
                 return;
             IViewPart appsView = findApplicationsView(page);
@@ -633,70 +345,6 @@ public class ApplicationsViewHook implements IStartup
         });
     }
 
-    /** Проект редактора, пока фокус не в навигаторе (редактор или другая view при открытом редакторе). */
-    private static boolean shouldPreferEditorProject(IWorkbenchPage page)
-    {
-        if (page == null)
-            return false;
-        IWorkbenchPart active = page.getActivePart();
-        if (isNavigatorPart(active))
-            return false;
-        if (isStartupProjectSyncGrace(page) && page.getActiveEditor() != null)
-            return true;
-        return page.getActiveEditor() != null;
-    }
-
-    private static boolean isStartupProjectSyncGrace(IWorkbenchPage page)
-    {
-        if (page == null)
-            return false;
-        Long until = PROJECT_SYNC_GRACE_UNTIL.get(page);
-        return until != null && System.currentTimeMillis() < until;
-    }
-
-    /** После restore навигатор кратко получает фокус — не переключаем проект на selection навигатора. */
-    private static void beginStartupProjectSyncGrace(IWorkbenchPage page)
-    {
-        if (page == null)
-            return;
-        long until = System.currentTimeMillis() + STARTUP_PROJECT_SYNC_GRACE_MS;
-        PROJECT_SYNC_GRACE_UNTIL.put(page, until);
-        scheduleGraceProjectCorrection(page, 0);
-        Display display = Display.getDefault();
-        if (display == null || display.isDisposed())
-            return;
-        display.timerExec(STARTUP_PROJECT_SYNC_GRACE_MS, () ->
-        {
-            PROJECT_SYNC_GRACE_UNTIL.remove(page);
-            syncApplicationsProjectForPage(page);
-        });
-    }
-
-    private static void scheduleGraceProjectCorrection(IWorkbenchPage page, int attempt)
-    {
-        if (page == null || !isStartupProjectSyncGrace(page))
-            return;
-        Display display = Display.getDefault();
-        if (display == null || display.isDisposed())
-            return;
-        display.timerExec(50, () ->
-        {
-            if (!isStartupProjectSyncGrace(page))
-                return;
-            applyApplicationsProjectIfMismatch(page);
-            if (attempt < GRACE_PROJECT_CORRECTION_MAX)
-                scheduleGraceProjectCorrection(page, attempt + 1);
-        });
-    }
-
-    private static IProject editorProjectForPage(IWorkbenchPage page)
-    {
-        if (page == null)
-            return null;
-        IEditorPart editor = page.getActiveEditor();
-        return editor != null ? resolveEditorProject(editor) : null;
-    }
-
     private static void applyApplicationsProjectPreferEditor(IWorkbenchPage page)
     {
         if (page == null)
@@ -704,57 +352,15 @@ public class ApplicationsViewHook implements IStartup
         IEditorPart editor = page.getActiveEditor();
         if (editor != null)
         {
-            IProject project = resolveEditorProject(editor);
+            IProject project = ActiveProjectTracker.resolveEditorProject(editor);
             if (project != null)
             {
                 applyApplicationsProject(page, project);
                 return;
             }
-            scheduleEditorReadyProjectSync(page, editor, 0);
             return;
         }
         applyApplicationsProjectFromNavigator(page);
-    }
-
-    private static IProject expectedProjectForPage(IWorkbenchPage page)
-    {
-        if (page == null)
-            return null;
-        if (isStartupProjectSyncGrace(page))
-        {
-            IProject editorProject = editorProjectForPage(page);
-            if (editorProject != null)
-                return editorProject;
-        }
-        IWorkbenchPart active = page.getActivePart();
-        if (active instanceof IEditorPart)
-            return resolveEditorProject((IEditorPart) active);
-        if (isNavigatorPart(active))
-        {
-            IProject navProject = getNavigatorProject(page);
-            if (navProject != null)
-                return navProject;
-            IEditorPart editor = page.getActiveEditor();
-            if (editor != null)
-                return resolveEditorProject(editor);
-            return null;
-        }
-        IEditorPart editor = page.getActiveEditor();
-        if (editor != null)
-            return resolveEditorProject(editor);
-        return getNavigatorProject(page);
-    }
-
-    private static boolean isNavigatorPart(IWorkbenchPart part)
-    {
-        if (!(part instanceof IViewPart))
-            return false;
-        IViewPart view = (IViewPart) part;
-        if (view.getViewSite() == null)
-            return false;
-        String id = view.getViewSite().getId();
-        return Global.NAVIGATOR_VIEW_ID.equals(id)
-            || "org.eclipse.ui.navigator.ProjectExplorer".equals(id); //$NON-NLS-1$
     }
 
     private static void scheduleHookApplicationsViewsForPage(IWorkbenchPage page)
@@ -852,11 +458,11 @@ public class ApplicationsViewHook implements IStartup
     {
         if (page == null)
             return;
-        IProject expected = expectedProjectForPage(page);
+        IProject expected = ActiveProjectTracker.resolveContextProject(page);
         if (expected != null)
             applyApplicationsProject(page, expected);
-        else if (shouldPreferEditorProject(page))
-            syncActiveEditorProject(page);
+        else if (ActiveProjectTracker.shouldPreferEditorProject(page))
+            applyApplicationsProjectPreferEditor(page);
         else
             applyApplicationsProjectFromNavigator(page);
     }
@@ -890,7 +496,7 @@ public class ApplicationsViewHook implements IStartup
         syncApplicationsProjectForPage(page);
         if (appsView == null)
             return false;
-        IProject expected = expectedProjectForPage(page);
+        IProject expected = ActiveProjectTracker.resolveContextProject(page);
         if (expected == null)
         {
             if (page.getActiveEditor() != null || page.getActivePart() instanceof IEditorPart)
@@ -898,54 +504,6 @@ public class ApplicationsViewHook implements IStartup
             return true;
         }
         return expected.equals(Global.invoke(appsView, "getCurrentProject")); //$NON-NLS-1$
-    }
-
-    private static IProject resolveEditorProject(IEditorPart editor)
-    {
-        if (editor == null)
-            return null;
-        IProject project = Global.getActiveProject(editor, false);
-        if (project != null)
-            return project;
-        IDtProject dtProject = Global.getProjectFromEditor(editor);
-        if (dtProject != null)
-            return dtProject.getWorkspaceProject();
-        try
-        {
-            IEditorInput input = editor.getEditorInput();
-            if (input != null)
-            {
-                IFile file = input.getAdapter(IFile.class);
-                if (file != null)
-                    return file.getProject();
-                IProject adapter = input.getAdapter(IProject.class);
-                if (adapter != null)
-                    return adapter;
-            }
-        }
-        catch (Exception ignored) {}
-        return null;
-    }
-
-    private static IProject getNavigatorProject(IWorkbenchPage page)
-    {
-        if (page == null)
-            return null;
-        try
-        {
-            IViewPart nav = page.findView(Global.NAVIGATOR_VIEW_ID);
-            if (!(nav instanceof CommonNavigator))
-                return null;
-            TreeSelection sel = (TreeSelection) nav.getSite().getSelectionProvider().getSelection();
-            if (sel == null || sel.isEmpty())
-                return null;
-            Object segment = sel.getPaths()[0].getSegment(0);
-            return segment instanceof IProject ? (IProject) segment : null;
-        }
-        catch (Exception ignored)
-        {
-            return null;
-        }
     }
 
     private static void detachStockNavigatorSelectionListener(IViewPart appsView)
@@ -1018,15 +576,15 @@ public class ApplicationsViewHook implements IStartup
                 && event.getEventType() == IApplicationEvent.ApplicationEventType.LIFECYCLE_STATE_CHANGED)
             {
                 IWorkbenchPage page = appsView.getSite().getPage();
-                if (page != null && shouldPreferEditorProject(page))
+                if (page != null && ActiveProjectTracker.shouldPreferEditorProject(page))
                 {
-                    IProject expected = editorProjectForPage(page);
+                    IProject expected = ActiveProjectTracker.resolveContextProject(page);
                     if (expected != null)
                     {
                         applyApplicationsProject(page, expected);
                         return;
                     }
-                    syncActiveEditorProject(page);
+                    applyApplicationsProjectPreferEditor(page);
                     return;
                 }
             }
@@ -1054,7 +612,7 @@ public class ApplicationsViewHook implements IStartup
             return;
         Global.invoke(appsView, "updateViewUsingProject", project); //$NON-NLS-1$
         ensureHookApplicationsView(appsView);
-        if (shouldPreferEditorProject(page))
+        if (ActiveProjectTracker.shouldPreferEditorProject(page))
             scheduleStockOverwriteCorrection(page, 0);
     }
 
@@ -1062,7 +620,7 @@ public class ApplicationsViewHook implements IStartup
     {
         if (page == null)
             return;
-        if (shouldPreferEditorProject(page))
+        if (ActiveProjectTracker.shouldPreferEditorProject(page))
         {
             applyApplicationsProjectPreferEditor(page);
             return;
@@ -1070,7 +628,7 @@ public class ApplicationsViewHook implements IStartup
         IViewPart appsView = findApplicationsView(page);
         if (appsView == null)
             return;
-        IProject project = getNavigatorProject(page);
+        IProject project = ActiveProjectTracker.getNavigatorProject(page);
         if (project != null)
             applyApplicationsProject(page, project);
         else

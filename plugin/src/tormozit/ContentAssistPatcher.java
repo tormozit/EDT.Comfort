@@ -6,6 +6,7 @@ import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.contentassist.ContentAssistant;
 import org.eclipse.jface.text.contentassist.IContentAssistProcessor;
 import org.eclipse.jface.text.source.SourceViewer;
+import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import org.eclipse.xtext.ui.editor.contentassist.XtextContentAssistProcessor;
 
 public final class ContentAssistPatcher
@@ -16,6 +17,12 @@ public final class ContentAssistPatcher
     private ContentAssistPatcher() {}
 
     public static boolean applyPatch(SourceViewer sourceViewer, int timeout, String charset)
+    {
+        return applyPatch(sourceViewer, timeout, charset, null);
+    }
+
+    public static boolean applyPatch(SourceViewer sourceViewer, int timeout, String charset,
+                                    BslXtextEditor editor)
     {
         ContentAssistant contentAssist = getContentAssistant(sourceViewer);
         if (contentAssist == null)
@@ -62,7 +69,7 @@ public final class ContentAssistPatcher
         }
 
         contentAssist.setSorter(new SmartCodeProposalSorter());
-        ContentAssistSessionReloader.install(sourceViewer, contentAssist, wrapper);
+        ContentAssistSessionReloader.install(sourceViewer, contentAssist, wrapper, editor);
 
         ContentAssistDebug.log("applyPatch OK delegate=" + xtext.getClass().getSimpleName()); //$NON-NLS-1$
         return true;

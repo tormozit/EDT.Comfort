@@ -746,6 +746,37 @@ public class GoToDefinition extends AbstractHandler
         }
     }
 
+    /**
+     * Резолв {@link EObject} метаданных по полному имени без открытия редактора
+     * (для «Показать в навигаторе» и т.п.).
+     */
+    public static EObject resolveEObjectForFullName(String fullName, IWorkbenchPage page, IProject project)
+    {
+        if (project == null || fullName == null || fullName.isBlank())
+            return null;
+        IV8ProjectManager projectManager =
+            (IV8ProjectManager) Global.getServiceByClass(IV8ProjectManager.class);
+        IV8Project v8Project = projectManager.getProject(project);
+        if (v8Project == null)
+            return null;
+
+        IRSession irSession = resolveConnectedIrSession(project);
+        MdLinkNormalizer.Result norm = MdLinkNormalizer.normalize(fullName, irSession);
+        String normalizedRef = norm.normalizedRef();
+
+        EObject eObject = resolveEObjectByQualifiedName(normalizedRef, v8Project);
+        if (eObject != null)
+            return eObject;
+
+        String mdoPath = mdNameToMdoPath(normalizedRef);
+        if (mdoPath == null)
+            return null;
+        IFile mdoFile = findFileInWorkspace(mdoPath, page, project);
+        if (mdoFile == null)
+            return null;
+        return resolveEObjectViaResourceSet(mdoFile, v8Project);
+    }
+
     private static IRSession resolveConnectedIrSession(IProject project)
     {
         IDtProject dtProject = Global.getDtProjectFromWorkspaceProject(project);

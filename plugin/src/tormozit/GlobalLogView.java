@@ -23,7 +23,7 @@ import org.eclipse.ui.part.ViewPart;
 /**
  * Общий отладочный журнал плагина (content assist, установщик и др.).
  */
-public final class ContentAssistLogView extends ViewPart
+public final class GlobalLogView extends ViewPart
 {
     private StyledText logText;
     private final java.util.function.Consumer<String> logListener = this::onLogLine;
@@ -38,12 +38,12 @@ public final class ContentAssistLogView extends ViewPart
             SWT.MULTI | SWT.READ_ONLY | SWT.V_SCROLL | SWT.H_SCROLL | SWT.BORDER);
         logText.setEditable(false);
         logText.setText(ComfortSettings.isDebugLogEnabled()
-            ? ContentAssistLog.getFullText()
+            ? GlobalLog.getFullText()
             : ""); //$NON-NLS-1$
         if (logText.getLineCount() > 0 && ComfortSettings.isLogAutoscroll())
             scrollToBottom();
 
-        ContentAssistLog.addListener(logListener);
+        GlobalLog.addListener(logListener);
         attachFindKeyListener();
         installContextMenu();
 
@@ -73,7 +73,7 @@ public final class ContentAssistLogView extends ViewPart
             @Override
             public void run()
             {
-                ContentAssistLog.clear();
+                GlobalLog.clear();
                 if (logText != null && !logText.isDisposed())
                 {
                     logText.setText(""); //$NON-NLS-1$
@@ -93,7 +93,7 @@ public final class ContentAssistLogView extends ViewPart
     @Override
     public void dispose()
     {
-        ContentAssistLog.removeListener(logListener);
+        GlobalLog.removeListener(logListener);
         super.dispose();
     }
 
@@ -239,7 +239,7 @@ public final class ContentAssistLogView extends ViewPart
             logText.setText(""); //$NON-NLS-1$
             return;
         }
-        if (ContentAssistLog.RESYNC.equals(line))
+        if (GlobalLog.RESYNC.equals(line))
         {
             resyncFromBuffer();
             return;
@@ -272,7 +272,7 @@ public final class ContentAssistLogView extends ViewPart
         if (!ComfortSettings.isDebugLogEnabled())
             return;
 
-        String newText = ContentAssistLog.getFullText();
+        String newText = GlobalLog.getFullText();
         String oldText = logText.getText();
         if (oldText.equals(newText))
             return;

@@ -6,7 +6,7 @@ import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
 
 /**
- * Логи Content Assist в общем журнале {@link ContentAssistLogView}.
+ * Логи Content Assist в общем журнале {@link GlobalLogView}.
  */
 public final class ContentAssistDebug
 {

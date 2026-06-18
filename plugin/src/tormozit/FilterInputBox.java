@@ -25,6 +25,8 @@ final class FilterInputBox
     private static final int MAX_ITEMS = 20;
     /** Максимальная ширина compact-поля (окно «Коллекция»). */
     static final int COMPACT_MAX_WIDTH = 267;
+    /** Максимальная ширина поля фильтра (панель «Последние места»). */
+    static final int RECENT_PLACES_MAX_WIDTH = 300;
     /** Отступ справа от compact-поля до следующего элемента строки. */
     static final int COMPACT_RIGHT_MARGIN = 10;
 
@@ -96,7 +98,7 @@ final class FilterInputBox
     {
         Options opts = new Options();
         opts.scope = Scope.RECENT_PLACES;
-        opts.layoutData = new GridData(SWT.FILL, SWT.CENTER, true, false);
+        opts.layoutData = recentPlacesLayoutData();
         opts.message = "Поиск..."; //$NON-NLS-1$
         opts.tooltip = "Фильтр по колонке «Имя» (smart-фильтр, пробел = AND)"; //$NON-NLS-1$
         return create(parent, opts, onSearch);
@@ -106,6 +108,14 @@ final class FilterInputBox
     {
         GridData gd = new GridData(SWT.BEGINNING, SWT.CENTER, false, false);
         gd.widthHint = COMPACT_MAX_WIDTH;
+        gd.minimumWidth = 80;
+        return gd;
+    }
+
+    static GridData recentPlacesLayoutData()
+    {
+        GridData gd = new GridData(SWT.BEGINNING, SWT.CENTER, false, false);
+        gd.widthHint = RECENT_PLACES_MAX_WIDTH;
         gd.minimumWidth = 80;
         return gd;
     }

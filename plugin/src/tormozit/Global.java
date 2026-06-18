@@ -287,6 +287,19 @@ public final class Global
         return getActiveProject(page, showMessage);
     }
 
+    /** Навигатор EDT или Project Explorer. */
+    public static boolean isNavigatorPart(IWorkbenchPart part)
+    {
+        if (!(part instanceof IViewPart))
+            return false;
+        IViewPart view = (IViewPart) part;
+        if (view.getViewSite() == null)
+            return false;
+        String id = view.getViewSite().getId();
+        return NAVIGATOR_VIEW_ID.equals(id)
+            || "org.eclipse.ui.navigator.ProjectExplorer".equals(id); //$NON-NLS-1$
+    }
+
     /** Возвращает {@link IDtProject} из поля {@code project} произвольного редактора. */
     public static IDtProject getProjectFromEditor(Object editorPart)
     {
@@ -380,7 +393,7 @@ public final class Global
     }
 
     // =========================================================================
-    // Логирование (журнал «Журнал Комфорт», {@link ContentAssistLogView})
+    // Логирование (журнал «Журнал Комфорт», {@link GlobalLogView})
     // =========================================================================
 
     /** Включение: Параметры → Комфорт → «Общее логирование». */
@@ -398,7 +411,7 @@ public final class Global
     {
         if (!isLogEnabled() || message == null)
             return;
-        ContentAssistLog.append(formatLogTag(tag) + message);
+        GlobalLog.append(formatLogTag(tag) + message);
     }
 
     public static void logError(String tag, String message, Throwable error)
@@ -414,7 +427,7 @@ public final class Global
                 detail += ": " + root.getMessage(); //$NON-NLS-1$
             text = text.isBlank() ? detail : text + ": " + detail; //$NON-NLS-1$
         }
-        ContentAssistLog.append(formatLogTag(tag) + "ERROR " + text); //$NON-NLS-1$
+        GlobalLog.append(formatLogTag(tag) + "ERROR " + text); //$NON-NLS-1$
         if (root != null)
             appendLogStackTrace(root);
     }
@@ -427,7 +440,7 @@ public final class Global
         {
             if (line.isBlank())
                 continue;
-            ContentAssistLog.append("    " + line); //$NON-NLS-1$
+            GlobalLog.append("    " + line); //$NON-NLS-1$
         }
     }
 
