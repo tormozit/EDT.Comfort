@@ -13,6 +13,7 @@ import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Tree;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import com._1c.g5.v8.dt.core.platform.IDtProject;
 import org.eclipse.jface.internal.text.InformationControlReplacer;
 import org.eclipse.jface.text.AbstractInformationControlManager;
 import org.eclipse.jface.text.DefaultInformationControl;
@@ -63,6 +64,13 @@ public final class BslSideHintOutlineInstall
     private static final String PENDING_KEY = "tormozit.bslSideHintPending"; //$NON-NLS-1$
     static final String SUPPRESS_SELECTION_KEY = "tormozit.bslSideHintSuppressSelection"; //$NON-NLS-1$
     private static final String LAST_HINT_ELEMENT_KEY = "tormozit.bslSideHintLastElement"; //$NON-NLS-1$
+    private static final String WORDS_TABLE_READY_KEY = "tormozit.bslSideHintWordsTableReady"; //$NON-NLS-1$
+    private static final String CONTEXT_HOST_KEY = "tormozit.bslSideHintContextHost"; //$NON-NLS-1$
+    private static final String LAST_BASE_HINT_KEY = "tormozit.bslSideHintLastBaseHint"; //$NON-NLS-1$
+    private static final String METHOD_IMPL_CLASS = "com._1c.g5.v8.dt.internal.bsl.core.MethodImpl"; //$NON-NLS-1$
+    private static final String I_EXTENSION_ELEMENT = "com._1c.g5.v8.dt.bsl.core.IExtensionElement"; //$NON-NLS-1$
+    /** EDT offset 0 → позиция каретки 1 в ИР при sync перед {@code ЗаполнитьТаблицуСлов}. */
+    private static final int WORDS_TABLE_SYNC_CARET_OFFSET = 0;
     private static final int DEBOUNCE_MS = OpenStrategy.getPostSelectionDelay();
     private BslSideHintOutlineInstall() {}
 
@@ -86,6 +94,7 @@ public final class BslSideHintOutlineInstall
         final BslSideHintPresenter presenter = new BslSideHintPresenter();
         presenter.install(tree);
         tree.setData(PRESENTER_KEY, presenter);
+        tree.setData(CONTEXT_HOST_KEY, contextHost);
         final int[] generation = new int[1];
         tree.setData("tormozit.bslSideHintGeneration", generation); //$NON-NLS-1$
         ISelectionChangedListener listener = new ISelectionChangedListener() {
@@ -142,7 +151,11 @@ public final class BslSideHintOutlineInstall
             tree.setData(PENDING_KEY, null);
             tree.setData("tormozit.bslSideHintGeneration", null); //$NON-NLS-1$
             tree.setData(ROW_HOVER_HINT_KEY, null);
+            tree.setData(WORDS_TABLE_READY_KEY, null);
+            tree.setData(CONTEXT_HOST_KEY, null);
+            tree.setData(LAST_BASE_HINT_KEY, null);
         });
+        ensureWordsTablePreparation(tree, contextHost);
         if (viewer.getSelection() instanceof IStructuredSelection sel && !sel.isEmpty())
             listener.selectionChanged(new SelectionChangedEvent(viewer, sel));
         BslSideHintDebug.log("installed on " + dialogName); //$NON-NLS-1$
@@ -231,6 +244,135 @@ public final class BslSideHintOutlineInstall
 
         presenter.updateHint(hint);
         tree.setData(LAST_HINT_ELEMENT_KEY, element);
+        tree.setData(LAST_BASE_HINT_KEY, hint);
+        scheduleIrMethodEnrichment(tree, presenter, contextHost, element, hint, gen);
+    }
+
+    private static void retryIrMethodEnrichmentIfNeeded(Tree tree)
+    {
+        if (tree == null || tree.isDisposed())
+            return;
+        if (!Boolean.TRUE.equals(tree.getData(WORDS_TABLE_READY_KEY)))
+            return;
+        BslSideHintPresenter presenter = (BslSideHintPresenter) tree.getData(PRESENTER_KEY);
+        Object contextHost = tree.getData(CONTEXT_HOST_KEY);
+        Object element = tree.getData(LAST_HINT_ELEMENT_KEY);
+        BslItemSideHint hint = (BslItemSideHint) tree.getData(LAST_BASE_HINT_KEY);
+        if (presenter == null || contextHost == null || element == null || hint == null || hint.isEmpty())
+            return;
+        scheduleIrMethodEnrichment(tree, presenter, contextHost, element, hint, resolveGeneration(tree, -1));
+    }
+
+    private static void ensureWordsTablePreparation(Tree tree, Object contextHost)
+    {
+        if (tree == null || tree.isDisposed())
+            return;
+        Object state = tree.getData(WORDS_TABLE_READY_KEY);
+        if (Boolean.TRUE.equals(state) || Boolean.FALSE.equals(state))
+            return;
+        scheduleWordsTablePreparation(tree, contextHost);
+    }
+
+    private static void scheduleWordsTablePreparation(Tree tree, Object contextHost)
+    {
+        BslXtextEditor editor = IrMethodListHandler.resolveBslEditor(contextHost);
+        if (editor == null)
+            return;
+        IDtProject dtProject = Global.getDtProjectFromBslEditor(editor);
+        if (dtProject == null || !IRApplication.hasConnectedSessionForKeys(dtProject))
+            return;
+        IRSession session = IRApplication.getSession(dtProject);
+        if (session == null || session.executor == null || session.executor.isShutdown())
+            return;
+        tree.setData(WORDS_TABLE_READY_KEY, Boolean.FALSE);
+        try
+        {
+            session.syncCodeEditorToIR(editor, WORDS_TABLE_SYNC_CARET_OFFSET);
+        }
+        catch (Exception e)
+        {
+            BslSideHintDebug.problem("wordsTable sync: " + e.getMessage()); //$NON-NLS-1$
+            return;
+        }
+        session.executor.submit(() -> {
+            try
+            {
+                IrOutlineSideHintSupport.ensureCodeEditor(session);
+                ComBridge.invoke(session.codeEditor, "РазобратьТекущийКонтекст"); //$NON-NLS-1$
+                ComBridge.invoke(session.codeEditor, "ЗаполнитьТаблицуСлов"); //$NON-NLS-1$
+                Display display = Display.getDefault();
+                if (display != null && !display.isDisposed())
+                    display.asyncExec(() -> {
+                        if (tree.isDisposed())
+                            return;
+                        tree.setData(WORDS_TABLE_READY_KEY, Boolean.TRUE);
+                        BslSideHintDebug.log("wordsTable ready"); //$NON-NLS-1$
+                        retryIrMethodEnrichmentIfNeeded(tree);
+                    });
+            }
+            catch (Exception e)
+            {
+                BslSideHintDebug.problem("wordsTable: " + e.getMessage()); //$NON-NLS-1$
+            }
+        });
+    }
+
+    private static void scheduleIrMethodEnrichment(Tree tree, BslSideHintPresenter presenter,
+            Object contextHost, Object element, BslItemSideHint baseHint, int gen)
+    {
+        if (element == null || baseHint == null || baseHint.isEmpty())
+            return;
+        String methodName = IrOutlineSideHintSupport.resolveOutlineMethodName(element);
+        if (methodName == null || methodName.isEmpty())
+            return;
+        if (!Boolean.TRUE.equals(tree.getData(WORDS_TABLE_READY_KEY)))
+        {
+            ensureWordsTablePreparation(tree, contextHost);
+            return;
+        }
+        BslXtextEditor editor = IrMethodListHandler.resolveBslEditor(contextHost);
+        IRSession session = IrOutlineSideHintSupport.resolveConnectedSession(editor);
+        if (session == null)
+            return;
+        final int irGen = resolveGeneration(tree, gen);
+        final Object baseInput = baseHint.getControlInput();
+        final IInformationControlCreator creator = baseHint.getControlCreator();
+        final int sourceOffset = baseHint.getSourceOffset();
+        session.executor.submit(() -> {
+            String irHtml = IrOutlineSideHintSupport.fetchMethodDescriptionHtml(session, methodName);
+            if (irHtml == null || irHtml.isBlank())
+                return;
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            display.asyncExec(() -> {
+                if (tree.isDisposed())
+                    return;
+                if (irGen >= 0 && !isCurrentGeneration(tree, irGen))
+                {
+                    BslSideHintDebug.step("ir skip", "stale gen=" + irGen + " method=" + methodName); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    return;
+                }
+                Object lastElement = tree.getData(LAST_HINT_ELEMENT_KEY);
+                if (lastElement != null && !lastElement.equals(element))
+                {
+                    BslSideHintDebug.step("ir skip", "element changed method=" + methodName); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
+                String baseHtml = IrBslHoverHtml.readHtml(baseInput);
+                String merged = IrBslHoverHtml.mergeHtml(baseHtml, irHtml);
+                presenter.updateHint(new BslItemSideHint(merged, creator, sourceOffset));
+                BslSideHintDebug.log("ir enriched method=" + methodName + " len=" + irHtml.length()); //$NON-NLS-1$ //$NON-NLS-2$
+            });
+        });
+    }
+
+    private static int resolveGeneration(Tree tree, int gen)
+    {
+        if (gen >= 0)
+            return gen;
+        Object g = tree.getData("tormozit.bslSideHintGeneration"); //$NON-NLS-1$
+        return g instanceof int[] generation ? generation[0] : -1;
     }
 
     private static boolean shouldSkipHintForElement(Tree tree, BslSideHintPresenter presenter,
@@ -1076,6 +1218,122 @@ public final class BslSideHintOutlineInstall
 
         }
 
+    }
+
+
+    /** COM-цепочка ИР для боковой подсказки Quick Outline по имени метода. */
+    private static final class IrOutlineSideHintSupport
+    {
+        private IrOutlineSideHintSupport() {}
+
+        static IRSession resolveConnectedSession(BslXtextEditor editor)
+        {
+            if (editor == null)
+                return null;
+            IDtProject dtProject = Global.getDtProjectFromBslEditor(editor);
+            if (dtProject == null || !IRApplication.hasConnectedSessionForKeys(dtProject))
+                return null;
+            IRSession session = IRApplication.getSession(dtProject);
+            if (session == null || session.executor == null || session.executor.isShutdown())
+                return null;
+            return session;
+        }
+
+        static String resolveOutlineMethodName(Object element)
+        {
+            if (element == null)
+                return null;
+            if (BslOutlineEventsSupport.isOutlineEvent(element)
+                    || BslOutlineEventsSupport.isOutlineEventHandlerElement(element))
+                return null;
+            if (!isOutlineMethodElement(element) && !isExtensionElement(element))
+                return null;
+            String name = resolveElementName(element);
+            if (name == null || name.isEmpty())
+                return null;
+            int paren = name.indexOf('(');
+            if (paren >= 0)
+                name = name.substring(0, paren).trim();
+            if (name.isEmpty())
+                return null;
+            if (isOutlineMethodElement(element))
+            {
+                Object isEvent = Global.invoke(element, "isEvent"); //$NON-NLS-1$
+                if (Boolean.TRUE.equals(isEvent))
+                    return null;
+            }
+            Object formItemEvent = Global.invoke(element, "isFormItemEvent"); //$NON-NLS-1$
+            if (formItemEvent instanceof Boolean && (Boolean) formItemEvent)
+                return null;
+            return name;
+        }
+
+        static String fetchMethodDescriptionHtml(IRSession session, String methodName)
+        {
+            if (session == null || methodName == null || methodName.isEmpty())
+                return null;
+            try
+            {
+                ensureCodeEditor(session);
+                Object raw = ComBridge.invoke(session.codeEditor, "ОписаниеХТМЛВыражения", methodName, "Метод"); //$NON-NLS-1$ //$NON-NLS-2$
+                String html = ComBridge.toString(raw);
+                if (html == null || html.isBlank())
+                {
+                    BslSideHintDebug.step("ir fetch", "пустой ответ method=" + methodName); //$NON-NLS-1$ //$NON-NLS-2$
+                    return null;
+                }
+                return html;
+            }
+            catch (Exception e)
+            {
+                BslSideHintDebug.problem("ir fetch method=" + methodName + ": " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
+                return null;
+            }
+        }
+
+        private static boolean isOutlineMethodElement(Object element)
+        {
+            if (element == null)
+                return false;
+            String name = element.getClass().getName();
+            return METHOD_IMPL_CLASS.equals(name) || name.contains("MethodImpl"); //$NON-NLS-1$
+        }
+
+        private static boolean isExtensionElement(Object element)
+        {
+            if (element == null)
+                return false;
+            try
+            {
+                Class<?> type = Class.forName(I_EXTENSION_ELEMENT, false,
+                        BslSideHintOutlineInstall.class.getClassLoader());
+                if (type.isInstance(element))
+                    return true;
+            }
+            catch (ClassNotFoundException ignored)
+            {
+            }
+            return element.getClass().getName().contains("ExtensionElement"); //$NON-NLS-1$
+        }
+
+        private static String resolveElementName(Object element)
+        {
+            if (element == null)
+                return null;
+            Object fromGetName = Global.invoke(element, "getName"); //$NON-NLS-1$
+            if (fromGetName instanceof String name && !name.isEmpty())
+                return name;
+            Object fromField = Global.getField(element, "name"); //$NON-NLS-1$
+            return fromField instanceof String fieldName && !fieldName.isEmpty() ? fieldName : null;
+        }
+
+        static void ensureCodeEditor(IRSession session)
+        {
+            if (session.codeEditor != null)
+                return;
+            Object irCache = session.getModule("ирКэш"); //$NON-NLS-1$
+            session.codeEditor = ComBridge.invoke(irCache, "ПолеТекстаПрограммы", 0); //$NON-NLS-1$
+        }
     }
 
 }

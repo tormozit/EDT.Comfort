@@ -26,5 +26,11 @@ public final class BslSideHintDebug
         if (Global.isLogEnabled())
             Global.log(TAG, "[!] " + msg); //$NON-NLS-1$
     }
+
+    static void step(String phase, String detail)
+    {
+        if (Global.isLogEnabled())
+            Global.log(TAG, phase + ": " + detail); //$NON-NLS-1$
+    }
 }
 

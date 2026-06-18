@@ -4,6 +4,7 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.jface.dialogs.PageChangedEvent;
 import org.eclipse.jface.text.ITextHover;
@@ -24,7 +25,6 @@ import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.bsl.ui.hover.BslDispatchingEObjectTextHover;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
-import java.util.concurrent.atomic.AtomicInteger;
 import org.eclipse.jface.text.IInformationControlCreator;
 import org.eclipse.jface.text.IInformationControlExtension5;
 import org.eclipse.jface.text.IRegion;
@@ -151,7 +151,7 @@ public final class IrBslEditorHoverHook implements IStartup
             ITextHover hover = entry.getValue();
             if (hover instanceof IrBslTextHoverWrapper)
                 continue;
-            if (hover instanceof BslDispatchingEObjectTextHover)
+            if (isWrappableBslHover(hover))
             {
                 entry.setValue(new IrBslTextHoverWrapper(hover, editor));
                 wrapped = true;
@@ -162,6 +162,22 @@ public final class IrBslEditorHoverHook implements IStartup
             sourceViewer.setData(HOOK_MARKER, Boolean.TRUE);
             IrBslHoverDebug.log("wrapped hover editor=" + editor.getTitle()); //$NON-NLS-1$
         }
+    }
+
+    /**
+     * В {@code fTextHovers} часто лежит {@code BestMatchEObjectTextHover} с полем {@code htmlHover}
+     * ({@link BslDispatchingEObjectTextHover}), а не сам dispatching-hover.
+     */
+    private static boolean isWrappableBslHover(ITextHover hover)
+    {
+        if (hover == null)
+            return false;
+        if (hover instanceof BslDispatchingEObjectTextHover)
+            return true;
+        if ("com._1c.g5.v8.dt.lcore.ui.hover.BestMatchEObjectTextHover".equals(hover.getClass().getName())) //$NON-NLS-1$
+            return true;
+        Object htmlHover = Global.getField(hover, "htmlHover"); //$NON-NLS-1$
+        return htmlHover instanceof BslDispatchingEObjectTextHover;
     }
 
     /**
@@ -257,8 +273,12 @@ public final class IrBslEditorHoverHook implements IStartup
                     IrBslHoverDebug.step("skip", "control hidden offset=" + offset); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
                 }
-                String merged = IrBslHoverHtml.mergedHtml(baseInput, irHtml);
-                control.notifyDelayedInputChange(merged);
+                String baseHtml = IrBslHoverHtml.readHtml(baseInput);
+                String merged = IrBslHoverHtml.mergeHtml(baseHtml, irHtml);
+                if (control.hasDelayedInputChangeListener())
+                    control.notifyDelayedInputChange(merged);
+                else
+                    control.setInput(merged);
                 IrBslHoverDebug.log("enriched offset=" + offset); //$NON-NLS-1$
             });
         }
@@ -293,56 +313,6 @@ public final class IrBslEditorHoverHook implements IStartup
             private static IXtextBrowserInformationControl asBrowserControl(Object control)
             {
                 return control instanceof IXtextBrowserInformationControl browser ? browser : null;
-            }
-        }
-
-
-        /**
-         * Слияние HTML doc-hover без ссылок на internal API {@code BslBrowserInformationControlInput}.
-         */
-        private static final class IrBslHoverHtml
-        {
-            private static final String BSL_BROWSER_INPUT_CLASS =
-                "com._1c.g5.v8.dt.internal.bsl.ui.browserscommon.BslBrowserInformationControlInput"; //$NON-NLS-1$
-
-            private IrBslHoverHtml() {}
-
-            static boolean isBslBrowserInput(Object info)
-            {
-                if (info == null)
-                    return false;
-                for (Class<?> type = info.getClass(); type != null; type = type.getSuperclass())
-                {
-                    if (BSL_BROWSER_INPUT_CLASS.equals(type.getName()))
-                        return true;
-                }
-                return false;
-            }
-
-            static String readHtml(Object browserInput)
-            {
-                if (browserInput == null)
-                    return ""; //$NON-NLS-1$
-                Object html = Global.invoke(browserInput, "getHtml"); //$NON-NLS-1$
-                return html != null ? html.toString() : ""; //$NON-NLS-1$
-            }
-
-            static String mergeHtml(String baseHtml, String irFragment)
-            {
-                if (irFragment == null || irFragment.isEmpty())
-                    return baseHtml != null ? baseHtml : ""; //$NON-NLS-1$
-                if (baseHtml == null || baseHtml.isEmpty())
-                    return irFragment;
-                String lower = baseHtml.toLowerCase();
-                int bodyEnd = lower.lastIndexOf("</body>"); //$NON-NLS-1$
-                if (bodyEnd >= 0)
-                    return baseHtml.substring(0, bodyEnd) + irFragment + baseHtml.substring(bodyEnd);
-                return baseHtml + irFragment;
-            }
-
-            static String mergedHtml(Object baseInput, String irHtml)
-            {
-                return mergeHtml(readHtml(baseInput), irHtml);
             }
         }
 

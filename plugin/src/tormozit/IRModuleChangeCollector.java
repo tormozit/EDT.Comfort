@@ -2,8 +2,14 @@ package tormozit;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
+import java.nio.charset.CharsetEncoder;
+import java.nio.charset.CoderResult;
+import java.nio.charset.CodingErrorAction;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -33,6 +39,22 @@ public final class IRModuleChangeCollector
 {
     private static final String STATE_MANAGER_CLASS =
         "com._1c.g5.v8.dt.platform.services.core.infobases.sync.v2.IInfobaseSynchronizationStateManager"; //$NON-NLS-1$
+
+    private static final ThreadLocal<MessageDigest> CONTENT_MD5 = ThreadLocal.withInitial(() -> {
+        try
+        {
+            return MessageDigest.getInstance("MD5"); //$NON-NLS-1$
+        }
+        catch (NoSuchAlgorithmException e)
+        {
+            throw new IllegalStateException("MD5", e); //$NON-NLS-1$
+        }
+    });
+
+    private static final ThreadLocal<CharsetEncoder> UTF8_ENCODER = ThreadLocal.withInitial(() ->
+        StandardCharsets.UTF_8.newEncoder()
+            .onMalformedInput(CodingErrorAction.REPLACE)
+            .onUnmappableCharacter(CodingErrorAction.REPLACE));
 
     private IRModuleChangeCollector() {}
 
@@ -144,21 +166,31 @@ public final class IRModuleChangeCollector
         return result;
     }
 
-    static byte[] contentHash(IFile file) throws CoreException
+    /** Fingerprint содержимого (MD5, 16 байт) для дедупликации push в ИР. Без полного {@code getBytes}. */
+    static byte[] contentFingerprint(String text)
     {
-        try (InputStream in = file.getContents())
+        MessageDigest md = CONTENT_MD5.get();
+        md.reset();
+        if (text != null && !text.isEmpty())
+            md5UpdateUtf8(md, text);
+        return md.digest();
+    }
+
+    private static void md5UpdateUtf8(MessageDigest md, String text)
+    {
+        CharsetEncoder enc = UTF8_ENCODER.get();
+        enc.reset();
+        CharBuffer in = CharBuffer.wrap(text);
+        ByteBuffer out = ByteBuffer.allocate(8192);
+        while (true)
         {
-            MessageDigest md = MessageDigest.getInstance("SHA-256"); //$NON-NLS-1$
-            byte[] buf = new byte[8192];
-            int n;
-            while ((n = in.read(buf)) > 0)
-                md.update(buf, 0, n);
-            return md.digest();
-        }
-        catch (Exception e)
-        {
-            throw new CoreException(
-                org.eclipse.core.runtime.Status.error("contentHash: " + e.getMessage(), e)); //$NON-NLS-1$
+            CoderResult cr = enc.encode(in, out, !in.hasRemaining());
+            out.flip();
+            if (out.hasRemaining())
+                md.update(out);
+            out.clear();
+            if (cr.isUnderflow() && !in.hasRemaining())
+                break;
         }
     }
 
@@ -185,14 +217,15 @@ public final class IRModuleChangeCollector
 
         try
         {
-            byte[] hash = contentHash(file);
-            if (session.isAlreadyPushed(bslPath, hash))
-                return null;
-            String text;
+            byte[] bytes;
             try (InputStream in = file.getContents())
             {
-                text = new String(in.readAllBytes(), StandardCharsets.UTF_8);
+                bytes = in.readAllBytes();
             }
+            String text = new String(bytes, StandardCharsets.UTF_8);
+            byte[] hash = fingerprintUtf8(bytes);
+            if (session.isAlreadyPushed(bslPath, hash))
+                return null;
             return new ModuleSyncEntry(bslPath, moduleName, text, hash);
         }
         catch (CoreException | IOException e)
@@ -200,6 +233,13 @@ public final class IRModuleChangeCollector
             IRModuleSyncDebug.problem("read " + bslPath + ": " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
+    }
+
+    /** MD5 по уже прочитанным UTF-8 байтам (без повторного getBytes). */
+    private static byte[] fingerprintUtf8(byte[] utf8)
+    {
+        byte[] input = utf8 != null ? utf8 : new byte[0];
+        return CONTENT_MD5.get().digest(input);
     }
 
     private static IInfobaseSynchronizationStateManager getStateManager()

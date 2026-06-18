@@ -207,10 +207,10 @@ public final class IRSession
             });
         }
 
-        /** Подготовка данных sync на потоке вызывающего (hover job / UI). */
+        /** Подготовка данных sync на потоке вызывающего (hover job / UI). Без collect pending. */
         CodeEditorSyncPayload prepareCodeEditorSyncForHover(BslXtextEditor editor, int offset)
         {
-            return prepareCodeEditorSync(editor, offset, offset);
+            return prepareCodeEditorSync(editor, offset, offset, false);
         }
 
         /** Применить подготовленный sync на потоке {@link #executor}. */
@@ -223,32 +223,38 @@ public final class IRSession
         private CodeEditorSyncPayload prepareCodeEditorSync(
             BslXtextEditor editor, int offset, int endOffset)
         {
+            return prepareCodeEditorSync(editor, offset, endOffset, true);
+        }
+
+        private CodeEditorSyncPayload prepareCodeEditorSync(
+            BslXtextEditor editor, int offset, int endOffset, boolean collectPending)
+        {
             if (editor == null)
                 return null;
             ISourceViewer viewer = editor.getInternalSourceViewer();
             if (viewer == null || !(viewer.getDocument() instanceof IXtextDocument doc))
                 return null;
+
             String currentModuleName = GetRef.resolveSetTextModuleName(editor);
             String text = doc.get();
             String currentBslPath = ""; //$NON-NLS-1$
-            byte[] currentHash = null;
             IEditorInput input = editor.getEditorInput();
             if (input != null)
             {
                 IFile file = input.getAdapter(IFile.class);
                 if (file != null)
-                {
                     currentBslPath = file.getProjectRelativePath().toString().replace('\\', '/');
-                    try
-                    {
-                        currentHash = IRModuleChangeCollector.contentHash(file);
-                    }
-                    catch (CoreException ignored) {}
-                }
             }
-            List<IRModuleChangeCollector.ModuleSyncEntry> pending =
-                IRModuleChangeCollector.collectPendingModules(
-                    this, project, infobase, currentModuleName);
+
+            byte[] currentHash = collectPending
+                ? IRModuleChangeCollector.contentFingerprint(text)
+                : null;
+
+            List<IRModuleChangeCollector.ModuleSyncEntry> pending = collectPending
+                ? IRModuleChangeCollector.collectPendingModules(
+                    this, project, infobase, currentModuleName)
+                : List.of();
+
             return new CodeEditorSyncPayload(
                 text, currentModuleName, offset, endOffset, currentBslPath, currentHash, pending);
         }
