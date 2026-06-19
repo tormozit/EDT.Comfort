@@ -59,6 +59,10 @@ public class Activator extends AbstractUIPlugin
             ComfortSettings.DEFAULT_DEBUG_INSPECTOR_AUTO_CLOSE);
         // Подключаем персистентное хранилище последних мест.
         RecentPlaces.getInstance().init(PLUGIN_ID);
+        ObjectSets.getInstance().init(PLUGIN_ID);
+        ObjectSetsAddTargetState.getInstance().init(PLUGIN_ID);
+        for (ObjectSets.SetDef set : ObjectSets.getInstance().getAllSets())
+            ObjectSetsAddTargetState.getInstance().ensureForProject(set.projectName);
 
         ComfortUpdateChecker.startDailyScheduler();
         IRModuleChangeCollector.installDirtyListener();

@@ -2429,9 +2429,7 @@ public class GoToDefinition extends AbstractHandler
             listViewer.setContentProvider(ArrayContentProvider.getInstance());
             listViewer.setInput(rows);
 
-            tableInteraction = new FormTableInteraction(table, this::cellText);
-            tableInteraction.setSelectionSync(item ->
-                listViewer.setSelection(new StructuredSelection(item.getData())));
+            tableInteraction = new FormTableInteraction(table, listViewer, this::cellText);
             tableInteraction.install();
             if (!rows.isEmpty())
             {

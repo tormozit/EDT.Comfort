@@ -535,6 +535,12 @@ public class GetRef extends AbstractHandler
         catch (Exception e) { Global.log("GetRef.refFromNavigator: " + e); return null; } //$NON-NLS-1$
     }
 
+    /** Полное имя объекта МД из элемента навигатора (для наборов объектов и фильтра). */
+    static String fullNameFromNavigatorElement(Object element)
+    {
+        return refFromElement(element);
+    }
+
     private static String refFromElement(Object element)
     {
         if (element == null)

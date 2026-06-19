@@ -5,6 +5,7 @@ import java.util.Map;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
 
+import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.navigator.providers.INavigatorContentProviderFolder;
 
@@ -31,10 +32,21 @@ public final class NavigatorTreeElementLabels
     private NavigatorTreeElementLabels() {}
 
     /**
-     * Служебная папка навигатора EDT. НЕ ТРОГАТЬ ГРУППЫ: не фильтровать и не раскрашивать
-     * по паттерну; только показывать, если в поддереве есть совпадения.
+     * Корень конфигурации в навигаторе EDT (жёлтый шар, имя конфигурации).
+     * Не группа и не объект набора — всегда контейнер пути, как в штатном фильтре подсистем.
      */
-    public static boolean isGroupNode(Object element)
+    public static boolean isNavigatorConfigurationRoot(Object element)
+    {
+        if (element == null)
+            return false;
+        EObject model = NavigatorElementModels.resolveEObject(element);
+        return model != null && MdClassPackage.Literals.CONFIGURATION.equals(model.eClass());
+    }
+
+    /**
+     * Служебная папка навигатора EDT (структура дерева, без проверки «это объект МД»).
+     */
+    private static boolean isGroupNodeStructural(Object element)
     {
         if (element == null)
             return false;
@@ -47,6 +59,120 @@ public final class NavigatorTreeElementLabels
         if (className.contains("FolderNavigatorAdapter")) //$NON-NLS-1$
             return true;
         return isInstanceOf(element, VIRTUAL_ADAPTER) || isInstanceOf(element, EXTERNAL_FOLDER_ADAPTER);
+    }
+
+    /**
+     * Узел — крупный объект МД (Справочник.Имя, ЖурналДокументов.Имя…), а не служебная папка EDT.
+     * Папки коллекций типов могут иметь {@link #resolveMdObject} на конфигурации — это не объект МД.
+     */
+    public static boolean hasRootMdObjectIdentity(Object element)
+    {
+        if (element == null)
+            return false;
+        String fullName = GetRef.fullNameFromNavigatorElement(element);
+        if (fullName != null && !fullName.isBlank())
+            return MdTypeMapping.isRootMdObjectRef(fullName);
+        if (isNamedLeafMdObjectAdapter(element))
+            return true;
+        if (resolveMdObject(element) == null)
+            return false;
+        if (isGroupNodeStructural(element) || isMetadataTypeCollectionFolderByClassName(element))
+            return false;
+        return true;
+    }
+
+    /**
+     * Крупный объект МД по модели на адаптере (журнал, критерий отбора…), когда {@link GetRef} не даёт fullName.
+     */
+    public static String inferRootMdObjectRef(Object element)
+    {
+        if (element == null)
+            return null;
+        String fullName = GetRef.fullNameFromNavigatorElement(element);
+        if (fullName != null && !fullName.isBlank())
+        {
+            String owner = MdTypeMapping.toOwnerMdObjectRef(fullName);
+            return owner != null && !owner.isBlank() ? owner : fullName.trim();
+        }
+        MdObject md = resolveMdObject(element);
+        if (!(md instanceof EObject eObject))
+            return null;
+        if (MdClassPackage.Literals.CONFIGURATION.equals(eObject.eClass()))
+            return null;
+        String ruType = MdTypeMapping.enSingToRu(eObject.eClass().getName());
+        String name = md.getName();
+        if (ruType == null || name == null || name.isBlank())
+            return null;
+        return ruType + "." + name; //$NON-NLS-1$
+    }
+
+    private static boolean isNamedLeafMdObjectAdapter(Object element)
+    {
+        if (element == null)
+            return false;
+        if (!element.getClass().getName().contains("FolderNavigatorAdapter")) //$NON-NLS-1$
+            return false;
+        MdObject md = resolveMdObject(element);
+        if (!(md instanceof EObject eObject))
+            return false;
+        if (MdClassPackage.Literals.CONFIGURATION.equals(eObject.eClass()))
+            return false;
+        String name = md.getName();
+        return name != null && !name.isBlank();
+    }
+
+    /**
+     * Узел навигатора — крупный объект МД (справочник, журнал…), а не служебная группа EDT.
+     */
+    public static boolean isMdObjectNavigatorNode(Object element)
+    {
+        return hasRootMdObjectIdentity(element);
+    }
+
+    /**
+     * Служебная папка навигатора EDT. НЕ ТРОГАТЬ ГРУППЫ: не фильтровать и не раскрашивать
+     * по паттерну; только показывать, если в поддереве есть совпадения.
+     */
+    public static boolean isGroupNode(Object element)
+    {
+        if (hasRootMdObjectIdentity(element))
+            return false;
+        return isGroupNodeStructural(element) || isMetadataTypeCollectionFolderByClassName(element);
+    }
+
+    /**
+     * Папка коллекции типа МД («Справочники», «Документы»…) — группа, не объект.
+     */
+    private static boolean isMetadataTypeCollectionFolderByClassName(Object element)
+    {
+        if (element == null)
+            return false;
+        String className = element.getClass().getName();
+        for (String folder : MdTypeMapping.getRuToFolderMap().values())
+        {
+            if (folder == null || folder.isEmpty())
+                continue;
+            if (className.contains(folder))
+                return true;
+        }
+        return false;
+    }
+
+    private static boolean isMetadataTypeCollectionFolder(Object element)
+    {
+        if (element == null || hasRootMdObjectIdentity(element))
+            return false;
+        return isMetadataTypeCollectionFolderByClassName(element);
+    }
+
+    /**
+     * Служебная группа EDT, которую фильтр не скрывает даже пустой (от неё создают объекты).
+     */
+    public static boolean keepEmptyGroupVisible(Object element)
+    {
+        if (element == null || hasRootMdObjectIdentity(element))
+            return false;
+        return isGroupNodeStructural(element) || isMetadataTypeCollectionFolder(element);
     }
 
     public static String resolveSearchText(Object element, Object labelSource)

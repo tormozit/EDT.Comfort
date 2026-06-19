@@ -1,16 +1,18 @@
 package tormozit;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
-import java.util.function.Consumer;
 
+import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.StructuredSelection;
+import org.eclipse.jface.viewers.TableViewer;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.swt.events.ControlAdapter;
 import org.eclipse.swt.events.ControlEvent;
-import org.eclipse.swt.events.MouseAdapter;
-import org.eclipse.swt.events.MouseEvent;
 import org.eclipse.swt.events.PaintEvent;
 import org.eclipse.swt.events.PaintListener;
 import org.eclipse.swt.events.SelectionAdapter;
@@ -56,13 +58,17 @@ final class FormTableInteraction
     private final Table table;
     private final FormTableCellAccess cellAccess;
 
-    private Consumer<TableItem> selectionSync;
+    private Runnable selectionSync;
     private Runnable copyHook;
+    private TableViewer multiSelectViewer;
 
     private TableItem selectedItem;
+    private TableItem selectionAnchor;
+    private int suppressTableToViewerSync;
     private TableColumn activeColumnWidget;
     private boolean columnReorderEnabled = true;
     private Color ownedRowBg;
+    private Color ownedInactiveRowBg;
     private Color ownedActiveCellBg;
     private Color ownedHeaderAccentBg;
     private Color ownedHeaderSeparatorBg;
@@ -82,7 +88,7 @@ final class FormTableInteraction
     private Listener selectionListener;
     private Listener menuDetectListener;
     private Listener keyFilter;
-    private MouseAdapter mouseListener;
+    private Listener mouseDownListener;
 
     FormTableInteraction(Table table, FormTableCellAccess cellAccess)
     {
@@ -90,9 +96,33 @@ final class FormTableInteraction
         this.cellAccess = cellAccess;
     }
 
-    void setSelectionSync(Consumer<TableItem> selectionSync)
+    FormTableInteraction(Table table, TableViewer viewer, FormTableCellAccess cellAccess)
     {
-        this.selectionSync = selectionSync;
+        this(table, cellAccess);
+        setTableViewer(viewer);
+    }
+
+    void setTableViewer(TableViewer viewer)
+    {
+        multiSelectViewer = viewer;
+        selectionSync = viewer == null
+            ? null
+            : () -> syncTableViewerSelection(table, viewer);
+    }
+
+    static void syncTableViewerSelection(Table table, TableViewer viewer)
+    {
+        if (table == null || table.isDisposed() || viewer == null)
+            return;
+        TableItem[] sel = table.getSelection();
+        List<Object> elements = new ArrayList<>();
+        for (TableItem ti : sel)
+        {
+            Object data = ti.getData();
+            if (data != null)
+                elements.add(data);
+        }
+        viewer.setSelection(new StructuredSelection(elements));
     }
 
     void setCopyHook(Runnable copyHook)
@@ -110,21 +140,8 @@ final class FormTableInteraction
         if (table == null || table.isDisposed())
             return;
 
-        mouseListener = new MouseAdapter()
-        {
-            @Override
-            public void mouseDown(MouseEvent e)
-            {
-                if (e.button != 1)
-                    return;
-                TableItem item = table.getItem(new Point(e.x, e.y));
-                if (item == null)
-                    return;
-                int column = columnAt(e.x, e.y, item);
-                selectCell(item, column >= 0 ? column : 0);
-            }
-        };
-        table.addMouseListener(mouseListener);
+        mouseDownListener = this::onMouseDown;
+        table.addListener(SWT.MouseDown, mouseDownListener);
 
         eraseItemListener = this::onEraseItem;
         table.addListener(SWT.EraseItem, eraseItemListener);
@@ -134,7 +151,7 @@ final class FormTableInteraction
         focusListener = e ->
         {
             invalidateHighlightColor();
-            redrawSelectedRow();
+            redrawSelectedRows();
             redrawHeader();
         };
         table.addListener(SWT.FocusIn, focusListener);
@@ -164,14 +181,54 @@ final class FormTableInteraction
     {
         if (item == null || item.isDisposed())
             return;
-        TableItem previous = selectedItem;
-        selectedItem = item;
-        activeColumnWidget = columnWidget(column);
-        table.setSelection(item);
-        syncSelection(item);
-        redrawRow(previous);
-        redrawRow(selectedItem);
-        redrawHeader();
+        TableItem[] previousSelection = table.getSelection();
+        TableItem previousActive = selectedItem;
+        selectSingleRow(item);
+        updateActiveCell(item, column);
+        redrawAffectedRows(previousSelection, table.getSelection(), previousActive);
+        if (!useViewerForMultiSelect())
+            syncSelection();
+    }
+
+    private void onMouseDown(Event e)
+    {
+        if (e.button != 1)
+            return;
+        TableItem item = table.getItem(new Point(e.x, e.y));
+        if (item == null)
+            return;
+        int column = columnAt(e.x, e.y, item);
+        if (column < 0)
+            column = 0;
+        if (isMultiSelect())
+        {
+            int mods = e.stateMask & (SWT.MOD1 | SWT.MOD2);
+            if (useViewerForMultiSelect() && mods != 0)
+            {
+                updateActiveCell(item, column);
+                return;
+            }
+            TableItem[] previousSelection = table.getSelection();
+            TableItem previousActive = selectedItem;
+            if ((mods & SWT.MOD2) != 0)
+                extendRangeSelection(item);
+            else if ((mods & SWT.MOD1) != 0)
+                toggleRowSelection(item);
+            else
+                selectSingleRow(item);
+            updateActiveCell(item, column);
+            redrawAffectedRows(previousSelection, table.getSelection(), previousActive);
+            if (!useViewerForMultiSelect())
+                syncSelection();
+            if (useViewerForMultiSelect() && mods == 0)
+                e.doit = false;
+            else if (!useViewerForMultiSelect() && mods != 0)
+                e.doit = false;
+        }
+        else
+        {
+            selectCell(item, column);
+        }
     }
 
     int activeColumn()
@@ -198,25 +255,168 @@ final class FormTableInteraction
         return selectedItem;
     }
 
+    private boolean isMultiSelect()
+    {
+        return (table.getStyle() & SWT.MULTI) != 0;
+    }
+
+    private boolean useViewerForMultiSelect()
+    {
+        return isMultiSelect() && multiSelectViewer != null
+            && multiSelectViewer.getControl() != null
+            && !multiSelectViewer.getControl().isDisposed();
+    }
+
+    private int viewerSelectionCount()
+    {
+        if (!useViewerForMultiSelect())
+            return 0;
+        return multiSelectViewer.getStructuredSelection().size();
+    }
+
+    private void applyViewerSelection(StructuredSelection selection)
+    {
+        if (!useViewerForMultiSelect())
+            return;
+        suppressTableToViewerSync++;
+        multiSelectViewer.setSelection(selection);
+        syncTableFromViewer();
+        table.getDisplay().asyncExec(() ->
+        {
+            if (table.isDisposed())
+                return;
+            suppressTableToViewerSync = Math.max(0, suppressTableToViewerSync - 1);
+        });
+    }
+
+    private void syncTableFromViewer()
+    {
+        if (!useViewerForMultiSelect())
+            return;
+        List<?> elements = multiSelectViewer.getStructuredSelection().toList();
+        table.deselectAll();
+        for (int i = 0; i < table.getItemCount(); i++)
+        {
+            Object data = table.getItem(i).getData();
+            if (data != null && elements.contains(data))
+                table.select(i);
+        }
+    }
+
+    private void selectSingleRow(TableItem item)
+    {
+        selectionAnchor = item;
+        Object data = item.getData();
+        if (useViewerForMultiSelect() && data != null)
+            applyViewerSelection(new StructuredSelection(data));
+        else
+            table.setSelection(item);
+    }
+
+    private void toggleRowSelection(TableItem item)
+    {
+        Object data = item.getData();
+        if (data == null)
+            return;
+        if (useViewerForMultiSelect())
+        {
+            List<Object> next = new ArrayList<>(multiSelectViewer.getStructuredSelection().toList());
+            if (next.contains(data))
+                next.remove(data);
+            else
+                next.add(data);
+            applyViewerSelection(new StructuredSelection(next));
+            return;
+        }
+        int idx = table.indexOf(item);
+        if (idx < 0)
+            return;
+        if (table.isSelected(idx))
+        {
+            if (table.getSelectionCount() <= 1)
+                table.deselectAll();
+            else
+                table.deselect(idx);
+        }
+        else
+            table.select(idx);
+    }
+
+    private void extendRangeSelection(TableItem item)
+    {
+        TableItem anchor = selectionAnchor;
+        if (anchor == null || anchor.isDisposed())
+            anchor = currentSelectedRow();
+        if (anchor == null)
+        {
+            selectSingleRow(item);
+            return;
+        }
+        int anchorIdx = table.indexOf(anchor);
+        int clickIdx = table.indexOf(item);
+        if (anchorIdx < 0 || clickIdx < 0)
+        {
+            selectSingleRow(item);
+            return;
+        }
+        int from = Math.min(anchorIdx, clickIdx);
+        int to = Math.max(anchorIdx, clickIdx);
+        if (useViewerForMultiSelect())
+        {
+            TableItem[] all = table.getItems();
+            List<Object> elements = new ArrayList<>();
+            for (int i = from; i <= to; i++)
+            {
+                Object d = all[i].getData();
+                if (d != null)
+                    elements.add(d);
+            }
+            applyViewerSelection(new StructuredSelection(elements));
+            return;
+        }
+        table.setSelection(from, to);
+    }
+
+    private void updateActiveCell(TableItem item, int column)
+    {
+        selectedItem = item;
+        activeColumnWidget = columnWidget(column);
+    }
+
     private void onSelection(Event e)
     {
         TableItem row = currentSelectedRow();
         if (row == null)
+        {
+            if (suppressTableToViewerSync <= 0)
+                syncSelection();
             return;
-        TableItem previous = selectedItem;
-        selectedItem = row;
+        }
+        TableItem previousActive = selectedItem;
+        if (!isMultiSelect() || selectedItem == null || !isRowSelected(selectedItem))
+            selectedItem = row;
         if (activeColumnWidget == null || activeColumnWidget.isDisposed())
             activeColumnWidget = columnWidget(0);
-        redrawRow(previous);
-        redrawRow(selectedItem);
+        if (isMultiSelect())
+        {
+            redrawSelectedRows();
+            if (previousActive != null && !isRowSelected(previousActive))
+                redrawRow(previousActive);
+        }
+        else
+        {
+            redrawRow(previousActive);
+            redrawRow(selectedItem);
+        }
         redrawHeader();
-        syncSelection(row);
+        if (suppressTableToViewerSync <= 0)
+            syncSelection();
     }
 
-    private void syncSelection(TableItem item)
+    private void syncSelection()
     {
-        if (selectionSync != null && item != null && !item.isDisposed())
-            selectionSync.accept(item);
+        if (selectionSync != null)
+            selectionSync.run();
     }
 
     private void onKeyFilter(Event e)
@@ -237,7 +437,16 @@ final class FormTableInteraction
         if (item != null)
         {
             int column = columnAt(loc.x, loc.y, item);
-            selectCell(item, column >= 0 ? column : 0);
+            if (column < 0)
+                column = 0;
+            TableItem[] previousSelection = table.getSelection();
+            TableItem previousActive = selectedItem;
+            if (!isMultiSelect() || !isRowSelected(item))
+                selectSingleRow(item);
+            updateActiveCell(item, column);
+            redrawAffectedRows(previousSelection, table.getSelection(), previousActive);
+            if (!useViewerForMultiSelect())
+                syncSelection();
         }
         ensureCopyMenu();
     }
@@ -260,7 +469,9 @@ final class FormTableInteraction
 
     private void copyActiveCell()
     {
-        TableItem item = currentSelectedRow();
+        TableItem item = selectedItem != null && !selectedItem.isDisposed()
+            ? selectedItem
+            : currentSelectedRow();
         if (item == null || item.isDisposed() || activeColumnIndex() < 0)
             return;
         String text = cellAccess.cellText(item, activeColumnIndex());
@@ -275,11 +486,12 @@ final class FormTableInteraction
 
     private void onEraseItem(Event e)
     {
-        if (!(e.item instanceof TableItem item) || item != currentSelectedRow())
+        if (!(e.item instanceof TableItem item) || !isRowSelected(item))
             return;
-        Color rowBg = rowSelectionBackground();
         int col = activeColumnIndex();
-        Color bg = e.index == col ? activeCellBackground(rowBg) : rowBg;
+        boolean activeRow = item == selectedItem;
+        Color rowBg = activeRow ? rowSelectionBackground() : inactiveRowSelectionBackground();
+        Color bg = activeRow && e.index == col ? activeCellBackground(rowBg) : rowBg;
         e.gc.setBackground(bg);
         e.gc.fillRectangle(e.x, e.y, e.width, e.height);
         e.detail &= ~SWT.BACKGROUND;
@@ -287,7 +499,7 @@ final class FormTableInteraction
 
     private void onPaintItem(Event e)
     {
-        if (!(e.item instanceof TableItem item) || item != currentSelectedRow() || e.index != activeColumnIndex())
+        if (!(e.item instanceof TableItem item) || item != selectedItem || e.index != activeColumnIndex())
             return;
         Rectangle bounds = item.getBounds(e.index);
         if (bounds == null || bounds.isEmpty())
@@ -385,7 +597,7 @@ final class FormTableInteraction
                 public void controlMoved(ControlEvent e)
                 {
                     updateHeaderOverlays();
-                    redrawSelectedRow();
+                    redrawSelectedRows();
                 }
             };
         }
@@ -626,6 +838,25 @@ final class FormTableInteraction
         return table.getLocation();
     }
 
+    private boolean isRowSelected(TableItem item)
+    {
+        if (item == null || item.isDisposed())
+            return false;
+        if (useViewerForMultiSelect())
+        {
+            Object data = item.getData();
+            if (data == null)
+                return false;
+            return multiSelectViewer.getStructuredSelection().toList().contains(data);
+        }
+        for (TableItem s : table.getSelection())
+        {
+            if (s == item)
+                return true;
+        }
+        return false;
+    }
+
     private TableItem currentSelectedRow()
     {
         TableItem[] selection = table.getSelection();
@@ -644,6 +875,24 @@ final class FormTableInteraction
         table.redraw(bounds.x, bounds.y, bounds.width, bounds.height, false);
     }
 
+    private void redrawRows(TableItem[] items)
+    {
+        if (items == null)
+            return;
+        for (TableItem item : items)
+            redrawRow(item);
+    }
+
+    private void redrawAffectedRows(TableItem[] previousSelection, TableItem[] currentSelection,
+        TableItem previousActive)
+    {
+        redrawRows(previousSelection);
+        redrawRows(currentSelection);
+        if (previousActive != null && !isRowSelected(previousActive))
+            redrawRow(previousActive);
+        redrawHeader();
+    }
+
     private Rectangle rowBounds(TableItem item)
     {
         if (item == null || item.isDisposed())
@@ -657,9 +906,11 @@ final class FormTableInteraction
         return bounds;
     }
 
-    private void redrawSelectedRow()
+    private void redrawSelectedRows()
     {
-        redrawRow(currentSelectedRow());
+        redrawRows(table.getSelection());
+        if (selectedItem != null && !isRowSelected(selectedItem))
+            redrawRow(selectedItem);
     }
 
     private void redrawHeader()
@@ -706,6 +957,21 @@ final class FormTableInteraction
         double factor = table.isFocusControl() ? 0.12 : 0.08;
         ownedRowBg = slightlyDarker(base, factor);
         return ownedRowBg;
+    }
+
+    /** Фон прочих выбранных строк при мультивыделении (слабее текущей). */
+    private Color inactiveRowSelectionBackground()
+    {
+        if (!isMultiSelect())
+            return rowSelectionBackground();
+        if (ownedInactiveRowBg != null && !ownedInactiveRowBg.isDisposed())
+            return ownedInactiveRowBg;
+        Color base = table.getBackground();
+        if (base == null || base.isDisposed())
+            base = table.getDisplay().getSystemColor(SWT.COLOR_LIST_BACKGROUND);
+        double factor = table.isFocusControl() ? 0.045 : 0.03;
+        ownedInactiveRowBg = slightlyDarker(base, factor);
+        return ownedInactiveRowBg;
     }
 
     private Color activeCellBackground(Color rowBg)
@@ -767,6 +1033,8 @@ final class FormTableInteraction
     {
         if (ownedRowBg != null && !ownedRowBg.isDisposed())
             ownedRowBg.dispose();
+        if (ownedInactiveRowBg != null && !ownedInactiveRowBg.isDisposed())
+            ownedInactiveRowBg.dispose();
         if (ownedActiveCellBg != null && !ownedActiveCellBg.isDisposed())
             ownedActiveCellBg.dispose();
         if (ownedHeaderAccentBg != null && !ownedHeaderAccentBg.isDisposed())
@@ -774,6 +1042,7 @@ final class FormTableInteraction
         if (ownedHeaderSeparatorBg != null && !ownedHeaderSeparatorBg.isDisposed())
             ownedHeaderSeparatorBg.dispose();
         ownedRowBg = null;
+        ownedInactiveRowBg = null;
         ownedActiveCellBg = null;
         ownedHeaderAccentBg = null;
         ownedHeaderSeparatorBg = null;

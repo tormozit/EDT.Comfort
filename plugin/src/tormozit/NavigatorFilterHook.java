@@ -306,6 +306,8 @@ public final class NavigatorFilterHook implements IStartup
             String safePattern = pattern != null ? pattern : ""; //$NON-NLS-1$
             tree.setData(REQUESTED_PATTERN_KEY, safePattern);
             NavigatorFilterDebug.log("modify pattern=\"" + safePattern + "\" mode=" + input.mode()); //$NON-NLS-1$ //$NON-NLS-2$
+            if (!safePattern.isEmpty())
+                ObjectSetsNavigatorFilterSupport.deactivateBecauseCompetingFilter();
             // ФИЛЬТРАЦИЯ НЕ ДОЛЖНА БЛОКИРОВАТЬ ВВОД: фильтр — штатный SearchJob; здесь только подсветка.
             applyHighlightState(viewer, tree, highlight, searchCache, safePattern);
             if (safePattern.isEmpty())

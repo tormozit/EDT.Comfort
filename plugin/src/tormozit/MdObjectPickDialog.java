@@ -205,9 +205,7 @@ public class MdObjectPickDialog extends Dialog
         listViewer.setContentProvider(ArrayContentProvider.getInstance());
         listViewer.setInput(entries);
 
-        tableInteraction = new FormTableInteraction(table, this::cellText);
-        tableInteraction.setSelectionSync(item ->
-            listViewer.setSelection(new StructuredSelection(item.getData())));
+        tableInteraction = new FormTableInteraction(table, listViewer, this::cellText);
         tableInteraction.install();
         selectFirst();
 

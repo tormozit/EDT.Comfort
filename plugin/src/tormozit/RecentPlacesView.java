@@ -7,6 +7,8 @@ import java.util.List;
 import java.util.Map;
 
 import org.eclipse.core.resources.IProject;
+import org.eclipse.jface.dialogs.InputDialog;
+import org.eclipse.jface.window.Window;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.layout.TableColumnLayout;
@@ -31,8 +33,13 @@ import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.ControlAdapter;
 import org.eclipse.swt.events.ControlEvent;
 import org.eclipse.swt.dnd.Clipboard;
+import org.eclipse.swt.dnd.DND;
+import org.eclipse.swt.dnd.DragSource;
+import org.eclipse.swt.dnd.DragSourceAdapter;
+import org.eclipse.swt.dnd.DragSourceEvent;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
+import org.eclipse.jface.util.LocalSelectionTransfer;
 import org.eclipse.swt.events.KeyAdapter;
 import org.eclipse.swt.events.KeyEvent;
 import org.eclipse.swt.events.SelectionAdapter;
@@ -81,7 +88,7 @@ public final class RecentPlacesView extends ViewPart
     private static final String KEY_COL_NAME_WIDTH    = "colNameWidth";    //$NON-NLS-1$
     private static final String KEY_COL_PROJECT_WIDTH = "colProjectWidth"; //$NON-NLS-1$
     private static final String KEY_COL_DATE_WIDTH    = "colDateWidth";    //$NON-NLS-1$
-    private static final String KEY_COL_ORDER         = "columnOrder";     //$NON-NLS-1$
+    private static final String KEY_COL_ORDER         = "columnOrderV2";   //$NON-NLS-1$
     private static final String KEY_FILTER_BY_PROJECT = "filterByProject"; //$NON-NLS-1$
 
     private static final int DEFAULT_PLACE_COL_WIDTH   = 280;
@@ -184,7 +191,7 @@ public final class RecentPlacesView extends ViewPart
         columnHost.setLayout(columnLayout);
 
         listViewer = new TableViewer(columnHost,
-            SWT.BORDER | SWT.SINGLE | SWT.FULL_SELECTION | SWT.V_SCROLL);
+            SWT.BORDER | SWT.MULTI | SWT.FULL_SELECTION | SWT.V_SCROLL);
         Table table = listViewer.getTable();
         table.setHeaderVisible(true);
         table.setLinesVisible(true);
@@ -212,6 +219,12 @@ public final class RecentPlacesView extends ViewPart
             }
         });
 
+        TableViewerColumn colName = new TableViewerColumn(listViewer, SWT.NONE);
+        nameColumn = colName.getColumn();
+        nameColumn.setText("Имя"); //$NON-NLS-1$
+        nameLabelProvider = new NameLabelProvider();
+        colName.setLabelProvider(new DelegatingStyledCellLabelProvider(nameLabelProvider));
+
         TableViewerColumn colPlace = new TableViewerColumn(listViewer, SWT.NONE);
         placeColumn = colPlace.getColumn();
         placeColumn.setText("Путь"); //$NON-NLS-1$
@@ -226,12 +239,6 @@ public final class RecentPlacesView extends ViewPart
                 return placePrefix(entry.displayName, entry.ownName);
             }
         });
-
-        TableViewerColumn colName = new TableViewerColumn(listViewer, SWT.NONE);
-        nameColumn = colName.getColumn();
-        nameColumn.setText("Имя"); //$NON-NLS-1$
-        nameLabelProvider = new NameLabelProvider();
-        colName.setLabelProvider(new DelegatingStyledCellLabelProvider(nameLabelProvider));
 
         TableViewerColumn colProject = new TableViewerColumn(listViewer, SWT.NONE);
         projectColumn = colProject.getColumn();
@@ -265,10 +272,10 @@ public final class RecentPlacesView extends ViewPart
 
         columnLayout.setColumnData(iconColumn,
             new ColumnPixelData(ICON_COL_WIDTH, false, false));
-        columnLayout.setColumnData(placeColumn,
-            new ColumnPixelData(placeWidth, true, true));
         columnLayout.setColumnData(nameColumn,
             new ColumnPixelData(nameWidth, true, true));
+        columnLayout.setColumnData(placeColumn,
+            new ColumnPixelData(placeWidth, true, true));
         columnLayout.setColumnData(projectColumn,
             new ColumnPixelData(projectWidth, true, true));
         columnLayout.setColumnData(dateColumn,
@@ -279,15 +286,14 @@ public final class RecentPlacesView extends ViewPart
 
         listViewer.setContentProvider(ArrayContentProvider.getInstance());
 
-        tableInteraction = new FormTableInteraction(table, this::cellText);
-        tableInteraction.setSelectionSync(item ->
-            listViewer.setSelection(new StructuredSelection(item.getData())));
+        tableInteraction = new FormTableInteraction(table, listViewer, this::cellText);
         tableInteraction.install();
 
         installColumnWidthPersistence();
         installKeyListeners(table);
         installDoubleClick(table);
         installTableContextMenu(table);
+        installDragSource(table);
 
         RecentPlaces.getInstance().addChangeListener(storeChangeListener);
         refreshFromStore();
@@ -320,12 +326,22 @@ public final class RecentPlacesView extends ViewPart
 
     public RecentPlaces.Entry getSelectedEntry()
     {
+        List<RecentPlaces.Entry> entries = getSelectedEntries();
+        return entries.isEmpty() ? null : entries.get(0);
+    }
+
+    public List<RecentPlaces.Entry> getSelectedEntries()
+    {
+        List<RecentPlaces.Entry> result = new ArrayList<>();
         if (listViewer == null || listViewer.getControl().isDisposed())
-            return null;
+            return result;
         IStructuredSelection sel = listViewer.getStructuredSelection();
-        if (sel.isEmpty() || !(sel.getFirstElement() instanceof RecentPlaces.Entry))
-            return null;
-        return (RecentPlaces.Entry) sel.getFirstElement();
+        for (Object o : sel.toList())
+        {
+            if (o instanceof RecentPlaces.Entry entry)
+                result.add(entry);
+        }
+        return result;
     }
 
     void jumpToSelected()
@@ -627,10 +643,24 @@ public final class RecentPlacesView extends ViewPart
     {
         if (displayName == null || displayName.isEmpty())
             return ""; //$NON-NLS-1$
+        String result;
         if (ownName == null || ownName.isEmpty())
-            return displayName;
-        int idx = displayName.toLowerCase().lastIndexOf(ownName.toLowerCase());
-        return idx > 0 ? displayName.substring(0, idx) : ""; //$NON-NLS-1$
+            result = displayName;
+        else
+        {
+            int idx = displayName.toLowerCase().lastIndexOf(ownName.toLowerCase());
+            result = idx > 0 ? displayName.substring(0, idx) : ""; //$NON-NLS-1$
+        }
+        return trimPathDisplaySuffix(result);
+    }
+
+    private static String trimPathDisplaySuffix(String value)
+    {
+        if (value == null || value.isEmpty())
+            return value != null ? value : ""; //$NON-NLS-1$
+        while (value.endsWith(".") || value.endsWith(":")) //$NON-NLS-1$ //$NON-NLS-2$
+            value = value.substring(0, value.length() - 1);
+        return value;
     }
 
     private final class NameLabelProvider extends LabelProvider implements IStyledLabelProvider
@@ -905,6 +935,8 @@ public final class RecentPlacesView extends ViewPart
         menu.setData(TABLE_MENU_KEY, Boolean.TRUE);
 
         new MenuItem(menu, SWT.SEPARATOR);
+        installAddToObjectSetMenuItems(menu);
+
         MenuItem showNav = new MenuItem(menu, SWT.PUSH);
         showNav.setText(ITEM_TEXT_SHOW_IN_NAVIGATOR);
         showNav.setToolTipText("Показать объект метаданных в дереве навигатора"); //$NON-NLS-1$
@@ -920,6 +952,133 @@ public final class RecentPlacesView extends ViewPart
             showNav.setEnabled(hasSelection);
             copyRef.setEnabled(hasSelection);
         });
+    }
+
+    private void installDragSource(Table table)
+    {
+        DragSource source = new DragSource(table, DND.DROP_COPY | DND.DROP_MOVE);
+        source.setTransfer(new Transfer[] { LocalSelectionTransfer.getTransfer() });
+        source.addDragListener(new DragSourceAdapter()
+        {
+            @Override
+            public void dragStart(DragSourceEvent event)
+            {
+                IStructuredSelection selection = listViewer.getStructuredSelection();
+                LocalSelectionTransfer.getTransfer().setSelection(selection);
+                event.doit = !selection.isEmpty();
+            }
+
+            @Override
+            public void dragSetData(DragSourceEvent event)
+            {
+                LocalSelectionTransfer.getTransfer().setSelection(listViewer.getStructuredSelection());
+            }
+        });
+    }
+
+    private static final String ADD_TO_SET_MENU_MARKER = "tormozit.recentPlacesAddToSetMenu"; //$NON-NLS-1$
+
+    private void installAddToObjectSetMenuItems(Menu menu)
+    {
+        menu.addListener(SWT.Show, ev -> refreshAddToObjectSetMenuItems((Menu) ev.widget));
+    }
+
+    private void refreshAddToObjectSetMenuItems(Menu menu)
+    {
+        if (menu == null || menu.isDisposed())
+            return;
+        for (MenuItem item : menu.getItems())
+        {
+            if (Boolean.TRUE.equals(item.getData(ADD_TO_SET_MENU_MARKER)))
+                item.dispose();
+        }
+        List<RecentPlaces.Entry> entries = getSelectedEntries();
+        ObjectSets.SetDef selectedSet = resolveAddTargetSet(entries);
+        if (selectedSet != null)
+        {
+            MenuItem direct = new MenuItem(menu, SWT.PUSH);
+            direct.setData(ADD_TO_SET_MENU_MARKER, Boolean.TRUE);
+            direct.setText("Добавить в набор <" + selectedSet.name + ">"); //$NON-NLS-1$ //$NON-NLS-2$
+            direct.setToolTipText("Добавить выделенные записи в набор «" + selectedSet.name + "»"); //$NON-NLS-1$ //$NON-NLS-2$
+            direct.setEnabled(!entries.isEmpty());
+            direct.addListener(SWT.Selection, e -> addSelectedToSet(selectedSet));
+            return;
+        }
+        MenuItem root = new MenuItem(menu, SWT.CASCADE);
+        root.setData(ADD_TO_SET_MENU_MARKER, Boolean.TRUE);
+        root.setText("Добавить в набор объектов"); //$NON-NLS-1$
+        Menu sub = new Menu(menu.getShell(), SWT.DROP_DOWN);
+        root.setMenu(sub);
+        if (entries.isEmpty())
+        {
+            root.setEnabled(false);
+            return;
+        }
+        root.setEnabled(true);
+        String projectName = entries.get(0).projectName;
+        if (projectName == null || projectName.isBlank())
+        {
+            IProject p = ActiveProjectTracker.resolveContextProject(getSite().getPage());
+            projectName = p != null ? p.getName() : null;
+        }
+        if (projectName == null)
+        {
+            MenuItem none = new MenuItem(sub, SWT.PUSH);
+            none.setText("Нет активного проекта"); //$NON-NLS-1$
+            none.setEnabled(false);
+            return;
+        }
+        List<ObjectSets.SetDef> sets = ObjectSets.getInstance().getSetsForProject(projectName);
+        if (sets.isEmpty())
+        {
+            MenuItem create = new MenuItem(sub, SWT.PUSH);
+            create.setText("Создать набор…"); //$NON-NLS-1$
+            String proj = projectName;
+            create.addListener(SWT.Selection, e -> createSetAndAdd(proj));
+            return;
+        }
+        for (ObjectSets.SetDef set : sets)
+        {
+            MenuItem item = new MenuItem(sub, SWT.PUSH);
+            item.setText(set.name);
+            item.addListener(SWT.Selection, e -> addSelectedToSet(set));
+        }
+    }
+
+    private ObjectSets.SetDef resolveAddTargetSet(List<RecentPlaces.Entry> entries)
+    {
+        if (entries == null || entries.isEmpty())
+            return null;
+        String projectName = entries.get(0).projectName;
+        if (projectName == null || projectName.isBlank())
+        {
+            IProject project = ActiveProjectTracker.resolveContextProject(getSite().getPage());
+            projectName = project != null ? project.getName() : null;
+        }
+        if (projectName == null || projectName.isBlank())
+            return null;
+        ObjectSetsAddTargetState.getInstance().ensureForProject(projectName);
+        return ObjectSetsAddTargetState.getInstance().getAddTargetSet(projectName);
+    }
+
+    private void addSelectedToSet(ObjectSets.SetDef target)
+    {
+        if (target == null)
+            return;
+        ObjectSetsItems.addItemsToSet(target,
+            ObjectSetsItems.fromRecentPlaceEntries(getSelectedEntries(), target),
+            getSite().getShell());
+    }
+
+    private void createSetAndAdd(String projectName)
+    {
+        InputDialog dialog = new InputDialog(getSite().getShell(),
+            "Новый набор", "Имя набора:", "", null); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        if (dialog.open() != Window.OK)
+            return;
+        ObjectSets.SetDef set = ObjectSets.getInstance().createSet(dialog.getValue(), projectName);
+        if (set != null)
+            addSelectedToSet(set);
     }
 
     private void executeShowInNavigatorCommand()

@@ -75,6 +75,12 @@ public final class MdTypeMapping
         add("Роль",                         "Role",                         "Roles");
         add("Подсистема",                   "Subsystem",                    "Subsystems");
         add("ЯзыкКонфигурации",             "Language",                     "Languages");
+        add("ЖурналДокументов",             "DocumentJournal",              "DocumentJournals");
+        add("КритерийОтбора",               "FilterCriterion",              "FilterCriteria");
+        add("ХранилищеНастроек",            "SettingsStorage",              "SettingsStorages");
+        add("ПараметрСеанса",               "SessionParameter",             "SessionParameters");
+        add("ГруппаКоманд",                 "CommandGroup",                 "CommandGroups");
+        add("Бот",                          "Bot",                          "Bots");
 
         add("ВнешнийИсточникДанных",        "ExternalDataSource",           "ExternalDataSources");
         add("ПакетXDTO",                    "XDTOPackage",                  "XDTOPackages");
@@ -225,6 +231,45 @@ public final class MdTypeMapping
             return null;
         int dot = fullName.indexOf('.');
         return dot < 0 ? fullName : fullName.substring(0, dot);
+    }
+
+    /**
+     * Крупный объект МД — «Тип.Имя» (тип с папкой EDT: справочник, регистр, план обмена…).
+     * Дочерние объекты (реквизит, форма, модуль, значение перечисления…) → владелец.
+     * Путь вида «Общие.ПланОбмена.Имя» → «ПланОбмена.Имя».
+     */
+    public static String toOwnerMdObjectRef(String fullName)
+    {
+        if (fullName == null || fullName.isBlank())
+            return null;
+        String trimmed = fullName.trim();
+        String[] parts = trimmed.split("\\.", -1); //$NON-NLS-1$
+        if (parts.length < 2)
+            return trimmed;
+        int rootIdx = indexOfRootMdTypeSegment(parts);
+        if (rootIdx < 0 || rootIdx + 1 >= parts.length)
+            return trimmed;
+        return parts[rootIdx] + "." + parts[rootIdx + 1]; //$NON-NLS-1$
+    }
+
+    /** Полное имя уже является крупным объектом МД (не реквизит/форма/модуль…). */
+    public static boolean isRootMdObjectRef(String fullName)
+    {
+        if (fullName == null || fullName.isBlank())
+            return false;
+        String owner = toOwnerMdObjectRef(fullName);
+        return owner != null && owner.equals(fullName.trim());
+    }
+
+    private static int indexOfRootMdTypeSegment(String[] parts)
+    {
+        for (int i = 0; i < parts.length - 1; i++)
+        {
+            String ru = anyToRu(parts[i]);
+            if (ru != null && RU_TO_FOLDER.containsKey(ru))
+                return i;
+        }
+        return -1;
     }
 
     private static final Set<String> REFERENCE_TYPES_WITH_PREDEFINED = Set.of(

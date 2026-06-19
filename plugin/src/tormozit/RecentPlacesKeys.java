@@ -21,13 +21,20 @@ final class RecentPlacesKeys
      */
     static String mdObjectRef(RecentPlaces.Entry entry)
     {
-        if (entry == null || entry.key == null || entry.key.isBlank())
+        if (entry == null)
             return null;
-        String key = entry.key.trim();
-        int methodSep = key.indexOf(": "); //$NON-NLS-1$
+        return mdObjectRefFromKey(entry.key);
+    }
+
+    static String mdObjectRefFromKey(String key)
+    {
+        if (key == null || key.isBlank())
+            return null;
+        String trimmed = key.trim();
+        int methodSep = trimmed.indexOf(": "); //$NON-NLS-1$
         if (methodSep >= 0)
-            return stripModuleTypeSuffix(key.substring(0, methodSep).trim());
-        return stripModuleTypeSuffix(key);
+            return stripModuleTypeSuffix(trimmed.substring(0, methodSep).trim());
+        return stripModuleTypeSuffix(trimmed);
     }
 
     private static String stripModuleTypeSuffix(String modulePath)

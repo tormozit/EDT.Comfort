@@ -27,6 +27,8 @@ final class FilterInputBox
     static final int COMPACT_MAX_WIDTH = 267;
     /** Максимальная ширина поля фильтра (панель «Последние места»). */
     static final int RECENT_PLACES_MAX_WIDTH = 300;
+    /** Максимальная ширина поля фильтра (панель «Набор объектов»). */
+    static final int OBJECT_SETS_MAX_WIDTH = 300;
     /** Отступ справа от compact-поля до следующего элемента строки. */
     static final int COMPACT_RIGHT_MARGIN = 10;
 
@@ -37,7 +39,10 @@ final class FilterInputBox
             "debug.collection.filter.history."), //$NON-NLS-1$
         RECENT_PLACES(
             "comfort.recentPlaces.filter.history.count", //$NON-NLS-1$
-            "comfort.recentPlaces.filter.history."); //$NON-NLS-1$
+            "comfort.recentPlaces.filter.history."), //$NON-NLS-1$
+        OBJECT_SETS(
+            "comfort.objectSets.filter.history.count", //$NON-NLS-1$
+            "comfort.objectSets.filter.history."); //$NON-NLS-1$
 
         final String prefCountKey;
         final String prefItemPrefix;
@@ -104,6 +109,16 @@ final class FilterInputBox
         return create(parent, opts, onSearch);
     }
 
+    static FilterInputBox forObjectSets(Composite parent, Runnable onSearch)
+    {
+        Options opts = new Options();
+        opts.scope = Scope.OBJECT_SETS;
+        opts.layoutData = objectSetsLayoutData();
+        opts.message = "Поиск..."; //$NON-NLS-1$
+        opts.tooltip = "Фильтр по колонке «Имя» (smart-фильтр, пробел = AND)"; //$NON-NLS-1$
+        return create(parent, opts, onSearch);
+    }
+
     static GridData compactLayoutData()
     {
         GridData gd = new GridData(SWT.BEGINNING, SWT.CENTER, false, false);
@@ -116,6 +131,14 @@ final class FilterInputBox
     {
         GridData gd = new GridData(SWT.BEGINNING, SWT.CENTER, false, false);
         gd.widthHint = RECENT_PLACES_MAX_WIDTH;
+        gd.minimumWidth = 80;
+        return gd;
+    }
+
+    static GridData objectSetsLayoutData()
+    {
+        GridData gd = new GridData(SWT.BEGINNING, SWT.CENTER, false, false);
+        gd.widthHint = OBJECT_SETS_MAX_WIDTH;
         gd.minimumWidth = 80;
         return gd;
     }
