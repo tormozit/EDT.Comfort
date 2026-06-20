@@ -2,6 +2,12 @@ package tormozit;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
 import org.eclipse.swt.widgets.Display;
 
 /**
@@ -12,7 +18,38 @@ public final class IrBslExpressionHtmlSupport
     public static final String KIND_METHOD = "Метод"; //$NON-NLS-1$
     public static final String KIND_PROPERTY = "Свойство"; //$NON-NLS-1$
 
+    static final String CANCEL_FILE_PREFIX = "tormozit-ir-cancel-"; //$NON-NLS-1$
+    static final String CANCEL_FILE_SUFFIX = ".tmp"; //$NON-NLS-1$
+
+    static final ConcurrentHashMap<IRSession, AtomicReference<Path>> activeCancelFiles =
+        new ConcurrentHashMap<>();
+
     private IrBslExpressionHtmlSupport() {}
+
+    /**
+     * Проактивная отмена: удаление cancel-файла (ИР прерывает {@code ОписаниеХТМЛВыражения}).
+     * COM {@code УстановитьФайлОтменыВычислений(null)} вызывается в {@code finally} на executor.
+     */
+    public static void cancelActiveEvaluation(IRSession session)
+    {
+        if (session == null)
+            return;
+        AtomicReference<Path> ref = activeCancelFiles.get(session);
+        if (ref == null)
+            return;
+        Path path = ref.get();
+        if (path == null)
+            return;
+        try
+        {
+            if (Files.deleteIfExists(path))
+                BslSideHintDebug.step("ir cancel", "deleted " + path.getFileName()); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (Exception e)
+        {
+            BslSideHintDebug.problem("ir cancel: " + e.getMessage()); //$NON-NLS-1$
+        }
+    }
 
     public static IRSession resolveConnectedSession(BslXtextEditor editor)
     {
@@ -50,18 +87,40 @@ public final class IrBslExpressionHtmlSupport
             ensureCodeEditor(session);
             ComBridge.invoke(session.codeEditor, "РазобратьТекущийКонтекст"); //$NON-NLS-1$
             ComBridge.invoke(session.codeEditor, "ЗаполнитьТаблицуСлов"); //$NON-NLS-1$
-            Object raw = ComBridge.invoke(session.codeEditor, "ОписаниеХТМЛВыражения", name, kind); //$NON-NLS-1$
-            String html = ComBridge.toString(raw);
-            if (html == null || html.isBlank())
-            {
-                BslSideHintDebug.step("ir fetch", "пустой ответ name=" + name + " kind=" + kind); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                return null;
-            }
-            return html;
+            return invokeDescriptionHtmlWithCancellation(session, name, kind);
         }
         catch (Exception e)
         {
             BslSideHintDebug.problem("ir fetch name=" + name + " kind=" + kind + ": " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return null;
+        }
+    }
+
+    /**
+     * Doc-hover: sync → {@code РазобратьТекущийКонтекст} → {@code ОписаниеХТМЛВыражения()}.
+     */
+    public static String fetchDescriptionHtmlForHover(
+        IRSession session, IRSession.CodeEditorSyncPayload payload)
+    {
+        if (session == null || payload == null)
+            return null;
+        try
+        {
+            session.applyPreparedCodeEditorSync(payload);
+            ensureCodeEditor(session);
+            ComBridge.invoke(session.codeEditor, "РазобратьТекущийКонтекст"); //$NON-NLS-1$
+            String html = invokeDescriptionHtmlWithCancellation(session);
+            if (html == null || html.isBlank())
+            {
+                IrBslHoverDebug.step("fetch", "пустой ответ offset=" + payload.offset); //$NON-NLS-1$ //$NON-NLS-2$
+                return null;
+            }
+            IrBslHoverDebug.log("fetch offset=" + payload.offset + " len=" + html.length()); //$NON-NLS-1$ //$NON-NLS-2$
+            return html;
+        }
+        catch (Exception e)
+        {
+            IrBslHoverDebug.problem("fetch offset=" + payload.offset + ": " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
     }
@@ -76,8 +135,7 @@ public final class IrBslExpressionHtmlSupport
         try
         {
             ensureCodeEditor(session);
-            Object raw = ComBridge.invoke(session.codeEditor, "ОписаниеХТМЛВыражения", name, kind); //$NON-NLS-1$
-            String html = ComBridge.toString(raw);
+            String html = invokeDescriptionHtmlWithCancellation(session, name, kind);
             if (html == null || html.isBlank())
             {
                 BslSideHintDebug.step("ir fetch", "пустой ответ name=" + name + " kind=" + kind); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
@@ -89,6 +147,27 @@ public final class IrBslExpressionHtmlSupport
         {
             BslSideHintDebug.problem("ir fetch name=" + name + " kind=" + kind + ": " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return null;
+        }
+    }
+
+    private static String invokeDescriptionHtmlWithCancellation(IRSession session, Object... args)
+    {
+        Object codeEditor = session.codeEditor;
+        Path cancelFile = null;
+        try
+        {
+            cancelFile = IRSession.setEvaluationCancellationFile(session, codeEditor);
+            Object raw = ComBridge.invoke(codeEditor, "ОписаниеХТМЛВыражения", args); //$NON-NLS-1$
+            return ComBridge.toString(raw);
+        }
+        catch (IOException e)
+        {
+            Global.log(e.getMessage());
+            return "";
+        }
+        finally
+        {
+            IRSession.clearEvaluationCancellationFile(session, codeEditor, cancelFile);
         }
     }
 

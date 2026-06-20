@@ -1,6 +1,9 @@
 package tormozit;
 
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.custom.ScrolledComposite;
+import org.eclipse.swt.events.ControlAdapter;
+import org.eclipse.swt.events.ControlEvent;
 import org.eclipse.swt.events.MouseAdapter;
 import org.eclipse.swt.events.MouseEvent;
 import org.eclipse.swt.events.PaintEvent;
@@ -9,18 +12,17 @@ import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.GC;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
+import org.eclipse.swt.widgets.Canvas;
+import org.eclipse.swt.widgets.ScrollBar;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
-
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
+import org.eclipse.swt.widgets.Event;
+import org.eclipse.swt.widgets.Listener;
 
 /**
  * Выделение текущей строки по клику — через PaintListener (SWT и LWT).
- * Вместо {@code setBackground}, рисуем полупрозрачный фон поверх стандартной отрисовки.
+ * Рамка поверх стандартной отрисовки (без заливки фона).
  */
 final class PropertySheetRowSelectionFeature implements PropertySheetUiFeature
 {
@@ -32,6 +34,8 @@ final class PropertySheetRowSelectionFeature implements PropertySheetUiFeature
     private static final String ACTIVE_PROP_KEY = "tormozit.ps.rowSelectProp"; //$NON-NLS-1$
     /** Сам объект PropertySheetPaletteRow — чтобы PaintListener знал строку для LWT-оригин. */
     private static final String ACTIVE_ROW_KEY = "tormozit.ps.rowSelectRow"; //$NON-NLS-1$
+    private static final String SCAN_OVERLAY_KEY = "tormozit.ps.scanOverlay"; //$NON-NLS-1$
+    private static final String SCAN_OVERLAY_PAGE_KEY = "tormozit.ps.scanOverlayPage"; //$NON-NLS-1$
 
     private PropertySheetPaletteRow lastSelected;
     /** Последний paint-host с ACTIVE_* — снимаем при смене секции. */
@@ -185,9 +189,153 @@ final class PropertySheetRowSelectionFeature implements PropertySheetUiFeature
 
     private static Control paintHost(PropertySheetPaletteRow row, Object page)
     {
+        if (row != null && row.selectionBandIsCanvas)
+        {
+            Canvas overlay = ensureScanOverlay(page);
+            if (overlay != null && !overlay.isDisposed())
+                return overlay;
+        }
+        if (row != null && row.lwtView != null)
+        {
+            Composite leaf = PropertySheetControlInterop.leafFieldRowHostForView(row.lwtView);
+            if (leaf != null && !leaf.isDisposed())
+                return leaf;
+        }
+        if (row != null && row.selectionBandTopDisplay >= 0
+                && row.selectionBandBottomDisplay > row.selectionBandTopDisplay
+                && row.rowComposite != null && !row.rowComposite.isDisposed()
+                && row.rowComposite.getSize().y <= 120)
+            return row.rowComposite;
         if (row != null && row.hitDisplayY > 0)
             return lwtPaintHostAtDisplayY(row, page, row.hitDisplayY);
         return lwtPaintHostAtDisplayY(row, page, 0);
+    }
+
+    /** Прозрачный overlay поверх viewport ScrolledComposite — LWT content не шлёт Paint. */
+    private static Canvas ensureScanOverlay(Object page)
+    {
+        ScrolledComposite scroll = PropertySheetUiContext.findPaletteScrolledComposite(page);
+        if (scroll == null || scroll.isDisposed())
+        {
+            // #region agent log
+            PropertySheetControlInterop.agentHitLog("H25", "PropertySheetRowSelectionFeature.ensureScanOverlay", //$NON-NLS-1$ //$NON-NLS-2$
+                    "noScroll", java.util.Map.of("pageNull", page == null)); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return null;
+        }
+        Canvas overlay = (Canvas) scroll.getData(SCAN_OVERLAY_KEY);
+        if (overlay == null || overlay.isDisposed())
+        {
+            overlay = new Canvas(scroll, SWT.NO_MERGE_PAINTS | SWT.DOUBLE_BUFFERED);
+            overlay.setEnabled(false);
+            scroll.setData(SCAN_OVERLAY_KEY, overlay);
+            final Canvas overlayRef = overlay;
+            overlay.addPaintListener(new PaintListener()
+            {
+                @Override
+                public void paintControl(PaintEvent e)
+                {
+                    String activeName = (String) overlayRef.getData(ACTIVE_PROP_KEY);
+                    if (activeName == null || activeName.isEmpty())
+                        return;
+                    PropertySheetPaletteRow row = (PropertySheetPaletteRow) overlayRef.getData(ACTIVE_ROW_KEY);
+                    if (row == null || !activeName.equals(row.propertyName))
+                        return;
+                    Object overlayPage = overlayRef.getData(SCAN_OVERLAY_PAGE_KEY);
+                    drawSelectionBand(e.gc, overlayRef, row, overlayPage);
+                }
+            });
+            ControlAdapter layoutOnResize = new ControlAdapter()
+            {
+                @Override
+                public void controlResized(ControlEvent e)
+                {
+                    layoutScanOverlay(scroll, overlayRef);
+                    if (!overlayRef.isDisposed())
+                        overlayRef.redraw();
+                }
+            };
+            scroll.addControlListener(layoutOnResize);
+            Listener overlayOnScroll = e -> {
+                if (!overlayRef.isDisposed())
+                {
+                    layoutScanOverlay(scroll, overlayRef);
+                    overlayRef.redraw();
+                }
+            };
+            ScrollBar vertical = scroll.getVerticalBar();
+            if (vertical != null)
+                vertical.addListener(SWT.Selection, overlayOnScroll);
+            ScrollBar horizontal = scroll.getHorizontalBar();
+            if (horizontal != null)
+                horizontal.addListener(SWT.Selection, overlayOnScroll);
+        }
+        overlay.setData(SCAN_OVERLAY_PAGE_KEY, page);
+        return overlay;
+    }
+
+    private static void layoutScanOverlayForRow(ScrolledComposite scroll, Canvas overlay, Object page,
+            PropertySheetPaletteRow row)
+    {
+        if (scroll == null || scroll.isDisposed() || overlay == null || overlay.isDisposed())
+            return;
+        Rectangle band = viewportCanvasBand(page, row);
+        if (band == null)
+        {
+            overlay.setVisible(false);
+            return;
+        }
+        overlay.setBounds(band.x, band.y, band.width, band.height);
+        overlay.moveAbove(null);
+        overlay.setVisible(true);
+    }
+
+    private static void layoutScanOverlay(ScrolledComposite scroll, Canvas overlay)
+    {
+        if (scroll == null || scroll.isDisposed() || overlay == null || overlay.isDisposed())
+            return;
+        PropertySheetPaletteRow row = (PropertySheetPaletteRow) overlay.getData(ACTIVE_ROW_KEY);
+        Object page = overlay.getData(SCAN_OVERLAY_PAGE_KEY);
+        if (row != null && row.selectionBandIsCanvas)
+            layoutScanOverlayForRow(scroll, overlay, page, row);
+        else
+            overlay.setVisible(false);
+    }
+
+    /** Canvas-band → координаты viewport ScrolledComposite. */
+    private static Rectangle viewportCanvasBand(Object page, PropertySheetPaletteRow row)
+    {
+        if (page == null || row == null || !row.selectionBandIsCanvas
+                || row.selectionBandBottomCanvas <= row.selectionBandTopCanvas)
+            return null;
+        PropertySheetUiContext.PaletteCanvasSpace space =
+                PropertySheetUiContext.PaletteCanvasSpace.forPage(page);
+        ScrolledComposite scroll = PropertySheetUiContext.findPaletteScrolledComposite(page);
+        if (space == null || scroll == null || scroll.isDisposed()
+                || space.content == null || space.content.isDisposed())
+            return null;
+        Point topD = space.content.toDisplay(0, row.selectionBandTopCanvas);
+        Point botD = space.content.toDisplay(0, row.selectionBandBottomCanvas);
+        Point localTop = scroll.toControl(topD);
+        Point localBot = scroll.toControl(botD);
+        int y = localTop.y;
+        int h = localBot.y - localTop.y;
+        int w = scroll.getClientArea().width;
+        if (h <= 0 || w <= 0)
+            return null;
+        Rectangle client = scroll.getClientArea();
+        if (y + h < 0 || y > client.height)
+            return null;
+        if (y < 0)
+        {
+            h += y;
+            y = 0;
+        }
+        if (y + h > client.height)
+            h = client.height - y;
+        if (h <= 0)
+            return null;
+        return new Rectangle(0, y, w, h);
     }
 
     void selectRow(PropertySheetUiContext ctx, PropertySheetPaletteRow row)
@@ -275,7 +423,7 @@ final class PropertySheetRowSelectionFeature implements PropertySheetUiFeature
                             + " row=" + PropertySheetDebug.quote(row != null ? row.propertyName : null)); //$NON-NLS-1$
                     return;
                 }
-                drawSelectionBand(e.gc, host, row);
+                drawSelectionBand(e.gc, host, row, null);
             }
         });
     }
@@ -288,23 +436,51 @@ final class PropertySheetRowSelectionFeature implements PropertySheetUiFeature
         {
             log("activate skip noHost " + PropertySheetDebug.quote(row.propertyName) //$NON-NLS-1$
                     + " " + describeInteractionTarget(row, page)); //$NON-NLS-1$
+            // #region agent log
+            PropertySheetControlInterop.agentHitLog("H9", "PropertySheetRowSelectionFeature.activate", "noHost", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    java.util.Map.of("prop", row.propertyName)); //$NON-NLS-1$
+            // #endregion
             return;
         }
-        if (row.lwtView != null)
+        if (row.lwtView != null && !row.selectionBandIsCanvas)
             PropertySheetControlInterop.refreshLwtRowGeometry(host, row.lwtView, row.propertyName);
-        Rectangle bandPreview = resolveRowBand(host, row);
-        // #region agent log
-        agentActivateLog(row, host, bandPreview);
-        // #endregion
-        ensurePaintHook(host);
+        if (!row.selectionBandIsCanvas)
+            ensurePaintHook(host);
         log("activate " + PropertySheetDebug.quote(row.propertyName) //$NON-NLS-1$
                 + " host=" + PropertySheetDebug.controlBrief(host) //$NON-NLS-1$
-                + " " + describeBand(host, row)); //$NON-NLS-1$
+                + " " + describeBand(host, row, page)); //$NON-NLS-1$
         if (lastActivePaintHost != null && lastActivePaintHost != host && !lastActivePaintHost.isDisposed())
             clearActiveOnHost(lastActivePaintHost);
         host.setData(ACTIVE_PROP_KEY, row.propertyName);
         host.setData(ACTIVE_ROW_KEY, row);
+        if (host instanceof Canvas)
+            host.setData(SCAN_OVERLAY_PAGE_KEY, page);
         lastActivePaintHost = host;
+        if (row.selectionBandIsCanvas && host instanceof Canvas)
+        {
+            ScrolledComposite scroll = PropertySheetUiContext.findPaletteScrolledComposite(page);
+            layoutScanOverlayForRow(scroll, (Canvas) host, page, row);
+        }
+        Rectangle band = resolveRowBand(host, row, page);
+        // #region agent log
+        java.util.Map<String, Object> h9 = new java.util.LinkedHashMap<>();
+        h9.put("prop", row.propertyName); //$NON-NLS-1$
+        h9.put("host", host.getClass().getSimpleName()); //$NON-NLS-1$
+        h9.put("rectW", band != null ? band.width : -1); //$NON-NLS-1$
+        h9.put("rectH", band != null ? band.height : -1); //$NON-NLS-1$
+        if (row.selectionBandIsCanvas)
+        {
+            h9.put("topCanvas", row.selectionBandTopCanvas); //$NON-NLS-1$
+            h9.put("bottomCanvas", row.selectionBandBottomCanvas); //$NON-NLS-1$
+            h9.put("overlay", host instanceof Canvas); //$NON-NLS-1$
+        }
+        else
+        {
+            h9.put("bandTop", row.selectionBandTopDisplay); //$NON-NLS-1$
+            h9.put("bandBottom", row.selectionBandBottomDisplay); //$NON-NLS-1$
+        }
+        PropertySheetControlInterop.agentHitLog("H9", "PropertySheetRowSelectionFeature.activate", "draw", h9); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // #endregion
         host.redraw();
     }
 
@@ -322,20 +498,22 @@ final class PropertySheetRowSelectionFeature implements PropertySheetUiFeature
         log("deactivate " + PropertySheetDebug.quote(row.propertyName) //$NON-NLS-1$
                 + " host=" + PropertySheetDebug.controlBrief(host)); //$NON-NLS-1$
         clearActiveOnHost(host);
+        if (host instanceof Canvas)
+            host.setVisible(false);
         if (host == lastActivePaintHost)
             lastActivePaintHost = null;
     }
 
     /**
-     * Рисуем полупрозрачный фон выделения поверх стандартной отрисовки контрола.
-     * Alpha=60 (~24%) — видно, но не глушит текст и редактор значения.
-     * Для LWT-хостов рисуем только полосу одной строки (не весь контейнер).
+     * Рамка выделения поверх стандартной отрисовки контрола (без заливки фона).
      */
-    private static void drawSelectionBand(GC gc, Control host, PropertySheetPaletteRow row)
+    private static void drawSelectionBand(GC gc, Control host, PropertySheetPaletteRow row, Object page)
     {
-        if (row != null && row.lwtView != null)
+        if (row != null && !row.selectionBandIsCanvas && row.lwtView != null)
             PropertySheetControlInterop.refreshLwtRowGeometry(host, row.lwtView, row.propertyName);
-        Rectangle band = resolveRowBand(host, row);
+        if (page == null && host != null)
+            page = host.getData(SCAN_OVERLAY_PAGE_KEY);
+        Rectangle band = resolveRowBand(host, row, page);
         if (band == null)
             return;
         int x = band.x;
@@ -346,20 +524,64 @@ final class PropertySheetRowSelectionFeature implements PropertySheetUiFeature
         if (w <= 0 || h <= 0)
             return;
         Color selColor = selectionBg(host.getDisplay());
-        int alpha = gc.getAlpha();
-        gc.setAlpha(60);
-        gc.setBackground(selColor);
-        gc.fillRectangle(x, y, w, h);
-        gc.setAlpha(alpha);
+        gc.setForeground(selColor);
+        gc.setLineWidth(1);
+        gc.drawRectangle(x, y, Math.max(0, w - 1), Math.max(0, h - 1));
+        // #region agent log
+        java.util.Map<String, Object> h24 = new java.util.LinkedHashMap<>();
+        h24.put("prop", row.propertyName); //$NON-NLS-1$
+        h24.put("host", host.getClass().getSimpleName()); //$NON-NLS-1$
+        h24.put("x", x); //$NON-NLS-1$
+        h24.put("y", y); //$NON-NLS-1$
+        h24.put("w", w); //$NON-NLS-1$
+        h24.put("h", h); //$NON-NLS-1$
+        h24.put("hostH", host.getSize().y); //$NON-NLS-1$
+        if (row.selectionBandIsCanvas)
+        {
+            h24.put("topCanvas", row.selectionBandTopCanvas); //$NON-NLS-1$
+            h24.put("bottomCanvas", row.selectionBandBottomCanvas); //$NON-NLS-1$
+        }
+        PropertySheetControlInterop.agentHitLog("H24", "PropertySheetRowSelectionFeature.drawSelectionBand", //$NON-NLS-1$ //$NON-NLS-2$
+                "scanFrame", h24); //$NON-NLS-1$
+        PropertySheetControlInterop.agentHitLog("H9d", "PropertySheetRowSelectionFeature.drawSelectionBand", //$NON-NLS-1$ //$NON-NLS-2$
+                "paint", java.util.Map.of("prop", row.propertyName, "host", host.getClass().getSimpleName(), //$NON-NLS-1$ //$NON-NLS-2$
+                        "x", x, "y", y, "w", w, "h", h)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // #endregion
     }
 
-    private static Rectangle resolveRowBand(Control host, PropertySheetPaletteRow row)
+    private static Rectangle resolveRowBand(Control host, PropertySheetPaletteRow row, Object page)
     {
         if (host == null || host.isDisposed() || row == null)
             return null;
+        if (row.selectionBandIsCanvas)
+        {
+            Rectangle viewport = viewportCanvasBand(page, row);
+            if (viewport != null && host instanceof Canvas)
+                return new Rectangle(0, 0, host.getSize().x, host.getSize().y);
+            if (viewport != null)
+                return viewport;
+        }
         int hostH = host.getSize().y;
         if (hostH <= 0)
             return null;
+
+        if (row.selectionBandTopDisplay >= 0
+                && row.selectionBandBottomDisplay > row.selectionBandTopDisplay)
+        {
+            if (host instanceof Composite
+                    && (PropertySheetControlInterop.isLwtFieldRowComposite((Composite) host)
+                            || host.getSize().y <= 120))
+            {
+                return new Rectangle(0, 0, host.getSize().x, hostH);
+            }
+            int displayX = host.toDisplay(0, 0).x;
+            Point localTop = host.toControl(displayX, row.selectionBandTopDisplay);
+            int h = row.selectionBandBottomDisplay - row.selectionBandTopDisplay;
+            int rowY = Math.max(0, localTop.y);
+            int rowH = Math.min(hostH - rowY, h);
+            if (rowH > 0)
+                return new Rectangle(0, rowY, host.getSize().x, rowH);
+        }
 
         if (row.lwtView != null)
         {
@@ -530,50 +752,6 @@ final class PropertySheetRowSelectionFeature implements PropertySheetUiFeature
         return display.getSystemColor(SWT.COLOR_LIST_SELECTION);
     }
 
-    // #region agent log
-    private static void agentActivateLog(PropertySheetPaletteRow row, Control host, Rectangle band)
-    {
-        try
-        {
-            int hostTop = host != null && !host.isDisposed() ? host.toDisplay(0, 0).y : -1;
-            int hostH = host != null && !host.isDisposed() ? host.getSize().y : -1;
-            int bandY = band != null ? band.y : -1;
-            int bandH = band != null ? band.height : -1;
-            int bandDisplayY = band != null && host != null && !host.isDisposed()
-                    ? host.toDisplay(band.x, band.y).y : -1;
-            int clickGap = row.hitDisplayY > 0 && bandDisplayY >= 0
-                    ? Math.abs(row.hitDisplayY - (bandDisplayY + (band != null ? band.height / 2 : 0))) : -1;
-            boolean hadHook = host != null && Boolean.TRUE.equals(host.getData(PAINT_HOOK_KEY));
-            boolean fullHostBand = band != null && hostH > 0 && band.y <= 1 && band.height >= hostH - 2;
-            String line = "{\"sessionId\":\"db8c17\",\"hypothesisId\":\"H20\",\"location\":\"PropertySheetRowSelectionFeature.activate\"," //$NON-NLS-1$
-                    + "\"message\":\"band\",\"data\":{\"prop\":\"" + escAgent(row.propertyName) //$NON-NLS-1$
-                    + "\",\"clickY\":" + row.hitDisplayY //$NON-NLS-1$
-                    + ",\"hostTop\":" + hostTop //$NON-NLS-1$
-                    + ",\"hostH\":" + hostH //$NON-NLS-1$
-                    + ",\"bandY\":" + bandY //$NON-NLS-1$
-                    + ",\"bandH\":" + bandH //$NON-NLS-1$
-                    + ",\"bandDisplayY\":" + bandDisplayY //$NON-NLS-1$
-                    + ",\"clickGap\":" + clickGap //$NON-NLS-1$
-                    + ",\"hadPaintHook\":" + hadHook //$NON-NLS-1$
-                    + ",\"fullHostBand\":" + fullHostBand //$NON-NLS-1$
-                    + "},\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
-            Files.writeString(Path.of("C:\\VC\\EDT.Comfort\\debug-db8c17.log"), line, //$NON-NLS-1$
-                    StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-        }
-        catch (Exception ignored)
-        {
-            // debug session only
-        }
-    }
-
-    private static String escAgent(String s)
-    {
-        if (s == null)
-            return ""; //$NON-NLS-1$
-        return s.replace("\\", "\\\\").replace("\"", "\\\""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-    }
-    // #endregion
-
     private static String describeInteractionTarget(PropertySheetPaletteRow row)
     {
         return describeInteractionTarget(row, PropertySheetUiCoordinator.pageForRow(row));
@@ -599,10 +777,17 @@ final class PropertySheetRowSelectionFeature implements PropertySheetUiFeature
         return sb.toString();
     }
 
-    private static String describeBand(Control host, PropertySheetPaletteRow row)
+    private static String describeBand(Control host, PropertySheetPaletteRow row, Object page)
     {
         if (host == null || host.isDisposed() || row == null)
             return "band=<null>"; //$NON-NLS-1$
+        if (row.selectionBandIsCanvas)
+        {
+            Rectangle band = resolveRowBand(host, row, page);
+            return "band=scanViewport y=" + (band != null ? band.y : -1) //$NON-NLS-1$
+                    + " h=" + (band != null ? band.height : -1) //$NON-NLS-1$
+                    + " canvas=" + row.selectionBandTopCanvas + ".." + row.selectionBandBottomCanvas; //$NON-NLS-1$ //$NON-NLS-2$
+        }
         if (!PropertySheetControlInterop.isLwtPaintHost(host))
             return "band=fullHost size=" + host.getSize().x + "x" + host.getSize().y; //$NON-NLS-1$ //$NON-NLS-2$
         Rectangle band = PropertySheetControlInterop.lwtRowBand(host, row.propertyName);

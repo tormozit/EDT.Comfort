@@ -21,7 +21,6 @@ import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
-import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.bsl.ui.hover.BslDispatchingEObjectTextHover;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
@@ -230,10 +229,11 @@ public final class IrBslEditorHoverHook implements IStartup
                 return info;
             if (!IrBslHoverHtml.isBslBrowserInput(info))
                 return info;
-            IRSession session = IrBslHoverSupport.resolveConnectedSession(editor);
+            IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(editor);
             if (session == null)
                 return info;
             final int offset = hoverRegion.getOffset();
+            IrBslExpressionHtmlSupport.cancelActiveEvaluation(session);
             final int gen = fetchGeneration.incrementAndGet();
             lastScheduledOffset = offset;
             final Object baseInput = info;
@@ -248,7 +248,7 @@ public final class IrBslEditorHoverHook implements IStartup
             IRSession session, Object baseInput,
             IRSession.CodeEditorSyncPayload payload, int offset, int gen)
         {
-            String irHtml = IrBslHoverSupport.fetchExpressionHtml(session, editor, payload);
+            String irHtml = IrBslExpressionHtmlSupport.fetchDescriptionHtmlForHover(session, payload);
             if (irHtml == null || irHtml.isBlank())
                 return;
             Display display = Display.getDefault();
@@ -304,7 +304,8 @@ public final class IrBslEditorHoverHook implements IStartup
                     Object replacerControl = Global.getField(replacer, "fInformationControl"); //$NON-NLS-1$
                     IXtextBrowserInformationControl ic = asBrowserControl(replacerControl);
                     if (ic != null)
-                        return ic;
+//                        return ic;
+                        Global.log("replaced HTML hover = ");
                 }
                 Object infoControl = Global.getField(textHoverManager, "fInformationControl"); //$NON-NLS-1$
                 return asBrowserControl(infoControl);
@@ -313,64 +314,6 @@ public final class IrBslEditorHoverHook implements IStartup
             private static IXtextBrowserInformationControl asBrowserControl(Object control)
             {
                 return control instanceof IXtextBrowserInformationControl browser ? browser : null;
-            }
-        }
-
-
-        /**
-         * COM-цепочка ИР для doc-hover: sync → {@code РазобратьТекущийКонтекст} → {@code ОписаниеХТМЛВыражения}.
-         */
-        private static final class IrBslHoverSupport
-        {
-            private IrBslHoverSupport() {}
-
-            /**
-             * @return HTML-фрагмент ИР или {@code null}, если дополнение не нужно
-             */
-            static String fetchExpressionHtml(
-                IRSession session, BslXtextEditor editor, IRSession.CodeEditorSyncPayload payload)
-            {
-                if (session == null || editor == null || payload == null)
-                    return null;
-                try
-                {
-                    session.applyPreparedCodeEditorSync(payload);
-                    ensureCodeEditor(session);
-                    ComBridge.invoke(session.codeEditor, "РазобратьТекущийКонтекст"); //$NON-NLS-1$
-                    Object raw = ComBridge.invoke(session.codeEditor, "ОписаниеХТМЛВыражения"); //$NON-NLS-1$
-                    String html = ComBridge.toString(raw);
-                    if (html == null || html.isBlank())
-                    {
-                        IrBslHoverDebug.step("fetch", "пустой ответ offset=" + payload.offset); //$NON-NLS-1$ //$NON-NLS-2$
-                        return null;
-                    }
-                    IrBslHoverDebug.log("fetch offset=" + payload.offset + " len=" + html.length()); //$NON-NLS-1$ //$NON-NLS-2$
-                    return html;
-                }
-                catch (Exception e)
-                {
-                    IrBslHoverDebug.problem("fetch offset=" + payload.offset + ": " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
-                    return null;
-                }
-            }
-
-            static IRSession resolveConnectedSession(BslXtextEditor editor)
-            {
-                IDtProject dtProject = Global.getDtProjectFromBslEditor(editor);
-                if (dtProject == null || !IRApplication.hasConnectedSessionForKeys(dtProject))
-                    return null;
-                IRSession session = IRApplication.getSession(dtProject);
-                if (session == null || session.executor == null || session.executor.isShutdown())
-                    return null;
-                return session;
-            }
-
-            private static void ensureCodeEditor(IRSession session)
-            {
-                if (session.codeEditor != null)
-                    return;
-                Object irCache = session.getModule("ирКэш"); //$NON-NLS-1$
-                session.codeEditor = ComBridge.invoke(irCache, "ПолеТекстаПрограммы", 0); //$NON-NLS-1$
             }
         }
 

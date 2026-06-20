@@ -15,7 +15,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import org.eclipse.swt.graphics.Point;
-import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
@@ -32,7 +31,7 @@ public final class PropertySheetHook implements IStartup
     {
         if (true)
         {
-            return; // Отключено, т.к. не доделано
+            return; // не осилил
         }
         Display.getDefault().asyncExec(() -> {
             IWorkbench wb = PlatformUI.getWorkbench();
@@ -145,6 +144,17 @@ public final class PropertySheetHook implements IStartup
 
         PropertySheetUiCoordinator.scheduleSync(page, new SmartMatcher("")); //$NON-NLS-1$
 
+        PropertySheetControlInterop.installPaletteCanvasListeners(page);
+
+        // #region agent log
+        Composite paletteContent = PropertySheetUiContext.findPaletteContent(page);
+        PropertySheetControlInterop.agentHitLog("H0", "PropertySheetHook.tryPatch", "patched", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                java.util.Map.of("attempt", attempt, //$NON-NLS-1$
+                        "contentClass", paletteContent != null ? paletteContent.getClass().getSimpleName() : "null", //$NON-NLS-1$ //$NON-NLS-2$
+                        "contentH", paletteContent != null ? paletteContent.getSize().y : -1, //$NON-NLS-1$
+                        "sessionCount", PropertySheetUiCoordinator.sessionCountForDebug())); //$NON-NLS-1$
+        // #endregion
+
         PropertySheetDebug.uiVerbose("tryPatch #" + attempt + " OK page=" //$NON-NLS-1$ //$NON-NLS-2$
                 + page.getClass().getSimpleName());
         return true;
@@ -187,6 +197,10 @@ public final class PropertySheetHook implements IStartup
             display.addFilter(SWT.MenuDetect, PropertySheetMouseBridge::handleMenuDetect);
             installed = true;
             PropertySheetDebug.uiVerbose("mouseBridge installed"); //$NON-NLS-1$
+            // #region agent log
+            PropertySheetControlInterop.agentHitLog("H0", "PropertySheetHook.ensureInstalled", "bridgeOk", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    java.util.Collections.emptyMap());
+            // #endregion
         }
 
         private static void handleMouseDown(Event event)
@@ -194,17 +208,42 @@ public final class PropertySheetHook implements IStartup
             if (event.button != 1 || !(event.widget instanceof Control))
                 return;
             Control widget = (Control) event.widget;
-            if (widget.isDisposed() || PropertySheetUiContext.isFilterAreaControl(widget))
+            if (widget.isDisposed())
                 return;
-
-            Object page = PropertySheetUiCoordinator.pageForControl(widget);
-            if (page == null)
+            if (PropertySheetUiContext.isFilterAreaControl(widget))
+            {
+                // #region agent log
+                PropertySheetControlInterop.agentHitLog("H4", "PropertySheetHook.mouseDown", "filterArea", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        java.util.Map.of("widget", widget.getClass().getSimpleName())); //$NON-NLS-1$
+                // #endregion
                 return;
+            }
 
             Point display = widget.toDisplay(event.x, event.y);
+            Object page = PropertySheetUiCoordinator.pageForControl(widget);
+            if (page == null)
+            {
+                // #region agent log
+                PropertySheetControlInterop.agentHitLog("H4", "PropertySheetHook.mouseDown", "noPage", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        java.util.Map.of("widget", widget.getClass().getSimpleName(), //$NON-NLS-1$
+                                "clickY", display.y, //$NON-NLS-1$
+                                "diag", PropertySheetUiCoordinator.pageLookupDiag(widget))); //$NON-NLS-1$
+                // #endregion
+                return;
+            }
+
+            // #region agent log
+            PropertySheetControlInterop.agentHitLog("H4", "PropertySheetHook.mouseDown", "entry", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    java.util.Map.of("clickX", display.x, "clickY", display.y, //$NON-NLS-1$ //$NON-NLS-2$
+                            "widget", widget.getClass().getSimpleName())); //$NON-NLS-1$
+            // #endregion
             PropertySheetPaletteRow row = resolveRowAt(page, widget, display);
             if (row == null)
             {
+                // #region agent log
+                PropertySheetControlInterop.agentHitLog("H5", "PropertySheetHook.mouseDown", "miss", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        java.util.Map.of("clickY", display.y, "ctxRows", contextRowCount(page))); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
                 PropertySheetDebug.problem("mouseDown MISS at=(" + display.x + "," + display.y + ") " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                         + "widget=" + PropertySheetDebug.controlBrief(widget) //$NON-NLS-1$
                         + " ctx.rows=" + contextRowCount(page)); //$NON-NLS-1$
@@ -212,10 +251,6 @@ public final class PropertySheetHook implements IStartup
             }
 
             row.setHitDisplayY(display.y);
-            // #region agent log
-            agentHitDetail(page, row, display);
-            // #endregion
-
             PropertySheetDebug.feature("mouseDown hit " + PropertySheetDebug.quote(row.propertyName)); //$NON-NLS-1$
             PropertySheetUiCoordinator.handleRowClick(page, row);
         }
@@ -234,6 +269,10 @@ public final class PropertySheetHook implements IStartup
 
             Point display = event.x > 0 || event.y > 0
                     ? new Point(event.x, event.y) : widget.getDisplay().getCursorLocation();
+            // #region agent log
+            PropertySheetControlInterop.agentHitLog("H4", "PropertySheetHook.menuDetect", "entry", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    java.util.Map.of("clickY", display.y)); //$NON-NLS-1$
+            // #endregion
             PropertySheetPaletteRow row = resolveRowAt(page, widget, display);
             if (row == null)
             {
@@ -250,30 +289,121 @@ public final class PropertySheetHook implements IStartup
 
         private static PropertySheetPaletteRow resolveRowAt(Object page, Control widget, Point display)
         {
-            PropertySheetPaletteRow direct = hitTestRendererLightLabel(page, widget, display);
-            if (direct != null)
+            PropertySheetUiContext ctx = PropertySheetUiCoordinator.lastContext(page);
+            Object scene = ctx != null ? ctx.scene : null;
+            Composite root = PropertySheetUiContext.findPaletteRoot(page);
+            java.util.List<java.util.Map.Entry<?, ?>> labelEntries =
+                    PropertySheetControlInterop.labelEntriesFromScene(scene);
+            PropertySheetControlInterop.PropertyClickHit hit = root == null
+                    ? null
+                    : PropertySheetControlInterop.resolvePropertyAtClick(display, labelEntries,
+                            root, page, scene);
+            if (hit != null)
             {
-                PropertySheetUiContext ctx = PropertySheetUiCoordinator.lastContext(page);
-                Object scene = ctx != null ? ctx.scene : null;
-                String modelAtClick = PropertySheetControlInterop.resolveModelPropertyName(page, scene,
-                        direct.lwtView, direct.propertyName);
-                PropertySheetPaletteRow matched = matchContextRow(page, direct.propertyName, direct.lwtView);
-                PropertySheetPaletteRow base = matched != null ? matched : direct;
-                if (modelAtClick != null && !modelAtClick.isEmpty())
-                {
-                    String cached = base.copyPropertyName();
-                    if (cached == null || cached.isEmpty() || !modelAtClick.equals(cached))
-                        base = rowWithModel(base, modelAtClick);
-                }
-                return base;
+                PropertySheetPaletteRow row = buildRowFromHit(page, scene, root, hit, display);
+                if (row != null)
+                    return row;
+                // #region agent log
+                PropertySheetControlInterop.agentHitLog("H7", "PropertySheetHook.resolveRowAt", "buildRowNull", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        java.util.Map.of("prop", hit.displayName, "via", hit.via)); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
             }
-            return hitTestContextRows(page, display);
+            return null;
         }
 
-        private static PropertySheetPaletteRow rowWithModel(PropertySheetPaletteRow row, String model)
+        /** Строка scanner ctx по имени из canvas-hit — без повторного area-scan. */
+        private static PropertySheetPaletteRow scannerRowForHit(Object page, Object scene,
+                PropertySheetControlInterop.PropertyClickHit hit, Point display)
         {
-            return new PropertySheetPaletteRow(row.nameControl, row.rowComposite, row.rowControls,
-                    row.propertyName, row.lwtView, model);
+            PropertySheetUiContext ctx = PropertySheetUiCoordinator.lastContext(page);
+            if (ctx == null || hit == null || hit.displayName.isEmpty())
+                return null;
+            PropertySheetControlInterop.LwtPropertySection section = null;
+            PropertySheetUiContext.PaletteCanvasSpace space =
+                    PropertySheetUiContext.PaletteCanvasSpace.forPage(page);
+            if (space != null)
+            {
+                java.util.List<PropertySheetControlInterop.LwtPropertySection> sections =
+                        PropertySheetControlInterop.collectPropertySections(space.content);
+                PropertySheetControlInterop.refreshSectionCanvasBounds(sections, space.content);
+                section = PropertySheetControlInterop.findActiveSectionAtCanvasY(sections,
+                        space.displayToCanvas(display).y);
+            }
+            Composite sectionBody = section != null ? section.body : null;
+            for (PropertySheetPaletteRow paletteRow : ctx.rows)
+            {
+                if (!paletteRow.isAlive() || !hit.displayName.equals(paletteRow.propertyName))
+                    continue;
+                Composite host = PropertySheetControlInterop.paintHostForPaletteRow(paletteRow,
+                        sectionBody, display.y);
+                if (host == null)
+                    continue;
+                Object view = paletteRow.lwtView != null ? paletteRow.lwtView : hit.lwtView;
+                String modelName = PropertySheetControlInterop.resolveModelPropertyName(page, scene,
+                        view, hit.displayName);
+                PropertySheetPaletteRow row = new PropertySheetPaletteRow(host, host,
+                        PropertySheetUiContext.rowControls(host, host), hit.displayName, view,
+                        modelName);
+                row.setHitDisplayY(display.y);
+                row.setSelectionDisplayBand(hit.areaTopDisplay, hit.areaBottomDisplay);
+                // #region agent log
+                PropertySheetControlInterop.agentHitLog("H21", "PropertySheetHook.scannerRowForHit", //$NON-NLS-1$ //$NON-NLS-2$
+                        "ctxByName", java.util.Map.of("prop", hit.displayName, //$NON-NLS-1$ //$NON-NLS-2$
+                                "hostH", host.getSize().y)); //$NON-NLS-1$
+                // #endregion
+                return row;
+            }
+            return null;
+        }
+
+        private static java.util.List<java.util.Map.Entry<?, ?>> labelEntriesFromScene(Object scene)
+        {
+            return PropertySheetControlInterop.labelEntriesFromScene(scene);
+        }
+
+        private static PropertySheetPaletteRow buildRowFromHit(Object page, Object scene,
+                Composite root, PropertySheetControlInterop.PropertyClickHit hit, Point display)
+        {
+            if (hit == null || hit.displayName.isEmpty() || display == null)
+            {
+                // #region agent log
+                PropertySheetControlInterop.agentHitLog("H7", "PropertySheetHook.buildRowFromHit", "earlyNull", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        java.util.Map.of("hitNull", hit == null, //$NON-NLS-1$
+                                "nameEmpty", hit == null || hit.displayName.isEmpty())); //$NON-NLS-1$
+                // #endregion
+                return null;
+            }
+            if (!"scan".equals(hit.via)) //$NON-NLS-1$
+                return null;
+            PropertySheetUiContext.PaletteCanvasSpace space =
+                    PropertySheetUiContext.PaletteCanvasSpace.forPage(page);
+            Composite content = space != null ? space.content : root;
+            if (content == null || content.isDisposed())
+            {
+                // #region agent log
+                PropertySheetControlInterop.agentHitLog("H7", "PropertySheetHook.buildRowFromHit", "noContent", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        java.util.Map.of("prop", hit.displayName)); //$NON-NLS-1$
+                // #endregion
+                return null;
+            }
+            if (hit.areaBottomCanvas <= hit.areaTopCanvas)
+                return null;
+            PropertySheetPaletteRow row = new PropertySheetPaletteRow(content, content,
+                    PropertySheetUiContext.rowControls(content, content), hit.displayName,
+                    hit.lwtView, null);
+            row.setHitDisplayY(display.y);
+            row.setSelectionCanvasBand(hit.areaTopCanvas, hit.areaBottomCanvas);
+            // #region agent log
+            PropertySheetControlInterop.agentHitLog("H20", "PropertySheetHook.buildRowFromHit", "paintHost", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    java.util.Map.of("prop", hit.displayName, //$NON-NLS-1$
+                            "host", content.getClass().getSimpleName(), //$NON-NLS-1$
+                            "hostH", content.getSize().y, //$NON-NLS-1$
+                            "topCanvas", hit.areaTopCanvas, //$NON-NLS-1$
+                            "bottomCanvas", hit.areaBottomCanvas, //$NON-NLS-1$
+                            "propertyIndex", hit.propertyIndex, //$NON-NLS-1$
+                            "leaf", false)); //$NON-NLS-1$
+            // #endregion
+            return row;
         }
 
         private static PropertySheetPaletteRow hitTestContextRows(Object page, Point display)
@@ -281,25 +411,13 @@ public final class PropertySheetHook implements IStartup
             PropertySheetUiContext ctx = PropertySheetUiCoordinator.lastContext(page);
             if (ctx == null || ctx.rows.isEmpty() || display == null)
                 return null;
+            Object scene = ctx.scene;
             PropertySheetPaletteRow best = null;
             int bestDist = Integer.MAX_VALUE;
-            Composite root = PropertySheetUiContext.findPaletteRoot(page);
-            Composite clickSection = root != null && !root.isDisposed()
-                    ? PropertySheetControlInterop.findSectionBodyAtDisplayY(root, display.y) : null;
             for (PropertySheetPaletteRow row : ctx.rows)
             {
                 if (!row.isAlive())
                     continue;
-                if (clickSection != null && row.lwtView != null)
-                {
-                    Rectangle light = PropertySheetControlInterop.liveLightDisplayBoundsOnHost(row.lwtView,
-                            clickSection);
-                    if (light == null)
-                        continue;
-                    int centerY = light.y + Math.max(1, light.height / 2);
-                    if (Math.abs(display.y - centerY) > 14)
-                        continue;
-                }
                 if (!row.hitTest(display, page))
                     continue;
                 int dist = row.hitTestDistance(display, page);
@@ -309,114 +427,20 @@ public final class PropertySheetHook implements IStartup
                     best = row;
                 }
             }
-            return best;
-        }
-
-        private static PropertySheetPaletteRow matchContextRow(Object page, String propertyName, Object lwtView)
-        {
-            if (propertyName == null || propertyName.isEmpty())
-                return null;
-            PropertySheetUiContext ctx = PropertySheetUiCoordinator.lastContext(page);
-            if (ctx == null)
-                return null;
-            if (lwtView != null)
-            {
-                for (PropertySheetPaletteRow row : ctx.rows)
-                {
-                    if (!row.isAlive())
-                        continue;
-                    if (lwtView == row.lwtView)
-                        return row;
-                }
-                return null;
-            }
-            for (PropertySheetPaletteRow row : ctx.rows)
-            {
-                if (!row.isAlive())
-                    continue;
-                if (propertyName.equals(row.propertyName))
-                    return row;
-            }
-            return null;
-        }
-
-        private static PropertySheetPaletteRow hitTestRendererLightLabel(Object page, Control widget, Point display)
-        {
-            if (page == null || widget == null || widget.isDisposed() || display == null)
-                return null;
-            PropertySheetUiContext ctx = PropertySheetUiCoordinator.lastContext(page);
-            if (ctx == null || ctx.scene == null)
-                return null;
-            Object renderer = Global.invoke(ctx.scene, "getRenderer"); //$NON-NLS-1$
-            Object mapObj = Global.getField(renderer, "viewModelToView"); //$NON-NLS-1$
-            if (!(mapObj instanceof Map))
-                return null;
-            List<Map.Entry<?, ?>> labelEntries = labelEntries((Map<?, ?>) mapObj);
-            if (labelEntries.isEmpty())
-                return null;
-
-            Composite root = PropertySheetUiContext.findPaletteRoot(page);
-            Composite clickSection = root != null && !root.isDisposed()
-                    ? PropertySheetControlInterop.findSectionBodyAtDisplayY(root, display.y) : null;
-
-            PropertySheetPaletteRow best = null;
-            int bestDist = Integer.MAX_VALUE;
-            for (Map.Entry<?, ?> entry : labelEntries)
-            {
-                Object vm = entry.getKey();
-                String name = textOfViewModel(vm);
-                if (name.isEmpty())
-                    continue;
-                Object view = entry.getValue();
-                Composite paintHost = clickSection;
-                if (paintHost == null || paintHost.isDisposed())
-                {
-                    Composite leaf = PropertySheetControlInterop.leafFieldRowHostForView(view);
-                    if (leaf != null && !leaf.isDisposed() && leaf.getSize().y <= 80)
-                        paintHost = leaf;
-                    if (paintHost == null || paintHost.isDisposed())
-                        paintHost = PropertySheetControlInterop.findPaintHostForView(view, root);
-                }
-                if (paintHost == null || paintHost.isDisposed())
-                    continue;
-
-                Rectangle liveBand = PropertySheetControlInterop.liveRowBandInHost(view, paintHost);
-                if (liveBand == null || liveBand.height <= 0)
-                    continue;
-
-                Point bandTopLeft = paintHost.toDisplay(liveBand.x, liveBand.y);
-                int rowTop = bandTopLeft.y - 2;
-                int rowBottom = rowTop + liveBand.height + 4;
-                if (display.y < rowTop || display.y >= rowBottom)
-                    continue;
-
-                Point hostLocal = paintHost.toControl(display);
-                if (hostLocal.x < 0 || hostLocal.y < 0
-                        || hostLocal.x >= paintHost.getSize().x || hostLocal.y >= paintHost.getSize().y)
-                    continue;
-
-                int dist = Math.abs(display.y - (bandTopLeft.y + Math.max(1, liveBand.height / 2)));
-                if (dist < bestDist)
-                {
-                    PropertySheetControlInterop.refreshLwtRowGeometry(paintHost, view, name);
-                    String modelName = PropertySheetControlInterop.resolveModelPropertyName(page, ctx.scene, view, name);
-                    best = new PropertySheetPaletteRow(paintHost, paintHost,
-                            PropertySheetUiContext.rowControls(paintHost, paintHost), name, view, modelName);
-                    bestDist = dist;
-                }
-            }
             if (best != null)
             {
-                // #region agent log
-                agentRendererHit(display, best, clickSection, bestDist);
-                // #endregion
-                PropertySheetDebug.feature("directLightLabel hit " + PropertySheetDebug.quote(best.propertyName)); //$NON-NLS-1$
-            }
-            else
-            {
-                // #region agent log
-                agentRendererMiss(display, clickSection, labelEntries.size());
-                // #endregion
+                if (best.lwtView != null)
+                {
+                    String model = PropertySheetControlInterop.resolveModelPropertyName(page, scene,
+                            best.lwtView, best.propertyName);
+                    if (model != null && !model.isEmpty()
+                            && (best.copyPropertyName() == null || !model.equals(best.copyPropertyName())))
+                    {
+                        best = new PropertySheetPaletteRow(best.nameControl, best.rowComposite,
+                                best.rowControls, best.propertyName, best.lwtView, model);
+                    }
+                }
+                best.setHitDisplayY(display.y);
             }
             return best;
         }
@@ -433,138 +457,11 @@ public final class PropertySheetHook implements IStartup
             return out;
         }
 
-        private static Object lightFromView(Object view)
-        {
-            if (view == null)
-                return null;
-            Object light = Global.getField(view, "lightControl"); //$NON-NLS-1$
-            if (light == null)
-                light = Global.getField(view, "lightLabel"); //$NON-NLS-1$
-            if (light == null)
-                light = Global.getField(view, "nativeControl"); //$NON-NLS-1$
-            if (light == null)
-                light = Global.invoke(view, "getNativeControl"); //$NON-NLS-1$
-            return light;
-        }
-
-        private static Point lightDisplayOrigin(Object light)
-        {
-            if (light == null)
-                return null;
-            Object pt = Global.invoke(light, "toDisplay", Integer.valueOf(0), Integer.valueOf(0)); //$NON-NLS-1$
-            if (pt instanceof Point)
-                return (Point) pt;
-            Object abs = Global.invoke(light, "getAbsoluteBounds"); //$NON-NLS-1$
-            if (abs instanceof Rectangle)
-            {
-                Rectangle r = (Rectangle) abs;
-                return new Point(r.x, r.y);
-            }
-            Object loc = Global.invoke(light, "getLocationInWindow"); //$NON-NLS-1$
-            if (loc instanceof Point)
-                return (Point) loc;
-            return null;
-        }
-
-        private static String textOfViewModel(Object viewModel)
-        {
-            if (viewModel == null)
-                return ""; //$NON-NLS-1$
-            Object text = Global.invoke(viewModel, "getText"); //$NON-NLS-1$
-            if (text instanceof String)
-                return (String) text;
-            return SmartTreeElementLabels.resolve(viewModel, null);
-        }
-
         private static int contextRowCount(Object page)
         {
             PropertySheetUiContext ctx = PropertySheetUiCoordinator.lastContext(page);
             return ctx != null ? ctx.rows.size() : 0;
         }
-
-        // #region agent log
-        private static void agentHitDetail(Object page, PropertySheetPaletteRow row, Point display)
-        {
-            try
-            {
-                Composite root = PropertySheetUiContext.findPaletteRoot(page);
-                Control host = PropertySheetRowSelectionFeature.lwtPaintHostAtDisplayY(row, page, display.y);
-                int hostTop = host != null && !host.isDisposed() ? host.toDisplay(0, 0).y : -1;
-                Composite clickSection = root != null
-                        ? PropertySheetControlInterop.findSectionBodyAtDisplayY(root, display.y) : null;
-                int clickSectionTop = clickSection != null && !clickSection.isDisposed()
-                        ? clickSection.toDisplay(0, 0).y : -1;
-                boolean hostHasHook = host != null && Boolean.TRUE.equals(host.getData("tormozit.ps.rowSelectPaint")); //$NON-NLS-1$
-                String line = "{\"sessionId\":\"db8c17\",\"hypothesisId\":\"H13\",\"location\":\"PropertySheetHook.mouseDown\"," //$NON-NLS-1$
-                        + "\"message\":\"hit\",\"data\":{\"display\":\"" + escJson(row.propertyName) //$NON-NLS-1$
-                        + "\",\"model\":\"" + escJson(row.copyPropertyName()) //$NON-NLS-1$
-                        + "\",\"clickY\":" + display.y //$NON-NLS-1$
-                        + ",\"hostTop\":" + hostTop //$NON-NLS-1$
-                        + ",\"clickSectionTop\":" + clickSectionTop //$NON-NLS-1$
-                        + ",\"hostHasPaintHook\":" + hostHasHook //$NON-NLS-1$
-                        + "},\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
-                java.nio.file.Files.writeString(
-                        java.nio.file.Path.of("C:\\VC\\EDT.Comfort\\debug-db8c17.log"), //$NON-NLS-1$
-                        line, java.nio.charset.StandardCharsets.UTF_8,
-                        java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
-            }
-            catch (Exception ignored)
-            {
-                // debug session only
-            }
-        }
-
-        private static void agentRendererHit(Point display, PropertySheetPaletteRow best, Composite clickSection,
-                int dist)
-        {
-            try
-            {
-                int sectionTop = clickSection != null && !clickSection.isDisposed()
-                        ? clickSection.toDisplay(0, 0).y : -1;
-                String line = "{\"sessionId\":\"db8c17\",\"hypothesisId\":\"H17\",\"location\":\"PropertySheetHook.rendererHit\"," //$NON-NLS-1$
-                        + "\"message\":\"direct\",\"data\":{\"prop\":\"" + escJson(best.propertyName) //$NON-NLS-1$
-                        + "\",\"clickY\":" + display.y + ",\"dist\":" + dist //$NON-NLS-1$
-                        + ",\"clickSectionTop\":" + sectionTop //$NON-NLS-1$
-                        + "},\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
-                java.nio.file.Files.writeString(
-                        java.nio.file.Path.of("C:\\VC\\EDT.Comfort\\debug-db8c17.log"), //$NON-NLS-1$
-                        line, java.nio.charset.StandardCharsets.UTF_8,
-                        java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
-            }
-            catch (Exception ignored)
-            {
-                // debug session only
-            }
-        }
-
-        private static void agentRendererMiss(Point display, Composite clickSection, int labelCount)
-        {
-            try
-            {
-                int sectionTop = clickSection != null && !clickSection.isDisposed()
-                        ? clickSection.toDisplay(0, 0).y : -1;
-                String line = "{\"sessionId\":\"db8c17\",\"hypothesisId\":\"H18\",\"location\":\"PropertySheetHook.rendererMiss\"," //$NON-NLS-1$
-                        + "\"message\":\"miss\",\"data\":{\"clickY\":" + display.y //$NON-NLS-1$
-                        + ",\"labels\":" + labelCount + ",\"clickSectionTop\":" + sectionTop //$NON-NLS-1$
-                        + "},\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
-                java.nio.file.Files.writeString(
-                        java.nio.file.Path.of("C:\\VC\\EDT.Comfort\\debug-db8c17.log"), //$NON-NLS-1$
-                        line, java.nio.charset.StandardCharsets.UTF_8,
-                        java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
-            }
-            catch (Exception ignored)
-            {
-                // debug session only
-            }
-        }
-
-        private static String escJson(String s)
-        {
-            if (s == null)
-                return ""; //$NON-NLS-1$
-            return s.replace("\\", "\\\\").replace("\"", "\\\""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-        }
-        // #endregion
 
     }
 

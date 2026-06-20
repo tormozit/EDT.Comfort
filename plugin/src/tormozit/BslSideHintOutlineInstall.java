@@ -197,7 +197,10 @@ public final class BslSideHintOutlineInstall
     private static void scheduleHintUpdate(Tree tree, BslSideHintPresenter presenter, Object contextHost,
             Object element, int gen)
     {
-
+        BslXtextEditor editor = IrMethodListHandler.resolveBslEditor(contextHost);
+        IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(editor);
+        if (session != null)
+            IrBslExpressionHtmlSupport.cancelActiveEvaluation(session);
         int peekOffset = BslSideHintResolver.peekSourceOffset(element);
         if (shouldSkipHintForElement(tree, presenter, element, peekOffset))
             return;

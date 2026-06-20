@@ -5,7 +5,6 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.WeakHashMap;
 
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.viewers.ISelection;
@@ -40,7 +39,7 @@ final class PropertySheetUiCoordinator
     private static final int SYNC_DELAY_MS = 80;
 
     private static final Map<Object, PageSession> SESSIONS =
-            Collections.synchronizedMap(new WeakHashMap<>());
+            Collections.synchronizedMap(new HashMap<>());
 
     private PropertySheetUiCoordinator() {}
 
@@ -154,7 +153,7 @@ final class PropertySheetUiCoordinator
             if (session.syncAttempt >= MAX_SYNC_ATTEMPTS)
             {
         PropertySheetDebug.uiProblem("sync GIVE UP context=null attempt=" + session.syncAttempt); //$NON-NLS-1$
-                cancelSync(page);
+                cancelPendingTimer(session);
                 return;
             }
             PropertySheetDebug.uiVerbose("sync WAIT context=null attempt=" + session.syncAttempt //$NON-NLS-1$
@@ -172,7 +171,7 @@ final class PropertySheetUiCoordinator
         if (ctx.rows.isEmpty())
         {
             PropertySheetDebug.uiProblem("sync GIVE UP rows=0 attempt=" + session.syncAttempt); //$NON-NLS-1$
-            cancelSync(page);
+            cancelPendingTimer(session);
             return;
         }
         int expected = PropertySheetPaletteScanner.expectedLabelRows(ctx.scene);
@@ -228,6 +227,7 @@ final class PropertySheetUiCoordinator
         {
             if (session.selectedView != null && session.selectedView == row.lwtView)
             {
+                applySessionSelectionBand(row, session);
                 ctx.setSelectedRow(row);
                 PropertySheetDebug.uiVerbose("restoreSelection byView " //$NON-NLS-1$
                         + PropertySheetDebug.safe(session.selectedView));
@@ -235,6 +235,7 @@ final class PropertySheetUiCoordinator
             }
             if (session.selectedName != null && session.selectedName.equals(row.propertyName))
             {
+                applySessionSelectionBand(row, session);
                 ctx.setSelectedRow(row);
                 PropertySheetDebug.uiVerbose("restoreSelection " + PropertySheetDebug.quote(session.selectedName)); //$NON-NLS-1$
                 return;
@@ -268,7 +269,22 @@ final class PropertySheetUiCoordinator
         {
             session.selectedName = row.propertyName;
             session.selectedView = row.lwtView;
+            session.selectedHitDisplayY = row.hitDisplayY;
+            session.selectedBandTopDisplay = row.selectionBandTopDisplay;
+            session.selectedBandBottomDisplay = row.selectionBandBottomDisplay;
         }
+    }
+
+    static void applySessionSelectionBand(PropertySheetPaletteRow row, PageSession session)
+    {
+        if (row == null || session == null)
+            return;
+        if (session.selectedBandTopDisplay >= 0
+                && session.selectedBandBottomDisplay > session.selectedBandTopDisplay)
+            row.setSelectionDisplayBand(session.selectedBandTopDisplay,
+                    session.selectedBandBottomDisplay);
+        if (session.selectedHitDisplayY > 0)
+            row.setHitDisplayY(session.selectedHitDisplayY);
     }
 
     static PropertySheetUiContext lastContext(Object page)
@@ -288,32 +304,40 @@ final class PropertySheetUiCoordinator
             for (Map.Entry<Object, PageSession> entry : SESSIONS.entrySet())
             {
                 PropertySheetUiContext ctx = entry.getValue().lastContext;
-                if (ctx == null)
-                    continue;
-                for (PropertySheetPaletteRow row : ctx.rows)
+                if (ctx != null)
                 {
-                    if (PropertySheetPaletteRow.touchesControl(row, control))
-                        return entry.getKey();
-                    org.eclipse.swt.widgets.Control target =
-                            PropertySheetRowSelectionFeature.interactionTarget(row);
-                    if (target != null && !target.isDisposed()
-                            && (control == target
-                                    || (target instanceof org.eclipse.swt.widgets.Composite
-                                            && isDescendant(control,
-                                                    (org.eclipse.swt.widgets.Composite) target))
-                                    || (control instanceof org.eclipse.swt.widgets.Composite
-                                            && isDescendant(target,
-                                                    (org.eclipse.swt.widgets.Composite) control))))
-                        return entry.getKey();
+                    for (PropertySheetPaletteRow row : ctx.rows)
+                    {
+                        if (PropertySheetPaletteRow.touchesControl(row, control))
+                            return entry.getKey();
+                        org.eclipse.swt.widgets.Control target =
+                                PropertySheetRowSelectionFeature.interactionTarget(row);
+                        if (target != null && !target.isDisposed()
+                                && (control == target
+                                        || (target instanceof org.eclipse.swt.widgets.Composite
+                                                && isDescendant(control,
+                                                        (org.eclipse.swt.widgets.Composite) target))
+                                        || (control instanceof org.eclipse.swt.widgets.Composite
+                                                && isDescendant(target,
+                                                        (org.eclipse.swt.widgets.Composite) control))))
+                            return entry.getKey();
+                    }
                 }
-                org.eclipse.swt.widgets.Composite root = PropertySheetUiContext.findPaletteRoot(entry.getKey());
+                org.eclipse.swt.widgets.Composite root =
+                        PropertySheetUiContext.findPaletteRoot(entry.getKey());
                 if (root != null && !root.isDisposed() && isDescendant(control, root))
                     return entry.getKey();
-                if (!ctx.rows.isEmpty())
+                org.eclipse.swt.widgets.Composite paletteContent =
+                        PropertySheetUiContext.findPaletteContent(entry.getKey());
+                if (paletteContent != null && !paletteContent.isDisposed()
+                        && isDescendant(control, paletteContent))
+                    return entry.getKey();
+                if (ctx != null && !ctx.rows.isEmpty())
                 {
                     org.eclipse.swt.widgets.Control target =
                             PropertySheetRowSelectionFeature.interactionTarget(ctx.rows.get(0));
-                    if (target != null && !target.isDisposed() && target.getShell() == control.getShell())
+                    if (target != null && !target.isDisposed()
+                            && target.getShell() == control.getShell())
                         return entry.getKey();
                 }
             }
@@ -321,16 +345,74 @@ final class PropertySheetUiCoordinator
         return null;
     }
 
+    static int sessionCountForDebug()
+    {
+        synchronized (SESSIONS)
+        {
+            return SESSIONS.size();
+        }
+    }
+
+    /** Краткая диагностика для agent log при pageForControl=null. */
+    static String pageLookupDiag(org.eclipse.swt.widgets.Control control)
+    {
+        if (control == null || control.isDisposed())
+            return "controlDisposed"; //$NON-NLS-1$
+        StringBuilder sb = new StringBuilder(96);
+        synchronized (SESSIONS)
+        {
+            sb.append("sessions=").append(SESSIONS.size()); //$NON-NLS-1$
+            for (Map.Entry<Object, PageSession> entry : SESSIONS.entrySet())
+            {
+                org.eclipse.swt.widgets.Composite root =
+                        PropertySheetUiContext.findPaletteRoot(entry.getKey());
+                org.eclipse.swt.widgets.Composite content =
+                        PropertySheetUiContext.findPaletteContent(entry.getKey());
+                boolean underRoot = root != null && isDescendant(control, root);
+                boolean underContent = content != null && isDescendant(control, content);
+                PropertySheetUiContext ctx = entry.getValue().lastContext;
+                sb.append("|root=").append(root != null ? root.getClass().getSimpleName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
+                        .append(underRoot ? "+desc" : "-desc") //$NON-NLS-1$ //$NON-NLS-2$
+                        .append("|content=").append(content != null ? content.getClass().getSimpleName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
+                        .append(underContent ? "+desc" : "-desc") //$NON-NLS-1$ //$NON-NLS-2$
+                        .append("|rows=").append(ctx != null ? ctx.rows.size() : -1); //$NON-NLS-1$
+            }
+        }
+        return sb.toString();
+    }
+
     static void handleRowClick(Object page, PropertySheetPaletteRow row)
     {
         if (page == null || row == null)
+        {
+            // #region agent log
+            PropertySheetControlInterop.agentHitLog("H8", "PropertySheetUiCoordinator.handleRowClick", "earlyNull", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    java.util.Map.of("pageNull", page == null, "rowNull", row == null)); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
             return;
+        }
         PageSession session = SESSIONS.get(page);
         if (session == null || session.rowSelection == null)
+        {
+            // #region agent log
+            PropertySheetControlInterop.agentHitLog("H8", "PropertySheetUiCoordinator.handleRowClick", "noSession", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    java.util.Map.of("sessionNull", session == null)); //$NON-NLS-1$
+            // #endregion
             return;
+        }
         PropertySheetUiContext ctx = session.lastContext;
         if (ctx == null)
+        {
+            // #region agent log
+            PropertySheetControlInterop.agentHitLog("H8", "PropertySheetUiCoordinator.handleRowClick", "noCtx", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    java.util.Collections.emptyMap());
+            // #endregion
             return;
+        }
+        // #region agent log
+        PropertySheetControlInterop.agentHitLog("H8", "PropertySheetUiCoordinator.handleRowClick", "selectRow", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                java.util.Map.of("prop", row.propertyName)); //$NON-NLS-1$
+        // #endregion
         session.rowSelection.selectRow(ctx, row);
     }
 
@@ -372,6 +454,9 @@ final class PropertySheetUiCoordinator
         Runnable pendingRunnable;
         String selectedName;
         Object selectedView;
+        int selectedHitDisplayY = -1;
+        int selectedBandTopDisplay = -1;
+        int selectedBandBottomDisplay = -1;
         int syncAttempt;
         PropertySheetUiContext lastContext;
     }
@@ -794,11 +879,9 @@ final class PropertySheetUiCoordinator
         {
             PropertySheetUiContext ctx = PropertySheetUiCoordinator.lastContext(page);
             Object scene = ctx != null ? ctx.scene : null;
-            String name = row.copyPropertyName();
-            if (name == null || name.isEmpty())
-                name = PropertySheetControlInterop.resolveCopyPropertyName(page, scene, row.lwtView,
-                        row.propertyName);
-            final String copyText = name != null ? name : ""; //$NON-NLS-1$
+            String resolved = PropertySheetControlInterop.resolveCopyPropertyName(page, scene,
+                    row.lwtView, row.propertyName);
+            final String copyText = resolved != null ? resolved : ""; //$NON-NLS-1$
 
             MenuItem copyItem = new MenuItem(menu, SWT.PUSH);
             copyItem.setText("Копировать имя\tCtrl+C"); //$NON-NLS-1$
@@ -808,9 +891,6 @@ final class PropertySheetUiCoordinator
             else
             {
                 copyItem.addListener(SWT.Selection, e -> widget.getDisplay().asyncExec(() -> {
-                    // #region agent log
-                    agentMenuLog("copy", copyText); //$NON-NLS-1$
-                    // #endregion
                     PropertySheetDebug.feature("contextMenu copy " + PropertySheetDebug.quote(copyText)); //$NON-NLS-1$
                     PropertySheetUiContext.copyToClipboard(widget, copyText);
                     ToastNotification.show("Скопировано", copyText, 2_500); //$NON-NLS-1$
@@ -824,35 +904,11 @@ final class PropertySheetUiCoordinator
             syntaxItem.setToolTipText("Открыть справку по свойству в синтакс-помощнике" //$NON-NLS-1$
                     + Global.pluginSignForTooltip());
             syntaxItem.addListener(SWT.Selection, e -> widget.getDisplay().syncExec(() -> {
-                // #region agent log
-                agentMenuLog("syntax", row.propertyName); //$NON-NLS-1$
-                // #endregion
                 PropertySheetDebug.feature("contextMenu syntaxHelp " //$NON-NLS-1$
                         + PropertySheetDebug.quote(row.propertyName));
                 PropertySheetSyntaxHelpSupport.openForProperty(page, row);
             }));
         }
-
-        // #region agent log
-        private static void agentMenuLog(String action, String prop)
-        {
-            try
-            {
-                String safe = prop != null ? prop.replace("\\", "\\\\").replace("\"", "\\\"") : ""; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-                String line = "{\"sessionId\":\"db8c17\",\"hypothesisId\":\"H6\",\"location\":\"PropertySheetUiCoordinator.menu\"," //$NON-NLS-1$
-                        + "\"message\":\"" + action + "\",\"data\":{\"prop\":\"" + safe //$NON-NLS-1$ //$NON-NLS-2$
-                        + "\"},\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$ //$NON-NLS-2$
-                java.nio.file.Files.writeString(
-                        java.nio.file.Path.of("C:\\VC\\EDT.Comfort\\debug-db8c17.log"), //$NON-NLS-1$
-                        line, java.nio.charset.StandardCharsets.UTF_8,
-                        java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
-            }
-            catch (Exception ignored)
-            {
-                // debug session only
-            }
-        }
-        // #endregion
 
         private static void installContextMenu(Control target, PropertySheetPaletteRow row)
         {
@@ -913,26 +969,15 @@ final class PropertySheetUiCoordinator
 
         private static void openForPropertyOnUiThread(Object page, PropertySheetPaletteRow row)
         {
-            // #region agent log
-            agentSyntaxLog("start", row.propertyName, null); //$NON-NLS-1$
-            // #endregion
             try
             {
                 IWorkbenchPage wbPage = PlatformUI.getWorkbench().getActiveWorkbenchWindow() != null
                         ? PlatformUI.getWorkbench().getActiveWorkbenchWindow().getActivePage() : null;
                 if (wbPage != null)
-                {
                     wbPage.showView(SYNTAX_VIEW_ID);
-                    // #region agent log
-                    agentSyntaxLog("viewShown", row.propertyName, null); //$NON-NLS-1$
-                    // #endregion
-                }
                 Class<?> utilClass = Class.forName(SYNTAX_VIEW_UTIL);
                 utilClass.getMethod("showOrGetShowedView").invoke(null); //$NON-NLS-1$
                 utilClass.getMethod("showSearch", String.class).invoke(null, row.propertyName); //$NON-NLS-1$
-                // #region agent log
-                agentSyntaxLog("searchShown", row.propertyName, null); //$NON-NLS-1$
-                // #endregion
 
                 Object docProvider = resolveDocumentationProvider();
                 if (docProvider == null)
@@ -956,41 +1001,13 @@ final class PropertySheetUiCoordinator
                     return;
                 }
                 openInSyntaxAssist(viewPage, docProvider, locale);
-                // #region agent log
-                agentSyntaxLog("docOpened", row.propertyName, null); //$NON-NLS-1$
-                // #endregion
                 PropertySheetDebug.feature("syntaxHelp opened " + PropertySheetDebug.quote(row.propertyName)); //$NON-NLS-1$
             }
             catch (Exception ex)
             {
-                // #region agent log
-                agentSyntaxLog("error", row.propertyName, ex.getMessage()); //$NON-NLS-1$
-                // #endregion
                 PropertySheetDebug.problem("syntaxHelp " + ex.getMessage()); //$NON-NLS-1$
             }
         }
-
-        // #region agent log
-        private static void agentSyntaxLog(String step, String prop, String error)
-        {
-            try
-            {
-                String safeProp = prop != null ? prop.replace("\\", "\\\\").replace("\"", "\\\"") : ""; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-                String safeErr = error != null ? error.replace("\\", "\\\\").replace("\"", "\\\"") : ""; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-                String line = "{\"sessionId\":\"db8c17\",\"hypothesisId\":\"H7\",\"location\":\"PropertySheetSyntaxHelpSupport\"," //$NON-NLS-1$
-                        + "\"message\":\"" + step + "\",\"data\":{\"prop\":\"" + safeProp //$NON-NLS-1$ //$NON-NLS-2$
-                        + "\",\"error\":\"" + safeErr + "\"},\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                java.nio.file.Files.writeString(
-                        java.nio.file.Path.of("C:\\VC\\EDT.Comfort\\debug-db8c17.log"), //$NON-NLS-1$
-                        line, java.nio.charset.StandardCharsets.UTF_8,
-                        java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
-            }
-            catch (Exception ignored)
-            {
-                // debug session only
-            }
-        }
-        // #endregion
 
         private static Object resolveDocumentationProvider() throws Exception
         {

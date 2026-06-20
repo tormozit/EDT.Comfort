@@ -75,7 +75,7 @@ public class ComfortPreferencePage
 
         BooleanFieldEditor replaceListFiltersField = new BooleanFieldEditor(
             ComfortSettings.PREF_REPLACE_LIST_FILTERS,
-            "Заменять фильтры в списках",
+            "Заменять фильтры по подстроке в списках",
             getFieldEditorParent());
         addField(replaceListFiltersField);
         setFieldTooltip(replaceListFiltersField, REPLACE_LIST_FILTERS_TOOLTIP);

@@ -166,6 +166,7 @@ public final class ContentAssistSessionReloader
             @Override
             public void assistSessionEnded(ContentAssistEvent event)
             {
+                cancelIrEvaluationIfConnected();
                 uninstallCtrlSpaceFilter();
                 uninstallSessionCaretListener();
                 ContentAssistPopupSync.cancelCaretRecompute(viewer);
@@ -201,17 +202,35 @@ public final class ContentAssistSessionReloader
             @Override
             public void selectionChanged(
                 org.eclipse.jface.text.contentassist.ICompletionProposal proposal,
-                boolean smartToggle) {}
+                boolean smartToggle)
+            {
+                if (proposal == null)
+                    return;
+                String displayKey = proposal.getDisplayString();
+                if (displayKey == null || displayKey.isEmpty())
+                    return;
+                if (displayKey.equals(activeIrDisplayKey))
+                    return;
+                cancelIrEvaluationIfConnected();
+            }
         };
         assistant.addCompletionListener(completionListener);
     }
 
     private void detach()
     {
+        cancelIrEvaluationIfConnected();
         uninstallCtrlSpaceFilter();
         uninstallSessionCaretListener();
         ContentAssistPopupSync.cancelCaretRecompute(viewer);
         assistant.removeCompletionListener(completionListener);
+    }
+
+    private void cancelIrEvaluationIfConnected()
+    {
+        IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(bslEditor);
+        if (session != null)
+            IrBslExpressionHtmlSupport.cancelActiveEvaluation(session);
     }
 
     private void installSessionCaretListener()

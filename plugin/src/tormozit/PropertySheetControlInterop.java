@@ -17,9 +17,16 @@ import org.eclipse.core.runtime.Platform;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.jface.viewers.StructuredSelection;
+import org.eclipse.swt.SWT;
+import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.GC;
+import org.eclipse.swt.graphics.Image;
+import org.eclipse.swt.graphics.ImageData;
+import org.eclipse.swt.graphics.PaletteData;
 import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.graphics.Rectangle;
+import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Label;
@@ -43,6 +50,52 @@ final class PropertySheetControlInterop
     private static final String SWT_LIGHT_COMPOSITE = "com._1c.g5.lwt.interop.SwtLightComposite"; //$NON-NLS-1$
 
     private PropertySheetControlInterop() {}
+
+    // #region agent log
+    private static final java.nio.file.Path AGENT_LOG_PATH =
+            java.nio.file.Path.of("C:\\VC\\EDT.Comfort\\debug-db8c17.log"); //$NON-NLS-1$
+
+    static void agentHitLog(String hypothesisId, String location, String message,
+            java.util.Map<String, Object> data)
+    {
+        try
+        {
+            StringBuilder sb = new StringBuilder(256);
+            sb.append("{\"sessionId\":\"db8c17\",\"hypothesisId\":\"").append(hypothesisId) //$NON-NLS-1$
+                    .append("\",\"location\":\"").append(location) //$NON-NLS-1$
+                    .append("\",\"message\":\"").append(message) //$NON-NLS-1$
+                    .append("\",\"data\":{"); //$NON-NLS-1$
+            boolean first = true;
+            if (data != null)
+            {
+                for (java.util.Map.Entry<String, Object> e : data.entrySet())
+                {
+                    if (!first)
+                        sb.append(',');
+                    first = false;
+                    sb.append('"').append(e.getKey()).append("\":");
+                    Object v = e.getValue();
+                    if (v == null)
+                        sb.append("null"); //$NON-NLS-1$
+                    else if (v instanceof Number || v instanceof Boolean)
+                        sb.append(v);
+                    else
+                        sb.append('"').append(String.valueOf(v).replace("\\", "\\\\") //$NON-NLS-1$ //$NON-NLS-2$
+                                .replace("\"", "\\\"")).append('"'); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+            }
+            sb.append("},\"timestamp\":").append(System.currentTimeMillis()).append("}\n"); //$NON-NLS-1$ //$NON-NLS-2$
+            java.nio.file.Files.writeString(AGENT_LOG_PATH, sb.toString(),
+                    java.nio.charset.StandardCharsets.UTF_8,
+                    java.nio.file.StandardOpenOption.CREATE,
+                    java.nio.file.StandardOpenOption.APPEND);
+        }
+        catch (Exception ignored)
+        {
+            // debug session only
+        }
+    }
+    // #endregion
 
     static Control unwrapToSwtControl(Object value)
     {
@@ -600,6 +653,1929 @@ final class PropertySheetControlInterop
         return null;
     }
 
+    private static final String PS_SECTION_AREAS_KEY = "tormozit.ps.sectionAreas"; //$NON-NLS-1$
+    private static final String PS_SECTION_BANDS_KEY = "tormozit.ps.sectionBands"; //$NON-NLS-1$
+    private static final String PS_CANVAS_CAPTURE_KEY = "tormozit.ps.canvasCapture"; //$NON-NLS-1$
+    private static final String PS_SECTION_AREAS_CAPTURE_KEY = "tormozit.ps.sectionAreasCapture"; //$NON-NLS-1$
+    private static final String PS_SECTION_ROW_LABELS_KEY = "tormozit.ps.sectionRowLabels"; //$NON-NLS-1$
+    private static final int MIN_BACK_COLOR_BAND_HEIGHT = 2;
+    private static final int MAX_SEPARATOR_BAND_HEIGHT = 8;
+    private static final int MAX_BLURRED_SEPARATOR_RUN = 24;
+    private static final int MAX_FIELD_END_SEPARATOR_RUN = 72;
+    private static final int MIN_PROPERTY_AREA_HEIGHT = 12;
+    private static final int MIN_ROW_GAP_CANVAS = 14;
+    /** Минимум между bottom соседних band; меньше — дубль одной строки (319,337). */
+    private static final int MIN_BAND_BOTTOM_GAP = 20;
+    private static final int MIN_AREA_SLIVER_CANVAS = 18;
+    private static final int SEP_BAND_CLUSTER_RADIUS = 22;
+    private static final int SEP_BAND_CLUSTER_RADIUS_WIDE = 20;
+    /** Не сканировать верх секции — chrome заголовка ExpandableComposite даёт ложные band@32. */
+    private static final int SECTION_BODY_EDGE_EXCLUDE = 20;
+    private static final int BACK_COLOR_SCAN_SAMPLE_STEP = 4;
+    private static final int BACK_COLOR_LINE_THRESHOLD_PERCENT = 85;
+    private static final int BACK_COLOR_RGB_TOLERANCE = 12;
+    private static final int GUTTER_SEPARATOR_SCAN_X1 = 14;
+
+    /** EDT-группа свойств: Section + body (DtLayoutComposite). */
+    static final class LwtPropertySection
+    {
+        Composite sectionWidget;
+        Composite body;
+        int sectionTopDisplay;
+        int bodyTopDisplay;
+        int bodyBottomDisplay;
+        String titleHint;
+        int headerTopCanvas;
+        int headerBottomCanvas;
+        int bodyTopCanvas;
+        int bodyBottomCanvas;
+        boolean expanded;
+    }
+
+    /** Горизонтальная полоса разделителя цвета фона (canvas Y). */
+    static final class BackColorBand
+    {
+        final int topCanvas;
+        final int bottomCanvas;
+
+        BackColorBand(int topCanvas, int bottomCanvas)
+        {
+            this.topCanvas = topCanvas;
+            this.bottomCanvas = bottomCanvas;
+        }
+    }
+
+    /** Область одного свойства между разделителями (canvas Y). */
+    static final class PropertyArea
+    {
+        final int topCanvas;
+        final int bottomCanvas;
+
+        PropertyArea(int topCanvas, int bottomCanvas)
+        {
+            this.topCanvas = topCanvas;
+            this.bottomCanvas = bottomCanvas;
+        }
+
+        int height()
+        {
+            return bottomCanvas - topCanvas;
+        }
+
+        boolean containsCanvasY(int canvasY)
+        {
+            return canvasY >= topCanvas && canvasY < bottomCanvas;
+        }
+
+        int[] toDisplayBand(Composite content)
+        {
+            if (content == null || content.isDisposed())
+                return new int[] { topCanvas, bottomCanvas };
+            return new int[] {
+                    content.toDisplay(0, topCanvas).y,
+                    content.toDisplay(0, bottomCanvas).y
+            };
+        }
+    }
+
+    /** Результат resolve под кликом. */
+    static final class PropertyClickHit
+    {
+        final String displayName;
+        final Object lwtView;
+        final int areaTopDisplay;
+        final int areaBottomDisplay;
+        final int areaTopCanvas;
+        final int areaBottomCanvas;
+        final int propertyIndex;
+        final String via;
+
+        PropertyClickHit(String displayName, Object lwtView, int areaTopDisplay,
+                int areaBottomDisplay, int areaTopCanvas, int areaBottomCanvas, int propertyIndex,
+                String via)
+        {
+            this.displayName = displayName;
+            this.lwtView = lwtView;
+            this.areaTopDisplay = areaTopDisplay;
+            this.areaBottomDisplay = areaBottomDisplay;
+            this.areaTopCanvas = areaTopCanvas;
+            this.areaBottomCanvas = areaBottomCanvas;
+            this.propertyIndex = propertyIndex;
+            this.via = via;
+        }
+    }
+
+    static List<LwtPropertySection> collectPropertySections(Composite paletteRoot)
+    {
+        List<LwtPropertySection> out = new ArrayList<>();
+        if (paletteRoot == null || paletteRoot.isDisposed())
+            return out;
+        collectPropertySectionsDeep(paletteRoot, out);
+        refreshSectionDisplayBounds(out);
+        normalizeSectionBodyBounds(out);
+        return out;
+    }
+
+    private static void refreshSectionDisplayBounds(List<LwtPropertySection> sections)
+    {
+        for (LwtPropertySection section : sections)
+        {
+            if (section.sectionWidget == null || section.sectionWidget.isDisposed()
+                    || section.body == null || section.body.isDisposed())
+                continue;
+            section.sectionTopDisplay = section.sectionWidget.toDisplay(0, 0).y;
+            section.bodyTopDisplay = section.body.toDisplay(0, 0).y;
+            section.bodyBottomDisplay = section.bodyTopDisplay + section.body.getSize().y;
+            if (section.titleHint == null || section.titleHint.isEmpty())
+                section.titleHint = sectionTitleHint(section.sectionWidget);
+        }
+        sections.sort(java.util.Comparator
+                .comparingInt((LwtPropertySection s) -> s.bodyTopDisplay)
+                .thenComparingInt(s -> s.sectionTopDisplay));
+    }
+
+    /** Обрезка bodyBottom: тело секции не заходит в заголовок/тело следующей. */
+    private static void normalizeSectionBodyBounds(List<LwtPropertySection> sections)
+    {
+        for (int i = 0; i < sections.size(); i++)
+        {
+            LwtPropertySection section = sections.get(i);
+            int clip = Integer.MAX_VALUE;
+            for (int j = i + 1; j < sections.size(); j++)
+            {
+                LwtPropertySection next = sections.get(j);
+                if (next.sectionTopDisplay > section.bodyTopDisplay)
+                {
+                    clip = Math.min(clip, next.sectionTopDisplay);
+                    if (next.bodyTopDisplay > section.bodyTopDisplay)
+                        clip = Math.min(clip, next.bodyTopDisplay);
+                    break;
+                }
+            }
+            if (clip != Integer.MAX_VALUE && section.bodyBottomDisplay > clip)
+                section.bodyBottomDisplay = clip;
+        }
+    }
+
+    private static String sectionTitleHint(Composite sectionWidget)
+    {
+        if (sectionWidget == null || sectionWidget.isDisposed())
+            return ""; //$NON-NLS-1$
+        Object text = Global.invoke(sectionWidget, "getText"); //$NON-NLS-1$
+        if (text instanceof String && !((String) text).isEmpty())
+            return (String) text;
+        for (Control child : sectionWidget.getChildren())
+        {
+            if (child instanceof Label && !child.isDisposed())
+            {
+                String labelText = ((Label) child).getText();
+                if (labelText != null && !labelText.isEmpty())
+                    return labelText.trim();
+            }
+        }
+        return sectionWidget.getClass().getSimpleName();
+    }
+
+    private static void collectPropertySectionsDeep(Composite composite, List<LwtPropertySection> out)
+    {
+        if (composite == null || composite.isDisposed()
+                || PropertySheetUiContext.isFilterAreaControl(composite))
+            return;
+        String cn = composite.getClass().getName();
+        if (cn.contains("Section") || cn.contains("ExpandableComposite")) //$NON-NLS-1$ //$NON-NLS-2$
+        {
+            Composite body = findSectionBodyChild(composite);
+            if (body != null && !body.isDisposed())
+            {
+                LwtPropertySection section = new LwtPropertySection();
+                section.sectionWidget = composite;
+                section.body = body;
+                section.titleHint = sectionTitleHint(composite);
+                section.sectionTopDisplay = composite.toDisplay(0, 0).y;
+                section.bodyTopDisplay = body.toDisplay(0, 0).y;
+                section.bodyBottomDisplay = section.bodyTopDisplay + body.getSize().y;
+                out.add(section);
+            }
+        }
+        for (Control child : composite.getChildren())
+        {
+            if (child instanceof Composite)
+                collectPropertySectionsDeep((Composite) child, out);
+        }
+    }
+
+    private static Composite findSectionBodyChild(Composite sectionWidget)
+    {
+        if (sectionWidget == null || sectionWidget.isDisposed())
+            return null;
+        Composite best = null;
+        int bestHeight = 0;
+        for (Control child : sectionWidget.getChildren())
+        {
+            if (!(child instanceof Composite))
+                continue;
+            Composite c = (Composite) child;
+            String cn = c.getClass().getName();
+            if (!(cn.contains("DtLayoutComposite") || cn.contains("LayoutComposite"))) //$NON-NLS-1$ //$NON-NLS-2$
+                continue;
+            Point size = c.getSize();
+            if (size.x < 100 || size.y < 20)
+                continue;
+            if (size.y > bestHeight)
+            {
+                bestHeight = size.y;
+                best = c;
+            }
+        }
+        return best;
+    }
+
+    /** Группа под кликом: body содержит clickY; при нескольких — max bodyTop (вложенная/нижняя). */
+    static LwtPropertySection findActiveSectionAtClick(Composite paletteRoot, int displayY)
+    {
+        if (paletteRoot == null || paletteRoot.isDisposed() || displayY <= 0)
+            return null;
+        java.util.List<LwtPropertySection> sections = collectPropertySections(paletteRoot);
+        LwtPropertySection best = null;
+        int matchCount = 0;
+        for (LwtPropertySection section : sections)
+        {
+            if (displayY < section.bodyTopDisplay || displayY >= section.bodyBottomDisplay)
+                continue;
+            matchCount++;
+            if (best == null || section.bodyTopDisplay > best.bodyTopDisplay
+                    || (section.bodyTopDisplay == best.bodyTopDisplay
+                            && section.sectionTopDisplay > best.sectionTopDisplay))
+                best = section;
+        }
+        // #region agent log
+        {
+            java.util.Map<String, Object> d = new java.util.LinkedHashMap<>();
+            d.put("clickY", displayY); //$NON-NLS-1$
+            d.put("sectionCount", sections.size()); //$NON-NLS-1$
+            d.put("matchCount", matchCount); //$NON-NLS-1$
+            if (best != null)
+            {
+                d.put("title", best.titleHint != null ? best.titleHint : ""); //$NON-NLS-1$ //$NON-NLS-2$
+                d.put("sectionTop", best.sectionTopDisplay); //$NON-NLS-1$
+                d.put("bodyTop", best.bodyTopDisplay); //$NON-NLS-1$
+                d.put("bodyBottom", best.bodyBottomDisplay); //$NON-NLS-1$
+            }
+            if (sections.size() <= 8)
+            {
+                java.util.List<String> frames = new java.util.ArrayList<>();
+                for (LwtPropertySection s : sections)
+                {
+                    frames.add((s.titleHint != null ? s.titleHint : "?") //$NON-NLS-1$
+                            + "@" + s.bodyTopDisplay + ".." + s.bodyBottomDisplay); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                d.put("frames", String.join("|", frames)); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            agentHitLog(best != null ? "H1ok" : "H1", "ControlInterop.findActiveSectionAtClick", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    best != null ? "found" : "miss", d); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        // #endregion
+        return best;
+    }
+
+    /** Строка свойства внутри body (leaf ~33px или многострочная). */
+    private static boolean isSectionPropertyRow(Composite composite)
+    {
+        if (composite == null || composite.isDisposed())
+            return false;
+        if (isLwtFieldRowComposite(composite))
+            return true;
+        String cn = composite.getClass().getName();
+        if (!cn.contains("DtLayoutComposite") && !cn.contains("LayoutComposite")) //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        Point size = composite.getSize();
+        if (size.x < 100 || size.y < 18)
+            return false;
+        return !containsNestedFieldRow(composite);
+    }
+
+    /** LWT view по подписи из renderer (LabelViewModel), без обхода FieldComponent. */
+    static Object findLwtViewByDisplayName(Object scene, String displayName)
+    {
+        if (scene == null || displayName == null || displayName.isEmpty())
+            return null;
+        for (java.util.Map.Entry<?, ?> entry : labelEntriesFromScene(scene))
+        {
+            String text = labelTextOfViewModel(entry.getKey());
+            if (displayName.equals(text))
+                return entry.getValue();
+        }
+        return null;
+    }
+
+    private static Object resolveFieldByDisplayName(Object page, int groupIndex, String displayName)
+    {
+        if (page == null || displayName == null || displayName.isEmpty())
+            return null;
+        java.util.List<Object> sections = modelSectionDefinitions(page);
+        if (groupIndex < 0 || groupIndex >= sections.size())
+            return null;
+        for (Object field : modelFieldDefinitions(sections.get(groupIndex)))
+        {
+            if (displayName.equals(labeledDefinitionText(field)))
+                return field;
+        }
+        return null;
+    }
+
+    /** Leaf-row host для LWT view; не возвращает section-body (>120px). */
+    static Composite resolveRowHostForView(Object view, Composite paletteRoot)
+    {
+        Composite row = leafFieldRowHostForView(view);
+        if (row != null && !row.isDisposed() && row.getSize().y <= 120)
+            return row;
+        row = resolveLwtFieldRowHost(view, paletteRoot);
+        if (row != null && !row.isDisposed() && row.getSize().y <= 120)
+            return row;
+        row = findPaintHostForView(view, paletteRoot);
+        if (row != null && !row.isDisposed() && row.getSize().y <= 120)
+            return row;
+        return null;
+    }
+
+    static Composite resolvePaletteRowHost(PropertySheetPaletteRow row)
+    {
+        return rowHostForPaletteRow(row);
+    }
+
+    /** Leaf-row host (~≤120px); не section-body. */
+    static Composite rowHostForPaletteRow(PropertySheetPaletteRow row)
+    {
+        if (row == null || !row.isAlive())
+            return null;
+        if (row.lwtView != null)
+        {
+            Composite leaf = leafFieldRowHostForView(row.lwtView);
+            if (leaf != null && !leaf.isDisposed() && leaf.getSize().y <= 120)
+                return leaf;
+        }
+        if (row.rowComposite != null && !row.rowComposite.isDisposed()
+                && row.rowComposite.getSize().y <= 120)
+            return row.rowComposite;
+        if (row.nameControl instanceof Composite)
+        {
+            Composite nc = (Composite) row.nameControl;
+            if (!nc.isDisposed() && nc.getSize().y <= 120)
+                return nc;
+        }
+        return null;
+    }
+
+    /** Host для рамки: leaf → scanner controls → leaf@Y → section.body. */
+    static Composite paintHostForPaletteRow(PropertySheetPaletteRow row, Composite sectionBody,
+            int displayY)
+    {
+        Composite host = rowHostForPaletteRow(row);
+        if (host != null)
+            return host;
+        if (row != null && row.lwtView != null && sectionBody != null && !sectionBody.isDisposed())
+        {
+            Composite leaf = leafFieldRowHostForView(row.lwtView);
+            if (leaf == null)
+                leaf = resolveRowHostForView(row.lwtView, sectionBody);
+            if (leaf != null && !leaf.isDisposed() && isDescendantOf(leaf, sectionBody)
+                    && leaf.getSize().y <= 120)
+                return leaf;
+        }
+        if (row != null && row.nameControl instanceof Composite)
+        {
+            Composite nc = (Composite) row.nameControl;
+            if (!nc.isDisposed() && nc.getSize().y <= 120
+                    && (sectionBody == null || isDescendantOf(nc, sectionBody)))
+                return nc;
+        }
+        if (row != null && row.rowComposite != null && !row.rowComposite.isDisposed()
+                && row.rowComposite.getSize().y <= 120
+                && (sectionBody == null || isDescendantOf(row.rowComposite, sectionBody)))
+            return row.rowComposite;
+        if (sectionBody != null && !sectionBody.isDisposed() && displayY > 0)
+        {
+            Composite leaf = leafFieldRowAtDisplayY(sectionBody, displayY);
+            if (leaf != null && !leaf.isDisposed())
+                return leaf;
+        }
+        if (sectionBody != null && !sectionBody.isDisposed())
+            return sectionBody;
+        return null;
+    }
+
+    /** Canvas-полоса строки: leaf-host в секции, не stale light-bounds. */
+    private static int[] paletteRowCanvasBand(PropertySheetPaletteRow row, Composite content,
+            LwtPropertySection section)
+    {
+        if (row == null || content == null || content.isDisposed())
+            return null;
+        Composite sectionBody = section != null ? section.body : null;
+        Composite host = rowHostForPaletteRow(row);
+        if (host != null && !host.isDisposed()
+                && (sectionBody == null || isDescendantOf(host, sectionBody)))
+        {
+            Point topLeft = content.toControl(host.toDisplay(0, 0));
+            int top = topLeft.y;
+            return new int[] { top, top + Math.max(1, host.getSize().y) };
+        }
+        if (row.lwtView != null && sectionBody != null && !sectionBody.isDisposed())
+        {
+            Composite leaf = leafFieldRowHostForView(row.lwtView);
+            if (leaf == null)
+                leaf = resolveRowHostForView(row.lwtView, content);
+            if (leaf != null && !leaf.isDisposed() && isDescendantOf(leaf, sectionBody))
+            {
+                Point topLeft = content.toControl(leaf.toDisplay(0, 0));
+                int top = topLeft.y;
+                return new int[] { top, top + Math.max(1, leaf.getSize().y) };
+            }
+        }
+        if (row.nameControl instanceof Composite)
+        {
+            Composite nc = (Composite) row.nameControl;
+            if (!nc.isDisposed() && nc.getSize().y <= 120
+                    && (sectionBody == null || isDescendantOf(nc, sectionBody)))
+            {
+                Point topLeft = content.toControl(nc.toDisplay(0, 0));
+                int top = topLeft.y;
+                return new int[] { top, top + Math.max(1, nc.getSize().y) };
+            }
+        }
+        if (row.rowComposite != null && !row.rowComposite.isDisposed()
+                && row.rowComposite.getSize().y <= 120
+                && (sectionBody == null || isDescendantOf(row.rowComposite, sectionBody)))
+        {
+            Point topLeft = content.toControl(row.rowComposite.toDisplay(0, 0));
+            int top = topLeft.y;
+            return new int[] { top, top + Math.max(1, row.rowComposite.getSize().y) };
+        }
+        return null;
+    }
+
+    /** @deprecated use {@link #rowHostForPaletteRow} */
+    static Composite rowHostFromPaletteRow(PropertySheetPaletteRow row)
+    {
+        return rowHostForPaletteRow(row);
+    }
+
+    static boolean paletteRowInSection(PropertySheetPaletteRow row, LwtPropertySection section,
+            Composite content)
+    {
+        if (row == null || section == null || section.body == null || section.body.isDisposed())
+            return false;
+        if (row.lwtView != null && viewInSectionBody(row.lwtView, section.body, content))
+            return true;
+        int[] band = paletteRowCanvasBand(row, content, section);
+        if (band == null)
+            return false;
+        int centerCanvas = (band[0] + band[1]) / 2;
+        int centerY = content.toDisplay(0, centerCanvas).y;
+        return centerY >= section.bodyTopDisplay && centerY < section.bodyBottomDisplay;
+    }
+
+    private static boolean isDescendantOf(Control control, Composite ancestor)
+    {
+        if (control == null || control.isDisposed() || ancestor == null || ancestor.isDisposed())
+            return false;
+        for (Composite parent = control.getParent(); parent != null && !parent.isDisposed();
+                parent = parent.getParent())
+        {
+            if (parent == ancestor)
+                return true;
+        }
+        return false;
+    }
+
+    private static Composite paletteRootAncestor(Composite start)
+    {
+        if (start == null || start.isDisposed())
+            return null;
+        Composite best = start;
+        for (Composite c = start; c != null && !c.isDisposed(); c = c.getParent())
+        {
+            if (c.getSize().y >= 400)
+                best = c;
+        }
+        return best;
+    }
+
+    /** Строки свойств секции → canvas-areas (границы LWT layout, не print-scan). */
+    static List<PropertyArea> buildPropertyAreasFromPropertyRows(Composite content,
+            LwtPropertySection section, Object scene, Object page)
+    {
+        if (content == null || content.isDisposed() || section == null
+                || section.body == null || section.body.isDisposed())
+            return java.util.Collections.emptyList();
+        java.util.List<LwtPropertySection> sections = collectPropertySections(content);
+        refreshSectionDisplayBounds(sections);
+        normalizeSectionBodyBounds(sections);
+        for (LwtPropertySection s : sections)
+        {
+            if (s.body == section.body)
+            {
+                section.bodyTopDisplay = s.bodyTopDisplay;
+                section.bodyBottomDisplay = s.bodyBottomDisplay;
+                break;
+            }
+        }
+        if (Boolean.TRUE.equals(section.body.getData("tormozit.ps.rowAreasStale"))) //$NON-NLS-1$
+        {
+            section.body.setData(PS_SECTION_AREAS_KEY, null);
+            section.body.setData(PS_SECTION_AREAS_CAPTURE_KEY, null);
+            section.body.setData(PS_SECTION_ROW_LABELS_KEY, null);
+            section.body.setData("tormozit.ps.rowAreasStale", null); //$NON-NLS-1$
+        }
+        Object areasToken = section.body.getData(PS_SECTION_AREAS_CAPTURE_KEY);
+        Object cached = section.body.getData(PS_SECTION_AREAS_KEY);
+        if ("rowLayout".equals(areasToken) && cached instanceof List) //$NON-NLS-1$
+        {
+            @SuppressWarnings("unchecked")
+            java.util.List<PropertyArea> cachedAreas = (java.util.List<PropertyArea>) cached;
+            if (page != null)
+            {
+                int groupIndex = resolveGroupIndex(page, section, sections);
+                int visible = visibleFieldDefinitionsInSection(page, groupIndex, section, scene,
+                        content).size();
+                if (visible <= 0 || cachedAreas.size() <= visible + 2)
+                    return cachedAreas;
+            }
+            else
+                return cachedAreas;
+        }
+        List<PropertyArea> areas = new ArrayList<>();
+        List<String> rowLabels = new ArrayList<>();
+        String rowSource = "none"; //$NON-NLS-1$
+        int ctxRowsInSection = 0;
+        if (page != null)
+        {
+            PropertySheetUiContext ctx = PropertySheetUiCoordinator.lastContext(page);
+            if (ctx != null && !ctx.rows.isEmpty())
+            {
+                int groupIndex = resolveGroupIndex(page, section, sections);
+                java.util.List<PropertySheetPaletteRow> sectionRows = ctxRowsForSection(ctx,
+                        section, content, page, groupIndex, scene);
+                ctxRowsInSection = sectionRows.size();
+                sectionRows.sort(java.util.Comparator.comparingInt(r -> {
+                    int[] band = paletteRowCanvasBand(r, content, section);
+                    return band != null ? band[0] : Integer.MAX_VALUE;
+                }));
+                java.util.Set<String> seenBands = new java.util.LinkedHashSet<>();
+                for (PropertySheetPaletteRow paletteRow : sectionRows)
+                {
+                    int[] band = paletteRowCanvasBand(paletteRow, content, section);
+                    if (band == null || band[1] <= band[0])
+                        continue;
+                    String key = band[0] + ":" + band[1]; //$NON-NLS-1$
+                    if (!seenBands.add(key))
+                        continue;
+                    areas.add(new PropertyArea(band[0], band[1]));
+                    rowLabels.add(paletteRow.propertyName);
+                }
+                if (!areas.isEmpty())
+                    rowSource = "ctx"; //$NON-NLS-1$
+            }
+        }
+        if (areas.isEmpty())
+        {
+            List<Composite> rows = new ArrayList<>();
+            collectPropertyRowHostsRelaxed(section.body, section.bodyTopDisplay,
+                    section.bodyBottomDisplay, rows);
+            if (!rows.isEmpty())
+                rowSource = "relaxed"; //$NON-NLS-1$
+            for (Composite row : rows)
+            {
+                if (row.isDisposed())
+                    continue;
+                Point topLeft = content.toControl(row.toDisplay(0, 0));
+                int top = topLeft.y;
+                int bottom = top + row.getSize().y;
+                if (bottom <= top)
+                    continue;
+                areas.add(new PropertyArea(top, bottom));
+            }
+        }
+        if (!areas.isEmpty())
+        {
+            section.body.setData(PS_SECTION_AREAS_KEY, areas);
+            section.body.setData(PS_SECTION_AREAS_CAPTURE_KEY, "rowLayout"); //$NON-NLS-1$
+            section.body.setData(PS_SECTION_ROW_LABELS_KEY,
+                    rowLabels.isEmpty() ? null : new ArrayList<>(rowLabels));
+        }
+        // #region agent log
+        StringBuilder areaRanges = new StringBuilder();
+        for (int i = 0; i < areas.size() && i < 10; i++)
+        {
+            if (i > 0)
+                areaRanges.append(',');
+            PropertyArea a = areas.get(i);
+            areaRanges.append(a.topCanvas).append('-').append(a.bottomCanvas);
+        }
+        agentHitLog("H19", "ControlInterop.buildPropertyAreasFromPropertyRows", "rowAreas", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                java.util.Map.of("title", section.titleHint != null ? section.titleHint : "", //$NON-NLS-1$ //$NON-NLS-2$
+                        "rowCount", areas.size(), "areas", areas.size(), //$NON-NLS-1$ //$NON-NLS-2$
+                        "rowSource", rowSource, "labelCount", rowLabels.size(), //$NON-NLS-1$ //$NON-NLS-2$
+                        "ctxRowsInSection", ctxRowsInSection, //$NON-NLS-1$
+                        "areaRanges", areaRanges.toString())); //$NON-NLS-1$
+        // #endregion
+        return areas;
+    }
+
+    /** Обход body без {@link #containsNestedFieldRow} — leaf DtLayoutComposite ~18–120px. */
+    private static void collectPropertyRowHostsRelaxed(Composite body, int bodyTopDisplay,
+            int bodyBottomDisplay, List<Composite> out)
+    {
+        if (body == null || body.isDisposed())
+            return;
+        collectPropertyRowHostsRelaxedDeep(body, body, bodyTopDisplay, bodyBottomDisplay, out);
+        out.sort(java.util.Comparator.comparingInt(PropertySheetControlInterop::fieldRowDisplayY));
+    }
+
+    private static void collectPropertyRowHostsRelaxedDeep(Composite body, Composite composite,
+            int bodyTopDisplay, int bodyBottomDisplay, List<Composite> out)
+    {
+        if (composite == null || composite.isDisposed())
+            return;
+        if (composite != body)
+        {
+            String cn = composite.getClass().getName();
+            if (cn.contains("DtLayoutComposite") || cn.contains("LayoutComposite")) //$NON-NLS-1$ //$NON-NLS-2$
+            {
+                Point size = composite.getSize();
+                if (size.x >= 100 && size.y >= 18 && size.y <= 120)
+                {
+                    int y = composite.toDisplay(0, 0).y;
+                    if (y >= bodyTopDisplay && y < bodyBottomDisplay && !out.contains(composite))
+                        out.add(composite);
+                }
+            }
+        }
+        for (Control child : composite.getChildren())
+        {
+            if (child instanceof Composite)
+                collectPropertyRowHostsRelaxedDeep(body, (Composite) child, bodyTopDisplay,
+                        bodyBottomDisplay, out);
+        }
+    }
+
+    static List<Object> visibleFieldDefinitionsInSection(Object page, int groupIndex,
+            LwtPropertySection section, Object scene, Composite content)
+    {
+        java.util.List<Object> sections = modelSectionDefinitions(page);
+        if (groupIndex < 0 || groupIndex >= sections.size())
+            return java.util.Collections.emptyList();
+        java.util.List<Object> all = modelFieldDefinitions(sections.get(groupIndex));
+        java.util.List<Object> visible = new ArrayList<>();
+        for (Object field : all)
+        {
+            String label = labeledDefinitionText(field);
+            if (label == null || label.isEmpty())
+                continue;
+            Object view = findLwtViewByDisplayName(scene, label);
+            if (view == null)
+                view = findFieldComponentByDisplayName(scene, label);
+            if (view == null)
+                continue;
+            if (section != null && section.body != null && content != null
+                    && !viewInSectionBody(view, section.body, content))
+                continue;
+            visible.add(field);
+        }
+        if (section != null && section.body != null && content != null)
+        {
+            visible.sort(java.util.Comparator.comparingInt(f -> {
+                Object view = findLwtViewByDisplayName(scene, labeledDefinitionText(f));
+                if (view == null)
+                    view = findFieldComponentByDisplayName(scene, labeledDefinitionText(f));
+                if (view == null)
+                    return Integer.MAX_VALUE;
+                return labelLightCenterDisplayY(view, section.body, content);
+            }));
+        }
+        return visible;
+    }
+
+    private static void collectPropertyRowsInBody(Composite body, List<Composite> out)
+    {
+        if (body == null || body.isDisposed())
+            return;
+        collectPropertyRowsInBodyDeep(body, body, out);
+        out.sort(java.util.Comparator.comparingInt(PropertySheetControlInterop::fieldRowDisplayY));
+    }
+
+    private static void collectPropertyRowsInBodyDeep(Composite body, Composite composite,
+            List<Composite> out)
+    {
+        if (composite == null || composite.isDisposed())
+            return;
+        if (composite != body && isSectionPropertyRow(composite))
+        {
+            if (!out.contains(composite))
+                out.add(composite);
+            return;
+        }
+        for (Control child : composite.getChildren())
+        {
+            if (child instanceof Composite)
+                collectPropertyRowsInBodyDeep(body, (Composite) child, out);
+        }
+    }
+
+    static void invalidateSectionAreaCache(Composite body)
+    {
+        if (body != null && !body.isDisposed())
+        {
+            body.setData(PS_SECTION_AREAS_KEY, null);
+            body.setData(PS_SECTION_BANDS_KEY, null);
+            body.setData(PS_SECTION_AREAS_CAPTURE_KEY, null);
+            body.setData(PS_SECTION_ROW_LABELS_KEY, null);
+            body.setData("tormozit.ps.rowAreasStale", Boolean.TRUE); //$NON-NLS-1$
+        }
+    }
+
+    static void invalidatePaletteGeometryCache(Composite content)
+    {
+        if (content == null || content.isDisposed())
+            return;
+        content.setData(PS_CANVAS_CAPTURE_KEY, null);
+        content.setData(PS_SECTION_AREAS_KEY, null);
+        content.setData(PS_SECTION_BANDS_KEY, null);
+        for (LwtPropertySection section : collectPropertySections(content))
+        {
+            if (section.body == null || section.body.isDisposed())
+                continue;
+            section.body.setData(PS_SECTION_AREAS_KEY, null);
+            section.body.setData(PS_SECTION_BANDS_KEY, null);
+            section.body.setData(PS_SECTION_AREAS_CAPTURE_KEY, null);
+            section.body.setData(PS_SECTION_ROW_LABELS_KEY, null);
+        }
+    }
+
+    private static boolean isExpandableSectionWidget(Composite sectionWidget)
+    {
+        return sectionWidget != null && !sectionWidget.isDisposed()
+                && sectionWidget.getClass().getName().contains("ExpandableComposite"); //$NON-NLS-1$
+    }
+
+    private static boolean sectionExpanded(Composite sectionWidget)
+    {
+        if (sectionWidget == null || sectionWidget.isDisposed())
+            return false;
+        Object expanded = Global.invoke(sectionWidget, "getExpanded"); //$NON-NLS-1$
+        if (expanded instanceof Boolean)
+            return (Boolean) expanded;
+        return true;
+    }
+
+    private static int sectionHeaderBottomCanvas(Composite sectionWidget, Composite content,
+            int headerTopCanvas)
+    {
+        if (sectionWidget == null || sectionWidget.isDisposed() || content == null)
+            return headerTopCanvas + 24;
+        if (isExpandableSectionWidget(sectionWidget))
+        {
+            Object clientAreaObj = Global.invoke(sectionWidget, "getClientArea"); //$NON-NLS-1$
+            if (clientAreaObj instanceof Rectangle)
+            {
+                Rectangle client = (Rectangle) clientAreaObj;
+                Point clientScreen = sectionWidget.toDisplay(client.x, client.y);
+                return content.toControl(clientScreen).y;
+            }
+        }
+        int probeY = Math.min(28, Math.max(8, sectionWidget.getSize().y / 3));
+        return content.toControl(sectionWidget.toDisplay(0, probeY)).y;
+    }
+
+    static void refreshSectionCanvasBounds(java.util.List<LwtPropertySection> sections,
+            Composite content)
+    {
+        if (content == null || content.isDisposed() || sections == null)
+            return;
+        for (LwtPropertySection section : sections)
+        {
+            if (section.sectionWidget == null || section.sectionWidget.isDisposed())
+                continue;
+            Point headerTop = content.toControl(section.sectionWidget.toDisplay(0, 0));
+            section.headerTopCanvas = headerTop.y;
+            section.expanded = sectionExpanded(section.sectionWidget);
+            section.headerBottomCanvas = sectionHeaderBottomCanvas(section.sectionWidget, content,
+                    section.headerTopCanvas);
+            if (section.expanded && section.body != null && !section.body.isDisposed())
+            {
+                Point bodyTop = content.toControl(section.body.toDisplay(0, 0));
+                section.bodyTopCanvas = bodyTop.y;
+                section.bodyBottomCanvas = bodyTop.y + section.body.getSize().y;
+            }
+            else
+            {
+                section.bodyTopCanvas = section.headerBottomCanvas;
+                section.bodyBottomCanvas = section.headerBottomCanvas;
+            }
+        }
+        sections.sort(java.util.Comparator.comparingInt(s -> s.headerTopCanvas));
+        normalizeSectionBodyCanvasBounds(sections);
+    }
+
+    private static void normalizeSectionBodyCanvasBounds(java.util.List<LwtPropertySection> sections)
+    {
+        for (int i = 0; i < sections.size(); i++)
+        {
+            LwtPropertySection section = sections.get(i);
+            int clip = Integer.MAX_VALUE;
+            for (int j = i + 1; j < sections.size(); j++)
+            {
+                LwtPropertySection next = sections.get(j);
+                if (next.headerTopCanvas > section.bodyTopCanvas)
+                {
+                    clip = Math.min(clip, next.headerTopCanvas);
+                    if (next.bodyTopCanvas > section.bodyTopCanvas)
+                        clip = Math.min(clip, next.bodyTopCanvas);
+                    break;
+                }
+            }
+            if (clip != Integer.MAX_VALUE && section.bodyBottomCanvas > clip)
+                section.bodyBottomCanvas = clip;
+        }
+    }
+
+    /** Группа под canvasY: ближайший заголовок выше (включая свёрнутые). */
+    static LwtPropertySection findActiveSectionAtCanvasY(
+            java.util.List<LwtPropertySection> sections, int canvasY)
+    {
+        if (sections == null || canvasY < 0)
+            return null;
+        LwtPropertySection best = null;
+        for (LwtPropertySection section : sections)
+        {
+            if (canvasY < section.headerTopCanvas)
+                continue;
+            if (best == null || section.headerTopCanvas >= best.headerTopCanvas)
+                best = section;
+        }
+        return best;
+    }
+
+    private static String normalizeSectionTitle(String title)
+    {
+        if (title == null)
+            return ""; //$NON-NLS-1$
+        return title.replace("\u25b6", "").replace("\u25bc", "").replace("\u25be", "") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                .replace("\u25b8", "").trim(); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static boolean isSectionDefinitionNode(Object node)
+    {
+        return node != null && node.getClass().getName().contains("SectionDefinition"); //$NON-NLS-1$
+    }
+
+    private static boolean isFieldDefinitionNode(Object node)
+    {
+        return node != null && node.getClass().getName().contains("FieldDefinition"); //$NON-NLS-1$
+    }
+
+    private static boolean isSeparatorDefinitionNode(Object node)
+    {
+        return node != null && node.getClass().getName().contains("SeparatorDefinition"); //$NON-NLS-1$
+    }
+
+    static java.util.List<Object> modelSectionDefinitions(Object page)
+    {
+        java.util.List<Object> out = new ArrayList<>();
+        Object paletteModel = page != null ? Global.invoke(page, "getPaletteModel") : null; //$NON-NLS-1$
+        Object definition = paletteModel != null ? Global.invoke(paletteModel, "getDefinition") //$NON-NLS-1$
+                : null;
+        if (definition == null)
+            return out;
+        Object children = Global.invoke(definition, "getChildren"); //$NON-NLS-1$
+        if (!(children instanceof Iterable))
+            return out;
+        for (Object child : (Iterable<?>) children)
+        {
+            if (isSectionDefinitionNode(child))
+                out.add(child);
+        }
+        return out;
+    }
+
+    private static java.util.List<Object> modelFieldDefinitions(Object sectionDef)
+    {
+        java.util.List<Object> out = new ArrayList<>();
+        if (sectionDef == null)
+            return out;
+        Object children = Global.invoke(sectionDef, "getChildren"); //$NON-NLS-1$
+        if (!(children instanceof Iterable))
+            return out;
+        for (Object child : (Iterable<?>) children)
+        {
+            if (isFieldDefinitionNode(child) && !isSeparatorDefinitionNode(child))
+                out.add(child);
+        }
+        return out;
+    }
+
+    static int resolveGroupIndex(Object page, LwtPropertySection section,
+            java.util.List<LwtPropertySection> sections)
+    {
+        java.util.List<Object> modelSections = modelSectionDefinitions(page);
+        if (section == null)
+            return -1;
+        String title = normalizeSectionTitle(section.titleHint);
+        for (int i = 0; i < modelSections.size(); i++)
+        {
+            String label = normalizeSectionTitle(labeledDefinitionText(modelSections.get(i)));
+            if (!title.isEmpty() && title.equals(label))
+                return i;
+        }
+        if (sections != null)
+        {
+            for (int i = 0; i < sections.size(); i++)
+            {
+                if (sections.get(i) == section)
+                {
+                    // #region agent log
+                    agentHitLog("H13", "ControlInterop.resolveGroupIndex", "fallbackIndex", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                            java.util.Map.of("lwtIndex", i, "title", title, "modelSections", modelSections.size())); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    // #endregion
+                    return i;
+                }
+            }
+        }
+        return -1;
+    }
+
+    static Object resolveFieldByIndices(Object page, int groupIndex, int propertyIndex)
+    {
+        java.util.List<Object> sections = modelSectionDefinitions(page);
+        if (groupIndex < 0 || groupIndex >= sections.size())
+            return null;
+        java.util.List<Object> fields = modelFieldDefinitions(sections.get(groupIndex));
+        if (propertyIndex < 0 || propertyIndex >= fields.size())
+            return null;
+        return fields.get(propertyIndex);
+    }
+
+    private static org.eclipse.swt.custom.ScrolledComposite findParentScrolledComposite(
+            Composite content)
+    {
+        for (Composite parent = content != null ? content.getParent() : null; parent != null;
+                parent = parent.getParent())
+        {
+            if (parent instanceof org.eclipse.swt.custom.ScrolledComposite)
+                return (org.eclipse.swt.custom.ScrolledComposite) parent;
+        }
+        return null;
+    }
+
+    /** Полный canvas через {@link Composite#print(GC)} — без прокрутки viewport. */
+    private static ImageData captureCanvasImageData(Composite content)
+    {
+        if (content == null || content.isDisposed())
+            return null;
+        Point size = content.getSize();
+        if (size.x < 40 || size.y < MIN_PROPERTY_AREA_HEIGHT)
+            return null;
+        Display display = content.getDisplay();
+        Image image = null;
+        GC gc = null;
+        org.eclipse.swt.custom.ScrolledComposite scrolled = findParentScrolledComposite(content);
+        org.eclipse.swt.graphics.Point origin = scrolled != null ? scrolled.getOrigin() : null;
+        int oldOriginY = origin != null ? origin.y : 0;
+        int oldOriginX = origin != null ? origin.x : 0;
+        boolean redrawOff = false;
+        try
+        {
+            if (scrolled != null && !scrolled.isDisposed())
+            {
+                scrolled.setRedraw(false);
+                content.setRedraw(false);
+                redrawOff = true;
+                scrolled.setOrigin(0, 0);
+            }
+            image = new Image(display, size.x, size.y);
+            gc = new GC(image);
+            Color bg = content.getBackground();
+            if (bg != null && !bg.isDisposed())
+            {
+                gc.setBackground(bg);
+                gc.fillRectangle(0, 0, size.x, size.y);
+            }
+            if (!content.print(gc))
+            {
+                PropertySheetDebug.problem("canvasCapture print=false size=" + size.x + "x" //$NON-NLS-1$ //$NON-NLS-2$
+                        + size.y);
+                // #region agent log
+                agentHitLog("H10", "ControlInterop.captureCanvasImageData", "printFail", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        java.util.Map.of("w", size.x, "h", size.y)); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
+                return null;
+            }
+            ImageData data = image.getImageData();
+            if (!captureImageLooksValid(data, bg != null ? bg.getRGB() : null))
+            {
+                PropertySheetDebug.problem("canvasCapture print blank size=" + size.x + "x" //$NON-NLS-1$ //$NON-NLS-2$
+                        + size.y);
+                // #region agent log
+                agentHitLog("H10", "ControlInterop.captureCanvasImageData", "printBlank", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        java.util.Map.of("w", size.x, "h", size.y)); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
+                return null;
+            }
+            // #region agent log
+            agentHitLog("H10", "ControlInterop.captureCanvasImageData", "printOk", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    java.util.Map.of("w", size.x, "h", size.y)); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return data;
+        }
+        catch (Exception ex)
+        {
+            PropertySheetDebug.problem("canvasCapture " + ex.getMessage()); //$NON-NLS-1$
+            return null;
+        }
+        finally
+        {
+            if (scrolled != null && !scrolled.isDisposed())
+                scrolled.setOrigin(oldOriginX, oldOriginY);
+            if (redrawOff)
+            {
+                content.setRedraw(true);
+                scrolled.setRedraw(true);
+            }
+            if (gc != null)
+                gc.dispose();
+            if (image != null)
+                image.dispose();
+        }
+    }
+
+    private static boolean captureImageLooksValid(ImageData data, RGB referenceBackColorRgb)
+    {
+        if (data == null || data.width < 4 || data.height < 4)
+            return false;
+        int diffRows = 0;
+        int samples = 0;
+        RGB prev = null;
+        for (int y = 2; y < data.height - 2; y += Math.max(8, data.height / 32))
+        {
+            RGB px = pixelRgb(data, data.width / 3, y);
+            if (px == null)
+                continue;
+            if (prev != null && !colorNear(px, prev, 6))
+                diffRows++;
+            if (referenceBackColorRgb != null && !colorNear(px, referenceBackColorRgb, BACK_COLOR_RGB_TOLERANCE + 4))
+                diffRows++;
+            prev = px;
+            samples++;
+        }
+        return samples >= 2 && diffRows >= 1;
+    }
+
+    static ImageData cachedCanvasCapture(Composite content)
+    {
+        if (content == null || content.isDisposed())
+            return null;
+        Object cached = content.getData(PS_CANVAS_CAPTURE_KEY);
+        if (cached instanceof ImageData)
+            return (ImageData) cached;
+        ImageData data = captureCanvasImageData(content);
+        if (data != null)
+            content.setData(PS_CANVAS_CAPTURE_KEY, data);
+        return data;
+    }
+
+    private static RGB pixelRgb(ImageData data, int x, int y)
+    {
+        if (data == null || x < 0 || y < 0 || x >= data.width || y >= data.height)
+            return null;
+        int pixel = data.getPixel(x, y);
+        PaletteData palette = data.palette;
+        if (palette == null)
+            return null;
+        return palette.getRGB(pixel);
+    }
+
+    private static RGB referenceBackColorRgb(ImageData data, Composite content)
+    {
+        RGB contentBackColor = contentBackColorRgb(content);
+        if (data == null || data.width < 4 || data.height < 2)
+            return contentBackColor;
+        RGB corner = pixelRgb(data, 2, 0);
+        if (corner != null && colorNear(corner, contentBackColor, BACK_COLOR_RGB_TOLERANCE + 6))
+            return corner;
+        return contentBackColor;
+    }
+
+    private static int backColorLinePercent(ImageData data, int y, int x0, int x1, RGB backColorRgb)
+    {
+        if (data == null || y < 0 || y >= data.height || x1 <= x0)
+            return 0;
+        int backColorCount = 0;
+        int samples = 0;
+        for (int x = x0; x < x1; x += BACK_COLOR_SCAN_SAMPLE_STEP)
+        {
+            RGB px = pixelRgb(data, x, y);
+            if (px != null && colorNear(px, backColorRgb, BACK_COLOR_RGB_TOLERANCE))
+                backColorCount++;
+            samples++;
+        }
+        return samples > 0 ? backColorCount * 100 / samples : 0;
+    }
+
+    private static RGB contentBackColorRgb(Composite body)
+    {
+        Color bg = body.getBackground();
+        if (bg == null || bg.isDisposed())
+            bg = body.getDisplay().getSystemColor(SWT.COLOR_LIST_BACKGROUND);
+        return bg.getRGB();
+    }
+
+    private static boolean isBackColorSeparatorLine(ImageData data, int y, int midX, RGB backColorRgb,
+            int thresholdPercent)
+    {
+        if (data == null || y < 0 || y >= data.height)
+            return false;
+        int labelEnd = Math.max(midX, Math.max(40, data.width / 3));
+        int left = backColorLinePercent(data, y, 0, labelEnd, backColorRgb);
+        int right = backColorLinePercent(data, y, midX, data.width, backColorRgb);
+        int full = backColorLinePercent(data, y, 0, data.width, backColorRgb);
+        if (left < thresholdPercent - 5)
+            return false;
+        if (right < thresholdPercent - 20 && full < thresholdPercent - 10)
+            return false;
+        if (y >= 3 && y < data.height - 3)
+        {
+            int above = backColorLinePercent(data, y - 3, 0, labelEnd, backColorRgb);
+            int below = backColorLinePercent(data, y + 3, 0, labelEnd, backColorRgb);
+            if (left >= thresholdPercent - 5 && above < left - 8 && below < left - 8)
+                return true;
+        }
+        return left >= thresholdPercent && right >= thresholdPercent - 15;
+    }
+
+    private static boolean isGutterBackColorSeparatorLine(ImageData data, int y, RGB backColorRgb)
+    {
+        if (data == null || y < 4 || y >= data.height - 4)
+            return false;
+        int x1 = Math.min(GUTTER_SEPARATOR_SCAN_X1, data.width);
+        if (x1 < 4)
+            return false;
+        int line = backColorLinePercent(data, y, 0, x1, backColorRgb);
+        if (line < 92)
+            return false;
+        int above = backColorLinePercent(data, y - 4, 0, x1, backColorRgb);
+        int below = backColorLinePercent(data, y + 4, 0, x1, backColorRgb);
+        return above < line - 10 && below < line - 10;
+    }
+
+    private static boolean isSeparatorScanline(ImageData data, int y, int midX, RGB backColorRgb,
+            int thresholdPercent)
+    {
+        if (isGutterBackColorSeparatorLine(data, y, backColorRgb))
+            return true;
+        return isBackColorSeparatorLine(data, y, midX, backColorRgb, thresholdPercent);
+    }
+
+    /** Слить только перекрывающиеся полосы одного разделителя; gap<14 не трогать — там граница строки. */
+    private static List<BackColorBand> consolidateSeparatorBands(List<BackColorBand> bands,
+            int minContentGap)
+    {
+        if (bands == null || bands.size() <= 1)
+            return bands != null ? bands : new ArrayList<>();
+        List<BackColorBand> out = new ArrayList<>();
+        BackColorBand current = bands.get(0);
+        for (int i = 1; i < bands.size(); i++)
+        {
+            BackColorBand next = bands.get(i);
+            if (next.topCanvas < current.bottomCanvas)
+                current = new BackColorBand(current.topCanvas,
+                        Math.max(current.bottomCanvas, next.bottomCanvas));
+            else
+            {
+                out.add(current);
+                current = next;
+            }
+        }
+        out.add(current);
+        return out;
+    }
+
+    /** Слить дубли одного разделителя (bandTops в логе: 42,45 или 593,601,609). */
+    private static List<BackColorBand> clusterSeparatorBands(List<BackColorBand> bands)
+    {
+        return clusterSeparatorBands(bands, SEP_BAND_CLUSTER_RADIUS);
+    }
+
+    private static List<BackColorBand> clusterSeparatorBands(List<BackColorBand> bands, int clusterRadius)
+    {
+        if (bands == null || bands.isEmpty())
+            return new ArrayList<>();
+        List<BackColorBand> sorted = new ArrayList<>(bands);
+        sorted.sort(java.util.Comparator.comparingInt(b -> b.topCanvas));
+        List<BackColorBand> out = new ArrayList<>();
+        int clusterTop = sorted.get(0).topCanvas;
+        int clusterBottom = sorted.get(0).bottomCanvas;
+        for (int i = 1; i < sorted.size(); i++)
+        {
+            BackColorBand band = sorted.get(i);
+            if (band.topCanvas - clusterTop < clusterRadius)
+                clusterBottom = Math.max(clusterBottom, band.bottomCanvas);
+            else
+            {
+                out.add(thinBandFromCluster(clusterTop, clusterBottom));
+                clusterTop = band.topCanvas;
+                clusterBottom = band.bottomCanvas;
+            }
+        }
+        out.add(thinBandFromCluster(clusterTop, clusterBottom));
+        return out;
+    }
+
+    /** Слить band, если bottom ближе minGap — лишний разделитель одной строки. */
+    private static List<BackColorBand> mergeBandsByMinBottomGap(List<BackColorBand> bands,
+            int minGap)
+    {
+        if (bands == null || bands.size() <= 1)
+            return bands != null ? new ArrayList<>(bands) : new ArrayList<>();
+        List<BackColorBand> sorted = new ArrayList<>(bands);
+        sorted.sort(java.util.Comparator.comparingInt(b -> b.bottomCanvas));
+        List<BackColorBand> out = new ArrayList<>();
+        BackColorBand current = sorted.get(0);
+        for (int i = 1; i < sorted.size(); i++)
+        {
+            BackColorBand next = sorted.get(i);
+            if (next.bottomCanvas - current.bottomCanvas < minGap)
+                current = new BackColorBand(Math.min(current.topCanvas, next.topCanvas),
+                        Math.max(current.bottomCanvas, next.bottomCanvas));
+            else
+            {
+                out.add(current);
+                current = next;
+            }
+        }
+        out.add(current);
+        return out;
+    }
+
+    private static BackColorBand thinBandFromCluster(int clusterTop, int clusterBottom)
+    {
+        int clusterH = clusterBottom - clusterTop;
+        if (clusterH <= MAX_SEPARATOR_BAND_HEIGHT)
+            return new BackColorBand(clusterTop, clusterBottom);
+        return new BackColorBand(clusterTop, clusterTop + MIN_BACK_COLOR_BAND_HEIGHT);
+    }
+
+    /** Print() размывает разделитель; для runH>8 — нижний край полосы (граница строки). */
+    private static BackColorBand bandFromSeparatorRun(int runStart, int runEnd)
+    {
+        int runH = runEnd - runStart;
+        if (runH < MIN_BACK_COLOR_BAND_HEIGHT)
+            return null;
+        if (runH <= MAX_SEPARATOR_BAND_HEIGHT)
+            return new BackColorBand(runStart, runEnd);
+        if (runH <= MAX_BLURRED_SEPARATOR_RUN)
+            return new BackColorBand(runEnd - MIN_BACK_COLOR_BAND_HEIGHT, runEnd);
+        if (runH <= MAX_FIELD_END_SEPARATOR_RUN)
+            return new BackColorBand(runEnd - MIN_BACK_COLOR_BAND_HEIGHT, runEnd);
+        return null;
+    }
+
+    private static void appendSeparatorRunBand(List<BackColorBand> bands, int runStart, int runEnd,
+            boolean tail)
+    {
+        BackColorBand band = bandFromSeparatorRun(runStart, runEnd);
+        if (band != null)
+        {
+            bands.add(band);
+            return;
+        }
+        int runH = runEnd - runStart;
+        if (runH > MAX_FIELD_END_SEPARATOR_RUN)
+        {
+            // #region agent log
+            java.util.Map<String, Object> data = new java.util.LinkedHashMap<>();
+            data.put("runStart", runStart); //$NON-NLS-1$
+            data.put("runH", runH); //$NON-NLS-1$
+            if (tail)
+                data.put("tail", true); //$NON-NLS-1$
+            agentHitLog("H12", "ControlInterop.mergeSeparatorRunsCanvas", "runTooTall", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    data);
+            // #endregion
+        }
+    }
+
+    private static List<BackColorBand> mergeSeparatorRunsCanvas(int sliceTop, int sliceBottom,
+            ImageData data, int midX, RGB backColorRgb, int thresholdPercent)
+    {
+        List<BackColorBand> bands = new ArrayList<>();
+        if (data == null || sliceBottom <= sliceTop)
+            return bands;
+        int runStart = -1;
+        int yEnd = Math.min(sliceBottom, data.height);
+        for (int y = Math.max(0, sliceTop); y < yEnd; y++)
+        {
+            boolean sepLine = isSeparatorScanline(data, y, midX, backColorRgb, thresholdPercent);
+            if (sepLine)
+            {
+                if (runStart < 0)
+                    runStart = y;
+            }
+            else if (runStart >= 0)
+            {
+                appendSeparatorRunBand(bands, runStart, y, false);
+                runStart = -1;
+            }
+        }
+        if (runStart >= 0)
+            appendSeparatorRunBand(bands, runStart, yEnd, true);
+        return bands;
+    }
+
+    private static boolean colorNear(RGB a, RGB b, int tolerance)
+    {
+        if (a == null || b == null)
+            return false;
+        return Math.abs(a.red - b.red) <= tolerance
+                && Math.abs(a.green - b.green) <= tolerance
+                && Math.abs(a.blue - b.blue) <= tolerance;
+    }
+
+    static List<PropertyArea> buildPropertyAreasFromBandsCanvas(int bodyTopCanvas,
+            int bodyBottomCanvas, List<BackColorBand> bands)
+    {
+        List<PropertyArea> areas = new ArrayList<>();
+        if (bodyBottomCanvas <= bodyTopCanvas)
+            return areas;
+        if (bands == null || bands.isEmpty())
+        {
+            areas.add(new PropertyArea(bodyTopCanvas, bodyBottomCanvas));
+            return areas;
+        }
+        int prev = bodyTopCanvas;
+        for (BackColorBand band : bands)
+        {
+            // Граница строки — нижний край разделителя; иначе каждая area короче
+            // на толщину band и propertyIndex «отстаёт» от визуала накопительно.
+            if (band.bottomCanvas > prev)
+                areas.add(new PropertyArea(prev, band.bottomCanvas));
+            prev = band.bottomCanvas;
+        }
+        if (bodyBottomCanvas > prev)
+            areas.add(new PropertyArea(prev, bodyBottomCanvas));
+        return normalizePropertyAreas(areas, bodyTopCanvas, bodyBottomCanvas);
+    }
+
+    /** Закрыть дыры между областями и слить слишком узкие полосы. */
+    private static List<PropertyArea> normalizePropertyAreas(List<PropertyArea> areas,
+            int bodyTopCanvas, int bodyBottomCanvas)
+    {
+        if (areas == null || areas.isEmpty())
+            return java.util.List.of(new PropertyArea(bodyTopCanvas, bodyBottomCanvas));
+        List<PropertyArea> sorted = new ArrayList<>(areas);
+        sorted.sort(java.util.Comparator.comparingInt(a -> a.topCanvas));
+        List<PropertyArea> out = new ArrayList<>();
+        int prevBottom = bodyTopCanvas;
+        for (PropertyArea area : sorted)
+        {
+            int top = Math.max(area.topCanvas, bodyTopCanvas);
+            int bottom = Math.min(area.bottomCanvas, bodyBottomCanvas);
+            if (bottom <= top)
+                continue;
+            if (top > prevBottom)
+            {
+                if (!out.isEmpty())
+                {
+                    PropertyArea last = out.remove(out.size() - 1);
+                    out.add(new PropertyArea(last.topCanvas, top));
+                }
+                else
+                    top = prevBottom;
+            }
+            if (!out.isEmpty() && bottom - top < MIN_AREA_SLIVER_CANVAS)
+            {
+                PropertyArea last = out.remove(out.size() - 1);
+                out.add(new PropertyArea(last.topCanvas, bottom));
+            }
+            else
+                out.add(new PropertyArea(top, bottom));
+            prevBottom = bottom;
+        }
+        if (prevBottom < bodyBottomCanvas)
+        {
+            if (!out.isEmpty())
+            {
+                PropertyArea last = out.remove(out.size() - 1);
+                out.add(new PropertyArea(last.topCanvas, bodyBottomCanvas));
+            }
+            else
+                out.add(new PropertyArea(bodyTopCanvas, bodyBottomCanvas));
+        }
+        return out;
+    }
+
+    static List<PropertyArea> buildPropertyAreasForSectionCanvas(Composite content,
+            LwtPropertySection section, Object scene, Object page)
+    {
+        if (content == null || section == null || !section.expanded
+                || section.bodyBottomCanvas <= section.bodyTopCanvas)
+            return java.util.Collections.emptyList();
+        if (section.body != null && !section.body.isDisposed())
+        {
+            Object captureToken = content.getData(PS_CANVAS_CAPTURE_KEY);
+            Object areasToken = section.body.getData(PS_SECTION_AREAS_CAPTURE_KEY);
+            Object cached = section.body.getData(PS_SECTION_AREAS_KEY);
+            if (captureToken != null && captureToken == areasToken
+                    && cached instanceof List)
+                return (List<PropertyArea>) cached;
+        }
+        ImageData capture = cachedCanvasCapture(content);
+        if (capture == null)
+            return java.util.Collections.emptyList();
+        RGB backColorRgb = referenceBackColorRgb(capture, content);
+        int midX = Math.max(1, capture.width / 2);
+        int scanTop = section.bodyTopCanvas + SECTION_BODY_EDGE_EXCLUDE;
+        if (scanTop >= section.bodyBottomCanvas)
+            scanTop = section.bodyTopCanvas;
+        List<BackColorBand> bands = mergeSeparatorRunsCanvas(scanTop,
+                section.bodyBottomCanvas, capture, midX, backColorRgb, BACK_COLOR_LINE_THRESHOLD_PERCENT);
+        if (bands.isEmpty())
+        {
+            bands = mergeSeparatorRunsCanvas(scanTop, section.bodyBottomCanvas,
+                    capture, midX, backColorRgb, 70);
+        }
+        bands = clusterSeparatorBands(bands);
+        if (bands.size() > 40)
+            bands = clusterSeparatorBands(bands, SEP_BAND_CLUSTER_RADIUS_WIDE);
+        bands = mergeBandsByMinBottomGap(bands, MIN_BAND_BOTTOM_GAP);
+        bands = consolidateSeparatorBands(bands, 0);
+        List<PropertyArea> areas = buildPropertyAreasFromBandsCanvas(section.bodyTopCanvas,
+                section.bodyBottomCanvas, bands);
+        if (section.body != null && !section.body.isDisposed())
+        {
+            section.body.setData(PS_SECTION_AREAS_KEY, areas);
+            section.body.setData(PS_SECTION_AREAS_CAPTURE_KEY,
+                    content.getData(PS_CANVAS_CAPTURE_KEY));
+        }
+        // #region agent log
+        StringBuilder bandTops = new StringBuilder();
+        for (int i = 0; i < bands.size() && i < 24; i++)
+        {
+            if (i > 0)
+                bandTops.append(',');
+            bandTops.append(bands.get(i).topCanvas);
+        }
+        StringBuilder areaRanges = new StringBuilder();
+        for (int i = 0; i < areas.size() && i < 8; i++)
+        {
+            if (i > 0)
+                areaRanges.append(',');
+            PropertyArea a = areas.get(i);
+            areaRanges.append(a.topCanvas).append('-').append(a.bottomCanvas);
+        }
+        agentHitLog("H10", "ControlInterop.buildPropertyAreasForSectionCanvas", "scanAreas", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                java.util.Map.of("title", section.titleHint != null ? section.titleHint : "", //$NON-NLS-1$ //$NON-NLS-2$
+                        "bands", bands.size(), "areas", areas.size(), //$NON-NLS-1$ //$NON-NLS-2$
+                        "bodyTop", section.bodyTopCanvas, "bodyBottom", section.bodyBottomCanvas, //$NON-NLS-1$ //$NON-NLS-2$
+                        "scanTop", scanTop, "captureH", capture.height, "bandTops", bandTops.toString(), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        "firstAreaH", areas.isEmpty() ? 0 : areas.get(0).bottomCanvas - areas.get(0).topCanvas, //$NON-NLS-1$
+                        "areaRanges", areaRanges.toString())); //$NON-NLS-1$
+        // #endregion
+        return areas;
+    }
+
+    static PropertyArea findPropertyAreaAtCanvas(Object page, int canvasY)
+    {
+        PropertySheetUiContext.PaletteCanvasSpace space =
+                PropertySheetUiContext.PaletteCanvasSpace.forPage(page);
+        if (space == null || canvasY < 0)
+            return null;
+        Composite content = space.content;
+        java.util.List<LwtPropertySection> sections = collectPropertySections(content);
+        refreshSectionCanvasBounds(sections, content);
+        LwtPropertySection section = findActiveSectionAtCanvasY(sections, canvasY);
+        if (section == null || !section.expanded || canvasY < section.bodyTopCanvas
+                || canvasY >= section.bodyBottomCanvas)
+            return null;
+        Object scene = null;
+        PropertySheetUiContext ctx = PropertySheetUiCoordinator.lastContext(page);
+        if (ctx != null)
+            scene = ctx.scene;
+        for (PropertyArea area : buildPropertyAreasForSectionCanvas(content, section, scene, page))
+        {
+            if (area.containsCanvasY(canvasY))
+                return area;
+        }
+        return null;
+    }
+
+    /** Слушатели scroll/resize/expand для сброса canvas capture. */
+    static void installPaletteCanvasListeners(Object page)
+    {
+        Composite content = PropertySheetUiContext.findPaletteContent(page);
+        if (content == null || content.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(content.getData("tormozit.ps.canvasHooksInstalled"))) //$NON-NLS-1$
+            return;
+        content.setData("tormozit.ps.canvasHooksInstalled", Boolean.TRUE); //$NON-NLS-1$
+        Runnable invalidate = () -> invalidatePaletteGeometryCache(content);
+        content.addListener(SWT.Resize, e -> invalidate.run());
+        org.eclipse.swt.custom.ScrolledComposite scrolled =
+                PropertySheetUiContext.findPaletteScrolledComposite(page);
+        if (scrolled != null && !scrolled.isDisposed() && scrolled.getVerticalBar() != null)
+            scrolled.getVerticalBar().addListener(SWT.Selection, e -> invalidate.run());
+        installExpandInvalidators(content, invalidate);
+    }
+
+    private static void installExpandInvalidators(Composite composite, Runnable invalidate)
+    {
+        if (composite == null || composite.isDisposed())
+            return;
+        if (composite.getClass().getName().contains("ExpandableComposite")) //$NON-NLS-1$
+        {
+            composite.addListener(SWT.Expand, e -> invalidate.run());
+            composite.addListener(SWT.Collapse, e -> invalidate.run());
+        }
+        for (Control child : composite.getChildren())
+        {
+            if (child instanceof Composite)
+                installExpandInvalidators((Composite) child, invalidate);
+        }
+    }
+
+    static java.util.List<java.util.Map.Entry<?, ?>> labelEntriesFromScene(Object scene)
+    {
+        if (scene == null)
+            return java.util.Collections.emptyList();
+        Object renderer = Global.invoke(scene, "getRenderer"); //$NON-NLS-1$
+        Object mapObj = Global.getField(renderer, "viewModelToView"); //$NON-NLS-1$
+        if (!(mapObj instanceof java.util.Map))
+            return java.util.Collections.emptyList();
+        java.util.List<java.util.Map.Entry<?, ?>> out = new ArrayList<>();
+        for (java.util.Map.Entry<?, ?> entry : ((java.util.Map<?, ?>) mapObj).entrySet())
+        {
+            Object vm = entry.getKey();
+            if (vm != null && vm.getClass().getName().contains("LabelViewModel")) //$NON-NLS-1$
+                out.add(entry);
+        }
+        return out;
+    }
+
+    private static int[] normalizedBodyDisplayBounds(Composite sectionBody, Composite paletteRoot)
+    {
+        if (sectionBody == null || sectionBody.isDisposed())
+            return new int[] { 0, 0 };
+        if (paletteRoot != null && !paletteRoot.isDisposed())
+        {
+            for (LwtPropertySection section : collectPropertySections(paletteRoot))
+            {
+                if (section.body == sectionBody)
+                    return new int[] { section.bodyTopDisplay, section.bodyBottomDisplay };
+            }
+        }
+        int top = sectionBody.toDisplay(0, 0).y;
+        return new int[] { top, top + sectionBody.getSize().y };
+    }
+
+    static boolean viewInSectionBody(Object view, Composite sectionBody, Composite paletteRoot)
+    {
+        if (view == null || sectionBody == null || sectionBody.isDisposed())
+            return false;
+        Composite leaf = leafFieldRowHostForView(view);
+        if (leaf == null && paletteRoot != null)
+            leaf = resolveRowHostForView(view, paletteRoot);
+        if (leaf != null && isDescendantOf(leaf, sectionBody))
+            return true;
+        return labelCenterInSectionBounds(view, sectionBody, paletteRoot);
+    }
+
+    /** Строки scanner ctx, принадлежащие секции (модель + leaf-host в body). */
+    private static java.util.List<PropertySheetPaletteRow> ctxRowsForSection(
+            PropertySheetUiContext ctx, LwtPropertySection section, Composite content,
+            Object page, int groupIndex, Object scene)
+    {
+        java.util.List<PropertySheetPaletteRow> out = new ArrayList<>();
+        if (ctx == null || section == null || section.body == null || section.body.isDisposed())
+            return out;
+        java.util.Set<String> visibleNames = new java.util.LinkedHashSet<>();
+        for (Object field : visibleFieldDefinitionsInSection(page, groupIndex, section, scene,
+                content))
+        {
+            String label = labeledDefinitionText(field);
+            if (label != null && !label.isEmpty())
+                visibleNames.add(label);
+        }
+        for (PropertySheetPaletteRow row : ctx.rows)
+        {
+            if (!row.isAlive())
+                continue;
+            if (!visibleNames.isEmpty() && !visibleNames.contains(row.propertyName))
+                continue;
+            if (!paletteRowInSection(row, section, content))
+                continue;
+            if (paletteRowCanvasBand(row, content, section) == null)
+                continue;
+            out.add(row);
+        }
+        // #region agent log
+        agentHitLog("H23", "ControlInterop.ctxRowsForSection", "filtered", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                java.util.Map.of("title", section.titleHint != null ? section.titleHint : "", //$NON-NLS-1$ //$NON-NLS-2$
+                        "visibleNames", visibleNames.size(), "ctxRows", out.size())); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+        return out;
+    }
+
+    static boolean labelCenterInSectionBounds(Object view, Composite sectionBody)
+    {
+        return labelCenterInSectionBounds(view, sectionBody, null);
+    }
+
+    static boolean labelCenterInSectionBounds(Object view, Composite sectionBody,
+            Composite paletteRoot)
+    {
+        if (view == null || sectionBody == null || sectionBody.isDisposed())
+            return false;
+        Rectangle bounds = liveLightDisplayBounds(view);
+        if (bounds == null || bounds.height <= 0)
+            bounds = liveLightDisplayBoundsOnHost(view, sectionBody);
+        if (bounds == null || bounds.height <= 0)
+            return false;
+        int centerY = bounds.y + Math.max(1, bounds.height / 2);
+        int[] bodyBounds = normalizedBodyDisplayBounds(sectionBody, paletteRoot);
+        return centerY >= bodyBounds[0] && centerY < bodyBounds[1];
+    }
+
+    private static java.util.List<java.util.Map.Entry<?, ?>> labelEntriesInSection(
+            Composite sectionBody, java.util.List<java.util.Map.Entry<?, ?>> labelEntries,
+            Composite paletteRoot)
+    {
+        java.util.List<java.util.Map.Entry<?, ?>> out = new ArrayList<>();
+        if (sectionBody == null || sectionBody.isDisposed() || labelEntries == null)
+            return out;
+        for (java.util.Map.Entry<?, ?> entry : labelEntries)
+        {
+            if (viewInSectionBody(entry.getValue(), sectionBody, paletteRoot))
+                out.add(entry);
+        }
+        return out;
+    }
+
+    private static int labelLightCenterDisplayY(Object view, Composite sectionBody,
+            Composite paletteRoot)
+    {
+        Rectangle bounds = liveLightDisplayBounds(view);
+        if (bounds != null && bounds.height > 0)
+            return bounds.y + Math.max(1, bounds.height / 2);
+        bounds = liveLightDisplayBoundsOnHost(view, sectionBody);
+        if (bounds != null && bounds.height > 0)
+            return bounds.y + Math.max(1, bounds.height / 2);
+        int y = labelDisplayYForView(view, paletteRoot);
+        return y != Integer.MAX_VALUE ? y : Integer.MAX_VALUE;
+    }
+
+    private static String labelDisplayTextFromViewModel(Object viewModel)
+    {
+        if (viewModel == null)
+            return ""; //$NON-NLS-1$
+        Object text = Global.invoke(viewModel, "getText"); //$NON-NLS-1$
+        if (text instanceof String)
+            return (String) text;
+        return SmartTreeElementLabels.resolve(viewModel, null);
+    }
+
+    /**
+     * Hit-test по scanner ctx: canvas Y в bounds leaf-row, без pixel-scan.
+     */
+    private static PropertyClickHit resolvePropertyAtClickFromCtxRows(Composite content,
+            int canvasY, LwtPropertySection section, int groupIndex, Object page, Object scene)
+    {
+        PropertySheetUiContext ctx = PropertySheetUiCoordinator.lastContext(page);
+        if (ctx == null || ctx.rows.isEmpty() || content == null || section == null)
+            return null;
+        java.util.List<PropertySheetPaletteRow> sectionRows = ctxRowsForSection(ctx, section,
+                content, page, groupIndex, scene);
+        if (sectionRows.isEmpty())
+            return null;
+        sectionRows.sort(java.util.Comparator.comparingInt(r -> {
+            int[] band = paletteRowCanvasBand(r, content, section);
+            return band != null ? band[0] : Integer.MAX_VALUE;
+        }));
+        for (int i = 0; i < sectionRows.size(); i++)
+        {
+            PropertySheetPaletteRow paletteRow = sectionRows.get(i);
+            int[] bandCanvas = paletteRowCanvasBand(paletteRow, content, section);
+            if (bandCanvas == null)
+                continue;
+            int topCanvas = bandCanvas[0];
+            int bottomCanvas = bandCanvas[1];
+            if (canvasY < topCanvas || canvasY >= bottomCanvas)
+                continue;
+            Object fieldDef = resolveFieldByDisplayName(page, groupIndex, paletteRow.propertyName);
+            String displayName = fieldDef != null ? labeledDefinitionText(fieldDef)
+                    : paletteRow.propertyName;
+            if (displayName == null || displayName.isEmpty())
+                continue;
+            Object lwtView = paletteRow.lwtView;
+            if (lwtView == null)
+                lwtView = findLwtViewByDisplayName(scene, displayName);
+            int[] band = new int[] {
+                    content.toDisplay(0, topCanvas).y,
+                    content.toDisplay(0, bottomCanvas).y
+            };
+            Composite host = rowHostForPaletteRow(paletteRow);
+            int hostH = host != null ? host.getSize().y : bottomCanvas - topCanvas;
+            // #region agent log
+            agentHitLog("H22", "ControlInterop.resolvePropertyAtClickFromCtxRows", "ctxHit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    java.util.Map.of("prop", displayName, "propertyIndex", i, //$NON-NLS-1$ //$NON-NLS-2$
+                            "sectionRows", sectionRows.size(), "hostH", hostH, //$NON-NLS-1$ //$NON-NLS-2$
+                            "topCanvas", topCanvas, "bottomCanvas", bottomCanvas)); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return new PropertyClickHit(displayName, lwtView, band[0], band[1], topCanvas,
+                    bottomCanvas, i, "ctxRow"); //$NON-NLS-1$
+        }
+        return null;
+    }
+
+    /**
+     * Resolve по canvas: полная прокручиваемая область → groupIndex + propertyIndex → модель.
+     */
+    static PropertyClickHit resolvePropertyAtClick(org.eclipse.swt.graphics.Point display,
+            java.util.List<java.util.Map.Entry<?, ?>> labelEntries, Composite paletteRoot,
+            Object page, Object scene)
+    {
+        if (display == null || page == null)
+        {
+            // #region agent log
+            agentHitLog("H5", "ControlInterop.resolvePropertyAtClick", "earlyNull", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    java.util.Map.of("displayNull", display == null, "pageNull", page == null)); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return null;
+        }
+        PropertySheetUiContext.PaletteCanvasSpace space =
+                PropertySheetUiContext.PaletteCanvasSpace.forPage(page);
+        if (space == null)
+        {
+            // #region agent log
+            agentHitLog("H5", "ControlInterop.resolvePropertyAtClick", "noCanvas", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    java.util.Collections.emptyMap());
+            // #endregion
+            return null;
+        }
+        Composite content = space.content;
+        if (scene == null)
+        {
+            PropertySheetUiContext ctx = PropertySheetUiCoordinator.lastContext(page);
+            if (ctx != null)
+                scene = ctx.scene;
+        }
+        Point canvas = space.displayToCanvas(display);
+        int canvasY = canvas.y;
+        java.util.List<LwtPropertySection> sections = collectPropertySections(content);
+        refreshSectionCanvasBounds(sections, content);
+        refreshSectionDisplayBounds(sections);
+        normalizeSectionBodyBounds(sections);
+        LwtPropertySection section = findActiveSectionAtCanvasY(sections, canvasY);
+        if (section == null)
+        {
+            // #region agent log
+            agentHitLog("H1", "ControlInterop.resolvePropertyAtClick", "noSection", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    java.util.Map.of("canvasY", canvasY, "sectionCount", sections.size())); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return null;
+        }
+        int groupIndex = resolveGroupIndex(page, section, sections);
+        if (canvasY < section.headerBottomCanvas)
+        {
+            // #region agent log
+            agentHitLog("H1h", "ControlInterop.resolvePropertyAtClick", "headerClick", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    java.util.Map.of("canvasY", canvasY, "groupIndex", groupIndex, //$NON-NLS-1$ //$NON-NLS-2$
+                            "title", section.titleHint != null ? section.titleHint : "")); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return null;
+        }
+        if (!section.expanded || canvasY < section.bodyTopCanvas
+                || canvasY >= section.bodyBottomCanvas)
+        {
+            // #region agent log
+            agentHitLog("H1c", "ControlInterop.resolvePropertyAtClick", "collapsedOrOutsideBody", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    java.util.Map.of("canvasY", canvasY, "groupIndex", groupIndex, //$NON-NLS-1$ //$NON-NLS-2$
+                            "expanded", section.expanded)); //$NON-NLS-1$
+            // #endregion
+            return null;
+        }
+        java.util.List<PropertyArea> areas = buildPropertyAreasForSectionCanvas(content, section,
+                scene, page);
+        PropertyArea area = null;
+        int propertyIndex = -1;
+        for (int i = 0; i < areas.size(); i++)
+        {
+            if (areas.get(i).containsCanvasY(canvasY))
+            {
+                area = areas.get(i);
+                propertyIndex = i;
+                break;
+            }
+        }
+        if (area == null || propertyIndex < 0)
+        {
+            // #region agent log
+            agentHitLog("H2", "ControlInterop.resolvePropertyAtClick", "noArea", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    java.util.Map.of("canvasY", canvasY, "groupIndex", groupIndex, //$NON-NLS-1$ //$NON-NLS-2$
+                            "areaCount", areas.size(), "bodyTop", section.bodyTopCanvas, //$NON-NLS-1$ //$NON-NLS-2$
+                            "bodyBottom", section.bodyBottomCanvas)); //$NON-NLS-1$
+            // #endregion
+            return null;
+        }
+        Object fieldDef = null;
+        Object rowLabelsObj = section.body != null ? section.body.getData(PS_SECTION_ROW_LABELS_KEY)
+                : null;
+        if (rowLabelsObj instanceof List)
+        {
+            @SuppressWarnings("unchecked")
+            java.util.List<String> rowLabels = (java.util.List<String>) rowLabelsObj;
+            if (propertyIndex >= 0 && propertyIndex < rowLabels.size())
+                fieldDef = resolveFieldByDisplayName(page, groupIndex, rowLabels.get(propertyIndex));
+        }
+        java.util.List<Object> visibleFields = visibleFieldDefinitionsInSection(page, groupIndex,
+                section, scene, content);
+        if (fieldDef == null && propertyIndex >= 0 && propertyIndex < visibleFields.size())
+            fieldDef = visibleFields.get(propertyIndex);
+        if (fieldDef == null)
+            fieldDef = resolveFieldByIndices(page, groupIndex, propertyIndex);
+        String displayName;
+        Object lwtView = null;
+        if (fieldDef != null)
+        {
+            displayName = labeledDefinitionText(fieldDef);
+            if (displayName == null || displayName.isEmpty())
+                displayName = "scan#" + propertyIndex; //$NON-NLS-1$
+            lwtView = findLwtViewByDisplayName(scene, displayName);
+            if (lwtView == null)
+                lwtView = findFieldComponentByDisplayName(scene, displayName);
+        }
+        else
+        {
+            // #region agent log
+            java.util.List<Object> modelSecs = modelSectionDefinitions(page);
+            int fieldsCount = groupIndex >= 0 && groupIndex < modelSecs.size()
+                    ? modelFieldDefinitions(modelSecs.get(groupIndex)).size() : -1;
+            agentHitLog("H6", "ControlInterop.resolvePropertyAtClick", "modelMiss", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    java.util.Map.of("groupIndex", groupIndex, "propertyIndex", propertyIndex, //$NON-NLS-1$ //$NON-NLS-2$
+                            "fieldsCount", fieldsCount, "areasCount", areas.size(), //$NON-NLS-1$ //$NON-NLS-2$
+                            "sectionTitle", section.titleHint != null ? section.titleHint : "")); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            displayName = "scan#" + propertyIndex; //$NON-NLS-1$
+        }
+        int[] band = area.toDisplayBand(content);
+        // #region agent log
+        java.util.List<Object> modelSecs = modelSectionDefinitions(page);
+        int fieldsCount = groupIndex >= 0 && groupIndex < modelSecs.size()
+                ? modelFieldDefinitions(modelSecs.get(groupIndex)).size() : -1;
+        if (areas.size() != fieldsCount)
+        {
+            StringBuilder fieldLabels = new StringBuilder();
+            if (groupIndex >= 0 && groupIndex < modelSecs.size())
+            {
+                java.util.List<Object> fields = visibleFields.isEmpty()
+                        ? modelFieldDefinitions(modelSecs.get(groupIndex)) : visibleFields;
+                for (int i = 0; i < fields.size() && i < 12; i++)
+                {
+                    if (i > 0)
+                        fieldLabels.append('|');
+                    fieldLabels.append(labeledDefinitionText(fields.get(i)));
+                }
+            }
+            agentHitLog("H18", "ControlInterop.resolvePropertyAtClick", "areasFieldsMismatch", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    java.util.Map.of("areasCount", areas.size(), "fieldsCount", fieldsCount, //$NON-NLS-1$ //$NON-NLS-2$
+                            "visibleCount", visibleFields.size(), "propertyIndex", propertyIndex, //$NON-NLS-1$ //$NON-NLS-2$
+                            "prop", displayName, "fieldLabels", fieldLabels.toString())); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        agentHitLog("OK", "ControlInterop.resolvePropertyAtClick", "hit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                java.util.Map.of("prop", displayName, "groupIndex", groupIndex, //$NON-NLS-1$ //$NON-NLS-2$
+                        "propertyIndex", propertyIndex, "areaTop", band[0], "areaBottom", band[1], //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        "areaTopCanvas", area.topCanvas, "areaBottomCanvas", area.bottomCanvas, //$NON-NLS-1$ //$NON-NLS-2$
+                        "canvasY", canvasY, "fieldsCount", fieldsCount, "areasCount", areas.size())); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // #endregion
+        PropertySheetDebug.feature("resolve via=scan g=" + groupIndex //$NON-NLS-1$
+                + " p=" + propertyIndex + " " + PropertySheetDebug.quote(displayName)); //$NON-NLS-1$ //$NON-NLS-2$
+        return new PropertyClickHit(displayName, lwtView, band[0], band[1], area.topCanvas,
+                area.bottomCanvas, propertyIndex, "scan"); //$NON-NLS-1$
+    }
+
+    /** @deprecated display-Y; для совместимости — делегирует canvas через page. */
+    static PropertyArea findPropertyAreaAtClick(Composite body, int displayY,
+            java.util.List<java.util.Map.Entry<?, ?>> labelEntries, Composite paletteRoot,
+            Object page)
+    {
+        if (page == null || displayY <= 0)
+            return null;
+        PropertySheetUiContext.PaletteCanvasSpace space =
+                PropertySheetUiContext.PaletteCanvasSpace.forPage(page);
+        if (space == null)
+            return null;
+        Composite content = space.content;
+        Point probe = new Point(content.toDisplay(0, 0).x + 8, displayY);
+        int canvasY = content.toControl(probe).y;
+        return findPropertyAreaAtCanvas(page, canvasY);
+    }
+
     /** Section body с наименьшей area, содержащий displayY (секция под курсором). */
     static Composite findSectionBodyAtDisplayY(Composite paletteRoot, int displayY)
     {
@@ -872,19 +2848,23 @@ final class PropertySheetControlInterop
     static String resolveModelPropertyName(Object page, Object scene, Object lwtView, String displayName)
     {
         Object renderer = scene != null ? Global.invoke(scene, "getRenderer") : null; //$NON-NLS-1$
-        Object field = null;
-        boolean viewResolved = false;
         if (lwtView != null)
         {
-            field = findFieldComponentForView(scene, renderer, lwtView);
-            viewResolved = field != null;
+            Object field = findFieldComponentForView(scene, renderer, lwtView);
+            if (field == null)
+                return null;
+            String name = featureNameFromFieldComponent(field);
+            if (name == null || name.isEmpty())
+                name = featureNameFromFieldDefinition(field);
+            return name;
         }
-        if (field == null && displayName != null && !displayName.isEmpty())
+        Object field = null;
+        if (displayName != null && !displayName.isEmpty())
             field = findFieldComponentByDisplayName(scene, displayName);
         String name = featureNameFromFieldComponent(field);
         if (name == null || name.isEmpty())
             name = featureNameFromFieldDefinition(field);
-        if ((name == null || name.isEmpty()) && !viewResolved)
+        if (name == null || name.isEmpty())
             name = featureNameFromPaletteDefinition(page, displayName);
         return name;
     }
@@ -2479,6 +4459,22 @@ final class PropertySheetControlInterop
         return new int[] { topLeft.y, topLeft.y + band.height };
     }
 
+    /** Display Y строки: leaf LWT host (точная высота строки), иначе canvas-scan fallback. */
+    static int[] displayBandForFieldView(Object lwtView, int fallbackTop, int fallbackBottom)
+    {
+        Composite leaf = leafFieldRowHostForView(lwtView);
+        if (leaf != null && !leaf.isDisposed())
+        {
+            int top = leaf.toDisplay(0, 0).y;
+            int bottom = top + leaf.getSize().y;
+            if (bottom > top)
+                return new int[] { top, bottom };
+        }
+        if (fallbackTop >= 0 && fallbackBottom > fallbackTop)
+            return new int[] { fallbackTop, fallbackBottom };
+        return null;
+    }
+
     static Object lightControlForView(Object view)
     {
         return lightControlFromView(view);
@@ -2505,6 +4501,27 @@ final class PropertySheetControlInterop
         Point origin = lwtHighlightOrigin(host, propertyName);
         Rectangle band = liveLwtRowBand(host, view, propertyName);
         storeLwtRowGeometry(host, view, propertyName, origin, band);
+    }
+
+    private static Composite sectionBodyContaining(Control control)
+    {
+        if (control == null || control.isDisposed())
+            return null;
+        Composite start = control instanceof Composite ? (Composite) control : control.getParent();
+        for (Composite c = start; c != null && !c.isDisposed(); c = c.getParent())
+        {
+            Composite parent = c.getParent();
+            if (parent == null)
+                continue;
+            String pn = parent.getClass().getName();
+            if (!pn.contains("Section") && !pn.contains("ExpandableComposite")) //$NON-NLS-1$ //$NON-NLS-2$
+                continue;
+            String cn = c.getClass().getName();
+            if ((cn.contains("DtLayoutComposite") || cn.contains("LayoutComposite")) //$NON-NLS-1$ //$NON-NLS-2$
+                    && c.getSize().x >= 100 && c.getSize().y >= 20)
+                return c;
+        }
+        return null;
     }
 
     private static Point fallbackLabelOrigin(Composite fieldRow)

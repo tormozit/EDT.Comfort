@@ -112,6 +112,71 @@ final class PropertySheetUiContext
         return value instanceof Composite ? (Composite) value : null;
     }
 
+    /** Прокручиваемый content палитры (полная высота canvas). */
+    static Composite findPaletteContent(Object page)
+    {
+        if (page == null)
+            return null;
+        for (String method : new String[] {
+                "getNewPaletteScrolledComposite", //$NON-NLS-1$
+                "getNewPaletteContent" //$NON-NLS-1$
+        })
+        {
+            Object raw = Global.invoke(page, method);
+            if (raw instanceof ScrolledComposite)
+            {
+                Control content = ((ScrolledComposite) raw).getContent();
+                if (content instanceof Composite)
+                    return (Composite) content;
+            }
+            if (raw instanceof Composite)
+                return (Composite) raw;
+        }
+        return findPaletteRoot(page);
+    }
+
+    static ScrolledComposite findPaletteScrolledComposite(Object page)
+    {
+        if (page == null)
+            return null;
+        Object raw = Global.invoke(page, "getNewPaletteScrolledComposite"); //$NON-NLS-1$
+        return raw instanceof ScrolledComposite ? (ScrolledComposite) raw : null;
+    }
+
+    /** Координаты клика в прокручиваемом canvas content. */
+    static final class PaletteCanvasSpace
+    {
+        final Composite content;
+
+        PaletteCanvasSpace(Composite content)
+        {
+            this.content = content;
+        }
+
+        static PaletteCanvasSpace forPage(Object page)
+        {
+            Composite content = findPaletteContent(page);
+            if (content == null || content.isDisposed())
+                return null;
+            return new PaletteCanvasSpace(content);
+        }
+
+        Point displayToCanvas(Point display)
+        {
+            return content.toControl(display);
+        }
+
+        Point canvasToDisplay(int canvasX, int canvasY)
+        {
+            return content.toDisplay(canvasX, canvasY);
+        }
+
+        int canvasHeight()
+        {
+            return content.getSize().y;
+        }
+    }
+
     static boolean isPropertyNameControl(Control control, String propertyName)
     {
         if (control == null || control.isDisposed())

@@ -338,3 +338,5 @@ final class SearchBoxFilterAccess
     }
 
 }
+
+

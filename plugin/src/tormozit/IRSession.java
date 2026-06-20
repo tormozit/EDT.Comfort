@@ -1,4 +1,7 @@
 package tormozit;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.List;
@@ -31,6 +34,7 @@ import com._1c.g5.v8.dt.platform.services.model.InfobaseReference;
 import com.sun.jna.platform.win32.WinDef.HWND;
 import java.util.ArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.Set;
 import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.SWT;
@@ -568,6 +572,43 @@ public final class IRSession
             }
         }
 
+
+    public static Path setEvaluationCancellationFile(IRSession session, Object codeEditor) throws IOException
+        {
+            Path cancelFile;
+            cancelFile = Files.createTempFile(IrBslExpressionHtmlSupport.CANCEL_FILE_PREFIX, IrBslExpressionHtmlSupport.CANCEL_FILE_SUFFIX);
+            IrBslExpressionHtmlSupport.activeCancelFiles.computeIfAbsent(session, s -> new AtomicReference<>()).set(cancelFile);
+            ComBridge.invoke(codeEditor, "УстановитьФайлОтменыВычислений", //$NON-NLS-1$
+                cancelFile.toAbsolutePath().toString());
+            return cancelFile;
+        }
+
+    static void clearEvaluationCancellationFile(
+            IRSession session, Object codeEditor, Path cancelFile)
+        {
+            if (session == null || cancelFile == null)
+                return;
+            AtomicReference<Path> ref = IrBslExpressionHtmlSupport.activeCancelFiles.computeIfAbsent(session, s -> new AtomicReference<>());
+            if (ref.compareAndSet(cancelFile, null))
+            {
+                try
+                {
+                    ComBridge.invoke(codeEditor, "УстановитьФайлОтменыВычислений", (Object) null); //$NON-NLS-1$
+                }
+                catch (Exception e)
+                {
+                    BslSideHintDebug.problem("ir cancel clear: " + e.getMessage()); //$NON-NLS-1$
+                }
+            }
+            try
+            {
+                Files.deleteIfExists(cancelFile);
+            }
+            catch (Exception e)
+            {
+                BslSideHintDebug.problem("ir cancel delete: " + e.getMessage()); //$NON-NLS-1$
+            }
+        }
 
     /**
      * Псевдомодальный режим открытия окон ИР из EDT (аналог TurboConf
