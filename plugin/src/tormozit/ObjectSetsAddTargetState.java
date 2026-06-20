@@ -61,6 +61,20 @@ public final class ObjectSetsAddTargetState
         return ObjectSets.getInstance().getSetById(setId);
     }
 
+    /** Все активные (●) наборы по проектам пусты. */
+    public synchronized boolean areAllAddTargetSetsEmpty()
+    {
+        for (String setId : addTargetByProject.values())
+        {
+            if (setId == null || setId.isBlank())
+                continue;
+            ObjectSets.SetDef set = ObjectSets.getInstance().getSetById(setId);
+            if (set != null && !set.items.isEmpty())
+                return false;
+        }
+        return true;
+    }
+
     public synchronized boolean isAddTarget(String setId)
     {
 
@@ -77,6 +91,8 @@ public final class ObjectSetsAddTargetState
 
         ObjectSets.SetDef set = ObjectSets.getInstance().getSetById(setId);
         if (set == null)
+            return;
+        if (setId.equals(addTargetByProject.get(set.projectName)))
             return;
         addTargetByProject.put(set.projectName, setId);
         save();
@@ -194,7 +210,8 @@ public final class ObjectSetsAddTargetState
     private void notifyChanged()
     {
 
-        ObjectSetSubsystemsFilterBridge.onFilterStateChanged();
+        if (ObjectSetsNavigatorFilterSupport.isActive())
+            ObjectSetSubsystemsFilterBridge.onFilterStateChanged();
         for (Runnable listener : listeners)
         {
 

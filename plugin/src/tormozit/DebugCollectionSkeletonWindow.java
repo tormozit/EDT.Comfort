@@ -9,6 +9,7 @@ import org.eclipse.jface.layout.TableColumnLayout;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Label;
@@ -68,6 +69,7 @@ public final class DebugCollectionSkeletonWindow implements DebugCollectionTable
         createProgress(shell);
         interaction = new DebugCollectionTableInteraction(table, this);
         interaction.install();
+        installFilterNavigation();
         hookTableEvents();
         hookFilterHighlight();
 
@@ -77,6 +79,8 @@ public final class DebugCollectionSkeletonWindow implements DebugCollectionTable
         shell.pack();
         shell.setSize(900, 600);
         shell.open();
+        if (filterInput != null && !filterInput.isDisposed())
+            filterInput.scheduleFocusWhenReady();
         shell.addDisposeListener(e -> disposeWindow());
         shellPin = new DebugCollectionShellPin(shell);
         shell.setData("tormozit.collectionShellPin", shellPin); //$NON-NLS-1$
@@ -146,6 +150,39 @@ public final class DebugCollectionSkeletonWindow implements DebugCollectionTable
         progressLabel = new Label(parent, SWT.NONE);
         progressLabel.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
         progressLabel.setText(""); //$NON-NLS-1$
+    }
+
+    private void installFilterNavigation()
+    {
+        if (filterInput == null || filterInput.isDisposed() || table == null || table.isDisposed())
+            return;
+        Control filterKeys = filterInput.inputControl();
+        if (filterKeys == null)
+            filterKeys = filterInput.widget();
+        FilterInputBoxListNavigation.installTableNavigation(filterKeys, table, newIdx ->
+        {
+            if (interaction != null && table.getItemCount() > 0 && newIdx >= 0 && newIdx < table.getItemCount())
+            {
+                TableItem item = table.getItem(newIdx);
+                interaction.selectCell(item, interaction.activeColumn());
+            }
+        }, false, () ->
+        {
+            if (table.getItemCount() > 0)
+            {
+                int idx = table.getSelectionIndex();
+                if (idx < 0)
+                    idx = 0;
+                if (interaction != null)
+                {
+                    TableItem item = table.getItem(idx);
+                    if (item != null && !item.isDisposed())
+                        interaction.selectCell(item, interaction.activeColumn());
+                }
+                FilterInputBoxListNavigation.focusTableFromFilter(table);
+            }
+            return true;
+        });
     }
 
     private void hookTableEvents()

@@ -9,11 +9,13 @@ import org.eclipse.jface.action.IToolBarManager;
 import org.eclipse.jface.action.Separator;
 import org.eclipse.jface.viewers.AbstractTreeViewer;
 import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
 import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.events.SelectionEvent;
+import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.widgets.Display;
@@ -22,6 +24,7 @@ import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.ToolBar;
 import org.eclipse.swt.widgets.ToolItem;
 import org.eclipse.swt.widgets.Tree;
+import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
@@ -34,7 +37,15 @@ import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.contexts.IContextService;
 
+import com._1c.g5.v8.dt.bsl.compare.BslModuleComparisonNode;
+import com._1c.g5.v8.dt.bsl.compare.BslModuleSectionComparisonNode;
 import com._1c.g5.v8.dt.compare.model.MatchedObjectsComparisonNode;
+import com._1c.g5.v8.dt.compare.ui.editor.ISelectionProviderDelegate;
+import com._1c.g5.v8.dt.compare.ui.partialmodel.IPartialModel;
+import com._1c.g5.v8.dt.compare.ui.partialmodel.PartialModelController;
+import com._1c.g5.v8.dt.compare.ui.partialmodel.node.ExternalPropertyPartialModelNode;
+import com._1c.g5.v8.dt.compare.ui.partialmodel.node.IPartialModelNode;
+import org.eclipse.jface.resource.ResourceManager;
 import com._1c.g5.v8.dt.compare.ui.editor.DtComparisonView;
 import com._1c.g5.v8.dt.compare.core.ComparisonUtils;
 import com._1c.g5.v8.dt.compare.core.IComparisonManager;
@@ -49,6 +60,7 @@ import com._1c.g5.v8.dt.compare.model.SolidResourceComparisonNode;
 import com._1c.g5.v8.dt.compare.ui.editor.ComparisonTreeControl;
 import com._1c.g5.v8.dt.compare.ui.util.MergeUiUtils;
 import com._1c.g5.v8.dt.core.filesystem.IQualifiedNameFilePathConverter;
+import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.export.IExportOperation;
 import com._1c.g5.v8.dt.export.IExportOperationFactory;
 import com._1c.g5.v8.dt.export.IExportStrategy;
@@ -116,6 +128,7 @@ public class CompareConfigMenuHook implements IStartup
         {
 //          Activator.getDefault().getInjector().injectMembers(this); // Слишком рано?
             CompareConfigSearchDialogHook.install(Display.getDefault());
+            CompareConfigOpenModuleMergeHandler.install(Display.getDefault());
 
             IWorkbench wb = PlatformUI.getWorkbench();
             for (IWorkbenchWindow w : wb.getWorkbenchWindows())
@@ -189,11 +202,17 @@ public class CompareConfigMenuHook implements IStartup
             Display.getDefault().asyncExec(() ->
             {
                 Tree t = getCompareTree(editor);
-                if (t != null) attachMenuListener(editor, t);
+                if (t != null) attachTreeListeners(editor, t);
             });
             return;
         }
+        attachTreeListeners(editor, tree);
+    }
+
+    private void attachTreeListeners(IEditorPart editor, Tree tree)
+    {
         attachMenuListener(editor, tree);
+        CompareConfigOpenModuleMergeHandler.attachDoubleClickListener(editor, tree);
     }
 
     private void wireTreeViewerToListener(IEditorPart editor, CompareConfigSelectionListener listener)
@@ -464,16 +483,30 @@ public class CompareConfigMenuHook implements IStartup
             Object element = ((IStructuredSelection) selection).getFirstElement();
             if (element == null)
                 return;
+            runCompare(editor, shell, element);
+        }
+
+        public static void runCompare(IEditorPart editor, Shell shell, Object element)
+        {
+            runCompare(editor, shell, element, true);
+        }
+
+        public static void runCompare(IEditorPart editor, Shell shell, Object element, boolean connectIfAbsent)
+        {
             Path pathMain = getPropertySideFile(editor, element, ComparisonSide.MAIN); // mxlx
             if (pathMain == null)
             {
-                ToastNotification.show("Сравнение метаданных ИР", "Поддерживаются свойства: ТабличныйДокумент.Макет");
+                if (connectIfAbsent)
+                    ToastNotification.show("Сравнение метаданных ИР", "Поддерживаются свойства: ТабличныйДокумент.Макет");
                 return;
             }
             Path pathOther = getPropertySideFile(editor, element, ComparisonSide.OTHER); // mxlx
             Path pathAncestor = getPropertySideFile(editor, element, ComparisonSide.COMMON_ANCESTOR); // mxlx
             IComparisonSession compSession = CompareConfigSelectionListener.getSession(editor);
-            IRSession irSession = IRApplication.getSession(compSession.getDataSource(ComparisonSide.MAIN).getDtProject());
+            IDtProject dtProject = compSession.getDataSource(ComparisonSide.MAIN).getDtProject();
+            IRSession irSession = connectIfAbsent
+                ? IRApplication.getSession(dtProject)
+                : IRApplication.getConnectedSession(dtProject);
             if (irSession == null || irSession.executor == null) {
                 return;
             }
@@ -493,6 +526,21 @@ public class CompareConfigMenuHook implements IStartup
             });
         }
 
+        public static boolean isTabularDocumentTemplate(IEditorPart editor, Object element)
+        {
+            if (element == null)
+                return false;
+            try
+            {
+                return getPropertySideFile(editor, element, ComparisonSide.MAIN) != null
+                    || getPropertySideFile(editor, element, ComparisonSide.OTHER) != null;
+            }
+            catch (Exception e)
+            {
+                return false;
+            }
+        }
+
         /**
          * Читает содержимое xmxl-файла через {@link ExternalPropertyUtils#getContentStream},
          * сохраняет его во временный файл и возвращает путь к нему.
@@ -505,15 +553,9 @@ public class CompareConfigMenuHook implements IStartup
         {
             IComparisonSession session = CompareConfigSelectionListener.getSession(editor);
             MatchedObjectsComparisonNode matchedNode = CompareConfigSelectionListener.resolveMatchedNode(element);
-            ExternalPropertyComparisonNode properyNode;
-            try
-            {
-                properyNode = (ExternalPropertyComparisonNode) matchedNode;
-            }
-            catch (Exception e)
-            {
+            if (!(matchedNode instanceof ExternalPropertyComparisonNode))
                 return null;
-            }
+            ExternalPropertyComparisonNode properyNode = (ExternalPropertyComparisonNode) matchedNode;
             BundleContext ctx = Global.ourContext();
             ServiceReference<?> ref = ctx.getServiceReference(IComparisonManager.class);
             Object manager = ctx.getService(ref);
@@ -556,6 +598,333 @@ public class CompareConfigMenuHook implements IStartup
         }
     }
 
+    /**
+     * Двойной клик в дереве сравнения: секция или узел BSL-модуля — сравнение модуля;
+     * макет табличного документа — «Сравнить в приложении ИР».
+     */
+    private static final class CompareConfigOpenModuleMergeHandler
+    {
+        private static final String TAG = "CompareConfig"; //$NON-NLS-1$
+        private static final String DIALOG_CLASS_SNIPPET =
+            "CompareBslModuleWithParsingModuleStructureDialog"; //$NON-NLS-1$
+        private static final String SHELL_PATCHED_KEY = "tormozit.moduleMergeSectionPatched"; //$NON-NLS-1$
+        private static final String DBL_CLICK_HOOKED = "tormozit.compareConf.dblClickHooked"; //$NON-NLS-1$
+
+        private static volatile BslModuleSectionComparisonNode pendingSection;
+
+        static void install(Display display)
+        {
+            display.addFilter(SWT.Show, event ->
+            {
+                if (pendingSection == null || !(event.widget instanceof Shell))
+                    return;
+                Shell shell = (Shell) event.widget;
+                if (shell.getData(SHELL_PATCHED_KEY) != null)
+                    return;
+                Object dialog = shell.getData();
+                if (dialog == null)
+                    return;
+                if (!dialog.getClass().getName().contains(DIALOG_CLASS_SNIPPET))
+                    return;
+
+                shell.setData(SHELL_PATCHED_KEY, Boolean.TRUE);
+                final BslModuleSectionComparisonNode section = pendingSection;
+                shell.getDisplay().syncExec(() -> selectSectionInDialog(dialog, section));
+            });
+        }
+
+        static void attachDoubleClickListener(IEditorPart editor, Tree tree)
+        {
+            if (Boolean.TRUE.equals(tree.getData(DBL_CLICK_HOOKED)))
+                return;
+            tree.setData(DBL_CLICK_HOOKED, Boolean.TRUE);
+            tree.addListener(SWT.MouseDoubleClick, event ->
+            {
+                if (event.button != 1)
+                    return;
+                Object fromClick = resolveElementAt(tree, event.x, event.y);
+                Object element = fromClick != null ? fromClick : selectionElement(editor);
+                onDoubleClick(editor, tree, element);
+            });
+        }
+
+        static void onDoubleClick(IEditorPart editor, Tree tree, Object element)
+        {
+            if (element == null)
+                return;
+            try
+            {
+                ExternalPropertyPartialModelNode moduleNode = null;
+                BslModuleSectionComparisonNode section = null;
+
+                BslModuleSectionComparisonNode sectionNode = resolveSectionComparisonNode(element);
+                if (sectionNode != null)
+                {
+                    section = sectionNode;
+                    moduleNode = findParentModuleNode(element);
+                    if (moduleNode == null)
+                    {
+                        log("doubleClick: родительский узел модуля не найден"); //$NON-NLS-1$
+                        return;
+                    }
+                }
+                else
+                {
+                    moduleNode = resolveModuleNode(element);
+                }
+
+                if (moduleNode != null)
+                {
+                    openModuleMergeForNode(editor, moduleNode, section, tree.getShell());
+                    return;
+                }
+
+                if (CompareConfigCompareInIRHandler.isTabularDocumentTemplate(editor, element))
+                {
+                    CompareConfigCompareInIRHandler.runCompare(editor, tree.getShell(), element, false);
+                    return;
+                }
+            }
+            catch (Exception e)
+            {
+                Global.logError(TAG, "doubleClick", e); //$NON-NLS-1$
+            }
+        }
+
+        private static Object selectionElement(IEditorPart editor)
+        {
+            ISelection selection = CompareConfigOpenObjectHandler.getSelection(editor);
+            if (!(selection instanceof IStructuredSelection))
+                return null;
+            return ((IStructuredSelection) selection).getFirstElement();
+        }
+
+        private static Object resolveElementAt(Tree tree, int x, int y)
+        {
+            TreeItem item = itemAt(tree, x, y);
+            return item != null ? item.getData() : null;
+        }
+
+        private static TreeItem itemAt(Tree tree, int x, int y)
+        {
+            TreeItem item = tree.getItem(new Point(x, y));
+            if (item != null)
+                return item;
+            for (TreeItem root : tree.getItems())
+            {
+                TreeItem found = findItemAt(root, x, y);
+                if (found != null)
+                    return found;
+            }
+            return null;
+        }
+
+        private static TreeItem findItemAt(TreeItem item, int x, int y)
+        {
+            for (int col = 0; col < item.getParent().getColumnCount(); col++)
+            {
+                if (item.getBounds(col).contains(x, y))
+                    return item;
+            }
+            if (item.getExpanded())
+            {
+                for (TreeItem child : item.getItems())
+                {
+                    TreeItem found = findItemAt(child, x, y);
+                    if (found != null)
+                        return found;
+                }
+            }
+            return null;
+        }
+
+        private static void openModuleMergeForNode(IEditorPart editor,
+                ExternalPropertyPartialModelNode moduleNode,
+                BslModuleSectionComparisonNode section, Shell shell)
+        {
+            ComparisonNode moduleComparison = moduleNode.retrieveComparisonNode();
+            if (!(moduleComparison instanceof BslModuleComparisonNode))
+                return;
+
+            BslModuleComparisonNode bslModule = (BslModuleComparisonNode) moduleComparison;
+            boolean selectSection = section != null && bslModule.isParseModuleStructure();
+            if (section != null && !bslModule.isParseModuleStructure())
+                log("doubleClick: модуль без разбора структуры — открытие без выбора секции"); //$NON-NLS-1$
+
+            pendingSection = selectSection ? section : null;
+            try
+            {
+                openModuleMergeSettings(editor, moduleNode, shell);
+            }
+            finally
+            {
+                pendingSection = null;
+            }
+        }
+
+        private static ExternalPropertyPartialModelNode resolveModuleNode(Object element)
+        {
+            if (!(element instanceof ExternalPropertyPartialModelNode))
+                return null;
+            ComparisonNode cn = ((ExternalPropertyPartialModelNode) element).retrieveComparisonNode();
+            return cn instanceof BslModuleComparisonNode
+                ? (ExternalPropertyPartialModelNode) element : null;
+        }
+
+        private static BslModuleSectionComparisonNode resolveSectionComparisonNode(Object element)
+        {
+            if (!(element instanceof IPartialModelNode))
+                return null;
+            ComparisonNode cn = ((IPartialModelNode) element).retrieveComparisonNode();
+            return cn instanceof BslModuleSectionComparisonNode
+                ? (BslModuleSectionComparisonNode) cn : null;
+        }
+
+        private static ExternalPropertyPartialModelNode findParentModuleNode(Object element)
+        {
+            Object current = element;
+            while (current instanceof IPartialModelNode)
+            {
+                IPartialModelNode node = (IPartialModelNode) current;
+                if (node instanceof ExternalPropertyPartialModelNode)
+                {
+                    ComparisonNode cn = node.retrieveComparisonNode();
+                    if (cn instanceof BslModuleComparisonNode)
+                        return (ExternalPropertyPartialModelNode) node;
+                }
+                current = node.getParent();
+            }
+            return null;
+        }
+
+        private static void openModuleMergeSettings(IEditorPart editor,
+                ExternalPropertyPartialModelNode moduleNode, Shell shell)
+        {
+            Object artifacts = Global.invoke(editor, "getComparisonArtifacts", moduleNode); //$NON-NLS-1$
+            if (artifacts == null)
+            {
+                log("openModuleMerge: getComparisonArtifacts вернул null"); //$NON-NLS-1$
+                return;
+            }
+
+            Object partialModel = Global.getField(artifacts, "partialModel"); //$NON-NLS-1$
+            IComparisonSession session = (IComparisonSession) Global.getField(artifacts, "session"); //$NON-NLS-1$
+            PartialModelController pmc =
+                (PartialModelController) Global.getField(editor, "partialModelController"); //$NON-NLS-1$
+            DtComparisonView view = (DtComparisonView) Global.getField(editor, "comparisonView"); //$NON-NLS-1$
+
+            if (partialModel == null || session == null || pmc == null || view == null)
+            {
+                log("openModuleMerge: не хватает partialModel/session/controller/view"); //$NON-NLS-1$
+                return;
+            }
+
+            boolean canMerge = Boolean.TRUE.equals(Global.getField(editor, "canMerge")); //$NON-NLS-1$
+            boolean readOnly = view.isReadOnly() || !canMerge;
+
+            Object editorInput = Global.getField(editor, "dtComparisonEditorInput"); //$NON-NLS-1$
+            String mainSideName = editorInput != null
+                ? (String) Global.call(editorInput, "getMainComparisonSideName") : null; //$NON-NLS-1$
+            String otherSideName = editorInput != null
+                ? (String) Global.call(editorInput, "getOtherComparisonSideName") : null; //$NON-NLS-1$
+
+            ISelectionProviderDelegate selectionDelegate =
+                (ISelectionProviderDelegate) Global.getField(editor, "selectionProviderDelegate"); //$NON-NLS-1$
+            ResourceManager resourceManager =
+                (ResourceManager) Global.getField(editor, "resourceManager"); //$NON-NLS-1$
+
+            Color colorHasDiffs = view.getColorHasDiffs();
+            Color colorOnlyMain = view.getColorOnlyMain();
+            Color colorOnlyOther = view.getColorOnlyOther();
+
+            pmc.editMergeSettings(
+                (IPartialModel) partialModel,
+                moduleNode,
+                session,
+                shell,
+                readOnly,
+                colorHasDiffs,
+                colorOnlyMain,
+                colorOnlyOther,
+                mainSideName,
+                otherSideName,
+                view,
+                selectionDelegate,
+                resourceManager);
+        }
+
+        private static void selectSectionInDialog(Object dialog, BslModuleSectionComparisonNode section)
+        {
+            if (section == null || dialog == null)
+                return;
+
+            Object viewObj = Global.call(dialog, "getComparisonView"); //$NON-NLS-1$
+            if (!(viewObj instanceof DtComparisonView))
+                return;
+
+            ComparisonTreeControl treeControl = ((DtComparisonView) viewObj).getTreeControl();
+            if (treeControl == null)
+                return;
+
+            TreeViewer viewer = treeControl.getTreeViewer();
+            if (viewer == null)
+                return;
+
+            Object node = findPartialModelNode(viewer, section);
+            if (node == null)
+            {
+                log("selectSectionInDialog: секция не найдена в дереве диалога"); //$NON-NLS-1$
+                return;
+            }
+
+            viewer.setSelection(new StructuredSelection(node), true);
+            viewer.reveal(node);
+            log("selectSectionInDialog: выбрана секция"); //$NON-NLS-1$
+        }
+
+        private static Object findPartialModelNode(TreeViewer viewer, BslModuleSectionComparisonNode target)
+        {
+            ITreeContentProvider cp = (ITreeContentProvider) viewer.getContentProvider();
+            if (cp == null)
+                return null;
+            Object input = viewer.getInput();
+            if (input == null)
+                return null;
+            for (Object root : cp.getElements(input))
+            {
+                Object found = findInSubtree(cp, root, target);
+                if (found != null)
+                    return found;
+            }
+            return null;
+        }
+
+        private static Object findInSubtree(ITreeContentProvider cp, Object element,
+                BslModuleSectionComparisonNode target)
+        {
+            if (element instanceof IPartialModelNode)
+            {
+                ComparisonNode cn = ((IPartialModelNode) element).retrieveComparisonNode();
+                if (cn == target)
+                    return element;
+            }
+            if (!cp.hasChildren(element))
+                return null;
+            for (Object child : cp.getChildren(element))
+            {
+                Object found = findInSubtree(cp, child, target);
+                if (found != null)
+                    return found;
+            }
+            return null;
+        }
+
+        private static void log(String msg)
+        {
+            if (Global.isLogEnabled())
+                Global.log(TAG, msg);
+        }
+    }
 
     private static class CompareConfigExpandHandler extends AbstractHandler
     {
@@ -595,7 +964,8 @@ public class CompareConfigMenuHook implements IStartup
 
         /**
          * Рекурсивно собирает список узлов для раскрытия.
-         * Никаких вызовов вьювера внутри!
+         * В {@code toExpand} попадают только узлы, видимые при текущих фильтрах дерева.
+         * Обход модели — по полному дереву content provider; вызовов вьювера внутри нет.
          */
         private static void collectElementsToExpand(ITreeContentProvider cp, Object element, CompareConfigExpandMode mode, Set<Object> toExpand, AbstractTreeViewer viewer)
         {
@@ -606,7 +976,10 @@ public class CompareConfigMenuHook implements IStartup
                     || mode == CompareConfigExpandMode.toMarked      && !isMarked(element))
                 return;
 
-            toExpand.add(element);
+            if (CompareConfigSearchDialogHook.isNodeMatchFilters(element, viewer))
+            {
+                toExpand.add(element);
+            }
             Object[] children;
             try
             {
@@ -620,8 +993,7 @@ public class CompareConfigMenuHook implements IStartup
             }
             for (Object child : children)
             {
-                if (CompareConfigSearchDialogHook.isNodeMatchFilters(child, viewer));
-                    collectElementsToExpand(cp, child, mode, toExpand, viewer);
+                collectElementsToExpand(cp, child, mode, toExpand, viewer);
             }
         }
 

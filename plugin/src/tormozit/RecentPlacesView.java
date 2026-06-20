@@ -305,7 +305,7 @@ public final class RecentPlacesView extends ViewPart
         activateKeyContext();
         refreshFromStore();
         if (filterInput != null && !filterInput.isDisposed())
-            filterInput.setFocus();
+            filterInput.scheduleFocusWhenReady();
     }
 
     @Override
@@ -326,8 +326,32 @@ public final class RecentPlacesView extends ViewPart
 
     public RecentPlaces.Entry getSelectedEntry()
     {
+        RecentPlaces.Entry current = currentEntryFromTableFocus();
+        if (current != null)
+            return current;
         List<RecentPlaces.Entry> entries = getSelectedEntries();
         return entries.isEmpty() ? null : entries.get(0);
+    }
+
+    /** Текущая (сфокусированная) строка таблицы, не первое из мультивыделения. */
+    private RecentPlaces.Entry currentEntryFromTableFocus()
+    {
+        if (listViewer == null || listViewer.getControl().isDisposed())
+            return null;
+        Table table = listViewer.getTable();
+        if (table == null || table.isDisposed())
+            return null;
+        int idx = table.getSelectionIndex();
+        if (idx < 0 && tableInteraction != null)
+        {
+            TableItem item = tableInteraction.selectedItem();
+            if (item != null && !item.isDisposed())
+                idx = table.indexOf(item);
+        }
+        if (idx < 0)
+            return null;
+        Object element = listViewer.getElementAt(idx);
+        return element instanceof RecentPlaces.Entry entry ? entry : null;
     }
 
     public List<RecentPlaces.Entry> getSelectedEntries()
@@ -882,21 +906,12 @@ public final class RecentPlacesView extends ViewPart
         Control filterKeys = filterInput.inputControl();
         if (filterKeys == null)
             filterKeys = filterInput.widget();
-        filterKeys.addKeyListener(new KeyAdapter()
-        {
-            @Override
-            public void keyPressed(KeyEvent e)
-            {
-                if (e.keyCode == SWT.CR || e.keyCode == SWT.KEYPAD_CR)
-                    jumpToSelected();
-            }
-        });
 
-        FilterInputBoxListNavigation.installTableNavigation(filterKeys, table, newIdx ->
+        FilterInputBoxListNavigation.installTableOpenOnEnter(filterKeys, table, newIdx ->
         {
             if (newIdx < filtered.size())
                 listViewer.setSelection(new StructuredSelection(filtered.get(newIdx)));
-        });
+        }, this::jumpToSelected);
 
         table.addKeyListener(new KeyAdapter()
         {

@@ -25,6 +25,7 @@ import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.widgets.Canvas;
 import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Menu;
@@ -81,6 +82,7 @@ final class FormTableInteraction
     private ControlAdapter stackResizeListener;
     private ControlAdapter columnHeaderListener;
     private SelectionAdapter horizontalScrollListener;
+    private Runnable pendingHeaderOverlayUpdate;
 
     private Listener eraseItemListener;
     private Listener paintItemListener;
@@ -214,6 +216,10 @@ final class FormTableInteraction
                 extendRangeSelection(item);
             else if ((mods & SWT.MOD1) != 0)
                 toggleRowSelection(item);
+            else if (isRowSelected(item) && multiSelectionCount() > 1)
+            {
+                // Клик по уже выделенной строке — не сбрасывать мультивыделение (drag).
+            }
             else
                 selectSingleRow(item);
             updateActiveCell(item, column);
@@ -272,6 +278,13 @@ final class FormTableInteraction
         if (!useViewerForMultiSelect())
             return 0;
         return multiSelectViewer.getStructuredSelection().size();
+    }
+
+    private int multiSelectionCount()
+    {
+        if (useViewerForMultiSelect())
+            return viewerSelectionCount();
+        return table.getSelectionCount();
     }
 
     private void applyViewerSelection(StructuredSelection selection)
@@ -521,8 +534,13 @@ final class FormTableInteraction
 
     private void installHeaderOverlays()
     {
+        installColumnHeaderListeners();
+
         if (!resolveOverlayRoot())
+        {
+            table.getDisplay().asyncExec(this::scheduleHeaderOverlayUpdate);
             return;
+        }
 
         headerSeparator = new Canvas(overlayRoot, SWT.NO_MERGE_PAINTS | SWT.DOUBLE_BUFFERED);
         headerSeparator.setEnabled(false);
@@ -554,7 +572,7 @@ final class FormTableInteraction
             @Override
             public void controlResized(ControlEvent e)
             {
-                updateHeaderOverlays();
+                scheduleHeaderOverlayUpdate();
             }
         };
         table.addControlListener(tableResizeListener);
@@ -569,14 +587,13 @@ final class FormTableInteraction
                 @Override
                 public void widgetSelected(SelectionEvent e)
                 {
-                    updateHeaderOverlays();
+                    scheduleHeaderOverlayUpdate();
                 }
             };
             horizontal.addSelectionListener(horizontalScrollListener);
         }
 
-        table.getDisplay().asyncExec(this::updateHeaderOverlays);
-        installColumnHeaderListeners();
+        table.getDisplay().asyncExec(this::scheduleHeaderOverlayUpdate);
     }
 
     private void installColumnHeaderListeners()
@@ -590,13 +607,13 @@ final class FormTableInteraction
                 @Override
                 public void controlResized(ControlEvent e)
                 {
-                    updateHeaderOverlays();
+                    scheduleHeaderOverlayUpdate();
                 }
 
                 @Override
                 public void controlMoved(ControlEvent e)
                 {
-                    updateHeaderOverlays();
+                    scheduleHeaderOverlayUpdate();
                     redrawSelectedRows();
                 }
             };
@@ -691,21 +708,23 @@ final class FormTableInteraction
 
         columnHost = null;
         overlayRoot = tableParent;
+        boolean resolved = true;
         if (tableParent.getLayout() instanceof org.eclipse.jface.layout.TableColumnLayout)
         {
             columnHost = tableParent;
             overlayRoot = tableParent.getParent();
             if (overlayRoot == null || overlayRoot.isDisposed())
-                return false;
-            if (overlayRoot.getLayout() != null)
-                return false;
-            installColumnHostBoundsMaintainer();
+                resolved = false;
+            else if (overlayRoot.getLayout() != null)
+                resolved = false;
+            else
+                installColumnHostBoundsMaintainer();
         }
         else if (overlayRoot.getLayout() != null)
         {
-            return false;
+            resolved = false;
         }
-        return true;
+        return resolved;
     }
 
     private void installColumnHostBoundsMaintainer()
@@ -718,7 +737,7 @@ final class FormTableInteraction
             public void controlResized(ControlEvent e)
             {
                 layoutColumnHostInOverlayRoot();
-                updateHeaderOverlays();
+                scheduleHeaderOverlayUpdate();
             }
         };
         overlayRoot.addControlListener(stackResizeListener);
@@ -731,6 +750,22 @@ final class FormTableInteraction
             return;
         Rectangle area = overlayRoot.getClientArea();
         columnHost.setBounds(0, 0, area.width, area.height);
+    }
+
+    private void scheduleHeaderOverlayUpdate()
+    {
+        if (table == null || table.isDisposed())
+            return;
+        Display display = table.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        if (pendingHeaderOverlayUpdate != null)
+            display.timerExec(-1, pendingHeaderOverlayUpdate);
+        pendingHeaderOverlayUpdate = () -> {
+            pendingHeaderOverlayUpdate = null;
+            updateHeaderOverlays();
+        };
+        display.timerExec(0, pendingHeaderOverlayUpdate);
     }
 
     private void uninstallHeaderOverlays()
@@ -765,6 +800,8 @@ final class FormTableInteraction
     {
         installColumnHeaderListeners();
         updateColumnHeaderTooltips();
+        if (headerSeparator == null || headerSeparator.isDisposed())
+            return;
         updateHeaderSeparatorBounds();
         updateHeaderHighlightBounds();
     }
@@ -915,7 +952,7 @@ final class FormTableInteraction
 
     private void redrawHeader()
     {
-        updateHeaderOverlays();
+        scheduleHeaderOverlayUpdate();
     }
 
     private Rectangle columnHeaderBounds(int column)

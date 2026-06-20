@@ -36,6 +36,7 @@ import org.eclipse.swt.dnd.DragSourceEvent;
 import org.eclipse.swt.dnd.DropTarget;
 import org.eclipse.swt.dnd.DropTargetAdapter;
 import org.eclipse.swt.dnd.DropTargetEvent;
+import org.eclipse.swt.dnd.TableDropTargetEffect;
 import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.swt.events.ControlAdapter;
 import org.eclipse.swt.events.ControlEvent;
@@ -51,6 +52,7 @@ import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.layout.RowLayout;
 import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.FileDialog;
 import org.eclipse.swt.widgets.Label;
@@ -64,8 +66,12 @@ import org.eclipse.ui.IMemento;
 import org.eclipse.ui.IViewSite;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.PartInitException;
+import org.eclipse.ui.contexts.IContextActivation;
+import org.eclipse.ui.contexts.IContextService;
+import org.eclipse.ui.handlers.IHandlerService;
 import org.eclipse.ui.part.ViewPart;
 
+import com.sun.jna.platform.win32.User32;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.md.ui.shared.MdUiSharedImages;
@@ -77,18 +83,33 @@ public final class ObjectSetsView extends ViewPart
 {
     public static final String VIEW_ID = "tormozit.ObjectSetsView"; //$NON-NLS-1$
 
+    public static final String BINDING_CONTEXT_ID = "tormozit.objectSets.context"; //$NON-NLS-1$
+
+    public static final String SHOW_IN_NAVIGATOR_COMMAND_ID =
+        "tormozit.objectSets.showInNavigator"; //$NON-NLS-1$
+
+    private static final String ITEM_TEXT_SHOW_IN_NAVIGATOR =
+        "Показать в навигаторе \tCTRL+T"; //$NON-NLS-1$
+
     private static final String SETTINGS_SECTION = "ObjectSetsView"; //$NON-NLS-1$
     private static final String KEY_SASH = "sashWeights"; //$NON-NLS-1$
+    private static final String KEY_ITEMS_PANE_WIDTH     = "itemsPaneWidth"; //$NON-NLS-1$
     private static final String KEY_ITEMS_COL_NAME_WIDTH = "itemsColNameWidth"; //$NON-NLS-1$
     private static final String KEY_ITEMS_COL_PATH_WIDTH = "itemsColPathWidth"; //$NON-NLS-1$
     private static final String KEY_ITEMS_COL_ORDER      = "itemsColumnOrder"; //$NON-NLS-1$
+    private static final String KEY_SELECTED_SET_ID      = "selectedSetId"; //$NON-NLS-1$
+    private static final String KEY_SELECTED_ITEM_KEY    = "selectedItemKey"; //$NON-NLS-1$
 
     private static final int DEFAULT_ITEMS_NAME_COL_WIDTH = 120;
     private static final int DEFAULT_ITEMS_PATH_COL_WIDTH = 220;
     private static final int MIN_ITEMS_NAME_COL_WIDTH     = 50;
     private static final int MIN_ITEMS_PATH_COL_WIDTH     = 80;
     private static final int ITEMS_ICON_COL_WIDTH         = 24;
+    private static final int DEFAULT_ITEMS_PANE_WIDTH     = 360;
+    private static final int MIN_ITEMS_PANE_WIDTH         = 120;
+    private static final int MAX_ITEMS_PANE_WIDTH         = 2000;
     private static final int ITEMS_COLUMN_SAVE_DELAY_MS   = 300;
+    private static final int ITEMS_PANE_SAVE_DELAY_MS     = 300;
 
     private static ObjectSetsView activeInstance;
 
@@ -96,26 +117,43 @@ public final class ObjectSetsView extends ViewPart
 
     private FilterInputBox filterInput;
     private SashForm sashForm;
+    private Composite itemsPane;
     private TableViewer itemsViewer;
     private TableViewer setsViewer;
     private FormTableInteraction itemsInteraction;
+    private FormTableInteraction setsInteraction;
     private TableColumn pathColumn;
     private TableColumn nameColumn;
+    private TableColumn activeColumn;
+    private TableColumn setNameColumn;
+    private TableColumn countColumn;
+    private TableColumn projectColumn;
     private NameLabelProvider nameLabelProvider;
     private ItemIconResolver iconResolver;
     private List<ObjectSets.Item> filteredItems = new ArrayList<>();
     private List<ObjectSets.SetDef> filteredSets = new ArrayList<>();
     private ObjectSets.SetDef selectedSet;
     private ObjectSets.SetDef dragSourceSet;
+    private ObjectSets.SetDef setsSelectionAnchor;
+    private boolean revertingSetsSelection;
     private TableItem dropHighlightItem;
 
     private int itemsColumnSaveGeneration;
+    private int itemsPaneSaveGeneration;
     private int cachedItemsNameWidth;
     private int cachedItemsPathWidth;
+    private int cachedItemsPaneWidth;
+    private boolean sashSizingInstalled;
+    private boolean syncingSashLayout;
+
+    /** Ключ объекта для восстановления после закрытия вкладки (однократно). */
+    private String pendingItemKeyRestore;
 
     private final Runnable storeListener = this::refreshOnUi;
 
     private ActiveProjectTracker.ContextProjectListener contextProjectListener;
+
+    private IContextActivation keyContextActivation;
 
     public static ObjectSetsView getActiveInstance()
     {
@@ -129,8 +167,32 @@ public final class ObjectSetsView extends ViewPart
 
     public ObjectSets.Item getSelectedItem()
     {
+        ObjectSets.Item current = currentItemFromTableFocus();
+        if (current != null)
+            return current;
         List<ObjectSets.Item> items = getSelectedItems();
         return items.isEmpty() ? null : items.get(0);
+    }
+
+    /** Текущая (сфокусированная) строка таблицы элементов, не первое из мультивыделения. */
+    private ObjectSets.Item currentItemFromTableFocus()
+    {
+        if (itemsViewer == null || itemsViewer.getControl().isDisposed())
+            return null;
+        Table table = itemsViewer.getTable();
+        if (table == null || table.isDisposed())
+            return null;
+        int idx = table.getSelectionIndex();
+        if (idx < 0 && itemsInteraction != null)
+        {
+            TableItem item = itemsInteraction.selectedItem();
+            if (item != null && !item.isDisposed())
+                idx = table.indexOf(item);
+        }
+        if (idx < 0)
+            return null;
+        Object element = itemsViewer.getElementAt(idx);
+        return element instanceof ObjectSets.Item item ? item : null;
     }
 
     public List<ObjectSets.Item> getSelectedItems()
@@ -158,6 +220,8 @@ public final class ObjectSetsView extends ViewPart
     public void saveState(IMemento memento)
     {
         writeItemsColumnLayoutToMemento(memento);
+        writeItemsPaneWidthToMemento(memento);
+        writeSelectionToMemento(memento);
         super.saveState(memento);
     }
 
@@ -175,12 +239,18 @@ public final class ObjectSetsView extends ViewPart
         sashForm.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
         createItemsPane(sashForm);
         createSetsPane(sashForm);
-        sashForm.setWeights(readSashWeights());
+        installItemsPaneSashPersistence();
+        cachedItemsPaneWidth = readItemsPaneWidth(workbenchState, viewSettings());
+
+        pendingItemKeyRestore = readStringSetting(workbenchState, viewSettings(), KEY_SELECTED_ITEM_KEY);
+        if (pendingItemKeyRestore != null && pendingItemKeyRestore.isBlank())
+            pendingItemKeyRestore = null;
 
         ObjectSets.getInstance().addChangeListener(storeListener);
         ObjectSetsAddTargetState.getInstance().addListener(storeListener);
         installContextProjectListener();
         refreshSetsTable();
+        activateKeyContext();
     }
 
     private void createFilterRow(Composite parent)
@@ -207,20 +277,22 @@ public final class ObjectSetsView extends ViewPart
     {
         refreshItemIcons();
         if (filterInput != null && !filterInput.isDisposed())
-            filterInput.setFocus();
+            filterInput.scheduleFocusWhenReady();
     }
 
     @Override
     public void dispose()
     {
         saveItemsColumnWidths();
-        saveSashWeights();
+        saveItemsPaneWidth();
+        saveSelection();
         ObjectSets.getInstance().removeChangeListener(storeListener);
         ObjectSetsAddTargetState.getInstance().removeListener(storeListener);
         IWorkbenchPage page = getSite() != null ? getSite().getPage() : null;
         if (page != null && contextProjectListener != null)
             ActiveProjectTracker.removeListener(page, contextProjectListener);
         contextProjectListener = null;
+        deactivateKeyContext();
         if (activeInstance == this)
             activeInstance = null;
         super.dispose();
@@ -228,7 +300,8 @@ public final class ObjectSetsView extends ViewPart
 
     private void createItemsPane(Composite parent)
     {
-        Composite pane = new Composite(parent, SWT.NONE);
+        itemsPane = new Composite(parent, SWT.NONE);
+        Composite pane = itemsPane;
         pane.setLayout(new FillLayout());
 
         Composite tableStack = new Composite(pane, SWT.NONE);
@@ -312,6 +385,8 @@ public final class ObjectSetsView extends ViewPart
         });
         itemsInteraction.install();
 
+        installItemsFilterNavigation(table);
+
         installItemsColumnPersistence();
 
         table.addListener(SWT.MouseDoubleClick, e -> jumpToSelectedItem());
@@ -342,21 +417,42 @@ public final class ObjectSetsView extends ViewPart
         });
     }
 
+    private void installItemsFilterNavigation(Table table)
+    {
+        if (filterInput == null || filterInput.isDisposed() || table == null || table.isDisposed())
+            return;
+        Control filterKeys = filterInput.inputControl();
+        if (filterKeys == null)
+            filterKeys = filterInput.widget();
+        FilterInputBoxListNavigation.installTableOpenOnEnter(filterKeys, table, newIdx ->
+        {
+            if (newIdx >= 0 && newIdx < filteredItems.size())
+                itemsViewer.setSelection(new StructuredSelection(filteredItems.get(newIdx)));
+        }, this::jumpToSelectedItem);
+    }
+
     private void createSetsPane(Composite parent)
     {
         Composite pane = new Composite(parent, SWT.NONE);
         pane.setLayout(new GridLayout(1, false));
 
-        setsViewer = new TableViewer(pane,
+        Composite tableStack = new Composite(pane, SWT.NONE);
+        tableStack.setLayout(null);
+        tableStack.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+
+        Composite columnHost = new Composite(tableStack, SWT.NONE);
+        TableColumnLayout layout = new TableColumnLayout(true);
+        columnHost.setLayout(layout);
+
+        setsViewer = new TableViewer(columnHost,
             SWT.BORDER | SWT.SINGLE | SWT.FULL_SELECTION | SWT.V_SCROLL);
         Table table = setsViewer.getTable();
         table.setHeaderVisible(true);
         table.setLinesVisible(true);
-        table.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
 
         TableViewerColumn colActive = new TableViewerColumn(setsViewer, SWT.NONE);
-        colActive.getColumn().setText("Активный"); //$NON-NLS-1$
-        colActive.getColumn().setWidth(56);
+        activeColumn = colActive.getColumn();
+        activeColumn.setText("Активный"); //$NON-NLS-1$
         colActive.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
@@ -367,10 +463,11 @@ public final class ObjectSetsView extends ViewPart
                 return ObjectSetsAddTargetState.getInstance().isAddTarget(set.id) ? "●" : ""; //$NON-NLS-1$ //$NON-NLS-2$
             }
         });
+        layout.setColumnData(activeColumn, new ColumnPixelData(56, false, false));
 
         TableViewerColumn colSetName = new TableViewerColumn(setsViewer, SWT.NONE);
-        colSetName.getColumn().setText("Имя"); //$NON-NLS-1$
-        colSetName.getColumn().setWidth(120);
+        setNameColumn = colSetName.getColumn();
+        setNameColumn.setText("Набор"); //$NON-NLS-1$
         colSetName.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
@@ -379,10 +476,11 @@ public final class ObjectSetsView extends ViewPart
                 return element instanceof ObjectSets.SetDef set ? set.name : ""; //$NON-NLS-1$
             }
         });
+        layout.setColumnData(setNameColumn, new ColumnPixelData(120, true, true));
 
         TableViewerColumn colCount = new TableViewerColumn(setsViewer, SWT.NONE);
-        colCount.getColumn().setText("Объектов"); //$NON-NLS-1$
-        colCount.getColumn().setWidth(64);
+        countColumn = colCount.getColumn();
+        countColumn.setText("Объектов"); //$NON-NLS-1$
         colCount.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
@@ -393,10 +491,11 @@ public final class ObjectSetsView extends ViewPart
                 return Integer.toString(set.items.size());
             }
         });
+        layout.setColumnData(countColumn, new ColumnPixelData(64, false, false));
 
         TableViewerColumn colProject = new TableViewerColumn(setsViewer, SWT.NONE);
-        colProject.getColumn().setText("Проект"); //$NON-NLS-1$
-        colProject.getColumn().setWidth(90);
+        projectColumn = colProject.getColumn();
+        projectColumn.setText("Проект"); //$NON-NLS-1$
         colProject.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
@@ -405,20 +504,33 @@ public final class ObjectSetsView extends ViewPart
                 return element instanceof ObjectSets.SetDef set ? set.projectName : ""; //$NON-NLS-1$
             }
         });
+        layout.setColumnData(projectColumn, new ColumnPixelData(90, true, true));
 
         setsViewer.setContentProvider(ArrayContentProvider.getInstance());
 
-        table.addListener(SWT.MouseDown, e ->
+        setsInteraction = new FormTableInteraction(table, setsViewer, (item, column) ->
+        {
+            if (!(item.getData() instanceof ObjectSets.SetDef set))
+                return ""; //$NON-NLS-1$
+            TableColumn col = table.getColumn(column);
+            if (col == activeColumn)
+                return ObjectSetsAddTargetState.getInstance().isAddTarget(set.id) ? "●" : ""; //$NON-NLS-1$ //$NON-NLS-2$
+            if (col == setNameColumn)
+                return set.name != null ? set.name : ""; //$NON-NLS-1$
+            if (col == countColumn)
+                return Integer.toString(set.items.size());
+            if (col == projectColumn)
+                return set.projectName != null ? set.projectName : ""; //$NON-NLS-1$
+            return ""; //$NON-NLS-1$
+        });
+        setsInteraction.install();
+
+        table.addListener(SWT.MouseDoubleClick, e ->
         {
             TableItem row = table.getItem(new Point(e.x, e.y));
-            if (row == null)
+            if (row == null || !(row.getData() instanceof ObjectSets.SetDef set))
                 return;
-            int col = columnIndexAt(table, e.x, row);
-            if (col == 0 && row.getData() instanceof ObjectSets.SetDef set)
-            {
-                ObjectSetsAddTargetState.getInstance().setAddTarget(set.id);
-                setsViewer.refresh();
-            }
+            activateAddTargetSet(set);
         });
 
         setsViewer.addSelectionChangedListener(event ->
@@ -426,6 +538,19 @@ public final class ObjectSetsView extends ViewPart
             ObjectSets.SetDef set = null;
             if (event.getStructuredSelection().getFirstElement() instanceof ObjectSets.SetDef s)
                 set = s;
+            if (setsSelectionAnchor != null && set != setsSelectionAnchor && !revertingSetsSelection)
+            {
+                revertingSetsSelection = true;
+                try
+                {
+                    setsViewer.setSelection(new StructuredSelection(setsSelectionAnchor));
+                }
+                finally
+                {
+                    revertingSetsSelection = false;
+                }
+                return;
+            }
             selectedSet = set;
             refreshItemsTable();
         });
@@ -487,6 +612,22 @@ public final class ObjectSetsView extends ViewPart
                     setsViewer.setSelection(new StructuredSelection(set));
                     selectedSet = set;
                     break;
+                }
+            }
+        }
+        if (selectedSet == null && !filteredSets.isEmpty())
+        {
+            String savedSetId = readStringSetting(workbenchState, viewSettings(), KEY_SELECTED_SET_ID);
+            if (savedSetId != null && !savedSetId.isBlank())
+            {
+                for (ObjectSets.SetDef set : filteredSets)
+                {
+                    if (savedSetId.equals(set.id))
+                    {
+                        setsViewer.setSelection(new StructuredSelection(set));
+                        selectedSet = set;
+                        break;
+                    }
                 }
             }
         }
@@ -569,6 +710,15 @@ public final class ObjectSetsView extends ViewPart
         refreshSetsTable();
     }
 
+    private void activateAddTargetSet(ObjectSets.SetDef set)
+    {
+        if (set == null)
+            return;
+        ObjectSetsAddTargetState.getInstance().setAddTarget(set.id);
+        if (setsViewer != null && !setsViewer.getControl().isDisposed())
+            setsViewer.refresh();
+    }
+
     private ObjectSets.SetDef addTargetSetForActiveProject()
     {
         String projectName = activeProjectNameForSelection();
@@ -593,6 +743,15 @@ public final class ObjectSetsView extends ViewPart
     {
         String projectName = activeProjectNameForSelection();
         ObjectSets.getInstance().ensureDefaultSetForProject(projectName);
+    }
+
+    void refreshItemsForSetIfSelected(String setId)
+    {
+        if (setId == null || selectedSet == null || !setId.equals(selectedSet.id))
+            return;
+        if (itemsViewer == null || itemsViewer.getControl().isDisposed())
+            return;
+        refreshItemsTable();
     }
 
     private void refreshItemsTable()
@@ -658,6 +817,10 @@ public final class ObjectSetsView extends ViewPart
     {
         if (itemsViewer == null || itemsViewer.getControl().isDisposed() || selectedSet == null)
             return;
+        ObjectSets.Item current = getSelectedItem();
+        String selectedKey = current != null ? current.key : null;
+        if ((selectedKey == null || selectedKey.isBlank()) && pendingItemKeyRestore != null)
+            selectedKey = pendingItemKeyRestore;
         String pattern = filterInput != null ? filterInput.getText().trim() : ""; //$NON-NLS-1$
         SmartMatcher matcher = new SmartMatcher(pattern);
         nameLabelProvider.setMatcher(matcher);
@@ -674,11 +837,58 @@ public final class ObjectSetsView extends ViewPart
         {
             itemsViewer.setInput(filteredItems);
             itemsViewer.refresh();
+            if (selectedKey != null && !selectedKey.isBlank())
+                restoreItemSelectionByKey(selectedKey);
         }
         finally
         {
             table.setRedraw(true);
+            pendingItemKeyRestore = null;
         }
+    }
+
+    private boolean restoreItemSelectionByKey(String key)
+    {
+        if (key == null || key.isBlank() || filteredItems.isEmpty())
+            return false;
+        ObjectSets.Item item = null;
+        int index = -1;
+        for (int i = 0; i < filteredItems.size(); i++)
+        {
+            if (key.equals(filteredItems.get(i).key))
+            {
+                item = filteredItems.get(i);
+                index = i;
+                break;
+            }
+        }
+        if (item == null)
+            return false;
+        itemsViewer.setSelection(new StructuredSelection(item));
+        if (itemsInteraction == null)
+            return true;
+        Table table = itemsViewer.getTable();
+        if (table.isDisposed() || index < 0 || index >= table.getItemCount())
+            return true;
+        TableItem tableItem = table.getItem(index);
+        if (tableItem == null)
+            return true;
+        table.showItem(tableItem);
+        itemsInteraction.selectCell(tableItem, visualColumnIndex(table, nameColumn));
+        return true;
+    }
+
+    private static int visualColumnIndex(Table table, TableColumn column)
+    {
+        if (table == null || column == null || column.isDisposed())
+            return 0;
+        TableColumn[] cols = table.getColumns();
+        for (int i = 0; i < cols.length; i++)
+        {
+            if (cols[i] == column)
+                return i;
+        }
+        return 0;
     }
 
     void addToSetFromDrop(ObjectSets.SetDef target, IStructuredSelection dragSelection)
@@ -703,6 +913,66 @@ public final class ObjectSetsView extends ViewPart
         setsViewer.setSelection(new StructuredSelection(target));
         selectedSet = target;
         refreshItemsTable();
+    }
+
+    private void moveItemsToSetFromDrop(ObjectSets.SetDef source, ObjectSets.SetDef target,
+            IStructuredSelection dragSelection)
+    {
+        if (source == null || target == null || dragSelection == null || dragSelection.isEmpty())
+            return;
+        List<ObjectSets.Item> items = collectObjectSetItems(dragSelection);
+        ObjectSetsItems.MoveResult result = ObjectSetsItems.moveItemsToSet(
+            source, target, items, getSite().getShell());
+        if (result.removed <= 0)
+            return;
+        refreshItemsTable();
+    }
+
+    private void copyItemsToSetFromDrop(ObjectSets.SetDef target, IStructuredSelection dragSelection)
+    {
+        if (target == null || dragSelection == null || dragSelection.isEmpty())
+            return;
+        List<ObjectSets.Item> items = collectObjectSetItems(dragSelection);
+        ObjectSetsItems.addItemsToSet(target, items, getSite().getShell());
+        refreshItemsTable();
+    }
+
+    private static boolean isObjectSetItemsDrag(IStructuredSelection selection)
+    {
+        if (selection == null || selection.isEmpty())
+            return false;
+        for (Object element : selection.toList())
+        {
+            if (!(element instanceof ObjectSets.Item))
+                return false;
+        }
+        return true;
+    }
+
+    private static List<ObjectSets.Item> collectObjectSetItems(IStructuredSelection selection)
+    {
+        List<ObjectSets.Item> result = new ArrayList<>();
+        if (selection == null)
+            return result;
+        for (Object element : selection.toList())
+        {
+            if (element instanceof ObjectSets.Item item)
+                result.add(item);
+        }
+        return result;
+    }
+
+    private static int objectSetItemsDropDetail(ObjectSets.SetDef source, ObjectSets.SetDef target)
+    {
+        if (source == null || target == null || source.id.equals(target.id)
+                || !source.projectName.equals(target.projectName))
+            return DND.DROP_NONE;
+        return isCtrlKeyDown() ? DND.DROP_COPY : DND.DROP_MOVE;
+    }
+
+    private static boolean isCtrlKeyDown()
+    {
+        return (User32.INSTANCE.GetAsyncKeyState(0x11) & 0x8000) != 0;
     }
 
     private void addSet()
@@ -826,6 +1096,80 @@ public final class ObjectSetsView extends ViewPart
         }
     }
 
+    void showSelectedInNavigator()
+    {
+        ObjectSets.Item item = getSelectedItem();
+        if (item == null || selectedSet == null)
+            return;
+        IProject project = ResourcesPlugin.getWorkspace().getRoot().getProject(selectedSet.projectName);
+        if (project == null || !project.exists())
+        {
+            ToastNotification.show("Наборы объектов",
+                "Проект «" + selectedSet.projectName + "» не найден", 4000); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        IV8ProjectManager projectManager =
+            (IV8ProjectManager) Global.getServiceByClass(IV8ProjectManager.class);
+        IV8Project v8Project = projectManager.getProject(project);
+        if (v8Project == null)
+        {
+            ToastNotification.show("Наборы объектов",
+                "Проект " + project.getName() + " не открыт", 4000); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        String mdRef = RecentPlacesKeys.mdObjectRefFromKey(item.key);
+        if (mdRef == null || mdRef.isBlank())
+        {
+            ToastNotification.show("Наборы объектов",
+                "Не удалось определить объект для навигатора", 4000); //$NON-NLS-1$
+            return;
+        }
+        EObject eObject = GoToDefinition.resolveEObjectForFullName(
+            mdRef, getSite().getPage(), project);
+        if (eObject == null)
+        {
+            ToastNotification.show("Наборы объектов",
+                "Не удалось найти в навигаторе:\n" + item.displayName, 5000); //$NON-NLS-1$
+            return;
+        }
+        NavigatorReveal.reveal(eObject, true);
+    }
+
+    private void executeShowInNavigatorCommand()
+    {
+        IHandlerService handlerService = getSite().getService(IHandlerService.class);
+        if (handlerService == null)
+            return;
+        try
+        {
+            handlerService.executeCommand(SHOW_IN_NAVIGATOR_COMMAND_ID, null);
+        }
+        catch (Exception ex)
+        {
+            Global.log("ObjectSetsView: showInNavigator: " + ex); //$NON-NLS-1$
+        }
+    }
+
+    private void activateKeyContext()
+    {
+        if (keyContextActivation != null)
+            return;
+        IContextService contextService = getSite().getService(IContextService.class);
+        if (contextService == null)
+            return;
+        keyContextActivation = contextService.activateContext(BINDING_CONTEXT_ID);
+    }
+
+    private void deactivateKeyContext()
+    {
+        if (keyContextActivation == null)
+            return;
+        IContextService contextService = getSite().getService(IContextService.class);
+        if (contextService != null)
+            contextService.deactivateContext(keyContextActivation);
+        keyContextActivation = null;
+    }
+
     private final class NameLabelProvider extends LabelProvider implements IStyledLabelProvider
     {
         private SmartMatcher matcher = new SmartMatcher(""); //$NON-NLS-1$
@@ -933,8 +1277,9 @@ public final class ObjectSetsView extends ViewPart
         Menu menu = new Menu(table);
         table.setMenu(menu);
         MenuItem showNav = new MenuItem(menu, SWT.PUSH);
-        showNav.setText("Показать в навигаторе"); //$NON-NLS-1$
-        showNav.addListener(SWT.Selection, e -> jumpToSelectedItem());
+        showNav.setText(ITEM_TEXT_SHOW_IN_NAVIGATOR);
+        showNav.setToolTipText("Показать объект метаданных в дереве навигатора"); //$NON-NLS-1$
+        showNav.addListener(SWT.Selection, e -> executeShowInNavigatorCommand());
         MenuItem copy = new MenuItem(menu, SWT.PUSH);
         copy.setText("Копировать ссылку \tCtrl+C"); //$NON-NLS-1$
         copy.addListener(SWT.Selection, e -> copySelectedNavRef());
@@ -969,9 +1314,42 @@ public final class ObjectSetsView extends ViewPart
         ToastNotification.show("Скопировано", item.navRef, 4000); //$NON-NLS-1$
     }
 
+    private void installItemsDragSource(Table table)
+    {
+        DragSource source = new DragSource(table, DND.DROP_COPY | DND.DROP_MOVE);
+        source.setTransfer(new Transfer[] { LocalSelectionTransfer.getTransfer() });
+        source.addDragListener(new DragSourceAdapter()
+        {
+            @Override
+            public void dragStart(DragSourceEvent event)
+            {
+                IStructuredSelection selection = itemsViewer.getStructuredSelection();
+                LocalSelectionTransfer.getTransfer().setSelection(selection);
+                dragSourceSet = selectedSet;
+                setsSelectionAnchor = selectedSet;
+                event.doit = !selection.isEmpty() && isObjectSetItemsDrag(selection);
+            }
+
+            @Override
+            public void dragSetData(DragSourceEvent event)
+            {
+                LocalSelectionTransfer.getTransfer().setSelection(itemsViewer.getStructuredSelection());
+            }
+
+            @Override
+            public void dragFinished(DragSourceEvent event)
+            {
+                dragSourceSet = null;
+                setsSelectionAnchor = null;
+                if (setsViewer != null && !setsViewer.getControl().isDisposed())
+                    clearDropHighlight(setsViewer.getTable());
+            }
+        });
+    }
+
     private void installItemsDropTarget(Table table)
     {
-        DropTarget target = new DropTarget(table, DND.DROP_COPY | DND.DROP_DEFAULT);
+        DropTarget target = new DropTarget(table, DND.DROP_COPY | DND.DROP_MOVE | DND.DROP_DEFAULT);
         target.setTransfer(new Transfer[] { LocalSelectionTransfer.getTransfer() });
         target.addDropListener(new DropTargetAdapter()
         {
@@ -983,6 +1361,12 @@ public final class ObjectSetsView extends ViewPart
                     event.detail = DND.DROP_NONE;
                     return;
                 }
+                Object selObj = LocalSelectionTransfer.getTransfer().getSelection();
+                if (selObj instanceof IStructuredSelection sel && isObjectSetItemsDrag(sel))
+                {
+                    event.detail = objectSetItemsDropDetail(dragSourceSet, selectedSet);
+                    return;
+                }
                 event.detail = DND.DROP_COPY;
             }
 
@@ -990,7 +1374,16 @@ public final class ObjectSetsView extends ViewPart
             public void drop(DropTargetEvent event)
             {
                 Object selObj = LocalSelectionTransfer.getTransfer().getSelection();
-                if (selectedSet != null && selObj instanceof IStructuredSelection sel && !sel.isEmpty())
+                if (!(selObj instanceof IStructuredSelection sel) || sel.isEmpty() || selectedSet == null)
+                    return;
+                if (isObjectSetItemsDrag(sel))
+                {
+                    if (isCtrlKeyDown())
+                        copyItemsToSetFromDrop(selectedSet, sel);
+                    else
+                        moveItemsToSetFromDrop(dragSourceSet, selectedSet, sel);
+                }
+                else
                     addToSetFromDrop(selectedSet, sel);
             }
         });
@@ -998,37 +1391,66 @@ public final class ObjectSetsView extends ViewPart
 
     private void installSetsDropTarget(Table table)
     {
-        DropTarget target = new DropTarget(table, DND.DROP_COPY | DND.DROP_DEFAULT);
+        DropTarget target = new DropTarget(table, DND.DROP_COPY | DND.DROP_MOVE | DND.DROP_DEFAULT);
         target.setTransfer(new Transfer[] { LocalSelectionTransfer.getTransfer() });
-        target.addDropListener(new DropTargetAdapter()
+        target.setDropTargetEffect(new TableDropTargetEffect(table)
         {
             @Override
             public void dragOver(DropTargetEvent event)
             {
+                event.feedback &= ~DND.FEEDBACK_SELECT;
+                super.dragOver(event);
+            }
+        });
+        target.addDropListener(new DropTargetAdapter()
+        {
+            @Override
+            public void dragEnter(DropTargetEvent event)
+            {
+                event.feedback &= ~DND.FEEDBACK_SELECT;
+            }
+
+            @Override
+            public void dragOver(DropTargetEvent event)
+            {
+                event.feedback &= ~DND.FEEDBACK_SELECT;
                 ObjectSets.SetDef set = setAt(event);
                 if (set == null)
                 {
                     event.detail = DND.DROP_NONE;
                     return;
                 }
-                event.detail = DND.DROP_COPY;
+                Object selObj = LocalSelectionTransfer.getTransfer().getSelection();
+                if (selObj instanceof IStructuredSelection sel && isObjectSetItemsDrag(sel))
+                    event.detail = objectSetItemsDropDetail(dragSourceSet, set);
+                else
+                    event.detail = DND.DROP_COPY;
                 highlightDropRow(table, set);
             }
 
             @Override
             public void drop(DropTargetEvent event)
             {
-                clearDropHighlight();
+                clearDropHighlight(table);
                 ObjectSets.SetDef set = setAt(event);
                 Object selObj = LocalSelectionTransfer.getTransfer().getSelection();
-                if (set != null && selObj instanceof IStructuredSelection sel && !sel.isEmpty())
+                if (set == null || !(selObj instanceof IStructuredSelection sel) || sel.isEmpty())
+                    return;
+                if (isObjectSetItemsDrag(sel))
+                {
+                    if (isCtrlKeyDown())
+                        copyItemsToSetFromDrop(set, sel);
+                    else
+                        moveItemsToSetFromDrop(dragSourceSet, set, sel);
+                }
+                else
                     addToSetFromDrop(set, sel);
             }
 
             @Override
             public void dragLeave(DropTargetEvent event)
             {
-                clearDropHighlight();
+                clearDropHighlight(table);
             }
 
             private ObjectSets.SetDef setAt(DropTargetEvent event)
@@ -1044,20 +1466,22 @@ public final class ObjectSetsView extends ViewPart
 
     private void highlightDropRow(Table table, ObjectSets.SetDef set)
     {
-        TableItem[] items = table.getItems();
-        for (TableItem item : items)
+        clearDropHighlight(table);
+        for (TableItem item : table.getItems())
         {
             if (item.getData() == set)
             {
                 dropHighlightItem = item;
-                table.setSelection(item);
+                item.setBackground(table.getDisplay().getSystemColor(SWT.COLOR_WIDGET_LIGHT_SHADOW));
                 return;
             }
         }
     }
 
-    private void clearDropHighlight()
+    private void clearDropHighlight(Table table)
     {
+        if (dropHighlightItem != null && !dropHighlightItem.isDisposed())
+            dropHighlightItem.setBackground(null);
         dropHighlightItem = null;
     }
 
@@ -1071,9 +1495,159 @@ public final class ObjectSetsView extends ViewPart
         return -1;
     }
 
-    private int[] readSashWeights()
+    private void installItemsPaneSashPersistence()
     {
+        if (sashForm == null || sashForm.isDisposed() || sashSizingInstalled)
+            return;
+        sashSizingInstalled = true;
+        sashForm.addListener(SWT.Selection, e -> scheduleSaveItemsPaneWidth());
+        sashForm.addListener(SWT.Resize, e -> syncItemsPaneWidthFromStore());
+    }
+
+    private void syncItemsPaneWidthFromStore()
+    {
+        if (syncingSashLayout || sashForm == null || sashForm.isDisposed())
+            return;
+        int total = sashForm.getClientArea().width;
+        if (total <= 0)
+            return;
+        int width = cachedItemsPaneWidth > 0
+            ? cachedItemsPaneWidth
+            : readItemsPaneWidth(workbenchState, viewSettings());
+        if (width <= 0)
+        {
+            int[] weights = readLegacySashWeights(viewSettings());
+            width = weights[0] * total / Math.max(1, weights[0] + weights[1]);
+            width = clampItemsPaneWidth(width);
+            cachedItemsPaneWidth = width;
+        }
+        int actual = liveItemsPaneWidth();
+        if (actual > 0 && Math.abs(actual - width) <= 2)
+            return;
+        syncingSashLayout = true;
+        try
+        {
+            applySashWeightsForItemsPaneWidth(width);
+        }
+        finally
+        {
+            syncingSashLayout = false;
+        }
+    }
+
+    private void applySashWeightsForItemsPaneWidth(int paneWidth)
+    {
+        if (sashForm == null || sashForm.isDisposed())
+            return;
+        int total = sashForm.getClientArea().width;
+        if (total <= 0)
+            return;
+        paneWidth = clampItemsPaneWidth(paneWidth);
+        int rightWeight = Math.max(1, total - paneWidth);
+        sashForm.setWeights(new int[] { paneWidth, rightWeight });
+    }
+
+    private static int clampItemsPaneWidth(int width)
+    {
+        if (width < MIN_ITEMS_PANE_WIDTH)
+            return MIN_ITEMS_PANE_WIDTH;
+        if (width > MAX_ITEMS_PANE_WIDTH)
+            return MAX_ITEMS_PANE_WIDTH;
+        return width;
+    }
+
+    private int readItemsPaneWidth(IMemento memento, IDialogSettings settings)
+    {
+        if (memento != null)
+        {
+            String raw = memento.getString(KEY_ITEMS_PANE_WIDTH);
+            if (raw != null && !raw.isBlank())
+            {
+                try
+                {
+                    int w = Integer.parseInt(raw.trim());
+                    if (w >= MIN_ITEMS_PANE_WIDTH)
+                        return clampItemsPaneWidth(w);
+                }
+                catch (NumberFormatException ignored)
+                {
+                }
+            }
+        }
+        String raw = settings.get(KEY_ITEMS_PANE_WIDTH);
+        if (raw != null && !raw.isBlank())
+        {
+            try
+            {
+                int w = Integer.parseInt(raw);
+                if (w >= MIN_ITEMS_PANE_WIDTH)
+                    return clampItemsPaneWidth(w);
+            }
+            catch (NumberFormatException ignored)
+            {
+            }
+        }
+        return 0;
+    }
+
+    private int liveItemsPaneWidth()
+    {
+        if (itemsPane == null || itemsPane.isDisposed())
+            return 0;
+        int width = itemsPane.getBounds().width;
+        return width >= MIN_ITEMS_PANE_WIDTH ? width : 0;
+    }
+
+    private void scheduleSaveItemsPaneWidth()
+    {
+        if (sashForm == null || sashForm.isDisposed())
+            return;
+        Display display = sashForm.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        final int generation = ++itemsPaneSaveGeneration;
+        display.timerExec(ITEMS_PANE_SAVE_DELAY_MS, () ->
+        {
+            if (generation == itemsPaneSaveGeneration)
+                saveItemsPaneWidth();
+        });
+    }
+
+    private void saveItemsPaneWidth()
+    {
+        int width = liveItemsPaneWidth();
+        if (width <= 0 && cachedItemsPaneWidth > 0)
+            width = cachedItemsPaneWidth;
+        if (width <= 0)
+            return;
+        cachedItemsPaneWidth = clampItemsPaneWidth(width);
         IDialogSettings settings = viewSettings();
+        settings.put(KEY_ITEMS_PANE_WIDTH, Integer.toString(cachedItemsPaneWidth));
+        if (sashForm != null && !sashForm.isDisposed())
+        {
+            int[] weights = sashForm.getWeights();
+            if (weights != null && weights.length >= 2)
+                settings.put(KEY_SASH, weights[0] + "," + weights[1]); //$NON-NLS-1$
+        }
+    }
+
+    private void writeItemsPaneWidthToMemento(IMemento memento)
+    {
+        if (memento == null)
+            return;
+        int width = liveItemsPaneWidth();
+        if (width <= 0 && cachedItemsPaneWidth > 0)
+            width = cachedItemsPaneWidth;
+        if (width <= 0)
+            width = readItemsPaneWidth(workbenchState, viewSettings());
+        if (width <= 0)
+            width = DEFAULT_ITEMS_PANE_WIDTH;
+        if (width > 0)
+            memento.putString(KEY_ITEMS_PANE_WIDTH, Integer.toString(clampItemsPaneWidth(width)));
+    }
+
+    private static int[] readLegacySashWeights(IDialogSettings settings)
+    {
         String raw = settings.get(KEY_SASH);
         if (raw == null || !raw.contains(",")) //$NON-NLS-1$
             return new int[] { 65, 35 };
@@ -1088,14 +1662,37 @@ public final class ObjectSetsView extends ViewPart
         }
     }
 
-    private void saveSashWeights()
+    private void saveSelection()
     {
-        if (sashForm == null || sashForm.isDisposed())
+        String setId = selectedSet != null ? selectedSet.id : ""; //$NON-NLS-1$
+        ObjectSets.Item item = getSelectedItem();
+        String itemKey = item != null ? item.key : ""; //$NON-NLS-1$
+        IDialogSettings settings = viewSettings();
+        settings.put(KEY_SELECTED_SET_ID, setId);
+        settings.put(KEY_SELECTED_ITEM_KEY, itemKey);
+    }
+
+    private void writeSelectionToMemento(IMemento memento)
+    {
+        if (memento == null)
             return;
-        int[] weights = sashForm.getWeights();
-        if (weights == null || weights.length < 2)
-            return;
-        viewSettings().put(KEY_SASH, weights[0] + "," + weights[1]); //$NON-NLS-1$
+        String setId = selectedSet != null ? selectedSet.id : ""; //$NON-NLS-1$
+        ObjectSets.Item item = getSelectedItem();
+        String itemKey = item != null ? item.key : ""; //$NON-NLS-1$
+        memento.putString(KEY_SELECTED_SET_ID, setId);
+        memento.putString(KEY_SELECTED_ITEM_KEY, itemKey);
+    }
+
+    private static String readStringSetting(IMemento memento, IDialogSettings settings, String key)
+    {
+        if (memento != null)
+        {
+            String raw = memento.getString(key);
+            if (raw != null)
+                return raw;
+        }
+        String raw = settings.get(key);
+        return raw != null ? raw : ""; //$NON-NLS-1$
     }
 
     private static int readColWidth(IMemento memento, IDialogSettings settings, String key,

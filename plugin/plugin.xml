@@ -37,6 +37,7 @@
     <startup class="tormozit.DebugCollectionSessionHook"/>
     <startup class="tormozit.DebugInspectorHook"/>
     <startup class="tormozit.InfobaseSyncQuestionDialogHook"/>
+    <startup class="tormozit.FilterBySubsystemsDialogHook"/>
   </extension>
 
   <extension point="org.eclipse.ui.contexts">
@@ -51,6 +52,10 @@
     <context
         id="tormozit.recentPlaces.context"
         name="Панель «Последние места»"
+        parentId="org.eclipse.ui.contexts.window"/>
+    <context
+        id="tormozit.objectSets.context"
+        name="Панель «Наборы объектов»"
         parentId="org.eclipse.ui.contexts.window"/>
   </extension>
 
@@ -145,6 +150,12 @@
           schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
           sequence="M1+T">
     </key>
+    <key
+          commandId="tormozit.objectSets.showInNavigator"
+          contextId="tormozit.objectSets.context"
+          schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
+          sequence="M1+T">
+    </key>
   </extension>
 
   <extension point="org.eclipse.ui.commands">
@@ -211,6 +222,11 @@
         name="Показать в навигаторе"
         categoryId="tormozit.commands.global"
         description="Показать выбранный объект из панели «Последние места» в навигаторе (Комфорт)"/>
+    <command
+        id="tormozit.objectSets.showInNavigator"
+        name="Показать в навигаторе"
+        categoryId="tormozit.commands.global"
+        description="Показать объект метаданных текущей строки набора в дереве навигатора (Комфорт)"/>
     <command
         id="tormozit.OpenConfigurationObject"
         name="Открыть объект конфигурации"
@@ -329,6 +345,15 @@
       </activeWhen>
     </handler>
     <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.ObjectSetsShowInNavigatorHandler"
+        commandId="tormozit.objectSets.showInNavigator">
+      <activeWhen>
+        <with variable="activePartId">
+          <equals value="tormozit.ObjectSetsView"/>
+        </with>
+      </activeWhen>
+    </handler>
+    <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.OpenConfigurationObjectHandler"
         commandId="tormozit.OpenConfigurationObject">
      </handler>
@@ -419,12 +444,6 @@
               commandId="tormozit.RecentPlaces"
               label = "Последние"
               tooltip="Последние посещённые методы и объекты метаданных (Комфорт)"
-              style="push">
-            </command>
-            <command
-              commandId="tormozit.ObjectSets"
-              label = "Наборы"
-              tooltip="Наборы объектов метаданных для фильтрации и быстрого доступа (Комфорт)"
               style="push">
             </command>
          </toolbar>

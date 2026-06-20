@@ -4,6 +4,8 @@ import org.eclipse.core.commands.AbstractHandler;
 import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
 import org.eclipse.ui.IWorkbenchPage;
+import org.eclipse.ui.IWorkbenchWindow;
+import org.eclipse.ui.handlers.HandlerUtil;
 
 /**
  * Toggle фильтра навигатора по активному набору объектов (жёлтая звезда).
@@ -16,20 +18,31 @@ public final class ObjectSetsNavigatorFilterHandler extends AbstractHandler
     {
         boolean wasActive = ObjectSetsNavigatorFilterSupport.isActive();
         boolean turningOn = !wasActive;
-        boolean allEmpty = ObjectSets.getInstance().areAllSetsEmpty();
-        if (turningOn && allEmpty)
+        if (!turningOn)
         {
             ObjectSetsNavigatorFilterSupport.setActive(false);
-            ObjectSetsHandler.showView(IWorkbenchPage.VIEW_ACTIVATE);
             ObjectSetsNavigatorFilterSupport.refreshNavigators();
             return null;
         }
-        ObjectSetsNavigatorFilterSupport.setActive(turningOn);
-        if (turningOn)
+
+        IWorkbenchWindow window = HandlerUtil.getActiveWorkbenchWindow(event);
+        IWorkbenchPage page = window != null ? window.getActivePage() : null;
+        boolean allActiveEmpty =
+            ObjectSetsAddTargetState.getInstance().areAllAddTargetSetsEmpty();
+        boolean panelOpen = ObjectSetsHandler.isViewOpen(page);
+
+        if (allActiveEmpty)
+        {
+            ObjectSetsNavigatorFilterSupport.setActive(false);
             ObjectSetsHandler.showView(IWorkbenchPage.VIEW_ACTIVATE);
+        }
+        else
+        {
+            ObjectSetsNavigatorFilterSupport.setActive(true);
+            if (!panelOpen)
+                ObjectSetsHandler.showView(IWorkbenchPage.VIEW_VISIBLE);
+        }
         ObjectSetsNavigatorFilterSupport.refreshNavigators();
         return null;
     }
 }
-
-

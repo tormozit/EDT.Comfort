@@ -485,25 +485,15 @@ public final class ObjectSets
 
         static final Comparator<Item> COMPARATOR = (a, b) ->
         {
-            int byType = COLLATOR.compare(typeName(a), typeName(b));
-            if (byType != 0)
-                return byType;
-            return COLLATOR.compare(nameKey(a), nameKey(b));
+            int byName = COLLATOR.compare(nameKey(a), nameKey(b));
+            if (byName != 0)
+                return byName;
+            String ka = a != null && a.key != null ? a.key : ""; //$NON-NLS-1$
+            String kb = b != null && b.key != null ? b.key : ""; //$NON-NLS-1$
+            return COLLATOR.compare(ka, kb);
         };
 
         private ItemSort() {}
-
-        static String typeName(Item item)
-        {
-            if (item == null)
-                return ""; //$NON-NLS-1$
-            String mdRef = RecentPlacesKeys.mdObjectRefFromKey(item.key);
-            String segment = MdTypeMapping.firstSegment(mdRef);
-            if (segment == null || segment.isBlank())
-                segment = MdTypeMapping.firstSegment(item.displayName);
-            String ru = MdTypeMapping.anyToRu(segment);
-            return ru != null ? ru : (segment != null ? segment : ""); //$NON-NLS-1$
-        }
 
         static String nameKey(Item item)
         {

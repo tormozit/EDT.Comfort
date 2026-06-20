@@ -8,6 +8,10 @@ import java.util.Set;
 
 import org.eclipse.swt.widgets.TableColumn;
 
+import org.eclipse.jface.layout.TableColumnLayout;
+import org.eclipse.jface.viewers.ColumnPixelData;
+import org.eclipse.swt.widgets.Composite;
+
 import com._1c.g5.v8.dt.debug.core.model.IBslVariable;
 
 /**
@@ -502,17 +506,48 @@ final class DebugCollectionColumnModel
         org.eclipse.swt.widgets.TableColumn[] existing = table.getColumns();
         for (int i = existing.length; i < fixedCols; i++)
             new org.eclipse.swt.widgets.TableColumn(table, org.eclipse.swt.SWT.NONE);
+        Composite host = table.getParent();
+        TableColumnLayout columnLayout = null;
+        if (host != null && !host.isDisposed() && host.getLayout() instanceof TableColumnLayout layout)
+            columnLayout = layout;
         for (int i = 0; i < fixedCols; i++)
         {
             Column col = columnAt(i);
             org.eclipse.swt.widgets.TableColumn tc = table.getColumn(i);
             tc.setText(col != null ? col.header : ""); //$NON-NLS-1$
-            tc.setWidth(fixedColumnWidth(col));
+            int width = fixedColumnWidth(col);
+            tc.setWidth(width);
             tc.setResizable(true);
             tc.setMoveable(false);
+            if (columnLayout != null)
+                columnLayout.setColumnData(tc, new ColumnPixelData(Math.max(1, width), true, i < fixedCols - 1));
         }
         for (int i = fixedCols; i < existing.length; i++)
             existing[i].dispose();
+    }
+
+    /** {@link TableColumnLayout} index-панели: без {@code setColumnData} таблица остаётся 0×0 при колонках с первого sync. */
+    static void applyIndexTableColumnLayout(org.eclipse.swt.widgets.Table table)
+    {
+        applyIndexTableColumnLayout(table, true);
+    }
+
+    static void applyIndexTableColumnLayout(org.eclipse.swt.widgets.Table table, boolean layoutHost)
+    {
+        if (table == null || table.isDisposed())
+            return;
+        Composite host = table.getParent();
+        if (host == null || host.isDisposed() || !(host.getLayout() instanceof TableColumnLayout columnLayout))
+            return;
+        int count = table.getColumnCount();
+        for (int i = 0; i < count; i++)
+        {
+            org.eclipse.swt.widgets.TableColumn column = table.getColumn(i);
+            int width = Math.max(1, column.getWidth());
+            columnLayout.setColumnData(column, new ColumnPixelData(width, true, i < count - 1));
+        }
+        if (layoutHost)
+            host.layout(true);
     }
 
     private void syncDataTableHeaders(org.eclipse.swt.widgets.Table table)

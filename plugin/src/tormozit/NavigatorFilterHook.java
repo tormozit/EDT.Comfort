@@ -28,6 +28,7 @@ import com._1c.g5.v8.dt.core.platform.IBmModelManager;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 import com._1c.g5.v8.dt.search.core.IModelObjectTreeSearchEngine;
 import org.eclipse.jface.viewers.ViewerFilter;
+import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.ui.navigator.CommonNavigator;
 import org.eclipse.ui.navigator.ICommonFilterDescriptor;
 import org.eclipse.ui.navigator.INavigatorContentService;
@@ -301,8 +302,8 @@ public final class NavigatorFilterHook implements IStartup
 
         final SearchBoxFilterAccess input = searchInput;
         Control focusControl = searchInput.focusControl();
-        Object nativeListener = Global.invoke(searchBox, "getSearchListener"); //$NON-NLS-1$
-        boolean listenerOk = searchInput.attachPatternListener(navigator, nativeListener, null, pattern -> {
+        final Runnable[] nativeRecoveryPending = { null };
+        boolean listenerOk = searchInput.attachPatternListener(navigator, pattern -> {
             String safePattern = pattern != null ? pattern : ""; //$NON-NLS-1$
             tree.setData(REQUESTED_PATTERN_KEY, safePattern);
             NavigatorFilterDebug.log("modify pattern=\"" + safePattern + "\" mode=" + input.mode()); //$NON-NLS-1$ //$NON-NLS-2$
@@ -310,13 +311,22 @@ public final class NavigatorFilterHook implements IStartup
                 ObjectSetsNavigatorFilterSupport.deactivateBecauseCompetingFilter();
             // ФИЛЬТРАЦИЯ НЕ ДОЛЖНА БЛОКИРОВАТЬ ВВОД: фильтр — штатный SearchJob; здесь только подсветка.
             applyHighlightState(viewer, tree, highlight, searchCache, safePattern);
-            if (safePattern.isEmpty())
+            if (safePattern.isEmpty() && searchInput.isWidgetSearchEmpty())
                 onSearchCleared(navigator, viewer, tree);
+            else if (!safePattern.isEmpty())
+                NavigatorNativeSearchBridge.scheduleNativeFilterRecovery(navigator, viewer, nativeRecoveryPending);
         });
         NavigatorFilterDebug.log("patternListener attached=" + listenerOk + " mode=" + input.mode()); //$NON-NLS-1$ //$NON-NLS-2$
 
         if (focusControl != null)
+        {
             FilterInputBoxListNavigation.installTreeNavigation(focusControl, tree);
+            focusControl.addDisposeListener(e -> {
+                Display display = focusControl.getDisplay();
+                if (nativeRecoveryPending[0] != null && display != null && !display.isDisposed())
+                    display.timerExec(-1, nativeRecoveryPending[0]);
+            });
+        }
 
         storeNavigatorHookState(tree, viewer, highlight, rawLp);
         tree.setData(PATCHED_KEY, Boolean.TRUE);
@@ -558,6 +568,15 @@ public final class NavigatorFilterHook implements IStartup
         NavigatorFilterDebug.log("nativeSearch active=" + active + " pattern=\"" + pattern + "\""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
+    private static String readNativeActivePattern(IViewPart navigator)
+    {
+        Object state = navigator != null ? Global.invoke(navigator, "getSearchFilterState") : null; //$NON-NLS-1$
+        if (state == null)
+            return ""; //$NON-NLS-1$
+        String pattern = (String) Global.invoke(state, "getActivePattern"); //$NON-NLS-1$
+        return pattern != null ? pattern : ""; //$NON-NLS-1$
+    }
+
     private static CommonViewer getCommonViewer(IViewPart navigator)
     {
         Object viewer = Global.invoke(navigator, "getCommonViewer"); //$NON-NLS-1$
@@ -636,8 +655,97 @@ public final class NavigatorFilterHook implements IStartup
         private static final String COMFORT_ENGINE_KEY = "tormozit.comfortSearchEngine"; //$NON-NLS-1$
         private static final String NATIVE_FILTER_ID =
                 "com._1c.g5.v8.dt.internal.navigator.ui.filters.NavigatorSearchFilter"; //$NON-NLS-1$
+        /** {@code searchDelay(500) + jobScheduleDelay(100) + типичный SearchJob} — после нативного job. */
+        private static final int NATIVE_SEARCH_RECOVERY_DELAY_MS = 950;
+        private static final int NATIVE_SEARCH_PATTERN_RETRY_MS = 200;
+        private static final int NATIVE_SEARCH_PATTERN_RETRY_MAX = 6;
 
         private NavigatorNativeSearchBridge() {}
+
+        /**
+         * После паузы ввода: штатный SearchJob делает {@code collapseAll}, trie строится, но
+         * {@code expandTreeViewerStepByStep} часто пропускается (отмена job) — дерево остаётся
+         * на корнях проектов при {@code isSearchFilterActive=true} (см. логи, гипотеза G).
+         */
+        static void scheduleNativeFilterRecovery(IViewPart navigator, CommonViewer viewer, Runnable[] holder)
+        {
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed() || holder == null)
+                return;
+            if (holder[0] != null)
+                display.timerExec(-1, holder[0]);
+            holder[0] = () -> syncNativeSearchUiAfterTyping(navigator, viewer, holder, 0);
+            display.timerExec(NATIVE_SEARCH_RECOVERY_DELAY_MS, holder[0]);
+        }
+
+        static void syncNativeSearchUiAfterTyping(IViewPart navigator, CommonViewer viewer, Runnable[] holder,
+                int attempt)
+        {
+            if (!(navigator instanceof CommonNavigator commonNavigator) || viewer == null)
+                return;
+            Tree tree = viewer.getTree();
+            if (tree == null || tree.isDisposed())
+                return;
+            Object searchBox = Global.getField(navigator, "searchBox"); //$NON-NLS-1$
+            SearchBoxFilterAccess searchInput = SearchBoxFilterAccess.resolveQuiet(navigator, searchBox);
+            String pattern = searchInput != null ? searchInput.readPattern().trim() : ""; //$NON-NLS-1$
+            if (pattern.length() < 2)
+                return;
+            boolean active = Boolean.TRUE.equals(Global.invoke(navigator, "isSearchFilterActive")); //$NON-NLS-1$
+            String nativePattern = readNativeActivePattern(navigator);
+            if (!pattern.equals(nativePattern) && attempt < NATIVE_SEARCH_PATTERN_RETRY_MAX)
+            {
+                Display display = Display.getDefault();
+                if (display != null && !display.isDisposed() && holder != null)
+                {
+                    holder[0] = () -> syncNativeSearchUiAfterTyping(navigator, viewer, holder, attempt + 1);
+                    display.timerExec(NATIVE_SEARCH_PATTERN_RETRY_MS, holder[0]);
+                }
+                return;
+            }
+            boolean needActivate = !active || !pattern.equals(nativePattern);
+            Object patchedFilter = resolveNavigatorSearchFilter(navigator);
+            ensureNativeFilterOnViewer(viewer, patchedFilter);
+            invokeNavigatorUtil("applyFilterNonBlockingUi", commonNavigator, NATIVE_FILTER_ID); //$NON-NLS-1$
+            if (needActivate)
+                invokeNavigatorUtil("activateFilterNonBlockingUi", commonNavigator, NATIVE_FILTER_ID); //$NON-NLS-1$
+            viewer.refresh();
+            expandFilteredTree(viewer);
+        }
+
+        private static void invokeNavigatorUtil(String method, CommonNavigator navigator, String filterId)
+        {
+            try
+            {
+                Class<?> util = Class.forName("com._1c.g5.v8.dt.navigator.util.NavigatorUtil"); //$NON-NLS-1$
+                java.lang.reflect.Method m = util.getDeclaredMethod(method, CommonNavigator.class, String.class);
+                m.setAccessible(true);
+                m.invoke(null, navigator, filterId);
+            }
+            catch (Exception ignored) {}
+        }
+
+        private static void expandFilteredTree(CommonViewer viewer)
+        {
+            if (viewer == null)
+                return;
+            Tree tree = viewer.getTree();
+            if (tree == null || tree.isDisposed())
+                return;
+            Display display = tree.getDisplay();
+            if (display == null || display.isDisposed())
+                return;
+            try
+            {
+                Class<?> helper = Class.forName("com._1c.g5.v8.dt.common.ui.controls.search.UISearchHelper"); //$NON-NLS-1$
+                java.lang.reflect.Method m = helper.getDeclaredMethod("expandTreeViewerStepByStep", //$NON-NLS-1$
+                        Display.class, CommonViewer.class, org.eclipse.core.runtime.IProgressMonitor.class,
+                        org.eclipse.jface.viewers.ISelection.class);
+                m.setAccessible(true);
+                m.invoke(null, display, viewer, new NullProgressMonitor(), viewer.getSelection());
+            }
+            catch (Exception ignored) {}
+        }
 
         public static boolean install(IViewPart navigator, CommonViewer viewer, Tree tree)
         {
@@ -705,8 +813,10 @@ public final class NavigatorFilterHook implements IStartup
                 return;
             for (ViewerFilter existing : viewer.getFilters())
             {
-                if (existing != null && existing.getClass().getName().contains("NavigatorSearchFilter")) //$NON-NLS-1$
+                if (existing == filter)
                     return;
+                if (existing != null && existing.getClass().getName().contains("NavigatorSearchFilter")) //$NON-NLS-1$
+                    viewer.removeFilter(existing);
             }
             viewer.addFilter(filter);
         }

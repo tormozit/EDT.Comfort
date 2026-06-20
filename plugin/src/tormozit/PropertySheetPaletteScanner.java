@@ -153,7 +153,7 @@ final class PropertySheetPaletteScanner
                         + " reason=controlAlreadyUsed " + PropertySheetDebug.controlBrief(nameControl)); //$NON-NLS-1$
                 continue;
             }
-            addRow(rows, nameControl, name, "renderer", view, page); //$NON-NLS-1$
+            addRow(rows, nameControl, name, "renderer", view, page, scene); //$NON-NLS-1$
         }
     }
 
@@ -195,7 +195,7 @@ final class PropertySheetPaletteScanner
                         + " reason=" + PropertySheetDebug.nameControlRejectReason(nameControl, name)); //$NON-NLS-1$
                 continue;
             }
-            addRow(rows, nameControl, name, "labelVmText", view, page); //$NON-NLS-1$
+            addRow(rows, nameControl, name, "labelVmText", view, page, scene); //$NON-NLS-1$
         }
     }
 
@@ -227,7 +227,9 @@ final class PropertySheetPaletteScanner
             if (hasRowForView(rows, entry.view))
                 continue;
 
-            Composite rowComposite = PropertySheetControlInterop.findPaintHostForView(entry.view, root);
+            Composite rowComposite = PropertySheetControlInterop.leafFieldRowHostForView(entry.view);
+            if (rowComposite == null || rowComposite.isDisposed())
+                rowComposite = PropertySheetControlInterop.findPaintHostForView(entry.view, root);
             if (rowComposite == null || rowComposite.isDisposed())
             {
                 PropertySheetDebug.scanVerbose("skip lwtFieldRow " + PropertySheetDebug.quote(entry.name) //$NON-NLS-1$
@@ -236,8 +238,8 @@ final class PropertySheetPaletteScanner
             }
 
             Control nameControl = rowComposite;
-            PropertySheetControlInterop.storeLwtHighlightOrigin(nameControl, entry.view, rowComposite, entry.name);
-            addRow(rows, nameControl, entry.name, "lwtFieldRow", entry.view, page); //$NON-NLS-1$
+            PropertySheetControlInterop.refreshLwtRowGeometry(nameControl, entry.view, entry.name);
+            addRow(rows, nameControl, entry.name, "lwtFieldRow", entry.view, page, scene); //$NON-NLS-1$
         }
     }
 
@@ -361,7 +363,7 @@ final class PropertySheetPaletteScanner
             if (isPlausibleNameControl(byText, name))
             {
                 free.remove(byText);
-                addRow(rows, byText, name, "fieldLayout+text", entry.view, page); //$NON-NLS-1$
+                addRow(rows, byText, name, "fieldLayout+text", entry.view, page, scene); //$NON-NLS-1$
             }
             else
             {
@@ -391,18 +393,24 @@ final class PropertySheetPaletteScanner
                             + " reason=" + PropertySheetDebug.nameControlRejectReason(slot, name)); //$NON-NLS-1$
                     continue;
                 }
-                addRow(rows, slot, name, "fieldLayout+Y", entry.view, page); //$NON-NLS-1$
+                addRow(rows, slot, name, "fieldLayout+Y", entry.view, page, scene); //$NON-NLS-1$
             }
         }
     }
 
     private static void addRow(Set<PropertySheetPaletteRow> rows, Control nameControl, String name, String source)
     {
-        addRow(rows, nameControl, name, source, null, null);
+        addRow(rows, nameControl, name, source, null, null, null);
     }
 
     private static void addRow(Set<PropertySheetPaletteRow> rows, Control nameControl, String name,
             String source, Object lwtView, Object page)
+    {
+        addRow(rows, nameControl, name, source, lwtView, page, null);
+    }
+
+    private static void addRow(Set<PropertySheetPaletteRow> rows, Control nameControl, String name,
+            String source, Object lwtView, Object page, Object scene)
     {
         if (nameControl instanceof Composite)
         {
@@ -416,22 +424,35 @@ final class PropertySheetPaletteScanner
             }
         }
 
-        if (lwtView != null && page != null && !hasStoredLwtOrigin(nameControl, name))
+        Control paintControl = nameControl;
+        Composite rowComposite;
+        if (lwtView != null)
         {
-            Composite root = PropertySheetUiContext.findPaletteRoot(page);
-            Composite paintHost = PropertySheetControlInterop.findPaintHostForView(lwtView, root);
-            if (paintHost != null && !paintHost.isDisposed())
+            Composite leaf = PropertySheetControlInterop.leafFieldRowHostForView(lwtView);
+            if (leaf != null && !leaf.isDisposed())
             {
-                PropertySheetControlInterop.storeLwtHighlightOrigin(paintHost, lwtView, paintHost, name);
-                nameControl = paintHost;
+                paintControl = leaf;
+                rowComposite = leaf;
             }
+            else if (nameControl instanceof Composite)
+            {
+                rowComposite = (Composite) nameControl;
+                paintControl = nameControl;
+            }
+            else
+            {
+                rowComposite = findRowComposite(nameControl);
+                paintControl = nameControl;
+            }
+            PropertySheetControlInterop.refreshLwtRowGeometry(rowComposite, lwtView, name);
         }
-
-        Composite rowComposite = lwtView != null && nameControl instanceof Composite
-                ? null : findRowComposite(nameControl);
-        rows.add(new PropertySheetPaletteRow(nameControl, rowComposite,
-                PropertySheetUiContext.rowControls(rowComposite, nameControl), name, lwtView));
+        else
+            rowComposite = findRowComposite(nameControl);
+        String modelName = PropertySheetControlInterop.resolveModelPropertyName(page, scene, lwtView, name);
+        rows.add(new PropertySheetPaletteRow(paintControl, rowComposite,
+                PropertySheetUiContext.rowControls(rowComposite, paintControl), name, lwtView, modelName));
         PropertySheetDebug.scanVerbose("ADD [" + source + "] " + PropertySheetDebug.quote(name) //$NON-NLS-1$ //$NON-NLS-2$
+                + " model=" + PropertySheetDebug.quote(modelName) //$NON-NLS-1$
                 + " ctrl=" + PropertySheetDebug.controlBrief(nameControl) //$NON-NLS-1$
                 + " row=" + PropertySheetDebug.controlBrief(rowComposite)); //$NON-NLS-1$
     }
@@ -495,6 +516,9 @@ final class PropertySheetPaletteScanner
         if (control == null || control.isDisposed())
             return false;
         if (PropertySheetControlInterop.isTwistieOrDecor(control))
+            return false;
+        String cn = control.getClass().getName();
+        if (cn.contains("Hyperlink") || cn.contains("Link")) //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         if (PropertySheetUiContext.isFilterAreaControl(control))
             return false;
@@ -692,7 +716,9 @@ final class PropertySheetPaletteScanner
             return;
         if (hasRowUsingControl(rows, nameControl, name))
             return;
-        addRow(rows, nameControl, name);
+        Object renderer = scene != null ? Global.invoke(scene, "getRenderer") : null; //$NON-NLS-1$
+        Object lwtView = labelVm != null ? PropertySheetControlInterop.viewForViewModel(renderer, labelVm) : null;
+        addRow(rows, nameControl, name, "fieldComponent", lwtView, null, scene); //$NON-NLS-1$
     }
 
     private static void scanViaSwt(Composite root, Set<PropertySheetPaletteRow> rows)
@@ -771,6 +797,28 @@ final class PropertySheetPaletteScanner
             boolean lwt, int expected)
     {
         int rowCount = rows.size();
+        // #region agent log
+        int lwtRowCount = 0;
+        for (PropertySheetPaletteRow row : rows)
+        {
+            if (row.lwtView != null)
+                lwtRowCount++;
+        }
+        try
+        {
+            String line = "{\"sessionId\":\"db8c17\",\"hypothesisId\":\"H11\",\"location\":\"PropertySheetPaletteScanner.scan\"," //$NON-NLS-1$
+                    + "\"message\":\"rows\",\"data\":{\"total\":" + rowCount + ",\"lwt\":" + lwtRowCount //$NON-NLS-1$
+                    + ",\"expected\":" + expected + "},\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
+            java.nio.file.Files.writeString(
+                    java.nio.file.Path.of("C:\\VC\\EDT.Comfort\\debug-db8c17.log"), //$NON-NLS-1$
+                    line, java.nio.charset.StandardCharsets.UTF_8,
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+        }
+        catch (Exception ignored)
+        {
+            // debug session only
+        }
+        // #endregion
         if (rowCount > 0)
         {
             boolean incomplete = expected > 0 && rowCount < expected;
@@ -820,11 +868,11 @@ final class PropertySheetPaletteScanner
         }
         Composite root = PropertySheetUiContext.findPaletteRoot(page);
         List<Control> slots = root != null ? collectFieldNameSlots(root) : Collections.emptyList();
-        List<Composite> lwtRows = root != null ? collectLwtFieldRowComposites(root) : Collections.emptyList();
+        List<Composite> lwtFieldComposites = root != null ? collectLwtFieldRowComposites(root) : Collections.emptyList();
         PropertySheetDebug.scanProblem("rows=0 FAIL expected=" + expected //$NON-NLS-1$
                 + " renderer=" + PropertySheetDebug.safe(renderer) //$NON-NLS-1$
                 + " mapSize=" + mapSize + " labelVm=" + labelVm + " slots=" + slots.size() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " lwtFieldRows=" + lwtRows.size() //$NON-NLS-1$
+                + " lwtFieldRows=" + lwtFieldComposites.size() //$NON-NLS-1$
                 + " root=" + PropertySheetDebug.safe(root)); //$NON-NLS-1$
         if (PropertySheetDebug.isVerbose() && root != null && slots.isEmpty())
             PropertySheetDebug.scan("root tree: " + PropertySheetDebug.compositeTreeBrief(root, 2)); //$NON-NLS-1$

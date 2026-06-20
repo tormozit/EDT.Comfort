@@ -44,7 +44,7 @@ final class ObjectSetsNavigatorFilterSupport
         if (state == null)
             return;
         boolean active = Boolean.TRUE.equals(state.getValue());
-        if (active && ObjectSets.getInstance().areAllSetsEmpty())
+        if (active && ObjectSetsAddTargetState.getInstance().areAllAddTargetSetsEmpty())
         {
             active = false;
             state.setValue(Boolean.FALSE);

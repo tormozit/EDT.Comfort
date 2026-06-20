@@ -3,9 +3,15 @@ package tormozit;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.WeakHashMap;
 
+import org.eclipse.emf.ecore.EObject;
+import org.eclipse.jface.viewers.ISelection;
+import org.eclipse.jface.viewers.StructuredSelection;
+import org.eclipse.ui.IWorkbenchPage;
+import org.eclipse.ui.PlatformUI;
 import org.eclipse.swt.widgets.Display;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -286,6 +292,8 @@ final class PropertySheetUiCoordinator
                     continue;
                 for (PropertySheetPaletteRow row : ctx.rows)
                 {
+                    if (PropertySheetPaletteRow.touchesControl(row, control))
+                        return entry.getKey();
                     org.eclipse.swt.widgets.Control target =
                             PropertySheetRowSelectionFeature.interactionTarget(row);
                     if (target != null && !target.isDisposed()
@@ -334,7 +342,7 @@ final class PropertySheetUiCoordinator
         PageSession session = SESSIONS.get(page);
         if (session == null || session.nameCopy == null)
             return;
-        session.nameCopy.showContextMenu(row, widget, displayPoint);
+        session.nameCopy.showContextMenu(page, row, widget, displayPoint);
     }
 
     private static boolean isDescendant(org.eclipse.swt.widgets.Control control,
@@ -767,79 +775,432 @@ final class PropertySheetUiCoordinator
             PropertySheetDebug.feature("nameCopyMenu hooked=" + ctx.rows.size()); //$NON-NLS-1$
         }
 
-        void showContextMenu(PropertySheetPaletteRow row, Control widget, Point displayPoint)
+        void showContextMenu(Object page, PropertySheetPaletteRow row, Control widget, Point displayPoint)
         {
             if (row == null || widget == null || widget.isDisposed())
                 return;
-            String name = row.propertyName;
+            Menu menu = new Menu(widget.getShell(), SWT.POP_UP);
+            fillRowContextMenu(page, menu, row, widget);
+            Point at = displayPoint != null ? displayPoint : widget.getDisplay().getCursorLocation();
+            menu.setLocation(at);
+            menu.setVisible(true);
+            menu.addListener(SWT.Hide, e -> widget.getDisplay().asyncExec(() -> {
+                if (!menu.isDisposed())
+                    menu.dispose();
+            }));
+        }
+
+        private static void fillRowContextMenu(Object page, Menu menu, PropertySheetPaletteRow row, Control widget)
+        {
+            PropertySheetUiContext ctx = PropertySheetUiCoordinator.lastContext(page);
+            Object scene = ctx != null ? ctx.scene : null;
+            String name = row.copyPropertyName();
             if (name == null || name.isEmpty())
-                name = PropertySheetControlInterop.controlText(widget);
+                name = PropertySheetControlInterop.resolveCopyPropertyName(page, scene, row.lwtView,
+                        row.propertyName);
             final String copyText = name != null ? name : ""; //$NON-NLS-1$
 
-            Menu menu = new Menu(widget.getShell(), SWT.POP_UP);
             MenuItem copyItem = new MenuItem(menu, SWT.PUSH);
             copyItem.setText("Копировать имя\tCtrl+C"); //$NON-NLS-1$
+            copyItem.setToolTipText("Копировать имя свойства в буфер обмена" + Global.pluginSignForTooltip()); //$NON-NLS-1$
             if (copyText.isEmpty())
                 copyItem.setEnabled(false);
             else
             {
-                copyItem.addListener(SWT.Selection, e -> {
+                copyItem.addListener(SWT.Selection, e -> widget.getDisplay().asyncExec(() -> {
+                    // #region agent log
+                    agentMenuLog("copy", copyText); //$NON-NLS-1$
+                    // #endregion
                     PropertySheetDebug.feature("contextMenu copy " + PropertySheetDebug.quote(copyText)); //$NON-NLS-1$
                     PropertySheetUiContext.copyToClipboard(widget, copyText);
                     ToastNotification.show("Скопировано", copyText, 2_500); //$NON-NLS-1$
-                });
+                }));
             }
-            Point at = displayPoint != null ? displayPoint : widget.getDisplay().getCursorLocation();
-            menu.setLocation(at);
-            menu.setVisible(true);
-            menu.addListener(SWT.Hide, e -> {
-                if (!menu.isDisposed())
-                    menu.dispose();
-            });
+
+            new MenuItem(menu, SWT.SEPARATOR);
+
+            MenuItem syntaxItem = new MenuItem(menu, SWT.PUSH);
+            syntaxItem.setText("Синтакс-помощник"); //$NON-NLS-1$
+            syntaxItem.setToolTipText("Открыть справку по свойству в синтакс-помощнике" //$NON-NLS-1$
+                    + Global.pluginSignForTooltip());
+            syntaxItem.addListener(SWT.Selection, e -> widget.getDisplay().syncExec(() -> {
+                // #region agent log
+                agentMenuLog("syntax", row.propertyName); //$NON-NLS-1$
+                // #endregion
+                PropertySheetDebug.feature("contextMenu syntaxHelp " //$NON-NLS-1$
+                        + PropertySheetDebug.quote(row.propertyName));
+                PropertySheetSyntaxHelpSupport.openForProperty(page, row);
+            }));
         }
+
+        // #region agent log
+        private static void agentMenuLog(String action, String prop)
+        {
+            try
+            {
+                String safe = prop != null ? prop.replace("\\", "\\\\").replace("\"", "\\\"") : ""; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                String line = "{\"sessionId\":\"db8c17\",\"hypothesisId\":\"H6\",\"location\":\"PropertySheetUiCoordinator.menu\"," //$NON-NLS-1$
+                        + "\"message\":\"" + action + "\",\"data\":{\"prop\":\"" + safe //$NON-NLS-1$ //$NON-NLS-2$
+                        + "\"},\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$ //$NON-NLS-2$
+                java.nio.file.Files.writeString(
+                        java.nio.file.Path.of("C:\\VC\\EDT.Comfort\\debug-db8c17.log"), //$NON-NLS-1$
+                        line, java.nio.charset.StandardCharsets.UTF_8,
+                        java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+            }
+            catch (Exception ignored)
+            {
+                // debug session only
+            }
+        }
+        // #endregion
 
         private static void installContextMenu(Control target, PropertySheetPaletteRow row)
         {
             Menu menu = new Menu(target.getShell(), SWT.POP_UP);
-
-            // Пересоздаём пункты при каждом показе — чтобы текст был актуальным.
             menu.addMenuListener(new MenuAdapter()
             {
                 @Override
                 public void menuShown(MenuEvent e)
                 {
-                    // Очищаем старые пункты
                     for (MenuItem item : menu.getItems())
                         item.dispose();
-
-                    String name = row.propertyName;
-                    if (name == null || name.isEmpty())
-                        name = PropertySheetControlInterop.controlText(target);
-                    final String copyText = (name != null) ? name : ""; //$NON-NLS-1$
-
-                    MenuItem copyItem = new MenuItem(menu, SWT.PUSH);
-                    copyItem.setText("Копировать имя\tCtrl+C"); //$NON-NLS-1$
-
-                    if (copyText.isEmpty())
-                    {
-                        copyItem.setEnabled(false);
-                        return;
-                    }
-
-                    copyItem.addListener(SWT.Selection, event -> {
-                        PropertySheetDebug.feature("contextMenu copy " + PropertySheetDebug.quote(copyText)); //$NON-NLS-1$
-                        PropertySheetUiContext.copyToClipboard(target, copyText);
-                        ToastNotification.show("Скопировано", copyText, 2_500); //$NON-NLS-1$
-                    });
+                    Object page = pageForRow(row);
+                    fillRowContextMenu(page, menu, row, target);
                 }
             });
-
             target.setMenu(menu);
             target.addDisposeListener(e -> {
                 if (!menu.isDisposed())
                     menu.dispose();
             });
         }
+    }
+
+    /** Открытие синтакс-помощника EDT для свойства палитры. */
+    private static final class PropertySheetSyntaxHelpSupport
+    {
+        private static final String BSL_UI_PLUGIN =
+                "com._1c.g5.v8.dt.internal.bsl.ui.BslUiPlugin"; //$NON-NLS-1$
+        private static final String DOC_PROVIDER =
+                "com._1c.g5.v8.dt.internal.bsl.ui.documentation.BslDocumentationProvider"; //$NON-NLS-1$
+        private static final String VIEW_PAGE =
+                "com._1c.g5.v8.dt.internal.bsl.ui.documentation.page.IBslDocumentationViewPage"; //$NON-NLS-1$
+        private static final String PAGE_GROUP =
+                "com._1c.g5.v8.dt.internal.bsl.ui.documentation.page.BslDocumentationPageGroup"; //$NON-NLS-1$
+        private static final String PAGE_DESCRIPTOR =
+                "com._1c.g5.v8.dt.internal.bsl.ui.syntaxassist.description.DocumentationPageDescriptor"; //$NON-NLS-1$
+        private static final String SYNTAX_VIEW_UTIL =
+                "com._1c.g5.v8.dt.internal.bsl.ui.syntaxassist.SyntaxAssistViewUtil"; //$NON-NLS-1$
+        private static final String SYNTAX_VIEW_ID =
+                "com._1c.g5.v8.dt.bsl.ui.view.BslInfoView"; //$NON-NLS-1$
+
+        private PropertySheetSyntaxHelpSupport() {}
+
+        static void openForProperty(Object page, PropertySheetPaletteRow row)
+        {
+            if (row == null || row.propertyName == null || row.propertyName.isEmpty())
+                return;
+            Runnable action = () -> openForPropertyOnUiThread(page, row);
+            if (org.eclipse.swt.widgets.Display.getCurrent() != null)
+                action.run();
+            else
+            {
+                org.eclipse.swt.widgets.Display display = org.eclipse.swt.widgets.Display.getDefault();
+                if (display != null && !display.isDisposed())
+                    display.syncExec(action);
+            }
+        }
+
+        private static void openForPropertyOnUiThread(Object page, PropertySheetPaletteRow row)
+        {
+            // #region agent log
+            agentSyntaxLog("start", row.propertyName, null); //$NON-NLS-1$
+            // #endregion
+            try
+            {
+                IWorkbenchPage wbPage = PlatformUI.getWorkbench().getActiveWorkbenchWindow() != null
+                        ? PlatformUI.getWorkbench().getActiveWorkbenchWindow().getActivePage() : null;
+                if (wbPage != null)
+                {
+                    wbPage.showView(SYNTAX_VIEW_ID);
+                    // #region agent log
+                    agentSyntaxLog("viewShown", row.propertyName, null); //$NON-NLS-1$
+                    // #endregion
+                }
+                Class<?> utilClass = Class.forName(SYNTAX_VIEW_UTIL);
+                utilClass.getMethod("showOrGetShowedView").invoke(null); //$NON-NLS-1$
+                utilClass.getMethod("showSearch", String.class).invoke(null, row.propertyName); //$NON-NLS-1$
+                // #region agent log
+                agentSyntaxLog("searchShown", row.propertyName, null); //$NON-NLS-1$
+                // #endregion
+
+                Object docProvider = resolveDocumentationProvider();
+                if (docProvider == null)
+                {
+                    PropertySheetDebug.problem("syntaxHelp docProvider=null"); //$NON-NLS-1$
+                    return;
+                }
+                EObject eObject = resolveSelectionObject(page);
+                if (eObject == null)
+                {
+                    PropertySheetDebug.feature("syntaxHelp eObject=null searchOnly " //$NON-NLS-1$
+                            + PropertySheetDebug.quote(row.propertyName));
+                    return;
+                }
+                String locale = Locale.getDefault().getLanguage();
+                Object viewPage = resolveViewPage(docProvider, eObject, row.propertyName, locale);
+                if (viewPage == null)
+                {
+                    PropertySheetDebug.feature("syntaxHelp no page searchOnly " //$NON-NLS-1$
+                            + PropertySheetDebug.quote(row.propertyName));
+                    return;
+                }
+                openInSyntaxAssist(viewPage, docProvider, locale);
+                // #region agent log
+                agentSyntaxLog("docOpened", row.propertyName, null); //$NON-NLS-1$
+                // #endregion
+                PropertySheetDebug.feature("syntaxHelp opened " + PropertySheetDebug.quote(row.propertyName)); //$NON-NLS-1$
+            }
+            catch (Exception ex)
+            {
+                // #region agent log
+                agentSyntaxLog("error", row.propertyName, ex.getMessage()); //$NON-NLS-1$
+                // #endregion
+                PropertySheetDebug.problem("syntaxHelp " + ex.getMessage()); //$NON-NLS-1$
+            }
+        }
+
+        // #region agent log
+        private static void agentSyntaxLog(String step, String prop, String error)
+        {
+            try
+            {
+                String safeProp = prop != null ? prop.replace("\\", "\\\\").replace("\"", "\\\"") : ""; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                String safeErr = error != null ? error.replace("\\", "\\\\").replace("\"", "\\\"") : ""; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                String line = "{\"sessionId\":\"db8c17\",\"hypothesisId\":\"H7\",\"location\":\"PropertySheetSyntaxHelpSupport\"," //$NON-NLS-1$
+                        + "\"message\":\"" + step + "\",\"data\":{\"prop\":\"" + safeProp //$NON-NLS-1$ //$NON-NLS-2$
+                        + "\",\"error\":\"" + safeErr + "\"},\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                java.nio.file.Files.writeString(
+                        java.nio.file.Path.of("C:\\VC\\EDT.Comfort\\debug-db8c17.log"), //$NON-NLS-1$
+                        line, java.nio.charset.StandardCharsets.UTF_8,
+                        java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+            }
+            catch (Exception ignored)
+            {
+                // debug session only
+            }
+        }
+        // #endregion
+
+        private static Object resolveDocumentationProvider() throws Exception
+        {
+            Class<?> pluginClass = Class.forName(BSL_UI_PLUGIN);
+            Object plugin = pluginClass.getMethod("getDefault").invoke(null); //$NON-NLS-1$
+            if (plugin == null)
+                return null;
+            Object injector = plugin.getClass().getMethod("getInjector").invoke(plugin); //$NON-NLS-1$
+            if (injector == null)
+                return null;
+            Class<?> providerClass = Class.forName(DOC_PROVIDER);
+            return injector.getClass()
+                    .getMethod("getInstance", Class.class).invoke(injector, providerClass); //$NON-NLS-1$
+        }
+
+        private static EObject resolveSelectionObject(Object page)
+        {
+            Object selection = page != null ? Global.invoke(page, "getCurrentSelection") : null; //$NON-NLS-1$
+            EObject fromSelection = eObjectFromSelection(selection);
+            if (fromSelection != null)
+                return fromSelection;
+            Object paletteModel = page != null ? Global.invoke(page, "getPaletteModel") : null; //$NON-NLS-1$
+            if (paletteModel == null)
+                return null;
+            Object objects = Global.invoke(paletteModel, "getObjects"); //$NON-NLS-1$
+            if (!(objects instanceof Iterable))
+                return null;
+            for (Object item : (Iterable<?>) objects)
+            {
+                if (item instanceof EObject)
+                    return (EObject) item;
+            }
+            return null;
+        }
+
+        private static EObject eObjectFromSelection(Object selection)
+        {
+            if (!(selection instanceof ISelection))
+                return null;
+            if (selection instanceof StructuredSelection structured && !structured.isEmpty())
+            {
+                Object first = structured.getFirstElement();
+                if (first instanceof EObject)
+                    return (EObject) first;
+            }
+            return null;
+        }
+
+        private static Object resolveViewPage(Object docProvider, EObject eObject, String propertyName,
+                String locale) throws Exception
+        {
+            Object viewGroup = docProvider.getClass()
+                    .getMethod("getViewDocumentationPages", EObject.class, String.class) //$NON-NLS-1$
+                    .invoke(docProvider, eObject, locale);
+            Object page = normalizeToViewPage(pickFromGroup(viewGroup, propertyName, false));
+            if (page != null)
+                return page;
+            Object hoverGroup = docProvider.getClass()
+                    .getMethod("getHoverDocumentationPages", EObject.class, String.class) //$NON-NLS-1$
+                    .invoke(docProvider, eObject, locale);
+            page = normalizeToViewPage(pickFromGroup(hoverGroup, propertyName, true));
+            if (page != null)
+                return page;
+            return pickFromNestedHoverPages(docProvider, viewGroup, propertyName, locale);
+        }
+
+        private static Object pickFromNestedHoverPages(Object docProvider, Object viewGroup,
+                String propertyName, String locale) throws Exception
+        {
+            if (viewGroup == null)
+                return null;
+            Class<?> groupClass = Class.forName(PAGE_GROUP);
+            if (!groupClass.isInstance(viewGroup))
+                return null;
+            @SuppressWarnings("unchecked")
+            List<Object> viewPages = (List<Object>) groupClass.getMethod("getPages").invoke(viewGroup); //$NON-NLS-1$
+            if (viewPages == null)
+                return null;
+            String needle = propertyName.toLowerCase(Locale.ROOT);
+            for (Object viewPage : viewPages)
+            {
+                if (viewPage == null)
+                    continue;
+                @SuppressWarnings("unchecked")
+                List<Object> hovers = (List<Object>) viewPage.getClass().getMethod("getHoverPages") //$NON-NLS-1$
+                        .invoke(viewPage);
+                if (hovers == null)
+                    continue;
+                for (Object hover : hovers)
+                {
+                    String title = stringFrom(hover, "getHoverTitle"); //$NON-NLS-1$
+                    if (title == null || !title.toLowerCase(Locale.ROOT).contains(needle))
+                        continue;
+                    Object resolved = docProvider.getClass()
+                            .getMethod("resolveViewDocumentationPage", Class.forName(VIEW_PAGE), //$NON-NLS-1$
+                                    String.class, String.class)
+                            .invoke(docProvider, viewPage, propertyName, locale);
+                    if (resolved != null)
+                        return resolved;
+                    return viewPage;
+                }
+            }
+            return null;
+        }
+
+        private static Object pickFromGroup(Object group, String propertyName, boolean hoverGroup)
+                throws Exception
+        {
+            if (group == null)
+                return null;
+            Class<?> groupClass = Class.forName(PAGE_GROUP);
+            if (!groupClass.isInstance(group))
+                return null;
+            @SuppressWarnings("unchecked")
+            List<Object> pages = (List<Object>) groupClass.getMethod("getPages").invoke(group); //$NON-NLS-1$
+            if (pages == null || pages.isEmpty())
+                return null;
+            String needle = propertyName.toLowerCase(Locale.ROOT);
+            for (Object page : pages)
+            {
+                if (page == null)
+                    continue;
+                String title = hoverGroup ? stringFrom(page, "getHoverTitle") : null; //$NON-NLS-1$
+                if (title == null || title.isEmpty())
+                    title = stringFrom(page, "getExternalTitle"); //$NON-NLS-1$
+                if (title == null || title.isEmpty())
+                    title = stringFrom(page, "getHoverTitle"); //$NON-NLS-1$
+                if (title != null && title.toLowerCase(Locale.ROOT).contains(needle))
+                    return page;
+                String link = stringFrom(page, "getLink"); //$NON-NLS-1$
+                if (link != null && link.toLowerCase(Locale.ROOT).contains(needle))
+                    return page;
+            }
+            return pages.get(0);
+        }
+
+        private static Object normalizeToViewPage(Object page) throws Exception
+        {
+            if (page == null)
+                return null;
+            Class<?> viewClass = Class.forName(VIEW_PAGE);
+            if (viewClass.isInstance(page))
+                return page;
+            Object view = page.getClass().getMethod("getViewPage").invoke(page); //$NON-NLS-1$
+            return view != null ? view : page;
+        }
+
+        private static String stringFrom(Object target, String method) throws Exception
+        {
+            if (target == null)
+                return null;
+            Object value = target.getClass().getMethod(method).invoke(target);
+            return value instanceof String ? (String) value : null;
+        }
+
+        private static void openInSyntaxAssist(Object viewPage, Object docProvider, String locale)
+                throws Exception
+        {
+            Class<?> utilClass = Class.forName(SYNTAX_VIEW_UTIL);
+            Object view = utilClass.getMethod("showOrGetShowedView").invoke(null); //$NON-NLS-1$
+            if (view == null)
+                return;
+            Object panel = view.getClass().getMethod("getDescriptionPanel").invoke(view); //$NON-NLS-1$
+            Object browser = panel.getClass().getMethod("getBrowser").invoke(panel); //$NON-NLS-1$
+            Class<?> pageClass = Class.forName(VIEW_PAGE);
+            Class<?> providerClass = Class.forName(DOC_PROVIDER);
+            Object descriptor = Class.forName(PAGE_DESCRIPTOR)
+                    .getConstructor(pageClass, providerClass)
+                    .newInstance(viewPage, docProvider);
+            Class<?> descriptorInterface = Class.forName(
+                    "com._1c.g5.v8.dt.internal.bsl.ui.syntaxassist.browser.ISyntaxAssistBrowserPageDescriptor"); //$NON-NLS-1$
+            browser.getClass().getMethod("openPage", descriptorInterface) //$NON-NLS-1$
+                    .invoke(browser, descriptor);
+            Object page = viewPage;
+            docProvider.getClass()
+                    .getMethod("trySetLanguage", pageClass, String.class) //$NON-NLS-1$
+                    .invoke(docProvider, page, locale);
+        }
+
+        private static void fallbackSearch(String propertyName) throws Exception
+        {
+            Class<?> utilClass = Class.forName(SYNTAX_VIEW_UTIL);
+            utilClass.getMethod("showSearch", String.class).invoke(null, propertyName); //$NON-NLS-1$
+        }
+    }
+
+    static Object pageForRow(PropertySheetPaletteRow row)
+    {
+        if (row == null)
+            return null;
+        synchronized (SESSIONS)
+        {
+            for (Map.Entry<Object, PageSession> entry : SESSIONS.entrySet())
+            {
+                PropertySheetUiContext ctx = entry.getValue().lastContext;
+                if (ctx == null)
+                    continue;
+                for (PropertySheetPaletteRow candidate : ctx.rows)
+                {
+                    if (!candidate.isAlive())
+                        continue;
+                    if (!row.propertyName.equals(candidate.propertyName))
+                        continue;
+                    if (row.lwtView != null && row.lwtView != candidate.lwtView)
+                        continue;
+                    return entry.getKey();
+                }
+            }
+        }
+        return null;
     }
 
 }

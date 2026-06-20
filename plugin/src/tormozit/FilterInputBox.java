@@ -9,6 +9,7 @@ import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
+import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.ui.preferences.ScopedPreferenceStore;
@@ -42,7 +43,10 @@ final class FilterInputBox
             "comfort.recentPlaces.filter.history."), //$NON-NLS-1$
         OBJECT_SETS(
             "comfort.objectSets.filter.history.count", //$NON-NLS-1$
-            "comfort.objectSets.filter.history."); //$NON-NLS-1$
+            "comfort.objectSets.filter.history."), //$NON-NLS-1$
+        OPEN_MD_OBJECT(
+            "comfort.openMdObject.filter.history.count", //$NON-NLS-1$
+            "comfort.openMdObject.filter.history."); //$NON-NLS-1$
 
         final String prefCountKey;
         final String prefItemPrefix;
@@ -76,9 +80,10 @@ final class FilterInputBox
     {
         Options opts = options != null ? options : new Options();
         SearchBox box = new SearchBox(parent);
+        FilterInputBoxListNavigation.ensureSearchBoxStockKeyStripped(box);
         box.setLayoutData(opts.layoutData != null ? opts.layoutData : compactLayoutData());
         if (opts.tooltip != null)
-            box.setToolTipText(opts.tooltip);
+            box.setToolTipText(opts.tooltip + " Ctrl+↓ — история запросов."); //$NON-NLS-1$
         if (opts.message != null)
             box.setMessage(opts.message);
         box.setMinimumSearchTextLength(0);
@@ -117,6 +122,74 @@ final class FilterInputBox
         opts.message = "Поиск..."; //$NON-NLS-1$
         opts.tooltip = "Фильтр по колонке «Имя» (smart-фильтр, пробел = AND)"; //$NON-NLS-1$
         return create(parent, opts, onSearch);
+    }
+
+    static FilterInputBox forOpenMdObject(Composite parent, Runnable onSearch)
+    {
+        Options opts = new Options();
+        opts.scope = Scope.OPEN_MD_OBJECT;
+        opts.layoutData = compactLayoutData();
+        opts.message = "Поиск..."; //$NON-NLS-1$
+        opts.tooltip = "Smart-фильтр (пробел = AND)"; //$NON-NLS-1$
+        return create(parent, opts, onSearch);
+    }
+
+    /**
+     * Заменяет штатное {@link Text} поле паттерна в диалоге EDT на {@link SearchBox} с историей.
+     */
+    static FilterInputBox replacePatternText(Text oldText, Scope scope, Runnable onSearch)
+    {
+        if (oldText == null || oldText.isDisposed())
+            return null;
+        Composite parent = oldText.getParent();
+        if (parent == null || parent.isDisposed())
+            return null;
+        Object layoutData = oldText.getLayoutData();
+        String initial = oldText.getText();
+        Control siblingBelow = siblingBelow(oldText);
+        oldText.dispose();
+        FilterInputBox result = createForScope(parent, scope, onSearch);
+        if (result == null)
+            return null;
+        if (layoutData != null)
+            result.widget().setLayoutData(layoutData);
+        if (siblingBelow != null && !siblingBelow.isDisposed())
+            result.widget().moveAbove(siblingBelow);
+        result.setText(initial != null ? initial : ""); //$NON-NLS-1$
+        parent.layout(true, true);
+        return result;
+    }
+
+    private static Control siblingBelow(Control control)
+    {
+        Composite parent = control.getParent();
+        if (parent == null)
+            return null;
+        Control[] children = parent.getChildren();
+        for (int i = 0; i < children.length; i++)
+        {
+            if (children[i] == control && i + 1 < children.length)
+                return children[i + 1];
+        }
+        return null;
+    }
+
+    static void attachHistory(SearchBox searchBox, Scope scope)
+    {
+        if (searchBox == null || searchBox.isDisposed() || scope == null)
+            return;
+        searchBox.setHistory(new PrefsSearchHistory(scope));
+    }
+
+    private static FilterInputBox createForScope(Composite parent, Scope scope, Runnable onSearch)
+    {
+        return switch (scope)
+        {
+            case COLLECTION -> forCollection(parent, onSearch);
+            case RECENT_PLACES -> forRecentPlaces(parent, onSearch);
+            case OBJECT_SETS -> forObjectSets(parent, onSearch);
+            case OPEN_MD_OBJECT -> forOpenMdObject(parent, onSearch);
+        };
     }
 
     static GridData compactLayoutData()
@@ -175,6 +248,20 @@ final class FilterInputBox
         if (searchBox == null || searchBox.isDisposed())
             return;
         searchBox.setFocus();
+    }
+
+    /** Фокус после открытия окна/диалога (когда штатный UI уже завершил activate). */
+    void scheduleFocusWhenReady()
+    {
+        if (searchBox == null || searchBox.isDisposed())
+            return;
+        Display display = searchBox.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() -> {
+            if (!isDisposed())
+                setFocus();
+        });
     }
 
     boolean isDisposed()

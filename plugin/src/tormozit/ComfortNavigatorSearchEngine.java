@@ -128,6 +128,9 @@ public final class ComfortNavigatorSearchEngine implements IModelObjectTreeSearc
 
         attachResolvedObjects(indexProvider, scanTypes, trie, monitor);
 
+        if (monitor != null && monitor.isCanceled())
+            return new EObjectTrie();
+
         if (NavigatorFilterDebug.isEnabled())
             NavigatorFilterDebug.log("comfortSearch pattern=\"" + pattern + "\" matched=" + matched //$NON-NLS-1$ //$NON-NLS-2$
                     + " project=" + project.getName()); //$NON-NLS-1$

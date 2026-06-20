@@ -13,6 +13,7 @@ import org.eclipse.jface.viewers.TableViewer;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
@@ -77,11 +78,11 @@ public class OpenMdObjectHook implements IStartup {
             if (dialog == null) return;
 
             Object patternControlObj = Global.invoke(dialog, "getPatternControl");
-            if (!(patternControlObj instanceof Text)) {
+            Text patternText = patternControlObj instanceof Text ? (Text) patternControlObj : null;
+            if (patternText == null) {
                 OpenMdObjectDebug.log("patch FAIL getPatternControl=" + patternControlObj);
                 return;
             }
-            Text filterText = (Text) patternControlObj;
 
             Object currentBaseLpObj = Global.getField(dialog, "mdObjectLabelProvider");
             if (currentBaseLpObj == null) {
@@ -109,51 +110,55 @@ public class OpenMdObjectHook implements IStartup {
             setFieldExactClass(dialog, FilteredItemsSelectionDialog.class, "itemsComparator", comparator);
             setFieldExactClass(dialog, FilteredItemsSelectionDialog.class, "fItemsComparator", comparator);
 
-            org.eclipse.ui.dialogs.OpenMdObjectItemsFilter smartFilter =
-                    new org.eclipse.ui.dialogs.OpenMdObjectItemsFilter(
-                            (FilteredItemsSelectionDialog) dialog, smartLp, filterText.getText());
+            for (Listener l : patternText.getListeners(SWT.Modify)) {
+                patternText.removeListener(SWT.Modify, l);
+            }
+            for (Listener l : patternText.getListeners(SWT.KeyDown)) {
+                patternText.removeListener(SWT.KeyDown, l);
+            }
 
-            for (Listener l : filterText.getListeners(SWT.Modify)) {
-                filterText.removeListener(SWT.Modify, l);
+            final org.eclipse.ui.dialogs.OpenMdObjectItemsFilter[] smartFilterRef =
+                    new org.eclipse.ui.dialogs.OpenMdObjectItemsFilter[1];
+            final FilterInputBox[] filterInputRef = new FilterInputBox[1];
+            smartFilterRef[0] = new org.eclipse.ui.dialogs.OpenMdObjectItemsFilter(
+                    (FilteredItemsSelectionDialog) dialog, smartLp, patternText.getText());
+            FilterInputBox filterInput = FilterInputBox.replacePatternText(
+                    patternText,
+                    FilterInputBox.Scope.OPEN_MD_OBJECT,
+                    () -> {
+                        FilterInputBox box = filterInputRef[0];
+                        if (box == null || box.isDisposed() || smartFilterRef[0] == null)
+                            return;
+                        applySmartFilter(dialog, smartFilterRef[0], smartLp, comparator, box.getText());
+                    });
+            if (filterInput == null) {
+                OpenMdObjectDebug.log("patch FAIL replacePatternText");
+                return;
             }
-            for (Listener l : filterText.getListeners(SWT.KeyDown)) {
-                filterText.removeListener(SWT.KeyDown, l);
-            }
+            filterInputRef[0] = filterInput;
+
+            Control filterControl = filterInput.inputControl();
+            if (filterControl == null)
+                filterControl = filterInput.widget();
+            updatePatternControlReference(dialog, filterControl);
 
             Table listTable = getDialogTable(dialog, shell);
             if (listTable != null) {
-                FilterInputBoxListNavigation.installTableNavigation(filterText, listTable);
+                FilterInputBoxListNavigation.installTableNavigation(
+                        filterControl, listTable, null, false, () ->
+                        {
+                            Global.invoke(dialog, "okPressed"); //$NON-NLS-1$
+                            return true;
+                        });
                 OpenMdObjectDebug.log("tableNav OK items=" + listTable.getItemCount());
             } else {
                 OpenMdObjectDebug.log("tableNav SKIP table not found");
             }
 
-            final Runnable[] pendingTask = new Runnable[1];
-            final Display display = filterText.getDisplay();
-
-            filterText.addModifyListener(e -> {
-                String pattern = filterText.getText();
-                OpenMdObjectDebug.log("modify text=\"" + pattern + "\" len=" + pattern.length());
-                if (pendingTask[0] != null) display.timerExec(-1, pendingTask[0]);
-
-                pendingTask[0] = () -> {
-                    if (filterText.isDisposed()) return;
-                    OpenMdObjectDebug.log("debounce fire text=\"" + filterText.getText() + "\"");
-                    applySmartFilter(dialog, smartFilter, smartLp, comparator, filterText.getText());
-                };
-                display.timerExec(150, pendingTask[0]);
-            });
-
-            filterText.addDisposeListener(e -> {
-                if (pendingTask[0] != null && !display.isDisposed()) {
-                    display.timerExec(-1, pendingTask[0]);
-                }
-            });
-
-            applySmartFilter(dialog, smartFilter, smartLp, comparator, filterText.getText());
+            applySmartFilter(dialog, smartFilterRef[0], smartLp, comparator, filterInput.getText());
 
             shell.setData(PATCHED_KEY, Boolean.TRUE);
-            OpenMdObjectDebug.log("patch OK initial text=\"" + filterText.getText() + "\"");
+            OpenMdObjectDebug.log("patch OK initial text=\"" + filterInput.getText() + "\"");
 
             Label target = Global.findLabelByText(shell, "Выберите элемент");
             if (target != null && !target.isDisposed()) {
@@ -161,9 +166,20 @@ public class OpenMdObjectHook implements IStartup {
                 target.getParent().layout();
             }
 
+            filterInput.scheduleFocusWhenReady();
+
         } catch (Exception e) {
             Global.logError("OpenMdObject", "patch", e); //$NON-NLS-1$ //$NON-NLS-2$
         }
+    }
+
+    private static void updatePatternControlReference(Object dialog, Control control)
+    {
+        if (dialog == null || control == null)
+            return;
+        for (String field : new String[] { "patternControl", "fPatternControl" }) //$NON-NLS-1$ //$NON-NLS-2$
+            Global.setField(dialog, field, control);
+        Global.invoke(dialog, "setPatternControl", control);
     }
 
     /**
@@ -235,9 +251,8 @@ public class OpenMdObjectHook implements IStartup {
     private static Job getJobField(Object dialog, String... fieldNames) {
         for (String name : fieldNames) {
             Object job = Global.getField(dialog, name);
-            if (job instanceof Job) {
+            if (job instanceof Job)
                 return (Job) job;
-            }
         }
         return null;
     }

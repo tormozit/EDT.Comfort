@@ -4,6 +4,7 @@ import org.eclipse.core.commands.AbstractHandler;
 import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.ui.IViewReference;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PartInitException;
@@ -19,6 +20,14 @@ public final class ObjectSetsHandler extends AbstractHandler
     {
         showView(IWorkbenchPage.VIEW_ACTIVATE);
         return null;
+    }
+
+    public static boolean isViewOpen(IWorkbenchPage page)
+    {
+        if (page == null)
+            return false;
+        IViewReference ref = page.findViewReference(ObjectSetsView.VIEW_ID);
+        return ref != null;
     }
 
     public static void showView(int mode)
@@ -39,7 +48,7 @@ public final class ObjectSetsHandler extends AbstractHandler
                 if (page == null)
                     return;
                 var view = page.showView(ObjectSetsView.VIEW_ID, null, mode);
-                if (view != null)
+                if (view != null && mode == IWorkbenchPage.VIEW_ACTIVATE)
                     page.bringToTop(view);
             }
             catch (PartInitException ignored)

@@ -105,6 +105,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
     private Listener filterEraseListenerData;
     private IContextActivation keyContextActivation;
     private Listener collectionKeyFilter;
+    private long lastInspectEnterMs;
 
     public DebugCollectionWindow(
         IBslIndexedValue indexedValue,
@@ -168,6 +169,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         hookTableEvents();
         hookContextMenu();
         hookFilterHighlight();
+        installFilterNavigation();
         hookShellEvents();
         installKeyContext();
         installCollectionKeyFilter();
@@ -180,6 +182,8 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         shell.pack();
         DebugCollectionWindowGeometryStore.applyToShell(shell);
         shell.open();
+        if (filterInput != null && !filterInput.isDisposed())
+            filterInput.scheduleFocusWhenReady();
         shell.addDisposeListener(e -> disposeWindow());
         if (cloneSnapshot != null && cloneSnapshot.schemaResolved())
             startCloneLoadAfterOpen();
@@ -366,13 +370,32 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
 
     private DebugCollectionTableInteraction activeInteraction()
     {
-        Table data = dataTable();
-        if (data != null && !data.isDisposed() && data.isFocusControl())
-            return dataInteraction;
+        return interactionForTable(activeTable());
+    }
+
+    private Table activeTable()
+    {
         Table index = indexTable();
         if (index != null && !index.isDisposed() && index.isFocusControl())
+            return index;
+        Table data = dataTable();
+        if (data != null && !data.isDisposed() && data.isFocusControl())
+            return data;
+        return data != null ? data : index;
+    }
+
+    private DebugCollectionTableInteraction interactionForTable(Table table)
+    {
+        if (table != null && table == indexTable())
             return indexInteraction;
+        if (table != null && table == dataTable())
+            return dataInteraction;
         return dataInteraction != null ? dataInteraction : indexInteraction;
+    }
+
+    private static Table tableFromEventWidget(Object widget)
+    {
+        return widget instanceof Table table && !table.isDisposed() ? table : null;
     }
 
     void closeAndDispose()
@@ -636,11 +659,12 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
                 {
                     index.setRedraw(true);
                     data.setRedraw(true);
+                    index.redraw();
                 }
             }
         }
         if (splitTable != null)
-            splitTable.clearAll();
+            splitTable.clearDataAll();
         if (model.totalSize >= 0)
             updateTableItemCount(model.totalSize);
         if (scheduler != null)
@@ -1082,6 +1106,29 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         return selectedVariable() != null;
     }
 
+    private void installFilterNavigation()
+    {
+        if (filterInput == null || filterInput.isDisposed())
+            return;
+        Table index = indexTable();
+        if (index == null || index.isDisposed())
+            return;
+        Control filterKeys = filterInput.inputControl();
+        if (filterKeys == null)
+            filterKeys = filterInput.widget();
+        FilterInputBoxListNavigation.installTableNavigation(filterKeys, index, newIdx ->
+        {
+            int col = indexInteraction != null ? indexInteraction.activeColumn() : 0;
+            selectDisplayRow(newIdx, col);
+        }, false, () ->
+        {
+            Table idx = indexTable();
+            if (idx != null && !idx.isDisposed())
+                runInspectOnSelection(idx);
+            return true;
+        });
+    }
+
     private void hookTableEvents()
     {
         Table index = indexTable();
@@ -1090,6 +1137,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         {
             index.addListener(SWT.SetData, this::onSetDataIndex);
             index.addListener(SWT.KeyDown, this::onTableKeyDown);
+            index.addListener(SWT.Traverse, this::onTableTraverse);
             index.addListener(SWT.MouseDoubleClick, this::onTableDoubleClick);
             ScrollBar vertical = index.getVerticalBar();
             if (vertical != null)
@@ -1106,6 +1154,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         {
             data.addListener(SWT.SetData, this::onSetDataData);
             data.addListener(SWT.KeyDown, this::onTableKeyDown);
+            data.addListener(SWT.Traverse, this::onTableTraverse);
             data.addListener(SWT.MouseDoubleClick, this::onTableDoubleClick);
             ScrollBar vertical = data.getVerticalBar();
             if (vertical != null)
@@ -1281,9 +1330,43 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         }
         if (event.keyCode == SWT.F2 && (event.stateMask & (SWT.MOD1 | SWT.MOD2 | SWT.MOD3 | SWT.MOD4)) == 0)
         {
-            runInspectOnSelection();
+            runInspectOnSelection(tableFromEventWidget(event.widget));
+            event.doit = false;
+            return;
+        }
+        if (isTableInspectEnter(event))
+        {
+            inspectSelectionOnEnter(tableFromEventWidget(event.widget));
             event.doit = false;
         }
+    }
+
+    private void onTableTraverse(Event event)
+    {
+        if (!isTableInspectEnter(event))
+            return;
+        inspectSelectionOnEnter(tableFromEventWidget(event.widget));
+        event.doit = false;
+        event.detail = SWT.TRAVERSE_NONE;
+    }
+
+    private void inspectSelectionOnEnter(Table sourceTable)
+    {
+        long now = System.currentTimeMillis();
+        if (now - lastInspectEnterMs < 100)
+            return;
+        lastInspectEnterMs = now;
+        runInspectOnSelection(sourceTable);
+    }
+
+    /** Enter без модификаторов — открыть инспектор, как двойной клик. */
+    private static boolean isTableInspectEnter(Event event)
+    {
+        if ((event.stateMask & (SWT.MOD1 | SWT.MOD2 | SWT.MOD3 | SWT.MOD4)) != 0)
+            return false;
+        if (event.type == SWT.Traverse)
+            return event.detail == SWT.TRAVERSE_RETURN;
+        return event.keyCode == SWT.CR || event.keyCode == SWT.KEYPAD_CR;
     }
 
     private void onMenuDetect(Event event)
@@ -1307,7 +1390,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             return;
         if (!selectTableCellAt(table, new Point(event.x, event.y)))
             return;
-        runInspectOnSelection();
+        runInspectOnSelection(table);
     }
 
     /** @return {@code false}, если под координатами нет ячейки */
@@ -1381,16 +1464,26 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
 
     private void runInspectOnSelection()
     {
-        IBslVariable variable = selectedVariable();
-        Table data = dataTable();
-        if (variable == null || shell == null || shell.isDisposed() || data == null || data.isDisposed())
+        runInspectOnSelection(null);
+    }
+
+    private void runInspectOnSelection(Table sourceTable)
+    {
+        Table inspectTable = sourceTable != null && !sourceTable.isDisposed()
+            ? sourceTable
+            : activeTable();
+        IBslVariable variable = selectedVariable(inspectTable);
+        if (variable == null || shell == null || shell.isDisposed())
             return;
-        int logicalRow = selectedLogicalRow();
-        DebugCollectionTableInteraction interaction = activeInteraction();
+        Table anchorTable = inspectTable != null && !inspectTable.isDisposed() ? inspectTable : dataTable();
+        if (anchorTable == null || anchorTable.isDisposed())
+            return;
+        int logicalRow = selectedLogicalRow(inspectTable);
+        DebugCollectionTableInteraction interaction = interactionForTable(inspectTable);
         String header = columnHeader(interaction != null ? interaction.modelVisibleColumn() : 0);
-        Point anchor = inspectAnchor(data);
+        Point anchor = inspectAnchor(anchorTable);
         DebugCollectionRowContextSupport.runInspect(
-            variable, frame, header, data, anchor, shell, model, logicalRow);
+            variable, frame, header, anchorTable, anchor, shell, model, logicalRow);
     }
 
     private static Point inspectAnchor(Table table)
@@ -1404,21 +1497,18 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
 
     private IBslVariable selectedVariable()
     {
-        Table data = dataTable();
-        if (data == null || data.isDisposed())
-            return null;
-        TableItem[] sel = data.getSelection();
-        if (sel == null || sel.length == 0)
-        {
-            Table index = indexTable();
-            if (index != null && !index.isDisposed())
-                sel = index.getSelection();
-        }
+        return selectedVariable(null);
+    }
+
+    private IBslVariable selectedVariable(Table preferredTable)
+    {
+        TableItem[] sel = selectionOnTable(preferredTable);
         if (sel == null || sel.length == 0)
             return null;
-        int displayIndex = DebugCollectionTableItemKeys.displayIndex(sel[0], sel[0].getParent());
-        if (displayIndex < 0)
-            displayIndex = data.indexOf(sel[0]);
+        Table itemTable = sel[0].getParent();
+        int displayIndex = DebugCollectionTableItemKeys.displayIndex(sel[0], itemTable);
+        if (displayIndex < 0 && itemTable != null && !itemTable.isDisposed())
+            displayIndex = itemTable.indexOf(sel[0]);
         int logical = displayIndexToLogical(displayIndex);
         if (logical < 0)
             return null;
@@ -1427,22 +1517,40 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
 
     private int selectedLogicalRow()
     {
-        Table data = dataTable();
-        if (data == null || data.isDisposed())
-            return -1;
-        TableItem[] sel = data.getSelection();
-        if (sel == null || sel.length == 0)
-        {
-            Table index = indexTable();
-            if (index != null && !index.isDisposed())
-                sel = index.getSelection();
-        }
+        return selectedLogicalRow(null);
+    }
+
+    private int selectedLogicalRow(Table preferredTable)
+    {
+        TableItem[] sel = selectionOnTable(preferredTable);
         if (sel == null || sel.length == 0)
             return -1;
-        int displayIndex = DebugCollectionTableItemKeys.displayIndex(sel[0], sel[0].getParent());
-        if (displayIndex < 0)
-            displayIndex = data.indexOf(sel[0]);
+        Table itemTable = sel[0].getParent();
+        int displayIndex = DebugCollectionTableItemKeys.displayIndex(sel[0], itemTable);
+        if (displayIndex < 0 && itemTable != null && !itemTable.isDisposed())
+            displayIndex = itemTable.indexOf(sel[0]);
         return displayIndexToLogical(displayIndex);
+    }
+
+    private TableItem[] selectionOnTable(Table preferredTable)
+    {
+        Table primary = preferredTable;
+        if (primary == null || primary.isDisposed())
+            primary = activeTable();
+        if (primary != null && !primary.isDisposed())
+        {
+            TableItem[] sel = primary.getSelection();
+            if (sel != null && sel.length > 0)
+                return sel;
+        }
+        Table fallback = primary == indexTable() ? dataTable() : indexTable();
+        if (fallback != null && !fallback.isDisposed())
+        {
+            TableItem[] sel = fallback.getSelection();
+            if (sel != null && sel.length > 0)
+                return sel;
+        }
+        return null;
     }
 
     private String columnHeader(int visibleCol)
@@ -1971,10 +2079,13 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         private boolean syncingScroll;
         private boolean syncingSelection;
         private boolean syncingIndexLayout;
+        private boolean syncingIndexPaneLayout;
         private boolean syncingRowArea;
         private boolean indexColumnSizingInstalled;
         private boolean sashSizingInstalled;
         private boolean initialSashWeightsApplied;
+        private Runnable pendingSyncFixedPaneLayout;
+        private Runnable pendingSyncRowAreaAlignment;
 
         private DebugCollectionSplitTable(Composite panel, SashForm sash, Composite indexPane,
             Label indexBottomSpacer, Composite indexTableStack, Table indexTable, Table dataTable)
@@ -2228,6 +2339,22 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             }
         }
 
+        private void scheduleSyncRowAreaAlignment()
+        {
+            if (indexPane.isDisposed())
+                return;
+            Display display = indexPane.getDisplay();
+            if (display == null || display.isDisposed())
+                return;
+            if (pendingSyncRowAreaAlignment != null)
+                display.timerExec(-1, pendingSyncRowAreaAlignment);
+            pendingSyncRowAreaAlignment = () -> {
+                pendingSyncRowAreaAlignment = null;
+                syncRowAreaAlignment();
+            };
+            display.timerExec(50, pendingSyncRowAreaAlignment);
+        }
+
         /** Слушатель перетаскивания границы колонок фиксированной панели. */
         void installIndexColumnSizing()
         {
@@ -2262,6 +2389,12 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         {
             if (!indexTable.isDisposed())
                 indexTable.clearAll();
+            if (!dataTable.isDisposed())
+                dataTable.clearAll();
+        }
+
+        void clearDataAll()
+        {
             if (!dataTable.isDisposed())
                 dataTable.clearAll();
         }
@@ -2332,22 +2465,38 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             sash.addListener(SWT.Selection, e -> {
                 if (indexTable.isDisposed())
                     return;
-                indexTable.getDisplay().asyncExec(this::syncFixedPaneLayout);
+                scheduleSyncFixedPaneLayout();
             });
             sash.addListener(SWT.Resize, e -> applyInitialSashWeightsOnce());
         }
 
-        /** После изменения ширины панели индекса (sash) — растянуть колонку «Индекс» на всю панель. */
+        /** После изменения ширины stack index-панели (не самой таблицы) — пересчитать ширины колонок. */
         private void installIndexPaneColumnSync()
         {
-            indexTable.addControlListener(new ControlAdapter()
+            indexTableStack.addControlListener(new ControlAdapter()
             {
                 @Override
                 public void controlResized(ControlEvent e)
                 {
-                    syncFixedPaneLayout();
+                    scheduleSyncFixedPaneLayout();
                 }
             });
+        }
+
+        private void scheduleSyncFixedPaneLayout()
+        {
+            if (indexTable.isDisposed())
+                return;
+            Display display = indexTable.getDisplay();
+            if (display == null || display.isDisposed())
+                return;
+            if (pendingSyncFixedPaneLayout != null)
+                display.timerExec(-1, pendingSyncFixedPaneLayout);
+            pendingSyncFixedPaneLayout = () -> {
+                pendingSyncFixedPaneLayout = null;
+                syncFixedPaneLayout();
+            };
+            display.timerExec(50, pendingSyncFixedPaneLayout);
         }
 
         private void installRowAreaAlignmentSync()
@@ -2357,12 +2506,12 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
                 @Override
                 public void controlResized(ControlEvent e)
                 {
-                    syncRowAreaAlignment();
+                    scheduleSyncRowAreaAlignment();
                 }
             };
             dataTable.addControlListener(resizeListener);
             indexTable.addControlListener(resizeListener);
-            sash.addListener(SWT.Resize, e -> syncRowAreaAlignment());
+            sash.addListener(SWT.Resize, e -> scheduleSyncRowAreaAlignment());
 
             ScrollBar hBar = dataTable.getHorizontalBar();
             if (hBar != null)
@@ -2372,12 +2521,12 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
                     @Override
                     public void widgetSelected(SelectionEvent e)
                     {
-                        syncRowAreaAlignment();
+                        scheduleSyncRowAreaAlignment();
                     }
                 });
             }
 
-            dataTable.getDisplay().asyncExec(this::syncRowAreaAlignment);
+            indexPane.getDisplay().asyncExec(this::scheduleSyncRowAreaAlignment);
         }
 
         private static int horizontalScrollBarOccupiedHeight(Table table)
@@ -2427,23 +2576,33 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             initialSashWeightsApplied = true;
             applySashWeightsForColumnWidth(DebugCollectionFixedPaneWidthStore.load());
             if (!indexTable.isDisposed())
-                indexTable.getDisplay().asyncExec(this::syncFixedPaneLayout);
+                scheduleSyncFixedPaneLayout();
         }
 
         /** Две колонки — «Индекс» + «Тип»; три — + «Представление» с сохранёнными ширинами. */
         private void syncFixedPaneLayout()
         {
-            if (indexTable.isDisposed() || indexTable.getColumnCount() <= 0)
+            if (syncingIndexPaneLayout || indexTable.isDisposed() || indexTable.getColumnCount() <= 0)
                 return;
-            if (indexTable.getColumnCount() > 1)
-                syncFixedPaneColumnWidths();
-            else
-                syncIndexColumnToFillPane();
+            syncingIndexPaneLayout = true;
+            try
+            {
+                if (indexTable.getColumnCount() > 1)
+                    syncFixedPaneColumnWidths();
+                else
+                    syncIndexColumnToFillPane();
+                DebugCollectionColumnModel.applyIndexTableColumnLayout(indexTable);
+            }
+            finally
+            {
+                syncingIndexPaneLayout = false;
+            }
         }
 
         private void onFixedPaneColumnHeaderResized(TableColumn column)
         {
-            if (syncingIndexLayout || indexTable.isDisposed() || column == null || column.isDisposed())
+            if (syncingIndexLayout || syncingIndexPaneLayout || indexTable.isDisposed() || column == null
+                || column.isDisposed())
                 return;
             int columnIndex = indexOfColumn(column);
             if (columnIndex == 0)
@@ -2451,7 +2610,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
                 int width = DebugCollectionIndexColumnWidthStore.clamp(column.getWidth());
                 DebugCollectionIndexColumnWidthStore.save(width);
                 if (indexTable.getColumnCount() > 1)
-                    syncFixedPaneColumnWidths();
+                    scheduleSyncFixedPaneLayout();
                 else
                     persistIndexColumnWidth(width);
             }
@@ -2459,13 +2618,13 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             {
                 DebugCollectionTypeColumnWidthStore.save(column.getWidth());
                 if (indexTable.getColumnCount() > 1)
-                    syncFixedPaneColumnWidths();
+                    scheduleSyncFixedPaneLayout();
             }
             else if (columnIndex == 2)
             {
                 DebugCollectionPresentationColumnWidthStore.save(column.getWidth());
                 if (indexTable.getColumnCount() > 2)
-                    syncFixedPaneColumnWidths();
+                    scheduleSyncFixedPaneLayout();
             }
             if (indexTable.getColumnCount() <= 1)
                 applySashWeightsForColumnWidth(fixedPaneWidth());

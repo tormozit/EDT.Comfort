@@ -23,7 +23,7 @@ import org.eclipse.swt.widgets.Event;
 
 /**
  * Подключение UI-доработок в панели «Свойства»:
- * подсветка горизонтальной полосы по клику, контекстное меню копирования имени свойства.
+ * подсветка горизонтальной полосы по клику, контекстное меню (копирование имени, синтакс-помощник).
  */
 public final class PropertySheetHook implements IStartup
 {
@@ -32,8 +32,7 @@ public final class PropertySheetHook implements IStartup
     {
         if (true)
         {
-            // Отключено, т.к. не доделано. 
-            return;
+            return; // Отключено, т.к. не доделано
         }
         Display.getDefault().asyncExec(() -> {
             IWorkbench wb = PlatformUI.getWorkbench();
@@ -203,9 +202,7 @@ public final class PropertySheetHook implements IStartup
                 return;
 
             Point display = widget.toDisplay(event.x, event.y);
-            PropertySheetPaletteRow row = hitTestRendererLightLabel(page, widget, display);
-            if (row == null)
-                row = hitTestRow(page, display);
+            PropertySheetPaletteRow row = resolveRowAt(page, widget, display);
             if (row == null)
             {
                 PropertySheetDebug.problem("mouseDown MISS at=(" + display.x + "," + display.y + ") " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
@@ -213,6 +210,11 @@ public final class PropertySheetHook implements IStartup
                         + " ctx.rows=" + contextRowCount(page)); //$NON-NLS-1$
                 return;
             }
+
+            row.setHitDisplayY(display.y);
+            // #region agent log
+            agentHitDetail(page, row, display);
+            // #endregion
 
             PropertySheetDebug.feature("mouseDown hit " + PropertySheetDebug.quote(row.propertyName)); //$NON-NLS-1$
             PropertySheetUiCoordinator.handleRowClick(page, row);
@@ -232,9 +234,7 @@ public final class PropertySheetHook implements IStartup
 
             Point display = event.x > 0 || event.y > 0
                     ? new Point(event.x, event.y) : widget.getDisplay().getCursorLocation();
-            PropertySheetPaletteRow row = hitTestRendererLightLabel(page, widget, display);
-            if (row == null)
-                row = hitTestRow(page, display);
+            PropertySheetPaletteRow row = resolveRowAt(page, widget, display);
             if (row == null)
             {
                 PropertySheetDebug.feature("menuDetect miss widget=" + PropertySheetDebug.controlBrief(widget)); //$NON-NLS-1$
@@ -242,8 +242,102 @@ public final class PropertySheetHook implements IStartup
             }
 
             event.doit = false;
+            row.setHitDisplayY(display.y);
             PropertySheetDebug.feature("menuDetect hit " + PropertySheetDebug.quote(row.propertyName)); //$NON-NLS-1$
+            PropertySheetUiCoordinator.handleRowClick(page, row);
             PropertySheetUiCoordinator.showRowContextMenu(page, row, widget, display);
+        }
+
+        private static PropertySheetPaletteRow resolveRowAt(Object page, Control widget, Point display)
+        {
+            PropertySheetPaletteRow direct = hitTestRendererLightLabel(page, widget, display);
+            if (direct != null)
+            {
+                PropertySheetUiContext ctx = PropertySheetUiCoordinator.lastContext(page);
+                Object scene = ctx != null ? ctx.scene : null;
+                String modelAtClick = PropertySheetControlInterop.resolveModelPropertyName(page, scene,
+                        direct.lwtView, direct.propertyName);
+                PropertySheetPaletteRow matched = matchContextRow(page, direct.propertyName, direct.lwtView);
+                PropertySheetPaletteRow base = matched != null ? matched : direct;
+                if (modelAtClick != null && !modelAtClick.isEmpty())
+                {
+                    String cached = base.copyPropertyName();
+                    if (cached == null || cached.isEmpty() || !modelAtClick.equals(cached))
+                        base = rowWithModel(base, modelAtClick);
+                }
+                return base;
+            }
+            return hitTestContextRows(page, display);
+        }
+
+        private static PropertySheetPaletteRow rowWithModel(PropertySheetPaletteRow row, String model)
+        {
+            return new PropertySheetPaletteRow(row.nameControl, row.rowComposite, row.rowControls,
+                    row.propertyName, row.lwtView, model);
+        }
+
+        private static PropertySheetPaletteRow hitTestContextRows(Object page, Point display)
+        {
+            PropertySheetUiContext ctx = PropertySheetUiCoordinator.lastContext(page);
+            if (ctx == null || ctx.rows.isEmpty() || display == null)
+                return null;
+            PropertySheetPaletteRow best = null;
+            int bestDist = Integer.MAX_VALUE;
+            Composite root = PropertySheetUiContext.findPaletteRoot(page);
+            Composite clickSection = root != null && !root.isDisposed()
+                    ? PropertySheetControlInterop.findSectionBodyAtDisplayY(root, display.y) : null;
+            for (PropertySheetPaletteRow row : ctx.rows)
+            {
+                if (!row.isAlive())
+                    continue;
+                if (clickSection != null && row.lwtView != null)
+                {
+                    Rectangle light = PropertySheetControlInterop.liveLightDisplayBoundsOnHost(row.lwtView,
+                            clickSection);
+                    if (light == null)
+                        continue;
+                    int centerY = light.y + Math.max(1, light.height / 2);
+                    if (Math.abs(display.y - centerY) > 14)
+                        continue;
+                }
+                if (!row.hitTest(display, page))
+                    continue;
+                int dist = row.hitTestDistance(display, page);
+                if (dist < bestDist)
+                {
+                    bestDist = dist;
+                    best = row;
+                }
+            }
+            return best;
+        }
+
+        private static PropertySheetPaletteRow matchContextRow(Object page, String propertyName, Object lwtView)
+        {
+            if (propertyName == null || propertyName.isEmpty())
+                return null;
+            PropertySheetUiContext ctx = PropertySheetUiCoordinator.lastContext(page);
+            if (ctx == null)
+                return null;
+            if (lwtView != null)
+            {
+                for (PropertySheetPaletteRow row : ctx.rows)
+                {
+                    if (!row.isAlive())
+                        continue;
+                    if (lwtView == row.lwtView)
+                        return row;
+                }
+                return null;
+            }
+            for (PropertySheetPaletteRow row : ctx.rows)
+            {
+                if (!row.isAlive())
+                    continue;
+                if (propertyName.equals(row.propertyName))
+                    return row;
+            }
+            return null;
         }
 
         private static PropertySheetPaletteRow hitTestRendererLightLabel(Object page, Control widget, Point display)
@@ -261,18 +355,12 @@ public final class PropertySheetHook implements IStartup
             if (labelEntries.isEmpty())
                 return null;
 
-            Point local = widget.toControl(display);
-            if (local.x < 0 || local.y < 0 || local.x >= widget.getSize().x || local.y >= widget.getSize().y)
-                return null;
-            // Левая половина — зона имени; правая половина — зона значения.
-            // В правой половине может быть LightLabel имени (это определяет следующий цикл до границы / 2).
-            if (local.x > widget.getSize().x / 2)
-                return null;
+            Composite root = PropertySheetUiContext.findPaletteRoot(page);
+            Composite clickSection = root != null && !root.isDisposed()
+                    ? PropertySheetControlInterop.findSectionBodyAtDisplayY(root, display.y) : null;
 
             PropertySheetPaletteRow best = null;
             int bestDist = Integer.MAX_VALUE;
-            // Проходим все LabelViewModel — без slice-индексирования.
-            // Принадлежность к widget определяется по реальным координатам LightLabel.
             for (Map.Entry<?, ?> entry : labelEntries)
             {
                 Object vm = entry.getKey();
@@ -280,43 +368,56 @@ public final class PropertySheetHook implements IStartup
                 if (name.isEmpty())
                     continue;
                 Object view = entry.getValue();
-                Object light = lightFromView(view);
-                Object boundsObj = light != null ? Global.invoke(light, "getBounds") : null; //$NON-NLS-1$
-                if (!(boundsObj instanceof Rectangle))
+                Composite paintHost = clickSection;
+                if (paintHost == null || paintHost.isDisposed())
+                {
+                    Composite leaf = PropertySheetControlInterop.leafFieldRowHostForView(view);
+                    if (leaf != null && !leaf.isDisposed() && leaf.getSize().y <= 80)
+                        paintHost = leaf;
+                    if (paintHost == null || paintHost.isDisposed())
+                        paintHost = PropertySheetControlInterop.findPaintHostForView(view, root);
+                }
+                if (paintHost == null || paintHost.isDisposed())
                     continue;
-                Rectangle bounds = (Rectangle) boundsObj;
-                Point lightDisplay = lightDisplayOrigin(light);
-                Point lightLocal = lightDisplay != null ? widget.toControl(lightDisplay) : null;
-                if (lightLocal == null)
-                    lightLocal = new Point(bounds.x, bounds.y); // fallback: LWT local coords
-                if (lightLocal == null)
+
+                Rectangle liveBand = PropertySheetControlInterop.liveRowBandInHost(view, paintHost);
+                if (liveBand == null || liveBand.height <= 0)
                     continue;
-                if (lightLocal.x < -8 || lightLocal.x > widget.getSize().x / 2)
+
+                Point bandTopLeft = paintHost.toDisplay(liveBand.x, liveBand.y);
+                int rowTop = bandTopLeft.y - 2;
+                int rowBottom = rowTop + liveBand.height + 4;
+                if (display.y < rowTop || display.y >= rowBottom)
                     continue;
-                Rectangle band = new Rectangle(0, Math.max(0, lightLocal.y - 4),
-                        Math.max(1, widget.getSize().x), Math.max(24, bounds.height + 8));
-                if (local.y < band.y || local.y >= band.y + band.height)
+
+                Point hostLocal = paintHost.toControl(display);
+                if (hostLocal.x < 0 || hostLocal.y < 0
+                        || hostLocal.x >= paintHost.getSize().x || hostLocal.y >= paintHost.getSize().y)
                     continue;
-                int dist = Math.abs(local.y - (lightLocal.y + Math.max(1, bounds.height / 2)));
+
+                int dist = Math.abs(display.y - (bandTopLeft.y + Math.max(1, liveBand.height / 2)));
                 if (dist < bestDist)
                 {
-                    Composite host = widget instanceof Composite ? (Composite) widget : widget.getParent();
-                    Point origin = PropertySheetControlInterop.lwtLabelDrawOrigin(light, host);
-                    if (origin == null)
-                    {
-                        int textHeight = PropertySheetControlInterop.lwtTextHeight(light, host);
-                        origin = new Point(Math.max(0, lightLocal.x + 3),
-                                Math.max(0, lightLocal.y + Math.max(0, (bounds.height - textHeight) / 2)));
-                    }
-                    PropertySheetControlInterop.storeLwtRowGeometry(widget, view, name, origin, band);
-                    Composite rowComposite = widget instanceof Composite ? (Composite) widget : widget.getParent();
-                    best = new PropertySheetPaletteRow(widget, rowComposite,
-                            PropertySheetUiContext.rowControls(rowComposite, widget), name, view);
+                    PropertySheetControlInterop.refreshLwtRowGeometry(paintHost, view, name);
+                    String modelName = PropertySheetControlInterop.resolveModelPropertyName(page, ctx.scene, view, name);
+                    best = new PropertySheetPaletteRow(paintHost, paintHost,
+                            PropertySheetUiContext.rowControls(paintHost, paintHost), name, view, modelName);
                     bestDist = dist;
                 }
             }
             if (best != null)
+            {
+                // #region agent log
+                agentRendererHit(display, best, clickSection, bestDist);
+                // #endregion
                 PropertySheetDebug.feature("directLightLabel hit " + PropertySheetDebug.quote(best.propertyName)); //$NON-NLS-1$
+            }
+            else
+            {
+                // #region agent log
+                agentRendererMiss(display, clickSection, labelEntries.size());
+                // #endregion
+            }
             return best;
         }
 
@@ -330,31 +431,6 @@ public final class PropertySheetHook implements IStartup
                     out.add(entry);
             }
             return out;
-        }
-
-        private static boolean sameOrRelated(Control a, Control b)
-        {
-            if (a == null || b == null || a.isDisposed() || b.isDisposed())
-                return false;
-            if (a == b)
-                return true;
-            if (b instanceof Composite && isDescendant(a, (Composite) b))
-                return true;
-            if (a instanceof Composite && isDescendant(b, (Composite) a))
-                return true;
-            return false;
-        }
-
-        private static boolean isDescendant(Control control, Composite ancestor)
-        {
-            if (control == null || ancestor == null || control.isDisposed() || ancestor.isDisposed())
-                return false;
-            for (Composite p = control.getParent(); p != null && !p.isDisposed(); p = p.getParent())
-            {
-                if (p == ancestor)
-                    return true;
-            }
-            return false;
         }
 
         private static Object lightFromView(Object view)
@@ -400,68 +476,95 @@ public final class PropertySheetHook implements IStartup
             return SmartTreeElementLabels.resolve(viewModel, null);
         }
 
-        private static PropertySheetPaletteRow hitTestRow(Object page, Point display)
-        {
-            PropertySheetUiContext ctx = PropertySheetUiCoordinator.lastContext(page);
-            if (ctx == null || ctx.rows.isEmpty())
-                return null;
-
-            PropertySheetPaletteRow best = null;
-            int bestDist = Integer.MAX_VALUE;
-
-            for (PropertySheetPaletteRow row : ctx.rows)
-            {
-                if (!row.isAlive())
-                    continue;
-                Control host = PropertySheetRowSelectionFeature.interactionTarget(row);
-                if (host == null || host.isDisposed())
-                    continue;
-
-                Point local = host.toControl(display);
-                if (local.x < 0 || local.y < 0 || local.x >= host.getSize().x || local.y >= host.getSize().y)
-                    continue;
-
-                if (PropertySheetControlInterop.isLwtPaintHost(host))
-                {
-                    Rectangle band = PropertySheetControlInterop.lwtRowBand(host, row.propertyName);
-                    if (band == null)
-                    {
-                        Point origin = PropertySheetControlInterop.lwtHighlightOrigin(host, row.propertyName);
-                        int bandH = PropertySheetControlInterop.lwtRowBandHeight(host, row.propertyName);
-                        band = new Rectangle(0, Math.max(0, origin.y - 2), host.getSize().x, Math.max(4, bandH));
-                    }
-                    int bandTop = Math.max(0, band.y - 8);
-                    int bandBottom = bandTop + Math.max(12, band.height + 16);
-                    if (local.y < bandTop || local.y >= bandBottom)
-                        continue;
-                    int dist = Math.abs(local.y - (bandTop + Math.max(4, band.height) / 2));
-                    if (dist < bestDist)
-                    {
-                        bestDist = dist;
-                        best = row;
-                    }
-                    continue;
-                }
-                else if (local.x >= host.getSize().x / 2)
-                {
-                    continue;
-                }
-
-                int dist = Math.abs(local.y - host.getSize().y / 2);
-                if (dist < bestDist)
-                {
-                    bestDist = dist;
-                    best = row;
-                }
-            }
-            return best;
-        }
-
         private static int contextRowCount(Object page)
         {
             PropertySheetUiContext ctx = PropertySheetUiCoordinator.lastContext(page);
             return ctx != null ? ctx.rows.size() : 0;
         }
+
+        // #region agent log
+        private static void agentHitDetail(Object page, PropertySheetPaletteRow row, Point display)
+        {
+            try
+            {
+                Composite root = PropertySheetUiContext.findPaletteRoot(page);
+                Control host = PropertySheetRowSelectionFeature.lwtPaintHostAtDisplayY(row, page, display.y);
+                int hostTop = host != null && !host.isDisposed() ? host.toDisplay(0, 0).y : -1;
+                Composite clickSection = root != null
+                        ? PropertySheetControlInterop.findSectionBodyAtDisplayY(root, display.y) : null;
+                int clickSectionTop = clickSection != null && !clickSection.isDisposed()
+                        ? clickSection.toDisplay(0, 0).y : -1;
+                boolean hostHasHook = host != null && Boolean.TRUE.equals(host.getData("tormozit.ps.rowSelectPaint")); //$NON-NLS-1$
+                String line = "{\"sessionId\":\"db8c17\",\"hypothesisId\":\"H13\",\"location\":\"PropertySheetHook.mouseDown\"," //$NON-NLS-1$
+                        + "\"message\":\"hit\",\"data\":{\"display\":\"" + escJson(row.propertyName) //$NON-NLS-1$
+                        + "\",\"model\":\"" + escJson(row.copyPropertyName()) //$NON-NLS-1$
+                        + "\",\"clickY\":" + display.y //$NON-NLS-1$
+                        + ",\"hostTop\":" + hostTop //$NON-NLS-1$
+                        + ",\"clickSectionTop\":" + clickSectionTop //$NON-NLS-1$
+                        + ",\"hostHasPaintHook\":" + hostHasHook //$NON-NLS-1$
+                        + "},\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
+                java.nio.file.Files.writeString(
+                        java.nio.file.Path.of("C:\\VC\\EDT.Comfort\\debug-db8c17.log"), //$NON-NLS-1$
+                        line, java.nio.charset.StandardCharsets.UTF_8,
+                        java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+            }
+            catch (Exception ignored)
+            {
+                // debug session only
+            }
+        }
+
+        private static void agentRendererHit(Point display, PropertySheetPaletteRow best, Composite clickSection,
+                int dist)
+        {
+            try
+            {
+                int sectionTop = clickSection != null && !clickSection.isDisposed()
+                        ? clickSection.toDisplay(0, 0).y : -1;
+                String line = "{\"sessionId\":\"db8c17\",\"hypothesisId\":\"H17\",\"location\":\"PropertySheetHook.rendererHit\"," //$NON-NLS-1$
+                        + "\"message\":\"direct\",\"data\":{\"prop\":\"" + escJson(best.propertyName) //$NON-NLS-1$
+                        + "\",\"clickY\":" + display.y + ",\"dist\":" + dist //$NON-NLS-1$
+                        + ",\"clickSectionTop\":" + sectionTop //$NON-NLS-1$
+                        + "},\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
+                java.nio.file.Files.writeString(
+                        java.nio.file.Path.of("C:\\VC\\EDT.Comfort\\debug-db8c17.log"), //$NON-NLS-1$
+                        line, java.nio.charset.StandardCharsets.UTF_8,
+                        java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+            }
+            catch (Exception ignored)
+            {
+                // debug session only
+            }
+        }
+
+        private static void agentRendererMiss(Point display, Composite clickSection, int labelCount)
+        {
+            try
+            {
+                int sectionTop = clickSection != null && !clickSection.isDisposed()
+                        ? clickSection.toDisplay(0, 0).y : -1;
+                String line = "{\"sessionId\":\"db8c17\",\"hypothesisId\":\"H18\",\"location\":\"PropertySheetHook.rendererMiss\"," //$NON-NLS-1$
+                        + "\"message\":\"miss\",\"data\":{\"clickY\":" + display.y //$NON-NLS-1$
+                        + ",\"labels\":" + labelCount + ",\"clickSectionTop\":" + sectionTop //$NON-NLS-1$
+                        + "},\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
+                java.nio.file.Files.writeString(
+                        java.nio.file.Path.of("C:\\VC\\EDT.Comfort\\debug-db8c17.log"), //$NON-NLS-1$
+                        line, java.nio.charset.StandardCharsets.UTF_8,
+                        java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+            }
+            catch (Exception ignored)
+            {
+                // debug session only
+            }
+        }
+
+        private static String escJson(String s)
+        {
+            if (s == null)
+                return ""; //$NON-NLS-1$
+            return s.replace("\\", "\\\\").replace("\"", "\\\""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        }
+        // #endregion
 
     }
 

@@ -9,10 +9,12 @@ import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
 
+import org.eclipse.jface.action.IAction;
 import org.eclipse.jface.action.IContributionItem;
 import org.eclipse.jface.action.IMenuListener;
 import org.eclipse.jface.action.IMenuManager;
 import org.eclipse.jface.action.MenuManager;
+import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
@@ -23,10 +25,16 @@ import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.ui.IStartup;
+import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.actions.CompoundContributionItem;
 
+import com._1c.g5.v8.dt.form.ui.editor.FormEditor;
+import com._1c.g5.v8.dt.form.ui.editor.FormEditorPage;
+import com._1c.g5.v8.dt.form.ui.editor.item.FormItemActionsGroup;
+import com._1c.g5.v8.dt.ui.commands.ShowPropertiesHandler;
+
 /**
- * Объединяет два поведения редактора форм EDT:
+ * Объединяет три поведения редактора форм EDT:
  *
  * <ol>
  *   <li><b>Правый клик в области предпросмотра (WYSIWYG).</b>
@@ -34,6 +42,10 @@ import org.eclipse.ui.actions.CompoundContributionItem;
  *       чтобы EDT выбрал элемент формы под курсором до открытия контекстного меню.
  *       Область предпросмотра реализована классом
  *       {@code WysiwygNativeComposite} (наследник {@link Composite}).
+ *
+ *   <li><b>Двойной клик в области предпросмотра (WYSIWYG).</b>
+ *       Активирует панель «Свойства» и выполняет «Изменить» для выбранного
+ *       элемента — как двойной клик по дереву элементов формы в EDT.
  *
  *   <li><b>Сортировка подменю «События».</b>
  *       Упорядочивает пункты подменю «События» контекстного меню дерева элементов
@@ -135,6 +147,7 @@ public class FormEditorHook implements IStartup
         if (display == null || display.isDisposed())
             return;
         display.addFilter(SWT.MouseDown, FormEditorHook::handleMouseDown);
+        display.addFilter(SWT.MouseDoubleClick, FormEditorHook::handleMouseDoubleClick);
         display.addFilter(SWT.MenuDetect, FormEditorHook::handleMenuDetect);
     }
 
@@ -178,6 +191,51 @@ public class FormEditorHook implements IStartup
         up.y      = y;
         up.count  = 1;
         widget.notifyListeners(SWT.MouseUp, up);
+    }
+
+    // -----------------------------------------------------------------------
+    // Двойной клик — «Свойства» + «Изменить» (как в дереве элементов)
+    // -----------------------------------------------------------------------
+
+    private static void handleMouseDoubleClick(Event e)
+    {
+        if (e.button != 1)
+            return;
+        if (!(e.widget instanceof Composite))
+            return;
+        if (!WYSIWYG_CLASS.equals(e.widget.getClass().getSimpleName()))
+            return;
+
+        Display display = e.display;
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(FormEditorHook::runWysiwygDoubleClickActions);
+    }
+
+    /** Повторяет {@code FormEditorPage.lambda$9}: ShowProperties + Edit. */
+    private static void runWysiwygDoubleClickActions()
+    {
+        if (!PlatformUI.isWorkbenchRunning())
+            return;
+
+        FormEditorPage page = FormEditor.getActiveFormEditorPage();
+        if (page == null)
+            return;
+
+        Object groupObj = Global.getField(page, "itemsActionsGroup"); //$NON-NLS-1$
+        if (!(groupObj instanceof FormItemActionsGroup group))
+            return;
+
+        var provider = page.getSite().getSelectionProvider();
+        ISelection selection = provider != null ? provider.getSelection() : null;
+        if (selection == null || selection.isEmpty())
+            return;
+
+        ShowPropertiesHandler.run(page.getSite());
+
+        IAction edit = group.getEditAction();
+        if (edit != null)
+            edit.run();
     }
 
     // -----------------------------------------------------------------------

@@ -95,6 +95,12 @@ final class ObjectSetsItems
         int existing = ObjectSets.getInstance().countExistingKeys(target, keys);
         int added = ObjectSets.getInstance().addItems(target.id, items);
         showAddToast(target.name, added, existing, keys.size(), shell);
+        if (added > 0)
+        {
+            ObjectSetsView view = ObjectSetsView.getActiveInstance();
+            if (view != null)
+                view.refreshItemsForSetIfSelected(target.id);
+        }
         return new AddResult(added, existing);
     }
 
@@ -119,6 +125,15 @@ final class ObjectSetsItems
         int added = ObjectSets.getInstance().addItems(target.id, unique);
         int removed = ObjectSets.getInstance().removeItems(source.id, keys);
         showMoveToast(target.name, added, removed, keys.size(), shell);
+        if (added > 0 || removed > 0)
+        {
+            ObjectSetsView view = ObjectSetsView.getActiveInstance();
+            if (view != null)
+            {
+                view.refreshItemsForSetIfSelected(target.id);
+                view.refreshItemsForSetIfSelected(source.id);
+            }
+        }
         return new MoveResult(added, removed);
     }
 
