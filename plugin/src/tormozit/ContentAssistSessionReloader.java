@@ -230,7 +230,7 @@ public final class ContentAssistSessionReloader
     {
         IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(bslEditor);
         if (session != null)
-            IrBslExpressionHtmlSupport.cancelActiveEvaluation(session);
+            IRSession.cancelActiveEvaluation(session);
     }
 
     private void installSessionCaretListener()

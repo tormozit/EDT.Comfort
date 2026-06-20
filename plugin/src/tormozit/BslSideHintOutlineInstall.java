@@ -200,7 +200,7 @@ public final class BslSideHintOutlineInstall
         BslXtextEditor editor = IrMethodListHandler.resolveBslEditor(contextHost);
         IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(editor);
         if (session != null)
-            IrBslExpressionHtmlSupport.cancelActiveEvaluation(session);
+            IRSession.cancelActiveEvaluation(session);
         int peekOffset = BslSideHintResolver.peekSourceOffset(element);
         if (shouldSkipHintForElement(tree, presenter, element, peekOffset))
             return;
@@ -571,7 +571,12 @@ public final class BslSideHintOutlineInstall
             }
 
             Object input = hint.getControlInput();
-            if (control instanceof IInformationControlExtension2 ext2)
+            if (input instanceof String html)
+            {
+                // Обогащённый HTML-строкой: setInput(String) бросает InstanceOf-ассерт в Xtext-контроле
+                IrBslHoverHtml.applyHtmlToControl(control, html);
+            }
+            else if (control instanceof IInformationControlExtension2 ext2)
                 ext2.setInput(input);
             else
                 control.setInformation(input != null ? input.toString() : ""); //$NON-NLS-1$

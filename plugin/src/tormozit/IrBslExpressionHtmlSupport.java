@@ -4,7 +4,6 @@ import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 
 import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
@@ -25,31 +24,6 @@ public final class IrBslExpressionHtmlSupport
         new ConcurrentHashMap<>();
 
     private IrBslExpressionHtmlSupport() {}
-
-    /**
-     * Проактивная отмена: удаление cancel-файла (ИР прерывает {@code ОписаниеХТМЛВыражения}).
-     * COM {@code УстановитьФайлОтменыВычислений(null)} вызывается в {@code finally} на executor.
-     */
-    public static void cancelActiveEvaluation(IRSession session)
-    {
-        if (session == null)
-            return;
-        AtomicReference<Path> ref = activeCancelFiles.get(session);
-        if (ref == null)
-            return;
-        Path path = ref.get();
-        if (path == null)
-            return;
-        try
-        {
-            if (Files.deleteIfExists(path))
-                BslSideHintDebug.step("ir cancel", "deleted " + path.getFileName()); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        catch (Exception e)
-        {
-            BslSideHintDebug.problem("ir cancel: " + e.getMessage()); //$NON-NLS-1$
-        }
-    }
 
     public static IRSession resolveConnectedSession(BslXtextEditor editor)
     {

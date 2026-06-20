@@ -1,4 +1,10 @@
+// IrBslHoverHtml.java
 package tormozit;
+
+import org.eclipse.jface.text.IInformationControl;
+import org.eclipse.swt.browser.Browser;
+import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Control;
 
 /**
  * Слияние HTML doc-hover / боковой подсказки с блоком из ИР
@@ -48,6 +54,53 @@ public final class IrBslHoverHtml
         if (bodyEnd >= 0)
             return baseHtml.substring(0, bodyEnd) + irBlock + baseHtml.substring(bodyEnd);
         return baseHtml + irBlock;
+    }
+
+    /**
+     * Находит виджет {@link Browser} внутри information control, обходя дерево SWT-виджетов.
+     * Аналог внутреннего {@code BslInfoBrowserUtils.getInfoBrowser()} из EDT.
+     */
+    public static Browser findControlBrowser(IInformationControl control)
+    {
+        if (control == null)
+            return null;
+        Object shell = Global.invoke(control, "getShell"); //$NON-NLS-1$
+        if (!(shell instanceof Composite comp))
+            return null;
+        return findDescendantBrowser(comp);
+    }
+
+    private static Browser findDescendantBrowser(Composite composite)
+    {
+        for (Control child : composite.getChildren())
+        {
+            if (child instanceof Browser browser && !browser.isDisposed())
+                return browser;
+            if (child instanceof Composite c)
+            {
+                Browser b = findDescendantBrowser(c);
+                if (b != null)
+                    return b;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Применяет HTML напрямую в браузер information control, минуя {@code setInput()}.
+     * Используется когда стандартный {@code setInput(String)} бросает ассерт в Xtext-контроле.
+     *
+     * @return {@code true} если браузер найден и HTML применён
+     */
+    public static boolean applyHtmlToControl(IInformationControl control, String html)
+    {
+        if (control == null || html == null)
+            return false;
+        Browser browser = findControlBrowser(control);
+        if (browser == null || browser.isDisposed())
+            return false;
+        browser.setText(html);
+        return true;
     }
 
     /** ИР часто возвращает полный {@code <html>…</html>}; в base вставляем только содержимое body. */

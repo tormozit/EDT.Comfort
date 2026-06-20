@@ -573,6 +573,31 @@ public final class IRSession
         }
 
 
+    /**
+         * Проактивная отмена: удаление cancel-файла (ИР прерывает {@code ОписаниеХТМЛВыражения}).
+         * COM {@code УстановитьФайлОтменыВычислений(null)} вызывается в {@code finally} на executor.
+         */
+        public static void cancelActiveEvaluation(IRSession session)
+        {
+            if (session == null)
+                return;
+            AtomicReference<Path> ref = IrBslExpressionHtmlSupport.activeCancelFiles.get(session);
+            if (ref == null)
+                return;
+            Path path = ref.get();
+            if (path == null)
+                return;
+            try
+            {
+                if (Files.deleteIfExists(path))
+                    BslSideHintDebug.step("ir cancel", "deleted " + path.getFileName()); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (Exception e)
+            {
+                BslSideHintDebug.problem("ir cancel: " + e.getMessage()); //$NON-NLS-1$
+            }
+        }
+
     public static Path setEvaluationCancellationFile(IRSession session, Object codeEditor) throws IOException
         {
             Path cancelFile;
