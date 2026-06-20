@@ -74,135 +74,128 @@ public final class BslSideHintOutlineInstall
     private static final int DEBOUNCE_MS = OpenStrategy.getPostSelectionDelay();
     private BslSideHintOutlineInstall() {}
 
-public static void installIfBsl(TreeViewer viewer, Object contextHost, String dialogName)
-{
-
-    if (!ComfortSettings.isReplaceListFiltersEnabled() || viewer == null)
-        return;
-    if (!isBslOutlinePopup(dialogName, viewer))
+    public static void installIfBsl(TreeViewer viewer, Object contextHost, String dialogName)
     {
 
-        return;
-    }
-
-    Tree tree = viewer.getTree();
-    if (tree == null || tree.isDisposed())
-        return;
-    if (Boolean.TRUE.equals(tree.getData(INSTALLED_KEY)))
-        return;
-    tree.setData(INSTALLED_KEY, Boolean.TRUE);
-    final BslSideHintPresenter presenter = new BslSideHintPresenter();
-    presenter.install(tree);
-    tree.setData(PRESENTER_KEY, presenter);
-    tree.setData(CONTEXT_HOST_KEY, contextHost);
-    final int[] generation = new int[1];
-    tree.setData("tormozit.bslSideHintGeneration", generation); //$NON-NLS-1$
-
-    final Shell outlineShell = tree.getShell();
-    final Object popupDialog = outlineShell.getData();
-    final java.lang.reflect.Field[] listenToDeactivateField = new java.lang.reflect.Field[1];
-
-    if (popupDialog != null) {
-        BslSideHintDebug.log("popupDialog class: " + popupDialog.getClass().getName()); //$NON-NLS-1$
-        listenToDeactivateField[0] = findField(popupDialog, "listenToDeactivate"); //$NON-NLS-1$
-    }
-
-    // Глобальный фильтр: клик вне outline + подсказки → закрываем outline
-    final Listener globalMouseFilter = event -> {
-        if (event.type != SWT.MouseDown || event.button != 1) return;
-        if (!(event.widget instanceof Control clicked)) return;
-        
-        Shell clickedShell = clicked.getShell();
-        boolean inOutline = clickedShell == outlineShell;
-        boolean inHint = presenter.isClickInsideInformationControl(clicked);
-        
-        BslSideHintDebug.log("MouseDown: inOutline=" + inOutline + " inHint=" + inHint); //$NON-NLS-1$ //$NON-NLS-2$
-        
-        if (!inOutline && !inHint) {
-            // Клик вне outline и подсказки — закрываем outline
-            BslSideHintDebug.log("MouseDown outside outline+hint, closing outline"); //$NON-NLS-1$
-            if (!outlineShell.isDisposed()) {
-                outlineShell.close();
-            }
-        }
-    };
-    tree.getDisplay().addFilter(SWT.MouseDown, globalMouseFilter);
-
-    ISelectionChangedListener listener = new ISelectionChangedListener() {
-
-        @Override
-        public void selectionChanged(SelectionChangedEvent event)
+        if (!ComfortSettings.isReplaceListFiltersEnabled() || viewer == null)
+            return;
+        if (!isBslOutlinePopup(dialogName, viewer))
         {
 
-            if (Boolean.TRUE.equals(tree.getData(SUPPRESS_SELECTION_KEY)))
-                return;
-            if (!(event.getSelection() instanceof IStructuredSelection))
-            {
-
-                presenter.clearHint();
-                return;
-            }
-
-            IStructuredSelection sel = (IStructuredSelection) event.getSelection();
-            if (sel.isEmpty())
-            {
-
-                presenter.clearHint();
-                return;
-            }
-
-            final Object element = sel.getFirstElement();
-            scheduleHintUpdate(tree, presenter, contextHost, element, ++generation[0]);
+            return;
         }
 
-    };
-    viewer.addSelectionChangedListener(listener);
-    tree.setData(ROW_HOVER_HINT_KEY, (Consumer<Object>) element -> scheduleHintUpdate(tree, presenter,
-        contextHost, element, ++generation[0]));
-    FilterListMouseCurrentSync.installForOutlineTree(viewer,
-        () -> Boolean.TRUE.equals(tree.getData(SUPPRESS_SELECTION_KEY)));
+        Tree tree = viewer.getTree();
+        if (tree == null || tree.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(tree.getData(INSTALLED_KEY)))
+            return;
+        tree.setData(INSTALLED_KEY, Boolean.TRUE);
+        final BslSideHintPresenter presenter = new BslSideHintPresenter();
+        presenter.install(tree);
+        tree.setData(PRESENTER_KEY, presenter);
+        tree.setData(CONTEXT_HOST_KEY, contextHost);
+        final int[] generation = new int[1];
+        tree.setData("tormozit.bslSideHintGeneration", generation); //$NON-NLS-1$
 
-    // Deactivate: блокируем закрытие outline, если есть активная подсказка
-    final Listener outlineDeactivateFilter = event -> {
-        if (!(event.widget instanceof Shell)) return;
-        if (event.widget != outlineShell) return;
-        
-        if (presenter.hasActiveInformationControl()) {
-            BslSideHintDebug.log("Deactivate: hint active, blocking close"); //$NON-NLS-1$
-            if (listenToDeactivateField[0] != null && popupDialog != null) {
-                try {
-                    listenToDeactivateField[0].setBoolean(popupDialog, false);
-                } catch (Exception e) {
-                    BslSideHintDebug.problem("Failed to set listenToDeactivate: " + e.getMessage()); //$NON-NLS-1$
+        final Shell outlineShell = tree.getShell();
+        final Object popupDialog = outlineShell.getData();
+        final java.lang.reflect.Field[] listenToDeactivateField = new java.lang.reflect.Field[1];
+
+        if (popupDialog != null) {
+            listenToDeactivateField[0] = findField(popupDialog, "listenToDeactivate"); //$NON-NLS-1$
+        }
+
+        // Глобальный фильтр: клик вне outline + подсказки → закрываем outline
+        final Listener globalMouseFilter = event -> {
+            if (event.type != SWT.MouseDown || event.button != 1) return;
+            if (!(event.widget instanceof Control clicked)) return;
+
+            Shell clickedShell = clicked.getShell();
+            boolean inOutline = clickedShell == outlineShell;
+            boolean inHint = presenter.isClickInsideInformationControl(clicked);
+
+            if (!inOutline && !inHint) {
+                if (!outlineShell.isDisposed()) {
+                    outlineShell.close();
                 }
             }
-        }
-    };
-    outlineShell.getDisplay().addFilter(SWT.Deactivate, outlineDeactivateFilter);
+        };
+        tree.getDisplay().addFilter(SWT.MouseDown, globalMouseFilter);
 
-    tree.addDisposeListener(e -> {
+        ISelectionChangedListener listener = new ISelectionChangedListener() {
 
-        cancelPendingHintUpdate(tree);
-        FilterListMouseCurrentSync.uninstall(tree);
-        if (!outlineShell.isDisposed()) {
-            outlineShell.getDisplay().removeFilter(SWT.Deactivate, outlineDeactivateFilter);
-            outlineShell.getDisplay().removeFilter(SWT.MouseDown, globalMouseFilter);
-        }
-        presenter.dispose();
-        tree.setData(PRESENTER_KEY, null);
-        tree.setData(INSTALLED_KEY, null);
-        tree.setData(PENDING_KEY, null);
-        tree.setData("tormozit.bslSideHintGeneration", null); //$NON-NLS-1$
-        tree.setData(ROW_HOVER_HINT_KEY, null);
-        tree.setData(WORDS_TABLE_READY_KEY, null);
-        tree.setData(CONTEXT_HOST_KEY, null);
-        tree.setData(LAST_BASE_HINT_KEY, null);
-    });
-    ensureWordsTablePreparation(tree, contextHost);
-    if (viewer.getSelection() instanceof IStructuredSelection sel && !sel.isEmpty())
-        listener.selectionChanged(new SelectionChangedEvent(viewer, sel));
-    BslSideHintDebug.log("installed on " + dialogName); //$NON-NLS-1$
-}
+            @Override
+            public void selectionChanged(SelectionChangedEvent event)
+            {
+
+                if (Boolean.TRUE.equals(tree.getData(SUPPRESS_SELECTION_KEY)))
+                    return;
+                if (!(event.getSelection() instanceof IStructuredSelection))
+                {
+
+                    presenter.clearHint();
+                    return;
+                }
+
+                IStructuredSelection sel = (IStructuredSelection) event.getSelection();
+                if (sel.isEmpty())
+                {
+
+                    presenter.clearHint();
+                    return;
+                }
+
+                final Object element = sel.getFirstElement();
+                scheduleHintUpdate(tree, presenter, contextHost, element, ++generation[0]);
+            }
+
+        };
+        viewer.addSelectionChangedListener(listener);
+        tree.setData(ROW_HOVER_HINT_KEY, (Consumer<Object>) element -> scheduleHintUpdate(tree, presenter,
+            contextHost, element, ++generation[0]));
+        FilterListMouseCurrentSync.installForOutlineTree(viewer,
+            () -> Boolean.TRUE.equals(tree.getData(SUPPRESS_SELECTION_KEY)));
+
+        // Блокируем закрытие outline по Deactivate, пока показана боковая подсказка
+        final Listener outlineDeactivateFilter = event -> {
+            if (!(event.widget instanceof Shell)) return;
+            if (event.widget != outlineShell) return;
+
+            if (presenter.hasActiveInformationControl()) {
+                if (listenToDeactivateField[0] != null && popupDialog != null) {
+                    try {
+                        listenToDeactivateField[0].setBoolean(popupDialog, false);
+                    } catch (Exception ignored) {}
+                }
+            }
+        };
+        outlineShell.getDisplay().addFilter(SWT.Deactivate, outlineDeactivateFilter);
+
+        tree.addDisposeListener(e -> {
+
+            cancelPendingHintUpdate(tree);
+            FilterListMouseCurrentSync.uninstall(tree);
+            if (!outlineShell.isDisposed()) {
+                outlineShell.getDisplay().removeFilter(SWT.Deactivate, outlineDeactivateFilter);
+                outlineShell.getDisplay().removeFilter(SWT.MouseDown, globalMouseFilter);
+            }
+            presenter.dispose();
+            tree.setData(PRESENTER_KEY, null);
+            tree.setData(INSTALLED_KEY, null);
+            tree.setData(PENDING_KEY, null);
+            tree.setData("tormozit.bslSideHintGeneration", null); //$NON-NLS-1$
+            tree.setData(ROW_HOVER_HINT_KEY, null);
+            tree.setData(WORDS_TABLE_READY_KEY, null);
+            tree.setData(CONTEXT_HOST_KEY, null);
+            tree.setData(LAST_BASE_HINT_KEY, null);
+        });
+        ensureWordsTablePreparation(tree, contextHost);
+        if (viewer.getSelection() instanceof IStructuredSelection sel && !sel.isEmpty())
+            listener.selectionChanged(new SelectionChangedEvent(viewer, sel));
+        BslSideHintDebug.log("installed on " + dialogName); //$NON-NLS-1$
+    }
+
     private static java.lang.reflect.Field findField(Object obj, String fieldName) {
         if (obj == null) return null;
         Class<?> cls = obj.getClass();
@@ -210,14 +203,11 @@ public static void installIfBsl(TreeViewer viewer, Object contextHost, String di
             try {
                 java.lang.reflect.Field f = cls.getDeclaredField(fieldName);
                 f.setAccessible(true);
-                BslSideHintDebug.log("Found field '" + fieldName + "' in " + cls.getName()); //$NON-NLS-1$ //$NON-NLS-2$
                 return f;
             } catch (NoSuchFieldException e) {
-                BslSideHintDebug.log("Field '" + fieldName + "' not in " + cls.getName() + ", trying superclass"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                cls = cls.getSuperclass();
             }
-            cls = cls.getSuperclass();
         }
-        BslSideHintDebug.problem("Field '" + fieldName + "' not found in hierarchy of " + (obj != null ? obj.getClass().getName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         return null;
     }
 
@@ -500,9 +490,7 @@ public static void installIfBsl(TreeViewer viewer, Object contextHost, String di
         private int shownAreaX = Integer.MIN_VALUE;
         private int shownAreaY = Integer.MIN_VALUE;
         private Rectangle lastKnownArea;
-        public boolean hasActiveInformationControl() {
-            return getInternalAccessor().getCurrentInformationControl() != null;
-        }
+
         public BslSideHintPresenter()
         {
 
@@ -637,11 +625,13 @@ public static void installIfBsl(TreeViewer viewer, Object contextHost, String di
                     }
                     cls = cls.getSuperclass();
                 }
-            } catch (Exception e) {
-                BslSideHintDebug.problem("isClickInside: " + e.getMessage()); //$NON-NLS-1$
-            }
+            } catch (Exception ignored) {}
 
             return false;
+        }
+
+        public boolean hasActiveInformationControl() {
+            return getInternalAccessor().getCurrentInformationControl() != null;
         }
 
         private void refreshContentInPlace(BslItemSideHint hint, Rectangle area)
