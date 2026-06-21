@@ -1286,7 +1286,6 @@ public final class BslSideHintOutlineInstall
 
     }
 
-
     /** COM-цепочка ИР для боковой подсказки Quick Outline по имени метода. */
     private static final class IrOutlineSideHintSupport
     {

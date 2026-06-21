@@ -46,7 +46,10 @@ final class FilterInputBox
             "comfort.objectSets.filter.history."), //$NON-NLS-1$
         OPEN_MD_OBJECT(
             "comfort.openMdObject.filter.history.count", //$NON-NLS-1$
-            "comfort.openMdObject.filter.history."); //$NON-NLS-1$
+            "comfort.openMdObject.filter.history."), //$NON-NLS-1$
+        SELECT_TYPE(
+            "comfort.selectType.filter.history.count", //$NON-NLS-1$
+            "comfort.selectType.filter.history."); //$NON-NLS-1$
 
         final String prefCountKey;
         final String prefItemPrefix;
@@ -70,10 +73,12 @@ final class FilterInputBox
     private static ScopedPreferenceStore prefs;
 
     private final SearchBox searchBox;
+    private final Scope scope;
 
-    private FilterInputBox(SearchBox searchBox)
+    private FilterInputBox(SearchBox searchBox, Scope scope)
     {
         this.searchBox = searchBox;
+        this.scope = scope;
     }
 
     static FilterInputBox create(Composite parent, Options options, Runnable onSearch)
@@ -91,7 +96,7 @@ final class FilterInputBox
         box.setHistory(new PrefsSearchHistory(opts.scope));
         if (onSearch != null)
             box.setSearchListener((text, monitor) -> onSearch.run());
-        return new FilterInputBox(box);
+        return new FilterInputBox(box, opts.scope);
     }
 
     static FilterInputBox forCollection(Composite parent, Runnable onSearch)
@@ -134,6 +139,16 @@ final class FilterInputBox
         return create(parent, opts, onSearch);
     }
 
+    static FilterInputBox forSelectType(Composite parent, Runnable onSearch)
+    {
+        Options opts = new Options();
+        opts.scope = Scope.SELECT_TYPE;
+        opts.layoutData = compactLayoutData();
+        opts.message = "Поиск..."; //$NON-NLS-1$
+        opts.tooltip = "Smart-фильтр (пробел = AND)"; //$NON-NLS-1$
+        return create(parent, opts, onSearch);
+    }
+
     /**
      * Заменяет штатное {@link Text} поле паттерна в диалоге EDT на {@link SearchBox} с историей.
      */
@@ -160,16 +175,15 @@ final class FilterInputBox
         return result;
     }
 
-    private static Control siblingBelow(Control control)
+    /** Найти SearchBox в иерархии родителей control. */
+    public static SearchBox resolveSearchBox(Control control)
     {
-        Composite parent = control.getParent();
-        if (parent == null)
-            return null;
-        Control[] children = parent.getChildren();
-        for (int i = 0; i < children.length; i++)
+        Control current = control;
+        while (current != null && !current.isDisposed())
         {
-            if (children[i] == control && i + 1 < children.length)
-                return children[i + 1];
+            if (current instanceof SearchBox)
+                return (SearchBox) current;
+            current = current.getParent();
         }
         return null;
     }
@@ -189,6 +203,7 @@ final class FilterInputBox
             case RECENT_PLACES -> forRecentPlaces(parent, onSearch);
             case OBJECT_SETS -> forObjectSets(parent, onSearch);
             case OPEN_MD_OBJECT -> forOpenMdObject(parent, onSearch);
+            case SELECT_TYPE -> forSelectType(parent, onSearch);
         };
     }
 
@@ -344,7 +359,21 @@ final class FilterInputBox
         return null;
     }
 
-    private static void remember(Scope scope, String pattern)
+    public static Control siblingBelow(Control control)
+    {
+        Composite parent = control.getParent();
+        if (parent == null)
+            return null;
+        Control[] children = parent.getChildren();
+        for (int i = 0; i < children.length; i++)
+        {
+            if (children[i] == control && i + 1 < children.length)
+                return children[i + 1];
+        }
+        return null;
+    }
+
+    static void remember(Scope scope, String pattern)
     {
         if (pattern == null)
             return;
@@ -360,7 +389,7 @@ final class FilterInputBox
         save(scope, items);
     }
 
-    private static List<String> load(Scope scope)
+    static List<String> load(Scope scope)
     {
         ScopedPreferenceStore store = prefs();
         if (store == null)
@@ -378,7 +407,7 @@ final class FilterInputBox
         return items;
     }
 
-    private static void save(Scope scope, List<String> items)
+    static void save(Scope scope, List<String> items)
     {
         ScopedPreferenceStore store = prefs();
         if (store == null || items == null)
@@ -450,5 +479,10 @@ final class FilterInputBox
                 return items;
             return new ArrayList<>(items.subList(0, max));
         }
+    }
+
+    void remember(String pattern)
+    {
+        remember(scope, pattern);
     }
 }

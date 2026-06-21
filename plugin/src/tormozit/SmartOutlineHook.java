@@ -43,6 +43,8 @@ import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.IStartup;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
+
 import org.eclipse.jface.viewers.StyledString;
 
 /**
@@ -362,7 +364,7 @@ public class SmartOutlineHook implements IStartup {
         return null;
     }
 
-private static void applySmartSearch(TreeViewer viewer, Control filterControl, String shellTitle,
+    private static void applySmartSearch(TreeViewer viewer, Control filterControl, String shellTitle,
             String dialogName, Object dialog, Shell patchedShell)
     {
         for (ViewerFilter filter : viewer.getFilters()) {
@@ -453,20 +455,66 @@ private static void applySmartSearch(TreeViewer viewer, Control filterControl, S
             aef.apply(viewer, patchedShell);
         }
 
-        // ОПТИМИЗАЦИЯ 1: Устанавливаем компаратор ОДИН раз при инициализации.
-        // Переданные кэш-карты обновляются внутри smartFilter, компаратор увидит изменения автоматически.
+        // ПРИОРИТЕТ 1: Рейтинг Имени (от большего к меньшему)
         viewer.setComparator(new SmartOutlineComparator(smartFilter.getNamePremiumCache(), smartFilter.getParamPremiumCache(), baseLp, flatContentProvider));
+
+        // --- Замена поля фильтра для диалогов выбора типа ---
+        final Control fc;
+        final FilterInputBox[] typeFilterBoxRef = new FilterInputBox[1];
+        
+        if (typeTree && filterControl != null) {
+            // Находим штатный SearchBox (Composite) в иерархии
+            Control searchBoxComposite = filterControl;
+            while (searchBoxComposite != null && !searchBoxComposite.isDisposed()
+                    && !(searchBoxComposite instanceof com._1c.g5.v8.dt.common.ui.controls.search.SearchBox)) {
+                searchBoxComposite = searchBoxComposite.getParent();
+            }
+            
+            if (searchBoxComposite != null && !searchBoxComposite.isDisposed()) {
+                Composite parent = searchBoxComposite.getParent();
+                Object layoutData = searchBoxComposite.getLayoutData();
+                Control sibling = siblingBelow(searchBoxComposite);
+                
+                // Удаляем штатный SearchBox
+                searchBoxComposite.dispose();
+                
+                // Создаем наш FilterInputBox БЕЗ onSearch — фильтрация через ModifyListener
+                FilterInputBox newBox = FilterInputBox.forSelectType(parent, null);
+                if (newBox != null) {
+                    typeFilterBoxRef[0] = newBox;
+                    SearchBox newSearchBox = newBox.widget();
+                    if (layoutData != null)
+                        newSearchBox.setLayoutData(layoutData);
+                    if (sibling != null && !sibling.isDisposed())
+                        newSearchBox.moveAbove(sibling);
+                    parent.layout(true, true);
+                    
+                    fc = newBox.inputControl();
+                    // Фокус в новое поле
+                    newBox.scheduleFocusWhenReady();
+                } else {
+                    fc = filterControl;
+                }
+            } else {
+                fc = filterControl;
+            }
+        } else {
+            fc = filterControl;
+        }
 
         // Контейнер для хранения ссылки на текущую отложенную задачу (дебаунс)
         final Runnable[] pendingFilterTask = new Runnable[1];
 
-        addFilterModifyListener(filterControl, new ModifyListener() {
+        addFilterModifyListener(fc, new ModifyListener() {
             @Override
             public void modifyText(ModifyEvent e) {            
-                String pattern = getFilterPattern(filterControl);
-                Display display = filterControl.getDisplay();
+                String pattern = getFilterPattern(fc);
+//                if (typeFilterBoxRef[0] != null && !pattern.isEmpty()) {
+//                    typeFilterBoxRef[0].remember(pattern);
+//                }
+                Display display = fc.getDisplay();
                 
-                // ОПТИМИЗАЦИЯ 2: Дебаунс. Отменяем прошлый таймер, если пользователь продолжает быстро печатать
+                // ОПТИМИЗАЦИЯ 2: Дебаунс. Отменяем прошлый таймер
                 if (pendingFilterTask[0] != null) {
                     display.timerExec(-1, pendingFilterTask[0]);
                 }
@@ -474,84 +522,156 @@ private static void applySmartSearch(TreeViewer viewer, Control filterControl, S
                 pendingFilterTask[0] = new Runnable() {
                     @Override
                     public void run() {
-                        Control control = viewer.getControl();
-                        if (control == null || control.isDisposed()) return;
-                        
-                        Tree tree = viewer.getTree();
-                        if (tree == null || tree.isDisposed()) return;
-                        
-                        BslSideHintOutlineInstall.cancelPendingHintUpdate(tree);
-                        tree.setData(BslSideHintOutlineInstall.SUPPRESS_SELECTION_KEY, Boolean.TRUE);
-                        // ОПТИМИЗАЦИЯ 3: Полностью блокируем перерисовку дерева на уровне ОС.
-                        tree.setRedraw(false);
-                        try {
-                            String lastPattern = tree.getData(LAST_PATTERN_KEY) instanceof String
-                                ? (String) tree.getData(LAST_PATTERN_KEY) : ""; //$NON-NLS-1$
-                            boolean clearingFilter = pattern.isEmpty() && !lastPattern.isEmpty();
-                            IStructuredSelection pendingSelection = takePendingClearSelection(filterControl);
-                            if (pendingSelection == null && clearingFilter
-                                && viewer.getSelection() instanceof IStructuredSelection)
-                                pendingSelection = (IStructuredSelection) viewer.getSelection();
-                            final IStructuredSelection savedSelection = pendingSelection;
-
-                            // 1. Очищаем кэши и задаем новый текст поиска
-                            smartFilter.refreshPattern(pattern);
-                            
-                            // 2. Паттерн подсветки (styled label — при refresh; AEF — после refresh)
-                            if (highlightControl != null)
-                                highlightControl.setHighlightPattern(pattern);
-
-                            // 3. Обновляем только видимые элементы — плоский список уже пересобран в content provider
-                            viewer.refresh(true);
-
-                            if (highlightControl instanceof AefTreeItemHighlight)
-                                ((AefTreeItemHighlight) highlightControl).apply(viewer, patchedShell);
-
-                            // 4. Выделение: при очистке — прежняя строка, при фильтре — первая видимая
-                            if (clearingFilter)
-                                runSuppressingOutlineRecent(tree,
-                                    () -> restoreOutlineSelection(viewer, smartFilter, savedSelection));
-                            else if (!pattern.isEmpty() && !aefTree)
-                                runSuppressingOutlineRecent(tree,
-                                    () -> keepOrSelectFirstVisibleItem(viewer, smartFilter));
-
-                            tree.setData(LAST_PATTERN_KEY, pattern);
-                        } finally {
-                            tree.setData(BslSideHintOutlineInstall.SUPPRESS_SELECTION_KEY, null);
-                            // Включаем отрисовку обратно. ОС мгновенно отобразит финальный готовый результат
-                            tree.setRedraw(true);
-                        }
-                        if (bslQuickOutline)
-                            BslSideHintOutlineInstall.refreshAfterFilter(viewer, dialog);
+                        executeSmartFilterUpdate(viewer, smartFilter, highlightControl,
+                                flatContentProviderRef, bslQuickOutline, aefTree, typeTree,
+                                pattern, patchedShell, dialog, fc);
                     }
                 };
                 
-                // Запуск фильтрации с микрозадержкой в 150 мс для плавности ввода
                 display.timerExec(150, pendingFilterTask[0]);
             }
         });
 
-        FilterInputBoxListNavigation.installTreeNavigation(filterControl, viewer.getTree(),
-                () -> tryActivateEventFromFilter(viewer, dialog));
+        fc.addDisposeListener(e -> {
+            if (pendingFilterTask[0] != null && !fc.getDisplay().isDisposed()) {
+                fc.getDisplay().timerExec(-1, pendingFilterTask[0]);
+            }
+        });
+
+        // Навигация и Enter
+        if (typeTree) {
+            fc.addListener(SWT.Traverse, event -> {
+                if (event.detail == SWT.TRAVERSE_RETURN) {
+                    event.doit = false;
+                    event.detail = SWT.TRAVERSE_NONE;
+                    
+                    Tree tree = viewer.getTree();
+                    if (tree == null || tree.isDisposed()) return;
+                    
+                    // Если ничего не выделено — выделяем первый видимый элемент
+                    if (tree.getSelectionCount() == 0) {
+                        keepOrSelectFirstVisibleItem(viewer, smartFilter);
+                    }
+                    
+                    // Переводим фокус в дерево
+                    tree.setFocus();
+                    tree.showSelection();
+                }
+            });
+            FilterInputBoxListNavigation.installTreeNavigation(fc, viewer.getTree(), null);
+        } else {
+            FilterInputBoxListNavigation.installTreeNavigation(fc, viewer.getTree(),
+                    () -> tryActivateEventFromFilter(viewer, dialog));
+        }
 
         if (!typeTree)
         {
-            installQuickOutlineHeaderButtons(filterControl, viewer, patchedShell, dialog, dialogName);
+            installQuickOutlineHeaderButtons(fc, viewer, patchedShell, dialog, dialogName);
             installOutlineRecentPlacesTracking(viewer, baseLp);
         }
 
         if (bslQuickOutline)
-            BslOutlineEventsSupport.installEventHandlerActivation(viewer, dialog, filterControl);
+            BslOutlineEventsSupport.installEventHandlerActivation(viewer, dialog, fc);
 
         if (!typeTree)
             BslSideHintOutlineInstall.installIfBsl(viewer, dialog, dialogName);
+        
+        // --- Сохранение в историю при потере фокуса ---
+        Control inputControl = typeFilterBoxRef[0] != null ? typeFilterBoxRef[0].inputControl() : fc;
+        if (inputControl != null && !inputControl.isDisposed())
+        {
+            inputControl.addListener(SWT.FocusOut, e -> {
+                String pattern = getFilterPattern(fc);
+                if (typeFilterBoxRef[0] != null && !pattern.trim().isEmpty())
+                {
+                    typeFilterBoxRef[0].remember(pattern);
+                }
+            });
+        }
+    }
+    
+    private static void executeSmartFilterUpdate(TreeViewer viewer, SmartOutlineFilter smartFilter,
+            SmartLabelHighlight highlightControl, SmartOutlineFlatContentProvider flatContentProvider,
+            boolean bslQuickOutline, boolean aefTree, boolean typeTree,
+            String pattern, Shell patchedShell, Object dialog, Control filterControl) {
+        
+        Control control = viewer.getControl();
+        if (control == null || control.isDisposed()) return;
+        
+        Tree tree = viewer.getTree();
+        if (tree == null || tree.isDisposed()) return;
+        
+        BslSideHintOutlineInstall.cancelPendingHintUpdate(tree);
+        tree.setData(BslSideHintOutlineInstall.SUPPRESS_SELECTION_KEY, Boolean.TRUE);
+        tree.setRedraw(false);
+        try {
+            String lastPattern = tree.getData(LAST_PATTERN_KEY) instanceof String
+                ? (String) tree.getData(LAST_PATTERN_KEY) : ""; //$NON-NLS-1$
+            boolean clearingFilter = pattern.isEmpty() && !lastPattern.isEmpty();
+            IStructuredSelection pendingSelection = takePendingClearSelection(filterControl);
+            if (pendingSelection == null && clearingFilter
+                && viewer.getSelection() instanceof IStructuredSelection)
+                pendingSelection = (IStructuredSelection) viewer.getSelection();
+            final IStructuredSelection savedSelection = pendingSelection;
 
-        Display display = filterControl.getDisplay();
-        filterControl.addDisposeListener(e -> {
-            if (pendingFilterTask[0] != null && !display.isDisposed()) {
-                display.timerExec(-1, pendingFilterTask[0]);
-            }
-        });
+            // 1. Очищаем кэши и задаем новый текст поиска
+            smartFilter.refreshPattern(pattern);
+            
+            // 2. Паттерн подсветки (styled label — при refresh; AEF — после refresh)
+            if (highlightControl != null)
+                highlightControl.setHighlightPattern(pattern);
+
+            // 3. Обновляем только видимые элементы — плоский список уже пересобран в content provider
+            viewer.refresh(true);
+
+            if (highlightControl instanceof AefTreeItemHighlight)
+                ((AefTreeItemHighlight) highlightControl).apply(viewer, patchedShell);
+
+            // 4. Выделение: при очистке — прежняя строка, при фильтре — первая видимая
+            if (clearingFilter)
+                runSuppressingOutlineRecent(tree,
+                    () -> restoreOutlineSelection(viewer, smartFilter, savedSelection));
+            else if (!pattern.isEmpty() && !aefTree)
+                runSuppressingOutlineRecent(tree,
+                    () -> keepOrSelectFirstVisibleItem(viewer, smartFilter));
+
+            tree.setData(LAST_PATTERN_KEY, pattern);
+        } finally {
+            tree.setData(BslSideHintOutlineInstall.SUPPRESS_SELECTION_KEY, null);
+            tree.setRedraw(true);
+        }
+        if (bslQuickOutline)
+            BslSideHintOutlineInstall.refreshAfterFilter(viewer, dialog);
+    }
+    
+    private static Control siblingBelow(Control control)
+    {
+        Composite parent = control.getParent();
+        if (parent == null)
+            return null;
+        Control[] children = parent.getChildren();
+        for (int i = 0; i < children.length; i++)
+        {
+            if (children[i] == control && i + 1 < children.length)
+                return children[i + 1];
+        }
+        return null;
+    }
+    
+    /** Имитирует двойной клик по текущей выделенной строке дерева. */
+    private static void performTreeDoubleClick(TreeViewer viewer) {
+        Tree tree = viewer.getTree();
+        if (tree == null || tree.isDisposed()) return;
+        TreeItem[] selection = tree.getSelection();
+        if (selection.length == 0) return;
+        TreeItem item = selection[0];
+        Event event = new Event();
+        event.type = SWT.MouseDoubleClick;
+        event.widget = tree;
+        event.item = item;
+        event.button = 1;
+        event.count = 2;
+        tree.notifyListeners(SWT.MouseDoubleClick, event);
     }
 
     private static void wrapContentProviderForFlatOutline(TreeViewer viewer, SmartOutlineFilter smartFilter,

@@ -19,6 +19,9 @@ import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.Text;
+import org.eclipse.swt.events.ModifyEvent;
+import org.eclipse.swt.events.ModifyListener;
+import org.eclipse.swt.custom.StyledText;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.dialogs.FilteredItemsSelectionDialog;
 import java.util.Comparator;
@@ -110,6 +113,7 @@ public class OpenMdObjectHook implements IStartup {
             setFieldExactClass(dialog, FilteredItemsSelectionDialog.class, "itemsComparator", comparator);
             setFieldExactClass(dialog, FilteredItemsSelectionDialog.class, "fItemsComparator", comparator);
 
+            // --- Убираем штатные слушатели старого поля ---
             for (Listener l : patternText.getListeners(SWT.Modify)) {
                 patternText.removeListener(SWT.Modify, l);
             }
@@ -120,28 +124,76 @@ public class OpenMdObjectHook implements IStartup {
             final org.eclipse.ui.dialogs.OpenMdObjectItemsFilter[] smartFilterRef =
                     new org.eclipse.ui.dialogs.OpenMdObjectItemsFilter[1];
             final FilterInputBox[] filterInputRef = new FilterInputBox[1];
+
             smartFilterRef[0] = new org.eclipse.ui.dialogs.OpenMdObjectItemsFilter(
                     (FilteredItemsSelectionDialog) dialog, smartLp, patternText.getText());
+
+            // Создаем FilterInputBox БЕЗ onSearch — фильтрация через ModifyListener
             FilterInputBox filterInput = FilterInputBox.replacePatternText(
                     patternText,
                     FilterInputBox.Scope.OPEN_MD_OBJECT,
-                    () -> {
-                        FilterInputBox box = filterInputRef[0];
-                        if (box == null || box.isDisposed() || smartFilterRef[0] == null)
-                            return;
-                        applySmartFilter(dialog, smartFilterRef[0], smartLp, comparator, box.getText());
-                    });
+                    null);
             if (filterInput == null) {
                 OpenMdObjectDebug.log("patch FAIL replacePatternText");
                 return;
             }
             filterInputRef[0] = filterInput;
 
-            Control filterControl = filterInput.inputControl();
-            if (filterControl == null)
-                filterControl = filterInput.widget();
+            Control fc = filterInput.inputControl();
+            if (fc == null)
+                fc = filterInput.widget();
+            final Control filterControl = fc;
             updatePatternControlReference(dialog, filterControl);
 
+            // --- Фильтрация через ModifyListener с дебаунсом ---
+            final Runnable[] pendingFilterTask = new Runnable[1];
+
+            addFilterModifyListener(filterControl, new ModifyListener() {
+                @Override
+                public void modifyText(ModifyEvent e) {
+                    String pattern = getFilterPattern(filterControl);
+                    Display display = filterControl.getDisplay();
+
+                    // Отменяем прошлый таймер
+                    if (pendingFilterTask[0] != null) {
+                        display.timerExec(-1, pendingFilterTask[0]);
+                    }
+
+                    pendingFilterTask[0] = new Runnable() {
+                        @Override
+                        public void run() {
+                            applySmartFilter(dialog, smartFilterRef[0], smartLp, comparator, pattern);
+                        }
+                    };
+
+                    display.timerExec(150, pendingFilterTask[0]);
+                }
+            });
+
+            // Отмена таймера при dispose
+            filterControl.addDisposeListener(e -> {
+                if (pendingFilterTask[0] != null && !filterControl.getDisplay().isDisposed()) {
+                    filterControl.getDisplay().timerExec(-1, pendingFilterTask[0]);
+                }
+            });
+
+            // --- Сохранение в историю только при потере фокуса ---
+            filterControl.addListener(SWT.FocusOut, e -> {
+                String pattern = getFilterPattern(filterControl);
+                if (!pattern.trim().isEmpty()) {
+                    filterInput.remember(pattern);
+                }
+            });
+            
+            // --- Сохранение в историю только при потере фокуса ---
+            filterControl.addListener(SWT.FocusOut, e -> {
+                String pattern = getFilterPattern(filterControl);
+                if (!pattern.trim().isEmpty()) {
+                    filterInput.remember(pattern);
+                }
+            });
+
+            // --- Навигация ---
             Table listTable = getDialogTable(dialog, shell);
             if (listTable != null) {
                 FilterInputBoxListNavigation.installTableNavigation(
@@ -171,6 +223,25 @@ public class OpenMdObjectHook implements IStartup {
         } catch (Exception e) {
             Global.logError("OpenMdObject", "patch", e); //$NON-NLS-1$ //$NON-NLS-2$
         }
+    }
+
+    // --- Вспомогательные методы для работы с фильтром ---
+
+    private static String getFilterPattern(Control filterControl) {
+        if (filterControl == null || filterControl.isDisposed())
+            return ""; //$NON-NLS-1$
+        if (filterControl instanceof Text)
+            return ((Text) filterControl).getText();
+        if (filterControl instanceof StyledText)
+            return ((StyledText) filterControl).getText();
+        return ""; //$NON-NLS-1$
+    }
+
+    private static void addFilterModifyListener(Control filterControl, ModifyListener listener) {
+        if (filterControl instanceof Text)
+            ((Text) filterControl).addModifyListener(listener);
+        else if (filterControl instanceof StyledText)
+            ((StyledText) filterControl).addModifyListener(listener);
     }
 
     private static void updatePatternControlReference(Object dialog, Control control)
@@ -233,7 +304,7 @@ public class OpenMdObjectHook implements IStartup {
 
     private static Table getDialogTable(Object dialog, Shell shell)
     {
-        for (String field : new String[] { "tableViewer", "fTableViewer", "list" }) //$NON-NLS-1$
+        for (String field : new String[] { "tableViewer", "fTableViewer", "list" }) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         {
             Object viewerObj = Global.getField(dialog, field);
             if (viewerObj instanceof TableViewer)
