@@ -1,5 +1,7 @@
 package tormozit;
 
+import org.eclipse.jface.internal.text.InformationControlReplacer;
+import org.eclipse.jface.text.IInformationControlCreator;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.swt.SWT;
@@ -136,7 +138,7 @@ public final class DebugInspectorHook implements IStartup
         display.timerExec(0, () ->
         {
             if (!shell.isDisposed())
-                session.refresh();
+                session.refreshOrMaintain();
         });
     }
 
@@ -234,6 +236,7 @@ public final class DebugInspectorHook implements IStartup
         }
 
         session.installTreeEnhancements();
+        session.ensureHoverReplaceSuppressed();
 
         targets = resolveTargets(shell);
         session.updateTargets(targets);
@@ -782,6 +785,29 @@ public final class DebugInspectorHook implements IStartup
         return null;
     }
 
+    /** {@code fTextHoverManager} редактора, владеющий {@code fInformationControlReplacer}. */
+    private static Object resolveDebugHoverTextManager(Shell shell, Object infoControl)
+    {
+        if (shell == null || shell.isDisposed() || infoControl == null || !PlatformUI.isWorkbenchRunning())
+            return null;
+        for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
+        {
+            for (IWorkbenchPage page : window.getPages())
+            {
+                for (IEditorPart editor : page.getEditors())
+                {
+                    ISourceViewer viewer = sourceViewer(editor);
+                    if (viewer == null)
+                        continue;
+                    Object manager = resolveTextHoverManagerInSourceViewer(viewer, shell, infoControl);
+                    if (manager != null)
+                        return manager;
+                }
+            }
+        }
+        return null;
+    }
+
     private static Object resolveHoverManagerInSourceViewer(
         ISourceViewer viewer, Shell shell, Object infoControl)
     {
@@ -793,6 +819,22 @@ public final class DebugInspectorHook implements IStartup
         Object replacer = Global.getField(textHoverManager, "fInformationControlReplacer"); //$NON-NLS-1$
         if (hoverManagerHosts(replacer, shell, infoControl))
             return replacer;
+        if (hoverManagerHosts(textHoverManager, shell, infoControl))
+            return textHoverManager;
+        return null;
+    }
+
+    private static Object resolveTextHoverManagerInSourceViewer(
+        ISourceViewer viewer, Shell shell, Object infoControl)
+    {
+        if (!(viewer instanceof SourceViewer))
+            return null;
+        Object textHoverManager = Global.getField(viewer, "fTextHoverManager"); //$NON-NLS-1$
+        if (textHoverManager == null)
+            return null;
+        Object replacer = Global.getField(textHoverManager, "fInformationControlReplacer"); //$NON-NLS-1$
+        if (hoverManagerHosts(replacer, shell, infoControl))
+            return textHoverManager;
         if (hoverManagerHosts(textHoverManager, shell, infoControl))
             return textHoverManager;
         return null;
@@ -1007,6 +1049,123 @@ public final class DebugInspectorHook implements IStartup
 
     private record InspectorTargets(Object dialog, Object infoControl) {}
 
+    /** No-op replace: sticky-переход мыши сохраняется, shell/меню не пересоздаются. */
+    private static final class DebugHoverInformationControlReplacer extends InformationControlReplacer
+    {
+        private static final String IC_FIELD = "fInformationControl"; //$NON-NLS-1$
+
+        private final Object hoverManager;
+
+        DebugHoverInformationControlReplacer(IInformationControlCreator creator, Object hoverManager)
+        {
+            super(creator);
+            this.hoverManager = hoverManager;
+        }
+
+        @Override
+        public void replaceInformationControl(
+            IInformationControlCreator creator,
+            Rectangle area,
+            Object information,
+            Rectangle bounds,
+            boolean takesFocusWhenVisible)
+        {
+            Global.setField(this, "fIsReplacing", Boolean.TRUE); //$NON-NLS-1$
+            Global.setField(this, "fReplaceableArea", bounds); //$NON-NLS-1$
+            Global.setField(this, "fContentBounds", area); //$NON-NLS-1$
+            Global.setField(this, "fReplacableInformation", information); //$NON-NLS-1$
+
+            Object ic = hoverManager != null ? Global.getField(hoverManager, IC_FIELD) : null;
+            if (hoverManager != null)
+                Global.setField(hoverManager, IC_FIELD, null);
+
+            DebugInspectorDebug.step("hover", "replace suppressed keepalive"); //$NON-NLS-1$ //$NON-NLS-2$
+
+            if (ic == null || hoverManager == null)
+                return;
+            Display display = Display.getCurrent();
+            if (display == null || display.isDisposed())
+                return;
+            final Object icFinal = ic;
+            display.asyncExec(() ->
+            {
+                Object current = Global.getField(hoverManager, IC_FIELD);
+                if (current == null)
+                    Global.setField(hoverManager, IC_FIELD, icFinal);
+                Global.setField(this, "fIsReplacing", Boolean.FALSE); //$NON-NLS-1$
+            });
+        }
+    }
+
+    /**
+     * Подменяет {@code fInformationControlReplacer} на no-op-версию на время debug hover IC.
+     * Обнуление replacer ломает переход мыши; штатный replace (~200 ms) пересоздаёт shell и закрывает меню.
+     */
+    private static final class HoverReplacerSuppressGuard
+    {
+        private static final String REPLACER_FIELD = "fInformationControlReplacer"; //$NON-NLS-1$
+        private static final String CREATOR_FIELD = "fInformationControlCreator"; //$NON-NLS-1$
+
+        private final Object hoverManager;
+        private final Object savedReplacer;
+        private final DebugHoverInformationControlReplacer suppressingReplacer;
+        private boolean restored;
+
+        static HoverReplacerSuppressGuard install(Shell shell, Object infoControl)
+        {
+            if (shell == null || shell.isDisposed() || !isHoverInspectControl(infoControl))
+                return null;
+            Object manager = resolveDebugHoverTextManager(shell, infoControl);
+            if (manager == null)
+                return null;
+            Object saved = Global.getField(manager, REPLACER_FIELD);
+            if (!(saved instanceof InformationControlReplacer))
+                return null;
+            Object creatorObj = Global.getField(saved, CREATOR_FIELD);
+            if (!(creatorObj instanceof IInformationControlCreator creator))
+                return null;
+            DebugHoverInformationControlReplacer suppressing =
+                new DebugHoverInformationControlReplacer(creator, manager);
+            Global.setField(manager, REPLACER_FIELD, suppressing);
+            cancelReplacingDelay(manager);
+            DebugInspectorDebug.step("hover", "replacer suppress ON"); //$NON-NLS-1$ //$NON-NLS-2$
+            return new HoverReplacerSuppressGuard(manager, saved, suppressing);
+        }
+
+        private HoverReplacerSuppressGuard(
+            Object hoverManager, Object savedReplacer, DebugHoverInformationControlReplacer suppressingReplacer)
+        {
+            this.hoverManager = hoverManager;
+            this.savedReplacer = savedReplacer;
+            this.suppressingReplacer = suppressingReplacer;
+        }
+
+        void restore()
+        {
+            if (restored || hoverManager == null)
+                return;
+            restored = true;
+            Object current = Global.getField(hoverManager, REPLACER_FIELD);
+            if (current == suppressingReplacer && savedReplacer != null)
+            {
+                Global.setField(hoverManager, REPLACER_FIELD, savedReplacer);
+                DebugInspectorDebug.step("hover", "replacer suppress OFF"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        private static void cancelReplacingDelay(Object manager)
+        {
+            try
+            {
+                Global.invoke(manager, "cancelReplacingDelay"); //$NON-NLS-1$
+            }
+            catch (RuntimeException ignored)
+            {
+                // не AbstractHoverInformationControlManager
+            }
+        }
+    }
+
     private static final class InspectorPatchSession
     {
         private final Shell shell;
@@ -1023,6 +1182,7 @@ public final class DebugInspectorHook implements IStartup
         private boolean shellPinnedOnTop;
         private boolean headerGuardInstalled;
         private DebugInspectorTreeEnhancement treeEnhancement;
+        private HoverReplacerSuppressGuard hoverReplacerSuppressGuard;
 
         InspectorPatchSession(Shell shell, InspectorTargets targets)
         {
@@ -1039,6 +1199,35 @@ public final class DebugInspectorHook implements IStartup
                 dialog = resolveElementDialog(shell, fresh.infoControl);
             if (isPatchTarget(dialog))
                 targets = new InspectorTargets(dialog, fresh.infoControl);
+        }
+
+        void refreshOrMaintain()
+        {
+            if (shell.isDisposed())
+                return;
+            if (hoverPinDisposeAllowed)
+                return;
+            if (!Boolean.TRUE.equals(shell.getData(PATCHED_KEY)))
+            {
+                DebugInspectorDebug.step("hover", "patch aborted zombie shell=" + shell); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            if (!ComfortSettings.isImproveDebuggerWindowsEnabled())
+            {
+                disposeTreeEnhancements();
+                return;
+            }
+            updateTargets(resolveTargets(shell));
+            if (shouldLightRefreshHover())
+            {
+                ToolBar menuBar = menuBarRef != null && !menuBarRef.isDisposed()
+                    ? menuBarRef
+                    : resolveToolBar(targets.dialog, shell);
+                if (menuBar != null && !menuBar.isDisposed())
+                    maintainHeaderControls(menuBar);
+                return;
+            }
+            refresh();
         }
 
         void refresh()
@@ -1097,6 +1286,7 @@ public final class DebugInspectorHook implements IStartup
             if (shell.isDisposed())
                 return;
             hoverPinDisposeAllowed = true;
+            restoreHoverReplacerSuppressGuard();
             removeKeepDeactivateOffListener();
             removeShellPinMaintenance();
 
@@ -1222,6 +1412,7 @@ public final class DebugInspectorHook implements IStartup
             if (Boolean.TRUE.equals(shell.getData(PATCHED_KEY)))
                 return true;
             shell.setData(PATCHED_KEY, Boolean.TRUE);
+            ensureHoverReplaceSuppressed();
             applyInspectorModeForTargets();
             maintainHeaderControls(menuBar);
             if (!shell.isDisposed())
@@ -1526,10 +1717,62 @@ public final class DebugInspectorHook implements IStartup
             headerMaintainListener = null;
         }
 
+        private boolean isDebugHoverInspectContext()
+        {
+            if (!isHoverMode() || isPopupInspectDialog(targets != null ? targets.dialog : null))
+                return false;
+            Object infoControl = targets != null ? targets.infoControl : null;
+            if (isHoverInspectControl(infoControl))
+                return true;
+            return isHoverInspectControl(targets != null ? targets.dialog : null);
+        }
+
+        void ensureHoverReplaceSuppressed()
+        {
+            if (hoverReplacerSuppressGuard != null || !ComfortSettings.isImproveDebuggerWindowsEnabled())
+                return;
+            if (!isDebugHoverInspectContext())
+                return;
+            Object infoControl = targets != null ? targets.infoControl : null;
+            if (!isHoverInspectControl(infoControl) && targets != null)
+                infoControl = isHoverInspectControl(targets.dialog) ? targets.dialog : infoControl;
+            if (!isHoverInspectControl(infoControl))
+            {
+                InspectorTargets latest = resolveTargets(shell);
+                infoControl = latest.infoControl;
+                if (!isHoverInspectControl(infoControl) && isHoverInspectControl(latest.dialog))
+                    infoControl = latest.dialog;
+            }
+            if (!isHoverInspectControl(infoControl))
+                return;
+            hoverReplacerSuppressGuard = HoverReplacerSuppressGuard.install(shell, infoControl);
+        }
+
+        private void restoreHoverReplacerSuppressGuard()
+        {
+            if (hoverReplacerSuppressGuard == null)
+                return;
+            hoverReplacerSuppressGuard.restore();
+            hoverReplacerSuppressGuard = null;
+        }
+
+        private boolean shouldLightRefreshHover()
+        {
+            if (!isHoverMode() || !isHeaderInstalled())
+                return false;
+            if (isPopupInspectDialog(targets != null ? targets.dialog : null))
+                return false;
+            Object infoControl = targets != null ? targets.infoControl : null;
+            if (isHoverInspectControl(infoControl))
+                return true;
+            return isHoverInspectControl(targets != null ? targets.dialog : null);
+        }
+
         void applyInspectorModeForTargets()
         {
             if (shell.isDisposed())
                 return;
+            ensureHoverReplaceSuppressed();
             boolean popupInspect = isPopupInspectDialog(targets != null ? targets.dialog : null);
             Object deactivateHost = resolveElementDialogHost(targets != null ? targets.dialog : null);
             if (isHoverMode() && !popupInspect && deactivateHost == null)
@@ -1749,6 +1992,7 @@ public final class DebugInspectorHook implements IStartup
 
         void dispose()
         {
+            restoreHoverReplacerSuppressGuard();
             removeHeaderGuard();
             removeKeepDeactivateOffListener();
             removeShellPinMaintenance();

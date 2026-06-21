@@ -506,26 +506,42 @@ final class DebugCollectionColumnModel
     {
         int fixedCols = fixedColumnCount();
         org.eclipse.swt.widgets.TableColumn[] existing = table.getColumns();
-        for (int i = existing.length; i < fixedCols; i++)
-            new org.eclipse.swt.widgets.TableColumn(table, org.eclipse.swt.SWT.NONE);
         Composite host = table.getParent();
         TableColumnLayout columnLayout = null;
         if (host != null && !host.isDisposed() && host.getLayout() instanceof TableColumnLayout layout)
             columnLayout = layout;
+        for (int i = existing.length; i < fixedCols; i++)
+        {
+            TableColumn column = new TableColumn(table, org.eclipse.swt.SWT.NONE);
+            if (columnLayout != null)
+                bindTableColumnLayout(columnLayout, column, 1, false);
+        }
         for (int i = 0; i < fixedCols; i++)
         {
             Column col = columnAt(i);
-            org.eclipse.swt.widgets.TableColumn tc = table.getColumn(i);
+            TableColumn tc = table.getColumn(i);
             tc.setText(col != null ? col.header : ""); //$NON-NLS-1$
             int width = fixedColumnWidth(col);
-            tc.setWidth(width);
             tc.setResizable(true);
             tc.setMoveable(false);
             if (columnLayout != null)
-                columnLayout.setColumnData(tc, new ColumnPixelData(Math.max(1, width), true, i < fixedCols - 1));
+                bindTableColumnLayout(columnLayout, tc, width, i >= fixedCols - 1);
+            else
+                tc.setWidth(width);
         }
         for (int i = fixedCols; i < existing.length; i++)
             existing[i].dispose();
+        if (columnLayout != null && host != null && !host.isDisposed())
+            host.layout(true);
+    }
+
+    private static void bindTableColumnLayout(
+        TableColumnLayout layout,
+        TableColumn column,
+        int width,
+        boolean lastColumn)
+    {
+        layout.setColumnData(column, new ColumnPixelData(Math.max(1, width), true, !lastColumn));
     }
 
     /** {@link TableColumnLayout} index-панели: без {@code setColumnData} таблица остаётся 0×0 при колонках с первого sync. */
@@ -557,26 +573,33 @@ final class DebugCollectionColumnModel
         int dataCols = dataColumnCount();
         int fixed = fixedColumnCount();
         org.eclipse.swt.widgets.TableColumn[] existing = table.getColumns();
-        for (int i = existing.length; i < dataCols; i++)
-            new org.eclipse.swt.widgets.TableColumn(table, org.eclipse.swt.SWT.NONE);
         Composite host = table.getParent();
         TableColumnLayout columnLayout = null;
         if (host != null && !host.isDisposed() && host.getLayout() instanceof TableColumnLayout layout)
             columnLayout = layout;
+        for (int i = existing.length; i < dataCols; i++)
+        {
+            TableColumn column = new TableColumn(table, org.eclipse.swt.SWT.NONE);
+            if (columnLayout != null)
+                bindTableColumnLayout(columnLayout, column, 1, false);
+        }
         for (int dataCol = 0; dataCol < dataCols; dataCol++)
         {
             Column col = columnAt(fixed + dataCol);
-            org.eclipse.swt.widgets.TableColumn tc = table.getColumn(dataCol);
+            TableColumn tc = table.getColumn(dataCol);
             tc.setText(col != null ? col.header : ""); //$NON-NLS-1$
             int width = defaultWidth(col);
-            tc.setWidth(width);
             tc.setResizable(true);
             tc.setMoveable(true);
             if (columnLayout != null)
-                columnLayout.setColumnData(tc, new ColumnPixelData(Math.max(1, width), true, dataCol < dataCols - 1));
+                bindTableColumnLayout(columnLayout, tc, width, dataCol >= dataCols - 1);
+            else
+                tc.setWidth(width);
         }
         for (int i = dataCols; i < existing.length; i++)
             existing[i].dispose();
+        if (columnLayout != null && host != null && !host.isDisposed())
+            host.layout(true);
     }
 
     private static int fixedColumnWidth(Column col)
