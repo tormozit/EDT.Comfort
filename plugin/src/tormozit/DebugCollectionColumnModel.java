@@ -350,6 +350,18 @@ final class DebugCollectionColumnModel
         return columns.get(visibleToModel[visibleIndex]);
     }
 
+    /** Суффикс watch-выражения для property-колонки: {@code .ИмяСвойства} или пустая строка. */
+    String propertyWatchSuffix(int visibleCol)
+    {
+        Column col = columnAt(visibleCol);
+        if (col == null || col.kind != Kind.PROPERTY)
+            return ""; //$NON-NLS-1$
+        String name = col.propertyName;
+        if (name == null || name.isBlank())
+            return ""; //$NON-NLS-1$
+        return '.' + name.trim();
+    }
+
     List<Column> allColumns()
     {
         return Collections.unmodifiableList(columns);

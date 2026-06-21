@@ -172,6 +172,31 @@ public final class BslInspectSupport
     }
 
     /**
+     * Полный текст watch-выражения для строки «Коллекция», «Значения» или инспектора.
+     * Та же логика ветвления, что у {@link #openInspectForVariable}.
+     */
+    static String resolveExpressionTextForVariable(
+        IBslVariable variable,
+        DebugCollectionTableModel collectionModel,
+        int logicalRow,
+        AbstractDebugView valuesView)
+    {
+        if (variable == null)
+            return ""; //$NON-NLS-1$
+        if (needsInspectPathResolution(variable))
+        {
+            if (collectionModel != null && logicalRow >= 0)
+                return resolveCollectionRowInspectPath(collectionModel, logicalRow, variable).path;
+            if (valuesView != null)
+                return resolveValuesInspectPath(valuesView, variable).path;
+            return resolveVariableInspectPath(variable).path;
+        }
+        if (valuesView != null)
+            return resolveValuesInspectExpression(valuesView, variable);
+        return resolveVariableInspectExpression(variable);
+    }
+
+    /**
      * Единая точка инспекта из окна «Коллекция» или «Значения».
      */
     static void openInspectForVariable(
@@ -197,7 +222,6 @@ public final class BslInspectSupport
             return;
 
         InspectPathResolution resolution = null;
-        String exprText;
         if (needsInspectPathResolution(variable))
         {
             if (collectionModel != null && logicalRow >= 0)
@@ -206,15 +230,11 @@ public final class BslInspectSupport
                 resolution = resolveValuesInspectPath(valuesView, variable);
             else
                 resolution = resolveVariableInspectPath(variable);
-            exprText = resolution.path;
             logInspectPathResolution(resolution, valuesView != null);
         }
-        else
-        {
-            exprText = valuesView != null
-                ? resolveValuesInspectExpression(valuesView, variable)
-                : resolveVariableInspectExpression(variable);
-        }
+
+        String exprText = resolveExpressionTextForVariable(
+            variable, collectionModel, logicalRow, valuesView);
 
         if (exprText.isBlank())
         {

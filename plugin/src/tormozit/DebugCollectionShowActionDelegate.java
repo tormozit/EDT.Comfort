@@ -1,5 +1,6 @@
 package tormozit;
 
+import org.eclipse.debug.ui.AbstractDebugView;
 import org.eclipse.jface.action.IAction;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.IStructuredSelection;
@@ -17,10 +18,12 @@ public final class DebugCollectionShowActionDelegate implements IObjectActionDel
         "Открыть коллекцию в отдельном окне" + Global.pluginSignForTooltip(); //$NON-NLS-1$
 
     private ISelection selection;
+    private IWorkbenchPart targetPart;
 
     @Override
     public void setActivePart(IAction action, IWorkbenchPart targetPart)
     {
+        this.targetPart = targetPart;
         if (action != null)
         {
             action.setToolTipText(TOOLTIP);
@@ -55,6 +58,7 @@ public final class DebugCollectionShowActionDelegate implements IObjectActionDel
     {
         if (!(selection instanceof IStructuredSelection structured))
             return;
-        DebugCollectionShowSupport.openFromElement(structured.getFirstElement());
+        AbstractDebugView view = targetPart instanceof AbstractDebugView v ? v : null;
+        DebugCollectionShowSupport.openFromElement(structured.getFirstElement(), view);
     }
 }

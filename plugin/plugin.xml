@@ -37,6 +37,7 @@
     <startup class="tormozit.DebugCollectionSessionHook"/>
     <startup class="tormozit.DebugInspectorHook"/>
     <startup class="tormozit.DebugVariablePresentationHook"/>
+    <startup class="tormozit.DebugExpressionsChangeValueHook"/>
     <startup class="tormozit.InfobaseSyncQuestionDialogHook"/>
     <startup class="tormozit.FilterBySubsystemsDialogHook"/>
   </extension>

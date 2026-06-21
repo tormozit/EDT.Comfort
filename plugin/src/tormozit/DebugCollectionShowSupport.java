@@ -62,7 +62,8 @@ public final class DebugCollectionShowSupport
             Object element = structured.getFirstElement();
             if (canOpenFrom(element))
             {
-                openFromElement(element);
+                AbstractDebugView debugView = part instanceof AbstractDebugView v ? v : null;
+                openFromElement(element, debugView);
                 return true;
             }
         }
@@ -87,6 +88,11 @@ public final class DebugCollectionShowSupport
 
     public static void openFromElement(Object element)
     {
+        openFromElement(element, null);
+    }
+
+    public static void openFromElement(Object element, AbstractDebugView view)
+    {
         IBslIndexedValue indexed = resolveIndexedValue(element);
         if (indexed == null)
         {
@@ -101,7 +107,7 @@ public final class DebugCollectionShowSupport
         if (frame == null)
             frame = DebugSessionHelper.findSuspendedStackFrame(null);
 
-        BslValuePath path = indexed.getPath();
+        BslValuePath path = resolvePathForOpen(element, indexed, view);
         DebugCollectionOpener.open(indexed, frame, path, DebugCollectionOpener.OpenMode.NORMAL);
         DebugCollectionDebug.step("open", pathKey(path)); //$NON-NLS-1$
     }
@@ -172,6 +178,55 @@ public final class DebugCollectionShowSupport
         if (value instanceof IBslIndexedValue indexed)
             return indexed;
         return null;
+    }
+
+    private static BslValuePath resolvePathForOpen(
+        Object element,
+        IBslIndexedValue indexed,
+        AbstractDebugView view)
+    {
+        String exprText = resolveExpressionTextForOpen(element, view);
+        BslValuePath fallback = indexed.getPath();
+        if (fallback == null && indexed instanceof IBslValue bslValue)
+            fallback = bslValue.getPath();
+
+        if (!exprText.isBlank())
+        {
+            logPathResolutionIfDifferent(exprText, fallback);
+            return new BslValuePath(exprText);
+        }
+        return fallback;
+    }
+
+    private static String resolveExpressionTextForOpen(Object element, AbstractDebugView view)
+    {
+        if (element instanceof IWatchExpression watch)
+        {
+            String text = BslInspectSupport.watchExpressionText(watch);
+            if (!text.isBlank())
+                return text;
+        }
+        if (element instanceof IBslVariable variable)
+        {
+            if (view != null && isValuesView(view))
+            {
+                String text = BslInspectSupport.resolveValuesInspectExpression(view, variable);
+                if (!text.isBlank())
+                    return text;
+            }
+            String text = BslInspectSupport.resolveVariableInspectExpression(variable);
+            if (!text.isBlank())
+                return text;
+        }
+        return ""; //$NON-NLS-1$
+    }
+
+    private static void logPathResolutionIfDifferent(String exprText, BslValuePath fallback)
+    {
+        String resolved = exprText.trim();
+        String fallbackKey = pathKey(fallback);
+        if (!resolved.equals(fallbackKey))
+            DebugCollectionDebug.step("path", "resolved=" + resolved + " indexedPath=" + fallbackKey); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     private static String pathKey(BslValuePath path)

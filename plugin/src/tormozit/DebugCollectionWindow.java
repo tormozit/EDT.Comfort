@@ -1463,9 +1463,16 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             @Override
             public void widgetSelected(SelectionEvent ev)
             {
-                IBslVariable variable = selectedVariable();
+                Table sourceTable = activeTable();
+                IBslVariable variable = selectedVariable(sourceTable);
                 if (variable != null)
-                    DebugCollectionRowContextSupport.showInExpressions(variable, frame);
+                {
+                    int logicalRow = selectedLogicalRow(sourceTable);
+                    DebugCollectionTableInteraction interaction = interactionForTable(sourceTable);
+                    int visibleCol = interaction != null ? interaction.modelVisibleColumn() : 0;
+                    DebugCollectionRowContextSupport.showInExpressions(
+                        variable, frame, model, logicalRow, visibleCol);
+                }
             }
         });
 
@@ -3683,9 +3690,17 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
 
         private DebugCollectionRowContextSupport() {}
 
-        static void showInExpressions(IBslVariable variable, IBslStackFrame frame)
+        static void showInExpressions(
+            IBslVariable variable,
+            IBslStackFrame frame,
+            DebugCollectionTableModel model,
+            int logicalRow,
+            int visibleCol)
         {
-            String expr = resolveWatchExpression(variable);
+            String expr = BslInspectSupport.resolveExpressionTextForVariable(
+                variable, model, logicalRow, null);
+            if (model != null)
+                expr = expr + model.columns.propertyWatchSuffix(visibleCol);
             if (expr.isBlank())
             {
                 DebugCollectionDebug.problem("watch: empty expression"); //$NON-NLS-1$
@@ -3813,44 +3828,6 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             if (active != null && !active.isDisposed() && !DebugCollectionWindowRegistry.isCollectionShell(active))
                 return active;
             return null;
-        }
-
-        static String resolveWatchExpression(IBslVariable variable)
-        {
-            if (variable == null)
-                return ""; //$NON-NLS-1$
-            try
-            {
-                String toWatch = variable.toWatchExpression();
-                if (toWatch != null && !toWatch.isBlank())
-                    return toWatch.trim();
-            }
-            catch (Exception ignored)
-            {
-                // fallback ниже
-            }
-            try
-            {
-                IBslValue value = variable.getValue();
-                if (value != null)
-                {
-                    BslValuePath path = value.getPath();
-                    if (path != null)
-                    {
-                        String expr = path.getExpression();
-                        if (expr != null && !expr.isBlank())
-                            return expr.trim();
-                        String text = path.toString();
-                        if (text != null && !text.isBlank())
-                            return text.trim();
-                    }
-                }
-            }
-            catch (Exception e)
-            {
-                DebugCollectionDebug.problem("watch path: " + e.getMessage()); //$NON-NLS-1$
-            }
-            return ""; //$NON-NLS-1$
         }
 
         static String watchMenuLabel()
