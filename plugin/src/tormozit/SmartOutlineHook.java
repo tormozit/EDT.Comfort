@@ -575,19 +575,6 @@ public class SmartOutlineHook implements IStartup {
 
         if (!typeTree)
             BslSideHintOutlineInstall.installIfBsl(viewer, dialog, dialogName);
-        
-        // --- Сохранение в историю при потере фокуса ---
-        Control inputControl = typeFilterBoxRef[0] != null ? typeFilterBoxRef[0].inputControl() : fc;
-        if (inputControl != null && !inputControl.isDisposed())
-        {
-            inputControl.addListener(SWT.FocusOut, e -> {
-                String pattern = getFilterPattern(fc);
-                if (typeFilterBoxRef[0] != null && !pattern.trim().isEmpty())
-                {
-                    typeFilterBoxRef[0].remember(pattern);
-                }
-            });
-        }
     }
     
     private static void executeSmartFilterUpdate(TreeViewer viewer, SmartOutlineFilter smartFilter,

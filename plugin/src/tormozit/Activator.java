@@ -52,6 +52,9 @@ public class Activator extends AbstractUIPlugin
         settings.getPreferenceStore().setDefault(
             ComfortSettings.PREF_DEBUG_LOG,
             ComfortSettings.DEFAULT_DEBUG_LOG);
+        settings.getPreferenceStore().setDefault(
+            ComfortSettings.PREF_IMPROVE_DEBUGGER_WINDOWS,
+            ComfortSettings.DEFAULT_IMPROVE_DEBUGGER_WINDOWS);
         ContentAssistManager.init(settings);
         ComfortSettings.init(PLUGIN_ID);
         getPreferenceStore().setDefault(

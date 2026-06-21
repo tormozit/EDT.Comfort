@@ -86,6 +86,17 @@ public final class DebugInspectorHook implements IStartup
             display.asyncExec(() -> install(display));
     }
 
+    /** Снять pin inspector shell на время modal find; вернуть restore для {@code try/finally}. */
+    static Runnable suspendInspectorShellPin(Shell shell)
+    {
+        if (shell == null || shell.isDisposed())
+            return () -> { };
+        Object sessionObj = shell.getData(SESSION_KEY);
+        if (sessionObj instanceof InspectorPatchSession session)
+            return session.suspendShellPinForModal();
+        return () -> { };
+    }
+
     private static synchronized void install(Display display)
     {
         if (display == null || display.isDisposed() || filtersInstalled)
@@ -186,8 +197,24 @@ public final class DebugInspectorHook implements IStartup
 
     private static boolean tryPatchLocked(Shell shell, int attempt)
     {
+        if (!ComfortSettings.isImproveDebuggerWindowsEnabled())
+            return true;
         if (!isInspectorCandidateShell(shell))
             return false;
+        try
+        {
+            return tryPatchLockedImpl(shell, attempt);
+        }
+        catch (Exception e)
+        {
+            DebugInspectorDebug.problem("patch exception a=" + attempt + " " //$NON-NLS-1$ //$NON-NLS-2$
+                + e.getClass().getSimpleName() + ": " + (e.getMessage() != null ? e.getMessage() : "")); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        }
+    }
+
+    private static boolean tryPatchLockedImpl(Shell shell, int attempt)
+    {
 
         InspectorTargets targets = resolveTargets(shell);
 
@@ -390,6 +417,27 @@ public final class DebugInspectorHook implements IStartup
         if (name.contains("ExpressionInformationControl")) //$NON-NLS-1$
             return false;
         return CLASS_INSPECT_POPUP.equals(name) || CLASS_DEBUG_ELEMENT_DIALOG.equals(name);
+    }
+
+    private static boolean isPopupInspectDialog(Object data)
+    {
+        return data != null && CLASS_INSPECT_POPUP.equals(data.getClass().getName());
+    }
+
+    /** {@link DebugElementDialog} внутри {@code ExpressionInformationControl}. */
+    private static Object resolveElementDialogHost(Object data)
+    {
+        if (data == null)
+            return null;
+        if (isElementDialog(data))
+            return data;
+        if (!data.getClass().getName().contains("ExpressionInformationControl")) //$NON-NLS-1$
+            return null;
+        Object inner = Global.getField(data, "debugElementDialog"); //$NON-NLS-1$
+        if (isElementDialog(inner))
+            return inner;
+        inner = Global.invoke(data, "getDebugElementDialog"); //$NON-NLS-1$
+        return isElementDialog(inner) ? inner : null;
     }
 
     private static Object dialogFromEditorTree(IEditorPart editor, Tree tree)
@@ -711,6 +759,57 @@ public final class DebugInspectorHook implements IStartup
         return new HoverBinding(activeControl);
     }
 
+    /** {@link org.eclipse.jface.text.AbstractInformationControlManager} hover/replacer для popup IC. */
+    static Object resolveHoverInformationControlManager(Shell shell, Object infoControl)
+    {
+        if (shell == null || shell.isDisposed() || infoControl == null || !PlatformUI.isWorkbenchRunning())
+            return null;
+        for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
+        {
+            for (IWorkbenchPage page : window.getPages())
+            {
+                for (IEditorPart editor : page.getEditors())
+                {
+                    ISourceViewer viewer = sourceViewer(editor);
+                    if (viewer == null)
+                        continue;
+                    Object manager = resolveHoverManagerInSourceViewer(viewer, shell, infoControl);
+                    if (manager != null)
+                        return manager;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static Object resolveHoverManagerInSourceViewer(
+        ISourceViewer viewer, Shell shell, Object infoControl)
+    {
+        if (!(viewer instanceof SourceViewer))
+            return null;
+        Object textHoverManager = Global.getField(viewer, "fTextHoverManager"); //$NON-NLS-1$
+        if (textHoverManager == null)
+            return null;
+        Object replacer = Global.getField(textHoverManager, "fInformationControlReplacer"); //$NON-NLS-1$
+        if (hoverManagerHosts(replacer, shell, infoControl))
+            return replacer;
+        if (hoverManagerHosts(textHoverManager, shell, infoControl))
+            return textHoverManager;
+        return null;
+    }
+
+    private static boolean hoverManagerHosts(Object manager, Shell shell, Object infoControl)
+    {
+        if (manager == null)
+            return false;
+        Object ic = Global.getField(manager, "fInformationControl"); //$NON-NLS-1$
+        if (ic == null)
+            return false;
+        if (ic == infoControl)
+            return true;
+        return infoControlShellEquals(ic, shell);
+    }
+
     private static IEditorPart findEditorForHoverShell(Shell shell)
     {
         if (shell == null || shell.isDisposed())
@@ -901,34 +1000,7 @@ public final class DebugInspectorHook implements IStartup
 
     private static Tree findTreeWithInspectorColumns(Control root)
     {
-        if (root == null || root.isDisposed())
-            return null;
-        if (root instanceof Tree tree && treeHasInspectorColumns(tree))
-            return tree;
-        if (root instanceof Composite composite)
-        {
-            for (Control child : composite.getChildren())
-            {
-                Tree found = findTreeWithInspectorColumns(child);
-                if (found != null)
-                    return found;
-            }
-        }
-        return null;
-    }
-
-    private static boolean treeHasInspectorColumns(Tree tree)
-    {
-        TreeColumn[] columns = tree.getColumns();
-        if (columns == null || columns.length < 3)
-            return false;
-        for (TreeColumn column : columns)
-        {
-            String text = column.getText();
-            if (text != null && (text.contains(COLUMN_MARKER_RU) || text.contains(COLUMN_MARKER_EN)))
-                return true;
-        }
-        return false;
+        return DebugInspectorTreeEnhancement.findInspectorDebugTree(root);
     }
 
     private record HoverBinding(Object infoControl) {}
@@ -978,6 +1050,11 @@ public final class DebugInspectorHook implements IStartup
             if (!Boolean.TRUE.equals(shell.getData(PATCHED_KEY)))
             {
                 DebugInspectorDebug.step("hover", "patch aborted zombie shell=" + shell); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            if (!ComfortSettings.isImproveDebuggerWindowsEnabled())
+            {
+                disposeTreeEnhancements();
                 return;
             }
             updateTargets(resolveTargets(shell));
@@ -1311,14 +1388,29 @@ public final class DebugInspectorHook implements IStartup
 
         void installTreeEnhancements()
         {
+            if (!ComfortSettings.isImproveDebuggerWindowsEnabled())
+            {
+                disposeTreeEnhancements();
+                return;
+            }
             if (treeEnhancement != null && treeEnhancement.isAttached())
                 return;
             treeEnhancement = DebugInspectorTreeEnhancement.install(targets.dialog, shell);
+            DebugInspectorTreeEnhancement.hookInspectorPrefixTree(shell, targets.dialog);
             if (treeEnhancement == null)
                 DebugInspectorDebug.step("tree", "install failed dialog=" //$NON-NLS-1$ //$NON-NLS-2$
                     + DebugInspectorDebug.cn(targets.dialog));
             else
                 treeEnhancement.schedulePendingPropertyFocus();
+        }
+
+        private void disposeTreeEnhancements()
+        {
+            if (treeEnhancement != null)
+            {
+                treeEnhancement.dispose();
+                treeEnhancement = null;
+            }
         }
 
         private static void ensureMenuBarInParent(
@@ -1436,7 +1528,11 @@ public final class DebugInspectorHook implements IStartup
 
         void applyInspectorModeForTargets()
         {
-            if (isHoverMode() || shell.isDisposed())
+            if (shell.isDisposed())
+                return;
+            boolean popupInspect = isPopupInspectDialog(targets != null ? targets.dialog : null);
+            Object deactivateHost = resolveElementDialogHost(targets != null ? targets.dialog : null);
+            if (isHoverMode() && !popupInspect && deactivateHost == null)
                 return;
             if (!isPatchTarget(targets.dialog))
             {
@@ -1449,14 +1545,40 @@ public final class DebugInspectorHook implements IStartup
                 DebugInspectorDebug.step("inspector", "skip dialog=null"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
-            if (isElementDialog(targets.dialog))
+            deactivateHost = resolveElementDialogHost(targets.dialog);
+            if (deactivateHost != null)
+            {
+                Global.setField(deactivateHost, "listenToDeactivate", Boolean.FALSE); //$NON-NLS-1$
+                Global.setField(deactivateHost, "listenToParentDeactivate", Boolean.FALSE); //$NON-NLS-1$
+                installKeepDeactivateOffListener();
+            }
+            else if (isElementDialog(targets.dialog))
             {
                 Global.setField(targets.dialog, "listenToDeactivate", Boolean.FALSE); //$NON-NLS-1$
                 Global.setField(targets.dialog, "listenToParentDeactivate", Boolean.FALSE); //$NON-NLS-1$
                 installKeepDeactivateOffListener();
             }
-            restoreShellOnTop(true);
-            DebugInspectorDebug.step("standalone", "close OFF"); //$NON-NLS-1$ //$NON-NLS-2$
+            if (!isHoverMode())
+            {
+                restoreShellOnTop(true);
+                DebugInspectorDebug.step("standalone", "close OFF"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            else if (popupInspect || deactivateHost != null)
+                DebugInspectorDebug.step("popup", "close OFF"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        /** Временно снять pin shell на время modal find (z-order InputDialog). */
+        Runnable suspendShellPinForModal()
+        {
+            boolean wasPinned = shellPinnedOnTop;
+            if (wasPinned)
+                restoreShellOnTop(false);
+            Shell pinnedShell = shell;
+            return () ->
+            {
+                if (wasPinned && pinnedShell != null && !pinnedShell.isDisposed())
+                    restoreShellOnTop(true);
+            };
         }
 
         private void configureInspectToolItem(ToolItem inspectItem)
@@ -1511,7 +1633,13 @@ public final class DebugInspectorHook implements IStartup
             {
                 if (e.widget != shell || shell.isDisposed())
                     return;
-                if (isElementDialog(targets.dialog))
+                Object host = resolveElementDialogHost(targets.dialog);
+                if (host != null)
+                {
+                    Global.setField(host, "listenToDeactivate", Boolean.FALSE); //$NON-NLS-1$
+                    Global.setField(host, "listenToParentDeactivate", Boolean.FALSE); //$NON-NLS-1$
+                }
+                else if (isElementDialog(targets.dialog))
                 {
                     Global.setField(targets.dialog, "listenToDeactivate", Boolean.FALSE); //$NON-NLS-1$
                     Global.setField(targets.dialog, "listenToParentDeactivate", Boolean.FALSE); //$NON-NLS-1$

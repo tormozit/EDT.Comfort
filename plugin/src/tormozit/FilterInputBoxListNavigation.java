@@ -33,7 +33,11 @@ public final class FilterInputBoxListNavigation
     private static final String SEARCH_BOX_KEY_GUARD_KEY = "tormozit.searchBoxKeyGuard"; //$NON-NLS-1$
     private static final String SEARCH_BOX_KEY_DOWN_GUARD_KEY = "tormozit.searchBoxKeyDownGuard"; //$NON-NLS-1$
     private static final String SEARCH_BOX_STOCK_KEY_STRIPPED_KEY = "tormozit.searchBoxStockKeyStripped"; //$NON-NLS-1$
+    private static final String SEARCH_BOX_TRAVERSE_GUARD_KEY = "tormozit.searchBoxTraverseGuard"; //$NON-NLS-1$
+    private static final String SUPPRESS_PRIMARY_ENTER_KEY = "tormozit.suppressFilterPrimaryEnter"; //$NON-NLS-1$
     private static final String NAV_CONTEXT_KEY = "tormozit.filterNavContext"; //$NON-NLS-1$
+
+    private static volatile boolean displayTraverseFilterInstalled;
 
     private static final class NavContext
     {
@@ -334,6 +338,7 @@ public final class FilterInputBoxListNavigation
     {
         if (box == null || box.isDisposed())
             return;
+        ensureDisplayTraverseFilter();
         stripSearchBoxStockKeyListener(box);
         if (!Boolean.TRUE.equals(box.getData(SEARCH_BOX_KEY_GUARD_KEY)))
         {
@@ -344,6 +349,11 @@ public final class FilterInputBoxListNavigation
         {
             box.setData(SEARCH_BOX_KEY_DOWN_GUARD_KEY, Boolean.TRUE);
             box.addListener(SWT.KeyDown, event -> dismissSearchBoxPopupAfterStockNav(box, event));
+        }
+        if (!Boolean.TRUE.equals(box.getData(SEARCH_BOX_TRAVERSE_GUARD_KEY)))
+        {
+            box.setData(SEARCH_BOX_TRAVERSE_GUARD_KEY, Boolean.TRUE);
+            box.addListener(SWT.Traverse, event -> handleSearchBoxTraverse(box, event));
         }
     }
 
@@ -381,6 +391,11 @@ public final class FilterInputBoxListNavigation
         }
         if (isEnterKey(event.keyCode))
         {
+            if (isPrimaryEnterSuppressed(box))
+            {
+                event.doit = false;
+                return;
+            }
             if (ctx.enterListener != null && ctx.enterListener.onEnter())
             {
                 event.doit = false;
@@ -459,10 +474,107 @@ public final class FilterInputBoxListNavigation
             sel = 0;
         Object entry = items.get(sel);
         if (entry instanceof String text)
-            box.setText(text);
+            setSearchBoxFilterText(box, text);
         Global.invoke(box, "hidePopup"); //$NON-NLS-1$
         Global.invoke(box, "performSearch"); //$NON-NLS-1$
+        if (entry instanceof String text)
+            moveSearchBoxCaretToEnd(box, text);
+        suppressPrimaryEnterOnce(box);
         return true;
+    }
+
+    private static void setSearchBoxFilterText(SearchBox box, String text)
+    {
+        String value = text != null ? text : ""; //$NON-NLS-1$
+        box.setText(value);
+    }
+
+    private static void moveSearchBoxCaretToEnd(SearchBox box, String text)
+    {
+        if (box == null || box.isDisposed())
+            return;
+        int len = text != null ? text.length() : box.getText().length();
+        box.setSelection(len, len);
+    }
+
+    private static void ensureDisplayTraverseFilter()
+    {
+        if (displayTraverseFilterInstalled)
+            return;
+        Display display = Display.getCurrent();
+        if (display == null)
+            display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        displayTraverseFilterInstalled = true;
+        display.addFilter(SWT.Traverse, FilterInputBoxListNavigation::displayTraverseFilter);
+    }
+
+    /**
+     * До stock {@link SearchBox} {@code TraverseListener}: Enter при открытом popup истории
+     * не должен уходить в default button диалога.
+     */
+    private static void displayTraverseFilter(Event event)
+    {
+        if (!(event.widget instanceof SearchBox box) || box.isDisposed())
+            return;
+        if (!(box.getData(NAV_CONTEXT_KEY) instanceof NavContext))
+            return;
+        if (event.detail != SWT.TRAVERSE_RETURN)
+            return;
+        if (!Boolean.TRUE.equals(Global.getField(box, "displayingPopup"))) //$NON-NLS-1$
+            return;
+        if (applyPopupHistoryItem(box))
+        {
+            event.doit = false;
+            event.detail = SWT.TRAVERSE_NONE;
+        }
+    }
+
+    private static void suppressPrimaryEnterOnce(Control control)
+    {
+        if (control == null || control.isDisposed())
+            return;
+        control.setData(SUPPRESS_PRIMARY_ENTER_KEY, Boolean.TRUE);
+        Display display = control.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() -> {
+            if (!control.isDisposed())
+                control.setData(SUPPRESS_PRIMARY_ENTER_KEY, null);
+        });
+    }
+
+    private static boolean isPrimaryEnterSuppressed(Control control)
+    {
+        return control != null && Boolean.TRUE.equals(control.getData(SUPPRESS_PRIMARY_ENTER_KEY));
+    }
+
+    private static void handleSearchBoxTraverse(SearchBox box, Event event)
+    {
+        if (event.detail != SWT.TRAVERSE_RETURN)
+            return;
+        if (Boolean.TRUE.equals(Global.getField(box, "displayingPopup"))) //$NON-NLS-1$
+        {
+            if (applyPopupHistoryItem(box))
+            {
+                event.doit = false;
+                event.detail = SWT.TRAVERSE_NONE;
+            }
+            return;
+        }
+        if (isPrimaryEnterSuppressed(box))
+        {
+            event.doit = false;
+            event.detail = SWT.TRAVERSE_NONE;
+            return;
+        }
+        NavContext ctx = box.getData(NAV_CONTEXT_KEY) instanceof NavContext nav ? nav : null;
+        if (ctx != null && ctx.enterListener != null && ctx.enterListener.onEnter())
+        {
+            event.doit = false;
+            event.detail = SWT.TRAVERSE_NONE;
+        }
     }
 
     /** После stock {@code KeyDown}: закрыть popup/quick browse, если ↓ успел открыть историю. */
@@ -473,7 +585,13 @@ public final class FilterInputBoxListNavigation
             return;
         if (Boolean.TRUE.equals(Global.getField(box, "displayingPopup"))) //$NON-NLS-1$
         {
-            if (isEnterKey(event.keyCode) || isNavigationKey(event.keyCode))
+            if (isEnterKey(event.keyCode))
+            {
+                if (applyPopupHistoryItem(box))
+                    event.doit = false;
+                return;
+            }
+            if (isNavigationKey(event.keyCode))
                 return;
         }
         if (event.keyCode == SWT.ARROW_DOWN && (event.stateMask & SWT.CTRL) != 0)

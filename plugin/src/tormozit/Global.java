@@ -79,18 +79,62 @@ public final class Global
      */
     public static void setField(Object obj, String fieldName, Object value)
     {
-        if (obj == null || fieldName == null) return;
+        setFieldForce(obj, fieldName, value);
+    }
+
+    /**
+     * Запись в поле с обходом проверки типа (для internal-полей EDT с узким declared type).
+     *
+     * @return {@code true}, если после записи {@link #getField} возвращает {@code value}
+     */
+    public static boolean setFieldForce(Object obj, String fieldName, Object value)
+    {
+        if (obj == null || fieldName == null)
+            return false;
         for (Class<?> c = obj.getClass(); c != null; c = c.getSuperclass())
         {
             try
             {
                 Field f = c.getDeclaredField(fieldName);
                 f.setAccessible(true);
-                f.set(obj, value);
-                return;
+                try
+                {
+                    f.set(obj, value);
+                }
+                catch (IllegalArgumentException typeMismatch)
+                {
+                    if (!setFieldViaUnsafe(obj, f, value))
+                        return false;
+                }
+                return f.get(obj) == value;
             }
             catch (NoSuchFieldException ignored) {}
-            catch (Exception ignored) { return; }
+            catch (Exception ignored)
+            {
+                return false;
+            }
+        }
+        return false;
+    }
+
+    private static boolean setFieldViaUnsafe(Object obj, Field f, Object value)
+    {
+        try
+        {
+            Field unsafeField = Class.forName("sun.misc.Unsafe").getDeclaredField("theUnsafe"); //$NON-NLS-1$ //$NON-NLS-2$
+            unsafeField.setAccessible(true);
+            Object unsafe = unsafeField.get(null);
+            java.lang.reflect.Method offsetMethod =
+                unsafe.getClass().getMethod("objectFieldOffset", Field.class); //$NON-NLS-1$
+            java.lang.reflect.Method putMethod =
+                unsafe.getClass().getMethod("putObject", Object.class, long.class, Object.class); //$NON-NLS-1$
+            long offset = ((Long) offsetMethod.invoke(unsafe, f)).longValue();
+            putMethod.invoke(unsafe, obj, Long.valueOf(offset), value);
+            return true;
+        }
+        catch (Exception ignored)
+        {
+            return false;
         }
     }
     

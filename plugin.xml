@@ -1,0 +1,525 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?eclipse version="3.4"?>
+<plugin>
+   <!-- Property page adopted metadata object descriptors -->
+   <extension point="com._1c.g5.v8.dt.ui.objectDescriptors">
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedAccountingRegisterDescriptor"
+            eClass="AccountingRegister"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedAccountingRegisterDimensionDescriptor"
+            eClass="AccountingRegisterDimension"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedAccountingRegisterResourceDescriptor"
+            eClass="AccountingRegisterResource"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedAccumulationRegisterDescriptor"
+            eClass="AccumulationRegister"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedBasicCommandDescriptor"
+            eClass="BasicCommand"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedAddressingAttributeDescriptor"
+            eClass="AddressingAttribute"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedBasicFeatureDescriptor"
+            eClass="BasicFeature"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedBasicFormDescriptor"
+            eClass="BasicForm"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedCommonFormDescriptor"
+            eClass="CommonForm"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedBasicTemplateDescriptor"
+            eClass="BasicTemplate"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedBusinessProcessDescriptor"
+            eClass="BusinessProcess"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedCalculationRegisterDescriptor"
+            eClass="CalculationRegister"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedCatalogDescriptor"
+            eClass="Catalog"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedChartOfAccountsDescriptor"
+            eClass="ChartOfAccounts"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedChartOfCalculationTypesDescriptor"
+            eClass="ChartOfCalculationTypes"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedChartOfCharacteristicTypesDescriptor"
+            eClass="ChartOfCharacteristicTypes"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedCommandGroupDescriptor"
+            eClass="CommandGroup"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedCommonAttributeDescriptor"
+            eClass="CommonAttribute"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedCommonModuleDescriptor"
+            eClass="CommonModule"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedCommonPictureDescriptor"
+            eClass="CommonPicture"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedConfigurationDescriptor"
+            eClass="Configuration"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedConstantDescriptor"
+            eClass="Constant"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedDataProcessorDescriptor"
+            eClass="DataProcessor"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedDefinedTypeDescriptor"
+            eClass="DefinedType"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedDocumentDescriptor"
+            eClass="Document"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedDocumentJournalDescriptor"
+            eClass="DocumentJournal"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedDocumentNumeratorDescriptor"
+            eClass="DocumentNumerator"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedEnumDescriptor"
+            eClass="Enum"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedExchangePlanDescriptor"
+            eClass="ExchangePlan"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedFilterCriterionDescriptor"
+            eClass="FilterCriterion"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedFunctionalOptionDescriptor"
+            eClass="FunctionalOption"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedHTTPServiceDescriptor"
+            eClass="HTTPService"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedInformationRegisterDescriptor"
+            eClass="InformationRegister"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedLanguageDescriptor"
+            eClass="Language"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedMdObjectDescriptor"
+            eClass="MdObject"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedEventSubscriptionDescriptor"
+            eClass="EventSubscription"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedReportDescriptor"
+            eClass="Report"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedRoleDescriptor"
+            eClass="Role"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedSequenceDescriptor"
+            eClass="Sequence"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedSequenceDimentionDescriptor"
+            eClass="SequenceDimension"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedSessionParameterDescriptor"
+            eClass="SessionParameter"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedSettingsStorageDescriptor"
+            eClass="SettingsStorage"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedStyleItemDescriptor"
+            eClass="StyleItem"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedSubsystemDescriptor"
+            eClass="Subsystem"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedTaskDescriptor"
+            eClass="Task"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedWebServiceDescriptor"
+            eClass="WebService"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedWsReferenceDescriptor"
+            eClass="WSReference"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedXdtoPackageDescriptor"
+            eClass="XDTOPackage"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedStyleDescriptor"
+            eClass="Style"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedExternalDataSourceDescriptor"
+            eClass="ExternalDataSource"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedCubeDescriptor"
+            eClass="Cube"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedTableDescriptor"
+            eClass="Table"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedDimensionTableDescriptor"
+            eClass="DimensionTable"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedFieldDescriptor"
+            eClass="Field"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedDimensionDescriptor"
+            eClass="Dimension"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedResourceDescriptor"
+            eClass="Resource"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedFunctionDescriptor"
+            eClass="Function"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedIntegrationServiceDescriptor"
+            eClass="IntegrationService"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedBotDescriptor"
+            eClass="Bot"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedWebSocketClientDescriptor"
+            eClass="WebSocketClient"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedAccountingFlagDescriptor"
+            eClass="AccountingFlag"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedExtDimensionAccountingFlagDescriptor"
+            eClass="ExtDimensionAccountingFlag"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedColumnDescriptor"
+            eClass="Column"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+      <descriptor
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.MdExtensionUiExtensionFactory:com._1c.g5.v8.dt.internal.md.ui.extension.properties.descriptors.AdoptedPaletteColorDescriptor"
+            eClass="PaletteColor"
+            ePackage="http://g5.1c.ru/v8/dt/metadata/mdclass">
+         <enablement>
+             <test property="com._1c.g5.v8.dt.md.hasObjectBelonging" value="Adopted"/>
+         </enablement>
+      </descriptor>
+   </extension>
+   <extension
+         point="com._1c.g5.v8.dt.md.ui.properties.propertySheetToolbarItemsProvider">
+      <provider
+            class="com._1c.g5.v8.dt.internal.md.ui.extension.properties.propertysheet.MdExtensionPropertySheetToolbarItemsProvider">
+      </provider>
+   </extension>
+</plugin>

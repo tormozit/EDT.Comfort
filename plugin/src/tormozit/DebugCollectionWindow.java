@@ -433,6 +433,30 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         return text != null ? text : ""; //$NON-NLS-1$
     }
 
+    @Override
+    public String getCellHoverToolTip(int logicalRow, int visibleCol)
+    {
+        if (model == null)
+            return null;
+        DebugCollectionColumnModel.Column col = model.columns.columnAt(visibleCol);
+        if (col == null || col.kind == DebugCollectionColumnModel.Kind.INDEX
+            || col.kind == DebugCollectionColumnModel.Kind.TYPE)
+            return null;
+        String baseText = model.getCellBaseText(logicalRow, visibleCol);
+        if (baseText == null || baseText.isEmpty()
+            || DebugCollectionTableModel.PLACEHOLDER.equals(baseText))
+            return null;
+        try
+        {
+            IBslValue value = model.resolveCellValue(logicalRow, visibleCol);
+            return DebugStringValueFormat.tooltipPreviewForTruncated(value, baseText);
+        }
+        catch (DebugException e)
+        {
+            return null;
+        }
+    }
+
     void activate()
     {
         if (shell != null && !shell.isDisposed())
@@ -640,6 +664,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
                 ? DebugCollectionColumnVisibilityStore.orderWithPreferred(model.columns)
                 : DebugCollectionColumnVisibilityStore.orderFor(pathKey, count));
         applyStoredPresentation(pathKey);
+        refreshPresentationCombo();
         if (scheduler != null)
             scheduler.resetLoadJobForSchemaChange();
         model.clearCellCache();
@@ -2175,8 +2200,11 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         {
             if (indexTable.isDisposed() || indexTable.getColumnCount() <= 0)
                 return;
-            applySashWeightsForColumnWidth(DebugCollectionFixedPaneWidthStore.load());
             syncFixedPaneLayout();
+            Table data = dataTable();
+            if (data != null && !data.isDisposed() && data.getColumnCount() > 0)
+                DebugCollectionColumnModel.applyIndexTableColumnLayout(data, false);
+            applySashWeightsForColumnWidth(DebugCollectionFixedPaneWidthStore.load());
             syncRowAreaAlignment();
         }
 

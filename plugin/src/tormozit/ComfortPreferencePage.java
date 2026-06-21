@@ -80,6 +80,13 @@ public class ComfortPreferencePage
         addField(replaceListFiltersField);
         setFieldTooltip(replaceListFiltersField, REPLACE_LIST_FILTERS_TOOLTIP);
 
+        BooleanFieldEditor improveDebuggerField = new BooleanFieldEditor(
+            ComfortSettings.PREF_IMPROVE_DEBUGGER_WINDOWS,
+            "Улучшать окна отладчика", //$NON-NLS-1$
+            getFieldEditorParent());
+        addField(improveDebuggerField);
+        setFieldTooltip(improveDebuggerField, IMPROVE_DEBUGGER_WINDOWS_TOOLTIP);
+
         // === Группа «Редактор кода» ===
         Group codeEditorGroup = new Group(getFieldEditorParent(), SWT.NONE);
         codeEditorGroup.setText("Редактор кода");
@@ -112,6 +119,20 @@ public class ComfortPreferencePage
         // Поле «Символы» намеренно не добавляется:
         // значение задано константой ContentAssistSettings.CHARSET_VALUE
     }
+
+    private static final String IMPROVE_DEBUGGER_WINDOWS_TOOLTIP =
+        "Включает автоматические доработки штатных окон отладки EDT.\n\n"
+            + "Инспектор (F9, hover):\n"
+            + "• кнопка × и «Инспектировать» в hover;\n"
+            + "• закрепление отдельного окна без авто-закрытия;\n"
+            + "• выбор строки по клику в любой колонке, подсветка активной ячейки;\n"
+            + "• Ctrl+C — копирование ячейки, Ctrl+F / F3 — поиск по дереву;\n"
+            + "• F2 — «Показать коллекцию», двойной щелчок — редактирование значения.\n\n"
+            + "«Переменные» и «Выражения»:\n"
+            + "• префикс [N] у длинных строк в колонке «Значение»;\n"
+            + "• F2 — «Показать коллекцию».\n\n"
+            + "При выключении горячие клавиши в этих окнах не перехватываются.\n"
+            + "Пункты контекстного меню и окно «Коллекция» остаются доступны."; //$NON-NLS-1$
 
     private void createLoggingGroup()
     {
@@ -334,20 +355,49 @@ public class ComfortPreferencePage
 
     /**
      * Устанавливает tooltip на управляющий элемент {@link FieldEditor}.
-     * Для {@link BooleanFieldEditor} — на чекбокс.
+     * Для {@link BooleanFieldEditor} — на чекбокс и подпись.
      */
     private void setFieldTooltip(FieldEditor field, String tooltip)
     {
-        try {
-            java.lang.reflect.Method m = field.getClass().getDeclaredMethod(
+        setFieldTooltip(field, tooltip, getFieldEditorParent());
+    }
+
+    private void setFieldTooltip(FieldEditor field, String tooltip, Composite parent)
+    {
+        if (parent == null || parent.isDisposed())
+            return;
+        parent.getDisplay().asyncExec(() -> applyFieldTooltip(field, tooltip, parent));
+    }
+
+    private void applyFieldTooltip(FieldEditor field, String tooltip, Composite parent)
+    {
+        if (parent.isDisposed() || field == null)
+            return;
+        try
+        {
+            java.lang.reflect.Method changeMethod = field.getClass().getDeclaredMethod(
                 "getChangeControl", Composite.class); //$NON-NLS-1$
-            m.setAccessible(true);
-            Control ctrl = (Control) m.invoke(field, getFieldEditorParent());
-            if (ctrl != null && !ctrl.isDisposed()) {
-                ctrl.setToolTipText(tooltip);
-            }
-        } catch (Exception ignored) {
-            // Если метод недоступен — tooltip просто не появится
+            changeMethod.setAccessible(true);
+            Control change = (Control) changeMethod.invoke(field, parent);
+            if (change != null && !change.isDisposed())
+                change.setToolTipText(tooltip);
+        }
+        catch (Exception ignored)
+        {
+            // getChangeControl недоступен
+        }
+        try
+        {
+            java.lang.reflect.Method labelMethod = field.getClass().getDeclaredMethod(
+                "getLabelControl", Composite.class); //$NON-NLS-1$
+            labelMethod.setAccessible(true);
+            Control label = (Control) labelMethod.invoke(field, parent);
+            if (label != null && !label.isDisposed())
+                label.setToolTipText(tooltip);
+        }
+        catch (Exception ignored)
+        {
+            // getLabelControl недоступен
         }
     }
 

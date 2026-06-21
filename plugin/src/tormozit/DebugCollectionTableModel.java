@@ -477,7 +477,8 @@ final class DebugCollectionTableModel
         if (value.isUnreadable())
             return "<unreadable>"; //$NON-NLS-1$
         String detail = value.getDetailString();
-        return detail != null ? detail : ""; //$NON-NLS-1$
+        String text = detail != null ? detail : ""; //$NON-NLS-1$
+        return DebugStringValueFormat.formatForCollectionWindow(text, value);
     }
 
     private String formatProperty(int logicalRow, IBslVariable rowVar, String propertyName)
@@ -513,15 +514,23 @@ final class DebugCollectionTableModel
                 return typeName.trim();
             return "Коллекция"; //$NON-NLS-1$
         }
+        if (DebugStringValueFormat.isStringValue(childValue))
+        {
+            String detail = childValue.getDetailString();
+            if (detail != null && !detail.isEmpty())
+                return DebugStringValueFormat.formatForCollectionWindow(detail, childValue);
+        }
         String cached = childValue.getValueString();
         if (cached != null && !cached.isEmpty())
-            return cached;
+            return DebugStringValueFormat.formatForCollectionWindow(cached, childValue);
         if (!childValue.isEvaluated())
             childValue.evaluate();
         if (childValue.isPending())
             return null;
         String text = childValue.getValueString();
-        return text != null ? text : ""; //$NON-NLS-1$
+        if (text == null)
+            return ""; //$NON-NLS-1$
+        return DebugStringValueFormat.formatForCollectionWindow(text, childValue);
     }
 
     private IBslVariable findNamedChild(int logicalRow, IBslVariable rowVar, String propertyName)

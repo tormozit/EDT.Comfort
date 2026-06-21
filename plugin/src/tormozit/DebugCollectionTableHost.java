@@ -18,5 +18,10 @@ interface DebugCollectionTableHost
     {
         return 0;
     }
-}
 
+    /** Превью полной строки для тултипа; {@code null} — не показывать. */
+    default String getCellHoverToolTip(int logicalRow, int visibleCol)
+    {
+        return null;
+    }
+}

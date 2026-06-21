@@ -31,6 +31,11 @@ public final class DebugCollectionShowHandler extends AbstractHandler
             setBaseEnabled(false);
             return;
         }
+        if (!ComfortSettings.isImproveDebuggerWindowsEnabled())
+        {
+            setBaseEnabled(false);
+            return;
+        }
         boolean enabled = false;
         try
         {
@@ -53,6 +58,8 @@ public final class DebugCollectionShowHandler extends AbstractHandler
     public Object execute(ExecutionEvent event) throws ExecutionException
     {
         if (DebugCollectionWindowRegistry.isCollectionWindowFocused())
+            return null;
+        if (!ComfortSettings.isImproveDebuggerWindowsEnabled())
             return null;
         if (DebugInspectorCollectionMenuHook.handleWorkbenchF2InInspector())
             return null;

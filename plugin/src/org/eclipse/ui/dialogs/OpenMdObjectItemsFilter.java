@@ -1,6 +1,5 @@
 package org.eclipse.ui.dialogs;
 
-import java.util.List;
 import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.ui.dialogs.FilteredItemsSelectionDialog;
 import org.eclipse.ui.dialogs.FilteredItemsSelectionDialog.ItemsFilter;
@@ -96,24 +95,9 @@ public class OpenMdObjectItemsFilter extends FilteredItemsSelectionDialog.ItemsF
 
     private boolean isHistoryElement(Object item) {
         Object history = Global.invoke(dialog, "getSelectionHistory");
-        if (history == null) return false;
-        List<?> historyItems = (List<?>) Global.getField(history, "items");
-        if (historyItems == null) return false;
-
-        for (Object historyItem : historyItems) {
-            if (isSameItem(item, historyItem)) return true;
-        }
-        return false;
-    }
-
-    private boolean isSameItem(Object a, Object b) {
-        if (a == b) return true;
-        Object descA = Global.getField(a, "description");
-        Object descB = Global.getField(b, "description");
-        if (descA == null || descB == null) return false;
-        Object uriA = Global.invoke(descA, "getEObjectURI");
-        Object uriB = Global.invoke(descB, "getEObjectURI");
-        return uriA != null && uriA.equals(uriB);
+        if (history == null)
+            return false;
+        return Boolean.TRUE.equals(Global.invoke(history, "contains", item));
     }
 
     @Override

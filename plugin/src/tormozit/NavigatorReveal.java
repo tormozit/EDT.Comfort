@@ -25,6 +25,38 @@ public final class NavigatorReveal
     }
 
     /**
+     * Вернуть фокус на вкладку редактора (без смены выделения Property Sheet).
+     */
+    public static void reactivateEditorPart(IEditorPart editorPart)
+    {
+        if (editorPart == null)
+            return;
+
+        Display.getDefault().asyncExec(() ->
+        {
+            if (editorPart.getSite() == null)
+                return;
+
+            Class<?> classMPart = MPart.class;
+            Class<?> classEPartService = EPartService.class;
+            Object partService = editorPart.getSite().getService(classEPartService);
+            Object editorMPart = editorPart.getSite().getService(classMPart);
+            if (partService == null || editorMPart == null)
+                return;
+            try
+            {
+                Method activateMethod =
+                    partService.getClass().getMethod("activate", classMPart, boolean.class); //$NON-NLS-1$
+                activateMethod.invoke(partService, editorMPart, false);
+            }
+            catch (Exception ignored)
+            {
+                // активация part — необязательное улучшение UX
+            }
+        });
+    }
+
+    /**
      * @param editorToReactivate редактор, фокус которого вернуть после показа в навигаторе
      *        (редактор сравнения); {@code null} — не трогать активную часть
      */

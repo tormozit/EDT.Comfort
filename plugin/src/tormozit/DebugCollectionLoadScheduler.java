@@ -83,6 +83,7 @@ final class DebugCollectionLoadScheduler
         this.progress = progress;
         this.contextColumnsListener = contextColumnsListener;
         DebugCollectionSizeResolver.resetForNewWindow();
+        DebugCollectionStringFormatResolver.resetForNewWindow();
         contextResolveAttempts.set(0);
     }
 
@@ -278,6 +279,7 @@ final class DebugCollectionLoadScheduler
         sizePassGeneration.incrementAndGet();
         removeShellStateListener();
         DebugCollectionSizeResolver.cancelAll();
+        DebugCollectionStringFormatResolver.cancelAll();
         cancelJob(loadJob);
         cancelJob(sizeJob);
         cancelJob(filterJob);
@@ -496,6 +498,16 @@ final class DebugCollectionLoadScheduler
             fireBrowseProgress(colFrom, colTo, browseBound, total);
             if (cellsWritten > 0 && batchIntersectsRowViewport(from, count))
                 fireRowsReady(from, count);
+            if (cellsWritten > 0)
+            {
+                final int formatFrom = from;
+                final int formatCount = count;
+                DebugCollectionStringFormatResolver.scheduleBatch(model, from, count, colFrom, colTo, display,
+                    () -> {
+                        if (batchIntersectsRowViewport(formatFrom, formatCount))
+                            fireRowsReady(formatFrom, formatCount);
+                    });
+            }
             if (cellsWritten > 0 && batchIntersectsSizeViewport(from, count))
                 scheduleSizePass();
             return new LoadBatchResult(more, cellsWritten);

@@ -79,6 +79,7 @@ final class FilterInputBox
     {
         this.searchBox = searchBox;
         this.scope = scope;
+        installDeferredHistorySave();
     }
 
     static FilterInputBox create(Composite parent, Options options, Runnable onSearch)
@@ -193,6 +194,7 @@ final class FilterInputBox
         if (searchBox == null || searchBox.isDisposed() || scope == null)
             return;
         searchBox.setHistory(new PrefsSearchHistory(scope));
+        installDeferredHistorySave(searchBox, scope);
     }
 
     private static FilterInputBox createForScope(Composite parent, Scope scope, Runnable onSearch)
@@ -298,6 +300,28 @@ final class FilterInputBox
     Control inputControl()
     {
         return findTextControl(searchBox);
+    }
+
+    private void installDeferredHistorySave()
+    {
+        installDeferredHistorySave(searchBox, scope);
+    }
+
+    private static void installDeferredHistorySave(SearchBox box, Scope historyScope)
+    {
+        if (box == null || box.isDisposed() || historyScope == null)
+            return;
+        Runnable persist = () -> {
+            if (box.isDisposed())
+                return;
+            String text = box.getText();
+            if (text != null && !text.trim().isEmpty())
+                remember(historyScope, text);
+        };
+        Control input = findTextControl(box);
+        if (input != null && !input.isDisposed())
+            input.addListener(SWT.FocusOut, e -> persist.run());
+        box.addDisposeListener(e -> persist.run());
     }
 
     private static Control findTextControl(Object searchBox)
@@ -456,13 +480,13 @@ final class FilterInputBox
         @Override
         public void savePattern(String pattern)
         {
-            remember(historyScope, pattern);
+            // отложено — см. installDeferredHistorySave()
         }
 
         @Override
         public void replacePattern(String pattern)
         {
-            remember(historyScope, pattern);
+            // отложено — см. installDeferredHistorySave()
         }
 
         @Override

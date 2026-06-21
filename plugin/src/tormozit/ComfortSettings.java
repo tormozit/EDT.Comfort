@@ -60,6 +60,12 @@ public final class ComfortSettings
     /** Закрытие независимого инспектора включено по умолчанию. */
     public static final boolean DEFAULT_DEBUG_INSPECTOR_AUTO_CLOSE = true;
 
+    /** Ключ: автоматические доработки штатных окон отладки (инспектор, «Переменные»). */
+    public static final String PREF_IMPROVE_DEBUGGER_WINDOWS = "comfort.debug.improveWindows"; //$NON-NLS-1$
+
+    /** Автодоработки отладчика включены по умолчанию. */
+    public static final boolean DEFAULT_IMPROVE_DEBUGGER_WINDOWS = true;
+
     private static ComfortSettings instance;
 
     private final ScopedPreferenceStore preferenceStore;
@@ -93,6 +99,15 @@ public final class ComfortSettings
         if (settings == null)
             return DEFAULT_REPLACE_LIST_FILTERS;
         return settings.preferenceStore.getBoolean(PREF_REPLACE_LIST_FILTERS);
+    }
+
+    /** Автопатч инспектора и префикс длинных строк в штатных деревьях (не команды меню). */
+    public static boolean isImproveDebuggerWindowsEnabled()
+    {
+        ContentAssistSettings settings = ContentAssistSettings.getInstance();
+        if (settings == null)
+            return DEFAULT_IMPROVE_DEBUGGER_WINDOWS;
+        return settings.getPreferenceStore().getBoolean(PREF_IMPROVE_DEBUGGER_WINDOWS);
     }
 
     public static boolean isDebugLogEnabled()
@@ -219,6 +234,11 @@ public final class ComfortSettings
     }
 
     private static IPreferenceStore inspectorPreferenceStore()
+    {
+        return debuggerEnhancementPreferenceStore();
+    }
+
+    private static IPreferenceStore debuggerEnhancementPreferenceStore()
     {
         Activator activator = Activator.getDefault();
         if (activator != null)

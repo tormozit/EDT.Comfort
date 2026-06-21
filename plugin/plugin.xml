@@ -36,6 +36,7 @@
     <startup class="tormozit.DebugValuesInspectHook"/>
     <startup class="tormozit.DebugCollectionSessionHook"/>
     <startup class="tormozit.DebugInspectorHook"/>
+    <startup class="tormozit.DebugVariablePresentationHook"/>
     <startup class="tormozit.InfobaseSyncQuestionDialogHook"/>
     <startup class="tormozit.FilterBySubsystemsDialogHook"/>
   </extension>
@@ -156,6 +157,12 @@
           schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
           sequence="M1+T">
     </key>
+    <key
+          commandId="tormozit.formAttributes.showInNavigator"
+          contextId="com._1c.g5.v8.dt.form.ui.formEditor.attributes"
+          schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
+          sequence="M1+T">
+    </key>
   </extension>
 
   <extension point="org.eclipse.ui.commands">
@@ -227,6 +234,11 @@
         name="Показать в навигаторе"
         categoryId="tormozit.commands.global"
         description="Показать объект метаданных текущей строки набора в дереве навигатора (Комфорт)"/>
+    <command
+        id="tormozit.formAttributes.showInNavigator"
+        name="Показать в навигаторе"
+        categoryId="tormozit.commands.global"
+        description="Показать объект-владелец выбранного поля «Объект.*» дерева реквизитов формы в навигаторе (Комфорт)"/>
     <command
         id="tormozit.OpenConfigurationObject"
         name="Открыть объект конфигурации"
@@ -350,6 +362,17 @@
       <activeWhen>
         <with variable="activePartId">
           <equals value="tormozit.ObjectSetsView"/>
+        </with>
+      </activeWhen>
+    </handler>
+    <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.FormAttributesShowInNavigatorHandler"
+        commandId="tormozit.formAttributes.showInNavigator">
+      <activeWhen>
+        <with variable="activeContexts">
+          <iterate operator="or">
+            <equals value="com._1c.g5.v8.dt.form.ui.formEditor.attributes"/>
+          </iterate>
         </with>
       </activeWhen>
     </handler>

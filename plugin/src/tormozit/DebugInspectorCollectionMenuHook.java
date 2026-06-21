@@ -6,14 +6,11 @@ import java.util.List;
 import org.eclipse.debug.core.model.IValue;
 import org.eclipse.debug.core.model.IWatchExpression;
 import org.eclipse.jface.viewers.IStructuredSelection;
-import org.eclipse.jface.viewers.TreePath;
-import org.eclipse.jface.viewers.TreeSelection;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
 import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.events.SelectionEvent;
-import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
@@ -97,6 +94,8 @@ public final class DebugInspectorCollectionMenuHook
      */
     static boolean handleWorkbenchF2InInspector()
     {
+        if (!ComfortSettings.isImproveDebuggerWindowsEnabled())
+            return false;
         org.eclipse.swt.widgets.Display display = org.eclipse.swt.widgets.Display.getCurrent();
         if (display == null || display.isDisposed())
             return false;
@@ -226,41 +225,7 @@ public final class DebugInspectorCollectionMenuHook
     {
         if (e.widget != tree || tree.isDisposed())
             return;
-        selectRowAt(new Point(e.x, e.y));
         ensureMenuListener();
-    }
-
-    private void selectRowAt(Point loc)
-    {
-        if (loc == null)
-            return;
-        TreeItem item = tree.getItem(loc);
-        if (item == null || item.isDisposed())
-            return;
-        tree.setSelection(new TreeItem[] { item });
-        tree.setFocus();
-        applyViewerSelection(item);
-    }
-
-    private void applyViewerSelection(TreeItem item)
-    {
-        if (viewer == null || item == null)
-            return;
-        if (item.getData() == null)
-            return;
-        List<Object> path = new ArrayList<>();
-        TreeItem current = item;
-        while (current != null)
-        {
-            Object element = current.getData();
-            if (element != null)
-                path.add(0, element);
-            current = current.getParentItem();
-        }
-        if (path.isEmpty())
-            return;
-        TreeSelection selection = new TreeSelection(new TreePath(path.toArray()));
-        Global.invoke(viewer, "setSelection", selection); //$NON-NLS-1$
     }
 
     private MenuAdapter buildMenuListener()

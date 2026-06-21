@@ -287,6 +287,8 @@ final class DebugCollectionColumnModel
         {
             if (col.kind == Kind.INDEX || col.header == null || col.header.isBlank())
                 continue;
+            if (isTypeColumn(col))
+                continue;
             headers.add(col.header);
         }
         headers.sort(String::compareToIgnoreCase);
@@ -557,14 +559,21 @@ final class DebugCollectionColumnModel
         org.eclipse.swt.widgets.TableColumn[] existing = table.getColumns();
         for (int i = existing.length; i < dataCols; i++)
             new org.eclipse.swt.widgets.TableColumn(table, org.eclipse.swt.SWT.NONE);
+        Composite host = table.getParent();
+        TableColumnLayout columnLayout = null;
+        if (host != null && !host.isDisposed() && host.getLayout() instanceof TableColumnLayout layout)
+            columnLayout = layout;
         for (int dataCol = 0; dataCol < dataCols; dataCol++)
         {
             Column col = columnAt(fixed + dataCol);
             org.eclipse.swt.widgets.TableColumn tc = table.getColumn(dataCol);
             tc.setText(col != null ? col.header : ""); //$NON-NLS-1$
-            tc.setWidth(defaultWidth(col));
+            int width = defaultWidth(col);
+            tc.setWidth(width);
             tc.setResizable(true);
             tc.setMoveable(true);
+            if (columnLayout != null)
+                columnLayout.setColumnData(tc, new ColumnPixelData(Math.max(1, width), true, dataCol < dataCols - 1));
         }
         for (int i = dataCols; i < existing.length; i++)
             existing[i].dispose();
