@@ -70,9 +70,9 @@ public final class DebugIRHandler
             try
             {
                 ensureCodeEditor(irSession);
-                ComBridge.invoke(irSession.codeEditor, "РазобратьТекущийКонтекст"); //$NON-NLS-1$
+                irSession.invokeCodeEditor("РазобратьТекущийКонтекст"); //$NON-NLS-1$
                 String debugContext = ComBridge.toString(
-                    ComBridge.invoke(irSession.codeEditor, "ВычисляемыйКонтекстОтладчика")); //$NON-NLS-1$
+                    irSession.invokeCodeEditor("ВычисляемыйКонтекстОтладчика")); //$NON-NLS-1$
                 if (debugContext == null || debugContext.isBlank())
                 {
                     toast("Отладить ИР",
@@ -81,7 +81,7 @@ public final class DebugIRHandler
                 }
                 String textCall = debugContext.split("\\*")[0] + "От"; //$NON-NLS-1$ //$NON-NLS-2$
                 String moduleRef = ComBridge.toString(
-                    ComBridge.invoke(irSession.codeEditor, "СсылкаСтрокиМодуля", null, false)); //$NON-NLS-1$
+                    irSession.invokeCodeEditor("СсылкаСтрокиМодуля", null, false)); //$NON-NLS-1$
                 String exprText = selectedText;
                 if (exprText == null || exprText.isBlank())
                     exprText = ComBridge.toString(ComBridge.getProperty(irSession.codeEditor, "мКонтекст")); //$NON-NLS-1$
@@ -186,14 +186,14 @@ public final class DebugIRHandler
                 {
                     irSession.syncCodeEditorToIR(editor);
                     ensureCodeEditor(irSession);
-                    ComBridge.invoke(irSession.codeEditor, "РазобратьТекущийКонтекст"); //$NON-NLS-1$
+                    irSession.invokeCodeEditor("РазобратьТекущийКонтекст"); //$NON-NLS-1$
                     String debugContext = ComBridge.toString(
-                        ComBridge.invoke(irSession.codeEditor, "ВычисляемыйКонтекстОтладчика")); //$NON-NLS-1$
+                        irSession.invokeCodeEditor("ВычисляемыйКонтекстОтладчика")); //$NON-NLS-1$
                     if (debugContext != null && !debugContext.isBlank())
                     {
                         textCall = debugContext.split("\\*")[0] + "От"; //$NON-NLS-1$ //$NON-NLS-2$
                         moduleRef = ComBridge.toString(
-                            ComBridge.invoke(irSession.codeEditor, "СсылкаСтрокиМодуля", null, false)); //$NON-NLS-1$
+                            irSession.invokeCodeEditor("СсылкаСтрокиМодуля", null, false)); //$NON-NLS-1$
                     }
                 }
 

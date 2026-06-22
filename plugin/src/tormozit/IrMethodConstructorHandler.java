@@ -57,7 +57,7 @@ public final class IrMethodConstructorHandler extends AbstractHandler
             try
             {
                 ensureCodeEditor(irSession);
-                ComBridge.invoke(irSession.codeEditor, "РазобратьТекущийКонтекст"); //$NON-NLS-1$
+                irSession.invokeCodeEditor("РазобратьТекущийКонтекст"); //$NON-NLS-1$
                 long language = ComBridge.toLong(
                     ComBridge.getProperty(irSession.codeEditor, "мЯзыкПрограммы")); //$NON-NLS-1$
                 if (language != 0)
@@ -67,7 +67,8 @@ public final class IrMethodConstructorHandler extends AbstractHandler
                 }
 
                 Object result = irSession.runIrModalDialog(METHOD_CONSTRUCTOR_TITLE, DIALOG_WAIT_MS,
-                    () -> ComBridge.invoke(irSession.codeEditor, "ОткрытьКонструкторМетода")); //$NON-NLS-1$
+                    () -> irSession.invokeCodeEditor("ОткрытьКонструкторМетода"), //$NON-NLS-1$
+                    r -> "Ошибка".equals(ComBridge.toString(r))); //$NON-NLS-1$
 
                 if (isCancelled(result))
                     return;
@@ -75,8 +76,8 @@ public final class IrMethodConstructorHandler extends AbstractHandler
                 String resultText = ComBridge.toString(result);
                 if ("Ошибка".equals(resultText)) //$NON-NLS-1$
                 {
-                    irSession.showWindow();
-                    toast("Конструктор метода", "Ошибка открытия конструктора метода", 5_000); //$NON-NLS-1$ //$NON-NLS-2$
+                    if (!WinWindowActivator.isWindows() || irSession.pid <= 0)
+                        irSession.showWindow();
                     return;
                 }
 

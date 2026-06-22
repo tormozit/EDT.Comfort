@@ -1721,9 +1721,9 @@ public class GoToDefinition extends AbstractHandler
                 {
 
                     ensureCodeEditor(session);
-                    ComBridge.invoke(session.codeEditor, "РазобратьТекущийКонтекст"); //$NON-NLS-1$
-                    ComBridge.invoke(session.codeEditor, "ЗапомнитьИсточникПерехода"); //$NON-NLS-1$
-                    Object raw = ComBridge.invoke(session.codeEditor, "ПерейтиКОпределению", null, null, false); //$NON-NLS-1$
+                    session.invokeCodeEditor("РазобратьТекущийКонтекст"); //$NON-NLS-1$
+                    session.invokeCodeEditor("ЗапомнитьИсточникПерехода"); //$NON-NLS-1$
+                    Object raw = session.invokeCodeEditor("ПерейтиКОпределению", null, null, false); //$NON-NLS-1$
                     return marshalOutcome(raw);
                 });
             }
@@ -2143,9 +2143,10 @@ public class GoToDefinition extends AbstractHandler
                 codeEditor = ComBridge.invoke(irCache, "ПолеТекстаПрограммы", "//"); //$NON-NLS-1$ //$NON-NLS-2$
                 if (codeEditor == null)
                     codeEditor = ComBridge.invoke(irCache, "ПолеТекстаПрограммы", 0); //$NON-NLS-1$
+                session.codeEditor = codeEditor;
             }
 
-            Object formParts = ComBridge.invoke(codeEditor, "ЧастиПолногоИмениЭлементаФормы", ref); //$NON-NLS-1$
+            Object formParts = session.invokeCodeEditor("ЧастиПолногоИмениЭлементаФормы", ref); //$NON-NLS-1$
             String formName = ComBridge.structureField(formParts, "ИмяФормы"); //$NON-NLS-1$
             if (formName != null && !formName.isEmpty())
             {
@@ -2153,7 +2154,7 @@ public class GoToDefinition extends AbstractHandler
                 return new Result(formName, path, null, null, null, null, null);
             }
 
-            Object maketParts = ComBridge.invoke(codeEditor, "ЧастиПолногоИмениЭлементаМакета", ref); //$NON-NLS-1$
+            Object maketParts = session.invokeCodeEditor("ЧастиПолногоИмениЭлементаМакета", ref); //$NON-NLS-1$
             String maketName = ComBridge.structureField(maketParts, "ИмяМакета"); //$NON-NLS-1$
             if (maketName != null && !maketName.isEmpty())
             {

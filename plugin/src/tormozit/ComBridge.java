@@ -1,9 +1,12 @@
 package tormozit;
 
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
+
+import org.eclipse.swt.widgets.Display;
 
 /**
  * Рефлексивная обёртка над Jacob (Java COM Bridge).
@@ -46,7 +49,25 @@ public final class ComBridge
     private static Method methodVariantToJavaObject;
     private static Method methodVariantGetVt;
     private static Method methodVariantToString;
-    
+    private static Constructor<?> variantByRefCtor;
+    private static Method variantGetStringRef;
+    private static volatile boolean byrefAttempted;
+    private static volatile boolean byrefAvailable;
+    private static volatile boolean jacobFailureNotified;
+
+    /** Результат {@code ПрочитатьУдалитьСообщенияПользователю}. */
+    public static final class UserMessageDrainResult
+    {
+        public final String text;
+        public final String moduleRef;
+
+        UserMessageDrainResult(String text, String moduleRef)
+        {
+            this.text = text != null ? text : ""; //$NON-NLS-1$
+            this.moduleRef = moduleRef != null ? moduleRef : ""; //$NON-NLS-1$
+        }
+    }
+
     // -----------------------------------------------------------------------
     // Инициализация
     // -----------------------------------------------------------------------
@@ -79,9 +100,8 @@ public final class ComBridge
                 methodEnumVariantNext    = classEnumVariant.getMethod("nextElement");     //$NON-NLS-1$
                 methodVariantToJavaObject  = classVariant.getMethod("toJavaObject");
                 methodVariantToString      = classVariant.getMethod("toString");
-                methodVariantToJavaObject = classVariant.getMethod("toJavaObject");
                 methodVariantGetVt         = classVariant.getMethod("getvt");
-                
+
                 available = true;
                 initComThread();
                 Global.log("Jacob инициализирован успешно"); //$NON-NLS-1$
@@ -91,7 +111,56 @@ public final class ComBridge
                 available = false;
                 unavailableReason = e.toString();
                 Global.log("Jacob НЕУДАЧА: " + e); //$NON-NLS-1$
+                notifyJacobFailureOnce(e);
             }
+        }
+    }
+
+    private static void notifyJacobFailureOnce(Throwable e)
+    {
+        if (jacobFailureNotified)
+            return;
+        jacobFailureNotified = true;
+        String msg = e != null ? comErrorMessage(unwrap(e instanceof Exception ex ? ex : new Exception(e))) : ""; //$NON-NLS-1$
+        notifyComProblemToUser("Jacob/COM недоступен: " + msg); //$NON-NLS-1$
+    }
+
+    private static void notifyComProblemToUser(String message)
+    {
+        String detail = formatErrorForNotification(message);
+        if (detail.isEmpty())
+            return;
+        Global.log("ComBridge", detail); //$NON-NLS-1$
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        final String toastText = detail;
+        display.asyncExec(() -> ToastNotification.show(IRApplication.toastTitle(), toastText, 8_000));
+    }
+
+    /** Lazy init Variant(Object, boolean) + getStringRef — только для drainUserMessages. */
+    private static boolean ensureByrefSupport()
+    {
+        if (byrefAttempted)
+            return byrefAvailable;
+        synchronized (ComBridge.class)
+        {
+            if (byrefAttempted)
+                return byrefAvailable;
+            byrefAttempted = true;
+            try
+            {
+                variantByRefCtor = classVariant.getConstructor(Object.class, boolean.class);
+                variantGetStringRef = classVariant.getMethod("getStringRef"); //$NON-NLS-1$
+                byrefAvailable = true;
+            }
+            catch (Exception e)
+            {
+                byrefAvailable = false;
+                if (Global.isLogEnabled())
+                    Global.log("ComBridge", "byref init: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            return byrefAvailable;
         }
     }
 
@@ -178,6 +247,47 @@ public final class ComBridge
         { 
             Throwable c = unwrap(e); 
             throw new RuntimeException("COM." + method + "(): " + comErrorMessage(c), c); 
+        }
+    }
+
+    /**
+     * Порт {@code ПолеТекстаПрограммы.ПрочитатьУдалитьСообщенияПользователю(СсылкаМодуля)}.
+     * Без исключений — ошибки COM возвращают пустой результат.
+     */
+    public static UserMessageDrainResult drainUserMessages(Object codeEditor)
+    {
+        if (codeEditor == null)
+            return new UserMessageDrainResult("", ""); //$NON-NLS-1$ //$NON-NLS-2$
+        requireJacob();
+        if (ensureByrefSupport())
+        {
+            try
+            {
+                Object moduleRefOut = variantByRefCtor.newInstance("", Boolean.TRUE); //$NON-NLS-1$
+                Object raw = invoke(codeEditor, "ПрочитатьУдалитьСообщенияПользователю", moduleRefOut); //$NON-NLS-1$
+                String text = fixUtf8Mojibake(toString(raw).strip());
+                String moduleRefRaw = (String) variantGetStringRef.invoke(moduleRefOut);
+                String moduleRef = moduleRefRaw != null
+                    ? fixUtf8Mojibake(moduleRefRaw.strip())
+                    : ""; //$NON-NLS-1$
+                return new UserMessageDrainResult(text, moduleRef);
+            }
+            catch (Exception e)
+            {
+                if (Global.isLogEnabled())
+                    Global.log("ComBridge", "drainUserMessages byref: " + comErrorMessage(unwrap(e))); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+        try
+        {
+            Object raw = invoke(codeEditor, "ПрочитатьУдалитьСообщенияПользователю"); //$NON-NLS-1$
+            String text = fixUtf8Mojibake(toString(raw).strip());
+            return new UserMessageDrainResult(text, ""); //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+            notifyComProblemToUser("Не удалось прочитать сообщения ИР: " + comErrorMessage(unwrap(e))); //$NON-NLS-1$
+            return new UserMessageDrainResult("", ""); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 

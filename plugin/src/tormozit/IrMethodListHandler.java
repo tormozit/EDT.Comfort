@@ -76,14 +76,14 @@ public final class IrMethodListHandler
             try
             {
                 ensureCodeEditor(irSession);
-                ComBridge.invoke(irSession.codeEditor, "РазобратьТекущийКонтекст"); //$NON-NLS-1$
+                irSession.invokeCodeEditor("РазобратьТекущийКонтекст"); //$NON-NLS-1$
                 long language = ComBridge.toLong(ComBridge.getProperty(irSession.codeEditor, "мЯзыкПрограммы")); //$NON-NLS-1$
                 if (language != 0)
                 {
                     toast("Список методов", "Команда доступна только в модуле"); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
                 }
-                ComBridge.invoke(irSession.codeEditor, "ОткрытьСписокМетодов", query, onlyThisModule); //$NON-NLS-1$
+                irSession.invokeCodeEditor("ОткрытьСписокМетодов", query, onlyThisModule); //$NON-NLS-1$
                 irSession.showWindow();
             }
             catch (Exception e)

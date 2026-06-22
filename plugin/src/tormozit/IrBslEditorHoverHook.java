@@ -5,9 +5,6 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.jface.dialogs.PageChangedEvent;
@@ -44,29 +41,6 @@ import org.eclipse.xtext.ui.editor.hover.html.IXtextBrowserInformationControl;
 public final class IrBslEditorHoverHook implements IStartup
 {
     private static final String HOOK_MARKER = "tormozit.irHoverWrapped"; //$NON-NLS-1$
-
-    // #region agent log
-    private static final class AgentHoverDebugLog
-    {
-        private static final Path LOG_PATH = Path.of("C:\\VC\\EDT.Comfort\\debug-73c22c.log"); //$NON-NLS-1$
-
-        static void log(String hypothesisId, String location, String message, String dataJson)
-        {
-            try
-            {
-                String line = "{\"sessionId\":\"73c22c\",\"hypothesisId\":\"" + hypothesisId //$NON-NLS-1$
-                    + "\",\"location\":\"" + location + "\",\"message\":\"" + message //$NON-NLS-1$ //$NON-NLS-2$
-                    + "\",\"data\":" + (dataJson != null ? dataJson : "{}") //$NON-NLS-1$
-                    + ",\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
-                Files.writeString(LOG_PATH, line, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-            }
-            catch (Exception ignored)
-            {
-                // debug session only
-            }
-        }
-    }
-    // #endregion
 
     private final Set<DtGranularEditor<?>> hookedGranularEditors =
         Collections.newSetFromMap(new WeakHashMap<>());
@@ -303,13 +277,8 @@ public final class IrBslEditorHoverHook implements IStartup
             }
             final int offset = hoverRegion.getOffset();
             IRSession.cancelActiveEvaluation(session);
-            boolean hadWatcher = activeWatcher != null;
             final int gen = cancelIrEnrichment();
             lastScheduledOffset = offset;
-            // #region agent log
-            AgentHoverDebugLog.log("D", "getHoverInfo2", "hover re-eval", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"offset\":" + offset + ",\"gen\":" + gen + ",\"hadWatcher\":" + hadWatcher + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            // #endregion
             final Object baseInput = info;
             IRSession.CodeEditorSyncPayload payload = session.prepareCodeEditorSyncForHover(editor, offset);
             if (payload == null)
@@ -332,13 +301,7 @@ public final class IrBslEditorHoverHook implements IStartup
                 if (control == null)
                     return;
                 if (control.hasDelayedInputChangeListener())
-                {
-                    // #region agent log
-                    AgentHoverDebugLog.log("C", "scheduleNativeInputSync", "notifyDelayedInputChange base", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        "{\"offset\":" + offset + ",\"gen\":" + gen + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    // #endregion
                     control.notifyDelayedInputChange(baseInput);
-                }
             });
         }
 
@@ -376,12 +339,6 @@ public final class IrBslEditorHoverHook implements IStartup
         {
             if (gen != fetchGeneration.get() || offset != lastScheduledOffset)
             {
-                // #region agent log
-                AgentHoverDebugLog.log("E", "applyIrEnrichmentOnUi", "stale skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"offset\":" + offset + ",\"gen\":" + gen //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"fetchGen\":" + fetchGeneration.get() //$NON-NLS-1$
-                    + ",\"lastOffset\":" + lastScheduledOffset + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
                 IrBslHoverDebug.step("skip", "stale gen=" + gen + " offset=" + offset); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 return;
             }
@@ -395,10 +352,6 @@ public final class IrBslEditorHoverHook implements IStartup
 
             if (tryApplyToCurrentControl(merged))
             {
-                // #region agent log
-                AgentHoverDebugLog.log("E", "applyIrEnrichmentOnUi", "merged applied", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"offset\":" + offset + ",\"gen\":" + gen + ",\"mergedLen\":" + merged.length() + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                // #endregion
                 IrBslHoverDebug.log("enriched inline offset=" + offset); //$NON-NLS-1$
                 HtmlIntegrityWatcher watcher = new HtmlIntegrityWatcher(gen, lastBaseHtml, lastIrHtml, lastScheduledOffset);
                 activeWatcher = watcher;
@@ -623,46 +576,21 @@ public final class IrBslEditorHoverHook implements IStartup
                     && irHtml != null && !irHtml.isEmpty()
                     && !hasMarker)
                 {
-                    boolean backEnabled = browser.isBackEnabled();
                     String merged = IrBslHoverHtml.mergeHtml(baseHtml, irHtml);
                     boolean baseReset = IrBslHoverHtml.looksLikeBaseHtmlReset(currentText, baseHtml, merged);
-                    int diffToBase = Math.abs(
-                        (currentText != null ? currentText.length() : 0) - (baseHtml != null ? baseHtml.length() : 0));
-                    int diffToMerged = Math.abs(
-                        (currentText != null ? currentText.length() : 0) - merged.length());
-                    // #region agent log
-                    AgentHoverDebugLog.log("AB", "HtmlIntegrityWatcher.doCheck", "marker lost", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        "{\"offset\":" + offset + ",\"backEnabled\":" + backEnabled //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"baseReset\":" + baseReset //$NON-NLS-1$
-                        + ",\"diffToBase\":" + diffToBase //$NON-NLS-1$
-                        + ",\"diffToMerged\":" + diffToMerged //$NON-NLS-1$
-                        + ",\"currentLen\":" + (currentText != null ? currentText.length() : 0) //$NON-NLS-1$
-                        + ",\"baseLen\":" + (baseHtml != null ? baseHtml.length() : 0) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                    // #endregion
+                    boolean backEnabled = browser.isBackEnabled();
                     if (backEnabled && !baseReset)
                     {
-                        // #region agent log
-                        AgentHoverDebugLog.log("FIX", "HtmlIntegrityWatcher.doCheck", "skip navigation", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                            "{\"offset\":" + offset + ",\"backEnabled\":true,\"runId\":\"post-fix2\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-                        // #endregion
+                        IrBslHoverDebug.step("watcher", //$NON-NLS-1$
+                            "skip navigation back=" + backEnabled); //$NON-NLS-1$
                     }
                     else if (baseReset)
                     {
                         IrBslHoverHtml.applyHtmlToControl(control, merged);
-                        // #region agent log
-                        AgentHoverDebugLog.log("FIX", "HtmlIntegrityWatcher.doCheck", "html restored", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                            "{\"offset\":" + offset + ",\"backEnabled\":" + backEnabled //$NON-NLS-1$ //$NON-NLS-2$
-                            + ",\"runId\":\"post-fix2\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-                        // #endregion
                         IrBslHoverDebug.log("html restored offset=" + offset); //$NON-NLS-1$
                     }
                     else
                     {
-                        // #region agent log
-                        AgentHoverDebugLog.log("FIX", "HtmlIntegrityWatcher.doCheck", "skip navigation", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                            "{\"offset\":" + offset + ",\"backEnabled\":" + backEnabled //$NON-NLS-1$ //$NON-NLS-2$
-                            + ",\"runId\":\"post-fix2\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-                        // #endregion
                         IrBslHoverDebug.step("watcher", //$NON-NLS-1$
                             "skip restore back=" + backEnabled + " baseReset=" + baseReset); //$NON-NLS-1$ //$NON-NLS-2$
                     }

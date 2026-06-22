@@ -12,9 +12,11 @@ import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.Predicate;
 import java.util.regex.Pattern;
 
 import org.eclipse.core.resources.IFile;
+import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.jface.text.BadLocationException;
@@ -266,15 +268,17 @@ public final class IRSession
         private void applyCodeEditorSync(CodeEditorSyncPayload payload)
         {
             ensureCodeEditor();
+            discardPendingUserMessages();
             for (IRModuleChangeCollector.ModuleSyncEntry e : payload.pending)
             {
-                setText(e.text, e.moduleName, 0, 0);
+                setTextQuiet(e.text, e.moduleName, 0, 0);
                 markPushed(e.bslPath, e.hash);
                 IRModuleSyncDebug.logPushed(e.moduleName, e.bslPath);
             }
-            setText(payload.text, payload.moduleName, payload.offset, payload.endOffset);
+            setTextQuiet(payload.text, payload.moduleName, payload.offset, payload.endOffset);
             if (!payload.bslPath.isEmpty() && payload.hash != null)
                 markPushed(payload.bslPath, payload.hash);
+            pumpUserMessagesToUi();
         }
 
         static final class CodeEditorSyncPayload
@@ -309,6 +313,80 @@ public final class IRSession
             }
         }
 
+        /** Сброс очереди сообщений ИР без показа (порт RDT перед {@code УстановитьТекст}). COM-поток. */
+        void discardPendingUserMessages()
+        {
+            if (!canPumpUserMessages())
+                return;
+            ensureCodeEditor();
+            ComBridge.drainUserMessages(codeEditor);
+            IrUserMessagesDebug.step("discard", ""); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        /** Прочитать очередь сообщений ИР и показать тост на UI. COM-поток. */
+        public void pumpUserMessagesToUi()
+        {
+            if (!canPumpUserMessages())
+                return;
+            ensureCodeEditor();
+            ComBridge.UserMessageDrainResult drained = ComBridge.drainUserMessages(codeEditor);
+            if (drained.text.isEmpty())
+            {
+                IrUserMessagesDebug.step("pump", "empty"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            IrUserMessagesDebug.log("show len=" + drained.text.length() //$NON-NLS-1$
+                + (drained.moduleRef.isEmpty() ? "" : " ref=" + drained.moduleRef)); //$NON-NLS-1$ //$NON-NLS-2$
+            showUserMessageOnUi(drained.text, drained.moduleRef);
+        }
+
+        /** COM {@code codeEditor} + прокачка сообщений. Только COM-поток {@link #executor}. */
+        public Object invokeCodeEditor(String method, Object... args)
+        {
+            Object result = invokeCodeEditorQuiet(method, args);
+            pumpUserMessagesToUi();
+            return result;
+        }
+
+        /** COM {@code codeEditor} без прокачки (пакетный sync). COM-поток. */
+        Object invokeCodeEditorQuiet(String method, Object... args)
+        {
+            ensureCodeEditor();
+            return ComBridge.invoke(codeEditor, method, args);
+        }
+
+        private boolean canPumpUserMessages()
+        {
+            return state == IRApplication.State.CONNECTED;
+        }
+
+        private void showUserMessageOnUi(String text, String moduleRef)
+        {
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            display.asyncExec(() ->
+            {
+                Runnable action = null;
+                String actionLabel = null;
+                if (moduleRef != null && !moduleRef.isBlank())
+                {
+                    final String ref = moduleRef.strip();
+                    action = () ->
+                    {
+                        IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+                        if (window == null)
+                            return;
+                        IProject p = project;
+                        GoToDefinition.jump(ref, window.getShell(), window.getActivePage(), p);
+                    };
+                    actionLabel = "Открыть модуль"; //$NON-NLS-1$
+                }
+                ToastNotification.show(
+                    IRApplication.toastTitle(), text, 5_000, action, actionLabel);
+            });
+        }
+
         /** Синхронизация текста «Редактора запроса» в поле ИР (язык запросов). */
         public void syncQueryEditorToIR(ISourceViewer viewer)
         {
@@ -329,6 +407,7 @@ public final class IRSession
                 ensureCodeEditor();
                 ComBridge.setProperty(codeEditor, "ЯзыкПрограммы", 1); //$NON-NLS-1$
                 setText(text, "", offset, endOffset); //$NON-NLS-1$
+                pumpUserMessagesToUi();
                 return null;
             });
         }
@@ -455,6 +534,16 @@ public final class IRSession
             , int endOffset // from 0
         )
         {
+            discardPendingUserMessages();
+            setTextQuiet(text, moduleName, startOffset, endOffset);
+        }
+
+        private void setTextQuiet(String text
+            , String moduleName
+            , int startOffset
+            , int endOffset
+        )
+        {
             Global.LfTextSlice slice = Global.toLfWithSelection(text, startOffset, endOffset);
             if (moduleName != null && !moduleName.isEmpty() && slice.text() != null)
             {
@@ -464,19 +553,14 @@ public final class IRSession
             }
             IRModuleSyncDebug.logSetTextSelection(
                 startOffset, endOffset, slice.start(), slice.end(), Global.countCrlf(text));
-//            Процедура УстановитьТекст(Знач Текст = Неопределено, Знач Активировать = Ложь, Знач НачальныйТекстДляСравнения = Неопределено, Знач СохранитьГраницыВыделения = Ложь, Знач ИмяМодуляСжатое = Неопределено,
-//                Знач ИмяМодуля = Неопределено, Знач НовоеНачалоВыделения = 0, Знач НовоеКонецВыделения = 0) Экспорт
-            ComBridge.invoke(codeEditor, "УстановитьТекст", slice.text(), false, null, false, null, moduleName, slice.start() + 1,
+            invokeCodeEditorQuiet("УстановитьТекст", slice.text(), false, null, false, null, moduleName, slice.start() + 1, //$NON-NLS-1$
                 slice.end() + 1);
         }
 
         public Object replaceSelectedText(String text)
         {
             String lfText = Global.normalizeLineSeparators(text != null ? text : ""); //$NON-NLS-1$
-     //        ВставитьИзмененныйТекстовыйЛитерал(Знач НовыйТекст, Знач СтарыйТекстЛитерала = "", выхТекстИзменен = Ложь)
-            String string = ComBridge.toString(ComBridge.invoke(codeEditor, "ВставитьИзмененныйТекстовыйЛитерал", lfText));
-            return string;
-            
+            return ComBridge.toString(invokeCodeEditor("ВставитьИзмененныйТекстовыйЛитерал", lfText)); //$NON-NLS-1$
        }
 
         public void readChangedTextRange()
@@ -520,13 +604,13 @@ public final class IRSession
         {
 //            Функция ВыделитьТекстовыйЛитерал(Знач ПолеТекстаЛ = Неопределено, выхНачальнаяПозиция0 = 0, выхКонечнаяПозиция0 = 0, Знач РазбиратьКонтекст = Истина, выхВыражение = "",
 //                Знач РазрешитьПотерюКомментариев = Истина) Экспорт 
-            return ComBridge.toString(ComBridge.invoke(codeEditor, "ВыделитьТекстовыйЛитерал", null, null, null, true, null, false));
+            return ComBridge.toString(invokeCodeEditor("ВыделитьТекстовыйЛитерал", null, null, null, true, null, false)); //$NON-NLS-1$
         }
 
         // Модальный
         public boolean openTextLiteralEditor()
         {
-            return ComBridge.toBoolean(ComBridge.invoke(codeEditor, "ОткрытьРедакторТекстовогоЛитерала", null, null, null, true, null, false));
+            return ComBridge.toBoolean(invokeCodeEditor("ОткрытьРедакторТекстовогоЛитерала", null, null, null, true, null, false)); //$NON-NLS-1$
         }
 
         public void showWindow()
@@ -552,6 +636,17 @@ public final class IRSession
         public <T> T runIrModalDialog(Pattern titlePattern, long waitForDialogMs, Callable<T> action)
             throws Exception
         {
+            return runIrModalDialog(titlePattern, waitForDialogMs, action, null);
+        }
+
+        /**
+         * @param keepIrOpenOnResult если предикат вернёт {@code true} для результата {@code action},
+         *     псевдомодальность снимается, но окно ИР остаётся видимым (аналог
+         *     {@code ВосстановитьОкноПриложения} в RDT)
+         */
+        public <T> T runIrModalDialog(Pattern titlePattern, long waitForDialogMs, Callable<T> action,
+            Predicate<T> keepIrOpenOnResult) throws Exception
+        {
             if (state != IRApplication.State.CONNECTED)
                 throw new IllegalStateException("ИР не подключён"); //$NON-NLS-1$
 
@@ -562,14 +657,21 @@ public final class IRSession
             }
 
             IrModalWindowSession modal = IrModalWindowSession.begin(this, titlePattern, waitForDialogMs);
+            T result;
             try
             {
-                return action.call();
+                result = action.call();
             }
-            finally
+            catch (Exception e)
             {
                 modal.end();
+                throw e;
             }
+            if (keepIrOpenOnResult != null && keepIrOpenOnResult.test(result))
+                modal.endLeaveIrVisible();
+            else
+                modal.end();
+            return result;
         }
 
 
@@ -736,8 +838,50 @@ public final class IRSession
             if (!ended.compareAndSet(false, true))
                 return;
 
-            active.set(false);
+            stopMonitorAndUnblock();
             IrModalWindowDebug.step("end", "pid=" + session.pid); //$NON-NLS-1$ //$NON-NLS-2$
+
+            if (mainWindowState != null)
+            {
+                WinWindowActivator.restoreWindowHidden(mainWindowState);
+                mainWindowState = null;
+            }
+            else
+            {
+                IrModalWindowDebug.problem("end: нет сохранённого состояния главного окна"); //$NON-NLS-1$
+            }
+
+            try
+            {
+                ComBridge.setProperty(session.root, "Visible", false); //$NON-NLS-1$
+            }
+            catch (Exception e)
+            {
+                IrModalWindowDebug.problem("Visible=false: " + e.getMessage()); //$NON-NLS-1$
+            }
+        }
+
+        /** Снять псевдомодальность и оставить окно ИР видимым (неуспех конструктора метода и т.п.). */
+        void endLeaveIrVisible()
+        {
+            if (!ended.compareAndSet(false, true))
+                return;
+
+            stopMonitorAndUnblock();
+            IrModalWindowDebug.step("endLeaveIrVisible", "pid=" + session.pid); //$NON-NLS-1$ //$NON-NLS-2$
+
+            if (mainWindowState != null)
+            {
+                WinWindowActivator.restoreWindow(mainWindowState);
+                mainWindowState = null;
+            }
+
+            session.showWindow();
+        }
+
+        private void stopMonitorAndUnblock()
+        {
+            active.set(false);
 
             if (monitorThread != null)
             {
@@ -753,27 +897,8 @@ public final class IRSession
                 monitorThread = null;
             }
 
-            if (mainWindowState != null)
-            {
-                WinWindowActivator.restoreWindowHidden(mainWindowState);
-                mainWindowState = null;
-            }
-            else
-            {
-                IrModalWindowDebug.problem("end: нет сохранённого состояния главного окна"); //$NON-NLS-1$
-            }
-
             if (BLOCK_EDT_INPUT)
                 unblockEdtOnUiThread();
-
-            try
-            {
-                ComBridge.setProperty(session.root, "Visible", false); //$NON-NLS-1$
-            }
-            catch (Exception e)
-            {
-                IrModalWindowDebug.problem("Visible=false: " + e.getMessage()); //$NON-NLS-1$
-            }
         }
 
         private void startMonitor()

@@ -581,22 +581,22 @@ public final class IRApplication
         ComBridge.invoke(irCache, "СостояниеПодготовкиКэшМДСеансаЛкс"); //$NON-NLS-1$
         Object codeEditor = ComBridge.invoke(irCache, "ПолеТекстаПрограммы", 0); //$NON-NLS-1$
         session.codeEditor = codeEditor;
-        ComBridge.invoke(codeEditor, "РазобратьТекущийКонтекст"); //$NON-NLS-1$
-        ComBridge.invoke(codeEditor, "ПодготовитьГлобальныйКонтекст"); //$NON-NLS-1$
+        session.invokeCodeEditorQuiet("РазобратьТекущийКонтекст"); //$NON-NLS-1$
+        session.invokeCodeEditorQuiet("ПодготовитьГлобальныйКонтекст"); //$NON-NLS-1$
 
         long changedCount = 0;
         try
         {
             // Функция ПодготовитьОбновлениеИзПапкиГита(Знач ОтсекатьДатой = Истина) Экспорт
-            Object changedModules = ComBridge.invoke(codeEditor, "ПодготовитьОбновлениеИзПапкиГита", false); //$NON-NLS-1$
+            Object changedModules = session.invokeCodeEditorQuiet("ПодготовитьОбновлениеИзПапкиГита", false); //$NON-NLS-1$
             if (changedModules != null)
                 changedCount = ComBridge.toLong(ComBridge.invoke(changedModules, "Количество")); //$NON-NLS-1$
             if (changedCount > 0)
             {
-                ComBridge.invoke(codeEditor, "ОбновитьКэшМодулейИзПапкиГита", changedModules); //$NON-NLS-1$
+                session.invokeCodeEditorQuiet("ОбновитьКэшМодулейИзПапкиГита", changedModules); //$NON-NLS-1$
                 Object platform = ComBridge.getProperty(codeEditor, "мПлатформа"); //$NON-NLS-1$
                 ComBridge.invoke(platform, "ОчиститьКэшАнализатораЯзыка"); //$NON-NLS-1$
-                ComBridge.invoke(codeEditor, "ПодготовитьГлобальныйКонтекст"); //$NON-NLS-1$
+                session.invokeCodeEditorQuiet("ПодготовитьГлобальныйКонтекст"); //$NON-NLS-1$
             }
         }
         catch (RuntimeException e)
@@ -611,6 +611,7 @@ public final class IRApplication
         }
         IRModuleSyncDebug.logGitSync(changedCount);
         session.resetPushedSignatures();
+        session.pumpUserMessagesToUi();
     }
 
     // -----------------------------------------------------------------------

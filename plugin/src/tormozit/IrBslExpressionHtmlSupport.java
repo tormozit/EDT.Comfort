@@ -59,8 +59,8 @@ public final class IrBslExpressionHtmlSupport
             if (payload != null)
                 session.applyPreparedCodeEditorSync(payload);
             ensureCodeEditor(session);
-            ComBridge.invoke(session.codeEditor, "РазобратьТекущийКонтекст"); //$NON-NLS-1$
-            ComBridge.invoke(session.codeEditor, "ЗаполнитьТаблицуСлов"); //$NON-NLS-1$
+            session.invokeCodeEditor("РазобратьТекущийКонтекст"); //$NON-NLS-1$
+            session.invokeCodeEditor("ЗаполнитьТаблицуСлов"); //$NON-NLS-1$
             return invokeDescriptionHtmlWithCancellation(session, name, kind);
         }
         catch (Exception e)
@@ -82,7 +82,7 @@ public final class IrBslExpressionHtmlSupport
         {
             session.applyPreparedCodeEditorSync(payload);
             ensureCodeEditor(session);
-            ComBridge.invoke(session.codeEditor, "РазобратьТекущийКонтекст"); //$NON-NLS-1$
+            session.invokeCodeEditor("РазобратьТекущийКонтекст"); //$NON-NLS-1$
             String html = invokeDescriptionHtmlWithCancellation(session);
             if (html == null || html.isBlank())
             {
@@ -131,7 +131,7 @@ public final class IrBslExpressionHtmlSupport
         try
         {
             cancelFile = IRSession.setEvaluationCancellationFile(session, codeEditor);
-            Object raw = ComBridge.invoke(codeEditor, "ОписаниеХТМЛВыражения", args); //$NON-NLS-1$
+            Object raw = session.invokeCodeEditor("ОписаниеХТМЛВыражения", args); //$NON-NLS-1$
             return ComBridge.toString(raw);
         }
         catch (IOException e)
@@ -168,8 +168,8 @@ public final class IrBslExpressionHtmlSupport
             try
             {
                 ensureCodeEditor(session);
-                ComBridge.invoke(session.codeEditor, "РазобратьТекущийКонтекст"); //$NON-NLS-1$
-                ComBridge.invoke(session.codeEditor, "ЗаполнитьТаблицуСлов"); //$NON-NLS-1$
+                session.invokeCodeEditor("РазобратьТекущийКонтекст"); //$NON-NLS-1$
+                session.invokeCodeEditor("ЗаполнитьТаблицуСлов"); //$NON-NLS-1$
                 Display display = Display.getDefault();
                 if (display != null && !display.isDisposed())
                     display.asyncExec(onReady);

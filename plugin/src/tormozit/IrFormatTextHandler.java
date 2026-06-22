@@ -71,7 +71,7 @@ public final class IrFormatTextHandler
         try
         {
             ensureCodeEditor(irSession);
-            ComBridge.invoke(irSession.codeEditor, "РазобратьТекущийКонтекст"); //$NON-NLS-1$
+            irSession.invokeCodeEditor("РазобратьТекущийКонтекст"); //$NON-NLS-1$
             long language = ComBridge.toLong(
                 ComBridge.getProperty(irSession.codeEditor, "мЯзыкПрограммы")); //$NON-NLS-1$
             if (language != 0)
@@ -81,7 +81,7 @@ public final class IrFormatTextHandler
             }
 
             boolean formatted = ComBridge.toBoolean(
-                ComBridge.invoke(irSession.codeEditor, "ФорматироватьТекстВстроенногоЯзыка", false)); //$NON-NLS-1$
+                irSession.invokeCodeEditor("ФорматироватьТекстВстроенногоЯзыка", false)); //$NON-NLS-1$
             if (!formatted)
                 return;
 
@@ -122,7 +122,7 @@ public final class IrFormatTextHandler
         {
             ensureCodeEditor(irSession);
             boolean formatted = ComBridge.toBoolean(
-                ComBridge.invoke(irSession.codeEditor, "ФорматироватьТекстЯзыкаЗапросов")); //$NON-NLS-1$
+                irSession.invokeCodeEditor("ФорматироватьТекстЯзыкаЗапросов")); //$NON-NLS-1$
             if (!formatted)
                 return;
 
