@@ -103,6 +103,49 @@ public final class IrBslHoverHtml
         return true;
     }
 
+    /**
+     * {@code true}, если текущий HTML в браузере — сброс EDT на исходную base-страницу,
+     * а не навигация по гиперссылке на другую doc-страницу.
+     *
+     * @param mergedHtml полный merged (base + ИР), для отличия сброса от страницы без блока ИР
+     */
+    static boolean looksLikeBaseHtmlReset(String current, String base, String mergedHtml)
+    {
+        if (current == null || base == null || base.isEmpty())
+            return false;
+        String normCurrent = normalizeHtmlForCompare(current);
+        String normBase = normalizeHtmlForCompare(base);
+        if (normCurrent.equals(normBase))
+            return true;
+        int lenC = normCurrent.length();
+        int lenB = normBase.length();
+        if (lenB < 100)
+            return false;
+        int lenTolerance = Math.max(250, lenB / 25);
+        int diffToBase = Math.abs(lenC - lenB);
+        if (mergedHtml != null && !mergedHtml.isEmpty())
+        {
+            int diffToMerged = Math.abs(lenC - normalizeHtmlForCompare(mergedHtml).length());
+            if (diffToBase <= lenTolerance && diffToMerged > lenTolerance)
+                return true;
+        }
+        else if (diffToBase <= lenTolerance)
+            return true;
+        int prefixLen = Math.min(lenB, lenC) - 50;
+        if (prefixLen <= 0)
+            return false;
+        return lenB > 200
+            && lenC > lenB * 0.85
+            && normBase.regionMatches(0, normCurrent, 0, prefixLen);
+    }
+
+    private static String normalizeHtmlForCompare(String html)
+    {
+        if (html == null || html.isEmpty())
+            return ""; //$NON-NLS-1$
+        return html.toLowerCase().replaceAll("\\s+", " ").trim(); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
     /** ИР часто возвращает полный {@code <html>…</html>}; в base вставляем только содержимое body. */
     static String extractInsertableFragment(String html)
     {

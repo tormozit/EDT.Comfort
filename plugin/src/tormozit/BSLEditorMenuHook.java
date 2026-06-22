@@ -193,9 +193,17 @@ public class BSLEditorMenuHook implements IStartup
      */
     private void attachMenuToBslEditor(BslXtextEditor editor)
     {
-        if (editor.getSite() == null) return; // редактор ещё не инициализирован
-
         ISourceViewer viewer = editor.getInternalSourceViewer();
+        if (viewer instanceof SourceViewer sourceViewer)
+        {
+            StyledText textWidget = sourceViewer.getTextWidget();
+            if (textWidget != null && !textWidget.isDisposed())
+                ensureEmbeddedHooks(editor, textWidget);
+        }
+
+        if (editor.getSite() == null)
+            return; // редактор ещё не инициализирован — меню позже
+
         if (!(viewer instanceof SourceViewer))
         {
             // Viewer ещё не создан — попробуем чуть позже
@@ -206,9 +214,6 @@ public class BSLEditorMenuHook implements IStartup
         StyledText textWidget = ((SourceViewer) viewer).getTextWidget();
         if (textWidget == null || textWidget.isDisposed())
             return;
-
-        // Контекст и диагностика — сразу, не ждём SWT-меню (в DtGranularEditor меню может появиться поздно).
-        ensureEmbeddedHooks(editor, textWidget);
 
         // Защита от повторного прикрепления меню
         if (Boolean.TRUE.equals(textWidget.getData(HOOK_MARKER)))
@@ -249,6 +254,7 @@ public class BSLEditorMenuHook implements IStartup
             return;
         attachKeyDiagnostic(editor, textWidget);
         EmbeddedBslXtextContextHook.attach(editor, textWidget);
+        TextEditorIdentifierSelectionHook.attachToTextEditor(editor, textWidget);
     }
 
     private static void attachKeyDiagnostic(BslXtextEditor editor, StyledText textWidget)

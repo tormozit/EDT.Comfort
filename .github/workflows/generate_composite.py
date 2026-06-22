@@ -2,6 +2,7 @@ import io
 import os
 import re
 import shutil
+import subprocess
 import time
 import zipfile
 
@@ -185,6 +186,22 @@ def write_version_index_pages(children: list[str]) -> None:
             f.write(version_index)
 
 
+def docs_cache_bust(repo_root: str) -> str:
+    sha = os.environ.get("GITHUB_SHA", "").strip()
+    if sha:
+        return sha[:8]
+    try:
+        out = subprocess.check_output(
+            ["git", "rev-parse", "--short=8", "HEAD"],
+            cwd=repo_root,
+            stderr=subprocess.DEVNULL,
+            text=True,
+        )
+        return out.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return str(int(time.time()))
+
+
 def publish_help_site(repo_root: str) -> None:
     docs_src = os.path.join(repo_root, "docs")
     help_dst = os.path.join(deploy_dir, "help")
@@ -201,12 +218,25 @@ def publish_help_site(repo_root: str) -> None:
     )
 
     site_help_index = os.path.join(repo_root, "site", "help", "index.html")
+    dest_index = os.path.join(help_dst, "index.html")
+    cache_bust = docs_cache_bust(repo_root)
     if os.path.isfile(site_help_index):
-        shutil.copy2(site_help_index, os.path.join(help_dst, "index.html"))
+        with open(site_help_index, encoding="utf-8") as f:
+            index_html = f.read()
+        index_html = index_html.replace("{{DOCS_CACHE_BUST}}", cache_bust)
+        with open(dest_index, "w", encoding="utf-8", newline="\n") as f:
+            f.write(index_html)
     else:
         print("WARN: site/help/index.html not found")
 
-    print("Published help:", help_dst, "files:", len(os.listdir(help_dst)))
+    print(
+        "Published help:",
+        help_dst,
+        "files:",
+        len(os.listdir(help_dst)),
+        "cache_bust:",
+        cache_bust,
+    )
 
 
 def write_root_index_html(children: list[str]) -> None:

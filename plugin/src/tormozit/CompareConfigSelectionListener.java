@@ -12,6 +12,8 @@ import org.eclipse.ui.IEditorPart;
 import com._1c.g5.v8.dt.compare.core.IComparisonSession;
 import com._1c.g5.v8.dt.compare.model.ComparisonSide;
 import com._1c.g5.v8.dt.compare.model.MatchedObjectsComparisonNode;
+import com._1c.g5.v8.dt.compare.ui.partialmodel.node.IPartialModelNode;
+import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 
 /**
  * Слушатель выделения для редактора сравнения, транслирующий узел дерева
@@ -43,9 +45,38 @@ public class CompareConfigSelectionListener implements ISelectionChangedListener
 
     public void showObjectInNavigator(ISelection selection, boolean ifForced)
     {
-        EObject eObject = resolveEObject(selection, null, true);
+        EObject eObject = resolveNavigatorEObject(selection, null);
         if (eObject != null && editor != null)
             NavigatorReveal.reveal(eObject, ifForced, editor);
+    }
+
+    /**
+     * Резолв для навигатора: подъём по родителям дерева сравнения до первого {@link MdObject}.
+     */
+    public EObject resolveNavigatorEObject(ISelection selection, ComparisonSide side)
+    {
+        if (!(selection instanceof IStructuredSelection))
+            return null;
+
+        Object element = ((IStructuredSelection) selection).getFirstElement();
+        if (element == null)
+            return null;
+
+        IComparisonSession session = getSession(editor);
+        if (session == null)
+            return null;
+
+        Object currentElement = element;
+        while (currentElement != null)
+        {
+            EObject eObject = resolveEObjectAtElement(session, currentElement, side);
+            if (eObject instanceof MdObject)
+                return eObject;
+
+            currentElement = getParentElement(currentElement);
+        }
+
+        return null;
     }
 
     public EObject resolveEObject(ISelection selection, ComparisonSide side, boolean allowNearestParent)
@@ -62,54 +93,51 @@ public class CompareConfigSelectionListener implements ISelectionChangedListener
             return null;
 
         Object currentElement = element;
-        
+
         while (currentElement != null)
         {
-            MatchedObjectsComparisonNode matchedNode = resolveMatchedNode(currentElement);
-            if (matchedNode != null)
-            {
-                Long bmId = null;
-                if (side == null || side == ComparisonSide.MAIN)
-                    bmId = matchedNode.getMainObjectId();
-                if (bmId == null || bmId == -1L)
-                {
-                    if (side == null || side == ComparisonSide.OTHER)
-                        bmId = matchedNode.getOtherObjectId();
-                }
+            EObject eObject = resolveEObjectAtElement(session, currentElement, side);
+            if (eObject != null)
+                return eObject;
 
-                if (bmId != null && bmId != -1L)
-                {
-                    EObject eObject = CompareConfigOpenObjectHandler.getEObject(session, bmId, matchedNode);
-                    if (eObject != null)
-                    {
-                        return eObject;
-                    }
-                }
-            }
-
-            // Если флаг не установлен, сразу прерываем поиск
             if (!allowNearestParent)
-            {
                 break;
-            }
 
-            // Поднимаемся на уровень выше
             currentElement = getParentElement(currentElement);
         }
 
         return null;
     }
 
+    private static EObject resolveEObjectAtElement(
+            IComparisonSession session, Object element, ComparisonSide side)
+    {
+        MatchedObjectsComparisonNode matchedNode = resolveMatchedNode(element);
+        if (matchedNode == null)
+            return null;
+
+        Long bmId = null;
+        if (side == null || side == ComparisonSide.MAIN)
+            bmId = matchedNode.getMainObjectId();
+        if (bmId == null || bmId == -1L)
+        {
+            if (side == null || side == ComparisonSide.OTHER)
+                bmId = matchedNode.getOtherObjectId();
+        }
+
+        if (bmId == null || bmId == -1L)
+            return null;
+
+        return CompareConfigOpenObjectHandler.getEObject(session, bmId, matchedNode);
+    }
+
     private Object getParentElement(Object element)
     {
-        Object parentViaReflection = Global.call(element, "getParent");
-        if (parentViaReflection != null) 
-        {
-            return parentViaReflection;
-        }
-        return null;
+        if (element instanceof IPartialModelNode partial)
+            return partial.getParent();
+        return Global.call(element, "getParent"); //$NON-NLS-1$
     }
-    
+
     public static IComparisonSession getSession(IEditorPart editor)
     {
         Object list = Global.getField(editor, "comparisonArtifactsList");
@@ -128,10 +156,10 @@ public class CompareConfigSelectionListener implements ISelectionChangedListener
         }
         return null;
     }
-    
+
     public static MatchedObjectsComparisonNode resolveMatchedNode(Object element)
     {
-        Object node = Global.call(element, "retrieveComparisonNode"); 
+        Object node = Global.call(element, "retrieveComparisonNode");
         if (node instanceof MatchedObjectsComparisonNode)
             return (MatchedObjectsComparisonNode) node;
         if (element instanceof MatchedObjectsComparisonNode)

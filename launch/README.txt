@@ -13,6 +13,13 @@
 
 После restore-main bundles.info и config.ini — read-only (защита от перезаписи).
 
+ПОСЛЕ RELEASE.BAT / BUMP ВЕРСИИ
+================================
+  site\release.bat  →  Build All / site\build.bat  →  restore-main.ps1 (Eclipse закрыт)
+
+sync-version обновляет MANIFEST и launch/backup/osgi; restore-main копирует профиль
+в workspace и подставляет актуальную версию tormozit.comfort из site/version.txt.
+
 EDT БЕЗ ПЛАГИНА КОМФОРТ
 ========================
   powershell -File "C:\VC\EDT.Comfort\launch\install-no-comfort.ps1"

@@ -129,13 +129,11 @@ public final class ContentAssistPopupSync
             Runnable replacement = () -> {
                 if (isRecomputeInProgress())
                     return;
-                syncPopupOffsetsFromWidget(popup, viewer);
                 scheduleDebouncedNativeFilter(popup, viewer, original);
             };
             fFilterRunnableField.set(popup, replacement);
             installPopupScrollWatcher(popup, assistant, viewer,
                 ContentAssistSessionReloader.getActiveProcessor());
-            ContentAssistDebug.log("filterRunnable prepend tracker (debounced)"); //$NON-NLS-1$
         }
         catch (Exception e)
         {
@@ -164,10 +162,7 @@ public final class ContentAssistPopupSync
             initPopupReflection(popup);
             Runnable original = ORIGINAL_FILTER_RUNNABLES.remove(popup);
             if (original != null)
-            {
                 fFilterRunnableField.set(popup, original);
-                ContentAssistDebug.log("filterRunnable restored"); //$NON-NLS-1$
-            }
             HIJACKED_POPUPS.remove(assistant);
         }
         catch (Exception e)
@@ -211,20 +206,25 @@ public final class ContentAssistPopupSync
                 try
                 {
                     int caret = SmartContentAssistProcessor.resolveSessionCaret(assistant, viewer);
-                    if (caret >= 0)
-                        syncPopupOffsetsToCaret(viewer, caret);
                     ContentAssistPopupUi.ensureFilterToggle(assistant, viewer, processor);
                     installFilterTrackerPrepend(assistant, viewer);
                     if (isPopupVisible(assistant))
                     {
+                        IDocument doc = viewer.getDocument();
                         if (caret >= 0)
                             SmartContentAssistProcessor.primeFilterTrackerOnly(viewer, caret);
-                        if (recomputePopupList(assistant, viewer, processor, caret))
+                        if (shouldRecomputePopupList(SmartFilterTracker.getCurrentFilter(),
+                            false, doc, caret))
                         {
-                            refreshAdditionalInfo(assistant);
-                            ContentAssistDebug.log("sessionPopupSync OK step=" + step[0]); //$NON-NLS-1$
-                            return;
+                            runStockFilterRunnable(assistant);
+                            if (recomputePopupList(assistant, viewer, processor, caret))
+                            {
+                                refreshAdditionalInfo(assistant);
+                                return;
+                            }
                         }
+                        else
+                            return;
                     }
                 }
                 catch (Exception e)
@@ -317,29 +317,27 @@ public final class ContentAssistPopupSync
             }
             hideStatusLine(assistant, popup);
 
-            boolean restoreAfterFilterToggle = false;
-            SavedSelection saved = takePendingFilterToggleSelection();
-            if (saved != null)
-                restoreAfterFilterToggle = true;
-            else
-                saved = saveSelection(popup);
+            SavedSelection pending = takePendingFilterToggleSelection();
+            final boolean restoreAfterFilterToggle = pending != null;
+            final SavedSelection saved = pending != null ? pending : saveSelection(popup);
 
             int caret = caretOverride >= 0 ? caretOverride
                 : SmartContentAssistProcessor.resolveWidgetCaret(viewer);
-            IDocument doc = viewer.getDocument();
-            String docFilterBefore =
-                SmartContentAssistProcessor.computeIdentifierFilter(doc, caret);
-            syncPopupFilterOffsets(popup, viewer, caret);
-            boolean resetToFirst = restoreAfterFilterToggle
+            if (caret >= 0)
+                SmartContentAssistProcessor.primeFilterTrackerOnly(viewer, caret);
+            final boolean resetToFirst = restoreAfterFilterToggle
                 ? SmartAssistFilterState.isSmartFilterEnabled()
                 : shouldResetSelectionToFirst();
-            ICompletionProposal[] proposals = processor.computeForPopupRefresh(viewer, caret);
+            String filter = SmartFilterTracker.getCurrentFilter();
+            ICompletionProposal[] proposals = processor.filterCachedProposalsForPopup(viewer, caret,
+                filter);
+            if (proposals == null)
+                proposals = processor.computeForPopupRefresh(viewer, caret);
             if (proposals == null)
                 proposals = new ICompletionProposal[0];
+            final int fullProposalCount = proposals.length;
 
-            logFilterTrace(caret, docFilterBefore, assistant, doc);
-
-            String filter = SmartFilterTracker.getCurrentFilter();
+            filter = SmartFilterTracker.getCurrentFilter();
             boolean smartEnabled = SmartAssistFilterState.isSmartFilterEnabled();
             if (!filter.equals(lastSyncedFilter))
                 popupDisplayLimit = INITIAL_POPUP_DISPLAY_LIMIT;
@@ -355,8 +353,6 @@ public final class ContentAssistPopupSync
             if (proposals.length == 0 && filter.equals(lastSyncedFilter) && lastSyncedCount > 0
                 && !smartEnabled)
             {
-                ContentAssistDebug.log("popupSync SKIP empty transient filter=\"" + filter //$NON-NLS-1$
-                    + "\" lastCount=" + lastSyncedCount); //$NON-NLS-1$
                 finishSyncCycle(popup);
                 return true;
             }
@@ -368,6 +364,7 @@ public final class ContentAssistPopupSync
             lastFullFilteredCount = proposals.length;
 
             ArrayList<ICompletionProposal> list = new ArrayList<>(Arrays.asList(proposals));
+            final boolean stockToggleOff = restoreAfterFilterToggle && !smartEnabled;
             if (restoreAfterFilterToggle)
             {
                 int targetIdx = findProposalIndex(list, saved);
@@ -382,29 +379,45 @@ public final class ContentAssistPopupSync
                     popupDisplayLimit = Math.min(list.size(),
                         prefixIdx + POPUP_LOAD_MORE_MARGIN + 1);
             }
-            ArrayList<ICompletionProposal> displayList = list;
-            if (list.size() > popupDisplayLimit)
+            final ArrayList<ICompletionProposal> displayList;
+            if (stockToggleOff)
+                displayList = list;
+            else if (list.size() > popupDisplayLimit)
                 displayList = new ArrayList<>(list.subList(0, popupDisplayLimit));
+            else
+                displayList = list;
 
             if (fIsFilteredSubsetField != null)
                 fIsFilteredSubsetField.setBoolean(popup, false);
 
-            setProposalsAndRestoreSelection(popup, displayList, false, saved, resetToFirst,
-                restoreAfterFilterToggle);
-
-            List<ICompletionProposal> applied = (List<ICompletionProposal>)
-                fFilteredProposalsField.get(popup);
-            if (fComputedProposalsField != null && applied != null)
-                fComputedProposalsField.set(popup, applied);
-
-            installPopupScrollWatcher(popup, assistant, viewer, processor);
-
-            int tableRows = tableItemCount(popup);
-            logSyncResult(proposals.length, displayList.size(), tableRows,
-                SmartFilterTracker.getCurrentFilter(), resetToFirst);
-
-            if (tableRows >= 0 && tableRows != displayList.size() && !displayList.isEmpty())
-                forceTableRefresh(popup, displayList, saved, resetToFirst, restoreAfterFilterToggle);
+            if (stockToggleOff)
+            {
+                runWithPopupRedrawSuppressed(popup, () -> {
+                    try
+                    {
+                        applyPopupListSync(popup, assistant, viewer, processor, displayList,
+                            fullProposalCount, saved, resetToFirst, restoreAfterFilterToggle, true,
+                            true);
+                    }
+                    catch (Exception e)
+                    {
+                        ContentAssistDebug.log("popupSync apply ERROR: " + e.getMessage()); //$NON-NLS-1$
+                    }
+                });
+            }
+            else
+            {
+                try
+                {
+                    applyPopupListSync(popup, assistant, viewer, processor, displayList,
+                        fullProposalCount, saved, resetToFirst, restoreAfterFilterToggle,
+                        !smartEnabled, false);
+                }
+                catch (Exception e)
+                {
+                    ContentAssistDebug.log("popupSync apply ERROR: " + e.getMessage()); //$NON-NLS-1$
+                }
+            }
 
             finishSyncCycle(popup);
             return true;
@@ -419,6 +432,63 @@ public final class ContentAssistPopupSync
             if (viewer != null && isPopupVisible(assistant))
                 ContentAssistPopupUi.updateContextTypeLabel(viewer);
             RECOMPUTE_GUARD.set(Boolean.FALSE);
+        }
+    }
+
+    private static void applyPopupListSync(Object popup, ContentAssistant assistant,
+                                           SourceViewer viewer,
+                                           SmartContentAssistProcessor processor,
+                                           List<ICompletionProposal> displayList,
+                                           int fullCount, SavedSelection saved,
+                                           boolean resetToFirst, boolean restoreAfterFilterToggle,
+                                           boolean runStockFilterAfter,
+                                           boolean deferRestoreUntilStockFilter) throws Exception
+    {
+        boolean restoreNow = restoreAfterFilterToggle && !deferRestoreUntilStockFilter;
+        setProposalsAndRestoreSelection(popup, displayList, false, saved, resetToFirst, restoreNow);
+
+        List<ICompletionProposal> applied = (List<ICompletionProposal>)
+            fFilteredProposalsField.get(popup);
+        if (fComputedProposalsField != null && applied != null)
+            fComputedProposalsField.set(popup, applied);
+
+        installPopupScrollWatcher(popup, assistant, viewer, processor);
+
+        int tableRows = tableItemCount(popup);
+        logSyncResult(fullCount, displayList.size(), tableRows,
+            SmartFilterTracker.getCurrentFilter(), resetToFirst);
+
+        if (tableRows >= 0 && tableRows != displayList.size() && !displayList.isEmpty())
+            forceTableRefresh(popup, displayList, saved, resetToFirst, restoreNow);
+
+        if (runStockFilterAfter)
+            runStockFilterRunnable(assistant);
+
+        if (deferRestoreUntilStockFilter && restoreAfterFilterToggle)
+        {
+            applied = (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+            restoreSelection(popup, saved, applied);
+        }
+    }
+
+    private static void runWithPopupRedrawSuppressed(Object popup, Runnable task)
+    {
+        org.eclipse.swt.widgets.Shell shell = getProposalShell(popup);
+        Table table = getProposalTable(popup);
+        if (shell != null && !shell.isDisposed())
+            shell.setRedraw(false);
+        if (table != null && !table.isDisposed())
+            table.setRedraw(false);
+        try
+        {
+            task.run();
+        }
+        finally
+        {
+            if (table != null && !table.isDisposed())
+                table.setRedraw(true);
+            if (shell != null && !shell.isDisposed())
+                shell.setRedraw(true);
         }
     }
 
@@ -454,9 +524,23 @@ public final class ContentAssistPopupSync
             try
             {
                 int caret = SmartContentAssistProcessor.resolveWidgetCaret(viewer);
+                IDocument doc = viewer.getDocument();
                 if (caret >= 0)
                     SmartContentAssistProcessor.primeFilterTrackerOnly(viewer, caret);
-                recomputePopupList(assistant, viewer, processor);
+                if (shouldClosePopupAtCaret(viewer, caret))
+                {
+                    hideProposalPopup(assistant);
+                    return;
+                }
+                if (shouldRecomputePopupList(SmartFilterTracker.getCurrentFilter(), false,
+                    doc, caret))
+                {
+                    runStockFilterRunnable(assistant);
+                    if (SmartAssistFilterState.isSmartFilterEnabled())
+                        recomputePopupList(assistant, viewer, processor);
+                }
+                else
+                    runStockFilterRunnable(assistant);
             }
             catch (Exception e)
             {
@@ -475,50 +559,6 @@ public final class ContentAssistPopupSync
         PendingDebouncedFilter pending = PENDING_CARET_TASKS.remove(viewer);
         if (pending != null && pending.display != null && !pending.display.isDisposed())
             pending.display.timerExec(-1, pending.task);
-    }
-
-    private static void logFilterTrace(int caret, String docFilterBefore, ContentAssistant assistant,
-                                       IDocument doc)
-    {
-        if (!ContentAssistDebug.isEnabled())
-            return;
-        String trackerFilter = SmartFilterTracker.getCurrentFilter();
-        int wordStart = getFilterOffset(assistant);
-        int completionOff = getLastCompletionOffset(assistant);
-        int invocationOff = getInvocationOffset(assistant);
-        int widgetCaret = SmartContentAssistProcessor.resolveWidgetCaret(
-            ContentAssistSessionReloader.getActiveViewer());
-        String snippet = documentSnippet(doc, caret);
-        boolean mismatch = !docFilterBefore.equals(trackerFilter);
-        ContentAssistDebug.log("filterTrace" //$NON-NLS-1$
-            + (mismatch ? " MISMATCH" : "") //$NON-NLS-1$ //$NON-NLS-2$
-            + "\n  каретка: " + caret //$NON-NLS-1$
-            + "  widget: " + widgetCaret //$NON-NLS-1$
-            + "  invocation: " + invocationOff //$NON-NLS-1$
-            + "  |  префикс в документе: \"" + docFilterBefore + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-            + "\n  префикс в tracker: \"" + trackerFilter + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-            + "  |  popupWordStart: " + wordStart //$NON-NLS-1$
-            + "  completionOff: " + completionOff //$NON-NLS-1$
-            + "\n  фрагмент: …" + snippet + "…"); //$NON-NLS-1$ //$NON-NLS-2$
-    }
-
-    private static String documentSnippet(IDocument doc, int caret)
-    {
-        if (doc == null || caret < 0)
-            return ""; //$NON-NLS-1$
-        try
-        {
-            int len = doc.getLength();
-            int start = Math.max(0, caret - 15);
-            int end = Math.min(len, caret + 15);
-            if (end <= start)
-                return ""; //$NON-NLS-1$
-            return doc.get(start, end - start).replace('\n', ' ').replace('\r', ' ');
-        }
-        catch (Exception ignored)
-        {
-            return ""; //$NON-NLS-1$
-        }
     }
 
     /** Сбрасывает pending filter/document и отменяет отложенный debounce (разрыв цикла). */
@@ -620,12 +660,6 @@ public final class ContentAssistPopupSync
                 + "\" expected=" + shownCount + " total=" + proposalCount //$NON-NLS-1$ //$NON-NLS-2$
                 + " tableRows=" + tableRows + " resetSel=" + resetToFirst); //$NON-NLS-1$ //$NON-NLS-2$
         }
-        else
-        {
-            ContentAssistDebug.log("popupSync OK filter=\"" + filter //$NON-NLS-1$
-                + "\" count=" + proposalCount + " shown=" + shownCount //$NON-NLS-1$ //$NON-NLS-2$
-                + " tableRows=" + tableRows + " resetSel=" + resetToFirst); //$NON-NLS-1$ //$NON-NLS-2$
-        }
     }
 
     // ---- helpers ------------------------------------------------------------
@@ -666,7 +700,6 @@ public final class ContentAssistPopupSync
         table.clearAll();
         table.setItemCount(list.size());
         applySelection(popup, list, saved, resetToFirst, restoreAfterFilterToggle);
-        ContentAssistDebug.log("popupSync forceTableRefresh rows=" + list.size()); //$NON-NLS-1$
     }
 
     private static boolean shouldResetSelectionToFirst()
@@ -803,16 +836,21 @@ public final class ContentAssistPopupSync
             try
             {
                 primeAssistFilterContext(viewer);
+                ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
                 SmartContentAssistProcessor processor =
                     ContentAssistSessionReloader.getActiveProcessor();
-                ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
-                if (assistant != null && processor != null)
-                    recomputePopupList(assistant, viewer, processor);
-                else if (!SmartAssistFilterState.isSmartFilterEnabled())
+                int caret = SmartContentAssistProcessor.resolveWidgetCaret(viewer);
+                IDocument doc = viewer.getDocument();
+                if (assistant != null && processor != null
+                    && shouldRecomputePopupList(SmartFilterTracker.getCurrentFilter(), false,
+                        doc, caret))
                 {
-                    ensureFilterPending(popup);
-                    original.run();
+                    runStockFilterRunnable(assistant);
+                    if (SmartAssistFilterState.isSmartFilterEnabled())
+                        recomputePopupList(assistant, viewer, processor);
                 }
+                else
+                    runStockFilterRunnable(assistant);
             }
             catch (Exception e)
             {
@@ -841,6 +879,88 @@ public final class ContentAssistPopupSync
             pending.set(true);
     }
 
+    /**
+     * Пересчёт при непустом фильтре, toggle smart-фильтра или member-access ({@code obj.}).
+     */
+    private static boolean shouldRecomputePopupList(String filter, boolean afterFilterToggle,
+                                                    IDocument doc, int caret)
+    {
+        boolean memberAccess = doc != null && caret >= 0
+            && SmartContentAssistProcessor.ReceiverTypeLabel.findMemberAccessDot(doc, caret) >= 0;
+        boolean memberRecompute = memberAccess && (filter == null || filter.isEmpty());
+        return afterFilterToggle
+            || (filter != null && !filter.isEmpty())
+            || memberRecompute;
+    }
+
+    /**
+     * Штатный {@code fFilterRunnable}: offset'ы popup, {@code completeCommonPrefix}, validate.
+     * Вызывать до нашего {@link #recomputePopupList}, если тот нужен.
+     */
+    static void runStockFilterRunnable(ContentAssistant assistant)
+    {
+        if (assistant == null)
+            return;
+        try
+        {
+            Object popup = getPopup(assistant);
+            if (popup == null)
+                return;
+            Runnable original = ORIGINAL_FILTER_RUNNABLES.get(popup);
+            if (original == null)
+                return;
+            initPopupReflection(popup);
+            ensureFilterPending(popup);
+            original.run();
+            if (!SmartAssistFilterState.isSmartFilterEnabled())
+                applyPrefixSelectionIfNeeded(assistant);
+        }
+        catch (Exception e)
+        {
+            ContentAssistDebug.log("stockFilter ERROR: " + e.getMessage()); //$NON-NLS-1$
+        }
+    }
+
+    /** После штатного filter runnable при выключенном smart — вернуть выбор на набранный префикс. */
+    private static void applyPrefixSelectionIfNeeded(ContentAssistant assistant)
+    {
+        String prefix = SmartFilterTracker.getCurrentFilter();
+        if (prefix == null || prefix.isEmpty())
+            return;
+        try
+        {
+            Object popup = getPopup(assistant);
+            if (popup == null)
+                return;
+            List<ICompletionProposal> list =
+                (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+            if (list == null || list.isEmpty())
+                return;
+            int idx = findFirstPrefixMatchIndex(list, prefix);
+            if (idx >= 0)
+                selectProposalAtIndex(popup, idx);
+        }
+        catch (Exception ignored) {}
+    }
+
+    /** Каретка перед уже существующими {@code (} — штатная вставка ломается, закрываем assist. */
+    static boolean shouldClosePopupAtCaret(SourceViewer viewer, int caret)
+    {
+        if (viewer == null || caret < 0)
+            return false;
+        IDocument doc = viewer.getDocument();
+        if (doc == null || caret >= doc.getLength())
+            return false;
+        try
+        {
+            return doc.getChar(caret) == '(';
+        }
+        catch (Exception ignored)
+        {
+            return false;
+        }
+    }
+
     private static void primeAssistFilterContext(SourceViewer viewer)
     {
         try
@@ -852,34 +972,6 @@ public final class ContentAssistPopupSync
             if (caret < 0)
                 return;
             SmartContentAssistProcessor.primeFilterTrackerOnly(viewer, caret);
-            ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
-            if (assistant != null)
-            {
-                Object popup = getPopup(assistant);
-                if (popup != null)
-                {
-                    initPopupReflection(popup);
-                    syncPopupFilterOffsets(popup, viewer, caret);
-                }
-            }
-        }
-        catch (Exception ignored) {}
-    }
-
-    /** Каретка виджета → {@code fFilterOffset} (начало слова) + {@code fLastCompletionOffset}. */
-    private static void syncPopupOffsetsFromWidget(Object popup, SourceViewer viewer)
-    {
-        try
-        {
-            if (popup == null || viewer == null || viewer.getTextWidget() == null
-                || viewer.getTextWidget().isDisposed())
-                return;
-            int caret = SmartContentAssistProcessor.resolveWidgetCaret(viewer);
-            if (caret >= 0)
-            {
-                initPopupReflection(popup);
-                syncPopupFilterOffsets(popup, viewer, caret);
-            }
         }
         catch (Exception ignored) {}
     }
@@ -1321,54 +1413,12 @@ public final class ContentAssistPopupSync
             if (popup == null)
                 return caret;
             initPopupReflection(popup);
-            syncPopupFilterOffsets(popup, viewer, caret);
             clearFilterPending(popup);
             if (fIsFilteredSubsetField != null)
                 fIsFilteredSubsetField.setBoolean(popup, false);
         }
         catch (Exception ignored) {}
         return caret;
-    }
-
-    public static void syncPopupOffsetsToCaret(org.eclipse.jface.text.ITextViewer viewer, int caret)
-    {
-        if (viewer == null || caret < 0)
-            return;
-        ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
-        if (assistant == null && viewer instanceof SourceViewer)
-            assistant = ContentAssistPatcher.getContentAssistant((SourceViewer) viewer);
-        if (assistant == null)
-            return;
-        try
-        {
-            Object popup = getPopup(assistant);
-            if (popup == null)
-                return;
-            initPopupReflection(popup);
-            SourceViewer sv = viewer instanceof SourceViewer ? (SourceViewer) viewer : null;
-            syncPopupFilterOffsets(popup, sv, caret);
-        }
-        catch (Exception ignored) {}
-    }
-
-    private static void syncPopupFilterOffsets(Object popup, SourceViewer viewer, int caret)
-    {
-        try
-        {
-            int wordStart = caret;
-            if (viewer != null && caret >= 0)
-            {
-                IDocument doc = viewer.getDocument();
-                wordStart = SmartContentAssistProcessor.computeIdentifierWordStart(doc, caret);
-            }
-            if (fFilterOffsetField != null)
-                fFilterOffsetField.setInt(popup, wordStart);
-            if (fInvocationOffsetField != null)
-                fInvocationOffsetField.setInt(popup, wordStart);
-            if (fLastCompletionOffsetField != null)
-                fLastCompletionOffsetField.setInt(popup, caret);
-        }
-        catch (Exception ignored) {}
     }
 
     public static final class SavedSelection
@@ -1390,10 +1440,8 @@ public final class ContentAssistPopupSync
             Object popup = getPopup(assistant);
             if (popup == null)
                 return;
-            SavedSelection saved = saveSelection(popup);
+            SavedSelection saved = saveSelectionForFilterToggle(popup);
             pendingFilterToggleSelection.set(saved);
-            ContentAssistDebug.log("popupSync captureBeforeToggle idx=" + saved.index //$NON-NLS-1$
-                + " key=\"" + saved.displayKey + "\""); //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (Exception ignored) {}
     }
@@ -1423,6 +1471,29 @@ public final class ContentAssistPopupSync
                 (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
             String key = proposalDisplayKey(list, index);
             return new SavedSelection(index, key);
+        }
+        catch (Exception ignored)
+        {
+            return new SavedSelection(0, null);
+        }
+    }
+
+    /** Перед toggle: приоритет элементу, совпадающему с набранным префиксом, не строке таблицы. */
+    private static SavedSelection saveSelectionForFilterToggle(Object popup)
+    {
+        try
+        {
+            initPopupReflection(popup);
+            List<ICompletionProposal> list =
+                (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+            String prefix = SmartFilterTracker.getCurrentFilter();
+            if (list != null && !list.isEmpty() && prefix != null && !prefix.isEmpty())
+            {
+                int prefixIdx = findFirstPrefixMatchIndex(list, prefix);
+                if (prefixIdx >= 0)
+                    return new SavedSelection(prefixIdx, proposalDisplayKey(list, prefixIdx));
+            }
+            return saveSelection(popup);
         }
         catch (Exception ignored)
         {
@@ -1481,6 +1552,18 @@ public final class ContentAssistPopupSync
             return;
 
         int index = findProposalIndex(list, saved);
+        String prefix = SmartFilterTracker.getCurrentFilter();
+        if (prefix != null && !prefix.isEmpty())
+        {
+            int prefixIdx = findFirstPrefixMatchIndex(list, prefix);
+            if (prefixIdx >= 0)
+            {
+                boolean savedMatchesPrefix = index >= 0
+                    && proposalNameStartsWithPrefix(list.get(index), prefix);
+                if (!savedMatchesPrefix)
+                    index = prefixIdx;
+            }
+        }
         if (index < 0 && saved != null && saved.index >= 0 && saved.index < list.size())
             index = saved.index;
         if (index < 0)

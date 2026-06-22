@@ -34,6 +34,39 @@ function Set-Utf8NoBomContent {
     [System.IO.File]::WriteAllLines($Path, $Lines, $utf8NoBom)
 }
 
+function Update-PdeOsgiComfortVersion {
+    param(
+        [string]$BundlesInfoPath,
+        [string]$DevPropertiesPath,
+        [string]$Qualifier
+    )
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    if (-not (Test-Path -LiteralPath $BundlesInfoPath)) {
+        Write-Error "bundles.info not found: $BundlesInfoPath"
+    }
+    $bundleLines = [System.IO.File]::ReadAllLines($BundlesInfoPath)
+    $bundleUpdated = $false
+    for ($i = 0; $i -lt $bundleLines.Count; $i++) {
+        if ($bundleLines[$i] -match '^tormozit\.comfort,') {
+            $bundleLines[$i] = "tormozit.comfort,$Qualifier,file:/C:/VC/EDT.Comfort/plugin/,4,false"
+            $bundleUpdated = $true
+            break
+        }
+    }
+    if (-not $bundleUpdated) {
+        Write-Error "tormozit.comfort entry not found in $BundlesInfoPath"
+    }
+    [System.IO.File]::WriteAllLines($BundlesInfoPath, $bundleLines, $utf8NoBom)
+    $devLines = @(
+        '#',
+        "#$(Get-Date -Format 'ddd MMM dd HH:mm:ss ''MSK'' yyyy')",
+        "tormozit.comfort;$Qualifier=bin,lib/jacob.jar",
+        '@ignoredot@=true',
+        'tormozit.comfort=bin,lib/jacob.jar'
+    )
+    [System.IO.File]::WriteAllLines($DevPropertiesPath, $devLines, $utf8NoBom)
+}
+
 # plugin/META-INF/MANIFEST.MF
 $manifestPath = Join-Path $Root 'plugin\META-INF\MANIFEST.MF'
 $manifestLines = Get-Content -LiteralPath $manifestPath -Encoding UTF8
@@ -110,5 +143,11 @@ if ([regex]::IsMatch($targetPomText, $targetPomPattern)) {
     [System.IO.File]::WriteAllText($targetPomPath, $targetPomNew, (New-Object System.Text.UTF8Encoding($false)))
     Write-Host "Updated: target/pom.xml -> $release"
 }
+
+$launchOsgi = Join-Path $Root 'launch\backup\osgi'
+$bundlesInfoPath = Join-Path $launchOsgi 'org.eclipse.equinox.simpleconfigurator\bundles.info'
+$devPropertiesPath = Join-Path $launchOsgi 'dev.properties'
+Update-PdeOsgiComfortVersion -BundlesInfoPath $bundlesInfoPath -DevPropertiesPath $devPropertiesPath -Qualifier $qualifier
+Write-Host "Updated: launch/backup/osgi -> $qualifier"
 
 Write-Host "Done. OSGi version template: $qualifier (timestamp подставится при сборке)"

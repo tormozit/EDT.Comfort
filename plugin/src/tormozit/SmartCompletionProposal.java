@@ -2,6 +2,7 @@ package tormozit;
 
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.NullProgressMonitor;
+import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.ITextViewer;
@@ -23,17 +24,14 @@ import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal;
 import org.eclipse.xtext.ui.editor.hover.html.IXtextBrowserInformationControl;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 
 /**
- * Обёртка proposal: штатный popup вызывает {@link #validate} и
- * {@link #getStyledDisplayString()} — фильтр и подсветка через общий {@link SmartCodeMatcher}.
- */
-/**
- * Обёртка proposal: штатный popup вызывает {@link #validate} и
- * {@link #getStyledDisplayString()} — фильтр и подсветка через общий {@link SmartCodeMatcher}.
+ * Обёртка proposal: кастомны только {@link #validate} и {@link #getStyledDisplayString()};
+ * {@link #apply} — pass-through к delegate; если каретка перед {@code (}, вставка без {@code ()}.
  */
 public class SmartCompletionProposal implements
     ICompletionProposal,
@@ -47,6 +45,8 @@ public class SmartCompletionProposal implements
     private final ICompletionProposal delegate;
     /** Индекс в штатном списке delegate; {@code -1} — неизвестен. */
     private final int delegateOrder;
+    /** Как {@code ConfigurableCompletionProposal.apply(ITextViewer,…)} — флаг COMPLETE. */
+    private static final int COMPLETE_STATE_MASK = 262144;
 
     public SmartCompletionProposal(ICompletionProposal delegate)
     {
@@ -114,6 +114,8 @@ public class SmartCompletionProposal implements
     @Override
     public void apply(IDocument document)
     {
+        if (tryApplyWordOnly(document, null, -1, null))
+            return;
         delegate.apply(document);
     }
 
@@ -122,6 +124,8 @@ public class SmartCompletionProposal implements
     @Override
     public void apply(IDocument document, char trigger, int offset)
     {
+        if (tryApplyWordOnly(document, null, offset, null))
+            return;
         if (delegate instanceof ICompletionProposalExtension)
             ((ICompletionProposalExtension) delegate).apply(document, trigger, offset);
         else
@@ -155,6 +159,8 @@ public class SmartCompletionProposal implements
     @Override
     public void apply(ITextViewer viewer, char trigger, int stateMask, int offset)
     {
+        if (viewer != null && tryApplyWordOnly(viewer.getDocument(), viewer, offset, stateMask))
+            return;
         if (delegate instanceof ICompletionProposalExtension2)
             ((ICompletionProposalExtension2) delegate).apply(viewer, trigger, stateMask, offset);
         else if (viewer != null && viewer.getDocument() != null)
@@ -186,7 +192,9 @@ public class SmartCompletionProposal implements
     @Override
     public boolean isAutoInsertable()
     {
-        return false;
+        if (delegate instanceof ICompletionProposalExtension4)
+            return ((ICompletionProposalExtension4) delegate).isAutoInsertable();
+        return true;
     }
 
     // ---- ICompletionProposalExtension3 / 5 / 6 ------------------------------
@@ -248,6 +256,93 @@ public class SmartCompletionProposal implements
             return ((ICompletionProposalExtension3) delegate)
                 .getPrefixCompletionStart(document, completionOffset);
         return completionOffset;
+    }
+
+    /**
+     * Каретка непосредственно перед {@code (} — вставка без хвоста {@code ()} у replacement.
+     *
+     * @return {@code true}, если выполнен fallback вместо штатного delegate.apply
+     */
+    private boolean tryApplyWordOnly(IDocument document, ITextViewer viewer,
+        int completionOffset, Integer stateMask)
+    {
+        ConfigurableCompletionProposal cp = asConfigurable(delegate);
+        if (cp == null || document == null)
+            return false;
+        int caret = completionOffset >= 0
+            ? completionOffset
+            : resolveApplyCaretOffset(document);
+        if (caret < 0 || !needsWordOnlyInsert(cp, document, caret))
+            return false;
+        int effectiveOffset = completionOffset >= 0 ? completionOffset : caret;
+        applyWordOnly(cp, document, viewer, effectiveOffset, stateMask);
+        return true;
+    }
+
+    private static ConfigurableCompletionProposal asConfigurable(ICompletionProposal proposal)
+    {
+        ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(proposal);
+        return raw instanceof ConfigurableCompletionProposal cp ? cp : null;
+    }
+
+    private static int resolveApplyCaretOffset(IDocument document)
+    {
+        SourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
+        if (viewer == null || viewer.getDocument() != document)
+            return -1;
+        if (!(viewer.getTextWidget() instanceof StyledText text) || text.isDisposed())
+            return -1;
+        int caret = text.getCaretOffset();
+        return caret >= 0 ? caret : -1;
+    }
+
+    private static boolean needsWordOnlyInsert(ConfigurableCompletionProposal cp,
+        IDocument document, int caretOffset)
+    {
+        String repl = cp.getReplacementString();
+        if (repl == null || !repl.endsWith("()")) //$NON-NLS-1$
+            return false;
+        try
+        {
+            if (caretOffset >= document.getLength())
+                return false;
+            return document.getChar(caretOffset) == '(';
+        }
+        catch (BadLocationException e)
+        {
+            return false;
+        }
+    }
+
+    private static String stripTrailingEmptyCallParens(String replacement)
+    {
+        if (replacement != null && replacement.endsWith("()")) //$NON-NLS-1$
+            return replacement.substring(0, replacement.length() - 2);
+        return replacement;
+    }
+
+    private static void applyWordOnly(ConfigurableCompletionProposal cp, IDocument document,
+        ITextViewer viewer, int completionOffset, Integer stateMask)
+    {
+        String savedRepl = cp.getReplacementString();
+        int savedLen = cp.getReplacementLength();
+        try
+        {
+            cp.setReplacementString(stripTrailingEmptyCallParens(savedRepl));
+            int newLen = completionOffset - cp.getReplacementOffset();
+            Point sel = viewer != null ? viewer.getSelectedRange() : null;
+            if (sel != null)
+                newLen += sel.y;
+            cp.setReplacementLength(newLen);
+            if (stateMask != null && (stateMask & COMPLETE_STATE_MASK) != 0)
+                cp.setReplacementLength(cp.getReplaceContextLength());
+            cp.apply(document);
+        }
+        finally
+        {
+            cp.setReplacementString(savedRepl);
+            cp.setReplacementLength(savedLen);
+        }
     }
 
     private SmartCodeMatcher resolveHighlightMatcher()

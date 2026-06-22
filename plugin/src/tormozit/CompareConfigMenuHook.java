@@ -44,7 +44,9 @@ import com._1c.g5.v8.dt.compare.ui.editor.ISelectionProviderDelegate;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.IPartialModel;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.PartialModelController;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.ExternalPropertyPartialModelNode;
+import com._1c.g5.v8.dt.compare.ui.partialmodel.node.IDirectPartialModelNode;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.IPartialModelNode;
+import com._1c.g5.v8.dt.compare.ui.partialmodel.node.VirtualFolderPartialModelNode;
 import org.eclipse.jface.resource.ResourceManager;
 import com._1c.g5.v8.dt.compare.ui.editor.DtComparisonView;
 import com._1c.g5.v8.dt.compare.core.ComparisonUtils;
@@ -629,8 +631,41 @@ public class CompareConfigMenuHook implements IStartup
 
                 shell.setData(SHELL_PATCHED_KEY, Boolean.TRUE);
                 final BslModuleSectionComparisonNode section = pendingSection;
-                shell.getDisplay().syncExec(() -> selectSectionInDialog(dialog, section));
+                scheduleSelectSectionInDialog(shell, dialog, section);
             });
+        }
+
+        private static final int SECTION_SELECT_MAX_ATTEMPTS = 40;
+        private static final int SECTION_SELECT_DELAY_MS = 50;
+
+        private static void scheduleSelectSectionInDialog(Shell shell, Object dialog,
+                BslModuleSectionComparisonNode section)
+        {
+            scheduleSelectSectionAttempt(shell, dialog, section, 0);
+        }
+
+        private static void scheduleSelectSectionAttempt(Shell shell, Object dialog,
+                BslModuleSectionComparisonNode section, int attempt)
+        {
+            if (section == null || dialog == null)
+                return;
+            if (attempt >= SECTION_SELECT_MAX_ATTEMPTS)
+                return;
+            shell.getDisplay().timerExec(attempt == 0 ? 100 : SECTION_SELECT_DELAY_MS, () ->
+            {
+                if (trySelectSectionInDialog(dialog, section))
+                    return;
+                scheduleSelectSectionAttempt(shell, dialog, section, attempt + 1);
+            });
+        }
+
+        private static DtComparisonView getDialogComparisonView(Object dialog)
+        {
+            Object view = Global.invoke(dialog, "getComparisonView"); //$NON-NLS-1$
+            if (view instanceof DtComparisonView)
+                return (DtComparisonView) view;
+            view = Global.getField(dialog, "comparisonView"); //$NON-NLS-1$
+            return view instanceof DtComparisonView ? (DtComparisonView) view : null;
         }
 
         static void attachDoubleClickListener(IEditorPart editor, Tree tree)
@@ -800,15 +835,12 @@ public class CompareConfigMenuHook implements IStartup
         private static void openModuleMergeSettings(IEditorPart editor,
                 ExternalPropertyPartialModelNode moduleNode, Shell shell)
         {
-            Object artifacts = Global.invoke(editor, "getComparisonArtifacts", moduleNode); //$NON-NLS-1$
+            Object artifacts = resolveComparisonArtifacts(editor, moduleNode);
             if (artifacts == null)
-            {
-                log("openModuleMerge: getComparisonArtifacts вернул null"); //$NON-NLS-1$
                 return;
-            }
 
-            Object partialModel = Global.getField(artifacts, "partialModel"); //$NON-NLS-1$
-            IComparisonSession session = (IComparisonSession) Global.getField(artifacts, "session"); //$NON-NLS-1$
+            Object partialModel = Global.call(artifacts, "getPartialModel"); //$NON-NLS-1$
+            IComparisonSession session = (IComparisonSession) Global.call(artifacts, "getSession"); //$NON-NLS-1$
             PartialModelController pmc =
                 (PartialModelController) Global.getField(editor, "partialModelController"); //$NON-NLS-1$
             DtComparisonView view = (DtComparisonView) Global.getField(editor, "comparisonView"); //$NON-NLS-1$
@@ -853,33 +885,118 @@ public class CompareConfigMenuHook implements IStartup
                 resourceManager);
         }
 
-        private static void selectSectionInDialog(Object dialog, BslModuleSectionComparisonNode section)
+        /**
+         * Находит {@code ComparisonArtifacts} редактора для узла partial model
+         * (как {@code DtComparisonEditor.getComparisonArtifacts}, без двусмысленного {@link Global#invoke}).
+         */
+        private static Object resolveComparisonArtifacts(IEditorPart editor,
+                ExternalPropertyPartialModelNode moduleNode)
+        {
+            IPartialModelNode nodeForSession = normalizeNodeForSessionLookup(moduleNode);
+            IComparisonSession session = nodeForSession != null
+                ? nodeForSession.getComparisonSession() : null;
+            int sessionId = session != null ? session.getId() : -1;
+
+            Object listObj = Global.getField(editor, "comparisonArtifactsList"); //$NON-NLS-1$
+            if (!(listObj instanceof List))
+            {
+                logArtifactsNotFound(moduleNode, session, 0);
+                return null;
+            }
+            List<?> artifactsList = (List<?>) listObj;
+            int artifactsCount = artifactsList.size();
+
+            if (session != null)
+            {
+                for (Object artifact : artifactsList)
+                {
+                    Object artSession = Global.call(artifact, "getSession"); //$NON-NLS-1$
+                    if (artSession instanceof IComparisonSession
+                            && ((IComparisonSession) artSession).getId() == sessionId)
+                    {
+                        ensurePartialModelForArtifact(editor, artifact);
+                        return artifact;
+                    }
+                }
+            }
+
+            long nodeId = moduleNode.getNodeId();
+            for (Object artifact : artifactsList)
+            {
+                ensurePartialModelForArtifact(editor, artifact);
+                Object partialModel = Global.call(artifact, "getPartialModel"); //$NON-NLS-1$
+                if (!(partialModel instanceof IPartialModel))
+                    continue;
+                if (((IPartialModel) partialModel).getDirectNode(nodeId) != null)
+                    return artifact;
+            }
+
+            logArtifactsNotFound(moduleNode, session, artifactsCount);
+            return null;
+        }
+
+        private static IPartialModelNode normalizeNodeForSessionLookup(IPartialModelNode node)
+        {
+            if (node == null)
+                return null;
+            if (node instanceof VirtualFolderPartialModelNode)
+            {
+                IDirectPartialModelNode direct =
+                    ((VirtualFolderPartialModelNode) node).getClosestDirectParent();
+                return direct;
+            }
+            return node;
+        }
+
+        private static void ensurePartialModelForArtifact(IEditorPart editor, Object artifact)
+        {
+            if (Global.call(artifact, "getPartialModel") != null) //$NON-NLS-1$
+                return;
+            Global.invokeVoid(editor, "createPartialModelForArtifact", artifact); //$NON-NLS-1$
+        }
+
+        private static void logArtifactsNotFound(ExternalPropertyPartialModelNode moduleNode,
+                IComparisonSession session, int artifactsCount)
+        {
+            if (!Global.isLogEnabled())
+                return;
+            long nodeId = moduleNode != null ? moduleNode.getNodeId() : -1L;
+            int sessionId = session != null ? session.getId() : -1;
+            String nodeClass = moduleNode != null ? moduleNode.getClass().getSimpleName() : "null"; //$NON-NLS-1$
+            Global.log(TAG, "openModuleMerge: артефакт не найден" //$NON-NLS-1$
+                + " artifactsCount=" + artifactsCount //$NON-NLS-1$
+                + " sessionId=" + sessionId //$NON-NLS-1$
+                + " nodeId=" + nodeId //$NON-NLS-1$
+                + " nodeClass=" + nodeClass); //$NON-NLS-1$
+        }
+
+        private static boolean trySelectSectionInDialog(Object dialog,
+                BslModuleSectionComparisonNode section)
         {
             if (section == null || dialog == null)
-                return;
+                return false;
 
-            Object viewObj = Global.call(dialog, "getComparisonView"); //$NON-NLS-1$
-            if (!(viewObj instanceof DtComparisonView))
-                return;
+            DtComparisonView view = getDialogComparisonView(dialog);
+            if (view == null)
+                return false;
 
-            ComparisonTreeControl treeControl = ((DtComparisonView) viewObj).getTreeControl();
+            ComparisonTreeControl treeControl = view.getTreeControl();
             if (treeControl == null)
-                return;
+                return false;
 
             TreeViewer viewer = treeControl.getTreeViewer();
             if (viewer == null)
-                return;
+                return false;
 
             Object node = findPartialModelNode(viewer, section);
             if (node == null)
-            {
-                log("selectSectionInDialog: секция не найдена в дереве диалога"); //$NON-NLS-1$
-                return;
-            }
+                return false;
 
             viewer.setSelection(new StructuredSelection(node), true);
             viewer.reveal(node);
+            Global.invokeVoid(dialog, "nodeSelectionChanged", node); //$NON-NLS-1$
             log("selectSectionInDialog: выбрана секция"); //$NON-NLS-1$
+            return true;
         }
 
         private static Object findPartialModelNode(TreeViewer viewer, BslModuleSectionComparisonNode target)
@@ -899,13 +1016,34 @@ public class CompareConfigMenuHook implements IStartup
             return null;
         }
 
+        private static boolean sectionNodesMatch(BslModuleSectionComparisonNode a,
+                BslModuleSectionComparisonNode b)
+        {
+            if (a == b)
+                return true;
+            if (a == null || b == null)
+                return false;
+            if (a instanceof com._1c.g5.v8.bm.core.IBmObject
+                    && b instanceof com._1c.g5.v8.bm.core.IBmObject)
+            {
+                long idA = ((com._1c.g5.v8.bm.core.IBmObject) a).bmGetId();
+                long idB = ((com._1c.g5.v8.bm.core.IBmObject) b).bmGetId();
+                if (idA > 0 && idA == idB)
+                    return true;
+            }
+            String na = a.getMainName();
+            String nb = b.getMainName();
+            return na != null && na.equals(nb);
+        }
+
         private static Object findInSubtree(ITreeContentProvider cp, Object element,
                 BslModuleSectionComparisonNode target)
         {
             if (element instanceof IPartialModelNode)
             {
                 ComparisonNode cn = ((IPartialModelNode) element).retrieveComparisonNode();
-                if (cn == target)
+                if (cn instanceof BslModuleSectionComparisonNode
+                        && sectionNodesMatch((BslModuleSectionComparisonNode) cn, target))
                     return element;
             }
             if (!cp.hasChildren(element))

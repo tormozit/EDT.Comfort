@@ -26,7 +26,8 @@ if exist *.zip del /f /q *.zip
 echo.
 echo Next steps:
 echo   1. Build All in Eclipse update site project "site"
-echo   2. Commit site/features, site/plugins, site/content.jar, site/artifacts.jar
-echo   3. GitHub Actions -^> Publish p2 site -^> Run workflow
+echo   2. restore-main.ps1 ^(Eclipse PDE closed^) — launch\restore-main.ps1
+echo   3. Commit site/features, site/plugins, site/content.jar, site/artifacts.jar
+echo   4. GitHub Actions -^> Publish p2 site -^> Run workflow
 echo.
 endlocal

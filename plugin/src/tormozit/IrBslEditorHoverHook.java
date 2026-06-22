@@ -5,9 +5,14 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.jface.dialogs.PageChangedEvent;
+import org.eclipse.jface.text.AbstractInformationControlManager;
+import org.eclipse.jface.text.IInformationControl;
 import org.eclipse.jface.text.ITextHover;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.text.source.SourceViewer;
@@ -39,6 +44,29 @@ import org.eclipse.xtext.ui.editor.hover.html.IXtextBrowserInformationControl;
 public final class IrBslEditorHoverHook implements IStartup
 {
     private static final String HOOK_MARKER = "tormozit.irHoverWrapped"; //$NON-NLS-1$
+
+    // #region agent log
+    private static final class AgentHoverDebugLog
+    {
+        private static final Path LOG_PATH = Path.of("C:\\VC\\EDT.Comfort\\debug-73c22c.log"); //$NON-NLS-1$
+
+        static void log(String hypothesisId, String location, String message, String dataJson)
+        {
+            try
+            {
+                String line = "{\"sessionId\":\"73c22c\",\"hypothesisId\":\"" + hypothesisId //$NON-NLS-1$
+                    + "\",\"location\":\"" + location + "\",\"message\":\"" + message //$NON-NLS-1$ //$NON-NLS-2$
+                    + "\",\"data\":" + (dataJson != null ? dataJson : "{}") //$NON-NLS-1$
+                    + ",\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
+                Files.writeString(LOG_PATH, line, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+            }
+            catch (Exception ignored)
+            {
+                // debug session only
+            }
+        }
+    }
+    // #endregion
 
     private final Set<DtGranularEditor<?>> hookedGranularEditors =
         Collections.newSetFromMap(new WeakHashMap<>());
@@ -140,28 +168,62 @@ public final class IrBslEditorHoverHook implements IStartup
             return;
         if (Boolean.TRUE.equals(sourceViewer.getData(HOOK_MARKER)))
             return;
-        @SuppressWarnings("unchecked")
-        Map<Object, ITextHover> hovers =
-            (Map<Object, ITextHover>) Global.getField(sourceViewer, "fTextHovers"); //$NON-NLS-1$
-        if (hovers == null || hovers.isEmpty())
-            return;
-        boolean wrapped = false;
-        for (Map.Entry<Object, ITextHover> entry : hovers.entrySet())
-        {
-            ITextHover hover = entry.getValue();
-            if (hover instanceof IrBslTextHoverWrapper)
-                continue;
-            if (isWrappableBslHover(hover))
-            {
-                entry.setValue(new IrBslTextHoverWrapper(hover, editor));
-                wrapped = true;
-            }
-        }
+        boolean wrappedText = wrapTextHovers(sourceViewer, editor);
+        boolean wrappedInfo = wrapInformationProviderHover(editor);
+        boolean wrapped = wrappedText || wrappedInfo;
         if (wrapped)
         {
             sourceViewer.setData(HOOK_MARKER, Boolean.TRUE);
             IrBslHoverDebug.log("wrapped hover editor=" + editor.getTitle()); //$NON-NLS-1$
         }
+    }
+
+    private static boolean wrapTextHovers(SourceViewer sourceViewer, BslXtextEditor editor)
+    {
+        @SuppressWarnings("unchecked")
+        Map<Object, ITextHover> hovers =
+            (Map<Object, ITextHover>) Global.getField(sourceViewer, "fTextHovers"); //$NON-NLS-1$
+        if (hovers == null || hovers.isEmpty())
+            return false;
+        boolean wrapped = false;
+        for (Map.Entry<Object, ITextHover> entry : hovers.entrySet())
+        {
+            IrBslTextHoverWrapper wrapper = wrapHoverDelegate(entry.getValue(), editor);
+            if (wrapper != null)
+            {
+                entry.setValue(wrapper);
+                wrapped = true;
+            }
+        }
+        return wrapped;
+    }
+
+    /** Ctrl+F2 (INFORMATION_PROPOSAL) — {@code XtextInformationProvider.hover}, не из {@code fTextHovers}. */
+    private static boolean wrapInformationProviderHover(BslXtextEditor editor)
+    {
+        Object config = Global.invoke(editor, "getSourceViewerConfiguration"); //$NON-NLS-1$
+        if (config == null)
+            return false;
+        Object provider = Global.getField(config, "informationProvider"); //$NON-NLS-1$
+        if (provider == null)
+            return false;
+        Object hover = Global.getField(provider, "hover"); //$NON-NLS-1$
+        if (!(hover instanceof ITextHover textHover) || textHover instanceof IrBslTextHoverWrapper)
+            return false;
+        IrBslTextHoverWrapper wrapper = wrapHoverDelegate(textHover, editor);
+        if (wrapper == null)
+            return false;
+        Global.setField(provider, "hover", wrapper); //$NON-NLS-1$
+        return true;
+    }
+
+    private static IrBslTextHoverWrapper wrapHoverDelegate(ITextHover hover, BslXtextEditor editor)
+    {
+        if (hover instanceof IrBslTextHoverWrapper existing)
+            return existing;
+        if (!isWrappableBslHover(hover))
+            return null;
+        return new IrBslTextHoverWrapper(hover, editor);
     }
 
     private static boolean isWrappableBslHover(ITextHover hover)
@@ -202,7 +264,12 @@ public final class IrBslEditorHoverHook implements IStartup
         @Override
         public String getHoverInfo(ITextViewer textViewer, IRegion hoverRegion)
         {
-            return delegate.getHoverInfo(textViewer, hoverRegion);
+            Object info = getHoverInfo2(textViewer, hoverRegion);
+            if (info == null)
+                return null;
+            if (IrBslHoverHtml.isBslBrowserInput(info))
+                return IrBslHoverHtml.readHtml(info);
+            return info instanceof String text ? text : info.toString();
         }
 
         @Override
@@ -229,26 +296,68 @@ public final class IrBslEditorHoverHook implements IStartup
                 return info;
             IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(editor);
             if (session == null)
+            {
+                cancelIrEnrichment();
+                IrBslHoverDebug.step("skip", "no session"); //$NON-NLS-1$ //$NON-NLS-2$
                 return info;
+            }
             final int offset = hoverRegion.getOffset();
             IRSession.cancelActiveEvaluation(session);
-            final int gen = fetchGeneration.incrementAndGet();
+            boolean hadWatcher = activeWatcher != null;
+            final int gen = cancelIrEnrichment();
             lastScheduledOffset = offset;
-            lastIrHtml = null;
-            lastBaseHtml = null;
-            
-            HtmlIntegrityWatcher oldWatcher = activeWatcher;
-            if (oldWatcher != null)
-                oldWatcher.cancel();
-            activeWatcher = null;
-            
+            // #region agent log
+            AgentHoverDebugLog.log("D", "getHoverInfo2", "hover re-eval", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"offset\":" + offset + ",\"gen\":" + gen + ",\"hadWatcher\":" + hadWatcher + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            // #endregion
             final Object baseInput = info;
             IRSession.CodeEditorSyncPayload payload = session.prepareCodeEditorSyncForHover(editor, offset);
             if (payload == null)
                 return info;
+            scheduleNativeInputSync(baseInput, offset, gen);
             session.executor.submit(() -> scheduleIrEnrichment(session, baseInput, payload, offset, gen));
             return info;
         }
+
+        /** Сбрасывает delayed input на штатный base, чтобы родный HTML обновлялся при смене слова. */
+        private void scheduleNativeInputSync(Object baseInput, int offset, int gen)
+        {
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            display.asyncExec(() -> {
+                if (gen != fetchGeneration.get() || offset != lastScheduledOffset)
+                    return;
+                IXtextBrowserInformationControl control = IrBslHoverControlAccess.resolve(editor);
+                if (control == null)
+                    return;
+                if (control.hasDelayedInputChangeListener())
+                {
+                    // #region agent log
+                    AgentHoverDebugLog.log("C", "scheduleNativeInputSync", "notifyDelayedInputChange base", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        "{\"offset\":" + offset + ",\"gen\":" + gen + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    // #endregion
+                    control.notifyDelayedInputChange(baseInput);
+                }
+            });
+        }
+
+        /** Отменяет watcher, async-обогащение и кэш последнего ИР-фрагмента. */
+        private int cancelIrEnrichment()
+        {
+            int gen = fetchGeneration.incrementAndGet();
+            HtmlIntegrityWatcher oldWatcher = activeWatcher;
+            if (oldWatcher != null)
+                oldWatcher.cancel();
+            activeWatcher = null;
+            lastScheduledOffset = -1;
+            lastIrHtml = null;
+            lastBaseHtml = null;
+            return gen;
+        }
+
+        private static final int APPLY_MAX_ATTEMPTS = 10;
+        private static final int APPLY_RETRY_MS = 50;
 
         private void scheduleIrEnrichment(
             IRSession session, Object baseInput,
@@ -260,47 +369,80 @@ public final class IrBslEditorHoverHook implements IStartup
             Display display = Display.getDefault();
             if (display == null || display.isDisposed())
                 return;
-            display.asyncExec(() -> {
-                if (gen != fetchGeneration.get() || offset != lastScheduledOffset)
-                {
-                    IrBslHoverDebug.step("skip", "stale gen=" + gen + " offset=" + offset); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    return;
-                }
-                if (editor.getSite() == null)
-                    return;
+            display.asyncExec(() -> applyIrEnrichmentOnUi(baseInput, irHtml, offset, gen, 0));
+        }
 
-                lastIrHtml = irHtml;
-                String baseHtml = IrBslHoverHtml.readHtml(baseInput);
-                lastBaseHtml = baseHtml;
-                String merged = IrBslHoverHtml.mergeHtml(baseHtml, irHtml);
+        private void applyIrEnrichmentOnUi(Object baseInput, String irHtml, int offset, int gen, int attempt)
+        {
+            if (gen != fetchGeneration.get() || offset != lastScheduledOffset)
+            {
+                // #region agent log
+                AgentHoverDebugLog.log("E", "applyIrEnrichmentOnUi", "stale skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"offset\":" + offset + ",\"gen\":" + gen //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"fetchGen\":" + fetchGeneration.get() //$NON-NLS-1$
+                    + ",\"lastOffset\":" + lastScheduledOffset + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
+                IrBslHoverDebug.step("skip", "stale gen=" + gen + " offset=" + offset); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                return;
+            }
+            if (editor.getSite() == null)
+                return;
 
-                if (tryApplyToCurrentControl(merged))
-                {
-                    IrBslHoverDebug.log("enriched inline offset=" + offset); //$NON-NLS-1$
-                }
-                else
-                {
-                    IrBslHoverDebug.log("enriched inline FAILED offset=" + offset); //$NON-NLS-1$
-                }
+            lastIrHtml = irHtml;
+            String baseHtml = IrBslHoverHtml.readHtml(baseInput);
+            lastBaseHtml = baseHtml;
+            String merged = IrBslHoverHtml.mergeHtml(baseHtml, irHtml);
 
-                HtmlIntegrityWatcher watcher = new HtmlIntegrityWatcher(gen, editor, lastBaseHtml, lastIrHtml, lastScheduledOffset);
+            if (tryApplyToCurrentControl(merged))
+            {
+                // #region agent log
+                AgentHoverDebugLog.log("E", "applyIrEnrichmentOnUi", "merged applied", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"offset\":" + offset + ",\"gen\":" + gen + ",\"mergedLen\":" + merged.length() + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                // #endregion
+                IrBslHoverDebug.log("enriched inline offset=" + offset); //$NON-NLS-1$
+                HtmlIntegrityWatcher watcher = new HtmlIntegrityWatcher(gen, lastBaseHtml, lastIrHtml, lastScheduledOffset);
                 activeWatcher = watcher;
                 watcher.start();
-            });
+                return;
+            }
+            if (attempt < APPLY_MAX_ATTEMPTS)
+            {
+                Display display = Display.getDefault();
+                if (display != null && !display.isDisposed())
+                {
+                    display.timerExec(APPLY_RETRY_MS, () -> applyIrEnrichmentOnUi(baseInput, irHtml, offset, gen, attempt + 1));
+                    return;
+                }
+            }
+            IrBslHoverDebug.log("enriched inline FAILED offset=" + offset); //$NON-NLS-1$
+            HtmlIntegrityWatcher watcher = new HtmlIntegrityWatcher(gen, lastBaseHtml, lastIrHtml, lastScheduledOffset);
+            activeWatcher = watcher;
+            watcher.start();
         }
 
         private boolean tryApplyToCurrentControl(String mergedHtml)
         {
-            IXtextBrowserInformationControl control = IrBslHoverControlAccess.resolve(editor);
-            if (control == null)
-                return false;
-            if (!(control instanceof IInformationControlExtension5 ext5) || !ext5.isVisible())
+            ResolveResult resolved = IrBslHoverControlAccess.resolveDetailed(editor);
+            IXtextBrowserInformationControl control = resolved.control;
+            if (control == null || !resolved.visible)
                 return false;
             if (!IrBslHoverHtml.applyHtmlToControl(control, mergedHtml))
                 return false;
             if (control.hasDelayedInputChangeListener())
                 control.notifyDelayedInputChange(mergedHtml);
             return true;
+        }
+
+        private static final class ResolveResult
+        {
+            final IXtextBrowserInformationControl control;
+            final boolean visible;
+
+            ResolveResult(IXtextBrowserInformationControl control, boolean visible)
+            {
+                this.control = control;
+                this.visible = visible;
+            }
         }
 
         /** Доступ к активному browser-hover control BSL-редактора. */
@@ -310,40 +452,68 @@ public final class IrBslEditorHoverHook implements IStartup
 
             static IXtextBrowserInformationControl resolve(BslXtextEditor editor)
             {
+                ResolveResult result = resolveDetailed(editor);
+                return result.visible ? result.control : null;
+            }
+
+            static ResolveResult resolveDetailed(BslXtextEditor editor)
+            {
                 if (editor == null)
-                    return null;
+                    return new ResolveResult(null, false);
                 ISourceViewer viewer = editor.getInternalSourceViewer();
                 if (!(viewer instanceof SourceViewer sourceViewer))
-                    return null;
+                    return new ResolveResult(null, false);
+                IXtextBrowserInformationControl fromHoverManager = resolveVisibleFromTextHoverManager(sourceViewer);
+                if (fromHoverManager != null)
+                    return new ResolveResult(fromHoverManager, true);
+                IXtextBrowserInformationControl fromEditorPresenter =
+                    resolveVisibleFromPresenter(Global.getField(editor, "fInformationPresenter")); //$NON-NLS-1$
+                if (fromEditorPresenter != null)
+                    return new ResolveResult(fromEditorPresenter, true);
+                IXtextBrowserInformationControl fromViewerPresenter = resolveVisibleFromPresenter(
+                    Global.getField(sourceViewer, "fInformationPresenter")); //$NON-NLS-1$
+                if (fromViewerPresenter != null)
+                    return new ResolveResult(fromViewerPresenter, true);
+                return new ResolveResult(null, false);
+            }
+
+            private static IXtextBrowserInformationControl resolveVisibleFromTextHoverManager(SourceViewer sourceViewer)
+            {
                 Object textHoverManager = Global.getField(sourceViewer, "fTextHoverManager"); //$NON-NLS-1$
                 if (textHoverManager == null)
                     return null;
-                
                 Object replacer = Global.getField(textHoverManager, "fInformationControlReplacer"); //$NON-NLS-1$
                 Object infoControl = Global.getField(textHoverManager, "fInformationControl"); //$NON-NLS-1$
-                
                 IXtextBrowserInformationControl replacerIc = null;
-                IXtextBrowserInformationControl infoIc = null;
-                
                 if (replacer != null)
                 {
                     Object replacerControl = Global.getField(replacer, "fInformationControl"); //$NON-NLS-1$
                     replacerIc = asBrowserControl(replacerControl);
                 }
-                infoIc = asBrowserControl(infoControl);
-                
-                if (replacerIc != null)
-                {
-                    if (replacerIc instanceof IInformationControlExtension5 ext5 && ext5.isVisible())
-                        return replacerIc;
-                }
-                if (infoIc != null)
-                {
-                    if (infoIc instanceof IInformationControlExtension5 ext5 && ext5.isVisible())
-                        return infoIc;
-                }
-                
-                return infoIc != null ? infoIc : replacerIc;
+                IXtextBrowserInformationControl infoIc = asBrowserControl(infoControl);
+                if (replacerIc instanceof IInformationControlExtension5 ext5 && ext5.isVisible())
+                    return replacerIc;
+                if (infoIc instanceof IInformationControlExtension5 ext5 && ext5.isVisible())
+                    return infoIc;
+                return null;
+            }
+
+            private static IXtextBrowserInformationControl resolveVisibleFromPresenter(Object presenter)
+            {
+                if (!(presenter instanceof AbstractInformationControlManager manager))
+                    return null;
+                IInformationControl control = manager.getInternalAccessor().getCurrentInformationControl();
+                return asVisibleBrowserControl(control);
+            }
+
+            private static IXtextBrowserInformationControl asVisibleBrowserControl(Object control)
+            {
+                IXtextBrowserInformationControl browser = asBrowserControl(control);
+                if (browser == null)
+                    return null;
+                if (browser instanceof IInformationControlExtension5 ext5)
+                    return ext5.isVisible() ? browser : null;
+                return browser;
             }
 
             private static IXtextBrowserInformationControl asBrowserControl(Object control)
@@ -356,10 +526,9 @@ public final class IrBslEditorHoverHook implements IStartup
          * Watcher: проверяет HTML в браузере и восстанавливает ИР-фрагмент при сбросе.
          * Останавливается по cancel() или если контрол 10 раз подряд null.
          */
-        private static final class HtmlIntegrityWatcher
+        private final class HtmlIntegrityWatcher
         {
             final int gen;
-            private final BslXtextEditor editor;
             private final String baseHtml;
             private final String irHtml;
             private final int offset;
@@ -368,10 +537,9 @@ public final class IrBslEditorHoverHook implements IStartup
             private int nullCount = 0;
             private static final int MAX_NULL_RETRIES = 10;
 
-            HtmlIntegrityWatcher(int gen, BslXtextEditor editor, String baseHtml, String irHtml, int offset)
+            HtmlIntegrityWatcher(int gen, String baseHtml, String irHtml, int offset)
             {
                 this.gen = gen;
-                this.editor = editor;
                 this.baseHtml = baseHtml;
                 this.irHtml = irHtml;
                 this.offset = offset;
@@ -392,9 +560,21 @@ public final class IrBslEditorHoverHook implements IStartup
                 activeGen.incrementAndGet();
             }
 
+            private boolean shouldContinueWatching()
+            {
+                return activeGen.get() == gen
+                    && fetchGeneration.get() == gen
+                    && lastScheduledOffset == offset
+                    && IrBslExpressionHtmlSupport.resolveConnectedSession(editor) != null;
+            }
+
             private void doCheck()
             {
                 if (activeGen.get() != gen)
+                    return;
+                if (IrBslExpressionHtmlSupport.resolveConnectedSession(editor) == null)
+                    return;
+                if (fetchGeneration.get() != gen || lastScheduledOffset != offset)
                     return;
 
                 IXtextBrowserInformationControl control = IrBslHoverControlAccess.resolve(editor);
@@ -403,7 +583,7 @@ public final class IrBslEditorHoverHook implements IStartup
                     nullCount++;
                     if (nullCount >= MAX_NULL_RETRIES)
                         return;
-                    if (activeGen.get() == gen)
+                    if (shouldContinueWatching())
                     {
                         Display display = Display.getDefault();
                         if (display != null && !display.isDisposed())
@@ -415,7 +595,7 @@ public final class IrBslEditorHoverHook implements IStartup
 
                 if (!(control instanceof IInformationControlExtension5 ext5) || !ext5.isVisible())
                 {
-                    if (activeGen.get() == gen)
+                    if (shouldContinueWatching())
                     {
                         Display display = Display.getDefault();
                         if (display != null && !display.isDisposed())
@@ -427,7 +607,7 @@ public final class IrBslEditorHoverHook implements IStartup
                 Browser browser = IrBslHoverHtml.findControlBrowser(control);
                 if (browser == null || browser.isDisposed())
                 {
-                    if (activeGen.get() == gen)
+                    if (shouldContinueWatching())
                     {
                         Display display = Display.getDefault();
                         if (display != null && !display.isDisposed())
@@ -443,12 +623,52 @@ public final class IrBslEditorHoverHook implements IStartup
                     && irHtml != null && !irHtml.isEmpty()
                     && !hasMarker)
                 {
+                    boolean backEnabled = browser.isBackEnabled();
                     String merged = IrBslHoverHtml.mergeHtml(baseHtml, irHtml);
-                    IrBslHoverHtml.applyHtmlToControl(control, merged);
-                    IrBslHoverDebug.log("html restored offset=" + offset); //$NON-NLS-1$
+                    boolean baseReset = IrBslHoverHtml.looksLikeBaseHtmlReset(currentText, baseHtml, merged);
+                    int diffToBase = Math.abs(
+                        (currentText != null ? currentText.length() : 0) - (baseHtml != null ? baseHtml.length() : 0));
+                    int diffToMerged = Math.abs(
+                        (currentText != null ? currentText.length() : 0) - merged.length());
+                    // #region agent log
+                    AgentHoverDebugLog.log("AB", "HtmlIntegrityWatcher.doCheck", "marker lost", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        "{\"offset\":" + offset + ",\"backEnabled\":" + backEnabled //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"baseReset\":" + baseReset //$NON-NLS-1$
+                        + ",\"diffToBase\":" + diffToBase //$NON-NLS-1$
+                        + ",\"diffToMerged\":" + diffToMerged //$NON-NLS-1$
+                        + ",\"currentLen\":" + (currentText != null ? currentText.length() : 0) //$NON-NLS-1$
+                        + ",\"baseLen\":" + (baseHtml != null ? baseHtml.length() : 0) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                    // #endregion
+                    if (backEnabled && !baseReset)
+                    {
+                        // #region agent log
+                        AgentHoverDebugLog.log("FIX", "HtmlIntegrityWatcher.doCheck", "skip navigation", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                            "{\"offset\":" + offset + ",\"backEnabled\":true,\"runId\":\"post-fix2\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+                        // #endregion
+                    }
+                    else if (baseReset)
+                    {
+                        IrBslHoverHtml.applyHtmlToControl(control, merged);
+                        // #region agent log
+                        AgentHoverDebugLog.log("FIX", "HtmlIntegrityWatcher.doCheck", "html restored", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                            "{\"offset\":" + offset + ",\"backEnabled\":" + backEnabled //$NON-NLS-1$ //$NON-NLS-2$
+                            + ",\"runId\":\"post-fix2\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+                        // #endregion
+                        IrBslHoverDebug.log("html restored offset=" + offset); //$NON-NLS-1$
+                    }
+                    else
+                    {
+                        // #region agent log
+                        AgentHoverDebugLog.log("FIX", "HtmlIntegrityWatcher.doCheck", "skip navigation", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                            "{\"offset\":" + offset + ",\"backEnabled\":" + backEnabled //$NON-NLS-1$ //$NON-NLS-2$
+                            + ",\"runId\":\"post-fix2\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+                        // #endregion
+                        IrBslHoverDebug.step("watcher", //$NON-NLS-1$
+                            "skip restore back=" + backEnabled + " baseReset=" + baseReset); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
                 }
 
-                if (activeGen.get() == gen)
+                if (shouldContinueWatching())
                 {
                     Display display = Display.getDefault();
                     if (display != null && !display.isDisposed())

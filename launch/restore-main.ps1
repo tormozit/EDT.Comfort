@@ -9,6 +9,52 @@ if ($eclipse) {
 }
 
 $here = $PSScriptRoot
+$repoRoot = Split-Path $here -Parent
+$versionFile = Join-Path $repoRoot 'site\version.txt'
+$release = $null
+Get-Content -LiteralPath $versionFile -Encoding UTF8 | ForEach-Object {
+    if ($_ -match '^\s*comfort\.release\s*=\s*(\d+\.\d+\.\d+\.\d+)\s*(?:#.*)?$') {
+        $release = $Matches[1]
+    }
+}
+if (-not $release) {
+    throw "comfort.release not found in $versionFile"
+}
+$comfortQualifier = "$release-qualifier"
+
+function Update-PdeOsgiComfortVersion {
+    param(
+        [string]$BundlesInfoPath,
+        [string]$DevPropertiesPath,
+        [string]$Qualifier
+    )
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    if (-not (Test-Path -LiteralPath $BundlesInfoPath)) {
+        throw "bundles.info not found: $BundlesInfoPath"
+    }
+    $bundleLines = [System.IO.File]::ReadAllLines($BundlesInfoPath)
+    $bundleUpdated = $false
+    for ($i = 0; $i -lt $bundleLines.Count; $i++) {
+        if ($bundleLines[$i] -match '^tormozit\.comfort,') {
+            $bundleLines[$i] = "tormozit.comfort,$Qualifier,file:/C:/VC/EDT.Comfort/plugin/,4,false"
+            $bundleUpdated = $true
+            break
+        }
+    }
+    if (-not $bundleUpdated) {
+        throw "tormozit.comfort entry not found in $BundlesInfoPath"
+    }
+    [System.IO.File]::WriteAllLines($BundlesInfoPath, $bundleLines, $utf8NoBom)
+    $devLines = @(
+        '#',
+        "#$(Get-Date -Format 'ddd MMM dd HH:mm:ss ''MSK'' yyyy')",
+        "tormozit.comfort;$Qualifier=bin,lib/jacob.jar",
+        '@ignoredot@=true',
+        'tormozit.comfort=bin,lib/jacob.jar'
+    )
+    [System.IO.File]::WriteAllLines($DevPropertiesPath, $devLines, $utf8NoBom)
+}
+
 $wsOsgi = "C:\VC\EDT-plugin-WS\.metadata\.plugins\org.eclipse.pde.core\Eclipse Application"
 $wsLaunch = "C:\VC\EDT-plugin-WS\.metadata\.plugins\org.eclipse.debug.core\.launches\Eclipse Application.launch"
 $bakOsgi = Join-Path $here "backup\osgi"
@@ -23,6 +69,10 @@ New-Item -ItemType Directory -Force -Path "$wsOsgi\org.eclipse.equinox.simplecon
 Copy-Item "$bakOsgi\config.ini" "$wsOsgi\config.ini" -Force
 Copy-Item "$bakOsgi\dev.properties" "$wsOsgi\dev.properties" -Force
 Copy-Item $bundlesSrc $bundlesDst -Force
+
+Update-PdeOsgiComfortVersion -BundlesInfoPath $bundlesSrc -DevPropertiesPath "$bakOsgi\dev.properties" -Qualifier $comfortQualifier
+Update-PdeOsgiComfortVersion -BundlesInfoPath $bundlesDst -DevPropertiesPath "$wsOsgi\dev.properties" -Qualifier $comfortQualifier
+Write-Host "tormozit.comfort -> $comfortQualifier (backup + workspace)"
 
 $expected = (Get-Item $bundlesSrc).Length
 $actual = (Get-Item $bundlesDst).Length
@@ -46,4 +96,4 @@ Remove-Item "C:\VC\EDT-plugin-WS\.metadata\.plugins\org.eclipse.debug.core\.laun
 Remove-Item "C:\VC\EDT-plugin-WS\.metadata\.plugins\org.eclipse.pde.core\Comfort EDT Experimental" -Recurse -Force -ErrorAction SilentlyContinue
 
 Write-Host "OK: bundles.info $actual bytes; clearConfig=false; generateProfile=false"
-Write-Host "bundles.info и config.ini — read-only. Запустите PDE, Eclipse Application."
+Write-Host "bundles.info i config.ini - read-only. Zapustite PDE, Eclipse Application."

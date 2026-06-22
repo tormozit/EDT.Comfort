@@ -1,5 +1,7 @@
 package tormozit;
 
+import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.IDocumentExtension4;
 import org.eclipse.jface.text.contentassist.ContentAssistant;
 import org.eclipse.jface.text.contentassist.ContentAssistEvent;
 import org.eclipse.jface.text.contentassist.ICompletionListener;
@@ -63,6 +65,8 @@ public final class ContentAssistSessionReloader
     private final ConcurrentHashMap<String, String> irMergedHtmlByDisplay = new ConcurrentHashMap<>();
 
     private static final int WORDS_TABLE_DEBOUNCE_MS = 200;
+    /** Последний stamp документа при caret-событии (отличить ввод от стрелок). */
+    private long lastCaretDocumentStamp = -1;
 
     public static void install(SourceViewer viewer, ContentAssistant assistant,
                                SmartContentAssistProcessor processor, BslXtextEditor editor)
@@ -122,6 +126,7 @@ public final class ContentAssistSessionReloader
                 wordsTableCaret = -1;
                 activeIrDisplayKey = null;
                 irMergedHtmlByDisplay.clear();
+                lastCaretDocumentStamp = -1;
                 synchronized (pendingAfterWordsTable)
                 {
                     pendingAfterWordsTable.clear();
@@ -264,10 +269,24 @@ public final class ContentAssistSessionReloader
         int caret = event.caretOffset;
         if (caret < 0)
             return;
+        long docStamp = -1;
+        IDocument doc = viewer.getDocument();
+        if (doc instanceof IDocumentExtension4 ext4)
+            docStamp = ext4.getModificationStamp();
+        boolean typingMovedCaret = docStamp >= 0 && docStamp != lastCaretDocumentStamp;
+        if (docStamp >= 0)
+            lastCaretDocumentStamp = docStamp;
         SmartContentAssistProcessor.primeFilterTrackerOnly(viewer, caret);
         if (!ContentAssistPopupSync.isPopupVisible(assistant))
             return;
+        if (ContentAssistPopupSync.shouldClosePopupAtCaret(viewer, caret))
+        {
+            ContentAssistPopupSync.hideProposalPopup(assistant);
+            return;
+        }
         scheduleWordsTablePreparationDebounced(caret);
+        if (typingMovedCaret)
+            return;
         ContentAssistPopupSync.scheduleRecomputeOnCaretChange(assistant, viewer, processor);
     }
 

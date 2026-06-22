@@ -11,6 +11,7 @@
     <startup class="tormozit.MoxelEditorHook"/>
     <startup class="tormozit.BSLEditorMenuHook"/> 
     <startup class="tormozit.TextEditorRightClickCaretHook"/>
+    <startup class="tormozit.TextEditorIdentifierSelectionHook"/>
     <startup class="tormozit.TextEditorMenuHook"/>
     <startup class="tormozit.QueryTextEditDialogHook"/>
     <startup class="tormozit.FormEditorHook"/>
@@ -323,6 +324,18 @@
         class="tormozit.ExecutableExtensionFactory:tormozit.GetRef"
         commandId="tormozit.CopyRef">
      </handler>
+    <handler
+        class="tormozit.IdentifierWordNavigationHandler"
+        commandId="org.eclipse.ui.edit.text.select.wordPrevious"/>
+    <handler
+        class="tormozit.IdentifierWordNavigationHandler"
+        commandId="org.eclipse.ui.edit.text.select.wordNext"/>
+    <handler
+        class="tormozit.IdentifierWordNavigationHandler"
+        commandId="org.eclipse.ui.edit.text.goto.wordPrevious"/>
+    <handler
+        class="tormozit.IdentifierWordNavigationHandler"
+        commandId="org.eclipse.ui.edit.text.goto.wordNext"/>
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.RecentPlacesHandler"
         commandId="tormozit.RecentPlaces">

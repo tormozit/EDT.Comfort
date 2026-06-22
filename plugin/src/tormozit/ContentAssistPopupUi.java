@@ -18,6 +18,10 @@ public final class ContentAssistPopupUi
     private static final String BAR_DATA_KEY = "tormozit.filterBar"; //$NON-NLS-1$
     private static final String TOGGLE_DATA_KEY = "tormozit.filterToggleButton"; //$NON-NLS-1$
     private static final String CONTEXT_LABEL_DATA_KEY = "tormozit.contextTypeLabel"; //$NON-NLS-1$
+    /** Не реагировать на {@code setSelection} при программной синхронизации с Ctrl+Space. */
+    private static boolean suppressToggleSelection;
+    private static int cachedContextLabelDot = -1;
+    private static String cachedContextLabelText = ""; //$NON-NLS-1$
 
     private ContentAssistPopupUi() {}
 
@@ -57,14 +61,21 @@ public final class ContentAssistPopupUi
             }
 
             if (toggle != null && !toggle.isDisposed())
-                toggle.setSelection(SmartAssistFilterState.isSmartFilterEnabled());
+                setToggleSelectionQuiet(toggle, SmartAssistFilterState.isSmartFilterEnabled());
             if (contextLabel != null && !contextLabel.isDisposed())
-                contextLabel.setText(resolveContextTypeLabel(viewer));
+                applyContextTypeLabel(contextLabel, viewer);
         }
         catch (Exception e)
         {
             ContentAssistDebug.log("filterToggle UI ERROR: " + e.getMessage()); //$NON-NLS-1$
         }
+    }
+
+    private static void applyContextTypeLabel(Label contextLabel, SourceViewer viewer)
+    {
+        String text = resolveContextTypeLabel(viewer);
+        contextLabel.setText(text);
+        contextLabel.setToolTipText(text);
     }
 
     public static void updateContextTypeLabel(SourceViewer viewer)
@@ -85,7 +96,7 @@ public final class ContentAssistPopupUi
                 return;
             Label contextLabel = (Label) bar.getData(CONTEXT_LABEL_DATA_KEY);
             if (contextLabel != null && !contextLabel.isDisposed())
-                contextLabel.setText(resolveContextTypeLabel(viewer));
+                applyContextTypeLabel(contextLabel, viewer);
         }
         catch (Exception ignored) {}
     }
@@ -131,10 +142,10 @@ public final class ContentAssistPopupUi
                 return;
             Button toggle = (Button) bar.getData(TOGGLE_DATA_KEY);
             if (toggle != null && !toggle.isDisposed())
-                toggle.setSelection(SmartAssistFilterState.isSmartFilterEnabled());
+                setToggleSelectionQuiet(toggle, SmartAssistFilterState.isSmartFilterEnabled());
             Label contextLabel = (Label) bar.getData(CONTEXT_LABEL_DATA_KEY);
             if (contextLabel != null && !contextLabel.isDisposed())
-                contextLabel.setText(resolveContextTypeLabel(viewer));
+                applyContextTypeLabel(contextLabel, viewer);
         }
         catch (Exception ignored) {}
     }
@@ -146,21 +157,38 @@ public final class ContentAssistPopupUi
         int caret = viewer.getTextWidget() != null
             ? viewer.getTextWidget().getCaretOffset()
             : viewer.getSelectedRange().x;
-        if (SmartContentAssistProcessor.ReceiverTypeLabel.findMemberAccessDot(
-                viewer.getDocument(), caret) < 0)
+        int dot = SmartContentAssistProcessor.ReceiverTypeLabel.findMemberAccessDot(
+            viewer.getDocument(), caret);
+        if (dot < 0)
+        {
+            cachedContextLabelDot = -1;
+            cachedContextLabelText = ""; //$NON-NLS-1$
             return ""; //$NON-NLS-1$
+        }
+        if (dot == cachedContextLabelDot && !cachedContextLabelText.isEmpty())
+            return cachedContextLabelText;
 
         SmartContentAssistProcessor processor = ContentAssistSessionReloader.getActiveProcessor();
         if (processor != null)
         {
             String label = processor.resolveReceiverTypeLabel();
             if (label != null && !label.isEmpty())
-                return "Родитель: " + label;
+            {
+                cachedContextLabelDot = dot;
+                cachedContextLabelText = "Родитель: " + label;
+                return cachedContextLabelText;
+            }
         }
         String fallback = SmartContentAssistProcessor.ReceiverTypeLabel.resolve(viewer);
         if (fallback != null && !fallback.isEmpty())
-            return "Родитель: " + fallback;
-        return "Родитель: —"; //$NON-NLS-1$
+        {
+            cachedContextLabelDot = dot;
+            cachedContextLabelText = "Родитель: " + fallback;
+            return cachedContextLabelText;
+        }
+        cachedContextLabelDot = dot;
+        cachedContextLabelText = "Родитель: —"; //$NON-NLS-1$
+        return cachedContextLabelText;
     }
 
     private static Composite createFilterBar(Shell shell, ContentAssistant assistant,
@@ -180,15 +208,17 @@ public final class ContentAssistPopupUi
 
         Button toggle = new Button(bar, SWT.CHECK);
         toggle.setText("Фильтр"); //$NON-NLS-1$
-        toggle.setSelection(SmartAssistFilterState.isSmartFilterEnabled());
+        setToggleSelectionQuiet(toggle, SmartAssistFilterState.isSmartFilterEnabled());
         toggle.addListener(SWT.Selection, e -> {
+            if (suppressToggleSelection)
+                return;
             ContentAssistPopupSync.captureSelectionBeforeFilterToggle(assistant);
             SmartAssistFilterState.setSmartFilterEnabled(toggle.getSelection());
             ContentAssistPopupSync.recomputePopupList(assistant, viewer, processor);
         });
 
         Label contextLabel = new Label(bar, SWT.NONE);
-        contextLabel.setText(resolveContextTypeLabel(viewer));
+        applyContextTypeLabel(contextLabel, viewer);
 
         bar.setData(TOGGLE_DATA_KEY, toggle);
         bar.setData(CONTEXT_LABEL_DATA_KEY, contextLabel);
@@ -199,5 +229,18 @@ public final class ContentAssistPopupUi
         shell.layout(true, true);
         ContentAssistDebug.log("filterBar UI created"); //$NON-NLS-1$
         return bar;
+    }
+
+    private static void setToggleSelectionQuiet(Button toggle, boolean selected)
+    {
+        suppressToggleSelection = true;
+        try
+        {
+            toggle.setSelection(selected);
+        }
+        finally
+        {
+            suppressToggleSelection = false;
+        }
     }
 }

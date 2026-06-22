@@ -160,6 +160,7 @@ public class TextEditorMenuHook implements IStartup
         }
 
         TextEditorComfortMenu.attachWorkbench(textWidget, HOOK_MARKER, editorPart, part);
+        TextEditorIdentifierSelectionHook.attachToTextEditor(textEditor);
     }
 
     /**

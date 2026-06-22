@@ -15,6 +15,16 @@ public final class SmartAssistFilterState
 
     private SmartAssistFilterState() {}
 
+    public static boolean isUnfilteredReloadPending()
+    {
+        return Boolean.TRUE.equals(UNFILTERED_RELOAD_PENDING.get());
+    }
+
+    public static void clearUnfilteredReloadPending()
+    {
+        UNFILTERED_RELOAD_PENDING.remove();
+    }
+
     public static boolean isSmartFilterEnabled()
     {
         if (!ComfortSettings.isReplaceListFiltersEnabled())
@@ -44,15 +54,6 @@ public final class SmartAssistFilterState
         setSmartFilterEnabled(next);
         ContentAssistDebug.log("smartFilter toggled → " + (next ? "ON" : "OFF")); //$NON-NLS-1$ //$NON-NLS-2$
         return next;
-    }
-
-    /** Сбросить кэш и заново запросить delegate (полный список без smart-фильтра). */
-    public static boolean consumeUnfilteredReloadPending()
-    {
-        if (!Boolean.TRUE.equals(UNFILTERED_RELOAD_PENDING.get()))
-            return false;
-        UNFILTERED_RELOAD_PENDING.remove();
-        return true;
     }
 
     public static void reset()

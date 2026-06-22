@@ -135,6 +135,9 @@ public final class QueryTextEditDialogHook implements IStartup
 
     private static void hookControlMenu(Shell dialogShell, Control control)
     {
+        if (control instanceof StyledText styledText)
+            TextEditorIdentifierSelectionHook.installOnStyledText(styledText);
+
         Menu menu = control.getMenu();
         if (menu == null || menu.isDisposed())
             return;
