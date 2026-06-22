@@ -70,28 +70,37 @@ public final class IrMethodListHandler
             pattern = selectedText(editor);
 
         final String query = pattern;
-        irSession.syncCodeEditorToIR(editor);
-        irSession.executor.submit(() ->
+        IRSession.CodeEditorSyncPayload payload = irSession.prepareCodeEditorSyncFromEditor(editor);
+        if (payload == null)
+            return;
+
+        IRSession.cancelActiveEvaluation(irSession);
+        irSession.executor.submit(() -> openMethodListOnComThread(irSession, query, onlyThisModule, payload));
+    }
+
+    /** COM-поток {@link IRSession#executor}: без {@link IRSession#executeOnComThread} с UI. */
+    private static void openMethodListOnComThread(
+        IRSession irSession, String query, boolean onlyThisModule, IRSession.CodeEditorSyncPayload payload)
+    {
+        try
         {
-            try
+            irSession.applyPreparedCodeEditorSync(payload);
+            ensureCodeEditor(irSession);
+            irSession.invokeCodeEditor("РазобратьТекущийКонтекст"); //$NON-NLS-1$
+            long language = ComBridge.toLong(ComBridge.getProperty(irSession.codeEditor, "мЯзыкПрограммы")); //$NON-NLS-1$
+            if (language != 0)
             {
-                ensureCodeEditor(irSession);
-                irSession.invokeCodeEditor("РазобратьТекущийКонтекст"); //$NON-NLS-1$
-                long language = ComBridge.toLong(ComBridge.getProperty(irSession.codeEditor, "мЯзыкПрограммы")); //$NON-NLS-1$
-                if (language != 0)
-                {
-                    toast("Список методов", "Команда доступна только в модуле"); //$NON-NLS-1$ //$NON-NLS-2$
-                    return;
-                }
-                irSession.invokeCodeEditor("ОткрытьСписокМетодов", query, onlyThisModule); //$NON-NLS-1$
-                irSession.showWindow();
+                toast("Список методов", "Команда доступна только в модуле"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
             }
-            catch (Exception e)
-            {
-                Global.log("IrMethodListHandler: " + e.getMessage()); //$NON-NLS-1$
-                toast("Список методов", "Ошибка вызова ИР: " + e.getMessage(), 5_000); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-        });
+            irSession.invokeCodeEditor("ОткрытьСписокМетодов", query, onlyThisModule); //$NON-NLS-1$
+            irSession.showWindow();
+        }
+        catch (Exception e)
+        {
+            Global.log("IrMethodListHandler: " + e.getMessage()); //$NON-NLS-1$
+            toast("Список методов", "Ошибка вызова ИР: " + e.getMessage(), 5_000); //$NON-NLS-1$ //$NON-NLS-2$
+        }
     }
 
     private static BslXtextEditor activeBslEditor()

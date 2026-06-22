@@ -213,6 +213,21 @@ public final class IRSession
             });
         }
 
+        /** Подготовка sync для команд ИР на UI; применение — {@link #applyPreparedCodeEditorSync} на {@link #executor}. */
+        CodeEditorSyncPayload prepareCodeEditorSyncFromEditor(BslXtextEditor editor)
+        {
+            if (editor == null)
+                return null;
+            ISourceViewer viewer = editor.getInternalSourceViewer();
+            if (viewer == null)
+                return null;
+            Object sel = viewer.getSelectionProvider().getSelection();
+            if (!(sel instanceof ITextSelection textSelection))
+                return null;
+            int offset = textSelection.getOffset();
+            return prepareCodeEditorSync(editor, offset, offset + textSelection.getLength());
+        }
+
         /** Подготовка данных sync на потоке вызывающего (hover job / UI). Без collect pending. */
         CodeEditorSyncPayload prepareCodeEditorSyncForHover(BslXtextEditor editor, int offset)
         {

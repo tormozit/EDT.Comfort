@@ -838,19 +838,23 @@ public class SmartOutlineHook implements IStartup {
         if (commonItem != null)
         {
             commonItem.addListener(SWT.Selection, e -> {
-                BslXtextEditor editor = IrMethodListHandler.resolveBslEditor(dialog);
-                IrMethodListHandler.openCommonMethods(editor, getFilterPattern(filterControl));
-                if (!filterControl.isDisposed())
-                    filterControl.forceFocus();
+                filterControl.getDisplay().asyncExec(() -> {
+                    BslXtextEditor editor = IrMethodListHandler.resolveBslEditor(dialog);
+                    IrMethodListHandler.openCommonMethods(editor, getFilterPattern(filterControl));
+                    if (!filterControl.isDisposed())
+                        filterControl.forceFocus();
+                });
             });
         }
         if (detailedItem != null)
         {
             detailedItem.addListener(SWT.Selection, e -> {
-                BslXtextEditor editor = IrMethodListHandler.resolveBslEditor(dialog);
-                IrMethodListHandler.openModuleMethods(editor, getFilterPattern(filterControl));
-                if (!filterControl.isDisposed())
-                    filterControl.forceFocus();
+                filterControl.getDisplay().asyncExec(() -> {
+                    BslXtextEditor editor = IrMethodListHandler.resolveBslEditor(dialog);
+                    IrMethodListHandler.openModuleMethods(editor, getFilterPattern(filterControl));
+                    if (!filterControl.isDisposed())
+                        filterControl.forceFocus();
+                });
             });
         }
 
@@ -1022,19 +1026,23 @@ public class SmartOutlineHook implements IStartup {
         if (commonBtn != null)
         {
             commonBtn.addListener(SWT.Selection, e -> {
-                BslXtextEditor editor = IrMethodListHandler.resolveBslEditor(dialog);
-                IrMethodListHandler.openCommonMethods(editor, getFilterPattern(filterControl));
-                if (!filterControl.isDisposed())
-                    filterControl.forceFocus();
+                filterControl.getDisplay().asyncExec(() -> {
+                    BslXtextEditor editor = IrMethodListHandler.resolveBslEditor(dialog);
+                    IrMethodListHandler.openCommonMethods(editor, getFilterPattern(filterControl));
+                    if (!filterControl.isDisposed())
+                        filterControl.forceFocus();
+                });
             });
         }
         if (detailedBtn != null)
         {
             detailedBtn.addListener(SWT.Selection, e -> {
-                BslXtextEditor editor = IrMethodListHandler.resolveBslEditor(dialog);
-                IrMethodListHandler.openModuleMethods(editor, getFilterPattern(filterControl));
-                if (!filterControl.isDisposed())
-                    filterControl.forceFocus();
+                filterControl.getDisplay().asyncExec(() -> {
+                    BslXtextEditor editor = IrMethodListHandler.resolveBslEditor(dialog);
+                    IrMethodListHandler.openModuleMethods(editor, getFilterPattern(filterControl));
+                    if (!filterControl.isDisposed())
+                        filterControl.forceFocus();
+                });
             });
         }
 
