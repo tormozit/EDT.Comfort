@@ -1,15 +1,10 @@
 package tormozit;
 
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 import java.util.WeakHashMap;
 import org.eclipse.debug.core.DebugEvent;
 import org.eclipse.debug.core.DebugPlugin;
@@ -22,9 +17,6 @@ import org.eclipse.debug.core.model.IWatchExpression;
 import org.eclipse.debug.ui.AbstractDebugView;
 import org.eclipse.debug.ui.DebugUITools;
 import org.eclipse.debug.ui.IDebugUIConstants;
-import org.eclipse.jface.action.ContributionItem;
-import org.eclipse.jface.action.IToolBarManager;
-import org.eclipse.jface.action.Separator;
 import org.eclipse.jface.preference.IPreferenceStore;
 import org.eclipse.jface.util.IPropertyChangeListener;
 import org.eclipse.jface.util.PropertyChangeEvent;
@@ -37,7 +29,6 @@ import org.eclipse.jface.viewers.TreePath;
 import org.eclipse.jface.viewers.TreeSelection;
 import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.swt.SWT;
-import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
@@ -45,14 +36,10 @@ import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Shell;
-import org.eclipse.swt.widgets.ToolItem;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
-import org.eclipse.ui.IActionBars;
 import org.eclipse.ui.IStartup;
-import org.eclipse.ui.ISharedImages;
 import org.eclipse.ui.IViewReference;
-import org.eclipse.ui.IViewSite;
 import org.eclipse.ui.IWorkbench;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchPart;
@@ -73,7 +60,7 @@ import com._1c.g5.v8.dt.debug.core.model.values.IBslValue;
  *
  * <p>Обёртка content provider ломает lazy-дерево — не используется.
  *
- * <p>Тулбар «Выражений»: «Пересчитать все» — штатный полный {@code viewer.refresh()}.
+ * <p>Тулбар «Выражений»: «Пересчитать все» — {@link RecalculateAllExpressionsAction} ({@code viewContribution}).
  *
  * <p>Inline-редактирование «Значение»: сессия при открытии cell editor (до commit).
  *
@@ -86,7 +73,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
     private static final String HOOK_VIEWER_KEY = "tormozit.expressionsChangeValueHook"; //$NON-NLS-1$
     private static final String INLINE_CELL_WATCH_KEY = "tormozit.expressionsInlineCellWatch"; //$NON-NLS-1$
     private static final String INLINE_SESSION_COOLDOWN_KEY = "tormozit.expressionsInlineCooldown"; //$NON-NLS-1$
-    private static final String RECALCULATE_TOOLBAR_GROUP = "tormozit.recalculateAll"; //$NON-NLS-1$
     private static final String STOCK_CP_KEY = "tormozit.expressionsChangeValue.stockCp"; //$NON-NLS-1$
     private static final String EXPRESSIONS_STOCK_MASK_KEY = "tormozit.expressionsStockMask"; //$NON-NLS-1$
     private static final String EXPRESSIONS_GUARD_KEY = "tormozit.expressionsPermanentGuard"; //$NON-NLS-1$
@@ -97,7 +83,7 @@ public final class DebugExpressionsChangeValueHook implements IStartup
     private static final int SESSION_TIMEOUT_MS = 120_000;
     private static final int POST_SESSION_SETTLE_MS = 2_000;
     private static final int POST_CELL_EDITOR_SETTLE_MS = 150;
-    private static final int CONTEXT_MENU_CANCEL_FINISH_MS = 450;
+    private static final int CONTEXT_MENU_CANCEL_FINISH_MS = 2_000;
     private static final int INLINE_SESSION_COOLDOWN_MS = 1500;
     private static final int INLINE_SETTLE_AFTER_CLOSE_MS = 1500;
     private static final int CELL_EDITOR_POLL_MS = 50;
@@ -107,12 +93,8 @@ public final class DebugExpressionsChangeValueHook implements IStartup
     private static final int DEFAULT_MODEL_DELTA_MASK = -1;
     private static final int SELECTION_RESTORE_MAX_ATTEMPTS = 60;
     private static final int SELECTION_RESTORE_DELAY_MS = 100;
-    private static final int DEFERRED_VALUE_COLUMN_MAX_ATTEMPTS = 25;
-    private static final int DEFERRED_VALUE_COLUMN_DELAY_MS = 100;
-    private static final Path AGENT_LOG_PATH = Path.of("C:\\VC\\EDT.Comfort\\debug-a38e3f.log"); //$NON-NLS-1$
-
-    private static final Map<AbstractDebugView, Boolean> recalculateToolbarInstalled =
-        Collections.synchronizedMap(new WeakHashMap<>());
+    private static final int DEFERRED_VALUE_COLUMN_MAX_ATTEMPTS = 10;
+    private static final int DEFERRED_VALUE_COLUMN_DELAY_MS = 150;
 
     private static volatile boolean globalHooksInstalled;
     private static volatile boolean partListenersInstalled;
@@ -246,8 +228,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
             return;
         if (!isTargetView(debugView))
             return;
-        if (EXPRESSIONS_VIEW_ID.equals(viewId(debugView)))
-            installRecalculateAllToolbar(debugView);
         Viewer viewer = debugView.getViewer();
         if (viewer == null)
             return;
@@ -258,10 +238,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
         if (isExpressionsView(debugView))
             installExpressionsPermanentGuard(debugView, viewer);
         scheduleInlineCellEditWatch(debugView, viewer);
-        // #region agent log
-        agentLog("E", "tryHookDebugView", "hook-installed", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "viewId", viewId(debugView), "cpRestored", String.valueOf(cpRestored)); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
         DebugExpressionsDebug.step("hook", viewId(debugView)); //$NON-NLS-1$
     }
 
@@ -284,50 +260,7 @@ public final class DebugExpressionsChangeValueHook implements IStartup
             stockMask = modelDeltaMask(contentProvider);
             viewer.setData(EXPRESSIONS_STOCK_MASK_KEY, stockMask);
         }
-        // #region agent log
-        agentLog("P", "installExpressionsPermanentGuard", "guard-active", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "listenerRemoved", String.valueOf(listenerRemoved), //$NON-NLS-1$
-            "stockMask", String.valueOf(stockMask), "maskKeptStock", "true"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
         DebugExpressionsDebug.step("expressions", "permanent guard"); //$NON-NLS-1$ //$NON-NLS-2$
-    }
-
-    private static void installRecalculateAllToolbar(AbstractDebugView debugView)
-    {
-        if (debugView == null || Boolean.TRUE.equals(recalculateToolbarInstalled.get(debugView)))
-            return;
-        IViewSite site = debugView.getViewSite();
-        if (site == null)
-            return;
-        IActionBars bars = site.getActionBars();
-        if (bars == null)
-            return;
-        IToolBarManager toolbar = bars.getToolBarManager();
-        if (toolbar == null)
-            return;
-        recalculateToolbarInstalled.put(debugView, Boolean.TRUE);
-        toolbar.add(new Separator(RECALCULATE_TOOLBAR_GROUP));
-        toolbar.add(new ContributionItem()
-        {
-            @Override
-            public void fill(org.eclipse.swt.widgets.ToolBar bar, int index)
-            {
-                if (bar == null || bar.isDisposed())
-                    return;
-                ToolItem item = index >= 0 ? new ToolItem(bar, SWT.PUSH, index) : new ToolItem(bar, SWT.PUSH);
-                item.setText("Пересчитать все"); //$NON-NLS-1$
-                item.setToolTipText("Полное обновление всех выражений" + Global.pluginSignForTooltip()); //$NON-NLS-1$
-                Image image = PlatformUI.getWorkbench().getSharedImages().getImage(ISharedImages.IMG_ELCL_SYNCED);
-                if (image != null)
-                    item.setImage(image);
-                item.addListener(SWT.Selection, e -> refreshAllExpressions(debugView));
-            }
-        });
-        bars.updateActionBars();
-        DebugExpressionsDebug.step("toolbar", "recalculate-all"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #region agent log
-        agentLog("J", "installRecalculateAllToolbar", "installed", "post-fix"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        // #endregion
     }
 
     /** Штатный полный refresh панели «Выражения» (восстановление дерева после частичного update). */
@@ -355,13 +288,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
                 refreshDisplay.timerExec(SELECTION_RESTORE_DELAY_MS, () ->
                     scheduleTreeStateRestore(treeViewer, treeState));
             }
-            // #region agent log
-            agentLog("J", "refreshAllExpressions", "refreshed", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "viewId", viewId(debugView), //$NON-NLS-1$
-                "hadSelection", String.valueOf(treeState != null), //$NON-NLS-1$
-                "evaluated", String.valueOf(evaluated), //$NON-NLS-1$
-                "maskKeptStock", "true"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             DebugExpressionsDebug.step("recalculateAll", viewId(debugView) + " evaluated=" + evaluated); //$NON-NLS-1$ //$NON-NLS-2$
         });
     }
@@ -395,11 +321,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
                 DebugExpressionsDebug.problem("evaluate " + watch + ": " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
-        // #region agent log
-        agentLog("Q", "reevaluateAllWatchExpressions", "evaluated", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "count", String.valueOf(evaluated), //$NON-NLS-1$
-            "context", context != null ? context.getClass().getSimpleName() : "null"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
         return evaluated;
     }
 
@@ -447,10 +368,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
         Object stockObj = viewer.getData(EXPRESSIONS_STOCK_MASK_KEY);
         int stockMask = stockObj instanceof Integer mask ? mask.intValue() : DEFAULT_MODEL_DELTA_MASK;
         setModelDeltaMask(contentProvider, stockMask);
-        // #region agent log
-        agentLog("N", "restoreExpressionsStockModelDeltaMask", "mask-restored", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "mask", String.valueOf(stockMask)); //$NON-NLS-1$
-        // #endregion
     }
 
     private static void scheduleTreeStateRestore(AbstractTreeViewer treeViewer, TreeStateSnapshot snapshot)
@@ -502,31 +419,15 @@ public final class DebugExpressionsChangeValueHook implements IStartup
                 }
                 if (guard.isUserOverride())
                 {
-                    // #region agent log
-                    agentLog("S", "scheduleTreeStateRestore", "user-kept-selection", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        "attempt", String.valueOf(attempt[0]), //$NON-NLS-1$
-                        "selected", describe(selectedVariable(treeViewer))); //$NON-NLS-1$
-                    // #endregion
                     finish.run();
                     return;
                 }
                 snapshot.materializeExpandedPaths(treeViewer);
                 TreeStateSnapshot.MaterializeState state = snapshot.selectionMaterializeState(treeViewer);
                 int rootCount = treeRootItemCount(treeViewer);
-                // #region agent log
-                agentLog("T", "scheduleTreeStateRestore", "attempt-state", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "attempt", String.valueOf(attempt[0]), //$NON-NLS-1$
-                    "materialize", state.name(), "rootCount", String.valueOf(rootCount), //$NON-NLS-1$ //$NON-NLS-2$
-                    "selectionPath", snapshot.selectionPathText()); //$NON-NLS-1$
-                // #endregion
                 if (state == TreeStateSnapshot.MaterializeState.WAITING_CHILDREN)
                 {
                     snapshot.nudgeSelectionPathChildren(treeViewer);
-                    // #region agent log
-                    agentLog("S", "scheduleTreeStateRestore", "waiting-children", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        "attempt", String.valueOf(attempt[0]), //$NON-NLS-1$
-                        "selectionPath", snapshot.selectionPathText()); //$NON-NLS-1$
-                    // #endregion
                     attempt[0]++;
                     if (attempt[0] < SELECTION_RESTORE_MAX_ATTEMPTS)
                         display.timerExec(SELECTION_RESTORE_DELAY_MS, this);
@@ -541,10 +442,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
                         display.timerExec(SELECTION_RESTORE_DELAY_MS, this);
                     else
                     {
-                        // #region agent log
-                        agentLog("K", "scheduleTreeStateRestore", "tree-state-restore-failed", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                            "reason", "missing-prefix", "depth", String.valueOf(snapshot.pathDepth())); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        // #endregion
                         finish.run();
                     }
                     return;
@@ -555,15 +452,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
                 selected = selectedVariable(treeViewer);
                 boolean pinOk = snapshot.matchesSelectionPin(selected);
                 boolean rowReady = snapshot.isTargetRowReady(treeViewer);
-                // #region agent log
-                agentLog("K", "scheduleTreeStateRestore", pinOk && rowReady ? "tree-state-restored" : "tree-state-pending", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "attempt", String.valueOf(attempt[0]), //$NON-NLS-1$
-                    "depth", String.valueOf(snapshot.pathDepth()), //$NON-NLS-1$
-                    "expanded", String.valueOf(snapshot.expandedPathCount()), //$NON-NLS-1$
-                    "selected", describe(selected), //$NON-NLS-1$
-                    "pinOk", String.valueOf(pinOk), "rowReady", String.valueOf(rowReady), //$NON-NLS-1$ //$NON-NLS-2$
-                    "rootCount", String.valueOf(rootCount)); //$NON-NLS-1$
-                // #endregion
                 if (pinOk && rowReady)
                 {
                     finish.run();
@@ -637,12 +525,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
             if (!snapshot.isUserIntentionalSelectionChange(selected))
                 return;
             userOverride = true;
-            // #region agent log
-            agentLog("S", "SelectionRestoreGuard", "user-override", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "selected", describe(selected), //$NON-NLS-1$
-                "selectedPath", selected != null ? BslInspectSupport.resolveVariableInspectExpression(selected) : "", //$NON-NLS-1$ //$NON-NLS-2$
-                "targetPath", snapshot.selectionPinWatchPath()); //$NON-NLS-1$
-            // #endregion
         }
     }
 
@@ -675,60 +557,15 @@ public final class DebugExpressionsChangeValueHook implements IStartup
         {
             treeViewer.setContentProvider(stockCp);
             viewer.setData(STOCK_CP_KEY, null);
-            // #region agent log
-            agentLog("A", "restoreStockContentProvider", "restored", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "stockClass", stockCp.getClass().getName()); //$NON-NLS-1$
-            // #endregion
             return true;
         }
         IContentProvider current = treeViewer.getContentProvider();
         if (current != null && java.lang.reflect.Proxy.isProxyClass(current.getClass()))
         {
-            // #region agent log
-            agentLog("A", "restoreStockContentProvider", "proxy-without-stock", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "proxyClass", current.getClass().getName()); //$NON-NLS-1$
-            // #endregion
         }
         return false;
     }
 
-    // #region agent log
-    private static void agentLog(String hypothesisId, String location, String message, String runId,
-        String... kv)
-    {
-        try
-        {
-            StringBuilder data = new StringBuilder("{");
-            if (kv != null)
-            {
-                for (int i = 0; i + 1 < kv.length; i += 2)
-                {
-                    if (i > 0)
-                        data.append(',');
-                    data.append('"').append(jsonEscape(kv[i])).append("\":\"").append(jsonEscape(kv[i + 1])).append('"');
-                }
-            }
-            data.append('}');
-            String line = String.format(
-                "{\"sessionId\":\"a38e3f\",\"hypothesisId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\",\"runId\":\"%s\",\"data\":%s,\"timestamp\":%d}%n", //$NON-NLS-1$
-                jsonEscape(hypothesisId), jsonEscape(location), jsonEscape(message), jsonEscape(runId), data,
-                System.currentTimeMillis());
-            Files.writeString(AGENT_LOG_PATH, line, StandardCharsets.UTF_8, StandardOpenOption.CREATE,
-                StandardOpenOption.APPEND);
-        }
-        catch (Exception ignored)
-        {
-            // agent log must not break debugger UI
-        }
-    }
-
-    private static String jsonEscape(String value)
-    {
-        if (value == null)
-            return ""; //$NON-NLS-1$
-        return value.replace("\\", "\\\\").replace("\"", "\\\""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-    }
-    // #endregion
 
     private static void onChangeValueSelectionFilter(Event e)
     {
@@ -809,10 +646,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
             IBslVariable variable = selectedVariable(viewer);
             if (variable != null && (existing == null || existing.completed))
             {
-                // #region agent log
-                agentLog("L", "pollInlineCellEdit", "inline-edit-begin", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "variable", describe(variable), "viewId", viewId(debugView)); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
                 beginChangeValueSession(debugView, viewer, variable, "inline-cell"); //$NON-NLS-1$
             }
         }
@@ -846,10 +679,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
         }
         else
         {
-            // #region agent log
-            agentLog("P", "beginChangeValueSession", "guard-already-active", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "source", source); //$NON-NLS-1$
-            // #endregion
         }
 
         Object contentProvider = stockTreeModelContentProvider(viewer);
@@ -870,10 +699,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
             else
                 previousModelDeltaMask = modelDeltaMask(contentProvider);
             setModelDeltaMask(contentProvider, SUPPRESS_MODEL_DELTA_MASK);
-            // #region agent log
-            agentLog("F", "suppressModelDelta", expressionsGuard ? "mask-set-session" : "mask-set", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-                "previousMask", String.valueOf(previousModelDeltaMask)); //$NON-NLS-1$
-            // #endregion
         }
 
         ChangeValueSession session = new ChangeValueSession(debugView, viewer, variable,
@@ -881,13 +706,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
             TreeStateSnapshot.capture(asTreeViewer(viewer)), source);
         session.preEditValueColumnText = readValueColumnText(asTreeViewer(viewer), variable);
         pendingSessions.put(viewer, session);
-        // #region agent log
-        agentLog("C", "beginChangeValueSession", "session-begin", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "source", source, "variable", describe(variable), //$NON-NLS-1$ //$NON-NLS-2$
-            "pendingCount", String.valueOf(pendingSessions.size()), //$NON-NLS-1$
-            "selectionDepth", String.valueOf(session.treeStateSnapshot != null ? session.treeStateSnapshot.pathDepth() : 0), //$NON-NLS-1$
-            "expanded", String.valueOf(session.treeStateSnapshot != null ? session.treeStateSnapshot.expandedPathCount() : 0)); //$NON-NLS-1$
-        // #endregion
         DebugExpressionsDebug.step("changeValue", "begin " + describe(variable)); //$NON-NLS-1$ //$NON-NLS-2$
 
         if ("context-menu".equals(source)) //$NON-NLS-1$
@@ -909,9 +727,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
         try
         {
             store.removePropertyChangeListener(listener);
-            // #region agent log
-            agentLog("D", "suppressStockRefresh", "listener-removed", "post-fix"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            // #endregion
             return true;
         }
         catch (Exception e)
@@ -925,9 +740,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
     {
         if (isExpressionsView(debugView))
         {
-            // #region agent log
-            agentLog("N", "restoreStockRefresh", "skipped-expressions", "post-fix"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            // #endregion
             return;
         }
         IPropertyChangeListener listener = asPropertyChangeListener(debugView);
@@ -939,9 +751,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
         try
         {
             store.addPropertyChangeListener(listener);
-            // #region agent log
-            agentLog("D", "restoreStockRefresh", "listener-restored", "post-fix"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            // #endregion
         }
         catch (Exception e)
         {
@@ -986,13 +795,22 @@ public final class DebugExpressionsChangeValueHook implements IStartup
                     continue;
                 session.valueChanged = true;
                 session.lastChangedVariable = variable;
-                // #region agent log
-                agentLog("G", "notifyVariableChanged", "value-changed-flag", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "reason", reason, "variable", describe(variable)); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                scheduleFinishChangeValueSession(session, reason);
+                scheduleContextMenuApplyFinish(session);
             }
         }
+    }
+
+    /** Один finish после диалога; повторные debug-event не перебивают timer через finishGeneration. */
+    private static void scheduleContextMenuApplyFinish(ChangeValueSession session)
+    {
+        if (session == null || session.completed || session.applyFinishScheduled)
+            return;
+        if (!"context-menu".equals(session.source) || !session.dialogClosed) //$NON-NLS-1$
+            return;
+        if (!session.valueChanged)
+            return;
+        session.applyFinishScheduled = true;
+        scheduleFinishChangeValueSession(session, "dialog-close"); //$NON-NLS-1$
     }
 
     private static void handlePreferenceChange(PropertyChangeEvent event)
@@ -1001,10 +819,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
             return;
         if (!CHANGED_DEBUG_ELEMENT.equals(event.getProperty()))
             return;
-        // #region agent log
-        agentLog("O", "handlePreferenceChange", "changedDebugElement-fired", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "pendingSessions", String.valueOf(pendingSessions.size())); //$NON-NLS-1$
-        // #endregion
         synchronized (pendingSessions)
         {
             for (ChangeValueSession session : new ArrayList<>(pendingSessions.values()))
@@ -1043,31 +857,13 @@ public final class DebugExpressionsChangeValueHook implements IStartup
         if (session == null || session.completed)
             return;
         if ("context-menu".equals(session.source) //$NON-NLS-1$
-            && ("debug-event".equals(reason) || "preference".equals(reason)) //$NON-NLS-1$ //$NON-NLS-2$
-            && session.awaitingModalDialog)
-        {
-            // #region agent log
-            agentLog("V", "scheduleFinishChangeValueSession", "deferred-modal-await", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "reason", reason, "variable", describe(session.targetVariable)); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
+            && ("debug-event".equals(reason) || "preference".equals(reason))) //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         session.finishGeneration++;
         final int generation = session.finishGeneration;
         int settleMs = POST_SESSION_SETTLE_MS;
         if ("cell-editor-close".equals(reason) || "dialog-close".equals(reason)) //$NON-NLS-1$ //$NON-NLS-2$
             settleMs = POST_CELL_EDITOR_SETTLE_MS;
-        else if ("inline-cell".equals(session.source) && session.cellEditorWasActive //$NON-NLS-1$
-            && ("debug-event".equals(reason) || "preference".equals(reason))) //$NON-NLS-1$ //$NON-NLS-2$
-            settleMs = POST_CELL_EDITOR_SETTLE_MS;
-        else if ("context-menu".equals(session.source) && session.dialogClosed //$NON-NLS-1$
-            && ("debug-event".equals(reason) || "preference".equals(reason))) //$NON-NLS-1$ //$NON-NLS-2$
-            settleMs = POST_CELL_EDITOR_SETTLE_MS;
-        // #region agent log
-        agentLog("G", "scheduleFinishChangeValueSession", "finish-scheduled", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "reason", reason, "settleMs", String.valueOf(settleMs), //$NON-NLS-1$ //$NON-NLS-2$
-            "generation", String.valueOf(generation)); //$NON-NLS-1$
-        // #endregion
         Display display = displayOf(session.viewer);
         if (display == null || display.isDisposed())
             return;
@@ -1086,13 +882,7 @@ public final class DebugExpressionsChangeValueHook implements IStartup
         discardPendingModelDeltas(session.contentProvider);
         // updateElement — только после восстановления дерева; затем повторный pin состояния.
         boolean applyUpdateAfterRestore = session.valueChanged
-            || "cell-editor-close".equals(reason) //$NON-NLS-1$
-            || "dialog-close".equals(reason); //$NON-NLS-1$
-        // #region agent log
-        agentLog("G", "finishChangeValueSession", "finish", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "reason", reason, "valueChanged", String.valueOf(session.valueChanged), //$NON-NLS-1$ //$NON-NLS-2$
-            "applyUpdateAfterRestore", String.valueOf(applyUpdateAfterRestore)); //$NON-NLS-1$
-        // #endregion
+            || "cell-editor-close".equals(reason); //$NON-NLS-1$
         completeSession(session, reason, false, false);
         if (session.viewer != null)
         {
@@ -1112,10 +902,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
             if (isExpressionsView(session.debugView))
             {
                 restoreExpressionsStockModelDeltaMask(session.viewer);
-                // #region agent log
-                agentLog("U", "finishChangeValueSession", "mask-restored-after-session", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "reason", reason); //$NON-NLS-1$
-                // #endregion
             }
             if (!applyUpdateAfterRestore)
             {
@@ -1137,12 +923,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
                     reason + "-after-delta"); //$NON-NLS-1$
             if (modelStillPreEdit)
                 scheduleDeferredExpressionValueRefresh(session, treeViewer, updateVariable, reason, 0);
-            // #region agent log
-            agentLog("I", "finishChangeValueSession", "column-update-after-restore", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "reason", reason, "columnUpdated", String.valueOf(columnUpdated), //$NON-NLS-1$ //$NON-NLS-2$
-                "modelStillPreEdit", String.valueOf(modelStillPreEdit), //$NON-NLS-1$
-                "variable", describe(updateVariable)); //$NON-NLS-1$
-            // #endregion
             scheduleTreeStateRestore(treeViewer, treeState);
         });
     }
@@ -1157,10 +937,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
 
         if (isExpressionsView(session.debugView))
         {
-            // #region agent log
-            agentLog("N", "restoreStockRefreshAfterSelection", "expressions-done", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "reason", reason, "listenerRestored", "false"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             return;
         }
 
@@ -1170,10 +946,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
 
         if (session.refreshSuppressed)
             restoreStockRefresh(session.debugView);
-        // #region agent log
-        agentLog("M", "restoreStockRefreshAfterSelection", "listener-restored", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "reason", reason, "maskRestored", String.valueOf(session.modelDeltaMaskRestored)); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
 
         if (display != null && !display.isDisposed() && treeViewer != null && snapshot != null)
             display.asyncExec(() -> scheduleTreeStateRestore(treeViewer, snapshot));
@@ -1206,10 +978,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
                     queue.clear();
                 }
             }
-            // #region agent log
-            agentLog("G", "discardPendingModelDeltas", "queue-cleared", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "cleared", String.valueOf(cleared)); //$NON-NLS-1$
-            // #endregion
         }
         catch (Exception e)
         {
@@ -1235,11 +1003,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
             return false;
         }
         Object found = testFindItem(treeViewer, variable);
-        // #region agent log
-        agentLog("F", "applyTargetedUpdate", "tree-update-fallback", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "reason", reason, "variable", describe(variable), //$NON-NLS-1$ //$NON-NLS-2$
-            "foundItem", String.valueOf(found != null)); //$NON-NLS-1$
-        // #endregion
         if (found == null)
             return false;
         treeViewer.update(variable, null);
@@ -1258,10 +1021,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
         Object found = findTreeItemForVariable(treeViewer, variable);
         if (!(found instanceof TreeItem item) || item.isDisposed())
         {
-            // #region agent log
-            agentLog("P", "paintExpressionsValueCell", "no-item", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "reason", reason, "variable", describe(variable)); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             return false;
         }
         int[] columns = valueColumnIndices(treeViewer);
@@ -1274,11 +1033,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
         Tree tree = item.getParent();
         if (tree != null && !tree.isDisposed())
             tree.redraw();
-        // #region agent log
-        agentLog("P", "paintExpressionsValueCell", "painted", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "reason", reason, "variable", describe(variable), //$NON-NLS-1$ //$NON-NLS-2$
-            "before", before != null ? before : "", "after", after != null ? after : ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-        // #endregion
         return true;
     }
 
@@ -1386,11 +1140,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
         if (session == null || treeViewer == null || variable == null
             || attempt >= DEFERRED_VALUE_COLUMN_MAX_ATTEMPTS)
         {
-            // #region agent log
-            if (attempt >= DEFERRED_VALUE_COLUMN_MAX_ATTEMPTS)
-                agentLog("U", "scheduleDeferredExpressionValueRefresh", "deferred-gave-up", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "reason", reason, "variable", describe(variable)); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             return;
         }
         Control control = treeViewer.getControl();
@@ -1410,18 +1159,8 @@ public final class DebugExpressionsChangeValueHook implements IStartup
             {
                 applyTargetedUpdate(session.viewer, session.contentProvider, target,
                     reason + "-deferred-" + attempt); //$NON-NLS-1$
-                // #region agent log
-                agentLog("U", "scheduleDeferredExpressionValueRefresh", "deferred-painted", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "attempt", String.valueOf(attempt), "variable", describe(target), //$NON-NLS-1$ //$NON-NLS-2$
-                    "preEdit", preEdit != null ? preEdit : "", //$NON-NLS-1$ //$NON-NLS-2$
-                    "current", resolveValueColumnText(target, "")); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
                 return;
             }
-            // #region agent log
-            agentLog("U", "scheduleDeferredExpressionValueRefresh", "deferred-retry", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "attempt", String.valueOf(attempt), "variable", describe(target)); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             scheduleDeferredExpressionValueRefresh(session, treeViewer, variable, reason, attempt + 1);
         });
     }
@@ -1440,10 +1179,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
             Object pathsObj = Global.invoke(viewer, "getElementPaths", variable); //$NON-NLS-1$
             if (!(pathsObj instanceof TreePath[] paths) || paths.length == 0)
             {
-                // #region agent log
-                agentLog("I", "refreshVariableColumnLabels", "no-paths", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "variable", describe(variable)); //$NON-NLS-1$
-                // #endregion
                 return false;
             }
             int[] columns = valueColumnIndices(viewer);
@@ -1454,11 +1189,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
                 for (int column : columns)
                     Global.invoke(contentProvider, "updateElement", path, column); //$NON-NLS-1$
             }
-            // #region agent log
-            agentLog("I", "refreshVariableColumnLabels", "updateElement", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "reason", reason, "variable", describe(variable), //$NON-NLS-1$ //$NON-NLS-2$
-                "pathCount", String.valueOf(paths.length), "col0", String.valueOf(columns[0])); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             return true;
         }
         catch (Exception e)
@@ -1508,11 +1238,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
             int flags = 1024 | 2048; // CONTENT | STATE — подписи колонок и detail
             deltaClass.getMethod("addNode", Object.class, int.class).invoke(rootDelta, variable, flags); //$NON-NLS-1$
             Global.invoke(contentProvider, "updateModel", rootDelta, DEFAULT_MODEL_DELTA_MASK); //$NON-NLS-1$
-            // #region agent log
-            agentLog("H", "applyVariableContentDelta", "delta-applied", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "variable", describe(variable), //$NON-NLS-1$
-                "expressions", String.valueOf(isExpressionsViewer(viewer))); //$NON-NLS-1$
-            // #endregion
         }
         catch (Exception e)
         {
@@ -1584,17 +1309,10 @@ public final class DebugExpressionsChangeValueHook implements IStartup
             return;
         if (!force && isExpressionsView(session.debugView))
         {
-            // #region agent log
-            agentLog("N", "restoreModelDelta", "skipped-expressions", "post-fix"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            // #endregion
             return;
         }
         setModelDeltaMask(session.contentProvider, session.previousModelDeltaMask);
         session.modelDeltaMaskRestored = true;
-        // #region agent log
-        agentLog("F", "restoreModelDelta", "mask-restored", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "mask", String.valueOf(session.previousModelDeltaMask), "forced", String.valueOf(force)); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
     }
 
     private static void completeSession(ChangeValueSession session, String reason)
@@ -1623,12 +1341,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
             restoreStockRefresh(session.debugView);
         if (restoreMask && !session.modelDeltaMaskRestored)
             restoreModelDeltaMask(session);
-        // #region agent log
-        agentLog("C", "completeSession", "session-end", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "reason", reason, "pendingCount", String.valueOf(pendingSessions.size()), //$NON-NLS-1$ //$NON-NLS-2$
-            "listenerRestored", String.valueOf(restoreListener), //$NON-NLS-1$
-            "maskRestored", String.valueOf(restoreMask && session.modelDeltaMaskRestored)); //$NON-NLS-1$
-        // #endregion
         DebugExpressionsDebug.step("changeValue", "end " + reason); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
@@ -1662,13 +1374,8 @@ public final class DebugExpressionsChangeValueHook implements IStartup
                 return;
             session.awaitingModalDialog = false;
             session.dialogClosed = true;
-            // #region agent log
-            agentLog("V", "scheduleContextMenuDialogFinish", "dialog-async-close", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "variable", describe(session.targetVariable), //$NON-NLS-1$
-                "valueChanged", String.valueOf(session.valueChanged)); //$NON-NLS-1$
-            // #endregion
             if (session.valueChanged)
-                scheduleFinishChangeValueSession(session, "dialog-close"); //$NON-NLS-1$
+                scheduleContextMenuApplyFinish(session);
             else
             {
                 Display backupDisplay = displayOf(session.viewer);
@@ -1676,16 +1383,9 @@ public final class DebugExpressionsChangeValueHook implements IStartup
                 {
                     backupDisplay.timerExec(CONTEXT_MENU_CANCEL_FINISH_MS, () -> runOnViewerDisplay(session.viewer, () ->
                     {
-                        if (session.completed)
+                        if (session.completed || session.valueChanged || session.applyFinishScheduled)
                             return;
-                        if (!session.valueChanged)
-                        {
-                            // #region agent log
-                            agentLog("V", "scheduleContextMenuDialogFinish", "dialog-cancel-finish", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                                "variable", describe(session.targetVariable)); //$NON-NLS-1$
-                            // #endregion
-                            scheduleFinishChangeValueSession(session, "dialog-close"); //$NON-NLS-1$
-                        }
+                        scheduleFinishChangeValueSession(session, "dialog-close"); //$NON-NLS-1$
                     }));
                 }
             }
@@ -1724,20 +1424,11 @@ public final class DebugExpressionsChangeValueHook implements IStartup
             return;
         session.hookedDialogShell = shell;
         session.dialogWasOpen = true;
-        // #region agent log
-        agentLog("V", "hookChangeValueDialogClose", "dialog-hooked", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "shellClass", shell.getClass().getName(), //$NON-NLS-1$
-            "title", shell.getText() != null ? shell.getText() : ""); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
         shell.addListener(SWT.Dispose, e -> runOnViewerDisplay(session.viewer, () ->
         {
             if (session.completed)
                 return;
             session.valueChanged = true;
-            // #region agent log
-            agentLog("V", "hookChangeValueDialogClose", "dialog-dispose", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "variable", describe(session.targetVariable)); //$NON-NLS-1$
-            // #endregion
             scheduleFinishChangeValueSession(session, "dialog-close"); //$NON-NLS-1$
         }));
     }
@@ -2077,11 +1768,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
             List<List<String>> expanded = captureExpandedPaths(treeViewer);
             if (selection == null && expanded.isEmpty())
                 return null;
-            // #region agent log
-            agentLog("R", "TreeStateSnapshot.capture", "path-keys", "post-fix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "selectionPath", selection != null ? String.join("/", selection) : "", //$NON-NLS-1$ //$NON-NLS-2$
-                "pinWatchPath", pinWatchPath != null ? pinWatchPath : ""); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             return new TreeStateSnapshot(selection, expanded, pinWatchPath);
         }
 
@@ -2563,6 +2249,7 @@ public final class DebugExpressionsChangeValueHook implements IStartup
         volatile boolean dialogWasOpen;
         volatile boolean awaitingModalDialog;
         volatile boolean dialogClosed;
+        volatile boolean applyFinishScheduled;
         volatile Shell hookedDialogShell;
         volatile boolean modelDeltaMaskRestored;
         String preEditValueColumnText;

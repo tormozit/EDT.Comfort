@@ -5,7 +5,7 @@ import shutil
 import time
 import zipfile
 
-deploy_dir = "deploy"
+deploy_dir = os.environ.get("DEPLOY_DIR", "deploy")
 latest = os.environ.get("LATEST_VERSION", "")
 CATEGORY_ID = "comfort"
 BUNDLE_ID = "tormozit.comfort"
@@ -100,10 +100,6 @@ def remove_root_simple_repository() -> None:
 
 
 def write_composite_repository(children: list[str]) -> None:
-    """
-    Корень сайта — composite-репозиторий со ссылками на каталоги версий.
-    EDT «Показывать только последние версии»: снята — все версии, включена — одна.
-    """
     timestamp = str(int(time.time() * 1000))
     children_xml = "\n".join(f"    <child location='{child}/'/>" for child in children)
 
@@ -149,23 +145,31 @@ def write_composite_repository(children: list[str]) -> None:
         f.write(composite_p2_index)
 
 
-def main() -> None:
-    global latest
+def list_version_children() -> list[str]:
+    if not os.path.isdir(deploy_dir):
+        return []
     children = [
         d for d in os.listdir(deploy_dir)
         if os.path.isdir(os.path.join(deploy_dir, d)) and d[0:1].isdigit()
     ]
     children.sort(reverse=True)
+    return children
 
+
+def order_version_children(children: list[str]) -> list[str]:
+    global latest
     if latest and latest in children:
-        children.remove(latest)
-        children.insert(0, latest)
-    elif children:
+        ordered = [c for c in children if c != latest]
+        ordered.insert(0, latest)
+        return ordered
+    if children and not latest:
         latest = children[0]
+    return children
 
+
+def write_version_index_pages(children: list[str]) -> None:
     for child in children:
         child_dir = os.path.join(deploy_dir, child)
-        publish_p2_files(child_dir)
         version_index = f"""<!DOCTYPE html>
 <html lang="ru">
 <head><meta charset="utf-8"><title>EDT Comfort {child}</title></head>
@@ -173,30 +177,57 @@ def main() -> None:
   <h1>EDT Comfort — версия {child}</h1>
   <p>URL для EDT «Установить новое ПО»:</p>
   <p><code>{SITE_BASE_URL}{child}/</code></p>
-  <p><a href="../">← Все версии</a></p>
+  <p><a href="../">← Все версии</a> · <a href="../help/">Справка</a></p>
 </body>
 </html>
 """
         with open(os.path.join(child_dir, "index.html"), "w", encoding="utf-8") as f:
             f.write(version_index)
 
-    remove_root_simple_repository()
-    if children:
-        write_composite_repository(children)
 
-    open(os.path.join(deploy_dir, ".nojekyll"), "w").close()
+def publish_help_site(repo_root: str) -> None:
+    docs_src = os.path.join(repo_root, "docs")
+    help_dst = os.path.join(deploy_dir, "help")
+    if not os.path.isdir(docs_src):
+        print("WARN: docs/ not found, skipping help site")
+        return
 
+    if os.path.isdir(help_dst):
+        shutil.rmtree(help_dst)
+    shutil.copytree(
+        docs_src,
+        help_dst,
+        ignore=shutil.ignore_patterns("_shablon-okna.md"),
+    )
+
+    site_help_index = os.path.join(repo_root, "site", "help", "index.html")
+    if os.path.isfile(site_help_index):
+        shutil.copy2(site_help_index, os.path.join(help_dst, "index.html"))
+    else:
+        print("WARN: site/help/index.html not found")
+
+    print("Published help:", help_dst, "files:", len(os.listdir(help_dst)))
+
+
+def write_root_index_html(children: list[str]) -> None:
     version_links = "\n".join(
         f'    <li><a href="{c}/">{c}</a> — фиксированная версия</li>' for c in children
     )
-    index_html = f"""<!DOCTYPE html>
+    template_path = os.path.join(
+        os.environ.get("REPO_ROOT", "."), "site", "index.html")
+    if os.path.isfile(template_path):
+        with open(template_path, encoding="utf-8") as f:
+            index_html = f.read()
+        index_html = index_html.replace("{{SITE_BASE_URL}}", SITE_BASE_URL)
+        index_html = index_html.replace("{{VERSION_LINKS}}", version_links)
+    else:
+        index_html = f"""<!DOCTYPE html>
 <html lang="ru">
-<head><meta charset="utf-8"><title>EDT Comfort p2</title></head>
+<head><meta charset="utf-8"><title>EDT Comfort</title></head>
 <body>
   <h1>EDT Comfort — p2 update site</h1>
-  <p>Установить новое ПО (все версии, composite):<br>
-  <code>{SITE_BASE_URL}</code></p>
-  <p>Архивные версии (отдельный каталог):</p>
+  <p><a href="help/">Справка</a></p>
+  <p>Установить новое ПО:<br><code>{SITE_BASE_URL}</code></p>
   <ul>
 {version_links}
   </ul>
@@ -206,8 +237,34 @@ def main() -> None:
     with open(os.path.join(deploy_dir, "index.html"), "w", encoding="utf-8") as f:
         f.write(index_html)
 
+
+def publish_p2_site(children: list[str]) -> None:
+    for child in children:
+        publish_p2_files(os.path.join(deploy_dir, child))
+    write_version_index_pages(children)
+    remove_root_simple_repository()
+    if children:
+        write_composite_repository(children)
+
+
+def main() -> None:
+    global latest
+    repo_root = os.environ.get("REPO_ROOT", ".")
+    docs_only = os.environ.get("DOCS_ONLY") == "1"
+
+    children = list_version_children()
+    children = order_version_children(children)
+
+    if not docs_only:
+        publish_p2_site(children)
+
+    publish_help_site(repo_root)
+    write_root_index_html(children)
+    open(os.path.join(deploy_dir, ".nojekyll"), "w").close()
+
     print("Latest version:", latest)
     print("Composite children:", children)
+    print("Docs only:", docs_only)
 
 
 if __name__ == "__main__":

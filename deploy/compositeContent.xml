@@ -2,7 +2,7 @@
 <?compositeMetadataRepository version='1.0.0'?>
 <repository name='EDT Comfort' type='org.eclipse.equinox.internal.p2.metadata.repository.CompositeMetadataRepository' version='1.0.0'>
   <properties size='1'>
-    <property name='p2.timestamp' value='1781106601314'/>
+    <property name='p2.timestamp' value='1782105518019'/>
   </properties>
   <children size='1'>
     <child location='1.0.0.12/'/>

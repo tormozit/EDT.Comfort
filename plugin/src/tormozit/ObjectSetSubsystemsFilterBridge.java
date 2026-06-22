@@ -43,8 +43,11 @@ import java.util.Set;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 
 /**
- * Обёртка штатного фильтра подсистем: при включённой «звезде» наборов
+ * Обёртка штатного фильтра подсистем в <em>навигаторе</em>: при включённой «звезде» наборов
  * фильтр по непустому add-target набору вытесняет фильтр подсистем.
+ *
+ * <p>Не путать с {@link FilterBySubsystemsDialogHook}: в диалоге «Отбор / Фильтр по подсистемам»
+ * наборы объектов не отображаются (TODO — см. javadoc там).
  */
 public final class ObjectSetSubsystemsFilterBridge implements IStartup
 {

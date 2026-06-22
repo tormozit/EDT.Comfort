@@ -1,19 +1,33 @@
-Плагин широкого назначения для 1C EDT 2025.2.
-Список функций пока тут https://github.com/tormozit/EDT-Tormozit/releases.
-В частности обеспечивает доступ к функциям подсистемы "Инструменты разработчика Tormozit" (ИР) через автоматическе подключения через OLE (COM) служебного клиентского приложения текущей базы 1С.
+Плагин широкого назначения для **1C EDT 2025.2+**: навигация, наборы объектов, редактор BSL, отладка, сравнение конфигураций, интеграция с [Инструментами разработчика Tormozit (ИР)](docs/obshchie-mekhanizmy.md#integraciya-s-ir).
 
-Установка/Обновление:
-1. При наличии интернета - Главное меню / Справка / Установить новое ПО... / Добавить / https://tormozit.github.io/EDT.Comfort
-2. При отсутствии интернета - Главное меню / Справка / Установить новое ПО... / Добавить / Архив... / Выбрать скаченный zip файл / Добавить
-3. Пометить "EDT Comfort" / Далее / Готово.
-4. Если все сделали правильно, то EDT предложит перезапуск.
+## Справка
 
-Если установщик не видит новую версию, то нужно нажать в нем "Управление..." и в открывшемся списке сайтов нажать "Обновить" или передобавить сайт (с именем установочного файла в случае архива).
+- В репозитории: [docs/README.md](docs/README.md)
+- На сайте: [https://tormozit.github.io/EDT.Comfort/help/](https://tormozit.github.io/EDT.Comfort/help/)
 
-Раздел настроек "Комфорт" расположен на верхнем уровне окна "Параметры".
+## Установка
 
-Сборка релиза:
-1. `site\release.bat` — поднимает версию в [site/version.txt](site/version.txt) и очищает старые артефакты (`site\release.bat republish` — та же линейка).
-2. `Build All` в проекте site (Eclipse) или `site\build.bat` (Maven).
-3. Закоммитить `site/features/`, `site/plugins/`, `site/content.jar`, `site/artifacts.jar`.
-4. GitHub Actions → **Publish p2 site** → Run workflow.
+1. **Справка** → **Установить новое ПО…** → **Добавить** → `https://tormozit.github.io/EDT.Comfort/`
+2. Без интернета — **Архив…** и ZIP с [релизов](https://github.com/tormozit/EDT.Comfort/releases)
+3. **EDT Comfort** → перезапуск EDT
+
+Подробнее: [docs/ustanovka-i-obnovlenie.md](docs/ustanovka-i-obnovlenie.md)
+
+**Параметры → Комфорт** — настройки на верхнем уровне.
+
+## Публикация
+
+### p2 + справка
+
+1. `site\release.bat` — версия в [site/version.txt](site/version.txt)
+2. **Build All** (Eclipse) или `site\build.bat`
+3. Закоммитить `site/features/`, `site/plugins/`, `site/content.jar`, `site/artifacts.jar`
+4. Actions → **Publish p2 site**
+
+### Только справка
+
+Actions → **Publish docs** (без пересборки p2)
+
+### Редактирование справки
+
+Файлы в [docs/](docs/); шаблон окна: [docs/_shablon-okna.md](docs/_shablon-okna.md)

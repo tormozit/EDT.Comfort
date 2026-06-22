@@ -570,4 +570,31 @@
     </objectContribution>
   </extension>
 
+  <extension point="org.eclipse.ui.viewActions">
+    <viewContribution
+          id="tormozit.bslExpressionsViewActions"
+          targetID="com._1c.g5.v8.dt.debug.ui.variables.BslExpressionsView">
+      <action
+            class="tormozit.RecalculateAllExpressionsAction"
+            icon="platform:/plugin/org.eclipse.ui/icons/full/elcl16/refresh_nav.png"
+            id="tormozit.expressions.bsl.recalculateAll"
+            label="Пересчитать все"
+            toolbarPath="expressionGroup"
+            tooltip="Полное обновление всех выражений (Комфорт)">
+      </action>
+    </viewContribution>
+    <viewContribution
+          id="tormozit.expressionViewActions"
+          targetID="org.eclipse.debug.ui.ExpressionView">
+      <action
+            class="tormozit.RecalculateAllExpressionsAction"
+            icon="platform:/plugin/org.eclipse.ui/icons/full/elcl16/refresh_nav.png"
+            id="tormozit.expressions.stock.recalculateAll"
+            label="Пересчитать все"
+            toolbarPath="expressionGroup"
+            tooltip="Полное обновление всех выражений (Комфорт)">
+      </action>
+    </viewContribution>
+  </extension>
+
 </plugin>

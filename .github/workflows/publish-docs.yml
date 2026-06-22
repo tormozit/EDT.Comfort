@@ -1,0 +1,40 @@
+name: Publish docs
+
+# Обновить только справку (help/) и корневую index.html на gh-pages без пересборки p2.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Checkout gh-pages into deploy
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: deploy
+
+      - name: Verify gh-pages layout
+        run: |
+          test -f deploy/p2.index || (echo "ERROR: deploy/p2.index missing — run Publish p2 site first" && exit 1)
+
+      - name: Update help site
+        env:
+          DOCS_ONLY: "1"
+          REPO_ROOT: .
+          DEPLOY_DIR: deploy
+        run: python3 .github/workflows/generate_composite.py
+
+      - name: Push to gh-pages branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./deploy
+          publish_branch: gh-pages
+          commit_message: "Update user documentation"
