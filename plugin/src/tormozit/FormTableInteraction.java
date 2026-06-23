@@ -20,6 +20,7 @@ import org.eclipse.swt.events.SelectionEvent;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Device;
 import org.eclipse.swt.graphics.GC;
+import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.graphics.Rectangle;
@@ -56,6 +57,8 @@ final class FormTableInteraction
         String cellText(TableItem item, int column);
     }
 
+    private static final TableColumn[] NO_OWNER_DRAW_COLUMNS = new TableColumn[0];
+
     private final Table table;
     private final FormTableCellAccess cellAccess;
 
@@ -71,6 +74,7 @@ final class FormTableInteraction
     private Color ownedRowBg;
     private Color ownedInactiveRowBg;
     private Color ownedActiveCellBg;
+    private Color ownedSelectionFg;
     private Color ownedHeaderAccentBg;
     private Color ownedHeaderSeparatorBg;
 
@@ -91,6 +95,7 @@ final class FormTableInteraction
     private Listener menuDetectListener;
     private Listener keyFilter;
     private Listener mouseDownListener;
+    private TableColumn[] ownerDrawColumns = NO_OWNER_DRAW_COLUMNS;
 
     FormTableInteraction(Table table, FormTableCellAccess cellAccess)
     {
@@ -132,6 +137,15 @@ final class FormTableInteraction
         this.copyHook = copyHook;
     }
 
+    /** Колонки с {@code DelegatingStyledCellLabelProvider} (owner-draw), напр. «Имя». */
+    void setOwnerDrawColumns(TableColumn... columns)
+    {
+        if (columns == null || columns.length == 0)
+            ownerDrawColumns = NO_OWNER_DRAW_COLUMNS;
+        else
+            ownerDrawColumns = columns.clone();
+    }
+
     void setColumnReorderEnabled(boolean columnReorderEnabled)
     {
         this.columnReorderEnabled = columnReorderEnabled;
@@ -141,6 +155,8 @@ final class FormTableInteraction
     {
         if (table == null || table.isDisposed())
             return;
+
+        ListSelectionThemeColors.markOptOut(table);
 
         mouseDownListener = this::onMouseDown;
         table.addListener(SWT.MouseDown, mouseDownListener);
@@ -153,6 +169,7 @@ final class FormTableInteraction
         focusListener = e ->
         {
             invalidateHighlightColor();
+            syncSelectedRowForeground();
             redrawSelectedRows();
             redrawHeader();
         };
@@ -168,6 +185,16 @@ final class FormTableInteraction
         keyFilter = this::onKeyFilter;
         table.getDisplay().addFilter(SWT.KeyDown, keyFilter);
         installHeaderOverlays();
+        ListSelectionThemeColors.installSelectionPrePaintFilter(table, (t, item, col) ->
+        {
+            if (!isOwnerDrawColumn(col))
+                return null;
+            Color bg = selectionCellBackground(t, item, col);
+            if (bg == null || bg.isDisposed())
+                return null;
+            return new Color(t.getDisplay(), bg.getRGB());
+        }, "formTable"); //$NON-NLS-1$
+        table.getDisplay().asyncExec(this::syncSelectedRowForeground);
         table.addDisposeListener(e -> dispose());
     }
 
@@ -177,6 +204,13 @@ final class FormTableInteraction
             table.getDisplay().removeFilter(SWT.KeyDown, keyFilter);
         uninstallHeaderOverlays();
         disposeColors();
+    }
+
+    /** После {@code viewer.refresh()} / {@code setInput} — plain-колонки теряют fg selection. */
+    void resyncSelectionTheme()
+    {
+        syncSelectedRowForeground();
+        redrawSelectedRows();
     }
 
     void selectCell(TableItem item, int column)
@@ -415,12 +449,14 @@ final class FormTableInteraction
             redrawSelectedRows();
             if (previousActive != null && !isRowSelected(previousActive))
                 redrawRow(previousActive);
+            syncSelectedRowForeground();
         }
         else
         {
             redrawRow(previousActive);
             redrawRow(selectedItem);
         }
+        syncSelectedRowForeground();
         redrawHeader();
         if (suppressTableToViewerSync <= 0)
             syncSelection();
@@ -501,17 +537,74 @@ final class FormTableInteraction
     {
         if (!(e.item instanceof TableItem item) || !isRowSelected(item))
             return;
-        int col = activeColumnIndex();
+        Color bg = selectionCellBackground(table, item, e.index);
+        if (bg == null)
+            return;
+        if (ListSelectionThemeColors.isDarkList(table))
+        {
+            ListSelectionThemeColors.fillSelectionBackground(e, table, item, bg);
+            Color fg = selectionForeground();
+            if (fg != null)
+                e.gc.setForeground(fg);
+        }
+        else
+        {
+            e.gc.setBackground(bg);
+            e.gc.fillRectangle(e.x, e.y, e.width, e.height);
+        }
+        e.detail &= ~SWT.BACKGROUND;
+    }
+
+    private Color selectionCellBackground(Table t, TableItem item, int column)
+    {
+        if (!isRowSelected(item))
+            return null;
         boolean activeRow = item == selectedItem;
         Color rowBg = activeRow ? rowSelectionBackground() : inactiveRowSelectionBackground();
-        Color bg = activeRow && e.index == col ? activeCellBackground(rowBg) : rowBg;
-        e.gc.setBackground(bg);
-        e.gc.fillRectangle(e.x, e.y, e.width, e.height);
-        e.detail &= ~SWT.BACKGROUND;
+        if (rowBg == null)
+            return null;
+        if (activeRow && column == activeColumnIndex())
+            return activeCellBackground(rowBg);
+        return rowBg;
+    }
+
+    private Color selectionForeground()
+    {
+        if (ownedSelectionFg != null && !ownedSelectionFg.isDisposed())
+            return ownedSelectionFg;
+        Color resolved = ListSelectionThemeColors.listSelectionForeground(table);
+        if (resolved == null)
+            return null;
+        ownedSelectionFg = new Color(table.getDisplay(), resolved.getRGB());
+        return ownedSelectionFg;
+    }
+
+    /** Plain-колонки: светлый текст на кастомном фоне selection в тёмной теме. */
+    private void syncSelectedRowForeground()
+    {
+        if (table == null || table.isDisposed())
+            return;
+        Color selFg = selectionForeground();
+        if (selFg == null)
+            return;
+        int cols = table.getColumnCount();
+        for (TableItem item : table.getItems())
+        {
+            if (item == null || item.isDisposed())
+                continue;
+            boolean isSel = isRowSelected(item);
+            for (int c = 0; c < cols; c++)
+                item.setForeground(c, isSel ? selFg : null);
+        }
     }
 
     private void onPaintItem(Event e)
     {
+        if (ListSelectionThemeColors.isDarkList(table))
+        {
+            paintDarkSelectedPlainCell(e);
+            return;
+        }
         if (!(e.item instanceof TableItem item) || item != selectedItem || e.index != activeColumnIndex())
             return;
         Rectangle bounds = item.getBounds(e.index);
@@ -530,6 +623,67 @@ final class FormTableInteraction
             if (!frame.isDisposed())
                 frame.dispose();
         }
+    }
+
+    /**
+     * Plain-колонки (не owner-draw): SWT рисует серый текст/без иконки поверх кастомного фона —
+     * перекрываем ячейку и рисуем фон + иконку + текст заново.
+     */
+    private void paintDarkSelectedPlainCell(Event e)
+    {
+        if (!(e.item instanceof TableItem item) || !isRowSelected(item) || e.gc == null)
+            return;
+        int col = e.index;
+        if (isOwnerDrawColumn(col))
+            return;
+
+        Rectangle bounds = item.getBounds(col);
+        if (bounds == null || bounds.isEmpty())
+            return;
+
+        Color bg = rowSelectionBackground();
+        Color fg = selectionForeground();
+        if (bg == null || fg == null)
+            return;
+
+        String text = cellAccess != null ? cellAccess.cellText(item, col) : item.getText(col);
+        if (text == null)
+            text = ""; //$NON-NLS-1$
+        Image image = item.getImage(col);
+
+        GC gc = e.gc;
+        gc.setBackground(bg);
+        gc.fillRectangle(bounds);
+
+        if (image != null && !image.isDisposed())
+        {
+            Rectangle imgBounds = item.getImageBounds(col);
+            if (imgBounds != null && !imgBounds.isEmpty())
+                gc.drawImage(image, imgBounds.x, imgBounds.y);
+        }
+
+        if (!text.isEmpty())
+        {
+            gc.setForeground(fg);
+            gc.setFont(table.getFont());
+            Point ext = gc.textExtent(text);
+            int x = bounds.x + 6;
+            int y = bounds.y + Math.max(0, (bounds.height - ext.y) / 2);
+            gc.drawText(text, x, y, true);
+        }
+    }
+
+    private boolean isOwnerDrawColumn(int columnIndex)
+    {
+        if (ownerDrawColumns.length == 0 || columnIndex < 0 || columnIndex >= table.getColumnCount())
+            return false;
+        TableColumn column = table.getColumn(columnIndex);
+        for (TableColumn ownerDraw : ownerDrawColumns)
+        {
+            if (ownerDraw == column)
+                return true;
+        }
+        return false;
     }
 
     private void installHeaderOverlays()
@@ -988,6 +1142,11 @@ final class FormTableInteraction
     {
         if (ownedRowBg != null && !ownedRowBg.isDisposed())
             return ownedRowBg;
+        if (ListSelectionThemeColors.isDarkList(table))
+        {
+            ownedRowBg = ListSelectionThemeColors.listSelectionBackground(table, table.isFocusControl());
+            return ownedRowBg;
+        }
         Color base = table.getBackground();
         if (base == null || base.isDisposed())
             base = table.getDisplay().getSystemColor(SWT.COLOR_LIST_BACKGROUND);
@@ -1003,6 +1162,12 @@ final class FormTableInteraction
             return rowSelectionBackground();
         if (ownedInactiveRowBg != null && !ownedInactiveRowBg.isDisposed())
             return ownedInactiveRowBg;
+        if (ListSelectionThemeColors.isDarkList(table))
+        {
+            ownedInactiveRowBg = ListSelectionThemeColors.inactiveRowSelectionBackground(
+                table, table.isFocusControl());
+            return ownedInactiveRowBg;
+        }
         Color base = table.getBackground();
         if (base == null || base.isDisposed())
             base = table.getDisplay().getSystemColor(SWT.COLOR_LIST_BACKGROUND);
@@ -1015,6 +1180,11 @@ final class FormTableInteraction
     {
         if (ownedActiveCellBg != null && !ownedActiveCellBg.isDisposed())
             return ownedActiveCellBg;
+        if (ListSelectionThemeColors.isDarkList(table))
+        {
+            ownedActiveCellBg = ListSelectionThemeColors.activeCellBackground(table, rowBg);
+            return ownedActiveCellBg;
+        }
         ownedActiveCellBg = slightlyDarker(rowBg, table.isFocusControl() ? 0.08 : 0.06);
         return ownedActiveCellBg;
     }
@@ -1074,6 +1244,8 @@ final class FormTableInteraction
             ownedInactiveRowBg.dispose();
         if (ownedActiveCellBg != null && !ownedActiveCellBg.isDisposed())
             ownedActiveCellBg.dispose();
+        if (ownedSelectionFg != null && !ownedSelectionFg.isDisposed())
+            ownedSelectionFg.dispose();
         if (ownedHeaderAccentBg != null && !ownedHeaderAccentBg.isDisposed())
             ownedHeaderAccentBg.dispose();
         if (ownedHeaderSeparatorBg != null && !ownedHeaderSeparatorBg.isDisposed())
@@ -1081,6 +1253,7 @@ final class FormTableInteraction
         ownedRowBg = null;
         ownedInactiveRowBg = null;
         ownedActiveCellBg = null;
+        ownedSelectionFg = null;
         ownedHeaderAccentBg = null;
         ownedHeaderSeparatorBg = null;
     }

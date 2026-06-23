@@ -287,6 +287,7 @@ public final class RecentPlacesView extends ViewPart
         listViewer.setContentProvider(ArrayContentProvider.getInstance());
 
         tableInteraction = new FormTableInteraction(table, listViewer, this::cellText);
+        tableInteraction.setOwnerDrawColumns(nameColumn);
         tableInteraction.install();
 
         installColumnWidthPersistence();

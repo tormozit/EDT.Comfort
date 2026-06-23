@@ -15,7 +15,9 @@ import org.eclipse.swt.widgets.Shell;
  */
 public final class ContentAssistPopupUi
 {
-    private static final String BAR_DATA_KEY = "tormozit.filterBar"; //$NON-NLS-1$
+    /** Data-key нижней панели popup (для определения таблицы автодополнения). */
+    public static final String FILTER_BAR_DATA_KEY = "tormozit.filterBar"; //$NON-NLS-1$
+    private static final String BAR_DATA_KEY = FILTER_BAR_DATA_KEY;
     private static final String TOGGLE_DATA_KEY = "tormozit.filterToggleButton"; //$NON-NLS-1$
     private static final String CONTEXT_LABEL_DATA_KEY = "tormozit.contextTypeLabel"; //$NON-NLS-1$
     /** Не реагировать на {@code setSelection} при программной синхронизации с Ctrl+Space. */

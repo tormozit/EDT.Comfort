@@ -597,6 +597,7 @@ public final class ContentAssistPopupSync
                     }
                     catch (Exception ignored) {}
                 });
+            ListSelectionThemeHook.ensureControl(table);
         }
         catch (Exception ignored) {}
     }

@@ -383,6 +383,7 @@ public final class ObjectSetsView extends ViewPart
                 return placePrefix(row.displayName, row.ownName);
             return ""; //$NON-NLS-1$
         });
+        itemsInteraction.setOwnerDrawColumns(nameColumn);
         itemsInteraction.install();
 
         installItemsFilterNavigation(table);
@@ -651,6 +652,8 @@ public final class ObjectSetsView extends ViewPart
             setsViewer.setSelection(new StructuredSelection(pick));
             selectedSet = pick;
         }
+        if (setsInteraction != null)
+            setsInteraction.resyncSelectionTheme();
         refreshItemsTable();
     }
 
@@ -844,6 +847,8 @@ public final class ObjectSetsView extends ViewPart
         {
             table.setRedraw(true);
             pendingItemKeyRestore = null;
+            if (itemsInteraction != null)
+                itemsInteraction.resyncSelectionTheme();
         }
     }
 
@@ -1189,14 +1194,33 @@ public final class ObjectSetsView extends ViewPart
                 name = ""; //$NON-NLS-1$
 
             StyledString styled = new StyledString();
+            Table table = itemsViewer != null && !itemsViewer.getControl().isDisposed()
+                ? itemsViewer.getTable() : null;
+            boolean selected = isItemsRowSelected(element);
             for (NameSegment seg : buildNameSegments(name, matcher))
             {
                 if (seg.highlight)
-                    styled.append(seg.text, SmartMatchHighlight.styler());
+                    styled.append(seg.text, selected ? SmartMatchHighlight.boldOnlyStyler()
+                        : SmartMatchHighlight.styler(table));
                 else
                     styled.append(seg.text);
             }
             return styled;
+        }
+
+        private boolean isItemsRowSelected(Object element)
+        {
+            if (itemsViewer == null || itemsViewer.getControl().isDisposed())
+                return false;
+            IStructuredSelection sel = itemsViewer.getStructuredSelection();
+            if (sel == null || sel.isEmpty())
+                return false;
+            for (Object o : sel.toArray())
+            {
+                if (element == o || element.equals(o))
+                    return true;
+            }
+            return false;
         }
     }
 

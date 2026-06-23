@@ -289,6 +289,8 @@ final class DebugInspectorTreeEnhancement
         if (tree.isDisposed())
             return false;
 
+        ListSelectionThemeColors.markOptOut(tree);
+
         syncFromTreeSelection();
 
         mouseListener = new MouseAdapter()
@@ -440,6 +442,11 @@ final class DebugInspectorTreeEnhancement
     {
         if (ownedRowBg != null && !ownedRowBg.isDisposed())
             return ownedRowBg;
+        if (ListSelectionThemeColors.isDarkList(tree))
+        {
+            ownedRowBg = ListSelectionThemeColors.listSelectionBackground(tree, tree.isFocusControl());
+            return ownedRowBg;
+        }
         Display display = tree.getDisplay();
         Color base = tree.getBackground();
         if (base == null || base.isDisposed())
@@ -453,6 +460,11 @@ final class DebugInspectorTreeEnhancement
     {
         if (ownedActiveCellBg != null && !ownedActiveCellBg.isDisposed())
             return ownedActiveCellBg;
+        if (ListSelectionThemeColors.isDarkList(tree))
+        {
+            ownedActiveCellBg = ListSelectionThemeColors.activeCellBackground(tree, rowBg);
+            return ownedActiveCellBg;
+        }
         ownedActiveCellBg = slightlyDarker(rowBg, tree.isFocusControl() ? 0.08 : 0.06);
         return ownedActiveCellBg;
     }
