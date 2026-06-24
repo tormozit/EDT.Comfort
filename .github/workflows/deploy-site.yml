@@ -55,7 +55,7 @@ jobs:
           echo "Tag v$TAG_VER matches version.txt"
 
       - name: Sync version
-        run: pwsh site/sync-version.ps1
+        run: pwsh site/scripts/sync-version.ps1
 
       - name: Verify Maven modules
         shell: bash

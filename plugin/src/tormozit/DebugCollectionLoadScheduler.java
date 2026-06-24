@@ -339,9 +339,17 @@ final class DebugCollectionLoadScheduler
                 DebugCollectionDebug.problem("contextVariables: " + e.getMessage()); //$NON-NLS-1$
             }
             final IBslVariable[] result = context != null ? context : new IBslVariable[0];
-            if (result.length == 0 && !disposed.get() && !monitor.isCanceled()
-                && contextResolveAttempts.incrementAndGet() <= 8)
+            boolean metadataOnly = DebugCollectionPropertyVariables.isRowMetadataContext(result);
+            boolean indexedPlaceholders = DebugCollectionPropertyVariables.isIndexedPlaceholderContext(result);
+            if ((result.length == 0 || metadataOnly || indexedPlaceholders) && !disposed.get()
+                && !monitor.isCanceled() && contextResolveAttempts.incrementAndGet() <= 8)
             {
+                if (metadataOnly)
+                    DebugCollectionDebug.step("columns.ctx", "metadata-retry attempt=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + contextResolveAttempts.get());
+                else if (indexedPlaceholders)
+                    DebugCollectionDebug.step("columns.ctx", "placeholder-retry attempt=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + contextResolveAttempts.get());
                 Job followUp = Job.create("Комфорт: колонки коллекции (retry)", m -> { //$NON-NLS-1$
                     scheduleContextJobInternal();
                     return org.eclipse.core.runtime.Status.OK_STATUS;
@@ -350,13 +358,15 @@ final class DebugCollectionLoadScheduler
                 followUp.schedule(200);
                 return org.eclipse.core.runtime.Status.OK_STATUS;
             }
-            if (result.length > 0)
+            if (result.length > 0 && !metadataOnly && !indexedPlaceholders)
                 contextResolveAttempts.set(0);
+            final IBslVariable[] deliver = metadataOnly || indexedPlaceholders
+                ? new IBslVariable[0] : result;
             if (display != null && !display.isDisposed())
             {
                 display.asyncExec(() -> {
                     if (!disposed.get())
-                        contextColumnsListener.accept(result);
+                        contextColumnsListener.accept(deliver);
                 });
             }
             return org.eclipse.core.runtime.Status.OK_STATUS;
@@ -754,7 +764,7 @@ final class DebugCollectionLoadScheduler
             if (direct == null)
                 direct = new IBslVariable[0];
 
-            if (rowUnion.length > 0)
+            if (DebugCollectionPropertyVariables.isAcceptableColumnContext(rowUnion))
             {
                 IBslVariable[] chosen = capColumns(rowUnion);
                 DebugCollectionDebug.step("columns.ctx", //$NON-NLS-1$
@@ -763,7 +773,27 @@ final class DebugCollectionLoadScheduler
                 return chosen;
             }
 
-            if (direct.length > 0 && direct.length <= MAX_DIRECT_CONTEXT_COLS)
+            if (isTabularCollectionType(indexed))
+            {
+                IBslVariable[] tableSchema = resolveValueTableSchemaColumns(indexed);
+                if (DebugCollectionPropertyVariables.isAcceptableColumnContext(tableSchema))
+                {
+                    IBslVariable[] chosen = capColumns(tableSchema);
+                    DebugCollectionDebug.step("columns.ctx", "tableSchema=" + tableSchema.length); //$NON-NLS-1$ //$NON-NLS-2$
+                    return chosen;
+                }
+            }
+
+            IBslVariable[] rowVars = resolveRowVariablesUnion(indexed);
+            if (DebugCollectionPropertyVariables.isAcceptableColumnContext(rowVars))
+            {
+                IBslVariable[] chosen = capColumns(rowVars);
+                DebugCollectionDebug.step("columns.ctx", "rowVars=" + rowVars.length); //$NON-NLS-1$ //$NON-NLS-2$
+                return chosen;
+            }
+
+            if (direct.length > 0 && direct.length <= MAX_DIRECT_CONTEXT_COLS
+                && DebugCollectionPropertyVariables.isAcceptableColumnContext(direct))
             {
                 DebugCollectionDebug.step("columns.ctx", "direct=" + direct.length); //$NON-NLS-1$ //$NON-NLS-2$
                 return direct;
@@ -778,13 +808,13 @@ final class DebugCollectionLoadScheduler
             }
 
             IBslVariable[] mutual = resolveMutualFromRows(indexed);
-            if (mutual.length > 0)
+            if (DebugCollectionPropertyVariables.isAcceptableColumnContext(mutual))
             {
                 DebugCollectionDebug.step("columns.ctx", "mutual=" + mutual.length); //$NON-NLS-1$ //$NON-NLS-2$
                 return mutual;
             }
 
-            if (direct.length > 0)
+            if (direct.length > 0 && DebugCollectionPropertyVariables.isAcceptableColumnContext(direct))
             {
                 DebugCollectionDebug.step("columns.ctx", "directFallback=" + direct.length); //$NON-NLS-1$ //$NON-NLS-2$
                 return capColumns(direct);
@@ -831,6 +861,132 @@ final class DebugCollectionLoadScheduler
                 }
             }
             return templates.values().toArray(new IBslVariable[0]);
+        }
+
+        /** Union имён из {@code getVariables()} строк — поля данных ТаблицаЗначений и др. */
+        private static IBslVariable[] resolveRowVariablesUnion(IBslIndexedValue indexed) throws DebugException
+        {
+            int size = indexed.getSize();
+            if (size <= 0)
+                return new IBslVariable[0];
+
+            int count = Math.min(size, SAMPLE_ROWS);
+            IBslVariable[] rows = indexed.getVariables(0, count);
+            if (rows == null || rows.length == 0)
+                return new IBslVariable[0];
+
+            Map<String, IBslVariable> templates = new LinkedHashMap<>();
+            for (IBslVariable row : rows)
+            {
+                if (row == null)
+                    continue;
+                IBslValue value = row.getValue();
+                if (value == null || value.isPending())
+                    continue;
+                if (!value.isEvaluated())
+                    value.evaluate();
+                if (value.isPending())
+                    continue;
+
+                IBslVariable[] props = value.getVariables();
+                if (props == null || props.length == 0)
+                    continue;
+                for (IBslVariable prop : props)
+                {
+                    if (prop == null)
+                        continue;
+                    String name = prop.getName();
+                    if (name == null || name.isBlank())
+                        continue;
+                    templates.putIfAbsent(name, prop);
+                }
+            }
+            return templates.values().toArray(new IBslVariable[0]);
+        }
+
+        private static IBslVariable[] resolveValueTableSchemaColumns(IBslIndexedValue indexed) throws DebugException
+        {
+            if (!isTabularCollectionType(indexed))
+                return new IBslVariable[0];
+
+            IBslVariable columnsVar = findNamedVariable(indexed.getContextVariables(), "Колонки"); //$NON-NLS-1$
+            if (columnsVar == null)
+                columnsVar = findNamedVariable(indexed.getVariables(), "Колонки"); //$NON-NLS-1$
+            if (columnsVar == null)
+                return new IBslVariable[0];
+
+            IBslValue columnsValue = columnsVar.getValue();
+            if (columnsValue == null || columnsValue.isPending())
+                return new IBslVariable[0];
+            if (!columnsValue.isEvaluated())
+                columnsValue.evaluate();
+            if (columnsValue.isPending())
+                return new IBslVariable[0];
+
+            if (columnsValue instanceof IBslIndexedValue columnsIndexed)
+            {
+                int size = columnsIndexed.getSize();
+                if (size <= 0)
+                    return new IBslVariable[0];
+                IBslVariable[] defs = columnsIndexed.getVariables(0, size);
+                if (defs == null || defs.length == 0)
+                    return new IBslVariable[0];
+                Map<String, IBslVariable> templates = new LinkedHashMap<>();
+                for (IBslVariable def : defs)
+                {
+                    if (def == null)
+                        continue;
+                    String name = def.getName();
+                    if (name == null || name.isBlank())
+                        continue;
+                    templates.putIfAbsent(name, def);
+                }
+                return templates.values().toArray(new IBslVariable[0]);
+            }
+
+            IBslVariable[] defs = columnsValue.getVariables();
+            if (defs == null || defs.length == 0)
+                return new IBslVariable[0];
+            Map<String, IBslVariable> templates = new LinkedHashMap<>();
+            for (IBslVariable def : defs)
+            {
+                if (def == null)
+                    continue;
+                String name = def.getName();
+                if (name == null || name.isBlank())
+                    continue;
+                templates.putIfAbsent(name, def);
+            }
+            return templates.values().toArray(new IBslVariable[0]);
+        }
+
+        private static boolean isTabularCollectionType(IBslIndexedValue indexed)
+        {
+            if (indexed == null)
+                return false;
+            String typeName = indexed.getValueTypeName();
+            if (typeName == null || typeName.isBlank())
+                return false;
+            String lower = typeName.toLowerCase(java.util.Locale.ROOT);
+            return lower.contains("таблицазначений") //$NON-NLS-1$
+                || lower.contains("valuetable") //$NON-NLS-1$
+                || lower.contains("деревозначений") //$NON-NLS-1$
+                || lower.contains("valuetree"); //$NON-NLS-1$
+        }
+
+        private static IBslVariable findNamedVariable(IBslVariable[] variables, String name)
+        {
+            if (variables == null || variables.length == 0 || name == null || name.isBlank())
+                return null;
+            for (IBslVariable variable : variables)
+            {
+                if (variable == null)
+                    continue;
+                String variableName = variable.getName();
+                if (variableName != null && variableName.equalsIgnoreCase(name))
+                    return variable;
+            }
+            return null;
         }
 
         private static IBslVariable[] capColumns(IBslVariable[] direct)

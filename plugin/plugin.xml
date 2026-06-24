@@ -35,6 +35,7 @@
     <startup class="tormozit.ChoiceParametersHook"/>
     <startup class="tormozit.PredefinedSelectionDialogHook"/>
     <startup class="tormozit.DebugViewsMenuHook"/>
+    <startup class="tormozit.DebugViewsCollectionKeyHook"/>
     <startup class="tormozit.DebugValuesInspectHook"/>
     <startup class="tormozit.DebugCollectionSessionHook"/>
     <startup class="tormozit.DebugInspectorHook"/>

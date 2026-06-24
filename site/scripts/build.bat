@@ -32,18 +32,6 @@ for /d %%D in ("C:\Program Files\Java\jdk-17*") do (
 
 echo.
 echo ОШИБКА: не найден рабочий JDK 17.
-echo.
-if exist "C:\Program Files\Zulu\zulu-17\bin\java.exe" (
-    echo Установлен Zulu 17, но он поврежден - java.exe не запускается
-    echo ^(отсутствует java.dll^). Переустановите JDK 17:
-    echo   https://www.azul.com/downloads/?version=java-17-lts^&os=windows^&architecture=x86_64-bit^&package=jdk
-    echo или Eclipse Temurin 17:
-    echo   https://adoptium.net/temurin/releases/?version=17
-) else (
-    echo Установите JDK 17 и задайте переменную JAVA_HOME, либо положите JDK
-    echo в одну из стандартных папок ^(Zulu, Eclipse Adoptium, Microsoft, BellSoft^).
-)
-echo.
 pause
 exit /b 1
 
@@ -61,14 +49,21 @@ echo Using JAVA_HOME=%JAVA_HOME%
 exit /b 0
 
 :java_ready
-call "%~dp0sync-version.bat"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0sync-version.ps1"
 if errorlevel 1 exit /b 1
+
+if not exist "%~dp0..\..\target\tp.target" (
+    echo Restoring target/tp.target from git...
+    git -C "%~dp0..\.." checkout HEAD -- target/tp.target target/pom.xml
+)
 
 echo.
 echo Building EDT Comfort plugin...
-call mvn clean package -f "%~dp0..\pom.xml"
-
-if errorlevel 1 (
+pushd "%~dp0..\.."
+call mvn clean package -f pom.xml
+set MVN_ERR=%ERRORLEVEL%
+popd
+if not %MVN_ERR%==0 (
     echo.
     echo BUILD FAILED
     pause
@@ -78,6 +73,6 @@ if errorlevel 1 (
 echo.
 echo BUILD SUCCESS
 echo ZIP: site\target\EDT.Comfort-*.zip
-for %%f in ("%~dp0target\*.zip") do echo       %%f
+for %%f in ("%~dp0..\target\*.zip") do echo       %%f
 endlocal
 exit /b 0

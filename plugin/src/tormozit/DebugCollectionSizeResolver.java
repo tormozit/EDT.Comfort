@@ -72,7 +72,7 @@ final class DebugCollectionSizeResolver
                     int chunkTo = Math.min(colTo, chunkFrom + COL_CHUNK - 1);
                     for (int col = chunkFrom; col <= chunkTo; col++)
                     {
-                        if (isIndexColumn(model, col))
+                        if (isSizePassSkippedColumn(model, col))
                             continue;
                         String outcome = resolveCellSize(model, row, col);
                         switch (outcome)
@@ -98,10 +98,13 @@ final class DebugCollectionSizeResolver
         }).schedule();
     }
 
-    private static boolean isIndexColumn(DebugCollectionTableModel model, int col)
+    private static boolean isSizePassSkippedColumn(DebugCollectionTableModel model, int col)
     {
         DebugCollectionColumnModel.Column column = model.columns.columnAt(col);
-        return column != null && column.kind == DebugCollectionColumnModel.Kind.INDEX;
+        if (column == null)
+            return false;
+        return column.kind == DebugCollectionColumnModel.Kind.INDEX
+            || column.kind == DebugCollectionColumnModel.Kind.TYPE;
     }
 
     /** @return {@code size} | {@code na} | {@code pending} | {@code skip} | {@code error} */

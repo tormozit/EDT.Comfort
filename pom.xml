@@ -6,7 +6,7 @@
 
   <groupId>tormozit</groupId>
   <artifactId>comfort.parent</artifactId>
-  <version>1.0.0.15-SNAPSHOT</version>
+  <version>1.0.0.16-SNAPSHOT</version>
   <packaging>pom</packaging>
 
   <prerequisites>
@@ -30,6 +30,7 @@
   </modules>
 
   <build>
+    <directory>${project.basedir}/build</directory>
     <pluginManagement>
       <plugins>
         <plugin>

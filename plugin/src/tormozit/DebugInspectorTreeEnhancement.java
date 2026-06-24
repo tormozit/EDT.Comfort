@@ -90,6 +90,7 @@ final class DebugInspectorTreeEnhancement
     private Listener keyFilter;
     private Listener treeKeyListener;
     private Listener menuDetectListener;
+    private Listener doubleClickListener;
     private Listener changeValueSelectionFilter;
     private Listener changeValueInspectorDisposeListener;
     private FindDialogDeactivateGuard changeValueModalGuard;
@@ -293,6 +294,9 @@ final class DebugInspectorTreeEnhancement
 
         syncFromTreeSelection();
 
+        doubleClickListener = this::onTreeDoubleClick;
+        tree.addListener(SWT.MouseDoubleClick, doubleClickListener);
+
         mouseListener = new MouseAdapter()
         {
             @Override
@@ -307,12 +311,6 @@ final class DebugInspectorTreeEnhancement
                 if (column < 0)
                     column = 0;
                 selectCell(item, column);
-            }
-
-            @Override
-            public void mouseDoubleClick(MouseEvent e)
-            {
-                onMouseDoubleClick(e);
             }
         };
         tree.addMouseListener(mouseListener);
@@ -1019,26 +1017,42 @@ final class DebugInspectorTreeEnhancement
         selectCell(item, column);
     }
 
-    private void onMouseDoubleClick(MouseEvent e)
+    private void onTreeDoubleClick(Event e)
     {
-        if (e.button != 1 || tree.isDisposed() || !isIndependentElementDialog())
+        if (e.button != 1 || tree.isDisposed())
             return;
 
         TreeItem item = itemAt(tree, e.x, e.y);
         if (item == null)
             return;
 
-        int valueColumn = resolveInspectorValueColumn();
         int column = columnAt(tree, e.x, e.y, item);
+        if (column < 0)
+            column = 0;
+        selectCell(item, column);
+
+        Object element = item.getData();
+        if (DebugSessionHelper.isDebugSuspended(null)
+            && DebugCollectionShowSupport.canOpenFrom(element))
+        {
+            DebugCollectionShowSupport.openFromElement(element);
+            DebugCollectionDebug.step("doubleClick", "inspector"); //$NON-NLS-1$ //$NON-NLS-2$
+            e.doit = false;
+            return;
+        }
+
+        if (!isIndependentElementDialog())
+            return;
+
+        int valueColumn = resolveInspectorValueColumn();
         if (column != valueColumn)
             return;
 
         if (!isEditableVariable(item))
             return;
 
-        selectCell(item, column);
         tree.setFocus();
-        if (!activateInlineValueEditor(e))
+        if (!activateInlineValueEditor(new MouseEvent(e)))
             logValueEditFailure("activate failed"); //$NON-NLS-1$
     }
 
@@ -1613,6 +1627,8 @@ final class DebugInspectorTreeEnhancement
                 tree.removeListener(SWT.KeyDown, treeKeyListener);
             if (menuDetectListener != null)
                 tree.removeListener(SWT.MenuDetect, menuDetectListener);
+            if (doubleClickListener != null)
+                tree.removeListener(SWT.MouseDoubleClick, doubleClickListener);
             Shell inspectorShell = tree.getShell();
             if (inspectorShell != null && !inspectorShell.isDisposed()
                 && changeValueInspectorDisposeListener != null)
@@ -1623,6 +1639,7 @@ final class DebugInspectorTreeEnhancement
             DebugInspectorCollectionMenuHook.uninstall(tree);
             tree.setData(ENHANCED_KEY, null);
             tree.setData(COPY_HOOKED_KEY, null);
+            doubleClickListener = null;
         }
         invalidateHighlightColor();
         if (keyFilter != null)

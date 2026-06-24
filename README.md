@@ -36,15 +36,7 @@
 
 ### p2 + справка
 
-1. `site\release.bat` — версия в [site/version.txt](site/version.txt)
-2. **Build All** (Eclipse) или `site\build.bat`
+1. `site\republish.bat` — пересборка той же версии (Actions → mode **republish**)
+2. `site\release.bat` — новая линейка (Actions → mode **new**)
 3. Закоммитить `site/features/`, `site/plugins/`, `site/content.jar`, `site/artifacts.jar`
 4. Actions → **Publish p2 site**
-
-### Только справка
-
-Actions → **Publish docs** (без пересборки p2)
-
-### Редактирование справки
-
-Файлы в [docs/](docs/); шаблон окна: [docs/_shablon-okna.md](docs/_shablon-okna.md)

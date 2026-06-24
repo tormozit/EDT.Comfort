@@ -12,3 +12,10 @@ feature/target/
 target/target/
 
 # P2 update site (site/features/, plugins/, *.jar) — коммитить для publish.yml
+
+# Локальное зеркало gh-pages (site/sync-deploy.ps1)
+/deploy/
+/content.xml
+
+# Локальные пути PDE headless (site/scripts/pde-local.properties)
+site/scripts/pde-local.properties

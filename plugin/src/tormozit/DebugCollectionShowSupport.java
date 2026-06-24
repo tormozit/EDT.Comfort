@@ -6,6 +6,8 @@ import org.eclipse.debug.core.model.IWatchExpression;
 import org.eclipse.debug.ui.AbstractDebugView;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.swt.widgets.Tree;
+import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.IWorkbenchPart;
 
 import com._1c.g5.v8.dt.debug.core.model.IBslStackFrame;
@@ -120,6 +122,65 @@ public final class DebugCollectionShowSupport
     public static void openFromWatchExpression(IWatchExpression watch)
     {
         openFromElement(watch);
+    }
+
+    /**
+     * F2 / двойной щелчок в дереве отладочной панели: открыть коллекцию выделенной строки
+     * без workbench-selection (для «Выражений» и инспектора).
+     */
+    public static boolean tryOpenFromDebugTree(Tree tree, AbstractDebugView view)
+    {
+        Object viewer = view != null ? view.getViewer() : null;
+        return tryOpenFromDebugTree(tree, viewer, view);
+    }
+
+    /** То же для инспектора, где {@link AbstractDebugView} недоступен. */
+    public static boolean tryOpenFromDebugTree(Tree tree, Object viewer)
+    {
+        return tryOpenFromDebugTree(tree, viewer, null);
+    }
+
+    private static boolean tryOpenFromDebugTree(Tree tree, Object viewer, AbstractDebugView view)
+    {
+        if (tree == null || tree.isDisposed() || !DebugSessionHelper.isDebugSuspended(null))
+            return false;
+        Object element = resolveSelectedElement(tree, viewer);
+        if (!canOpenFrom(element))
+            return false;
+        openFromElement(element, view);
+        return true;
+    }
+
+    static Object resolveSelectedElement(Tree tree, Object viewer)
+    {
+        Object fromTree = resolveFromTreeSelection(tree);
+        Object fromViewer = resolveFromViewerSelection(viewer);
+        if (fromTree != null)
+            return fromTree;
+        return fromViewer;
+    }
+
+    private static Object resolveFromTreeSelection(Tree tree)
+    {
+        if (tree == null || tree.isDisposed())
+            return null;
+        TreeItem[] selection = tree.getSelection();
+        if (selection.length == 0)
+            return null;
+        TreeItem item = selection[0];
+        if (item == null || item.isDisposed())
+            return null;
+        return item.getData();
+    }
+
+    private static Object resolveFromViewerSelection(Object viewer)
+    {
+        if (viewer == null)
+            return null;
+        Object selectionObj = Global.invoke(viewer, "getSelection"); //$NON-NLS-1$
+        if (!(selectionObj instanceof IStructuredSelection structured) || structured.isEmpty())
+            return null;
+        return structured.getFirstElement();
     }
 
     static IBslIndexedValue resolveIndexedValue(Object element)

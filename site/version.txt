@@ -1,15 +1,28 @@
 # Фиксированная часть номера версии (единственное место для ручного изменения).
-# При сборке PDE/Tycho вместо "qualifier" подставляется метка времени автоматически.
+# При сборке PDE headless / Tycho вместо "qualifier" подставляется метка времени автоматически.
 # Пример итоговой версии: 1.0.0.10-202606061430
 #
 # Публикация на GitHub Pages:
-#   1. Соберите локально (Eclipse Build All в site/ или site\build.bat).
-#   2. Закоммитьте site/features/, site/plugins/, site/content.jar, site/artifacts.jar.
-#   3. Actions → Publish p2 site → Run workflow.
-#
+#   Ручной путь (рекомендуется):
+#     site\clean.bat — sync-version + очистка site/features plugins jars
+#     Build All на проекте site в PDE
+#     launch\restore-main.ps1 при необходимости
+#   Автоматический путь:
+#     site\republish.bat — пересборка той же линейки (PDE headless).
+#     site\release.bat — новая линейка (bump comfort.release + PDE headless).
+#     При сбое headless: .tmp\pde-headless.log в корне репозитория.
+#     Переменные (если авто-поиск EDT не сработал):
+#       COMFORT_EDT_HOME — каталог установки EDT (1cedt.exe)
+#       COMFORT_PDE_WS   — PDE workspace (по умолчанию C:\VC\EDT-plugin-WS)
+#     Или site\scripts\pde-local.properties (см. pde-local.properties.example)
+#   1. Закоммитьте site/features/, site/plugins/, site/content.jar, site/artifacts.jar
+#      (+ MANIFEST/feature/pom при новом релизе).
+#   2. Actions → Publish p2 site (republish или new).
+#   3. Опционально: site\scripts\sync-deploy.bat — локальное зеркало gh-pages.
+#      release/republish.bat сами синхронизируют PDE (restore-main.ps1).
 # URL в EDT «Установить новое ПО»:
 #   https://tormozit.github.io/EDT.Comfort/          — последняя версия
 #   https://tormozit.github.io/EDT.Comfort/1.0.0.10/ — фиксированная версия
 #
 # Один раз: GitHub → Settings → Pages → Deploy from branch → gh-pages / (root)
-comfort.release=1.0.0.15
+comfort.release=1.0.0.16

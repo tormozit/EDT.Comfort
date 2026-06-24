@@ -99,6 +99,14 @@ public final class EditEmbeddedTextHandler
     // =========================================================================
 
     /**
+     * {@code true}, если {@code offset} внутри строкового литерала BSL (одно- или многострочного).
+     */
+    static boolean isCaretInStringLiteral(IXtextDocument doc, int offset)
+    {
+        return extractStringLiteral(doc, offset) != null;
+    }
+
+    /**
      * Возвращает содержимое строкового литерала BSL, в котором находится
      * позиция {@code offset}, без кавычек и символов продолжения {@code |}.
      *

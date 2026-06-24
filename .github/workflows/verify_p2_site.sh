@@ -32,7 +32,7 @@ PLUGIN_JAR="$(ls -v site/plugins/tormozit.comfort_*.jar 2>/dev/null | tail -1 ||
 FEATURE_JAR="$(ls -v site/features/tormozit.comfort.feature_*.jar 2>/dev/null | tail -1 || true)"
 
 if [[ -z "$PLUGIN_JAR" || -z "$FEATURE_JAR" ]]; then
-  echo "ERROR: site/plugins or site/features jar missing. Build site locally first."
+  echo "ERROR: site/plugins or site/features jar missing. Run site\\republish.bat or site\\release.bat first."
   exit 1
 fi
 
@@ -47,7 +47,7 @@ echo "Feature: $FEATURE_FULL"
 
 if [[ "$BUNDLE_BASE" != "$RELEASE" ]]; then
   echo "ERROR: bundle base $BUNDLE_BASE != comfort.release $RELEASE"
-  echo "Run site/release.bat and rebuild, or fix version.txt"
+  echo "Run site\\release.bat or fix version.txt"
   exit 1
 fi
 
@@ -108,7 +108,7 @@ if git fetch origin gh-pages 2>/dev/null && git rev-parse --verify origin/gh-pag
         echo "Remote qualifier on gh-pages: ${REMOTE_QUAL:-none}"
         if [[ -n "$REMOTE_QUAL" && ( "$LOCAL_QUAL" < "$REMOTE_QUAL" || "$LOCAL_QUAL" == "$REMOTE_QUAL" ) ]]; then
           echo "ERROR: local qualifier $LOCAL_QUAL is not newer than published $REMOTE_QUAL."
-          echo "Rebuild site (Build All) or bump version with site\\release.bat"
+          echo "Run site\\republish.bat or bump with site\\release.bat"
           exit 1
         fi
       fi

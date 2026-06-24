@@ -539,9 +539,49 @@ final class DebugCollectionTableModel
         if (rowVar == null || propertyName == null)
             return null;
         IBslVariable[] props = rowPropertySource(logicalRow, rowVar);
+        if (props == null || props.length == 0)
+            props = rawRowVariables(rowVar);
         if (props == null)
             return null;
-        return findPropertyVariable(props, propertyName);
+        IBslVariable child = findPropertyVariable(props, propertyName);
+        if (child == null && DebugCollectionPropertyVariables.isIndexedPlaceholderContext(props))
+        {
+            int ordinal = propertyColumnOrdinal(propertyName);
+            if (ordinal >= 0 && ordinal < props.length)
+                child = props[ordinal];
+        }
+        return child;
+    }
+
+    private int propertyColumnOrdinal(String propertyName)
+    {
+        if (propertyName == null || propertyName.isBlank())
+            return -1;
+        int ordinal = 0;
+        for (DebugCollectionColumnModel.Column col : columns.allColumns())
+        {
+            if (col.kind != DebugCollectionColumnModel.Kind.PROPERTY)
+                continue;
+            if (propertyName.equals(col.propertyName) || propertyName.equalsIgnoreCase(col.propertyName))
+                return ordinal;
+            ordinal++;
+        }
+        return -1;
+    }
+
+    private static IBslVariable[] rawRowVariables(IBslVariable rowVar) throws DebugException
+    {
+        if (rowVar == null)
+            return null;
+        IBslValue value = rowVar.getValue();
+        if (value == null || value.isPending())
+            return null;
+        if (!value.isEvaluated())
+            value.evaluate();
+        if (value.isPending())
+            return null;
+        IBslVariable[] vars = value.getVariables();
+        return vars != null && vars.length > 0 ? vars : null;
     }
 
     /** EDT: {@code property.equals(child.getName())}, затем ignoreCase. */

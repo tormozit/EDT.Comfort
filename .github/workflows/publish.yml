@@ -1,6 +1,6 @@
 name: Publish p2 site
 
-# Локально: Eclipse Build All в site/ → закоммитить
+# Локально: site\republish.bat или site\release.bat → закоммитить
 # site/features/, site/plugins/, site/content.jar, site/artifacts.jar → Run workflow.
 on:
   workflow_dispatch:
@@ -64,6 +64,7 @@ jobs:
           mkdir -p "deploy/$VER"
           cp -r p2-staging/. "deploy/$VER/"
 
+          : > /tmp/old-pages-versions.txt
           if git fetch origin gh-pages 2>/dev/null && git rev-parse --verify origin/gh-pages >/dev/null 2>&1; then
             mkdir -p /tmp/old-pages
             git archive origin/gh-pages | tar -x -C /tmp/old-pages
@@ -73,6 +74,9 @@ jobs:
               case "$name" in
                 p2.index|compositeContent.jar|compositeArtifacts.jar|index.html) continue ;;
               esac
+              if [[ "$name" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                echo "$name" >> /tmp/old-pages-versions.txt
+              fi
               if [ ! -d "deploy/$name" ]; then
                 cp -r "$dir" "deploy/$name"
               fi
@@ -83,6 +87,8 @@ jobs:
 
           ls -la deploy
           ls -la "deploy/$VER"
+          echo "Previous gh-pages versions:"
+          cat /tmp/old-pages-versions.txt || true
 
       - name: Generate p2 site layout
         env:
@@ -91,12 +97,14 @@ jobs:
 
       - name: Verify deploy folder before push
         run: |
+          set -euo pipefail
           VER="${{ steps.ver.outputs.version }}"
           test -d "deploy/$VER/features" || (echo "ERROR: deploy/$VER/features missing" && exit 1)
           test -d "deploy/$VER/plugins" || (echo "ERROR: deploy/$VER/plugins missing" && exit 1)
           test -f deploy/compositeContent.jar || (echo "ERROR: deploy/compositeContent.jar missing at root" && exit 1)
           test -f deploy/compositeContent.xml || (echo "ERROR: deploy/compositeContent.xml missing at root" && exit 1)
           test -f deploy/compositeArtifacts.jar || (echo "ERROR: deploy/compositeArtifacts.jar missing at root" && exit 1)
+          test -f deploy/compositeArtifacts.xml || (echo "ERROR: deploy/compositeArtifacts.xml missing at root" && exit 1)
           test -f deploy/p2.index || (echo "ERROR: deploy/p2.index missing" && exit 1)
           test -f "deploy/$VER/p2.index" || (echo "ERROR: deploy/$VER/p2.index missing" && exit 1)
           test -f deploy/.nojekyll || (echo "ERROR: deploy/.nojekyll missing" && exit 1)
@@ -104,6 +112,46 @@ jobs:
           grep -q "<child location='$VER/'/>" deploy/compositeContent.xml || (echo "ERROR: $VER missing from compositeContent.xml" && exit 1)
           test ! -f deploy/content.jar || (echo "ERROR: root content.jar must not exist (use composite repo)" && exit 1)
           grep -q "unit id='tormozit.comfort'" "deploy/$VER/content.xml" || (echo "ERROR: bundle IU missing from deploy/$VER/content.xml" && exit 1)
+
+          shopt -s nullglob
+          version_dirs=()
+          for dir in deploy/*/; do
+            name=$(basename "$dir")
+            [[ "$name" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+            version_dirs+=("$name")
+            grep -q "<child location='$name/'/>" deploy/compositeContent.xml || (echo "ERROR: $name missing from compositeContent.xml" && exit 1)
+            grep -q "<child location='$name/'/>" deploy/compositeArtifacts.xml || (echo "ERROR: $name missing from compositeArtifacts.xml" && exit 1)
+            test -d "deploy/$name/features" || (echo "ERROR: deploy/$name/features missing" && exit 1)
+            test -d "deploy/$name/plugins" || (echo "ERROR: deploy/$name/plugins missing" && exit 1)
+          done
+
+          child_count=$(grep -o "<child location='" deploy/compositeContent.xml | wc -l | tr -d ' ')
+          dir_count=${#version_dirs[@]}
+          if [[ "$child_count" -ne "$dir_count" ]]; then
+            echo "ERROR: composite children ($child_count) != version folders ($dir_count)"
+            exit 1
+          fi
+
+          if [[ -f /tmp/old-pages-versions.txt ]]; then
+            while IFS= read -r old_ver || [[ -n "$old_ver" ]]; do
+              [[ -z "$old_ver" ]] && continue
+              if [[ "$old_ver" != "$VER" ]] && [[ ! -d "deploy/$old_ver" ]]; then
+                echo "ERROR: previous gh-pages version $old_ver missing from deploy/"
+                exit 1
+              fi
+            done < /tmp/old-pages-versions.txt
+          fi
+
+          while IFS= read -r child_loc; do
+            [[ -z "$child_loc" ]] && continue
+            child_name="${child_loc%/}"
+            if [[ ! -d "deploy/$child_name" ]]; then
+              echo "ERROR: composite child $child_name has no folder deploy/$child_name/"
+              exit 1
+            fi
+          done < <(grep -o "location='[^']*'" deploy/compositeContent.xml | sed "s/location='//;s/'$//")
+
+          echo "Version folders (${dir_count}): ${version_dirs[*]}"
           echo "deploy tree:"
           find deploy -maxdepth 3 -type f | head -30
 

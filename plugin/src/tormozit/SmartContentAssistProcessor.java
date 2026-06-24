@@ -212,6 +212,8 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         int widgetCaret = resolveWidgetCaret(viewer);
         if (widgetCaret >= 0)
             caret = widgetCaret;
+        if (isStringLiteralAssistContext(viewer, caret))
+            return;
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         ensureFullListForContext(viewer, doc, caret, isPopupVisible());
     }
@@ -227,6 +229,8 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             ? processor.lastTrackedFilter
             : SmartFilterTracker.getCurrentFilter();
         updateFilterTracker(viewer, caret);
+        if (isStringLiteralAssistContext(viewer, caret))
+            return;
         if (processor != null)
         {
             processor.onFilterPrefixChanged(viewer, caret, previous,
@@ -234,6 +238,28 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             processor.scheduleEagerFullListLoad(viewer);
             processor.rescheduleIdleFullListLoad(viewer, false);
         }
+    }
+
+    /** Каретка в строковом литерале BSL — штатный assist EDT без smart-фильтра Комфорт. */
+    static boolean isStringLiteralAssistContext(ITextViewer viewer, int caret)
+    {
+        return isStringLiteralAssistContext(viewer != null ? viewer.getDocument() : null, caret);
+    }
+
+    static boolean isStringLiteralAssistContext(IDocument doc, int caret)
+    {
+        boolean ixtext = doc instanceof IXtextDocument;
+        boolean inLiteral = false;
+        if (ixtext && caret >= 0)
+            inLiteral = EditEmbeddedTextHandler.isCaretInStringLiteral((IXtextDocument) doc, caret);
+        // #region agent log
+        ContentAssistDebug.agentLog("H1", "isStringLiteralAssistContext", "probe", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"caret\":" + caret + ",\"ixtext\":" + ixtext + ",\"doc\":\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + (doc != null ? doc.getClass().getSimpleName() : "null") + "\",\"inLiteral\":" + inLiteral + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // #endregion
+        if (ixtext && caret >= 0)
+            return inLiteral;
+        return false;
     }
 
     private static void updateFilterTracker(ITextViewer viewer, int caret)
@@ -299,6 +325,8 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     {
         if (doc == null || caret < 0)
             return null;
+        if (isStringLiteralAssistContext(doc, caret))
+            return null;
         int dot = ReceiverTypeLabel.findMemberAccessDot(doc, caret);
         if (dot < 0)
             return null;
@@ -316,6 +344,8 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     private ICompletionProposal[] computeProposalsLight(ITextViewer viewer, int offset)
     {
         int caret = resolveInvocationCaret(viewer, offset);
+        if (isStringLiteralAssistContext(viewer, caret))
+            return delegate.computeCompletionProposals(viewer, offset);
         primeFilterTrackerOnly(viewer, caret);
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         ensureFullListForContext(viewer, doc, caret, false);
@@ -337,6 +367,8 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
      */
     ICompletionProposal[] filterCachedProposalsForPopup(ITextViewer viewer, int caret, String filter)
     {
+        if (isStringLiteralAssistContext(viewer, caret))
+            return null;
         if (!SmartAssistFilterState.isSmartFilterEnabled())
             return null;
         IDocument doc = viewer != null ? viewer.getDocument() : null;
@@ -502,7 +534,26 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     public ICompletionProposal[] computeCompletionProposals(ITextViewer viewer, int offset)
     {
         if (!ComfortSettings.isReplaceListFiltersEnabled())
+        {
+            // #region agent log
+            ContentAssistDebug.agentLog("H3", "computeCompletionProposals", "comfortOff", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"offset\":" + offset + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
             return delegate.computeCompletionProposals(viewer, offset);
+        }
+
+        int literalCaret = resolveInvocationCaret(viewer, offset);
+        boolean inLiteral = isStringLiteralAssistContext(viewer, literalCaret);
+        if (inLiteral)
+        {
+            ICompletionProposal[] passthrough = computeLiteralPassthrough(viewer, offset, literalCaret);
+            // #region agent log
+            ContentAssistDebug.agentLog("H2", "computeCompletionProposals", "literalBypass", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"runId\":\"post-fix\",\"offset\":" + offset + ",\"literalCaret\":" + literalCaret //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"n\":" + (passthrough != null ? passthrough.length : -1) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return passthrough;
+        }
 
         if (RepeatedInvocationDetect.isActive())
         {
@@ -541,6 +592,8 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
         int caret = offset >= 0 ? clampCaret(viewer != null ? viewer.getDocument() : null, offset)
             : resolveWidgetCaret(viewer);
+        if (isStringLiteralAssistContext(viewer, caret))
+            return computeLiteralPassthrough(viewer, offset, caret);
         primeFilterTrackerOnly(viewer, caret);
         IDocument doc = viewer == null ? null : viewer.getDocument();
         String filter = SmartFilterTracker.getCurrentFilter();
@@ -553,6 +606,35 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         ICompletionProposal[] result = resolveProposalList(viewer, probeOffset, caret, filter,
             SmartAssistFilterState.isSmartFilterEnabled());
         return result;
+    }
+
+    /** В литерале — delegate на нескольких offset'ах, самый длинный ответ. */
+    private ICompletionProposal[] computeLiteralPassthrough(ITextViewer viewer, int offset, int caret)
+    {
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
+        java.util.LinkedHashSet<Integer> set = new java.util.LinkedHashSet<>();
+        addProbeOffset(set, offset);
+        addProbeOffset(set, caret);
+        if (assistant != null)
+        {
+            addProbeOffset(set, ContentAssistPopupSync.getInvocationOffset(assistant));
+            addProbeOffset(set, ContentAssistPopupSync.getFilterOffset(assistant));
+        }
+        int dot = ReceiverTypeLabel.findMemberAccessDot(doc, caret);
+        if (dot >= 0)
+            addProbeOffset(set, dot + 1);
+        ICompletionProposal[] best = EMPTY;
+        for (Integer off : set)
+        {
+            if (off == null || off < 0)
+                continue;
+            ICompletionProposal[] raw = delegate.computeCompletionProposals(viewer, off);
+            int count = raw != null ? raw.length : 0;
+            if (count > best.length)
+                best = raw != null ? raw : EMPTY;
+        }
+        return best;
     }
 
     /**
@@ -948,6 +1030,16 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     static boolean proposalMatchesFilter(ICompletionProposal proposal, IDocument document,
                                          int offset, DocumentEvent event)
     {
+        int caret = resolveFilterCaret(document, offset, event);
+        boolean inLiteralValidate = isStringLiteralAssistContext(document, caret);
+        // #region agent log
+        if (ContentAssistDebug.shouldLogValidateLiteral())
+            ContentAssistDebug.agentLog("H6", "proposalMatchesFilter", "enter", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"caret\":" + caret + ",\"offset\":" + offset + ",\"inLiteral\":" + inLiteralValidate //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"smart\":" + SmartAssistFilterState.isSmartFilterEnabled() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+        if (inLiteralValidate)
+            return matchesStockDelegateFilter(proposal, document, offset, event);
         if (!SmartAssistFilterState.isSmartFilterEnabled())
             return matchesStockDelegateFilter(proposal, document, offset, event);
         if (isMemberAccessContextChange(document, event))
@@ -955,7 +1047,6 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         String filter = computeActiveFilter(document, offset, event);
         if (filter.isEmpty())
         {
-            int caret = resolveFilterCaret(document, offset, event);
             if (ReceiverTypeLabel.findMemberAccessDot(document, caret) >= 0
                 && computeIdentifierFilter(document, caret).isEmpty())
                 return true;

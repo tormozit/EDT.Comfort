@@ -103,11 +103,10 @@ final class IdentifierSelectionSupport
             return false;
 
         Point sel = text.getSelection();
-        int anchor = caret == sel.y ? sel.x : sel.y;
-        int start = Math.min(anchor, newCaret);
-        int end = Math.max(anchor, newCaret);
-        text.setSelection(start, end);
-        text.setCaretOffset(newCaret);
+        if (caret == sel.x)
+            text.setSelectionRange(sel.y, newCaret - sel.y);
+        else
+            text.setSelectionRange(sel.x, newCaret - sel.x);
         text.showSelection();
         return true;
     }

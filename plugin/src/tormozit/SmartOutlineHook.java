@@ -803,13 +803,13 @@ public class SmartOutlineHook implements IStartup {
         if (clearImg != null)
         {
             clearItem.setImage(clearImg);
-            clearItem.setToolTipText("Очистить фильтр"); //$NON-NLS-1$
+            clearItem.setToolTipText("Очистить фильтр" + Global.pluginSignForTooltip()); //$NON-NLS-1$
             comfortBar.addDisposeListener(e -> clearImg.dispose());
         }
         else
         {
             clearItem.setText("✕"); //$NON-NLS-1$
-            clearItem.setToolTipText("Очистить фильтр"); //$NON-NLS-1$
+            clearItem.setToolTipText("Очистить фильтр" + Global.pluginSignForTooltip()); //$NON-NLS-1$
         }
 
         ToolItem commonItem = null;
@@ -959,13 +959,13 @@ public class SmartOutlineHook implements IStartup {
         if (clearImg != null)
         {
             clear.setImage(clearImg);
-            clear.setToolTipText("Очистить фильтр"); //$NON-NLS-1$
+            clear.setToolTipText("Очистить фильтр" + Global.pluginSignForTooltip()); //$NON-NLS-1$
             clear.addDisposeListener(e -> clearImg.dispose());
         }
         else
         {
             clear.setText("✕"); //$NON-NLS-1$
-            clear.setToolTipText("Очистить фильтр"); //$NON-NLS-1$
+            clear.setToolTipText("Очистить фильтр" + Global.pluginSignForTooltip()); //$NON-NLS-1$
         }
         configureOutlineHeaderButton(clear);
 

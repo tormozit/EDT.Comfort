@@ -5,7 +5,6 @@ import java.util.List;
 
 import org.eclipse.debug.core.model.IValue;
 import org.eclipse.debug.core.model.IWatchExpression;
-import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
@@ -17,7 +16,6 @@ import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Tree;
-import org.eclipse.swt.widgets.TreeItem;
 
 import com._1c.g5.v8.dt.debug.core.model.IBslVariable;
 import com._1c.g5.v8.dt.debug.core.model.values.IBslIndexedValue;
@@ -77,13 +75,7 @@ public final class DebugInspectorCollectionMenuHook
      */
     static boolean tryOpenCollectionFromTree(Tree tree, Object viewer)
     {
-        if (tree == null || tree.isDisposed() || !DebugSessionHelper.isDebugSuspended(null))
-            return false;
-        Object element = resolveSelectedElement(tree, viewer);
-        if (!DebugCollectionShowSupport.canOpenFrom(element))
-            return false;
-        DebugCollectionShowSupport.openFromElement(element);
-        return true;
+        return DebugCollectionShowSupport.tryOpenFromDebugTree(tree, viewer);
     }
 
     /**
@@ -140,36 +132,9 @@ public final class DebugInspectorCollectionMenuHook
         }
     }
 
-    private static Object resolveSelectedElement(Tree tree, Object viewer)
+    private Object resolveSelectedElement()
     {
-        Object fromTree = resolveFromTreeSelection(tree);
-        Object fromViewer = resolveFromViewerSelection(viewer);
-        if (fromTree != null)
-            return fromTree;
-        return fromViewer;
-    }
-
-    private static Object resolveFromTreeSelection(Tree tree)
-    {
-        if (tree == null || tree.isDisposed())
-            return null;
-        TreeItem[] selection = tree.getSelection();
-        if (selection.length == 0)
-            return null;
-        TreeItem item = selection[0];
-        if (item == null || item.isDisposed())
-            return null;
-        return item.getData();
-    }
-
-    private static Object resolveFromViewerSelection(Object viewer)
-    {
-        if (viewer == null)
-            return null;
-        Object selectionObj = Global.invoke(viewer, "getSelection"); //$NON-NLS-1$
-        if (!(selectionObj instanceof IStructuredSelection structured) || structured.isEmpty())
-            return null;
-        return structured.getFirstElement();
+        return DebugCollectionShowSupport.resolveSelectedElement(tree, viewer);
     }
 
     private boolean isAttached()
@@ -274,15 +239,6 @@ public final class DebugInspectorCollectionMenuHook
                 });
             }
         };
-    }
-
-    private Object resolveSelectedElement()
-    {
-        Object fromViewer = resolveFromViewerSelection(viewer);
-        Object fromTree = resolveFromTreeSelection(tree);
-        if (fromTree != null)
-            return fromTree;
-        return fromViewer;
     }
 
     private void logMenuShownDiagnostics(Object element)

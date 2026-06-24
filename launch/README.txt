@@ -13,12 +13,13 @@
 
 После restore-main bundles.info и config.ini — read-only (защита от перезаписи).
 
-ПОСЛЕ RELEASE.BAT / BUMP ВЕРСИИ
-================================
-  site\release.bat  →  Build All / site\build.bat  →  restore-main.ps1 (Eclipse закрыт)
+ПОСЛЕ RELEASE / REPUBLISH
+=========================
+  site\release.bat    — новая линейка (comfort.release + PDE headless Build All)
+  site\republish.bat  — пересборка той же линейки (новый qualifier)
 
-sync-version обновляет MANIFEST и launch/backup/osgi; restore-main копирует профиль
-в workspace и подставляет актуальную версию tormozit.comfort из site/version.txt.
+  Закоммитить site/ → GitHub Actions → Publish p2 site
+  release.bat / republish.bat сами вызывают restore-main.ps1 (Eclipse будет закрыт)
 
 EDT БЕЗ ПЛАГИНА КОМФОРТ
 ========================

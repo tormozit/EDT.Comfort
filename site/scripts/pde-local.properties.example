@@ -1,0 +1,6 @@
+# Локальные пути PDE headless (republish.bat / release.bat).
+# Скопируйте в pde-local.properties и раскомментируйте при необходимости.
+# Приоритет: переменные окружения COMFORT_EDT_HOME / COMFORT_PDE_WS, затем этот файл.
+
+# COMFORT_EDT_HOME=C:\Program Files\1C\1CE\components\1c-edt-2025.2.3+30-x86_64
+# COMFORT_PDE_WS=C:\VC\EDT-plugin-WS

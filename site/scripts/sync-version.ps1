@@ -1,11 +1,12 @@
-param(
-    [string]$Root = (Split-Path $PSScriptRoot -Parent)
+﻿param(
+    [string]$SiteDir = (Split-Path $PSScriptRoot -Parent),
+    [string]$Root = (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent)
 )
 
 $ErrorActionPreference = 'Stop'
-$versionFile = Join-Path $PSScriptRoot 'version.txt'
+$versionFile = Join-Path $SiteDir 'version.txt'
 
-if (-not (Test-Path $versionFile)) {
+if (-not (Test-Path -LiteralPath $versionFile)) {
     Write-Error "version.txt not found: $versionFile"
 }
 
@@ -20,7 +21,6 @@ if (-not $release) {
     Write-Error "comfort.release not found in version.txt (expected format: 1.0.0.10)"
 }
 
-# PDE и Tycho сами подставляют метку времени вместо "qualifier" при каждой сборке
 $qualifier = "$release-qualifier"
 $releaseSnapshot = "$release-SNAPSHOT"
 Write-Host "Sync version: $qualifier (Maven: $releaseSnapshot)"
@@ -67,7 +67,6 @@ function Update-PdeOsgiComfortVersion {
     [System.IO.File]::WriteAllLines($DevPropertiesPath, $devLines, $utf8NoBom)
 }
 
-# plugin/META-INF/MANIFEST.MF
 $manifestPath = Join-Path $Root 'plugin\META-INF\MANIFEST.MF'
 $manifestLines = Get-Content -LiteralPath $manifestPath -Encoding UTF8
 $manifestUpdated = $false
@@ -83,7 +82,6 @@ if (-not $manifestUpdated) {
 }
 Set-Utf8NoBomContent -Path $manifestPath -Lines $manifestLines
 
-# feature/feature.xml
 $featurePath = Join-Path $Root 'feature\feature.xml'
 $featureText = [System.IO.File]::ReadAllText($featurePath, [System.Text.Encoding]::UTF8)
 $featurePattern = '(<feature\b[\s\S]*?\sversion=")[^"]+(")'
@@ -98,8 +96,7 @@ $featureTextNew = [regex]::Replace(
 )
 [System.IO.File]::WriteAllText($featurePath, $featureTextNew, (New-Object System.Text.UTF8Encoding($false)))
 
-# site/site.xml
-$sitePath = Join-Path $PSScriptRoot 'site.xml'
+$sitePath = Join-Path $SiteDir 'site.xml'
 $siteText = [System.IO.File]::ReadAllText($sitePath, [System.Text.Encoding]::UTF8)
 $siteJar = "features/tormozit.comfort.feature_${qualifier}.jar"
 $sitePattern = 'url="features/tormozit\.comfort\.feature_[^"]+\.jar"'
@@ -113,7 +110,6 @@ $siteTextNew = [regex]::Replace(
 )
 [System.IO.File]::WriteAllText($sitePath, $siteTextNew, (New-Object System.Text.UTF8Encoding($false)))
 
-# pom.xml — версия parent и ссылки на parent во всех модулях
 $parentVersionPattern = '(<artifactId>comfort\.parent</artifactId>\s*<version>)[^<]+(</version>)'
 Get-ChildItem -Path $Root -Recurse -Filter 'pom.xml' | ForEach-Object {
     $pomText = [System.IO.File]::ReadAllText($_.FullName, [System.Text.Encoding]::UTF8)
@@ -124,8 +120,7 @@ Get-ChildItem -Path $Root -Recurse -Filter 'pom.xml' | ForEach-Object {
     }
 }
 
-# site/pom.xml — версия модуля site
-$sitePomPath = Join-Path $PSScriptRoot 'pom.xml'
+$sitePomPath = Join-Path $SiteDir 'pom.xml'
 $sitePomText = [System.IO.File]::ReadAllText($sitePomPath, [System.Text.Encoding]::UTF8)
 $sitePomPattern = '(<artifactId>comfort\.site</artifactId>\s*<version>)[^<]+(</version>)'
 if ([regex]::IsMatch($sitePomText, $sitePomPattern)) {
@@ -134,7 +129,6 @@ if ([regex]::IsMatch($sitePomText, $sitePomPattern)) {
     Write-Host "Updated: site/pom.xml -> $release"
 }
 
-# target/pom.xml
 $targetPomPath = Join-Path $Root 'target\pom.xml'
 $targetPomText = [System.IO.File]::ReadAllText($targetPomPath, [System.Text.Encoding]::UTF8)
 $targetPomPattern = '(<artifactId>tp</artifactId>\s*<version>)[^<]+(</version>)'

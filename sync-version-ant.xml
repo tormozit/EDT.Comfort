@@ -16,7 +16,7 @@
 			<arg value="-ExecutionPolicy"/>
 			<arg value="Bypass"/>
 			<arg value="-File"/>
-			<arg path="${basedir}/site/sync-version.ps1"/>
+			<arg path="${basedir}/site/scripts/sync-version.ps1"/>
 		</exec>
 
 		<eclipse.refreshLocal resource="/plugin" depth="infinite"/>
@@ -25,5 +25,11 @@
 
 		<eclipse.incrementalBuild project="plugin" kind="full"/>
 		<eclipse.incrementalBuild project="feature" kind="full"/>
+	</target>
+
+	<target name="buildSite" depends="sync">
+		<eclipse.refreshLocal resource="/site" depth="infinite"/>
+		<eclipse.incrementalBuild project="site" kind="clean"/>
+		<eclipse.incrementalBuild project="site" kind="full"/>
 	</target>
 </project>

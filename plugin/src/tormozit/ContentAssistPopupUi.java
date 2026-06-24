@@ -20,6 +20,8 @@ public final class ContentAssistPopupUi
     private static final String BAR_DATA_KEY = FILTER_BAR_DATA_KEY;
     private static final String TOGGLE_DATA_KEY = "tormozit.filterToggleButton"; //$NON-NLS-1$
     private static final String CONTEXT_LABEL_DATA_KEY = "tormozit.contextTypeLabel"; //$NON-NLS-1$
+    private static final String LITERAL_FILTER_TOOLTIP =
+        "В строковом литерале используется штатная фильтрация EDT"; //$NON-NLS-1$
     /** Не реагировать на {@code setSelection} при программной синхронизации с Ctrl+Space. */
     private static boolean suppressToggleSelection;
     private static int cachedContextLabelDot = -1;
@@ -63,7 +65,10 @@ public final class ContentAssistPopupUi
             }
 
             if (toggle != null && !toggle.isDisposed())
+            {
                 setToggleSelectionQuiet(toggle, SmartAssistFilterState.isSmartFilterEnabled());
+                applyFilterToggleAvailability(toggle, viewer);
+            }
             if (contextLabel != null && !contextLabel.isDisposed())
                 applyContextTypeLabel(contextLabel, viewer);
         }
@@ -144,7 +149,10 @@ public final class ContentAssistPopupUi
                 return;
             Button toggle = (Button) bar.getData(TOGGLE_DATA_KEY);
             if (toggle != null && !toggle.isDisposed())
+            {
                 setToggleSelectionQuiet(toggle, SmartAssistFilterState.isSmartFilterEnabled());
+                applyFilterToggleAvailability(toggle, viewer);
+            }
             Label contextLabel = (Label) bar.getData(CONTEXT_LABEL_DATA_KEY);
             if (contextLabel != null && !contextLabel.isDisposed())
                 applyContextTypeLabel(contextLabel, viewer);
@@ -244,5 +252,27 @@ public final class ContentAssistPopupUi
         {
             suppressToggleSelection = false;
         }
+    }
+
+    private static void applyFilterToggleAvailability(Button toggle, SourceViewer viewer)
+    {
+        int caret = resolveViewerCaret(viewer);
+        boolean inLiteral = SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret);
+        toggle.setEnabled(!inLiteral);
+        toggle.setToolTipText(inLiteral ? LITERAL_FILTER_TOOLTIP : null);
+        // #region agent log
+        ContentAssistDebug.agentLog("H5", "applyFilterToggleAvailability", "toggle", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"caret\":" + caret + ",\"inLiteral\":" + inLiteral + ",\"enabled\":" + !inLiteral //$NON-NLS-1$ //$NON-NLS-2$
+                + "}"); //$NON-NLS-1$
+        // #endregion
+    }
+
+    private static int resolveViewerCaret(SourceViewer viewer)
+    {
+        if (viewer == null)
+            return -1;
+        if (viewer.getTextWidget() != null)
+            return viewer.getTextWidget().getCaretOffset();
+        return viewer.getSelectedRange().x;
     }
 }
