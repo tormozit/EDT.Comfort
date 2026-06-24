@@ -1,6 +1,6 @@
 name: Publish p2 site
 
-# Локально: site\republish.bat или site\release.bat → закоммитить
+# Локально: site\clean.bat → Build All на проекте site в PDE → закоммитить
 # site/features/, site/plugins/, site/content.jar, site/artifacts.jar → Run workflow.
 on:
   workflow_dispatch:
@@ -123,6 +123,14 @@ jobs:
             grep -q "<child location='$name/'/>" deploy/compositeArtifacts.xml || (echo "ERROR: $name missing from compositeArtifacts.xml" && exit 1)
             test -d "deploy/$name/features" || (echo "ERROR: deploy/$name/features missing" && exit 1)
             test -d "deploy/$name/plugins" || (echo "ERROR: deploy/$name/plugins missing" && exit 1)
+            if grep -q "<update id=" "deploy/$name/content.xml" 2>/dev/null; then
+              echo "ERROR: deploy/$name/content.xml still contains p2 update metadata"
+              exit 1
+            fi
+            if grep -q "tormozit.github.io/EDT.Comfort/" "deploy/$name/content.xml" 2>/dev/null; then
+              echo "ERROR: deploy/$name/content.xml still references composite parent URL"
+              exit 1
+            fi
           done
 
           child_count=$(grep -o "<child location='" deploy/compositeContent.xml | wc -l | tr -d ' ')

@@ -23,8 +23,26 @@ artifact.repository.factory.order=compositeArtifacts.xml,compositeArtifacts.jar,
 """
 
 
+def sanitize_child_content_xml(xml_text: str) -> str:
+    """Убрать update-цепочку и ссылки на parent composite из дочернего p2-репозитория."""
+    xml_text = re.sub(
+        r"\s*<references\b[^>]*>.*?</references>\s*",
+        "\n",
+        xml_text,
+        count=1,
+        flags=re.DOTALL,
+    )
+    xml_text = re.sub(
+        r"\s*<update\b[^/]*/>\s*",
+        "\n",
+        xml_text,
+    )
+    return xml_text
+
+
 def fix_content_xml(xml_text: str) -> str:
-    """Переименовать только category-IU, если его id совпал с bundle id."""
+    """Category-IU fix + санитизация метаданных дочернего репозитория."""
+    xml_text = sanitize_child_content_xml(xml_text)
     if "p2.type.category" not in xml_text:
         return xml_text
 
