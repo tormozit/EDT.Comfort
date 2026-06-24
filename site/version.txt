@@ -8,8 +8,9 @@
 #   3. launch\restore-main.ps1 при необходимости
 #   4. Закоммитьте site/features/, site/plugins/, site/content.jar, site/artifacts.jar
 #      (+ MANIFEST/feature/pom при новом релизе).
-#   5. Actions → Publish p2 site (republish или new).
-#      republish допускает тот же qualifier — перекладка gh-pages (санитизация метаданных).
+#   5. Actions → Publish p2 site:
+#      resanitize — все архивные линейки в списке EDT (sanitize метаданных gh-pages);
+#      republish — та же линейка, новый qualifier; new — новая линейка.
 #   6. Опционально: site\scripts\sync-deploy.bat — локальное зеркало gh-pages.
 # URL в EDT «Установить новое ПО»:
 #   https://tormozit.github.io/EDT.Comfort/          — composite (все архивные линейки)

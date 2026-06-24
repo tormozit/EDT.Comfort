@@ -6,13 +6,14 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'new — новая линейка; republish — та же линейка (новый qualifier или перекладка gh-pages с тем же билдом)'
+        description: 'resanitize — все версии в EDT (sanitize gh-pages); republish — та же линейка, новый qualifier; new — новая линейка'
         required: true
-        default: 'new'
+        default: 'resanitize'
         type: choice
         options:
-          - new
+          - resanitize
           - republish
+          - new
 
 permissions:
   contents: write
@@ -123,11 +124,12 @@ jobs:
             grep -q "<child location='$name/'/>" deploy/compositeArtifacts.xml || (echo "ERROR: $name missing from compositeArtifacts.xml" && exit 1)
             test -d "deploy/$name/features" || (echo "ERROR: deploy/$name/features missing" && exit 1)
             test -d "deploy/$name/plugins" || (echo "ERROR: deploy/$name/plugins missing" && exit 1)
-            if grep -q "<update id=" "deploy/$name/content.xml" 2>/dev/null; then
+            test -f "deploy/$name/content.xml" || (echo "ERROR: deploy/$name/content.xml missing (sanitize failed?)" && exit 1)
+            if grep -q "<update id=" "deploy/$name/content.xml"; then
               echo "ERROR: deploy/$name/content.xml still contains p2 update metadata"
               exit 1
             fi
-            if grep -q "tormozit.github.io/EDT.Comfort/" "deploy/$name/content.xml" 2>/dev/null; then
+            if grep -q "tormozit.github.io/EDT.Comfort/" "deploy/$name/content.xml"; then
               echo "ERROR: deploy/$name/content.xml still references composite parent URL"
               exit 1
             fi

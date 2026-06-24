@@ -66,12 +66,18 @@ def fix_content_xml(xml_text: str) -> str:
 
 def publish_p2_files(target_dir: str) -> None:
     content_jar = os.path.join(target_dir, "content.jar")
+    content_xml_path = os.path.join(target_dir, "content.xml")
     artifacts_jar = os.path.join(target_dir, "artifacts.jar")
-    if not os.path.isfile(content_jar):
-        return
 
-    with zipfile.ZipFile(content_jar, "r") as zin:
-        content_xml = fix_content_xml(zin.read("content.xml").decode("utf-8"))
+    content_xml = None
+    if os.path.isfile(content_jar):
+        with zipfile.ZipFile(content_jar, "r") as zin:
+            content_xml = fix_content_xml(zin.read("content.xml").decode("utf-8"))
+    elif os.path.isfile(content_xml_path):
+        with open(content_xml_path, encoding="utf-8") as f:
+            content_xml = fix_content_xml(f.read())
+    else:
+        return
 
     artifacts_xml = None
     if os.path.isfile(artifacts_jar):
@@ -79,7 +85,7 @@ def publish_p2_files(target_dir: str) -> None:
             if "artifacts.xml" in zin.namelist():
                 artifacts_xml = zin.read("artifacts.xml").decode("utf-8")
 
-    with open(os.path.join(target_dir, "content.xml"), "w", encoding="utf-8", newline="\n") as f:
+    with open(content_xml_path, "w", encoding="utf-8", newline="\n") as f:
         f.write(content_xml)
 
     buf = io.BytesIO()

@@ -86,6 +86,12 @@ fi
 
 echo "Local qualifier: $LOCAL_QUAL"
 
+if [[ "$MODE" == "resanitize" ]]; then
+  echo "Resanitize: skip qualifier comparison — redeploy sanitized metadata for all gh-pages versions"
+  echo "Verify OK: release $RELEASE, qualifier $LOCAL_QUAL"
+  exit 0
+fi
+
 if git fetch origin gh-pages 2>/dev/null && git rev-parse --verify origin/gh-pages >/dev/null 2>&1; then
   LATEST_ON_SITE=""
   if git cat-file -e "origin/gh-pages:compositeContent.xml" 2>/dev/null; then
@@ -96,7 +102,7 @@ if git fetch origin gh-pages 2>/dev/null && git rev-parse --verify origin/gh-pag
   if [[ -n "$LATEST_ON_SITE" ]]; then
     if [[ "$MODE" == "new" && "$RELEASE" == "$LATEST_ON_SITE" ]]; then
       echo "ERROR: comfort.release=$RELEASE equals latest on gh-pages."
-      echo "Run site\\release.bat to bump version, or use workflow mode=republish."
+      echo "Bump comfort.release in site/version.txt, or use workflow mode=resanitize / republish."
       exit 1
     fi
 
