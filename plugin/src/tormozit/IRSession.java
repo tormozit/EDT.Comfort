@@ -66,6 +66,10 @@ public final class IRSession
         /** project-relative путь .bsl → hash содержимого на момент последнего setText в ИР. */
         private final Map<String, byte[]> pushedSignatures = new ConcurrentHashMap<>();
 
+        /** Порт RDT {@code КэшНаборовСлов}: имя набора → таблица слов на время COM-сессии. */
+        private final ConcurrentHashMap<String, List<IrBslCompletionSupport.WordEntry>> irWordSetCache =
+            new ConcurrentHashMap<>();
+
         /** Последний модуль и текст, ушедший в ИР через {@link #setText} (для обратного remap диапазона). */
         private String lastSyncedModuleName = ""; //$NON-NLS-1$
         /** {@code doc.get()} на момент sync — координаты для {@link #syncCodeEditorFromIR}. */
@@ -109,6 +113,20 @@ public final class IRSession
         void resetPushedSignatures()
         {
             pushedSignatures.clear();
+        }
+
+        List<IrBslCompletionSupport.WordEntry> getCachedWordSet(String setName)
+        {
+            if (setName == null)
+                return null;
+            return irWordSetCache.get(setName);
+        }
+
+        void putCachedWordSet(String setName, List<IrBslCompletionSupport.WordEntry> words)
+        {
+            if (setName == null || words == null)
+                return;
+            irWordSetCache.put(setName, List.copyOf(words));
         }
 
         /** Кэшированный HWND главного окна ИР (для повторных modal-сессий). */

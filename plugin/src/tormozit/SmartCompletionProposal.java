@@ -7,8 +7,6 @@ import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.jface.text.IInformationControlCreator;
-import org.eclipse.jface.text.IInformationControlExtension5;
-import org.eclipse.jface.util.OpenStrategy;
 import org.eclipse.jface.text.contentassist.ContentAssistant;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
 import org.eclipse.jface.text.contentassist.ICompletionProposalExtension;
@@ -25,7 +23,6 @@ import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal;
-import org.eclipse.xtext.ui.editor.hover.html.IXtextBrowserInformationControl;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 
@@ -167,11 +164,16 @@ public class SmartCompletionProposal implements
             apply(viewer.getDocument(), trigger, offset);
     }
 
+    /** Активация строки assist (Eclipse {@code selected}), не подтверждение {@code apply}. */
     @Override
     public void selected(ITextViewer viewer, boolean smartToggle)
     {
-        if (delegate instanceof ICompletionProposalExtension2)
-            ((ICompletionProposalExtension2) delegate).selected(viewer, smartToggle);
+        if (delegate instanceof IrCompletionProposal ir)
+            scheduleIrWordActivation(ir);
+        else
+            scheduleEdtRowActivation();
+        if (delegate instanceof ICompletionProposalExtension2 ext2)
+            ext2.selected(viewer, smartToggle);
     }
 
     @Override
@@ -202,42 +204,49 @@ public class SmartCompletionProposal implements
     @Override
     public String getAdditionalProposalInfo()
     {
+        if (delegate instanceof IrCompletionProposal ir)
+            return resolveIrAdditionalProposalInfo(ir);
+        Object baseInfo;
         if (delegate instanceof ICompletionProposalExtension5)
-        {
-            Object info = ((ICompletionProposalExtension5) delegate)
+            baseInfo = ((ICompletionProposalExtension5) delegate)
                 .getAdditionalProposalInfo(new NullProgressMonitor());
-            if (info instanceof String)
-                return (String) info;
-            if (info instanceof StyledString)
-                return ((StyledString) info).getString();
-            return info != null ? info.toString() : null;
-        }
-        return delegate.getAdditionalProposalInfo();
+        else
+            baseInfo = delegate.getAdditionalProposalInfo();
+        return objectToSideHintString(resolveEdtAssistSideHint(baseInfo));
+    }
+
+    private static String objectToSideHintString(Object info)
+    {
+        if (info instanceof String)
+            return (String) info;
+        if (info instanceof StyledString)
+            return ((StyledString) info).getString();
+        return info != null ? info.toString() : null;
     }
 
     @Override
     public IInformationControlCreator getInformationControlCreator()
     {
-        if (delegate instanceof ICompletionProposalExtension3)
-            return ((ICompletionProposalExtension3) delegate).getInformationControlCreator();
+        ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
+        if (delegate instanceof IrCompletionProposal)
+            return BslCompletionSideHintResolver.resolveAssistBrowserCreatorForProposal(
+                assistant, delegate);
+        if (delegate instanceof ICompletionProposalExtension3 ext3)
+            return ext3.getInformationControlCreator();
         return null;
     }
 
     @Override
     public Object getAdditionalProposalInfo(IProgressMonitor monitor)
     {
-        Object info = null;
+        if (delegate instanceof IrCompletionProposal ir)
+            return resolveIrAdditionalProposalInfo(ir);
+        Object baseInfo = null;
         if (delegate instanceof ICompletionProposalExtension5)
-            info = ((ICompletionProposalExtension5) delegate).getAdditionalProposalInfo(monitor);
-        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
-        if (reloader != null && ComfortSettings.isReplaceListFiltersEnabled())
-        {
-            String cached = reloader.getIrMergedHtml(delegate.getDisplayString());
-            if (cached != null && !cached.isEmpty())
-                return cached;
-        }
-        scheduleIrSideHintEnrichment(info);
-        return info;
+            baseInfo = ((ICompletionProposalExtension5) delegate).getAdditionalProposalInfo(monitor);
+        else
+            baseInfo = delegate.getAdditionalProposalInfo();
+        return resolveEdtAssistSideHint(baseInfo);
     }
 
     @Override
@@ -356,51 +365,349 @@ public class SmartCompletionProposal implements
         return SmartContentAssistProcessor.proposalMatchesFilter(delegate, document, offset, event);
     }
 
-    private void scheduleIrSideHintEnrichment(Object baseInfo)
+    private String resolveIrAdditionalProposalInfo(IrCompletionProposal ir)
     {
-        if (!IrBslHoverHtml.isBslBrowserInput(baseInfo))
+        long t0 = System.currentTimeMillis();
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        if (reloader != null && ComfortSettings.isReplaceListFiltersEnabled())
+        {
+            String cacheKey = ir.getStableCacheKey();
+            String merged = reloader.getIrMergedHtml(cacheKey);
+            if (merged == null || merged.isEmpty())
+                merged = reloader.getIrMergedHtml(ir.getDisplayString());
+            if (merged != null && !merged.isEmpty())
+            {
+                // #region agent log
+                ContentAssistDebug.debugSessionTiming("H19", "getAdditionalProposalInfo", "irReturn", t0, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    ",\"htmlLen\":" + merged.length()); //$NON-NLS-1$
+                // #endregion
+                return merged;
+            }
+            if (reloader.isIrActivationPending(cacheKey))
+            {
+                // #region agent log
+                ContentAssistDebug.debugSessionTiming("H23", "getAdditionalProposalInfo", "pendingSkip", t0, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    ",\"cacheKey\":" + ContentAssistDebug.jsonStr(cacheKey)); //$NON-NLS-1$
+                // #endregion
+                return null;
+            }
+            String html = resolveIrAssistSideHintHtml(reloader, ir);
+            if (html != null && !html.isEmpty())
+            {
+                // #region agent log
+                ContentAssistDebug.debugSessionTiming("H19", "getAdditionalProposalInfo", "irReturn", t0, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    ",\"htmlLen\":" + html.length()); //$NON-NLS-1$
+                // #endregion
+                return html;
+            }
+            maybeScheduleIrWordActivation(reloader, ir);
+        }
+        String fallback = ir.getAdditionalProposalInfo();
+        // #region agent log
+        ContentAssistDebug.debugSessionTiming("H19", "getAdditionalProposalInfo", "irFallback", t0, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            ",\"htmlLen\":" + (fallback != null ? fallback.length() : 0)); //$NON-NLS-1$
+        // #endregion
+        return fallback;
+    }
+
+    /**
+     * Боковая подсказка assist для ИР-строки: только кэш активации
+     * ({@code ОписаниеТекущегоСловаАвтодополнения}), без {@code ОписаниеХТМЛВыражения}.
+     */
+    private static String resolveIrAssistSideHintHtml(
+        ContentAssistSessionReloader reloader, IrCompletionProposal ir)
+    {
+        long t0 = System.currentTimeMillis();
+        String branch = "none"; //$NON-NLS-1$
+        String cacheKey = ir.getStableCacheKey();
+        String cached = reloader.getIrMergedHtml(cacheKey);
+        if (cached != null && !cached.isEmpty())
+            branch = "mergedKey"; //$NON-NLS-1$
+        else
+        {
+            cached = reloader.getIrMergedHtml(ir.getDisplayString());
+            if (cached != null && !cached.isEmpty())
+                branch = "mergedDisplay"; //$NON-NLS-1$
+            else
+            {
+                String onProposal = ir.getAdditionalProposalInfo();
+                if (onProposal != null && !onProposal.isEmpty())
+                {
+                    cached = onProposal;
+                    branch = "proposal"; //$NON-NLS-1$
+                }
+                else
+                {
+                    IrBslCompletionSupport.ActivationDescription act =
+                        reloader.getIrActivation(cacheKey);
+                    if (act != null)
+                    {
+                        cached = IrBslCompletionSupport.formatActivationHtml(
+                            act.description, act.rawHtml);
+                        branch = "formatActivation"; //$NON-NLS-1$
+                    }
+                }
+            }
+        }
+        // #region agent log
+        ContentAssistDebug.debugSessionTiming("H19", "resolveIrAssistSideHintHtml", "done", t0, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            ",\"branch\":" + ContentAssistDebug.jsonStr(branch) //$NON-NLS-1$
+                + ",\"htmlLen\":" + (cached != null ? cached.length() : 0)); //$NON-NLS-1$
+        // #endregion
+        return cached;
+    }
+
+    private void maybeScheduleIrWordActivation(
+        ContentAssistSessionReloader reloader, IrCompletionProposal ir)
+    {
+        String cacheKey = ir.getStableCacheKey();
+        if (reloader.getIrActivation(cacheKey) != null)
             return;
+        if (reloader.isIrActivationPending(cacheKey))
+            return;
+        scheduleIrWordActivation(ir);
+    }
+
+    /**
+     * EDT-строка: штатная боковая подсказка + HTML из кэша активации
+     * ({@code ОписаниеТекущегоСловаАвтодополнения}), без {@code ОписаниеХТМЛВыражения}.
+     */
+    private Object resolveEdtAssistSideHint(Object baseInfo)
+    {
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+            return baseInfo;
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        if (reloader == null)
+            return baseInfo;
+        String cacheKey = BslCompletionSideHintResolver.resolveIrCacheKey(delegate);
+        if (cacheKey == null || cacheKey.isEmpty())
+            return baseInfo;
+        String merged = reloader.getIrMergedHtml(cacheKey);
+        if (merged != null && !merged.isEmpty())
+            return merged;
+        if (!IrBslHoverHtml.isBslBrowserInput(baseInfo))
+            return baseInfo;
+        String irHtml = resolveActivationHtmlFromCache(reloader, cacheKey);
+        if (irHtml != null && !irHtml.isEmpty())
+        {
+            merged = IrBslHoverHtml.mergeHtml(IrBslHoverHtml.readHtml(baseInfo), irHtml);
+            reloader.putIrMergedHtml(cacheKey, merged);
+            return merged;
+        }
+        maybeScheduleEdtRowActivation(reloader);
+        return baseInfo;
+    }
+
+    private static String resolveActivationHtmlFromCache(
+        ContentAssistSessionReloader reloader, String cacheKey)
+    {
+        IrBslCompletionSupport.ActivationDescription act = reloader.getIrActivation(cacheKey);
+        if (act == null)
+            return null;
+        return IrBslCompletionSupport.formatActivationHtml(act.description, act.rawHtml);
+    }
+
+    private void maybeScheduleEdtRowActivation(ContentAssistSessionReloader reloader)
+    {
+        String cacheKey = BslCompletionSideHintResolver.resolveIrCacheKey(delegate);
+        if (cacheKey == null || cacheKey.isEmpty())
+            return;
+        if (reloader.getIrActivation(cacheKey) != null)
+            return;
+        if (reloader.isIrActivationPending(cacheKey))
+            return;
+        scheduleEdtRowActivation();
+    }
+
+    private void scheduleEdtRowActivation()
+    {
         if (!ComfortSettings.isReplaceListFiltersEnabled())
             return;
         ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
-        if (reloader != null)
-        {
-            String cached = reloader.getIrMergedHtml(delegate.getDisplayString());
-            if (cached != null && !cached.isEmpty())
-                return;
-        }
+        if (reloader == null)
+            return;
+        String cacheKey = BslCompletionSideHintResolver.resolveIrCacheKey(delegate);
         String name = BslCompletionSideHintResolver.resolveElementName(delegate);
         String kind = BslCompletionSideHintResolver.resolveElementKind(delegate);
-        if (name == null || name.isEmpty() || kind == null)
+        if (cacheKey == null || cacheKey.isEmpty() || name == null || name.isEmpty()
+            || kind == null)
             return;
-        if (reloader == null)
+        Object baseInfo = null;
+        if (delegate instanceof ICompletionProposalExtension5 ext5)
+            baseInfo = ext5.getAdditionalProposalInfo(new NullProgressMonitor());
+        else
+            baseInfo = delegate.getAdditionalProposalInfo();
+        final Object baseInput = baseInfo;
+        IrBslCompletionSupport.ActivationDescription cached = reloader.getIrActivation(cacheKey);
+        if (cached != null)
+        {
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            display.asyncExec(() -> applyCachedEdtActivation(
+                reloader, cacheKey, delegate.getDisplayString(), cached, baseInput));
+            return;
+        }
+        if (!reloader.tryBeginIrActivation(cacheKey))
             return;
         IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(reloader.getBslEditor());
         if (session == null)
+        {
+            reloader.endIrActivation(cacheKey);
             return;
-        final int gen = reloader.beginIrFetchForDisplay(delegate.getDisplayString());
+        }
+        final boolean isMethod =
+            IrBslExpressionHtmlSupport.KIND_METHOD.equals(kind);
+        final int gen = reloader.beginIrFetchForDisplay(cacheKey);
         final String displayKey = delegate.getDisplayString();
-        final Object baseInput = baseInfo;
         final BslXtextEditor editor = reloader.getBslEditor();
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
+        {
+            reloader.endIrActivation(cacheKey);
             return;
-        display.asyncExec(() -> submitIrFetchOnUi(
-            reloader, session, editor, gen, displayKey, baseInput, name, kind));
+        }
+        display.asyncExec(() -> submitEdtActivationOnUi(
+            reloader, session, editor, gen, cacheKey, displayKey, name, isMethod, baseInput));
     }
 
-    /** Sync/payload — только UI-поток; {@code getAdditionalProposalInfo} вызывается с фонового. */
-    private static void submitIrFetchOnUi(
-        ContentAssistSessionReloader reloader, IRSession session, BslXtextEditor editor,
-        int gen, String displayKey, Object baseInput, String name, String kind)
+    /** RDT {@code ПриАктивизацииСтрокиТ9}: динамический тип и описание ИР-слова. */
+    private void scheduleIrWordActivation(IrCompletionProposal ir)
     {
-        if (editor == null || session == null || reloader == null)
+        long t0 = System.currentTimeMillis();
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
             return;
-        int caret = resolveAssistCaret(reloader);
-        IRSession.CodeEditorSyncPayload syncPayload =
-            caret >= 0 ? session.prepareCodeEditorSyncForHover(editor, caret) : null;
-        Runnable fetch = () -> runIrFetch(
-            reloader, session, gen, displayKey, baseInput, name, kind, syncPayload, false);
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        if (reloader == null)
+            return;
+        String cacheKey = ir.getStableCacheKey();
+        // #region agent log
+        ContentAssistDebug.debugSessionLog("H5", "scheduleIrWordActivation", "enter", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"word\":" + ContentAssistDebug.jsonStr(ir.getWordValue()) //$NON-NLS-1$
+                + ",\"cacheKey\":" + ContentAssistDebug.jsonStr(cacheKey) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+        IrBslCompletionSupport.ActivationDescription cached = reloader.getIrActivation(cacheKey);
+        if (cached != null)
+        {
+            // #region agent log
+            ContentAssistDebug.debugSessionLog("H13", "scheduleIrWordActivation", "activationCacheHit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"word\":" + ContentAssistDebug.jsonStr(ir.getWordValue()) //$NON-NLS-1$
+                    + ",\"cacheKey\":" + ContentAssistDebug.jsonStr(cacheKey) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            applyCachedIrActivation(reloader, ir, cached);
+            // #region agent log
+            ContentAssistDebug.debugSessionTiming("H18", "scheduleIrWordActivation", "cacheHitExit", t0, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                ",\"word\":" + ContentAssistDebug.jsonStr(ir.getWordValue())); //$NON-NLS-1$
+            // #endregion
+            return;
+        }
+        if (!reloader.tryBeginIrActivation(cacheKey))
+        {
+            // #region agent log
+            ContentAssistDebug.debugSessionLog("H6", "scheduleIrWordActivation", "tryBeginBlocked", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"pending\":" + reloader.isIrActivationPending(cacheKey) //$NON-NLS-1$
+                    + ",\"cached\":" + (reloader.getIrActivation(cacheKey) != null) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return;
+        }
+        IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(reloader.getBslEditor());
+        if (session == null)
+        {
+            reloader.endIrActivation(cacheKey);
+            return;
+        }
+        final int gen = reloader.beginIrFetchForDisplay(cacheKey);
+        final BslXtextEditor editor = reloader.getBslEditor();
+        submitIrActivationOnUi(reloader, session, editor, gen, ir);
+        // #region agent log
+        ContentAssistDebug.debugSessionTiming("H18", "scheduleIrWordActivation", "fetchSubmitExit", t0, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            ",\"word\":" + ContentAssistDebug.jsonStr(ir.getWordValue())); //$NON-NLS-1$
+        // #endregion
+    }
+
+    private static void applyCachedIrActivation(
+        ContentAssistSessionReloader reloader, IrCompletionProposal ir,
+        IrBslCompletionSupport.ActivationDescription desc)
+    {
+        long t0 = System.currentTimeMillis();
+        String cacheKey = ir.getStableCacheKey();
+        org.eclipse.jface.text.contentassist.ContentAssistant assistant =
+            ContentAssistSessionReloader.getActiveAssistant();
+        if (assistant == null || !ContentAssistPopupSync.isPopupVisible(assistant))
+            return;
+        String oldDisplay = ir.getDisplayString();
+        String html = reloader.getIrMergedHtml(cacheKey);
+        if (html == null || html.isEmpty())
+            html = ir.getAdditionalProposalInfo();
+        boolean reapplied = false;
+        if (html == null || html.isEmpty())
+        {
+            long tApply = System.currentTimeMillis();
+            ir.applyActivation(desc.type, desc.description, desc.rawHtml);
+            reapplied = true;
+            html = ir.getAdditionalProposalInfo();
+            if (html != null && !html.isEmpty())
+            {
+                reloader.putIrMergedHtml(cacheKey, html);
+                reloader.putIrMergedHtml(ir.getDisplayString(), html);
+            }
+            // #region agent log
+            ContentAssistDebug.debugSessionTiming("H20", "applyCachedIrActivation", "applyActivation", tApply, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                ",\"htmlLen\":" + (html != null ? html.length() : 0)); //$NON-NLS-1$
+            // #endregion
+        }
+        else if (desc.type != null && !desc.type.isBlank())
+        {
+            String expectedDisplay =
+                IrBslCompletionSupport.buildDisplayString(ir.getWordValue(), desc.type);
+            if (!expectedDisplay.equals(oldDisplay))
+            {
+                long tApply = System.currentTimeMillis();
+                ir.applyActivation(desc.type, desc.description, desc.rawHtml);
+                reapplied = true;
+                html = reloader.getIrMergedHtml(cacheKey);
+                if (html == null || html.isEmpty())
+                    html = ir.getAdditionalProposalInfo();
+                // #region agent log
+                ContentAssistDebug.debugSessionTiming("H20", "applyCachedIrActivation", "applyActivationDisplay", tApply, "{}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                // #endregion
+            }
+        }
+        if (!oldDisplay.equals(ir.getDisplayString()))
+            ContentAssistPopupSync.refreshProposalTable(assistant);
+        reloader.noteActiveIrDisplayKey(cacheKey);
+        boolean pinned = false;
+        if (html != null && !html.isEmpty())
+        {
+            pinned = ContentAssistPopupSync.pinIrSideHint(assistant, ir, html);
+            if (pinned)
+                reloader.markIrSideHintPublished(cacheKey);
+            else
+                ContentAssistPopupSync.publishIrActivationSideHint(assistant, html, cacheKey);
+        }
+        // #region agent log
+        ContentAssistDebug.debugSessionTiming("H15", "applyCachedIrActivation", "cacheHitFastPath", t0, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            ",\"word\":" + ContentAssistDebug.jsonStr(ir.getWordValue()) //$NON-NLS-1$
+                + ",\"cacheKey\":" + ContentAssistDebug.jsonStr(cacheKey) //$NON-NLS-1$
+                + ",\"htmlLen\":" + (html != null ? html.length() : 0) //$NON-NLS-1$
+                + ",\"publish\":" + !pinned //$NON-NLS-1$
+                + ",\"reapplied\":" + reapplied //$NON-NLS-1$
+                + ",\"pinned\":" + pinned); //$NON-NLS-1$
+        // #endregion
+    }
+
+    private static void submitIrActivationOnUi(
+        ContentAssistSessionReloader reloader, IRSession session, BslXtextEditor editor,
+        int gen, IrCompletionProposal ir)
+    {
+        String cacheKey = ir != null ? ir.getStableCacheKey() : null;
+        if (editor == null || session == null || reloader == null || ir == null)
+        {
+            if (reloader != null)
+                reloader.endIrActivation(cacheKey);
+            return;
+        }
+        Runnable fetch = () -> runIrActivationFetch(reloader, session, gen, ir);
         if (!reloader.isWordsTableReady())
         {
             reloader.runWhenWordsTableReady(() -> session.executor.submit(fetch));
@@ -409,117 +716,224 @@ public class SmartCompletionProposal implements
         session.executor.submit(fetch);
     }
 
-    private static void runIrFetch(
-        ContentAssistSessionReloader reloader, IRSession session,
-        int gen, String displayKey, Object baseInput,
-        String name, String kind, IRSession.CodeEditorSyncPayload syncPayload, boolean retried)
+    private static void runIrActivationFetch(
+        ContentAssistSessionReloader reloader, IRSession session, int gen, IrCompletionProposal ir)
     {
-        String irHtml = IrBslExpressionHtmlSupport.fetchDescriptionHtmlAfterPreparedSync(
-            session, syncPayload, name, kind);
-        if ((irHtml == null || irHtml.isBlank()) && !retried && syncPayload != null)
+        String cacheKey = ir.getStableCacheKey();
+        try
         {
-            runIrFetch(reloader, session, gen, displayKey, baseInput, name, kind, syncPayload, true);
-            return;
+            IrBslCompletionSupport.ActivationDescription cached =
+                reloader.getIrActivation(cacheKey);
+            if (cached != null)
+            {
+                // #region agent log
+                ContentAssistDebug.debugSessionLog("H13", "runIrActivationFetch", "cacheHit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"word\":" + ContentAssistDebug.jsonStr(ir.getWordValue()) //$NON-NLS-1$
+                        + ",\"cacheKey\":" + ContentAssistDebug.jsonStr(cacheKey) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
+                Display display = Display.getDefault();
+                if (display == null || display.isDisposed())
+                    return;
+                display.asyncExec(() -> applyIrActivationResult(
+                    reloader, session, gen, ir, cached));
+                return;
+            }
+            long tCom = System.currentTimeMillis();
+            IrBslCompletionSupport.ActivationDescription desc =
+                IrBslCompletionSupport.fetchWordActivationDescription(
+                    session, ir.getWordValue(), ir.isMethod(), ir.getDictionaryKey());
+            // #region agent log
+            ContentAssistDebug.debugSessionTiming("H18", "runIrActivationFetch", "comFetch", tCom, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                desc == null ? ",\"desc\":null" : ",\"descLen\":" + desc.description.length()); //$NON-NLS-1$ //$NON-NLS-2$
+            ContentAssistDebug.debugSessionLog("H3", "runIrActivationFetch", "comResult", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                desc == null ? "{\"desc\":null}" //$NON-NLS-1$
+                    : "{\"type\":" + ContentAssistDebug.jsonStr(desc.type) //$NON-NLS-1$
+                        + ",\"descLen\":" + desc.description.length() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            if (desc == null)
+                return;
+            reloader.putIrActivation(cacheKey, desc);
+            // #region agent log
+            ContentAssistDebug.debugSessionLog("H14", "runIrActivationFetch", "cachedOnCom", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"word\":" + ContentAssistDebug.jsonStr(ir.getWordValue()) //$NON-NLS-1$
+                    + ",\"cacheKey\":" + ContentAssistDebug.jsonStr(cacheKey) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            session.pumpUserMessagesToUi();
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            display.asyncExec(() -> applyIrActivationResult(reloader, session, gen, ir, desc));
         }
-        if (irHtml == null || irHtml.isBlank())
-            return;
-        Display display = Display.getDefault();
-        if (display == null || display.isDisposed())
-            return;
-        display.asyncExec(() -> applyIrSideHintEnrichment(
-            reloader, gen, displayKey, baseInput, irHtml, 0));
+        finally
+        {
+            reloader.endIrActivation(cacheKey);
+        }
     }
 
-    private static int resolveAssistCaret(ContentAssistSessionReloader reloader)
+    private static void applyIrActivationResult(
+        ContentAssistSessionReloader reloader, IRSession session, int gen,
+        IrCompletionProposal ir, IrBslCompletionSupport.ActivationDescription desc)
     {
-        SourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
-        if (viewer != null && viewer.getTextWidget() instanceof StyledText text
-            && !text.isDisposed())
-        {
-            int caret = text.getCaretOffset();
-            if (caret >= 0)
-                return caret;
-        }
-        return reloader.getWordsTableCaret();
-    }
-
-    /** Панель assist появляется с задержкой {@link OpenStrategy#getPostSelectionDelay()}. */
-    private static final int APPLY_RETRY_MS = 80;
-    private static final int APPLY_MAX_ATTEMPTS = 12;
-
-    private static void applyIrSideHintEnrichment(
-        ContentAssistSessionReloader reloader, int gen,
-        String displayKey, Object baseInput, String irHtml, int attempt)
-    {
+        reloader.putIrActivation(ir.getStableCacheKey(), desc);
         if (gen != reloader.getIrFetchGeneration())
         {
-            BslSideHintDebug.step("ir skip", "stale gen=" + gen); //$NON-NLS-1$ //$NON-NLS-2$
+            // #region agent log
+            ContentAssistDebug.debugSessionLog("H2", "applyIrActivationResult", "skipStaleGen", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"gen\":" + gen + ",\"current\":" + reloader.getIrFetchGeneration() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
             return;
         }
         org.eclipse.jface.text.contentassist.ContentAssistant assistant =
             ContentAssistSessionReloader.getActiveAssistant();
-        if (assistant == null)
-            return;
-        if (!ContentAssistPopupSync.isPopupVisible(assistant))
-            return;
-        IXtextBrowserInformationControl control =
-            ContentAssistPopupSync.resolveVisibleBrowserControl(assistant);
-        if (control == null
-            || !(control instanceof IInformationControlExtension5 ext5)
-            || !ext5.isVisible())
+        if (assistant == null || !ContentAssistPopupSync.isPopupVisible(assistant))
         {
-            if (attempt < APPLY_MAX_ATTEMPTS)
+            // #region agent log
+            ContentAssistDebug.debugSessionLog("H4", "applyIrActivationResult", "skipPopupHidden", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"assistant\":" + (assistant != null) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return;
+        }
+        String oldDisplay = ir.getDisplayString();
+        ir.applyActivation(desc.type, desc.description, desc.rawHtml);
+        String html = ir.getAdditionalProposalInfo();
+        boolean selected = ContentAssistPopupSync.isSelectedIrProposal(assistant, ir);
+        // #region agent log
+        ContentAssistDebug.debugSessionLog("H4", "applyIrActivationResult", "applied", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"display\":" + ContentAssistDebug.jsonStr(ir.getDisplayString()) //$NON-NLS-1$
+                + ",\"htmlLen\":" + (html != null ? html.length() : 0) //$NON-NLS-1$
+                + ",\"descLen\":" + desc.description.length() //$NON-NLS-1$
+                + ",\"fullDoc\":" + IrBslHoverHtml.isFullHtmlDocument(html) //$NON-NLS-1$
+                + ",\"selected\":" + selected + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+        String cacheKey = ir.getStableCacheKey();
+        if (html != null && !html.isEmpty())
+        {
+            reloader.putIrMergedHtml(cacheKey, html);
+            reloader.putIrMergedHtml(ir.getDisplayString(), html);
+        }
+        if (!oldDisplay.equals(ir.getDisplayString()))
+            ContentAssistPopupSync.refreshProposalTable(assistant);
+        if (html != null && !html.isEmpty() && selected)
+        {
+            reloader.noteActiveIrDisplayKey(cacheKey);
+            boolean pinned = ContentAssistPopupSync.pinIrSideHint(assistant, ir, html);
+            if (pinned)
+                reloader.markIrSideHintPublished(cacheKey);
+            else if (!reloader.isIrSideHintPublishedForKey(cacheKey))
+                ContentAssistPopupSync.publishIrActivationSideHint(assistant, html, cacheKey);
+        }
+    }
+
+    private static void applyCachedEdtActivation(
+        ContentAssistSessionReloader reloader, String cacheKey, String displayKey,
+        IrBslCompletionSupport.ActivationDescription desc, Object baseInput)
+    {
+        org.eclipse.jface.text.contentassist.ContentAssistant assistant =
+            ContentAssistSessionReloader.getActiveAssistant();
+        if (assistant == null || !ContentAssistPopupSync.isPopupVisible(assistant))
+            return;
+        applyEdtActivationToSidePanel(
+            reloader, assistant, cacheKey, displayKey, desc, baseInput);
+    }
+
+    private static void submitEdtActivationOnUi(
+        ContentAssistSessionReloader reloader, IRSession session, BslXtextEditor editor,
+        int gen, String cacheKey, String displayKey, String wordValue, boolean isMethod,
+        Object baseInput)
+    {
+        if (editor == null || session == null || reloader == null)
+        {
+            if (reloader != null)
+                reloader.endIrActivation(cacheKey);
+            return;
+        }
+        Runnable fetch = () -> runEdtActivationFetch(
+            reloader, session, gen, cacheKey, displayKey, wordValue, isMethod, baseInput);
+        if (!reloader.isWordsTableReady())
+        {
+            reloader.runWhenWordsTableReady(() -> session.executor.submit(fetch));
+            return;
+        }
+        session.executor.submit(fetch);
+    }
+
+    private static void runEdtActivationFetch(
+        ContentAssistSessionReloader reloader, IRSession session, int gen,
+        String cacheKey, String displayKey, String wordValue, boolean isMethod,
+        Object baseInput)
+    {
+        try
+        {
+            IrBslCompletionSupport.ActivationDescription cached =
+                reloader.getIrActivation(cacheKey);
+            if (cached != null)
             {
+                // #region agent log
+                ContentAssistDebug.debugSessionLog("H13", "runEdtActivationFetch", "cacheHit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"word\":" + ContentAssistDebug.jsonStr(wordValue) //$NON-NLS-1$
+                        + ",\"cacheKey\":" + ContentAssistDebug.jsonStr(cacheKey) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
                 Display display = Display.getDefault();
-                if (display != null && !display.isDisposed())
-                {
-                    display.timerExec(APPLY_RETRY_MS, () -> applyIrSideHintEnrichment(
-                        reloader, gen, displayKey, baseInput, irHtml, attempt + 1));
-                }
+                if (display == null || display.isDisposed())
+                    return;
+                display.asyncExec(() -> applyEdtActivationResult(
+                    reloader, session, gen, cacheKey, displayKey, cached, baseInput));
                 return;
             }
-            BslSideHintDebug.step("ir skip", "control null"); //$NON-NLS-1$ //$NON-NLS-2$
+            IrBslCompletionSupport.ActivationDescription desc =
+                IrBslCompletionSupport.fetchWordActivationDescription(
+                    session, wordValue, isMethod, ""); //$NON-NLS-1$
+            if (desc == null)
+                return;
+            reloader.putIrActivation(cacheKey, desc);
+            // #region agent log
+            ContentAssistDebug.debugSessionLog("H14", "runEdtActivationFetch", "cachedOnCom", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"word\":" + ContentAssistDebug.jsonStr(wordValue) //$NON-NLS-1$
+                    + ",\"cacheKey\":" + ContentAssistDebug.jsonStr(cacheKey) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            session.pumpUserMessagesToUi();
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            display.asyncExec(() -> applyEdtActivationResult(
+                reloader, session, gen, cacheKey, displayKey, desc, baseInput));
         }
-        publishIrMergedHint(assistant, reloader, displayKey, baseInput, irHtml, attempt);
+        finally
+        {
+            reloader.endIrActivation(cacheKey);
+        }
     }
 
-    private static void publishIrMergedHint(
-        ContentAssistant assistant, ContentAssistSessionReloader reloader,
-        String displayKey, Object baseInput, String irHtml, int attempt)
+    private static void applyEdtActivationResult(
+        ContentAssistSessionReloader reloader, IRSession session, int gen,
+        String cacheKey, String displayKey, IrBslCompletionSupport.ActivationDescription desc,
+        Object baseInput)
     {
-        String merged = IrBslHoverHtml.mergeHtml(IrBslHoverHtml.readHtml(baseInput), irHtml);
-        reloader.putIrMergedHtml(displayKey, merged);
-        if (!ContentAssistPopupSync.isSelectedDisplay(assistant, displayKey))
+        reloader.putIrActivation(cacheKey, desc);
+        if (gen != reloader.getIrFetchGeneration())
             return;
-        scheduleSingleMergedPin(assistant, reloader, displayKey, irHtml.length());
+        org.eclipse.jface.text.contentassist.ContentAssistant assistant =
+            ContentAssistSessionReloader.getActiveAssistant();
+        if (assistant == null || !ContentAssistPopupSync.isPopupVisible(assistant))
+            return;
+        applyEdtActivationToSidePanel(
+            reloader, assistant, cacheKey, displayKey, desc, baseInput);
     }
 
-    /** Одно обновление панели — после штатного {@code showInformation} с базой. */
-    private static void scheduleSingleMergedPin(
-        ContentAssistant assistant, ContentAssistSessionReloader reloader,
-        String displayKey, int irLen)
+    private static void applyEdtActivationToSidePanel(
+        ContentAssistSessionReloader reloader,
+        org.eclipse.jface.text.contentassist.ContentAssistant assistant,
+        String cacheKey, String displayKey,
+        IrBslCompletionSupport.ActivationDescription desc, Object baseInput)
     {
-        Display display = Display.getDefault();
-        if (display == null || display.isDisposed())
+        String irHtml = IrBslCompletionSupport.formatActivationHtml(desc.description, desc.rawHtml);
+        if (irHtml == null || irHtml.isEmpty())
             return;
-        final int scheduleId = reloader.nextRepinScheduleId();
-        int postDelay = OpenStrategy.getPostSelectionDelay() + 50;
-        long pinAt = reloader.getIrSelectionEpochMs() + postDelay;
-        long delay = Math.max(0L, pinAt - System.currentTimeMillis());
-        if (delay > Integer.MAX_VALUE)
-            delay = Integer.MAX_VALUE;
-        display.timerExec((int) delay, () -> {
-            if (!reloader.isCurrentRepinSchedule(scheduleId))
-                return;
-            if (!ContentAssistPopupSync.isPopupVisible(assistant))
-                return;
-            if (!ContentAssistPopupSync.isSelectedDisplay(assistant, displayKey))
-                return;
-            String cached = reloader.getIrMergedHtml(displayKey);
-            if (cached == null || cached.isEmpty())
-                return;
-            ContentAssistPopupSync.pinMergedAdditionalInfo(assistant, displayKey, cached);
-            BslSideHintDebug.log("ir enriched assist name=" + displayKey + " len=" + irLen); //$NON-NLS-1$ //$NON-NLS-2$
-        });
+        String merged = IrBslHoverHtml.isBslBrowserInput(baseInput)
+            ? IrBslHoverHtml.mergeHtml(IrBslHoverHtml.readHtml(baseInput), irHtml)
+            : irHtml;
+        reloader.putIrMergedHtml(cacheKey, merged);
+        if (ContentAssistPopupSync.isSelectedDisplay(assistant, displayKey))
+            ContentAssistPopupSync.pinMergedAdditionalInfo(assistant, displayKey, merged);
     }
 }

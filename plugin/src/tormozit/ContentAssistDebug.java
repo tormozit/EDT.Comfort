@@ -1,5 +1,9 @@
 package tormozit;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.eclipse.jface.text.DocumentEvent;
@@ -12,10 +16,48 @@ public final class ContentAssistDebug
 {
     private static final AtomicInteger validateCalls = new AtomicInteger();
     private static final AtomicInteger agentValidateLogs = new AtomicInteger();
+    private static final Path DEBUG_SESSION_LOG =
+        Path.of("C:\\VC\\EDT.Comfort\\debug-9e4a68.log"); //$NON-NLS-1$
 
     private ContentAssistDebug() {}
 
     // #region agent log
+    public static void debugSessionLog(
+        String hypothesisId, String location, String message, String dataJson)
+    {
+        try
+        {
+            long ts = System.currentTimeMillis();
+            String data = dataJson != null && !dataJson.isEmpty() ? dataJson : "{}"; //$NON-NLS-1$
+            String line = "{\"sessionId\":\"9e4a68\",\"hypothesisId\":\"" + hypothesisId //$NON-NLS-1$
+                + "\",\"location\":\"" + location + "\",\"message\":\"" + message //$NON-NLS-1$ //$NON-NLS-2$
+                + "\",\"data\":" + data + ",\"timestamp\":" + ts + "}\n"; //$NON-NLS-1$ //$NON-NLS-2$
+            Files.writeString(DEBUG_SESSION_LOG, line, StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        }
+        catch (Exception ignored) {}
+    }
+
+    public static String jsonStr(String value)
+    {
+        if (value == null)
+            return "\"\""; //$NON-NLS-1$
+        String s = value.length() > 80 ? value.substring(0, 80) + "…" : value; //$NON-NLS-1$
+        return "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+    }
+
+    /** Замер фазы: elapsedMs с момента {@code startedMs}. */
+    public static void debugSessionTiming(
+        String hypothesisId, String location, String phase, long startedMs, String extraJson)
+    {
+        long elapsed = System.currentTimeMillis() - startedMs;
+        String extra = extraJson != null && !extraJson.isEmpty() ? extraJson : ""; //$NON-NLS-1$
+        if (!extra.isEmpty() && !extra.startsWith(",")) //$NON-NLS-1$
+            extra = "," + extra; //$NON-NLS-1$
+        debugSessionLog(hypothesisId, location, phase,
+            "{\"elapsedMs\":" + elapsed + extra + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
     /** Диагностика assist (H1/H2/…) — только в «Журнал Комфорт» при «Общем логировании». */
     public static void agentLog(String hypothesisId, String location, String message, String dataJson)
     {

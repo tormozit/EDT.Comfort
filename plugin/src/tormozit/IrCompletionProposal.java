@@ -1,0 +1,300 @@
+package tormozit;
+
+import org.eclipse.jface.text.BadLocationException;
+import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.ITextViewer;
+import org.eclipse.jface.text.IInformationControlCreator;
+import org.eclipse.jface.text.contentassist.ContentAssistant;
+import org.eclipse.jface.text.contentassist.ICompletionProposal;
+import org.eclipse.jface.text.contentassist.ICompletionProposalExtension;
+import org.eclipse.jface.text.contentassist.ICompletionProposalExtension2;
+import org.eclipse.jface.text.contentassist.ICompletionProposalExtension3;
+import org.eclipse.jface.text.contentassist.IContextInformation;
+import org.eclipse.swt.graphics.Image;
+import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.custom.StyledText;
+import org.eclipse.jface.text.source.SourceViewer;
+
+/**
+ * Элемент автодополнения из таблицы слов ИР (порт {@code НаборСловИзИР} / RDT).
+ */
+public final class IrCompletionProposal implements
+    ICompletionProposal,
+    ICompletionProposalExtension,
+    ICompletionProposalExtension2,
+    ICompletionProposalExtension3
+{
+    private static final char STABLE_KEY_SEP = '\u0001';
+
+    private volatile String displayString;
+    private final String filterName;
+    private final String wordValue;
+    private final String dictionaryKey;
+    private final String templateText;
+    private final boolean method;
+    private final int irPriority;
+    private final String stableCacheKey;
+    private volatile String activationHtml;
+
+    public IrCompletionProposal(
+        String displayString, String filterName, String templateText, boolean method, int irPriority,
+        String wordValue, String dictionaryKey)
+    {
+        this.displayString = displayString != null ? displayString : ""; //$NON-NLS-1$
+        this.filterName = filterName != null ? filterName : this.displayString;
+        this.wordValue = wordValue != null ? wordValue : this.filterName;
+        this.dictionaryKey = dictionaryKey != null ? dictionaryKey : ""; //$NON-NLS-1$
+        this.templateText = templateText;
+        this.method = method;
+        this.irPriority = irPriority;
+        this.stableCacheKey = buildStableCacheKey(this.filterName, this.dictionaryKey);
+    }
+
+    public static String buildStableCacheKey(String filterName, String dictionaryKey)
+    {
+        String filter = filterName != null ? filterName : ""; //$NON-NLS-1$
+        String dict = dictionaryKey != null ? dictionaryKey : ""; //$NON-NLS-1$
+        return filter + STABLE_KEY_SEP + dict;
+    }
+
+    public String getFilterName()
+    {
+        return filterName;
+    }
+
+    public String getWordValue()
+    {
+        return wordValue;
+    }
+
+    public String getDictionaryKey()
+    {
+        return dictionaryKey;
+    }
+
+    public String getStableCacheKey()
+    {
+        return stableCacheKey;
+    }
+
+    public int getIrPriority()
+    {
+        return irPriority;
+    }
+
+    public boolean isMethod()
+    {
+        return method;
+    }
+
+    /**
+     * Результат {@code ОписаниеТекущегоСловаАвтодополнения} (RDT {@code ПриАктивизацииСтрокиТ9}).
+     */
+    void applyActivation(String type, String description, boolean rawHtml)
+    {
+        if (type != null && !type.isBlank())
+            displayString = IrBslCompletionSupport.buildDisplayString(wordValue, type);
+        String html = IrBslCompletionSupport.formatActivationHtml(description, rawHtml);
+        if (html != null)
+            activationHtml = html;
+    }
+
+    @Override
+    public String getDisplayString()
+    {
+        return displayString;
+    }
+
+    @Override
+    public Image getImage()
+    {
+        return null;
+    }
+
+    @Override
+    public Point getSelection(IDocument document)
+    {
+        return null;
+    }
+
+    @Override
+    public IContextInformation getContextInformation()
+    {
+        return null;
+    }
+
+    @Override
+    public String getAdditionalProposalInfo()
+    {
+        if (activationHtml != null && !activationHtml.isEmpty())
+            return activationHtml;
+        if (ComfortSettings.isReplaceListFiltersEnabled())
+        {
+            ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+            if (reloader != null)
+            {
+                String cached = reloader.getIrMergedHtml(stableCacheKey);
+                if (cached != null && !cached.isEmpty())
+                    return cached;
+            }
+        }
+        return null;
+    }
+
+    @Override
+    public IInformationControlCreator getInformationControlCreator()
+    {
+        ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
+        return BslCompletionSideHintResolver.resolveAssistBrowserCreatorForProposal(
+            assistant, null);
+    }
+
+    @Override
+    public void apply(IDocument document)
+    {
+        apply(document, (char) 0, resolveCaretOffset(document));
+    }
+
+    @Override
+    public void apply(IDocument document, char trigger, int offset)
+    {
+        if (document == null)
+            return;
+        int replaceStart = getPrefixCompletionStart(document, offset);
+        int replaceLen = Math.max(0, offset - replaceStart);
+        try
+        {
+            InsertPlan plan = buildInsertPlan();
+            document.replace(replaceStart, replaceLen, plan.text);
+            setCaretOffset(document, replaceStart + plan.caretOffset);
+        }
+        catch (BadLocationException e)
+        {
+            IrCompletionDebug.problem("apply: " + e.getMessage()); //$NON-NLS-1$
+        }
+    }
+
+    @Override
+    public void apply(ITextViewer viewer, char trigger, int stateMask, int offset)
+    {
+        if (viewer != null && viewer.getDocument() != null)
+            apply(viewer.getDocument(), trigger, offset);
+    }
+
+    /** Активация обрабатывается в {@link SmartCompletionProposal#selected}. */
+    @Override
+    public void selected(ITextViewer viewer, boolean smartToggle) {}
+
+    @Override
+    public void unselected(ITextViewer viewer) {}
+
+    @Override
+    public boolean validate(IDocument document, int offset,
+        org.eclipse.jface.text.DocumentEvent event)
+    {
+        return SmartContentAssistProcessor.proposalMatchesFilter(this, document, offset, event);
+    }
+
+    @Override
+    public boolean isValidFor(IDocument document, int offset)
+    {
+        return SmartContentAssistProcessor.proposalMatchesFilter(this, document, offset, null);
+    }
+
+    @Override
+    public char[] getTriggerCharacters()
+    {
+        return null;
+    }
+
+    @Override
+    public int getContextInformationPosition()
+    {
+        return -1;
+    }
+
+    @Override
+    public CharSequence getPrefixCompletionText(IDocument document, int completionOffset)
+    {
+        return filterName;
+    }
+
+    @Override
+    public int getPrefixCompletionStart(IDocument document, int completionOffset)
+    {
+        return SmartContentAssistProcessor.computeIdentifierWordStart(document, completionOffset);
+    }
+
+    private InsertPlan buildInsertPlan()
+    {
+        if (templateText != null && !templateText.isEmpty())
+            return planFromTemplate(templateText);
+        if (method)
+            return new InsertPlan(filterName + "()", filterName.length() + 1); //$NON-NLS-1$
+        return new InsertPlan(filterName, filterName.length());
+    }
+
+    private static InsertPlan planFromTemplate(String template)
+    {
+        int caret = template.length();
+        String text = template;
+        int marker = template.indexOf("<!>"); //$NON-NLS-1$
+        if (marker >= 0)
+        {
+            caret = marker;
+            text = template.substring(0, marker) + template.substring(marker + 4);
+        }
+        else
+        {
+            marker = template.indexOf("<?>"); //$NON-NLS-1$
+            if (marker >= 0)
+            {
+                caret = marker;
+                text = template.substring(0, marker) + template.substring(marker + 4);
+            }
+            else
+            {
+                marker = template.indexOf("~<?>"); //$NON-NLS-1$
+                if (marker >= 0)
+                {
+                    caret = marker;
+                    text = template.substring(0, marker) + template.substring(marker + 4);
+                }
+            }
+        }
+        return new InsertPlan(text, caret);
+    }
+
+    private static void setCaretOffset(IDocument document, int caret)
+    {
+        SourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
+        if (viewer != null && viewer.getDocument() == document
+            && viewer.getTextWidget() instanceof StyledText styled && !styled.isDisposed())
+            styled.setCaretOffset(caret);
+    }
+
+    private static final class InsertPlan
+    {
+        final String text;
+        final int caretOffset;
+
+        InsertPlan(String text, int caretOffset)
+        {
+            this.text = text;
+            this.caretOffset = caretOffset;
+        }
+    }
+
+    private static int resolveCaretOffset(IDocument document)
+    {
+        SourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
+        if (viewer != null && viewer.getDocument() == document
+            && viewer.getTextWidget() instanceof StyledText text && !text.isDisposed())
+        {
+            int caret = text.getCaretOffset();
+            if (caret >= 0)
+                return caret;
+        }
+        return document != null ? document.getLength() : 0;
+    }
+}

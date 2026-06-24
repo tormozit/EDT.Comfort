@@ -233,6 +233,32 @@ public final class ComBridge
         }
         return obj;
     }
+
+    /** Результат COM: Dispatch из Variant; boolean — не структура. */
+    public static Object unwrapComResult(Object raw)
+    {
+        if (raw == null || raw instanceof Boolean)
+            return null;
+        try
+        {
+            return getRealDispatch(raw);
+        }
+        catch (Exception ignored)
+        {
+            return raw;
+        }
+    }
+
+    /** Значение поля COM-структуры / dispatch для чтения в Java. */
+    public static String comFieldAsString(Object val)
+    {
+        if (val == null || val instanceof Boolean)
+            return null;
+        if (val instanceof String s)
+            return s.isEmpty() ? null : s;
+        String s = toString(val);
+        return s != null && !s.isEmpty() ? s : null;
+    }
   
     static Object invoke(Object dispatch, String method, Object... args)
     {
@@ -435,7 +461,7 @@ public final class ComBridge
     {
         if (val == null)
             return null;
-        if (val instanceof Boolean b && !b)
+        if (val instanceof Boolean)
             return null;
         String s = toString(val);
         return s != null && !s.isEmpty() ? s : null;

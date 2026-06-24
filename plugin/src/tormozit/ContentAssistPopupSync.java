@@ -13,7 +13,9 @@ import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.IInformationControlExtension5;
 import org.eclipse.jface.text.contentassist.ContentAssistant;
+import org.eclipse.jface.text.IInformationControlCreator;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
+import org.eclipse.jface.text.contentassist.ICompletionProposalExtension3;
 import org.eclipse.xtext.ui.editor.hover.html.IXtextBrowserInformationControl;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.swt.SWT;
@@ -772,6 +774,143 @@ public final class ContentAssistPopupSync
         }
     }
 
+    /**
+     * Штатное обновление боковой панели assist при смене строки — только
+     * {@code handleTableSelectionChanged}, без {@code configureAndMakeVisible}.
+     */
+    public static void notifyAdditionalInfoSelectionChanged(ContentAssistant assistant)
+    {
+        if (assistant == null)
+            return;
+        long t0 = System.currentTimeMillis();
+        try
+        {
+            Object popup = getPopup(assistant);
+            if (popup == null)
+                return;
+            initPopupReflection(popup);
+            if (fAdditionalInfoControllerField == null || handleTableSelectionChangedMethod == null)
+                return;
+            Object controller = fAdditionalInfoControllerField.get(popup);
+            if (controller != null)
+                handleTableSelectionChangedMethod.invoke(controller);
+        }
+        catch (Exception e)
+        {
+            ContentAssistDebug.log("notifyAdditionalInfoSelectionChanged: " + e.getMessage()); //$NON-NLS-1$
+        }
+        // #region agent log
+        ContentAssistDebug.debugSessionTiming("H17", "notifyAdditionalInfoSelectionChanged", "done", t0, ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // #endregion
+    }
+
+    /**
+     * ИР: штатный путь боковой подсказки — как EDT {@link #pinMergedAdditionalInfo}.
+     *
+     * @return {@code true} если proposal найден и {@code showInformation} вызван
+     */
+    public static boolean pinIrSideHint(
+        ContentAssistant assistant, IrCompletionProposal ir, Object html)
+    {
+        long t0 = System.currentTimeMillis();
+        if (assistant == null || ir == null || html == null)
+            return false;
+        try
+        {
+            Object controller = resolveAdditionalInfoController(assistant);
+            if (controller == null)
+                return false;
+            Object popup = getPopupObject(assistant);
+            if (popup == null)
+                return false;
+            initPopupReflection(popup);
+            ICompletionProposal proposal = resolveWrappedProposalForIr(popup, ir);
+            if (proposal == null)
+            {
+                // #region agent log
+                ContentAssistDebug.debugSessionTiming("H28", "pinIrSideHint", "noProposal", t0, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    ",\"cacheKey\":" + ContentAssistDebug.jsonStr(ir.getStableCacheKey())); //$NON-NLS-1$
+                // #endregion
+                return false;
+            }
+            if (additionalInfoShowInformationMethod == null)
+            {
+                additionalInfoShowInformationMethod = controller.getClass().getDeclaredMethod(
+                    "showInformation", ICompletionProposal.class, Object.class); //$NON-NLS-1$
+                additionalInfoShowInformationMethod.setAccessible(true);
+            }
+            additionalInfoShowInformationMethod.invoke(controller, proposal, html);
+            scheduleAssistBrowserHtmlApply(assistant, html);
+            String rawHtml = IrBslHoverHtml.readHtml(html);
+            // #region agent log
+            ContentAssistDebug.debugSessionTiming("H28", "pinIrSideHint", "pinned", t0, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                ",\"cacheKey\":" + ContentAssistDebug.jsonStr(ir.getStableCacheKey()) //$NON-NLS-1$
+                    + ",\"display\":" + ContentAssistDebug.jsonStr(proposal.getDisplayString()) //$NON-NLS-1$
+                    + ",\"htmlLen\":" + (rawHtml != null ? rawHtml.length() : 0)); //$NON-NLS-1$
+            // #endregion
+            return true;
+        }
+        catch (Exception e)
+        {
+            ContentAssistDebug.log("pinIrSideHint: " + e.getMessage()); //$NON-NLS-1$
+            return false;
+        }
+    }
+
+    private static ICompletionProposal resolveWrappedProposalForIr(
+        Object popup, IrCompletionProposal ir)
+    {
+        if (popup == null || ir == null || fFilteredProposalsField == null)
+            return null;
+        try
+        {
+            @SuppressWarnings("unchecked")
+            List<ICompletionProposal> list =
+                (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+            if (list == null || list.isEmpty())
+                return null;
+            String cacheKey = ir.getStableCacheKey();
+            if (cacheKey != null && !cacheKey.isEmpty())
+            {
+                for (ICompletionProposal proposal : list)
+                {
+                    if (proposal == null)
+                        continue;
+                    ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(proposal);
+                    if (raw instanceof IrCompletionProposal irRow
+                        && cacheKey.equals(irRow.getStableCacheKey()))
+                        return proposal;
+                }
+            }
+            String display = ir.getDisplayString();
+            if (display != null && !display.isEmpty())
+            {
+                for (ICompletionProposal proposal : list)
+                {
+                    if (proposal != null && display.equals(proposal.getDisplayString()))
+                        return proposal;
+                }
+            }
+            Table table = getProposalTable(popup);
+            if (table != null && !table.isDisposed())
+            {
+                int idx = table.getSelectionIndex();
+                if (idx >= 0 && idx < list.size())
+                {
+                    ICompletionProposal selected = list.get(idx);
+                    ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(selected);
+                    if (raw == ir)
+                        return selected;
+                }
+            }
+            return null;
+        }
+        catch (Exception ignored)
+        {
+            return null;
+        }
+    }
+
     private static void syncProposalSelectionOnly(Object popup, boolean resetToFirst)
             throws Exception
     {
@@ -937,7 +1076,7 @@ public final class ContentAssistPopupSync
         }
     }
 
-    /** После штатного filter runnable при выключенном smart — вернуть выбор на набранный префикс. */
+    /** После штатного filter runnable при выключенном smart — вернуть активацию на строку с набранным префиксом. */
     private static void applyPrefixSelectionIfNeeded(ContentAssistant assistant)
     {
         String prefix = SmartFilterTracker.getCurrentFilter();
@@ -1108,6 +1247,55 @@ public final class ContentAssistPopupSync
         catch (Exception ignored) { return null; }
     }
 
+    /** Перерисовка строк списка после дорасчёта типа ИР. */
+    public static void refreshProposalTable(ContentAssistant assistant)
+    {
+        if (assistant == null)
+            return;
+        try
+        {
+            Object popup = getPopupObject(assistant);
+            Table table = getProposalTable(popup);
+            if (table == null || table.isDisposed())
+                return;
+            table.redraw();
+            table.update();
+        }
+        catch (Exception ignored) {}
+    }
+
+    /** Активирована ли строка с тем же {@link IrCompletionProposal} (стабильный ключ; Eclipse {@code selected}). */
+    public static boolean isSelectedIrProposal(
+        ContentAssistant assistant, IrCompletionProposal ir)
+    {
+        if (assistant == null || ir == null)
+            return false;
+        try
+        {
+            Object popup = getPopupObject(assistant);
+            if (popup == null || fFilteredProposalsField == null)
+                return false;
+            Table table = getProposalTable(popup);
+            if (table == null || table.isDisposed())
+                return false;
+            int idx = table.getSelectionIndex();
+            if (idx < 0)
+                return false;
+            @SuppressWarnings("unchecked")
+            List<ICompletionProposal> list =
+                (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+            if (list == null || idx >= list.size())
+                return false;
+            ICompletionProposal selected = list.get(idx);
+            ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(selected);
+            return raw == ir;
+        }
+        catch (Exception e)
+        {
+            return false;
+        }
+    }
+
     private static Object getPopup(ContentAssistant assistant) throws Exception
     {
         if (popupField == null)
@@ -1247,6 +1435,79 @@ public final class ContentAssistPopupSync
 
     private static Method additionalInfoShowInformationMethod;
 
+    /** Creator браузера из EDT-строк того же popup (ИР-строки его не задают). */
+    public static IInformationControlCreator findAssistBrowserCreatorInPopup(
+        ContentAssistant assistant)
+    {
+        if (assistant == null)
+            return null;
+        try
+        {
+            Object popup = getPopupObject(assistant);
+            if (popup == null)
+                return null;
+            initPopupReflection(popup);
+            if (fFilteredProposalsField == null)
+                return null;
+            @SuppressWarnings("unchecked")
+            List<ICompletionProposal> list =
+                (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+            if (list == null)
+                return null;
+            for (ICompletionProposal proposal : list)
+            {
+                if (proposal == null)
+                    continue;
+                ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(proposal);
+                if (raw instanceof IrCompletionProposal)
+                    continue;
+                if (raw instanceof ICompletionProposalExtension3 ext3)
+                {
+                    IInformationControlCreator creator = ext3.getInformationControlCreator();
+                    if (creator != null)
+                        return creator;
+                }
+            }
+        }
+        catch (Exception ignored) {}
+        return null;
+    }
+
+    /**
+     * ИР-активация (fallback): {@link #refreshAdditionalInfo} + опционально {@code setText} в browser.
+     * Основной путь — {@link #pinIrSideHint}.
+     */
+    public static void publishIrActivationSideHint(
+        ContentAssistant assistant, Object mergedInfo, String cacheKey)
+    {
+        if (assistant == null || mergedInfo == null)
+            return;
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        if (reloader != null && cacheKey != null)
+        {
+            if (reloader.isIrSideHintPublishedForKey(cacheKey))
+            {
+                // #region agent log
+                ContentAssistDebug.debugSessionLog("H11", "publishIrSideHint", "skipDup", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"key\":" + ContentAssistDebug.jsonStr(cacheKey) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
+                return;
+            }
+            reloader.markIrSideHintPublished(cacheKey);
+        }
+        refreshAdditionalInfo(assistant);
+        String html = IrBslHoverHtml.readHtml(mergedInfo);
+        boolean styledDoc = IrBslHoverHtml.isFullHtmlDocument(html);
+        if (!styledDoc)
+            scheduleAssistBrowserHtmlApply(assistant, mergedInfo);
+        // #region agent log
+        ContentAssistDebug.debugSessionLog("H11", "publishIrSideHint", "refresh", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"len\":" + html.length() //$NON-NLS-1$
+                + ",\"key\":" + ContentAssistDebug.jsonStr(cacheKey) //$NON-NLS-1$
+                + ",\"browserApply\":" + !styledDoc + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+    }
+
     /** Подменяет {@code fInformation} до штатного {@code showInformation} контроллера. */
     public static void patchAdditionalInfoPayload(ContentAssistant assistant, Object payload)
     {
@@ -1290,11 +1551,67 @@ public final class ContentAssistPopupSync
                 additionalInfoShowInformationMethod.setAccessible(true);
             }
             additionalInfoShowInformationMethod.invoke(controller, proposal, mergedInfo);
+            scheduleAssistBrowserHtmlApply(assistant, mergedInfo);
         }
         catch (Exception e)
         {
             ContentAssistDebug.log("pinMergedAdditionalInfo: " + e.getMessage()); //$NON-NLS-1$
         }
+    }
+
+    /** Browser assist для ИР-строк создаётся с задержкой — повторяем setText. */
+    private static void scheduleAssistBrowserHtmlApply(ContentAssistant assistant, Object mergedInfo)
+    {
+        String rawHtml = IrBslHoverHtml.readHtml(mergedInfo);
+        if (rawHtml == null || rawHtml.isEmpty())
+            return;
+        boolean rawFullDoc = IrBslHoverHtml.isFullHtmlDocument(rawHtml);
+        String displayHtml = rawFullDoc ? rawHtml : IrBslHoverHtml.wrapForAssistBrowser(rawHtml);
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        final boolean fullDoc = rawFullDoc || IrBslHoverHtml.isFullHtmlDocument(displayHtml);
+        final int[] attempts = {0};
+        Runnable task = new Runnable() {
+            @Override
+            public void run()
+            {
+                if (display.isDisposed() || assistant == null)
+                    return;
+                IXtextBrowserInformationControl browser = resolveVisibleBrowserControl(assistant);
+                boolean applied = browser != null
+                    && IrBslHoverHtml.applyHtmlToControl(browser, displayHtml);
+                if (!applied && attempts[0] < 8)
+                {
+                    attempts[0]++;
+                    display.timerExec(40, this);
+                    return;
+                }
+                String controlKind = "null"; //$NON-NLS-1$
+                try
+                {
+                    Object ctrlObj = resolveAdditionalInfoController(assistant);
+                    if (ctrlObj != null)
+                    {
+                        Object ctrl = Global.invoke(ctrlObj, "getCurrentInformationControl2"); //$NON-NLS-1$
+                        if (ctrl != null)
+                            controlKind = ctrl.getClass().getSimpleName();
+                    }
+                }
+                catch (Exception ignored) {}
+                // #region agent log
+                ContentAssistDebug.debugSessionLog("H10", "pinMergedAdditionalInfo", "browserApply", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"rawLen\":" + rawHtml.length() //$NON-NLS-1$
+                        + ",\"displayLen\":" + displayHtml.length() //$NON-NLS-1$
+                        + ",\"rewrap\":" + !rawFullDoc //$NON-NLS-1$
+                        + ",\"applied\":" + applied //$NON-NLS-1$
+                        + ",\"fullDoc\":" + fullDoc //$NON-NLS-1$
+                        + ",\"control\":\"" + controlKind + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"attempts\":" + attempts[0] + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
+            }
+        };
+        display.asyncExec(task);
     }
 
     private static ICompletionProposal resolveProposalByDisplay(Object popup, String displayKey)
@@ -1330,6 +1647,7 @@ public final class ContentAssistPopupSync
 
     public static boolean isSelectedDisplay(ContentAssistant assistant, String displayKey)
     {
+        // Активная строка assist (Eclipse selected), не подтверждение apply.
         if (assistant == null || displayKey == null || displayKey.isEmpty())
             return false;
         try

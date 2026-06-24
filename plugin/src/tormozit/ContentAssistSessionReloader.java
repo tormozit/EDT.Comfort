@@ -2,6 +2,7 @@ package tormozit;
 
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.IDocumentExtension4;
+import org.eclipse.jface.text.IInformationControlCreator;
 import org.eclipse.jface.text.contentassist.ContentAssistant;
 import org.eclipse.jface.text.contentassist.ContentAssistEvent;
 import org.eclipse.jface.text.contentassist.ICompletionListener;
@@ -22,6 +23,7 @@ import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -59,10 +61,21 @@ public final class ContentAssistSessionReloader
     private CaretListener sessionCaretListener;
     private volatile boolean wordsTableReady;
     private volatile int wordsTableCaret = -1;
+    /** Контекст assist в ИР открыт ({@code КончитьОбработкуКоманды} ещё не вызывали). */
+    private volatile boolean irAssistCommandOpen;
+    /** Ключ активированной строки assist (для отмены COM при смене активации). */
     private volatile String activeIrDisplayKey;
+    /** Время последней активации строки assist (мс). */
     private volatile long irSelectionEpochMs;
+    private volatile IrBslCompletionSupport.Snapshot irCompletionSnapshot;
     private final AtomicInteger repinScheduleId = new AtomicInteger();
     private final ConcurrentHashMap<String, String> irMergedHtmlByDisplay = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, IrBslCompletionSupport.ActivationDescription>
+        irActivationByKey = new ConcurrentHashMap<>();
+    private final Set<String> pendingIrActivationKeys = ConcurrentHashMap.newKeySet();
+    private volatile IInformationControlCreator assistBrowserCreator;
+    /** Ключ ИР-строки, для которой уже обновлена боковая подсказка (анти-шторм). */
+    private volatile String irSideHintPublishedKey;
 
     private static final int WORDS_TABLE_DEBOUNCE_MS = 200;
     /** Последний stamp документа при caret-событии (отличить ввод от стрелок). */
@@ -124,8 +137,11 @@ public final class ContentAssistSessionReloader
                 openSessionReloader = ContentAssistSessionReloader.this;
                 wordsTableReady = false;
                 wordsTableCaret = -1;
+                irAssistCommandOpen = false;
                 activeIrDisplayKey = null;
-                irMergedHtmlByDisplay.clear();
+                irCompletionSnapshot = null;
+                clearIrSideHintCaches();
+                assistBrowserCreator = BslCompletionSideHintResolver.resolveAssistBrowserCreator();
                 lastCaretDocumentStamp = -1;
                 synchronized (pendingAfterWordsTable)
                 {
@@ -171,6 +187,7 @@ public final class ContentAssistSessionReloader
             @Override
             public void assistSessionEnded(ContentAssistEvent event)
             {
+                finishIrAssistCommandProcessing();
                 cancelIrEvaluationIfConnected();
                 uninstallCtrlSpaceFilter();
                 uninstallSessionCaretListener();
@@ -185,8 +202,10 @@ public final class ContentAssistSessionReloader
                     openSessionReloader = null;
                 wordsTableReady = false;
                 wordsTableCaret = -1;
+                irAssistCommandOpen = false;
                 activeIrDisplayKey = null;
-                irMergedHtmlByDisplay.clear();
+                irCompletionSnapshot = null;
+                clearIrSideHintCaches();
                 synchronized (pendingAfterWordsTable)
                 {
                     pendingAfterWordsTable.clear();
@@ -211,11 +230,25 @@ public final class ContentAssistSessionReloader
             {
                 if (proposal == null)
                     return;
-                String displayKey = proposal.getDisplayString();
-                if (displayKey == null || displayKey.isEmpty())
+                org.eclipse.jface.text.contentassist.ICompletionProposal raw =
+                    SmartContentAssistProcessor.unwrapProposal(proposal);
+                if (!(raw instanceof IrCompletionProposal))
+                {
+                    clearIrSideHintPublishedKey();
                     return;
-                if (displayKey.equals(activeIrDisplayKey))
+                }
+                String cacheKey = BslCompletionSideHintResolver.resolveIrCacheKey(proposal);
+                if (cacheKey == null || cacheKey.isEmpty())
                     return;
+                if (cacheKey.equals(activeIrDisplayKey))
+                    return;
+                clearIrSideHintPublishedKey();
+                // #region agent log
+                ContentAssistDebug.debugSessionLog("H7", "selectionChanged", "cancelEval", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"key\":" + ContentAssistDebug.jsonStr(cacheKey) //$NON-NLS-1$
+                        + ",\"active\":" + ContentAssistDebug.jsonStr(activeIrDisplayKey) //$NON-NLS-1$
+                        + ",\"cached\":" + (getIrActivation(cacheKey) != null) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
                 cancelIrEvaluationIfConnected();
             }
         };
@@ -224,6 +257,7 @@ public final class ContentAssistSessionReloader
 
     private void detach()
     {
+        finishIrAssistCommandProcessing();
         cancelIrEvaluationIfConnected();
         uninstallCtrlSpaceFilter();
         uninstallSessionCaretListener();
@@ -236,6 +270,14 @@ public final class ContentAssistSessionReloader
         IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(bslEditor);
         if (session != null)
             IRSession.cancelActiveEvaluation(session);
+    }
+
+    private void finishIrAssistCommandProcessing()
+    {
+        IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(bslEditor);
+        if (session == null || session.executor == null || session.executor.isShutdown())
+            return;
+        session.executor.submit(() -> IrBslCompletionSupport.finishAssistCommandProcessing(session));
     }
 
     private void installSessionCaretListener()
@@ -386,6 +428,17 @@ public final class ContentAssistSessionReloader
         return bslEditor;
     }
 
+    public IInformationControlCreator getAssistBrowserCreator()
+    {
+        return assistBrowserCreator;
+    }
+
+    public void rememberAssistBrowserCreator(IInformationControlCreator creator)
+    {
+        if (creator != null)
+            assistBrowserCreator = creator;
+    }
+
     public boolean isWordsTableReady()
     {
         return wordsTableReady;
@@ -401,14 +454,22 @@ public final class ContentAssistSessionReloader
         return irFetchGeneration.incrementAndGet();
     }
 
-    /** Новый gen только при смене элемента списка — иначе repin/apply не отменяются зря. */
+    /** Новый gen только при активации другой строки списка — иначе repin/apply не отменяются зря. */
     public int beginIrFetchForDisplay(String displayKey)
     {
         if (displayKey != null && displayKey.equals(activeIrDisplayKey))
             return irFetchGeneration.get();
         activeIrDisplayKey = displayKey;
+        irSideHintPublishedKey = null;
         irSelectionEpochMs = System.currentTimeMillis();
         return irFetchGeneration.incrementAndGet();
+    }
+
+    /** Смена строки без bump gen (cache hit / повторный выбор). */
+    public void noteActiveIrDisplayKey(String displayKey)
+    {
+        if (displayKey != null && !displayKey.isEmpty())
+            activeIrDisplayKey = displayKey;
     }
 
     public long getIrSelectionEpochMs()
@@ -436,6 +497,72 @@ public final class ContentAssistSessionReloader
         irMergedHtmlByDisplay.put(displayKey, mergedHtml);
     }
 
+    public IrBslCompletionSupport.ActivationDescription getIrActivation(String stableCacheKey)
+    {
+        if (stableCacheKey == null || stableCacheKey.isEmpty())
+            return null;
+        return irActivationByKey.get(stableCacheKey);
+    }
+
+    public void putIrActivation(
+        String stableCacheKey, IrBslCompletionSupport.ActivationDescription desc)
+    {
+        if (stableCacheKey == null || stableCacheKey.isEmpty() || desc == null)
+            return;
+        irActivationByKey.put(stableCacheKey, desc);
+    }
+
+    /** Один COM {@code ОписаниеТекущегоСловаАвтодополнения} на ключ за одну активацию строки. */
+    public boolean tryBeginIrActivation(String stableCacheKey)
+    {
+        if (stableCacheKey == null || stableCacheKey.isEmpty())
+            return false;
+        if (irActivationByKey.containsKey(stableCacheKey))
+            return false;
+        return pendingIrActivationKeys.add(stableCacheKey);
+    }
+
+    public void endIrActivation(String stableCacheKey)
+    {
+        if (stableCacheKey != null && !stableCacheKey.isEmpty())
+            pendingIrActivationKeys.remove(stableCacheKey);
+    }
+
+    public boolean isIrActivationPending(String stableCacheKey)
+    {
+        return stableCacheKey != null && !stableCacheKey.isEmpty()
+            && pendingIrActivationKeys.contains(stableCacheKey);
+    }
+
+    private void clearIrSideHintCaches()
+    {
+        irActivationByKey.clear();
+        clearTransientIrSideHintState();
+    }
+
+    /** Сброс merged/pending без кэша активации ИР (повторный выбор строки). */
+    private void clearTransientIrSideHintState()
+    {
+        irMergedHtmlByDisplay.clear();
+        pendingIrActivationKeys.clear();
+        irSideHintPublishedKey = null;
+    }
+
+    public boolean isIrSideHintPublishedForKey(String cacheKey)
+    {
+        return cacheKey != null && !cacheKey.isEmpty() && cacheKey.equals(irSideHintPublishedKey);
+    }
+
+    public void markIrSideHintPublished(String cacheKey)
+    {
+        irSideHintPublishedKey = cacheKey;
+    }
+
+    public void clearIrSideHintPublishedKey()
+    {
+        irSideHintPublishedKey = null;
+    }
+
     /** Отменяет отложенные repin предыдущего элемента. */
     public int nextRepinScheduleId()
     {
@@ -445,6 +572,11 @@ public final class ContentAssistSessionReloader
     public boolean isCurrentRepinSchedule(int scheduleId)
     {
         return scheduleId == repinScheduleId.get();
+    }
+
+    public boolean isIrAssistCommandOpen()
+    {
+        return irAssistCommandOpen;
     }
 
     public void runWhenWordsTableReady(Runnable task)
@@ -471,19 +603,35 @@ public final class ContentAssistSessionReloader
             return;
         wordsTableReady = false;
         wordsTableCaret = caret;
-        irMergedHtmlByDisplay.clear();
-        IrBslExpressionHtmlSupport.prepareWordsTableAsync(session, bslEditor, caret, () -> {
-            wordsTableReady = true;
-            BslSideHintDebug.log("wordsTable ready caret=" + caret); //$NON-NLS-1$
-            List<Runnable> pending;
-            synchronized (pendingAfterWordsTable)
-            {
-                pending = new ArrayList<>(pendingAfterWordsTable);
-                pendingAfterWordsTable.clear();
-            }
-            for (Runnable task : pending)
-                task.run();
-        });
+        clearTransientIrSideHintState();
+        irCompletionSnapshot = null;
+        boolean closePrevious = irAssistCommandOpen;
+        IrBslCompletionSupport.prepareAssistContextAsync(session, bslEditor, caret, false,
+            closePrevious, raw -> onWordsTablePrepared(caret, raw));
+    }
+
+    private void onWordsTablePrepared(int caret, IrBslCompletionSupport.Snapshot raw)
+    {
+        wordsTableReady = true;
+        wordsTableCaret = caret;
+        if (raw != null)
+        {
+            irAssistCommandOpen = true;
+            irCompletionSnapshot = new IrBslCompletionSupport.Snapshot(
+                caret, raw.contextType, raw.proposals, raw.wordsTransferred, raw.wordsDisplayed);
+            processor.applyIrCompletion(irCompletionSnapshot);
+            IrCompletionDebug.log("assist snapshot caret=" + caret //$NON-NLS-1$
+                + " ir=" + raw.proposals.length); //$NON-NLS-1$
+        }
+        BslSideHintDebug.log("wordsTable ready caret=" + caret); //$NON-NLS-1$
+        List<Runnable> pending;
+        synchronized (pendingAfterWordsTable)
+        {
+            pending = new ArrayList<>(pendingAfterWordsTable);
+            pendingAfterWordsTable.clear();
+        }
+        for (Runnable task : pending)
+            task.run();
     }
 
     /** Повторная загрузка списка после reconcile (member-access после точки). */

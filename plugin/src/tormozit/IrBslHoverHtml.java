@@ -14,6 +14,13 @@ public final class IrBslHoverHtml
 {
     private static final String BSL_BROWSER_INPUT_CLASS =
         "com._1c.g5.v8.dt.internal.bsl.ui.browserscommon.BslBrowserInformationControlInput"; //$NON-NLS-1$
+    private static final String BSL_ASSIST_BROWSER_INPUT_CLASS =
+        "com._1c.g5.v8.dt.bsl.ui.contentassist.BslContentAssistBrowserInput"; //$NON-NLS-1$
+    private static final String BSL_DOC_UTIL_CLASS =
+        "com._1c.g5.v8.dt.internal.bsl.ui.documentation.BslDocumentationUtil"; //$NON-NLS-1$
+
+    private static volatile java.lang.reflect.Method addStyleToHtmlMethod;
+    private static volatile java.lang.reflect.Method defaultLanguageMethod;
 
     private IrBslHoverHtml() {}
 
@@ -39,16 +46,38 @@ public final class IrBslHoverHtml
         return html != null ? html.toString() : ""; //$NON-NLS-1$
     }
 
+    public static boolean isFullHtmlDocument(String html)
+    {
+        if (html == null || html.isBlank())
+            return false;
+        String lower = html.trim().toLowerCase();
+        return lower.startsWith("<!doctype html") || lower.startsWith("<html"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
     public static String mergeHtml(String baseHtml, String irFragment)
     {
         if (irFragment == null || irFragment.isEmpty())
             return baseHtml != null ? baseHtml : ""; //$NON-NLS-1$
-        String insert = extractInsertableFragment(irFragment);
-        if (insert.isEmpty())
-            insert = irFragment;
-        String irBlock = "<hr/><div class=\"comfort-ir-hover\">" + insert + "</div>"; //$NON-NLS-1$ //$NON-NLS-2$
+        String trimmedIr = irFragment.trim();
         if (baseHtml == null || baseHtml.isEmpty())
-            return irBlock;
+        {
+            String insert = extractInsertableFragment(trimmedIr);
+            if (insert.isEmpty())
+                insert = trimmedIr;
+            insert = stripIrEmbeddedChrome(insert);
+            String wrapped = wrapForAssistBrowser(insert);
+            // #region agent log
+            ContentAssistDebug.debugSessionLog("H12", "wrapIrOnly", "styled", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"inLen\":" + insert.length() //$NON-NLS-1$
+                    + ",\"outLen\":" + wrapped.length() //$NON-NLS-1$
+                    + ",\"fullDoc\":" + isFullHtmlDocument(wrapped) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return wrapped;
+        }
+        String insert = extractInsertableFragment(trimmedIr);
+        if (insert.isEmpty())
+            insert = trimmedIr;
+        String irBlock = "<hr/><div class=\"comfort-ir-hover\">" + insert + "</div>"; //$NON-NLS-1$ //$NON-NLS-2$
         String lower = baseHtml.toLowerCase();
         int bodyEnd = lower.lastIndexOf("</body>"); //$NON-NLS-1$
         if (bodyEnd >= 0)
@@ -144,6 +173,94 @@ public final class IrBslHoverHtml
         if (html == null || html.isEmpty())
             return ""; //$NON-NLS-1$
         return html.toLowerCase().replaceAll("\\s+", " ").trim(); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * Полный HTML-документ assist/hover EDT ({@code addStyleToHtml}) для фрагмента без base.
+     * Без обёртки SWT Browser показывает сырой HTML и обрезает содержимое.
+     */
+    public static String wrapForAssistBrowser(String content)
+    {
+        if (content == null || content.isBlank())
+            return content;
+        String trimmed = content.trim();
+        if (isFullHtmlDocument(trimmed))
+            return trimmed;
+        try
+        {
+            ensureAssistBrowserStyleMethods();
+            if (addStyleToHtmlMethod == null)
+            {
+                // #region agent log
+                ContentAssistDebug.debugSessionLog("H12", "wrapForAssistBrowser", "noMethod", "{}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                // #endregion
+                return trimmed;
+            }
+            String lang = "ru"; //$NON-NLS-1$
+            if (defaultLanguageMethod != null)
+            {
+                Object rawLang = defaultLanguageMethod.invoke(null);
+                if (rawLang instanceof String s && !s.isEmpty())
+                    lang = s;
+            }
+            Object wrapped = addStyleToHtmlMethod.invoke(null, trimmed, lang);
+            return wrapped != null ? wrapped.toString() : trimmed;
+        }
+        catch (Exception e)
+        {
+            // #region agent log
+            ContentAssistDebug.debugSessionLog("H12", "wrapForAssistBrowser", "fail", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"err\":" + ContentAssistDebug.jsonStr(e.getClass().getSimpleName()) //$NON-NLS-1$
+                    + ",\"msg\":" + ContentAssistDebug.jsonStr(String.valueOf(e.getMessage())) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return trimmed;
+        }
+    }
+
+    private static void ensureAssistBrowserStyleMethods()
+        throws ClassNotFoundException, NoSuchMethodException
+    {
+        if (addStyleToHtmlMethod == null)
+        {
+            Class<?> browserCls = resolveBslBrowserInputClass();
+            addStyleToHtmlMethod = browserCls.getMethod(
+                "addStyleToHtml", String.class, String.class); //$NON-NLS-1$
+        }
+        if (defaultLanguageMethod == null)
+        {
+            try
+            {
+                Class<?> util = Class.forName(BSL_DOC_UTIL_CLASS);
+                defaultLanguageMethod = util.getMethod("getDefaultLanguage"); //$NON-NLS-1$
+            }
+            catch (ClassNotFoundException | NoSuchMethodException ignored)
+            {
+                // lang остаётся ru
+            }
+        }
+    }
+
+    /** Internal-класс EDT недоступен из OSGi — берём через экспортированный assist-input. */
+    private static Class<?> resolveBslBrowserInputClass() throws ClassNotFoundException
+    {
+        Class<?> assist = Class.forName(BSL_ASSIST_BROWSER_INPUT_CLASS);
+        for (Class<?> type = assist; type != null; type = type.getSuperclass())
+        {
+            if (BSL_BROWSER_INPUT_CLASS.equals(type.getName()))
+                return type;
+        }
+        throw new ClassNotFoundException(BSL_BROWSER_INPUT_CLASS);
+    }
+
+    /** Убирает встроенные {@code style}/{@code script} ИР — иначе перебивают EDT {@code addStyleToHtml}. */
+    static String stripIrEmbeddedChrome(String html)
+    {
+        if (html == null || html.isEmpty())
+            return html;
+        String stripped = html
+            .replaceAll("(?is)<style[^>]*>.*?</style>", "") //$NON-NLS-1$
+            .replaceAll("(?is)<script[^>]*>.*?</script>", ""); //$NON-NLS-1$
+        return stripped.trim();
     }
 
     /** ИР часто возвращает полный {@code <html>…</html>}; в base вставляем только содержимое body. */

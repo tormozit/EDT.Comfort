@@ -148,36 +148,15 @@ public final class IrBslExpressionHtmlSupport
     /**
      * Sync на вызывающем потоке; COM — на {@code session.executor}.
      *
-     * @param onReady UI-thread callback после {@code ЗаполнитьТаблицуСлов}
+     * @param onReady UI-thread callback после цепочки RDT (таблица слов + наборы)
      */
     public static void prepareWordsTableAsync(
         IRSession session, BslXtextEditor editor, int caretOffset, Runnable onReady)
     {
-        if (session == null || editor == null || session.executor == null || session.executor.isShutdown())
-            return;
-        try
-        {
-            session.syncCodeEditorToIR(editor, caretOffset);
-        }
-        catch (Exception e)
-        {
-            BslSideHintDebug.problem("wordsTable sync: " + e.getMessage()); //$NON-NLS-1$
-            return;
-        }
-        session.executor.submit(() -> {
-            try
-            {
-                ensureCodeEditor(session);
-                session.invokeCodeEditor("РазобратьТекущийКонтекст"); //$NON-NLS-1$
-                session.invokeCodeEditor("ЗаполнитьТаблицуСлов"); //$NON-NLS-1$
-                Display display = Display.getDefault();
-                if (display != null && !display.isDisposed())
-                    display.asyncExec(onReady);
-            }
-            catch (Exception e)
-            {
-                BslSideHintDebug.problem("wordsTable: " + e.getMessage()); //$NON-NLS-1$
-            }
-        });
+        IrBslCompletionSupport.prepareAssistContextAsync(session, editor, caretOffset, false,
+            snapshot -> {
+                if (onReady != null)
+                    onReady.run();
+            });
     }
 }

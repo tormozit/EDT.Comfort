@@ -2,8 +2,10 @@ package tormozit;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Set;
 
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.text.DocumentEvent;
@@ -86,6 +88,11 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     private int cachedNonObjectDot = -1;
     /** Sync {@link #fetchDelegateList} уже выполнен для {@link #fullListContextKey}. */
     private int delegateSyncProbedContextKey = Integer.MIN_VALUE;
+    /** Слова ИР для текущего контекста assist (после {@link #applyIrCompletion}). */
+    private ICompletionProposal[] irProposals = EMPTY;
+    private int irSnapshotContextKey = Integer.MIN_VALUE;
+    /** Штатный список delegate без слов ИР. */
+    private ICompletionProposal[] delegateListCache = EMPTY;
 
     public SmartContentAssistProcessor(IContentAssistProcessor delegate, String activationChars)
     {
@@ -179,7 +186,29 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         terminalEmptyMemberAccess = false;
         cachedNonObjectDot = -1;
         clearDelegateSyncProbe();
+        irProposals = EMPTY;
+        irSnapshotContextKey = Integer.MIN_VALUE;
+        delegateListCache = EMPTY;
         ContentAssistDebug.log("invalidateCache"); //$NON-NLS-1$
+    }
+
+    /**
+     * Применяет snapshot слов ИР и пересобирает кэш списка (если delegate уже загружен).
+     */
+    public void applyIrCompletion(IrBslCompletionSupport.Snapshot snapshot)
+    {
+        if (snapshot == null || snapshot.proposals == null || snapshot.proposals.length == 0)
+            return;
+        irProposals = snapshot.proposals;
+        irSnapshotContextKey = fullListContextKey;
+        if (delegateListCache.length == 0)
+            return;
+        rebuildMergedFullListCache();
+        if (fullListCache.length > 0)
+        {
+            fullListReady = true;
+            ContentAssistSessionReloader.refreshPopupIfOpen();
+        }
     }
 
     static void clearLastComputeCaret()
@@ -752,8 +781,61 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
     private void assignFullListCache(ICompletionProposal[] cache)
     {
-        fullListCache = cache != null ? cache : EMPTY;
+        delegateListCache = stripIrProposals(cache != null ? cache : EMPTY);
+        rebuildMergedFullListCache();
+    }
+
+    private void rebuildMergedFullListCache()
+    {
+        fullListCache = mergeIrProposals(delegateListCache);
         rebuildDelegateOrderMap();
+    }
+
+    private static ICompletionProposal[] stripIrProposals(ICompletionProposal[] raw)
+    {
+        if (raw == null || raw.length == 0)
+            return EMPTY;
+        List<ICompletionProposal> kept = new ArrayList<>(raw.length);
+        for (ICompletionProposal p : raw)
+        {
+            if (!(unwrapProposal(p) instanceof IrCompletionProposal))
+                kept.add(p);
+        }
+        return kept.isEmpty() ? EMPTY : kept.toArray(new ICompletionProposal[kept.size()]);
+    }
+
+    private ICompletionProposal[] mergeIrProposals(ICompletionProposal[] delegateList)
+    {
+        if (irProposals.length == 0 || irSnapshotContextKey != fullListContextKey)
+            return delegateList != null ? delegateList : EMPTY;
+        if (delegateList == null || delegateList.length == 0)
+            return irProposals;
+        Set<String> names = new HashSet<>();
+        List<ICompletionProposal> merged = new ArrayList<>(delegateList.length + irProposals.length);
+        for (ICompletionProposal p : delegateList)
+        {
+            merged.add(p);
+            String key = dedupKey(p);
+            if (!key.isEmpty())
+                names.add(key);
+        }
+        for (ICompletionProposal p : irProposals)
+        {
+            String key = dedupKey(p);
+            if (!key.isEmpty() && names.contains(key))
+                continue;
+            merged.add(p);
+        }
+        return merged.toArray(new ICompletionProposal[merged.size()]);
+    }
+
+    private static String dedupKey(ICompletionProposal proposal)
+    {
+        ICompletionProposal raw = unwrapProposal(proposal);
+        if (raw instanceof IrCompletionProposal ir)
+            return IrBslCompletionSupport.normalizeFilterKey(ir.getFilterName());
+        return IrBslCompletionSupport.normalizeFilterKey(
+            BslCompletionSideHintResolver.extractProposalName(raw.getDisplayString()));
     }
 
     private void rebuildDelegateOrderMap()
@@ -1892,6 +1974,8 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     static int resolveNativePriority(ICompletionProposal proposal)
     {
         ICompletionProposal p = unwrapProposal(proposal);
+        if (p instanceof IrCompletionProposal ir)
+            return ir.getIrPriority();
         if (p instanceof ConfigurableCompletionProposal)
             return ((ConfigurableCompletionProposal) p).getPriority();
         return Integer.MIN_VALUE;
