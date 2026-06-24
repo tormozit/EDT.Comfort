@@ -101,7 +101,8 @@ public class RecentPlacesTracker implements IStartup
     // =========================================================================
 
     /**
-     * Quick Outline: сразу добавить выбранный метод в «Последние места».
+     * Схема модуля (Quick Outline / Content Outline): добавить метод в «Последние места»
+     * при подтверждении выбора (Enter или двойной клик), не при смене текущей строки.
      * Группирующие узлы дерева пропускаются.
      */
     public static void recordOutlineSelection(TreeViewer viewer, Object element, ILabelProvider labels)

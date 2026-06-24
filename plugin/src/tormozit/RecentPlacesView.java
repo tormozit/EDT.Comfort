@@ -75,6 +75,12 @@ public final class RecentPlacesView extends ViewPart
     public static final String SHOW_IN_NAVIGATOR_COMMAND_ID =
         "tormozit.recentPlaces.showInNavigator"; //$NON-NLS-1$
 
+    public static final String REMOVE_FROM_HISTORY_COMMAND_ID =
+        "tormozit.recentPlaces.removeFromHistory"; //$NON-NLS-1$
+
+    private static final String ITEM_TEXT_REMOVE_FROM_HISTORY =
+        "Удалить из истории \tDel"; //$NON-NLS-1$
+
     private static final String TABLE_MENU_KEY = "tormozit.recentPlacesTableMenu"; //$NON-NLS-1$
 
     private static final String ITEM_TEXT_SHOW_IN_NAVIGATOR =
@@ -919,7 +925,9 @@ public final class RecentPlacesView extends ViewPart
             @Override
             public void keyPressed(KeyEvent e)
             {
-                if (e.keyCode == SWT.CR || e.keyCode == SWT.KEYPAD_CR)
+                if (e.keyCode == SWT.DEL)
+                    executeRemoveFromHistoryCommand();
+                else if (e.keyCode == SWT.CR || e.keyCode == SWT.KEYPAD_CR)
                     jumpToSelected();
             }
         });
@@ -958,6 +966,10 @@ public final class RecentPlacesView extends ViewPart
         showNav.setToolTipText("Показать объект метаданных в дереве навигатора"); //$NON-NLS-1$
         showNav.addListener(SWT.Selection, ev -> executeShowInNavigatorCommand());
 
+        MenuItem removeHistory = new MenuItem(menu, SWT.PUSH);
+        removeHistory.setText(ITEM_TEXT_REMOVE_FROM_HISTORY);
+        removeHistory.addListener(SWT.Selection, ev -> executeRemoveFromHistoryCommand());
+
         MenuItem copyRef = new MenuItem(menu, SWT.PUSH);
         copyRef.setText("Копировать ссылку в буфер обмена"); //$NON-NLS-1$
         copyRef.addListener(SWT.Selection, ev -> copyNavRefToClipboard());
@@ -966,6 +978,7 @@ public final class RecentPlacesView extends ViewPart
         {
             boolean hasSelection = !listViewer.getStructuredSelection().isEmpty();
             showNav.setEnabled(hasSelection);
+            removeHistory.setEnabled(hasSelection);
             copyRef.setEnabled(hasSelection);
         });
     }
@@ -1109,6 +1122,21 @@ public final class RecentPlacesView extends ViewPart
         catch (Exception ex)
         {
             Global.log("RecentPlacesView: showInNavigator: " + ex); //$NON-NLS-1$
+        }
+    }
+
+    private void executeRemoveFromHistoryCommand()
+    {
+        IHandlerService handlerService = getSite().getService(IHandlerService.class);
+        if (handlerService == null)
+            return;
+        try
+        {
+            handlerService.executeCommand(REMOVE_FROM_HISTORY_COMMAND_ID, null);
+        }
+        catch (Exception ex)
+        {
+            Global.log("RecentPlacesView: removeFromHistory: " + ex); //$NON-NLS-1$
         }
     }
 

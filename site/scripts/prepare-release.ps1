@@ -289,6 +289,16 @@ Write-Host 'Sync PDE OSGi profile (launch\restore-main.ps1)...'
 & powershell -NoProfile -ExecutionPolicy Bypass -File $restoreScript
 Test-ExternalExitCode -Context 'restore-main.ps1'
 
+. (Join-Path $Root 'launch\comfort-osgi-version.ps1')
+$expectedQualifier = Get-ComfortExpectedQualifier
+$wsOsgi = $ComfortWsOsgi
+$wsBundles = Join-Path $wsOsgi $ComfortBundlesInfoRel
+$wsDev = Join-Path $wsOsgi 'dev.properties'
+Assert-ComfortOsgiVersionSync -Context 'prepare-release post-restore' `
+    -ExpectedQualifier $expectedQualifier `
+    -BundlesInfoPath $wsBundles `
+    -DevPropertiesPath $wsDev
+
 $release = Read-ComfortRelease
 $built = Get-BuiltFeatureVersion -SiteDirectory $SiteDir
 $actionsMode = if ($Mode -eq 'Release') { 'new' } else { 'republish' }

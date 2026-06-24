@@ -9,6 +9,7 @@ import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
+import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
@@ -201,7 +202,10 @@ public final class FilterInputBoxListNavigation
         if (table == null || table.isDisposed() || table.getItemCount() == 0)
             return false;
         if (table.getSelectionIndex() < 0)
+        {
             table.setSelection(0);
+            fireTableSelection(table);
+        }
         table.setFocus();
         table.showSelection();
         return true;
@@ -217,7 +221,23 @@ public final class FilterInputBoxListNavigation
             return -1;
         table.setSelection(newIdx);
         table.showSelection();
+        fireTableSelection(table);
         return newIdx;
+    }
+
+    /** Синхронизация {@link org.eclipse.jface.viewers.TableViewer} и строки статуса после программного выбора. */
+    private static void fireTableSelection(Table table)
+    {
+        if (table == null || table.isDisposed())
+            return;
+        TableItem[] selected = table.getSelection();
+        if (selected.length == 0)
+            return;
+        Event event = new Event();
+        event.type = SWT.Selection;
+        event.widget = table;
+        event.item = selected[0];
+        table.notifyListeners(SWT.Selection, event);
     }
 
     private static int computeTableNavIndex(Table table, int keyCode)

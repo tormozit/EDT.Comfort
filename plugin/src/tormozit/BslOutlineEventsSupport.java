@@ -538,13 +538,43 @@ public final class BslOutlineEventsSupport
     }
 
     /**
+     * Плоская подпись — только внешние обработчики подписок, не штатные методы формы с environmentNames.
+     */
+    private static boolean isSubscriptionOutlineElement(Object element, SubscriptionFlatLabels labels)
+    {
+        if (element == null)
+            return false;
+        if (isOutlineEventHandlerElement(element))
+            return true;
+        if (isEventSubscriptionExtension(element))
+            return true;
+        if (labels == null)
+            return false;
+        if (labels.elementSubscriptionParts.containsKey(element))
+            return true;
+        if (!isOutlineMethodElement(element))
+            return false;
+        String name = stripEventSignature(resolveOutlineElementName(element));
+        if (name.isEmpty())
+            return false;
+        if (!isSubscriptionHandlerProcedureName(name, labels))
+            return false;
+        if (labels.procedureNameIndex.containsKey(name))
+            return true;
+        if (lookupSubscriptionPartsByMethodName(labels, name, null) != null)
+            return true;
+        return labels.subscriptionDescriptions != null
+                && resolveSubscriptionPartsForMethodName(name, labels) != null;
+    }
+
+    /**
      * Плоский Quick Outline (с активным фильтром): подпись внешнего обработчика подписки —
      * {@code ИмяСобытия/ИмяМодуля.ИмяОбработчика}. Без фильтра — {@link #resolveTreeSubscriptionHandlerLabel}.
      */
     static String formatFlatSubscriptionHandlerLabel(Object element, IBaseLabelProvider labelSource,
             SubscriptionFlatLabels flatLabels)
     {
-        if (element == null)
+        if (element == null || !isSubscriptionOutlineElement(element, flatLabels))
             return null;
 
         if (flatLabels != null)
@@ -564,25 +594,6 @@ public final class BslOutlineEventsSupport
                     return flat;
                 }
             }
-        }
-
-        String flatFromEdt = resolveFlatViaEdtOutlineLabel(labelSource, element);
-        if (flatFromEdt != null)
-        {
-            if (flatLabels != null)
-                flatLabels.elementFlatLabels.put(element, flatFromEdt);
-            return flatFromEdt;
-        }
-
-        String flatFromEnv = formatFlatFromEnvironmentNames(resolveEnvironmentNames(element));
-        if (flatFromEnv != null)
-        {
-            if (flatLabels != null)
-            {
-                flatLabels.elementFlatLabels.put(element, flatFromEnv);
-                flatLabels.subscriptionOutlineLeaves.add(element);
-            }
-            return flatFromEnv;
         }
 
         if (isOutlineEventHandlerElement(element))
@@ -667,27 +678,7 @@ public final class BslOutlineEventsSupport
 
     private static boolean isSubscriptionHandlerCandidate(Object element, SubscriptionFlatLabels flatLabels)
     {
-        if (element == null)
-            return false;
-        if (isOutlineEventHandlerElement(element))
-            return true;
-        if (isEventSubscriptionExtension(element))
-            return true;
-        if (resolveEnvironmentNames(element) != null)
-            return true;
-        if (flatLabels != null)
-        {
-            if (flatLabels.subscriptionOutlineLeaves.contains(element))
-                return true;
-            if (flatLabels.elementFlatLabels.containsKey(element))
-                return true;
-            String glued = resolveOutlineElementName(element);
-            if (isSubscriptionHandlerProcedureName(glued, flatLabels))
-                return true;
-            if (!glued.isEmpty() && flatLabels.procedureNameIndex.containsKey(glued))
-                return true;
-        }
-        return false;
+        return isSubscriptionOutlineElement(element, flatLabels);
     }
 
     private static String resolveOutlineElementName(Object element)
@@ -706,18 +697,12 @@ public final class BslOutlineEventsSupport
     static String resolveFlatDisplayLabel(Object element, IBaseLabelProvider labelSource,
             SubscriptionFlatLabels flatLabels)
     {
-        if (element == null || flatLabels == null)
+        if (element == null || flatLabels == null || !isSubscriptionOutlineElement(element, flatLabels))
             return null;
         String cached = flatLabels.elementFlatLabels.get(element);
         if (cached != null)
             return cached;
-        String flat = formatFlatSubscriptionHandlerLabel(element, labelSource, flatLabels);
-        if (flat != null)
-            return flat;
-        String filterText = flatLabels.filterTextByElement.get(element);
-        if (filterText != null && filterText.indexOf('/') >= 0)
-            return filterText;
-        return null;
+        return formatFlatSubscriptionHandlerLabel(element, labelSource, flatLabels);
     }
 
     /**
@@ -1049,22 +1034,6 @@ public final class BslOutlineEventsSupport
             if (!isEventSubscriptionExtension(leaf)
                     && !isSubscriptionHandlerProcedureName(methodName, labels))
                 continue;
-            if (labelSource != null)
-            {
-                String flatEdt = resolveFlatViaEdtOutlineLabel(labelSource, leaf);
-                if (flatEdt != null)
-                {
-                    labels.subscriptionOutlineLeaves.add(leaf);
-                    labels.elementFlatLabels.put(leaf, flatEdt);
-                    continue;
-                }
-            }
-            String[] envNames = resolveEnvironmentNames(leaf);
-            if (envNames != null)
-            {
-                putSubscriptionEnvironmentOnLeaf(labels, leaf, envNames);
-                continue;
-            }
             String[] parts = resolveSubscriptionPartsForMethodName(methodName, labels);
             if (parts == null && labelSource != null)
             {
@@ -1130,6 +1099,8 @@ public final class BslOutlineEventsSupport
         if (name == null || name.isEmpty() || name.indexOf('(') >= 0 || labels == null)
             return false;
         if (labels.eventNames.contains(name))
+            return false;
+        if (name.endsWith("НаСервере") || name.endsWith("НаКлиенте")) //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         return longestMatchingEventPrefix(name, labels.eventNames) != null;
     }
@@ -1663,16 +1634,6 @@ public final class BslOutlineEventsSupport
         return slash >= 0 && handlerName.equals(descName.substring(slash + 1));
     }
 
-    private static void putSubscriptionEnvironmentOnLeaf(SubscriptionFlatLabels labels, Object leaf,
-            String[] envNames)
-    {
-        String flat = formatFlatFromEnvironmentNames(envNames);
-        if (labels == null || leaf == null || flat == null)
-            return;
-        labels.subscriptionOutlineLeaves.add(leaf);
-        labels.elementFlatLabels.put(leaf, flat);
-    }
-
     /** Штатная подпись EDT ({@code environmentsName}) — части через запятую, в плоском списке через {@code /}. */
     private static String resolveFlatViaEdtOutlineLabel(IBaseLabelProvider labelSource, Object element)
     {
@@ -1719,6 +1680,24 @@ public final class BslOutlineEventsSupport
         if (text == null)
             return null;
         String s = text.trim();
+        if (s.isEmpty())
+            return null;
+        int sep = s.indexOf(" : "); //$NON-NLS-1$
+        if (sep >= 0)
+        {
+            String head = s.substring(0, sep + 3);
+            String env = normalizeEnvironmentListSeparator(s.substring(sep + 3));
+            return env != null ? head + env : null;
+        }
+        return normalizeEnvironmentListSeparator(s);
+    }
+
+    /** Запятые → слэши только в списке сред, не в сигнатуре метода. */
+    private static String normalizeEnvironmentListSeparator(String env)
+    {
+        if (env == null)
+            return null;
+        String s = env.trim();
         if (s.isEmpty())
             return null;
         if (s.indexOf('/') >= 0)
@@ -1820,6 +1799,8 @@ public final class BslOutlineEventsSupport
     {
         if (methodName == null || eventNames == null)
             return null;
+        if (eventNames.contains(methodName))
+            return null;
         String bestEvent = null;
         for (String event : eventNames)
         {
@@ -1831,6 +1812,15 @@ public final class BslOutlineEventsSupport
             else if (methodName.endsWith(event) && methodName.length() > event.length()
                     && (bestEvent == null || event.length() > bestEvent.length()))
                 bestEvent = event;
+        }
+        if (bestEvent == null)
+            return null;
+        for (String event : eventNames)
+        {
+            if (event == null || event.isEmpty() || event.equals(methodName) || event.equals(bestEvent))
+                continue;
+            if (event.length() > bestEvent.length() && methodName.startsWith(event))
+                return null;
         }
         return bestEvent;
     }
@@ -2453,13 +2443,6 @@ public final class BslOutlineEventsSupport
     {
         if (element == null || cp == null || index == null || eventNames == null)
             return;
-        if (labels != null && isOutlineMethodElement(element)
-                && !labels.elementSubscriptionParts.containsKey(element))
-        {
-            String[] envNames = resolveEnvironmentNames(element);
-            if (envNames != null)
-                putSubscriptionEnvironmentOnLeaf(labels, element, envNames);
-        }
         if (isExtensionElement(element) && !isFormItemEventExtension(element))
         {
             String[] parts = resolveSubscriptionTypeNamesForOutlineElement(element, subscriptionDescriptions);

@@ -260,11 +260,6 @@ public final class ContentAssistPopupUi
         boolean inLiteral = SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret);
         toggle.setEnabled(!inLiteral);
         toggle.setToolTipText(inLiteral ? LITERAL_FILTER_TOOLTIP : null);
-        // #region agent log
-        ContentAssistDebug.agentLog("H5", "applyFilterToggleAvailability", "toggle", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + caret + ",\"inLiteral\":" + inLiteral + ",\"enabled\":" + !inLiteral //$NON-NLS-1$ //$NON-NLS-2$
-                + "}"); //$NON-NLS-1$
-        // #endregion
     }
 
     private static int resolveViewerCaret(SourceViewer viewer)

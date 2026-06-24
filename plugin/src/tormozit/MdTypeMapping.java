@@ -31,6 +31,9 @@ public final class MdTypeMapping
      */
     private static final Map<String, String> RU_TO_RU_PLURAL = new LinkedHashMap<>();
 
+    /** RU мн.ч. → RU ед.ч. для offline-резолва прямых имён менеджеров. */
+    private static final Map<String, String> RU_PLURAL_TO_RU = new LinkedHashMap<>();
+
     /** EN ед.ч. типа под-объекта → имя EMF-коллекции (attributes, forms…). */
     private static final Map<String, String> SUB_OBJECT_TO_EMF_FEATURE = new LinkedHashMap<>();
 
@@ -148,6 +151,9 @@ public final class MdTypeMapping
         RU_TO_RU_PLURAL.put("Задача",                 "Задачи");
         RU_TO_RU_PLURAL.put("Обработка",              "Обработки");
         RU_TO_RU_PLURAL.put("Отчет",                  "Отчеты");
+
+        for (Map.Entry<String, String> entry : RU_TO_RU_PLURAL.entrySet())
+            RU_PLURAL_TO_RU.put(entry.getValue(), entry.getKey());
     }
 
     // =========================================================================
@@ -171,6 +177,26 @@ public final class MdTypeMapping
     public static String ruToRuPlural(String ruSingular)   
     { 
         return RU_TO_RU_PLURAL.get(ruSingular); 
+    }
+
+    /**
+     * «Справочники» → «Справочник». Обратное к {@link #ruToRuPlural}.
+     */
+    public static String ruPluralToRu(String ruPlural)
+    {
+        return RU_PLURAL_TO_RU.get(ruPlural);
+    }
+
+    /**
+     * Первый сегмент точечной ссылки — известный корневой тип МД (ед.ч.)?
+     * Например «Справочник», «Документ»; не «Справочники», не «ДлительныеОперации».
+     */
+    public static boolean isKnownMdRootType(String segment)
+    {
+        if (segment == null || segment.isBlank())
+            return false;
+        String ru = anyToRu(segment.strip());
+        return ru != null && RU_TO_FOLDER.containsKey(ru);
     }
 
     // =========================================================================

@@ -25,6 +25,8 @@ $qualifier = "$release-qualifier"
 $releaseSnapshot = "$release-SNAPSHOT"
 Write-Host "Sync version: $qualifier (Maven: $releaseSnapshot)"
 
+. (Join-Path $Root 'launch\comfort-osgi-version.ps1')
+
 function Set-Utf8NoBomContent {
     param(
         [string]$Path,
@@ -32,39 +34,6 @@ function Set-Utf8NoBomContent {
     )
     $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllLines($Path, $Lines, $utf8NoBom)
-}
-
-function Update-PdeOsgiComfortVersion {
-    param(
-        [string]$BundlesInfoPath,
-        [string]$DevPropertiesPath,
-        [string]$Qualifier
-    )
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    if (-not (Test-Path -LiteralPath $BundlesInfoPath)) {
-        Write-Error "bundles.info not found: $BundlesInfoPath"
-    }
-    $bundleLines = [System.IO.File]::ReadAllLines($BundlesInfoPath)
-    $bundleUpdated = $false
-    for ($i = 0; $i -lt $bundleLines.Count; $i++) {
-        if ($bundleLines[$i] -match '^tormozit\.comfort,') {
-            $bundleLines[$i] = "tormozit.comfort,$Qualifier,file:/C:/VC/EDT.Comfort/plugin/,4,false"
-            $bundleUpdated = $true
-            break
-        }
-    }
-    if (-not $bundleUpdated) {
-        Write-Error "tormozit.comfort entry not found in $BundlesInfoPath"
-    }
-    [System.IO.File]::WriteAllLines($BundlesInfoPath, $bundleLines, $utf8NoBom)
-    $devLines = @(
-        '#',
-        "#$(Get-Date -Format 'ddd MMM dd HH:mm:ss ''MSK'' yyyy')",
-        "tormozit.comfort;$Qualifier=bin,lib/jacob.jar",
-        '@ignoredot@=true',
-        'tormozit.comfort=bin,lib/jacob.jar'
-    )
-    [System.IO.File]::WriteAllLines($DevPropertiesPath, $devLines, $utf8NoBom)
 }
 
 $manifestPath = Join-Path $Root 'plugin\META-INF\MANIFEST.MF'

@@ -388,10 +388,92 @@ public class GoToDefinition extends AbstractHandler
         }
 
         String stripped = stripTypeSuffix(ref);
-        if (stripped != null) 
-            return openByFullName(stripped, shell, page, project);
+        String mdRef = stripped != null ? stripped : ref;
 
-        return openByFullName(ref, shell, page, project);
+        String dotRef = stripDocRefPrefix(mdRef);
+        int firstDot = dotRef.indexOf('.');
+        if (firstDot > 0)
+        {
+            String firstSeg = dotRef.substring(0, firstDot);
+            if (MdTypeMapping.isKnownMdRootType(firstSeg))
+                return openByFullName(mdRef, shell, page, project);
+            if (resolveConnectedIrSession(project) == null
+                && tryOpenDirectModuleMethodOffline(dotRef, page, project))
+                return true;
+        }
+
+        return openByFullName(mdRef, shell, page, project);
+    }
+
+    /**
+     * Offline-fallback для doc-ссылок «прямоеИмя.Метод» без подключённого ИР.
+     * Общий модуль ({@code Имя.Метод}) или менеджер ({@code Справочники.Объект.Метод}).
+     */
+    private static boolean tryOpenDirectModuleMethodOffline(
+        String ref, IWorkbenchPage page, IProject project)
+    {
+        String[] segments = ref.split("\\.", -1); //$NON-NLS-1$
+        if (segments.length < 2)
+            return false;
+
+        String methodName = segments[segments.length - 1];
+        if (methodName.isEmpty())
+            return false;
+
+        String fullModulePath = resolveOfflineModulePath(segments);
+        if (fullModulePath == null)
+            return false;
+
+        String bslPath = moduleToBslPath(fullModulePath, null);
+        if (bslPath == null)
+            return false;
+
+        IFile file = findFileInWorkspace(bslPath, page, project);
+        if (file == null || !bslFileContainsMethod(file, methodName))
+            return false;
+
+        ModuleLineRef r = new ModuleLineRef();
+        r.modulePath = fullModulePath;
+        r.method = methodName;
+        r.line = 1;
+        r.column = 0;
+        return openModuleRefViaUri(r, page, project);
+    }
+
+    private static String resolveOfflineModulePath(String[] segments)
+    {
+        if (segments.length >= 3)
+        {
+            String ruSingular = MdTypeMapping.ruPluralToRu(segments[0]);
+            if (ruSingular != null && !segments[1].isEmpty())
+                return ruSingular + "." + segments[1] + ".МодульМенеджера"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        if (segments.length == 2 && !segments[0].isEmpty())
+            return "ОбщийМодуль." + segments[0] + ".Модуль"; //$NON-NLS-1$ //$NON-NLS-2$
+        return null;
+    }
+
+    private static String stripDocRefPrefix(String ref)
+    {
+        if (ref == null)
+            return ""; //$NON-NLS-1$
+        String s = ref.strip();
+        if (s.length() >= 3 && s.regionMatches(true, 0, "см.", 0, 3)) //$NON-NLS-1$
+            s = s.substring(3).strip();
+        return s;
+    }
+
+    private static boolean bslFileContainsMethod(IFile file, String methodName)
+    {
+        try (InputStream is = file.getContents())
+        {
+            String text = new String(is.readAllBytes(), StandardCharsets.UTF_8);
+            return GetRef.findMethodDeclarationLine(new Document(text), methodName) >= 0;
+        }
+        catch (Exception e)
+        {
+            return false;
+        }
     }
 
     // =======================================================================
@@ -1082,6 +1164,28 @@ public class GoToDefinition extends AbstractHandler
             return null;
 
         String[] p = modulePath.split("\\.");
+        if (p.length < 2)
+            return null;
+
+        if (p.length == 2)
+        {
+            String rootFolder = MdTypeMapping.anyToFolder(p[0]);
+            if (!"CommonModules".equals(rootFolder)) //$NON-NLS-1$
+                return null;
+            StringBuilder shortPath = new StringBuilder("src/"); //$NON-NLS-1$
+            if (extension != null && !extension.isBlank())
+            {
+                shortPath.append("ext/") //$NON-NLS-1$
+                    .append(extension)
+                    .append('/');
+            }
+            return shortPath.append(rootFolder)
+                .append('/')
+                .append(p[1])
+                .append("/Module.bsl") //$NON-NLS-1$
+                .toString();
+        }
+
         if (p.length < 3)
             return null;
 

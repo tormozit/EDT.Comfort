@@ -323,18 +323,11 @@ public final class ContentAssistPopupSync
 
             int caret = caretOverride >= 0 ? caretOverride
                 : SmartContentAssistProcessor.resolveWidgetCaret(viewer);
-            int invCaret = SmartContentAssistProcessor.resolveInvocationCaret(viewer,
-                getInvocationOffset(assistant));
             if (caret >= 0)
                 SmartContentAssistProcessor.primeFilterTrackerOnly(viewer, caret);
 
             boolean inLiteralRecompute = SmartContentAssistProcessor.isStringLiteralAssistContext(
                 viewer, caret);
-            // #region agent log
-            ContentAssistDebug.agentLog("H2", "recomputePopupList", "caretProbe", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"widgetCaret\":" + caret + ",\"invCaret\":" + invCaret + ",\"inLiteral\":" //$NON-NLS-1$ //$NON-NLS-2$
-                    + inLiteralRecompute + "}"); //$NON-NLS-1$
-            // #endregion
 
             if (inLiteralRecompute)
             {

@@ -252,11 +252,6 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         boolean inLiteral = false;
         if (ixtext && caret >= 0)
             inLiteral = EditEmbeddedTextHandler.isCaretInStringLiteral((IXtextDocument) doc, caret);
-        // #region agent log
-        ContentAssistDebug.agentLog("H1", "isStringLiteralAssistContext", "probe", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + caret + ",\"ixtext\":" + ixtext + ",\"doc\":\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + (doc != null ? doc.getClass().getSimpleName() : "null") + "\",\"inLiteral\":" + inLiteral + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        // #endregion
         if (ixtext && caret >= 0)
             return inLiteral;
         return false;

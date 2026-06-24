@@ -234,6 +234,11 @@
         categoryId="tormozit.commands.global"
         description="Показать выбранный объект из панели «Последние места» в навигаторе (Комфорт)"/>
     <command
+        id="tormozit.recentPlaces.removeFromHistory"
+        name="Удалить из истории"
+        categoryId="tormozit.commands.global"
+        description="Удалить выделенные записи из панели «Последние места» (Комфорт)"/>
+    <command
         id="tormozit.objectSets.showInNavigator"
         name="Показать в навигаторе"
         categoryId="tormozit.commands.global"
@@ -366,6 +371,15 @@
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.RecentPlacesShowInNavigatorHandler"
         commandId="tormozit.recentPlaces.showInNavigator">
+      <activeWhen>
+        <with variable="activePartId">
+          <equals value="tormozit.RecentPlacesView"/>
+        </with>
+      </activeWhen>
+    </handler>
+    <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.RecentPlacesRemoveFromHistoryHandler"
+        commandId="tormozit.recentPlaces.removeFromHistory">
       <activeWhen>
         <with variable="activePartId">
           <equals value="tormozit.RecentPlacesView"/>

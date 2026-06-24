@@ -171,7 +171,7 @@ public final class GlobalLogView extends ViewPart
             return;
         InputDialog dialog = new InputDialog(logText.getShell(),
             "Поиск в журнале", //$NON-NLS-1$
-            "Текст для поиска" + Global.pluginSignForTooltip(), //$NON-NLS-1$
+            "Текст для поиска", //$NON-NLS-1$
             findText,
             null);
         if (dialog.open() != InputDialog.OK)

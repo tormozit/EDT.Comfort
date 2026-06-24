@@ -91,6 +91,25 @@ public class GetRef extends AbstractHandler
             showModuleLineRefs(bslEditor, shell);
             return null; 
         }
+        if (shell != null)
+        {
+            String dialogRef = OpenMdObjectHook.getRefFromDialog(shell);
+            if (dialogRef != null && !dialogRef.isBlank())
+            {
+                Global.log("GetRef (open md object): " + dialogRef); //$NON-NLS-1$
+                setClipboardText(dialogRef, shell);
+                ToastNotification.show("Скопирована ссылка", dialogRef, 6000);
+                return null;
+            }
+            String typeRef = SmartOutlineHook.getRefFromTypeDialog(shell);
+            if (typeRef != null && !typeRef.isBlank())
+            {
+                Global.log("GetRef (select type): " + typeRef); //$NON-NLS-1$
+                setClipboardText(typeRef, shell);
+                ToastNotification.show("Скопировано", typeRef, 6000);
+                return null;
+            }
+        }
         String ref = getRefFromPart(part);
         if (ref == null || ref.isBlank())
         {

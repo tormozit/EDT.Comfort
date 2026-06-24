@@ -1,14 +1,19 @@
 package tormozit;
 
+import org.eclipse.core.commands.AbstractHandler;
+import org.eclipse.core.commands.ExecutionEvent;
+import org.eclipse.core.runtime.jobs.IJobChangeEvent;
+import org.eclipse.core.runtime.jobs.JobChangeAdapter;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.ILabelDecorator;
 import org.eclipse.jface.viewers.ILabelProvider;
-
-import java.lang.reflect.Field;
-
+import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.dnd.Clipboard;
+import org.eclipse.swt.dnd.TextTransfer;
+import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.jface.viewers.TableViewer;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
@@ -22,14 +27,20 @@ import org.eclipse.swt.widgets.Text;
 import org.eclipse.swt.events.ModifyEvent;
 import org.eclipse.swt.events.ModifyListener;
 import org.eclipse.swt.custom.StyledText;
+import org.eclipse.ui.ActiveShellExpression;
 import org.eclipse.ui.IStartup;
+import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.dialogs.FilteredItemsSelectionDialog;
-import java.util.Comparator;
+import org.eclipse.ui.handlers.IHandlerActivation;
+import org.eclipse.ui.handlers.IHandlerService;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import org.eclipse.jface.viewers.LabelProvider;
 import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.swt.graphics.Image;
+
+import java.lang.reflect.Field;
 
 public class OpenMdObjectHook implements IStartup {
 
@@ -42,6 +53,10 @@ public class OpenMdObjectHook implements IStartup {
     }
 
     private static final String PATCHED_KEY = "tormozit.mdObjectPatched";
+    private static final String COPY_HOOK_KEY = "tormozit.openMdObjectCopyHook"; //$NON-NLS-1$
+
+    private static final String OBJECT_PAIR_CLASS =
+            "com._1c.g5.v8.dt.md.ui.dialogs.OpenMdObjectSelectionDialog$ObjectDescriptionPair"; //$NON-NLS-1$
 
     public static void install(Display display) {
         if (display == null || display.isDisposed()) return;
@@ -127,8 +142,7 @@ public class OpenMdObjectHook implements IStartup {
             Global.invoke(dialog, "setListSelectionLabelDecorator", smartLp);
 
             OpenMdObjectComparator comparator = new OpenMdObjectComparator(smartLp);
-            setFieldExactClass(dialog, FilteredItemsSelectionDialog.class, "itemsComparator", comparator);
-            setFieldExactClass(dialog, FilteredItemsSelectionDialog.class, "fItemsComparator", comparator);
+            installLazyListSortHook(dialog, comparator);
 
             // --- Убираем штатные слушатели старого поля ---
             for (Listener l : patternText.getListeners(SWT.Modify)) {
@@ -209,13 +223,15 @@ public class OpenMdObjectHook implements IStartup {
                 OpenMdObjectDebug.log("tableNav SKIP table not found");
             }
 
+            installCopySupport(shell, dialog);
+
             applySmartFilter(dialog, smartFilterRef[0], smartLp, comparator, filterInput.getText(), true);
 
             filterControl.getDisplay().asyncExec(() -> {
                 if (filterControl.isDisposed())
                     return;
                 if (getFilterPattern(filterControl).isEmpty())
-                    refreshHistoryOnUiThread(dialog, smartFilterRef[0]);
+                    refreshHistoryOnUiThread(dialog, smartFilterRef[0], comparator);
             });
 
             filterInput.scheduleFocusWhenReady();
@@ -297,7 +313,7 @@ public class OpenMdObjectHook implements IStartup {
         if (skip && !filterHandoff && !forceSchedule) {
             OpenMdObjectDebug.log("applySmartFilter SKIP schedule (pattern unchanged for EDT)");
             if (!pattern.isEmpty())
-                refreshTableLabels(dialog);
+                refreshTableLabelDecorations(dialog);
             return;
         }
 
@@ -319,7 +335,7 @@ public class OpenMdObjectHook implements IStartup {
         if (pattern.isEmpty())
         {
             clearSearchCache(dialog);
-            refreshHistoryOnUiThread(dialog, smartFilter);
+            refreshHistoryOnUiThread(dialog, smartFilter, comparator);
             return;
         }
 
@@ -335,7 +351,8 @@ public class OpenMdObjectHook implements IStartup {
     }
 
     private static void refreshHistoryOnUiThread(Object dialog,
-            org.eclipse.ui.dialogs.OpenMdObjectItemsFilter smartFilter)
+            org.eclipse.ui.dialogs.OpenMdObjectItemsFilter smartFilter,
+            OpenMdObjectComparator comparator)
     {
         Object contentProvider = Global.getField(dialog, "contentProvider"); //$NON-NLS-1$
         if (contentProvider == null)
@@ -343,6 +360,185 @@ public class OpenMdObjectHook implements IStartup {
         Global.invoke(contentProvider, "reset"); //$NON-NLS-1$
         Global.invoke(contentProvider, "addHistoryItems", smartFilter); //$NON-NLS-1$
         Global.invoke(contentProvider, "refresh"); //$NON-NLS-1$
+        resortDialogLists(dialog, comparator);
+        refreshLazyTable(dialog);
+    }
+
+    /** Ссылка на выбранный объект для {@link GetRef} и копирования в буфер. */
+    public static String getRefFromDialog(Shell shell)
+    {
+        if (shell == null || shell.isDisposed())
+            return null;
+        Object dialog = shell.getData();
+        if (dialog == null || !dialog.getClass().getName().contains("OpenMdObjectSelectionDialog")) //$NON-NLS-1$
+            return null;
+        Object viewerObj = Global.getField(dialog, "tableViewer"); //$NON-NLS-1$
+        if (!(viewerObj instanceof TableViewer))
+            return null;
+        IStructuredSelection sel = ((TableViewer) viewerObj).getStructuredSelection();
+        if (sel.isEmpty())
+            return null;
+        return resolveNavRef(dialog, sel.getFirstElement());
+    }
+
+    private static void installLazyListSortHook(Object dialog, OpenMdObjectComparator comparator)
+    {
+        Object refreshCacheJob = Global.getField(dialog, "refreshCacheJob"); //$NON-NLS-1$
+        if (refreshCacheJob == null)
+            refreshCacheJob = Global.getField(dialog, "fRefreshCacheJob"); //$NON-NLS-1$
+        Object refreshJob = refreshCacheJob != null
+                ? Global.getField(refreshCacheJob, "refreshJob") : null; //$NON-NLS-1$
+        if (!(refreshJob instanceof Job))
+            return;
+        ((Job) refreshJob).addJobChangeListener(new JobChangeAdapter()
+        {
+            @Override
+            public void aboutToRun(IJobChangeEvent event)
+            {
+                Display display = Display.getDefault();
+                if (display == null || display.isDisposed())
+                    return;
+                display.syncExec(() -> resortDialogLists(dialog, comparator));
+            }
+        });
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void resortDialogLists(Object dialog, OpenMdObjectComparator comparator)
+    {
+        if (dialog == null || comparator == null || comparator.matcher == null || comparator.matcher.isEmpty)
+            return;
+        Object cp = Global.getField(dialog, "contentProvider"); //$NON-NLS-1$
+        if (cp == null)
+            return;
+        sortProviderList(cp, "lastSortedItems", comparator); //$NON-NLS-1$
+        sortProviderList(cp, "lastFilteredItems", comparator); //$NON-NLS-1$
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void sortProviderList(Object cp, String fieldName, OpenMdObjectComparator comparator)
+    {
+        Object listObj = Global.getField(cp, fieldName);
+        if (!(listObj instanceof List))
+            return;
+        List<Object> list = (List<Object>) listObj;
+        synchronized (list)
+        {
+            list.sort(comparator::compareItems);
+        }
+    }
+
+    /** ILazyContentProvider: обновить виртуальную таблицу после сортировки списка. */
+    private static void refreshLazyTable(Object dialog)
+    {
+        TableViewer viewer = getTableViewer(dialog);
+        if (viewer == null || viewer.getControl().isDisposed())
+            return;
+        Object cp = Global.getField(dialog, "contentProvider"); //$NON-NLS-1$
+        if (cp != null)
+        {
+            Object count = Global.invoke(cp, "getNumberOfElements"); //$NON-NLS-1$
+            if (count instanceof Integer)
+                viewer.setItemCount((Integer) count);
+        }
+        viewer.refresh();
+    }
+
+    private static TableViewer getTableViewer(Object dialog)
+    {
+        Object viewerObj = Global.getField(dialog, "tableViewer"); //$NON-NLS-1$
+        if (viewerObj instanceof TableViewer)
+            return (TableViewer) viewerObj;
+        for (String field : new String[] { "fTableViewer" }) //$NON-NLS-1$
+        {
+            viewerObj = Global.getField(dialog, field);
+            if (viewerObj instanceof TableViewer)
+                return (TableViewer) viewerObj;
+        }
+        return null;
+    }
+
+    /** Только подсветка совпадений, порядок строк не меняется. */
+    private static void refreshTableLabelDecorations(Object dialog)
+    {
+        TableViewer viewer = getTableViewer(dialog);
+        if (viewer == null || viewer.getControl().isDisposed())
+            return;
+        viewer.refresh(true);
+    }
+
+    private static void installCopySupport(Shell shell, Object dialog)
+    {
+        if (Boolean.TRUE.equals(shell.getData(COPY_HOOK_KEY)))
+            return;
+        IHandlerService handlerService = PlatformUI.getWorkbench().getService(IHandlerService.class);
+        if (handlerService == null)
+            return;
+        AbstractHandler handler = new AbstractHandler()
+        {
+            @Override
+            public Object execute(ExecutionEvent event)
+            {
+                copySelectedToClipboard(dialog, shell);
+                return null;
+            }
+        };
+        IHandlerActivation activation = handlerService.activateHandler(
+                "org.eclipse.ui.edit.copy", handler, new ActiveShellExpression(shell)); //$NON-NLS-1$
+        shell.setData(COPY_HOOK_KEY, Boolean.TRUE);
+        shell.addDisposeListener(e -> handlerService.deactivateHandler(activation));
+    }
+
+    private static void copySelectedToClipboard(Object dialog, Shell shell)
+    {
+        Object viewerObj = Global.getField(dialog, "tableViewer"); //$NON-NLS-1$
+        if (!(viewerObj instanceof TableViewer))
+            return;
+        IStructuredSelection sel = ((TableViewer) viewerObj).getStructuredSelection();
+        if (sel.isEmpty())
+            return;
+        String ref = resolveNavRef(dialog, sel.getFirstElement());
+        if (ref == null || ref.isEmpty())
+            return;
+        Clipboard clipboard = new Clipboard(shell.getDisplay());
+        try
+        {
+            clipboard.setContents(
+                    new Object[] { ref },
+                    new Transfer[] { TextTransfer.getInstance() });
+        }
+        finally
+        {
+            clipboard.dispose();
+        }
+        ToastNotification.show("Скопировано", ref, 4000); //$NON-NLS-1$
+        OpenMdObjectDebug.log("copy ref=\"" + ref + "\""); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static String resolveNavRef(Object dialog, Object element)
+    {
+        if (dialog == null || element == null)
+            return null;
+        if (!OBJECT_PAIR_CLASS.equals(element.getClass().getName()))
+            return null;
+        Object engine = Global.getField(dialog, "mdObjectsEngine"); //$NON-NLS-1$
+        Object description = Global.getField(element, "description"); //$NON-NLS-1$
+        if (engine == null || description == null)
+            return null;
+        Object fullName = Global.invoke(engine, "getFullName", description); //$NON-NLS-1$
+        if (!(fullName instanceof String))
+            return null;
+        return navRefFromDisplayFullName((String) fullName);
+    }
+
+    static String navRefFromDisplayFullName(String fullName)
+    {
+        if (fullName == null || fullName.isEmpty())
+            return null;
+        int linkSep = fullName.indexOf(" / "); //$NON-NLS-1$
+        if (linkSep >= 0)
+            return fullName.substring(linkSep + 3).trim();
+        return fullName.trim();
     }
 
     private static void clearSearchCache(Object dialog)
@@ -369,25 +565,11 @@ public class OpenMdObjectHook implements IStartup {
         }
     }
 
-    private static void refreshTableLabels(Object dialog)
-    {
-        Object viewerObj = Global.getField(dialog, "tableViewer"); //$NON-NLS-1$
-        if (viewerObj instanceof TableViewer)
-        {
-            TableViewer viewer = (TableViewer) viewerObj;
-            if (!viewer.getControl().isDisposed())
-                viewer.refresh(true);
-        }
-    }
-
     private static Table getDialogTable(Object dialog, Shell shell)
     {
-        for (String field : new String[] { "tableViewer", "fTableViewer", "list" }) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        {
-            Object viewerObj = Global.getField(dialog, field);
-            if (viewerObj instanceof TableViewer)
-                return ((TableViewer) viewerObj).getTable();
-        }
+        TableViewer viewer = getTableViewer(dialog);
+        if (viewer != null && !viewer.getControl().isDisposed())
+            return viewer.getTable();
         if (shell != null && !shell.isDisposed())
         {
             Table fromShell = Global.findControl((Composite) shell, Table.class, t -> true);
@@ -417,11 +599,12 @@ public class OpenMdObjectHook implements IStartup {
         }
     }
 
-    private static class OpenMdObjectComparator implements Comparator<Object> {
+    private static final class OpenMdObjectComparator {
 
         private final ILabelProvider labelProvider;
         private SmartMatcher matcher;
         private final Map<Object, Integer> premiumCache = new HashMap<>();
+
         public OpenMdObjectComparator(ILabelProvider labelProvider) {
             this.labelProvider = labelProvider;
         }
@@ -431,8 +614,11 @@ public class OpenMdObjectHook implements IStartup {
             this.premiumCache.clear();
         }
 
-        @Override
-        public int compare(Object o1, Object o2) {
+        public int compareItems(Object o1, Object o2) {
+            return compareElements(o1, o2);
+        }
+
+        private int compareElements(Object o1, Object o2) {
             if (matcher == null || matcher.fullPattern.isEmpty()) {
                 return compareAlphabetically(o1, o2);
             }

@@ -10,7 +10,6 @@ import org.eclipse.jface.viewers.CheckboxTreeViewer;
 import org.eclipse.jface.viewers.ICheckStateProvider;
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.LabelProvider;
-import org.eclipse.jface.viewers.ISelectionChangedListener;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.StyledCellLabelProvider;
@@ -40,7 +39,16 @@ import org.eclipse.swt.widgets.ToolBar;
 import org.eclipse.swt.widgets.ToolItem;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
+import org.eclipse.core.commands.AbstractHandler;
+import org.eclipse.core.commands.ExecutionEvent;
+import org.eclipse.swt.dnd.Clipboard;
+import org.eclipse.swt.dnd.TextTransfer;
+import org.eclipse.swt.dnd.Transfer;
+import org.eclipse.ui.ActiveShellExpression;
 import org.eclipse.ui.IStartup;
+import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.handlers.IHandlerActivation;
+import org.eclipse.ui.handlers.IHandlerService;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
@@ -62,6 +70,9 @@ public class SmartOutlineHook implements IStartup {
     }
     
     private static final String PATCHED_KEY = "tormozit.outlinePatched";
+    private static final String TYPE_COPY_HOOK_KEY = "tormozit.typeCopyHook"; //$NON-NLS-1$
+    private static final String TYPE_COPY_VIEWER_KEY = "tormozit.typeCopyViewer"; //$NON-NLS-1$
+    private static final String TYPE_COPY_LP_KEY = "tormozit.typeCopyLabelProvider"; //$NON-NLS-1$
     private static final String CLEAR_BUTTON_KEY = "tormozit.outlineClearButton"; //$NON-NLS-1$
     private static final String HEADER_BUTTON_KEY = "tormozit.outlineHeaderButton"; //$NON-NLS-1$
     private static final String OUTLINE_COMFORT_HEADER_KEY = "tormozit.outlineComfortHeader"; //$NON-NLS-1$
@@ -69,7 +80,7 @@ public class SmartOutlineHook implements IStartup {
     private static final String CLEAR_INSTALLED_KEY = "tormozit.outlineClearInstalled"; //$NON-NLS-1$
     private static final String LAST_PATTERN_KEY = "tormozit.outlineLastPattern"; //$NON-NLS-1$
     private static final String PENDING_CLEAR_SELECTION_KEY = "tormozit.outlinePendingClearSelection"; //$NON-NLS-1$
-    private static final String SUPPRESS_RECENT_KEY = "tormozit.outlineSuppressRecent"; //$NON-NLS-1$
+    private static final String OUTLINE_RECENT_ON_OPEN_KEY = "tormozit.outlineRecentOnOpen"; //$NON-NLS-1$
     /** Заголовок {@code SelectTypeDialog_title} / {@code TypeDescriptionDialogComponent_DialogTitle}. */
     private static final String SELECT_TYPE_DIALOG_TITLE =
             "Редактирование типа данных"; //$NON-NLS-1$
@@ -559,15 +570,21 @@ public class SmartOutlineHook implements IStartup {
                 }
             });
             FilterInputBoxListNavigation.installTreeNavigation(fc, viewer.getTree(), null);
+            installTypeCopySupport(patchedShell, viewer, baseLp);
         } else {
             FilterInputBoxListNavigation.installTreeNavigation(fc, viewer.getTree(),
-                    () -> tryActivateEventFromFilter(viewer, dialog));
+                    () -> {
+                        if (tryActivateEventFromFilter(viewer, dialog))
+                            return true;
+                        recordOutlineOpenSelection(viewer, baseLp);
+                        return false;
+                    });
         }
 
         if (!typeTree)
         {
             installQuickOutlineHeaderButtons(fc, viewer, patchedShell, dialog, dialogName);
-            installOutlineRecentPlacesTracking(viewer, baseLp);
+            installOutlineRecentPlacesOnOpen(viewer, baseLp);
         }
 
         if (bslQuickOutline)
@@ -616,11 +633,9 @@ public class SmartOutlineHook implements IStartup {
 
             // 4. Выделение: при очистке — прежняя строка, при фильтре — первая видимая
             if (clearingFilter)
-                runSuppressingOutlineRecent(tree,
-                    () -> restoreOutlineSelection(viewer, smartFilter, savedSelection));
+                restoreOutlineSelection(viewer, smartFilter, savedSelection);
             else if (!pattern.isEmpty() && !aefTree)
-                runSuppressingOutlineRecent(tree,
-                    () -> keepOrSelectFirstVisibleItem(viewer, smartFilter));
+                keepOrSelectFirstVisibleItem(viewer, smartFilter);
 
             tree.setData(LAST_PATTERN_KEY, pattern);
         } finally {
@@ -674,40 +689,29 @@ public class SmartOutlineHook implements IStartup {
         viewer.setContentProvider(new SmartOutlineFlatContentProvider((ITreeContentProvider) cp, smartFilter, baseLp));
     }
 
-    private static void installOutlineRecentPlacesTracking(TreeViewer viewer, ILabelProvider baseLp)
+    /** Enter / двойной клик в схеме модуля — запись в «Последние места» (не при смене выделения). */
+    private static void installOutlineRecentPlacesOnOpen(TreeViewer viewer, ILabelProvider baseLp)
     {
         if (viewer == null)
             return;
-        viewer.addSelectionChangedListener(new ISelectionChangedListener() {
-            @Override
-            public void selectionChanged(org.eclipse.jface.viewers.SelectionChangedEvent event)
-            {
-                Tree tree = viewer.getTree();
-                if (tree != null && Boolean.TRUE.equals(tree.getData(SUPPRESS_RECENT_KEY)))
-                    return;
-                if (!(event.getSelection() instanceof IStructuredSelection))
-                    return;
-                IStructuredSelection sel = (IStructuredSelection) event.getSelection();
-                if (sel.isEmpty())
-                    return;
-                RecentPlacesTracker.recordOutlineSelection(viewer, sel.getFirstElement(), baseLp);
-            }
-        });
+        Tree tree = viewer.getTree();
+        if (tree == null || tree.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(tree.getData(OUTLINE_RECENT_ON_OPEN_KEY)))
+            return;
+        tree.setData(OUTLINE_RECENT_ON_OPEN_KEY, Boolean.TRUE);
+        tree.addListener(SWT.DefaultSelection, event -> recordOutlineOpenSelection(viewer, baseLp));
     }
 
-    private static void runSuppressingOutlineRecent(Tree tree, Runnable action)
+    private static void recordOutlineOpenSelection(TreeViewer viewer, ILabelProvider baseLp)
     {
-        if (tree == null || action == null)
+        if (viewer == null)
             return;
-        tree.setData(SUPPRESS_RECENT_KEY, Boolean.TRUE);
-        try
-        {
-            action.run();
-        }
-        finally
-        {
-            tree.setData(SUPPRESS_RECENT_KEY, null);
-        }
+        if (!(viewer.getSelection() instanceof IStructuredSelection sel))
+            return;
+        if (sel.isEmpty())
+            return;
+        RecentPlacesTracker.recordOutlineSelection(viewer, sel.getFirstElement(), baseLp);
     }
 
     /** Иконка ✕ из {@code SearchBox} в плагине {@code com._1c.g5.v8.dt.common.ui}. */
@@ -1418,6 +1422,71 @@ public class SmartOutlineHook implements IStartup {
             return true;
         return dialogName.contains("SelectTypeDialog") || dialogName.contains("TypeDescriptionDialog") //$NON-NLS-1$ //$NON-NLS-2$
                 || dialogName.contains("LwtDialog"); //$NON-NLS-1$
+    }
+
+    /** Текст выбранного типа для {@link GetRef} и Ctrl+C в диалоге выбора типа. */
+    public static String getRefFromTypeDialog(Shell shell)
+    {
+        if (shell == null || shell.isDisposed())
+            return null;
+        Object dialog = shell.getData();
+        String dialogName = dialog != null ? dialog.getClass().getName() : ""; //$NON-NLS-1$
+        if (!isTypeTreeDialog(shell.getText(), dialogName))
+            return null;
+        Object viewerObj = shell.getData(TYPE_COPY_VIEWER_KEY);
+        if (!(viewerObj instanceof TreeViewer))
+            return null;
+        Object lpObj = shell.getData(TYPE_COPY_LP_KEY);
+        if (!(lpObj instanceof ILabelProvider))
+            return null;
+        IStructuredSelection sel = ((TreeViewer) viewerObj).getStructuredSelection();
+        if (sel.isEmpty())
+            return null;
+        String text = SmartTreeElementLabels.resolve(sel.getFirstElement(), (ILabelProvider) lpObj);
+        return text != null && !text.isBlank() ? text.strip() : null;
+    }
+
+    private static void installTypeCopySupport(Shell shell, TreeViewer viewer, ILabelProvider labelProvider)
+    {
+        if (Boolean.TRUE.equals(shell.getData(TYPE_COPY_HOOK_KEY)))
+            return;
+        shell.setData(TYPE_COPY_VIEWER_KEY, viewer);
+        shell.setData(TYPE_COPY_LP_KEY, labelProvider);
+        IHandlerService handlerService = PlatformUI.getWorkbench().getService(IHandlerService.class);
+        if (handlerService == null)
+            return;
+        AbstractHandler handler = new AbstractHandler()
+        {
+            @Override
+            public Object execute(ExecutionEvent event)
+            {
+                copySelectedTypeToClipboard(shell);
+                return null;
+            }
+        };
+        IHandlerActivation activation = handlerService.activateHandler(
+                "org.eclipse.ui.edit.copy", handler, new ActiveShellExpression(shell)); //$NON-NLS-1$
+        shell.setData(TYPE_COPY_HOOK_KEY, Boolean.TRUE);
+        shell.addDisposeListener(e -> handlerService.deactivateHandler(activation));
+    }
+
+    private static void copySelectedTypeToClipboard(Shell shell)
+    {
+        String text = getRefFromTypeDialog(shell);
+        if (text == null || text.isEmpty())
+            return;
+        Clipboard clipboard = new Clipboard(shell.getDisplay());
+        try
+        {
+            clipboard.setContents(
+                    new Object[] { text },
+                    new Transfer[] { TextTransfer.getInstance() });
+        }
+        finally
+        {
+            clipboard.dispose();
+        }
+        ToastNotification.show("Скопировано", text, 4000); //$NON-NLS-1$
     }
 
     private static ILabelProvider createLabelProviderAdapter(IBaseLabelProvider rawLp) {

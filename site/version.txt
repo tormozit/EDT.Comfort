@@ -3,15 +3,19 @@
 # Пример итоговой версии: 1.0.0.10-202606061430
 #
 # Публикация на GitHub Pages:
-#   1. site\clean.bat — sync-version + очистка site/features plugins jars
-#   2. Build All на проекте site в PDE (workspace C:\VC\EDT-plugin-WS)
-#   3. launch\restore-main.ps1 при необходимости
-#   4. Закоммитьте site/features/, site/plugins/, site/content.jar, site/artifacts.jar
-#      (+ MANIFEST/feature/pom при новом релизе).
-#   5. Actions → Publish p2 site:
+#   site\release.bat или site\republish.bat — sync, сборка site/, restore-main, проверка версии OSGi
+#   Закоммитьте site/features/, site/plugins/, site/content.jar, site/artifacts.jar
+#      (+ MANIFEST/feature/pom/launch/backup/osgi при новом релизе).
+#   Перед первым Run Eclipse Application после release:
+#      powershell -File launch\assert-comfort-osgi.ps1
+#   Actions → Publish p2 site:
 #      resanitize — все архивные линейки в списке EDT (sanitize метаданных gh-pages);
 #      republish — та же линейка, новый qualifier; new — новая линейка.
 #   6. Опционально: site\scripts\sync-deploy.bat — локальное зеркало gh-pages.
+#
+# Если после release в логе «image could not be loaded» / «Невозможно преобразовать модуль
+# tormozit.comfort» — это рассинхрон MANIFEST vs bundles.info vs dev.properties в PDE,
+# не пропажа файла в JAR. См. launch\README.txt и launch\assert-comfort-osgi.ps1.
 # URL в EDT «Установить новое ПО»:
 #   https://tormozit.github.io/EDT.Comfort/          — composite (все архивные линейки)
 #   https://tormozit.github.io/EDT.Comfort/1.0.0.10/ — фиксированная версия

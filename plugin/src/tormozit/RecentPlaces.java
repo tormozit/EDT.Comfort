@@ -212,6 +212,27 @@ public final class RecentPlaces
         notifyChanged();
     }
 
+    /** Удаляет записи по стабильным ключам. @return число удалённых записей */
+    public synchronized int removeKeys(Iterable<String> keys)
+    {
+        if (keys == null)
+            return 0;
+        int removed = 0;
+        for (String key : keys)
+        {
+            if (key == null || key.isBlank())
+                continue;
+            if (map.remove(key) != null)
+                removed++;
+        }
+        if (removed > 0)
+        {
+            save();
+            notifyChanged();
+        }
+        return removed;
+    }
+
     public synchronized int size()
     {
         return map.size();

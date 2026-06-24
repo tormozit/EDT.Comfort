@@ -1,5 +1,8 @@
 package tormozit;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.eclipse.jface.text.DocumentEvent;
@@ -12,25 +15,36 @@ public final class ContentAssistDebug
 {
     private static final AtomicInteger validateCalls = new AtomicInteger();
     private static final AtomicInteger agentValidateLogs = new AtomicInteger();
+    private static final Path AGENT_LOG_PATH = Path.of("C:\\VC\\EDT.Comfort\\debug-72952b.log"); //$NON-NLS-1$
 
     private ContentAssistDebug() {}
 
     // #region agent log
-    /** Диагностика assist (H1/H2/…) — только в «Журнал Комфорт» при «Общем логировании». */
     public static void agentLog(String hypothesisId, String location, String message, String dataJson)
     {
-        if (!Global.isLogEnabled())
-            return;
-        String data = dataJson != null && !dataJson.isEmpty() ? dataJson : "{}"; //$NON-NLS-1$
-        Global.log("contentAssist", //$NON-NLS-1$
-            "[" + hypothesisId + "] " + location + " " + message + " " + data); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        try
+        {
+            String data = dataJson != null && !dataJson.isEmpty() ? dataJson : "{}"; //$NON-NLS-1$
+            String line = String.format(
+                "{\"sessionId\":\"72952b\",\"hypothesisId\":\"%s\",\"location\":\"%s\",\"message\":\"%s\",\"data\":%s,\"timestamp\":%d}%n", //$NON-NLS-1$
+                agentEsc(hypothesisId), agentEsc(location), agentEsc(message), data,
+                System.currentTimeMillis());
+            Files.writeString(AGENT_LOG_PATH, line, StandardOpenOption.CREATE,
+                StandardOpenOption.APPEND);
+        }
+        catch (Exception ignored) {}
     }
 
     public static boolean shouldLogValidateLiteral()
     {
-        if (!Global.isLogEnabled())
-            return false;
         return agentValidateLogs.incrementAndGet() <= 5;
+    }
+
+    private static String agentEsc(String s)
+    {
+        if (s == null)
+            return ""; //$NON-NLS-1$
+        return s.replace("\\", "\\\\").replace("\"", "\\\""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
     }
     // #endregion
 
