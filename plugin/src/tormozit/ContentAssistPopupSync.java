@@ -1255,9 +1255,23 @@ public final class ContentAssistPopupSync
         try
         {
             Object popup = getPopupObject(assistant);
+            if (popup == null)
+                return;
+            initPopupReflection(popup);
             Table table = getProposalTable(popup);
             if (table == null || table.isDisposed())
                 return;
+            @SuppressWarnings("unchecked")
+            List<ICompletionProposal> list = fFilteredProposalsField != null
+                ? (List<ICompletionProposal>) fFilteredProposalsField.get(popup) : null;
+            int idx = table.getSelectionIndex();
+            if (list != null && !list.isEmpty())
+            {
+                table.clearAll();
+                table.setItemCount(list.size());
+                if (idx >= 0 && idx < list.size() && selectProposalMethod != null)
+                    selectProposalMethod.invoke(popup, idx, Boolean.FALSE);
+            }
             table.redraw();
             table.update();
         }
@@ -1288,7 +1302,10 @@ public final class ContentAssistPopupSync
                 return false;
             ICompletionProposal selected = list.get(idx);
             ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(selected);
-            return raw == ir;
+            if (!(raw instanceof IrCompletionProposal irRow))
+                return false;
+            String cacheKey = ir.getStableCacheKey();
+            return cacheKey != null && cacheKey.equals(irRow.getStableCacheKey());
         }
         catch (Exception e)
         {

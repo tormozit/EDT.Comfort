@@ -30,22 +30,29 @@ public final class IrCompletionProposal implements
     private final String filterName;
     private final String wordValue;
     private final String dictionaryKey;
+    private final String listTypeLabel;
+    private final String parentContextType;
     private final String templateText;
     private final boolean method;
+    private final boolean returnsValue;
     private final int irPriority;
     private final String stableCacheKey;
     private volatile String activationHtml;
 
     public IrCompletionProposal(
         String displayString, String filterName, String templateText, boolean method, int irPriority,
-        String wordValue, String dictionaryKey)
+        String wordValue, String dictionaryKey, String listTypeLabel, String parentContextType,
+        boolean returnsValue)
     {
         this.displayString = displayString != null ? displayString : ""; //$NON-NLS-1$
         this.filterName = filterName != null ? filterName : this.displayString;
         this.wordValue = wordValue != null ? wordValue : this.filterName;
         this.dictionaryKey = dictionaryKey != null ? dictionaryKey : ""; //$NON-NLS-1$
+        this.listTypeLabel = listTypeLabel != null ? listTypeLabel : ""; //$NON-NLS-1$
+        this.parentContextType = parentContextType != null ? parentContextType : ""; //$NON-NLS-1$
         this.templateText = templateText;
         this.method = method;
+        this.returnsValue = returnsValue;
         this.irPriority = irPriority;
         this.stableCacheKey = buildStableCacheKey(this.filterName, this.dictionaryKey);
     }
@@ -87,13 +94,31 @@ public final class IrCompletionProposal implements
         return method;
     }
 
+    public boolean isReturnsValue()
+    {
+        return returnsValue;
+    }
+
+    public String getListTypeLabel()
+    {
+        return listTypeLabel;
+    }
+
+    public String getParentContextType()
+    {
+        return parentContextType;
+    }
+
     /**
      * Результат {@code ОписаниеТекущегоСловаАвтодополнения} (RDT {@code ПриАктивизацииСтрокиТ9}).
      */
     void applyActivation(String type, String description, boolean rawHtml)
     {
         if (type != null && !type.isBlank())
-            displayString = IrBslCompletionSupport.buildDisplayString(wordValue, type);
+        {
+            displayString = IrBslCompletionSupport.buildActivatedListDisplay(
+                wordValue, method, listTypeLabel, type, parentContextType);
+        }
         String html = IrBslCompletionSupport.formatActivationHtml(description, rawHtml);
         if (html != null)
             activationHtml = html;

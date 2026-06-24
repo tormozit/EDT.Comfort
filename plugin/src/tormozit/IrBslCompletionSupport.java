@@ -44,6 +44,61 @@ public final class IrBslCompletionSupport
         return (word != null ? word : "") + " : " + type; //$NON-NLS-1$ //$NON-NLS-2$
     }
 
+    /** Начальная подпись ИР-строки в списке (тип из JSON, часто с {@code ??}). */
+    static String buildInitialListDisplay(
+        String word, boolean method, String listTypeLabel, String parentContextType)
+    {
+        String name = formatListEntryName(word, method);
+        if (listTypeLabel != null && !listTypeLabel.isEmpty())
+            return appendParentContext(name + " : " + listTypeLabel, parentContextType); //$NON-NLS-1$
+        if (parentContextType != null && !parentContextType.isEmpty())
+            return name + " ~ " + parentContextType; //$NON-NLS-1$
+        return name;
+    }
+
+    /**
+     * Подпись после {@code ОписаниеТекущегоСловаАвтодополнения}: весь тип из JSON заменяется
+     * рассчитанным {@code <Тип>} (как EDT {@code Имя : <Тип> ~ Родитель}).
+     */
+    static String buildActivatedListDisplay(
+        String word, boolean method, String listTypeLabel, String calculatedType,
+        String parentContextType)
+    {
+        if (calculatedType == null || calculatedType.isBlank())
+            return buildInitialListDisplay(word, method, listTypeLabel, parentContextType);
+        String name = formatListEntryName(word, method);
+        String calc = wrapAngleType(calculatedType);
+        return appendParentContext(name + " : " + calc, parentContextType); //$NON-NLS-1$
+    }
+
+    static String formatListEntryName(String word, boolean method)
+    {
+        if (word == null || word.isEmpty())
+            return ""; //$NON-NLS-1$
+        if (method && !word.endsWith("()")) //$NON-NLS-1$
+            return word + "()"; //$NON-NLS-1$
+        return word;
+    }
+
+    static String wrapAngleType(String type)
+    {
+        if (type == null || type.isEmpty())
+            return ""; //$NON-NLS-1$
+        String trimmed = type.trim();
+        if (trimmed.startsWith("<") && trimmed.endsWith(">")) //$NON-NLS-1$ //$NON-NLS-2$
+            return trimmed;
+        return "<" + trimmed + ">"; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static String appendParentContext(String base, String parentContextType)
+    {
+        if (base == null)
+            return ""; //$NON-NLS-1$
+        if (parentContextType == null || parentContextType.isEmpty() || base.contains(" ~ ")) //$NON-NLS-1$
+            return base;
+        return base + " ~ " + parentContextType; //$NON-NLS-1$
+    }
+
     /** HTML боковой подсказки из {@code Описание} активации строки assist. */
     static String formatActivationHtml(String description, boolean rawHtml)
     {
@@ -199,11 +254,12 @@ public final class IrBslCompletionSupport
             this.dictionaryKey = dictionaryKey != null ? dictionaryKey : ""; //$NON-NLS-1$
         }
 
-        IrCompletionProposal toProposal()
+        IrCompletionProposal toProposal(String parentContextType)
         {
-            String display = IrBslCompletionSupport.buildDisplayString(word, type);
+            String display = IrBslCompletionSupport.buildInitialListDisplay(
+                word, method, type, parentContextType);
             return new IrCompletionProposal(display, filterName, templateText, method, priority,
-                word, dictionaryKey);
+                word, dictionaryKey, type, parentContextType, returnsValue);
         }
     }
 
@@ -305,13 +361,13 @@ public final class IrBslCompletionSupport
                 List<WordEntry> fetched = fetchWordSet(session, setName, contextSeparator, setName);
                 session.putCachedWordSet(setName, fetched);
                 transferred += fetched.size();
-                appendUniqueProposals(merged, seenFilters, fetched);
+                appendUniqueProposals(merged, seenFilters, fetched, contextType);
                 displayed += fetched.size();
             }
             else
             {
                 IrCompletionDebug.step("cache", "hit set=\"" + setName + "\" size=" + cached.size()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                appendUniqueProposals(merged, seenFilters, cached);
+                appendUniqueProposals(merged, seenFilters, cached, contextType);
                 displayed += cached.size();
             }
         }
@@ -319,7 +375,7 @@ public final class IrBslCompletionSupport
         List<WordEntry> mainTable = fetchWordSet(session, "", contextSeparator, ""); //$NON-NLS-1$
         transferred += mainTable.size();
         displayed += mainTable.size();
-        appendUniqueProposals(merged, seenFilters, mainTable);
+        appendUniqueProposals(merged, seenFilters, mainTable, contextType);
 
         IrCompletionDebug.timing("Передача слов", started); //$NON-NLS-1$
         IrCompletionDebug.log("Выражение contextType=" + contextType //$NON-NLS-1$
@@ -334,7 +390,8 @@ public final class IrBslCompletionSupport
     }
 
     private static void appendUniqueProposals(
-        List<ICompletionProposal> target, Set<String> seenFilters, List<WordEntry> words)
+        List<ICompletionProposal> target, Set<String> seenFilters, List<WordEntry> words,
+        String parentContextType)
     {
         for (WordEntry entry : words)
         {
@@ -342,7 +399,7 @@ public final class IrBslCompletionSupport
             if (key.isEmpty() || seenFilters.contains(key))
                 continue;
             seenFilters.add(key);
-            target.add(entry.toProposal());
+            target.add(entry.toProposal(parentContextType));
         }
     }
 

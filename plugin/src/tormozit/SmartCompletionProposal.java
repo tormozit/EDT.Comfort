@@ -71,16 +71,17 @@ public class SmartCompletionProposal implements
     @Override
     public StyledString getStyledDisplayString()
     {
-        String display = delegate.getDisplayString();
-        if (display == null)
-            return new StyledString(""); //$NON-NLS-1$
-
+        StyledString result;
+        if (delegate instanceof ICompletionProposalExtension6 ext6)
+            result = ext6.getStyledDisplayString();
+        else
+        {
+            String display = delegate.getDisplayString();
+            result = new StyledString(display != null ? display : ""); //$NON-NLS-1$
+        }
         SmartCodeMatcher matcher = resolveHighlightMatcher();
-        if (matcher.isEmpty)
-            return new StyledString(display);
-
-        StyledString result = new StyledString(display);
-        SmartMatchHighlight.applyRanges(result, matcher.getHighlightRanges(display));
+        if (!matcher.isEmpty)
+            SmartMatchHighlight.applyRanges(result, matcher.getHighlightRanges(result.getString()));
         return result;
     }
 
@@ -635,63 +636,17 @@ public class SmartCompletionProposal implements
             ContentAssistSessionReloader.getActiveAssistant();
         if (assistant == null || !ContentAssistPopupSync.isPopupVisible(assistant))
             return;
-        String oldDisplay = ir.getDisplayString();
+        int gen = reloader.getIrFetchGeneration();
+        applyIrListTypeFromActivation(reloader, assistant, ir, desc, gen);
         String html = reloader.getIrMergedHtml(cacheKey);
         if (html == null || html.isEmpty())
             html = ir.getAdditionalProposalInfo();
-        boolean reapplied = false;
-        if (html == null || html.isEmpty())
-        {
-            long tApply = System.currentTimeMillis();
-            ir.applyActivation(desc.type, desc.description, desc.rawHtml);
-            reapplied = true;
-            html = ir.getAdditionalProposalInfo();
-            if (html != null && !html.isEmpty())
-            {
-                reloader.putIrMergedHtml(cacheKey, html);
-                reloader.putIrMergedHtml(ir.getDisplayString(), html);
-            }
-            // #region agent log
-            ContentAssistDebug.debugSessionTiming("H20", "applyCachedIrActivation", "applyActivation", tApply, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                ",\"htmlLen\":" + (html != null ? html.length() : 0)); //$NON-NLS-1$
-            // #endregion
-        }
-        else if (desc.type != null && !desc.type.isBlank())
-        {
-            String expectedDisplay =
-                IrBslCompletionSupport.buildDisplayString(ir.getWordValue(), desc.type);
-            if (!expectedDisplay.equals(oldDisplay))
-            {
-                long tApply = System.currentTimeMillis();
-                ir.applyActivation(desc.type, desc.description, desc.rawHtml);
-                reapplied = true;
-                html = reloader.getIrMergedHtml(cacheKey);
-                if (html == null || html.isEmpty())
-                    html = ir.getAdditionalProposalInfo();
-                // #region agent log
-                ContentAssistDebug.debugSessionTiming("H20", "applyCachedIrActivation", "applyActivationDisplay", tApply, "{}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                // #endregion
-            }
-        }
-        if (!oldDisplay.equals(ir.getDisplayString()))
-            ContentAssistPopupSync.refreshProposalTable(assistant);
-        reloader.noteActiveIrDisplayKey(cacheKey);
-        boolean pinned = false;
-        if (html != null && !html.isEmpty())
-        {
-            pinned = ContentAssistPopupSync.pinIrSideHint(assistant, ir, html);
-            if (pinned)
-                reloader.markIrSideHintPublished(cacheKey);
-            else
-                ContentAssistPopupSync.publishIrActivationSideHint(assistant, html, cacheKey);
-        }
+        boolean pinned = publishIrSideHintAfterActivation(
+            reloader, assistant, ir, cacheKey, html, true);
         // #region agent log
         ContentAssistDebug.debugSessionTiming("H15", "applyCachedIrActivation", "cacheHitFastPath", t0, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             ",\"word\":" + ContentAssistDebug.jsonStr(ir.getWordValue()) //$NON-NLS-1$
                 + ",\"cacheKey\":" + ContentAssistDebug.jsonStr(cacheKey) //$NON-NLS-1$
-                + ",\"htmlLen\":" + (html != null ? html.length() : 0) //$NON-NLS-1$
-                + ",\"publish\":" + !pinned //$NON-NLS-1$
-                + ",\"reapplied\":" + reapplied //$NON-NLS-1$
                 + ",\"pinned\":" + pinned); //$NON-NLS-1$
         // #endregion
     }
@@ -775,13 +730,13 @@ public class SmartCompletionProposal implements
         IrCompletionProposal ir, IrBslCompletionSupport.ActivationDescription desc)
     {
         reloader.putIrActivation(ir.getStableCacheKey(), desc);
-        if (gen != reloader.getIrFetchGeneration())
+        boolean staleGen = gen != reloader.getIrFetchGeneration();
+        if (staleGen)
         {
             // #region agent log
-            ContentAssistDebug.debugSessionLog("H2", "applyIrActivationResult", "skipStaleGen", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            ContentAssistDebug.debugSessionLog("H2", "applyIrActivationResult", "staleGenDisplayOnly", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 "{\"gen\":" + gen + ",\"current\":" + reloader.getIrFetchGeneration() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             // #endregion
-            return;
         }
         org.eclipse.jface.text.contentassist.ContentAssistant assistant =
             ContentAssistSessionReloader.getActiveAssistant();
@@ -793,35 +748,79 @@ public class SmartCompletionProposal implements
             // #endregion
             return;
         }
-        String oldDisplay = ir.getDisplayString();
-        ir.applyActivation(desc.type, desc.description, desc.rawHtml);
+        applyIrListTypeFromActivation(reloader, assistant, ir, desc, gen);
+        String cacheKey = ir.getStableCacheKey();
         String html = ir.getAdditionalProposalInfo();
         boolean selected = ContentAssistPopupSync.isSelectedIrProposal(assistant, ir);
+        boolean pinned = !staleGen && publishIrSideHintAfterActivation(
+            reloader, assistant, ir, cacheKey, html, false);
         // #region agent log
         ContentAssistDebug.debugSessionLog("H4", "applyIrActivationResult", "applied", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "{\"display\":" + ContentAssistDebug.jsonStr(ir.getDisplayString()) //$NON-NLS-1$
                 + ",\"htmlLen\":" + (html != null ? html.length() : 0) //$NON-NLS-1$
                 + ",\"descLen\":" + desc.description.length() //$NON-NLS-1$
                 + ",\"fullDoc\":" + IrBslHoverHtml.isFullHtmlDocument(html) //$NON-NLS-1$
-                + ",\"selected\":" + selected + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"selected\":" + selected //$NON-NLS-1$
+                + ",\"pinned\":" + pinned + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         // #endregion
+    }
+
+    /** Только подпись строки ИР в списке (тип из COM), без боковой подсказки. */
+    private static void applyIrListTypeFromActivation(
+        ContentAssistSessionReloader reloader,
+        org.eclipse.jface.text.contentassist.ContentAssistant assistant,
+        IrCompletionProposal ir, IrBslCompletionSupport.ActivationDescription desc, int gen)
+    {
         String cacheKey = ir.getStableCacheKey();
+        String oldDisplay = ir.getDisplayString();
+        if (desc.type != null && !desc.type.isBlank())
+            ir.applyActivation(desc.type, desc.description, desc.rawHtml);
+        else if (desc.description != null && !desc.description.isBlank())
+            ir.applyActivation("", desc.description, desc.rawHtml); //$NON-NLS-1$
+        String newDisplay = ir.getDisplayString();
+        String html = ir.getAdditionalProposalInfo();
         if (html != null && !html.isEmpty())
         {
             reloader.putIrMergedHtml(cacheKey, html);
-            reloader.putIrMergedHtml(ir.getDisplayString(), html);
+            reloader.putIrMergedHtml(newDisplay, html);
         }
-        if (!oldDisplay.equals(ir.getDisplayString()))
-            ContentAssistPopupSync.refreshProposalTable(assistant);
-        if (html != null && !html.isEmpty() && selected)
+        if (!oldDisplay.equals(newDisplay))
         {
-            reloader.noteActiveIrDisplayKey(cacheKey);
-            boolean pinned = ContentAssistPopupSync.pinIrSideHint(assistant, ir, html);
-            if (pinned)
-                reloader.markIrSideHintPublished(cacheKey);
-            else if (!reloader.isIrSideHintPublishedForKey(cacheKey))
-                ContentAssistPopupSync.publishIrActivationSideHint(assistant, html, cacheKey);
+            ContentAssistPopupSync.refreshProposalTable(assistant);
+            // #region agent log
+            ContentAssistDebug.debugSessionLog("H29", "irListTypeUpdate", "done", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"cacheKey\":" + ContentAssistDebug.jsonStr(cacheKey) //$NON-NLS-1$
+                    + ",\"old\":" + ContentAssistDebug.jsonStr(oldDisplay) //$NON-NLS-1$
+                    + ",\"new\":" + ContentAssistDebug.jsonStr(newDisplay) //$NON-NLS-1$
+                    + ",\"selected\":" + ContentAssistPopupSync.isSelectedIrProposal(assistant, ir) //$NON-NLS-1$
+                    + ",\"gen\":" + gen + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
         }
+    }
+
+    /**
+     * Боковая подсказка ИР — отдельно от обновления типа в списке.
+     *
+     * @param fromSelectedActivation {@code true} в {@code selected()} — строка активируется сейчас
+     */
+    private static boolean publishIrSideHintAfterActivation(
+        ContentAssistSessionReloader reloader,
+        org.eclipse.jface.text.contentassist.ContentAssistant assistant,
+        IrCompletionProposal ir, String cacheKey, String html,
+        boolean fromSelectedActivation)
+    {
+        if (html == null || html.isEmpty())
+            return false;
+        if (!fromSelectedActivation
+            && !ContentAssistPopupSync.isSelectedIrProposal(assistant, ir))
+            return false;
+        reloader.noteActiveIrDisplayKey(cacheKey);
+        boolean pinned = ContentAssistPopupSync.pinIrSideHint(assistant, ir, html);
+        if (pinned)
+            reloader.markIrSideHintPublished(cacheKey);
+        else if (!reloader.isIrSideHintPublishedForKey(cacheKey))
+            ContentAssistPopupSync.publishIrActivationSideHint(assistant, html, cacheKey);
+        return pinned;
     }
 
     private static void applyCachedEdtActivation(
