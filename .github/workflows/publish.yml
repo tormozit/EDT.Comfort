@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: 'new — новая линейка (comfort.release > gh-pages); republish — пересборка той же версии'
+        description: 'new — новая линейка; republish — та же линейка (новый qualifier или перекладка gh-pages с тем же билдом)'
         required: true
         default: 'new'
         type: choice

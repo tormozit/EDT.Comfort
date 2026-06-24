@@ -32,7 +32,7 @@ PLUGIN_JAR="$(ls -v site/plugins/tormozit.comfort_*.jar 2>/dev/null | tail -1 ||
 FEATURE_JAR="$(ls -v site/features/tormozit.comfort.feature_*.jar 2>/dev/null | tail -1 || true)"
 
 if [[ -z "$PLUGIN_JAR" || -z "$FEATURE_JAR" ]]; then
-  echo "ERROR: site/plugins or site/features jar missing. Run site\\republish.bat or site\\release.bat first."
+  echo "ERROR: site/plugins or site/features jar missing. Build site/ in PDE (clean.bat + Build All) first."
   exit 1
 fi
 
@@ -106,10 +106,18 @@ if git fetch origin gh-pages 2>/dev/null && git rev-parse --verify origin/gh-pag
         REMOTE_BUNDLE="$(echo "$REMOTE_XML" | grep -o "id='tormozit.comfort' version='[^']*'" | head -1 | sed "s/.*version='//;s/'$//")"
         REMOTE_QUAL="$(qualifier "$REMOTE_BUNDLE")"
         echo "Remote qualifier on gh-pages: ${REMOTE_QUAL:-none}"
-        if [[ -n "$REMOTE_QUAL" && ( "$LOCAL_QUAL" < "$REMOTE_QUAL" || "$LOCAL_QUAL" == "$REMOTE_QUAL" ) ]]; then
-          echo "ERROR: local qualifier $LOCAL_QUAL is not newer than published $REMOTE_QUAL."
-          echo "Run site\\republish.bat or bump with site\\release.bat"
+        if [[ -n "$REMOTE_QUAL" && "$LOCAL_QUAL" < "$REMOTE_QUAL" ]]; then
+          echo "ERROR: local qualifier $LOCAL_QUAL is older than published $REMOTE_QUAL."
+          echo "Rebuild site/ in PDE (clean.bat + Build All) or bump with site\\release.bat"
           exit 1
+        fi
+        if [[ "$MODE" == "new" && -n "$REMOTE_QUAL" && "$LOCAL_QUAL" == "$REMOTE_QUAL" ]]; then
+          echo "ERROR: local qualifier $LOCAL_QUAL equals published $REMOTE_QUAL."
+          echo "Use workflow mode=republish for the same build, or rebuild site/ for a new qualifier."
+          exit 1
+        fi
+        if [[ "$MODE" == "republish" && -n "$REMOTE_QUAL" && "$LOCAL_QUAL" == "$REMOTE_QUAL" ]]; then
+          echo "Republish: same qualifier as gh-pages — metadata redeploy OK"
         fi
       fi
     fi
