@@ -72,7 +72,9 @@ public class SmartCompletionProposal implements
     public StyledString getStyledDisplayString()
     {
         StyledString result;
-        if (delegate instanceof ICompletionProposalExtension6 ext6)
+        if (delegate instanceof IrCompletionProposal ir)
+            result = buildIrStyledDisplayString(ir.getDisplayString());
+        else if (delegate instanceof ICompletionProposalExtension6 ext6)
             result = ext6.getStyledDisplayString();
         else
         {
@@ -83,6 +85,19 @@ public class SmartCompletionProposal implements
         if (!matcher.isEmpty)
             SmartMatchHighlight.applyRanges(result, matcher.getHighlightRanges(result.getString()));
         return result;
+    }
+
+    /** Владелец после {@code ~} — как у штатного assist EDT ({@link StyledString#QUALIFIER_STYLER}). */
+    private static StyledString buildIrStyledDisplayString(String display)
+    {
+        if (display == null || display.isEmpty())
+            return new StyledString(""); //$NON-NLS-1$
+        int sep = display.indexOf(" ~ "); //$NON-NLS-1$
+        if (sep < 0)
+            return new StyledString(display);
+        StyledString styled = new StyledString(display.substring(0, sep));
+        styled.append(display.substring(sep), StyledString.QUALIFIER_STYLER);
+        return styled;
     }
 
     @Override

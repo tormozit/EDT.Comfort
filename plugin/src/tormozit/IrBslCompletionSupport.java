@@ -280,22 +280,26 @@ public final class IrBslCompletionSupport
         if (session == null || editor == null || session.executor == null
             || session.executor.isShutdown())
             return;
+        IRSession.CodeEditorSyncPayload payload;
         try
         {
-            session.syncCodeEditorToIR(editor, caretOffset);
+            payload = session.prepareCodeEditorSyncForAssist(editor, caretOffset);
         }
         catch (Exception e)
         {
             IrCompletionDebug.problem("sync: " + e.getMessage()); //$NON-NLS-1$
             return;
         }
+        if (payload == null)
+            return;
+        final IRSession.CodeEditorSyncPayload syncPayload = payload;
         session.executor.submit(() -> {
             Snapshot snapshot = null;
             try
             {
                 if (closePreviousCommand)
                     finishAssistCommandProcessing(session);
-                snapshot = fetchCompletionSnapshot(session, autoInvoke);
+                snapshot = fetchCompletionSnapshot(session, syncPayload, autoInvoke);
             }
             catch (Exception e)
             {
@@ -327,9 +331,10 @@ public final class IrBslCompletionSupport
         }
     }
 
-    static Snapshot fetchCompletionSnapshot(IRSession session, boolean autoInvoke)
+    static Snapshot fetchCompletionSnapshot(
+        IRSession session, IRSession.CodeEditorSyncPayload payload, boolean autoInvoke)
     {
-        IrBslExpressionHtmlSupport.ensureCodeEditor(session);
+        session.applyPreparedCodeEditorSync(payload);
         long started = System.currentTimeMillis();
         session.invokeCodeEditorQuiet("РазобратьТекущийКонтекст"); //$NON-NLS-1$
         Object typesTable = session.invokeCodeEditorQuiet(

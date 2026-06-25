@@ -13,7 +13,15 @@ import org.eclipse.jface.text.contentassist.IContextInformation;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.custom.StyledText;
+import org.eclipse.jface.resource.ImageDescriptor;
+import org.eclipse.jface.resource.JFaceResources;
+import org.eclipse.jface.resource.LocalResourceManager;
+import org.eclipse.jface.resource.ResourceManager;
+import org.eclipse.jface.viewers.DecorationOverlayIcon;
+import org.eclipse.jface.viewers.IDecoration;
 import org.eclipse.jface.text.source.SourceViewer;
+
+import com._1c.g5.v8.dt.bsl.ui.BslSharedImages;
 
 /**
  * Элемент автодополнения из таблицы слов ИР (порт {@code НаборСловИзИР} / RDT).
@@ -133,7 +141,7 @@ public final class IrCompletionProposal implements
     @Override
     public Image getImage()
     {
-        return null;
+        return ListEntryImages.resolve(method, returnsValue);
     }
 
     @Override
@@ -321,5 +329,51 @@ public final class IrCompletionProposal implements
                 return caret;
         }
         return document != null ? document.getLength() : 0;
+    }
+
+    /** Иконки строки списка — как {@code BslProposalProvider.getDeclareMethodPropImg} / {@code getDeclareVariablePropImg}. */
+    private static final class ListEntryImages
+    {
+        private static final ResourceManager RESOURCES =
+            new LocalResourceManager(JFaceResources.getResources());
+
+        private static Image propertyImage;
+        private static Image functionMethodImage;
+        private static Image procedureMethodImage;
+
+        private ListEntryImages() {}
+
+        static Image resolve(boolean method, boolean returnsValue)
+        {
+            if (!method)
+            {
+                if (propertyImage == null)
+                    propertyImage = BslSharedImages.getImage(BslSharedImages.IMG_VAR);
+                return propertyImage;
+            }
+            return returnsValue ? functionMethodImage() : procedureMethodImage();
+        }
+
+        private static Image functionMethodImage()
+        {
+            if (functionMethodImage == null)
+                functionMethodImage = overlayOnMethod(BslSharedImages.IMG_FUNCTION);
+            return functionMethodImage;
+        }
+
+        private static Image procedureMethodImage()
+        {
+            if (procedureMethodImage == null)
+                procedureMethodImage = overlayOnMethod(BslSharedImages.IMG_PROCEDURE);
+            return procedureMethodImage;
+        }
+
+        private static Image overlayOnMethod(String overlayKey)
+        {
+            Image base = BslSharedImages.getImage(BslSharedImages.IMG_METHOD);
+            ImageDescriptor overlay = BslSharedImages.getImageDescriptor(overlayKey);
+            return RESOURCES.get(new DecorationOverlayIcon(
+                base, overlay, IDecoration.BOTTOM_LEFT));
+        }
     }
 }

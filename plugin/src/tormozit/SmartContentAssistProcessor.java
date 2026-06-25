@@ -1764,10 +1764,6 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         return -1;
     }
 
-    /**
-     * Старт сессии / sync popup: максимум из виджета, completion и invocation.
-     * {@code fInvocationOffset} часто = начало слова (пустой префикс), виджет — каретка.
-     */
     static int resolveSessionCaret(ContentAssistant assistant, ITextViewer viewer)
     {
         IDocument doc = viewer != null ? viewer.getDocument() : null;
@@ -1775,15 +1771,16 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         int widget = resolveWidgetCaret(viewer);
         if (widget >= 0)
             best = widget;
-        if (assistant != null)
-        {
-            int completion = ContentAssistPopupSync.getLastCompletionOffset(assistant);
-            if (completion >= 0)
-                best = Math.max(best, completion);
-            int inv = ContentAssistPopupSync.getInvocationOffset(assistant);
-            if (inv >= 0)
-                best = Math.max(best, inv);
-        }
+        // Отключил грубую ошибку - брать старую позицию открытия окна автодополнения здесь нельзя!
+//        if (assistant != null)
+//        {
+//            int completion = ContentAssistPopupSync.getLastCompletionOffset(assistant);
+//            if (completion >= 0)
+//                best = Math.max(best, completion);
+//            int inv = ContentAssistPopupSync.getInvocationOffset(assistant);
+//            if (inv >= 0)
+//                best = Math.max(best, inv);
+//        }
         return best >= 0 ? clampCaret(doc, best) : 0;
     }
 
