@@ -76,6 +76,8 @@ public final class ContentAssistSessionReloader
     private volatile IInformationControlCreator assistBrowserCreator;
     /** Ключ ИР-строки, для которой уже обновлена боковая подсказка (анти-шторм). */
     private volatile String irSideHintPublishedKey;
+    private volatile boolean pendingPopupRefresh;
+    private volatile boolean pendingPopupRefreshIsIr;
 
     private static final int WORDS_TABLE_DEBOUNCE_MS = 200;
     /** Последний stamp документа при caret-событии (отличить ввод от стрелок). */
@@ -137,6 +139,8 @@ public final class ContentAssistSessionReloader
                 openSessionReloader = ContentAssistSessionReloader.this;
                 wordsTableReady = false;
                 wordsTableCaret = -1;
+                pendingPopupRefresh = false;
+                pendingPopupRefreshIsIr = false;
                 irAssistCommandOpen = false;
                 activeIrDisplayKey = null;
                 irCompletionSnapshot = null;
@@ -165,6 +169,7 @@ public final class ContentAssistSessionReloader
                 else
                 {
                     SmartContentAssistProcessor.primeAssistContext(viewer, caret);
+                    processor.onAssistSessionContextReady(viewer, caret);
                     ContentAssistPopupSync.installFilterTrackerPrepend(assistant, viewer);
                     installCtrlSpaceFilter();
                     installSessionCaretListener();
@@ -202,6 +207,8 @@ public final class ContentAssistSessionReloader
                     openSessionReloader = null;
                 wordsTableReady = false;
                 wordsTableCaret = -1;
+                pendingPopupRefresh = false;
+                pendingPopupRefreshIsIr = false;
                 irAssistCommandOpen = false;
                 activeIrDisplayKey = null;
                 irCompletionSnapshot = null;
@@ -243,12 +250,6 @@ public final class ContentAssistSessionReloader
                 if (cacheKey.equals(activeIrDisplayKey))
                     return;
                 clearIrSideHintPublishedKey();
-                // #region agent log
-                ContentAssistDebug.debugSessionLog("H7", "selectionChanged", "cancelEval", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"key\":" + ContentAssistDebug.jsonStr(cacheKey) //$NON-NLS-1$
-                        + ",\"active\":" + ContentAssistDebug.jsonStr(activeIrDisplayKey) //$NON-NLS-1$
-                        + ",\"cached\":" + (getIrActivation(cacheKey) != null) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
                 cancelIrEvaluationIfConnected();
             }
         };
@@ -619,6 +620,8 @@ public final class ContentAssistSessionReloader
             irAssistCommandOpen = true;
             irCompletionSnapshot = new IrBslCompletionSupport.Snapshot(
                 caret, raw.contextType, raw.proposals, raw.wordsTransferred, raw.wordsDisplayed);
+            IDocument doc = viewer != null ? viewer.getDocument() : null;
+            processor.rememberIrSnapshotCache(irCompletionSnapshot, doc);
             processor.applyIrCompletion(irCompletionSnapshot);
             IrCompletionDebug.log("assist snapshot caret=" + caret //$NON-NLS-1$
                 + " ir=" + raw.proposals.length); //$NON-NLS-1$
@@ -637,17 +640,67 @@ public final class ContentAssistSessionReloader
     /** Повторная загрузка списка после reconcile (member-access после точки). */
     public static void refreshPopupIfOpen()
     {
-        if (!ComfortSettings.isReplaceListFiltersEnabled())
+        requestPopupRefresh(false);
+    }
+
+    /** Обновление popup после прихода слов ИР (сразу или в очередь при recompute). */
+    public static void requestIrPopupRefresh()
+    {
+        requestPopupRefresh(true);
+    }
+
+    static void flushPendingPopupRefreshIfAny()
+    {
+        ContentAssistSessionReloader reloader = ACTIVE_RELOADER.get();
+        if (reloader == null || !reloader.pendingPopupRefresh)
             return;
+        boolean wasIr = reloader.pendingPopupRefreshIsIr;
+        reloader.pendingPopupRefresh = false;
+        reloader.pendingPopupRefreshIsIr = false;
         ContentAssistant ca = ACTIVE_ASSISTANT.get();
         SourceViewer viewer = ACTIVE_VIEWER.get();
         SmartContentAssistProcessor processor = ACTIVE_PROCESSOR.get();
         if (ca == null || viewer == null || processor == null)
             return;
+        if (wasIr && !processor.hasIrProposalsForCurrentContext())
+            return;
         if (!ContentAssistPopupSync.isPopupVisible(ca))
             return;
         if (ContentAssistPopupSync.isRecomputeInProgress())
+        {
+            reloader.pendingPopupRefresh = true;
+            reloader.pendingPopupRefreshIsIr = wasIr;
             return;
+        }
+        if (wasIr)
+            IrCompletionDebug.logIrPopupRefresh("flush"); //$NON-NLS-1$
+        ContentAssistPopupSync.recomputePopupList(ca, viewer, processor);
+    }
+
+    private static void requestPopupRefresh(boolean irOnly)
+    {
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+            return;
+        ContentAssistant ca = ACTIVE_ASSISTANT.get();
+        SourceViewer viewer = ACTIVE_VIEWER.get();
+        SmartContentAssistProcessor processor = ACTIVE_PROCESSOR.get();
+        ContentAssistSessionReloader reloader = ACTIVE_RELOADER.get();
+        if (ca == null || viewer == null || processor == null || reloader == null)
+            return;
+        if (irOnly && !processor.hasIrProposalsForCurrentContext())
+            return;
+        if (!ContentAssistPopupSync.isPopupVisible(ca))
+            return;
+        if (ContentAssistPopupSync.isRecomputeInProgress())
+        {
+            reloader.pendingPopupRefresh = true;
+            reloader.pendingPopupRefreshIsIr = irOnly;
+            if (irOnly)
+                IrCompletionDebug.logIrPopupRefresh("queued"); //$NON-NLS-1$
+            return;
+        }
+        if (irOnly)
+            IrCompletionDebug.logIrPopupRefresh("now"); //$NON-NLS-1$
         ContentAssistPopupSync.recomputePopupList(ca, viewer, processor);
     }
 

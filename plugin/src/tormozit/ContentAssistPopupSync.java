@@ -449,6 +449,7 @@ public final class ContentAssistPopupSync
             if (viewer != null && isPopupVisible(assistant))
                 ContentAssistPopupUi.updateContextTypeLabel(viewer);
             RECOMPUTE_GUARD.set(Boolean.FALSE);
+            ContentAssistSessionReloader.flushPendingPopupRefreshIfAny();
         }
     }
 
@@ -782,7 +783,6 @@ public final class ContentAssistPopupSync
     {
         if (assistant == null)
             return;
-        long t0 = System.currentTimeMillis();
         try
         {
             Object popup = getPopup(assistant);
@@ -799,9 +799,6 @@ public final class ContentAssistPopupSync
         {
             ContentAssistDebug.log("notifyAdditionalInfoSelectionChanged: " + e.getMessage()); //$NON-NLS-1$
         }
-        // #region agent log
-        ContentAssistDebug.debugSessionTiming("H17", "notifyAdditionalInfoSelectionChanged", "done", t0, ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        // #endregion
     }
 
     /**
@@ -812,7 +809,6 @@ public final class ContentAssistPopupSync
     public static boolean pinIrSideHint(
         ContentAssistant assistant, IrCompletionProposal ir, Object html)
     {
-        long t0 = System.currentTimeMillis();
         if (assistant == null || ir == null || html == null)
             return false;
         try
@@ -826,13 +822,7 @@ public final class ContentAssistPopupSync
             initPopupReflection(popup);
             ICompletionProposal proposal = resolveWrappedProposalForIr(popup, ir);
             if (proposal == null)
-            {
-                // #region agent log
-                ContentAssistDebug.debugSessionTiming("H28", "pinIrSideHint", "noProposal", t0, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    ",\"cacheKey\":" + ContentAssistDebug.jsonStr(ir.getStableCacheKey())); //$NON-NLS-1$
-                // #endregion
                 return false;
-            }
             if (additionalInfoShowInformationMethod == null)
             {
                 additionalInfoShowInformationMethod = controller.getClass().getDeclaredMethod(
@@ -841,13 +831,6 @@ public final class ContentAssistPopupSync
             }
             additionalInfoShowInformationMethod.invoke(controller, proposal, html);
             scheduleAssistBrowserHtmlApply(assistant, html);
-            String rawHtml = IrBslHoverHtml.readHtml(html);
-            // #region agent log
-            ContentAssistDebug.debugSessionTiming("H28", "pinIrSideHint", "pinned", t0, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                ",\"cacheKey\":" + ContentAssistDebug.jsonStr(ir.getStableCacheKey()) //$NON-NLS-1$
-                    + ",\"display\":" + ContentAssistDebug.jsonStr(proposal.getDisplayString()) //$NON-NLS-1$
-                    + ",\"htmlLen\":" + (rawHtml != null ? rawHtml.length() : 0)); //$NON-NLS-1$
-            // #endregion
             return true;
         }
         catch (Exception e)
@@ -1503,13 +1486,7 @@ public final class ContentAssistPopupSync
         if (reloader != null && cacheKey != null)
         {
             if (reloader.isIrSideHintPublishedForKey(cacheKey))
-            {
-                // #region agent log
-                ContentAssistDebug.debugSessionLog("H11", "publishIrSideHint", "skipDup", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"key\":" + ContentAssistDebug.jsonStr(cacheKey) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
                 return;
-            }
             reloader.markIrSideHintPublished(cacheKey);
         }
         refreshAdditionalInfo(assistant);
@@ -1517,12 +1494,6 @@ public final class ContentAssistPopupSync
         boolean styledDoc = IrBslHoverHtml.isFullHtmlDocument(html);
         if (!styledDoc)
             scheduleAssistBrowserHtmlApply(assistant, mergedInfo);
-        // #region agent log
-        ContentAssistDebug.debugSessionLog("H11", "publishIrSideHint", "refresh", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"len\":" + html.length() //$NON-NLS-1$
-                + ",\"key\":" + ContentAssistDebug.jsonStr(cacheKey) //$NON-NLS-1$
-                + ",\"browserApply\":" + !styledDoc + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
     }
 
     /** Подменяет {@code fInformation} до штатного {@code showInformation} контроллера. */
@@ -1587,7 +1558,6 @@ public final class ContentAssistPopupSync
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
-        final boolean fullDoc = rawFullDoc || IrBslHoverHtml.isFullHtmlDocument(displayHtml);
         final int[] attempts = {0};
         Runnable task = new Runnable() {
             @Override
@@ -1602,30 +1572,7 @@ public final class ContentAssistPopupSync
                 {
                     attempts[0]++;
                     display.timerExec(40, this);
-                    return;
                 }
-                String controlKind = "null"; //$NON-NLS-1$
-                try
-                {
-                    Object ctrlObj = resolveAdditionalInfoController(assistant);
-                    if (ctrlObj != null)
-                    {
-                        Object ctrl = Global.invoke(ctrlObj, "getCurrentInformationControl2"); //$NON-NLS-1$
-                        if (ctrl != null)
-                            controlKind = ctrl.getClass().getSimpleName();
-                    }
-                }
-                catch (Exception ignored) {}
-                // #region agent log
-                ContentAssistDebug.debugSessionLog("H10", "pinMergedAdditionalInfo", "browserApply", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"rawLen\":" + rawHtml.length() //$NON-NLS-1$
-                        + ",\"displayLen\":" + displayHtml.length() //$NON-NLS-1$
-                        + ",\"rewrap\":" + !rawFullDoc //$NON-NLS-1$
-                        + ",\"applied\":" + applied //$NON-NLS-1$
-                        + ",\"fullDoc\":" + fullDoc //$NON-NLS-1$
-                        + ",\"control\":\"" + controlKind + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"attempts\":" + attempts[0] + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
             }
         };
         display.asyncExec(task);

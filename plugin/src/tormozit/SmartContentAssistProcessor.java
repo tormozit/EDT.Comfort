@@ -10,6 +10,7 @@ import java.util.Set;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.IDocumentExtension4;
 import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.text.source.SourceViewer;
@@ -93,6 +94,9 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     private int irSnapshotContextKey = Integer.MIN_VALUE;
     /** Штатный список delegate без слов ИР. */
     private ICompletionProposal[] delegateListCache = EMPTY;
+    private int irSnapshotCacheContextKey = Integer.MIN_VALUE;
+    private long irSnapshotCacheDocStamp = -1L;
+    private IrBslCompletionSupport.Snapshot irSnapshotCache;
 
     public SmartContentAssistProcessor(IContentAssistProcessor delegate, String activationChars)
     {
@@ -193,7 +197,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     }
 
     /**
-     * Применяет snapshot слов ИР и пересобирает кэш списка (если delegate уже загружен).
+     * Применяет snapshot слов ИР и запрашивает обновление popup (сразу или в очередь).
      */
     public void applyIrCompletion(IrBslCompletionSupport.Snapshot snapshot)
     {
@@ -201,14 +205,98 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             return;
         irProposals = snapshot.proposals;
         irSnapshotContextKey = fullListContextKey;
-        if (delegateListCache.length == 0)
-            return;
-        rebuildMergedFullListCache();
-        if (fullListCache.length > 0)
+        String baseKind = "none"; //$NON-NLS-1$
+        if (delegateListCache.length > 0)
         {
+            rebuildMergedFullListCache();
             fullListReady = true;
-            ContentAssistSessionReloader.refreshPopupIfOpen();
+            baseKind = "delegate"; //$NON-NLS-1$
         }
+        else
+        {
+            ICompletionProposal[] interim = unwrapStableDelegateBase();
+            if (interim.length > 0)
+            {
+                fullListCache = mergeIrProposals(interim);
+                rebuildDelegateOrderMap();
+                fullListReady = true;
+                baseKind = "interim"; //$NON-NLS-1$
+            }
+        }
+        IrCompletionDebug.logApplyIrCompletion(irProposals.length, baseKind);
+        ContentAssistSessionReloader.requestIrPopupRefresh();
+    }
+
+    boolean hasIrProposalsForCurrentContext()
+    {
+        return irProposals.length > 0 && irSnapshotContextKey == fullListContextKey;
+    }
+
+    /** После {@link #invalidateCache} и {@link #ensureFullListForContext} — мгновенный snapshot из кэша. */
+    void tryRestoreIrSnapshotFromCache(IDocument doc, int caret)
+    {
+        if (irSnapshotCache == null || doc == null || caret < 0)
+        {
+            IrCompletionDebug.logSnapshotCache(false, fullListContextKey, -1L);
+            return;
+        }
+        long stamp = doc instanceof IDocumentExtension4 ext4
+            ? ext4.getModificationStamp() : -1L;
+        if (fullListContextKey != irSnapshotCacheContextKey || stamp != irSnapshotCacheDocStamp)
+        {
+            IrCompletionDebug.logSnapshotCache(false, fullListContextKey, stamp);
+            return;
+        }
+        IrCompletionDebug.logSnapshotCache(true, fullListContextKey, stamp);
+        applyIrCompletion(irSnapshotCache);
+    }
+
+    void rememberIrSnapshotCache(IrBslCompletionSupport.Snapshot snapshot, IDocument doc)
+    {
+        if (snapshot == null)
+            return;
+        irSnapshotCache = new IrBslCompletionSupport.Snapshot(
+            snapshot.caret, snapshot.contextType, snapshot.proposals,
+            snapshot.wordsTransferred, snapshot.wordsDisplayed);
+        irSnapshotCacheContextKey = fullListContextKey;
+        irSnapshotCacheDocStamp = doc instanceof IDocumentExtension4 ext4
+            ? ext4.getModificationStamp() : -1L;
+    }
+
+    void onAssistSessionContextReady(ITextViewer viewer, int caret)
+    {
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        ensureFullListForContext(viewer, doc, caret, false);
+        tryRestoreIrSnapshotFromCache(doc, caret);
+    }
+
+    private ICompletionProposal[] unwrapStableDelegateBase()
+    {
+        if (lastStableDelegateList.length > 0)
+            return stripIrProposals(unwrapProposals(lastStableDelegateList));
+        if (memberStockFullList.length > 0)
+            return stripIrProposals(unwrapProposals(memberStockFullList));
+        return EMPTY;
+    }
+
+    /**
+     * Merge ИР в delegate для popup: без IR-only (пустой base → не подмешивать только ИР).
+     */
+    ICompletionProposal[] mergeIrForDisplay(ICompletionProposal[] delegateBase)
+    {
+        if (irProposals.length == 0 || irSnapshotContextKey != fullListContextKey)
+            return delegateBase != null ? delegateBase : EMPTY;
+        if (delegateBase == null || delegateBase.length == 0)
+            return EMPTY;
+        return mergeIrProposals(delegateBase);
+    }
+
+    private ICompletionProposal[] popupListWithIr(ICompletionProposal[] base)
+    {
+        ICompletionProposal[] merged = mergeIrForDisplay(unwrapProposals(base != null ? base : EMPTY));
+        if (merged.length == 0)
+            return EMPTY;
+        return buildDelegateOrderedList(merged);
     }
 
     static void clearLastComputeCaret()
@@ -405,9 +493,10 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         ICompletionProposal[] interim = interimSourceForCaret(doc, caret);
         if (interim != null)
         {
+            ICompletionProposal[] merged = mergeIrForDisplay(unwrapProposals(interim));
             if (filter == null || filter.isEmpty())
-                return buildDelegateOrderedList(interim);
-            return filterAndSort(interim, filter);
+                return buildDelegateOrderedList(merged);
+            return filterAndSort(merged, filter);
         }
         if (isDelegateSyncProbedForContext())
         {
@@ -718,14 +807,14 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
         ICompletionProposal[] interim = interimSourceForCaret(doc, caret);
         if (interim != null)
-            return filterAndSort(interim, filter);
+            return filterAndSort(mergeIrForDisplay(unwrapProposals(interim)), filter);
         if (isDelegateSyncProbedForContext())
             return EMPTY;
         ICompletionProposal[] raw = unwrapProposals(fetchDelegateList(viewer, offset, caret));
         markDelegateSyncProbed();
         rememberInterimDelegateList(raw);
         absorbInterimIntoCache(viewer, caret, raw);
-        ICompletionProposal[] filtered = filterAndSort(raw, filter);
+        ICompletionProposal[] filtered = filterAndSort(mergeIrForDisplay(raw), filter);
         if (filtered.length > 0)
             return filtered;
         if (fullListCache.length > 0)
@@ -925,6 +1014,13 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         return a;
     }
 
+    private ICompletionProposal[] ensureIrInPopupList(ICompletionProposal[] built)
+    {
+        if (!hasIrProposalsForCurrentContext() || built == null || built.length == 0)
+            return built != null ? built : EMPTY;
+        return popupListWithIr(built);
+    }
+
     /** Порядок delegate при smart-фильтре и пустом префиксе (штатный priority, не алфавит). */
     private ICompletionProposal[] resolveDelegateOrderedList(ITextViewer viewer, int offset,
                                                              int caret)
@@ -938,7 +1034,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                 ICompletionProposal[] member = resolveMemberAccessOrderedList(viewer, offset,
                     caret, dot);
                 if (member.length > 0)
-                    return member;
+                    return ensureIrInPopupList(member);
             }
         }
 
@@ -953,14 +1049,14 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             }
         }
         if (lastStableDelegateList.length > 0)
-            return lastStableDelegateList;
+            return ensureIrInPopupList(lastStableDelegateList);
 
         ICompletionProposal[] raw = fetchFullDelegateListAtAnchor(viewer, offset, caret);
         if (raw.length > 0)
         {
             ICompletionProposal[] built = buildDelegateOrderedList(raw);
             lastStableDelegateList = built;
-            return built;
+            return ensureIrInPopupList(built);
         }
         if (fullListCache.length > 0)
             return buildDelegateOrderedList(fullListCache);
@@ -1538,7 +1634,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         if (terminalEmptyMemberAccess && cachedNonObjectDot == dot)
             return EMPTY;
         if (memberStockFullListDot == dot && memberStockFullList.length >= MIN_STABLE_MEMBER_CACHE)
-            return buildDelegateOrderedList(memberStockFullList);
+            return ensureIrInPopupList(buildDelegateOrderedList(memberStockFullList));
 
         ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
         IDocument doc = viewer != null ? viewer.getDocument() : null;
@@ -1549,7 +1645,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             captureMemberStockFullList(probed, dot);
             ICompletionProposal[] built = buildDelegateOrderedList(probed);
             lastStableDelegateList = built;
-            return built;
+            return ensureIrInPopupList(built);
         }
 
         if (canShiftCaretForMemberCapture(viewer))
@@ -1560,7 +1656,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             {
                 ICompletionProposal[] built = buildDelegateOrderedList(memberStockFullList);
                 lastStableDelegateList = built;
-                return built;
+                return ensureIrInPopupList(built);
             }
         }
         else
@@ -1570,7 +1666,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         {
             ICompletionProposal[] built = buildDelegateOrderedList(probed);
             lastStableDelegateList = built;
-            return built;
+            return ensureIrInPopupList(built);
         }
         return EMPTY;
     }

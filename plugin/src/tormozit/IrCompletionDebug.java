@@ -39,4 +39,24 @@ public final class IrCompletionDebug
         long ms = System.currentTimeMillis() - startedMs;
         Global.log(TAG, label + " " + ms + " мс"); //$NON-NLS-1$ //$NON-NLS-2$
     }
+
+    static void logApplyIrCompletion(int irCount, String baseKind)
+    {
+        if (Global.isLogEnabled())
+            Global.log(TAG, "applyIrCompletion ir=" + irCount + " base=" + baseKind); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    static void logSnapshotCache(boolean hit, int contextKey, long docStamp)
+    {
+        if (!Global.isLogEnabled())
+            return;
+        Global.log(TAG, "snapshotCache " + (hit ? "hit" : "miss") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " ctx=" + contextKey + " stamp=" + docStamp); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    static void logIrPopupRefresh(String phase)
+    {
+        if (Global.isLogEnabled())
+            Global.log(TAG, "ir popup refresh " + phase); //$NON-NLS-1$
+    }
 }

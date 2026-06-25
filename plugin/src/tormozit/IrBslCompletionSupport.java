@@ -141,22 +141,10 @@ public final class IrBslCompletionSupport
             Object comResult = ComBridge.unwrapComResult(raw);
             if (comResult == null)
             {
-                // #region agent log
-                ContentAssistDebug.debugSessionLog("H9", "fetchWordActivation", "badRaw", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"raw\":" + ContentAssistDebug.jsonStr(String.valueOf(raw)) //$NON-NLS-1$
-                        + ",\"word\":" + ContentAssistDebug.jsonStr(wordValue) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
                 return null;
             }
             String type = readActivationComField(comResult, "Тип"); //$NON-NLS-1$
             String description = readActivationComField(comResult, "Описание"); //$NON-NLS-1$
-            // #region agent log
-            ContentAssistDebug.debugSessionLog("H9", "fetchWordActivation", "fields", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"type\":" + ContentAssistDebug.jsonStr(type) //$NON-NLS-1$
-                    + ",\"descLen\":" + (description != null ? description.length() : 0) //$NON-NLS-1$
-                    + ",\"fullDoc\":" + IrBslHoverHtml.isFullHtmlDocument(description) //$NON-NLS-1$
-                    + ",\"word\":" + ContentAssistDebug.jsonStr(wordValue) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             if ((type == null || type.isEmpty()) && (description == null || description.isEmpty()))
                 return null;
             boolean rawHtml = description != null && !description.isEmpty()

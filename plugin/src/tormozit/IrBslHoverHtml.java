@@ -66,12 +66,6 @@ public final class IrBslHoverHtml
                 insert = trimmedIr;
             insert = stripIrEmbeddedChrome(insert);
             String wrapped = wrapForAssistBrowser(insert);
-            // #region agent log
-            ContentAssistDebug.debugSessionLog("H12", "wrapIrOnly", "styled", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"inLen\":" + insert.length() //$NON-NLS-1$
-                    + ",\"outLen\":" + wrapped.length() //$NON-NLS-1$
-                    + ",\"fullDoc\":" + isFullHtmlDocument(wrapped) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             return wrapped;
         }
         String insert = extractInsertableFragment(trimmedIr);
@@ -191,9 +185,6 @@ public final class IrBslHoverHtml
             ensureAssistBrowserStyleMethods();
             if (addStyleToHtmlMethod == null)
             {
-                // #region agent log
-                ContentAssistDebug.debugSessionLog("H12", "wrapForAssistBrowser", "noMethod", "{}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                // #endregion
                 return trimmed;
             }
             String lang = "ru"; //$NON-NLS-1$
@@ -208,11 +199,6 @@ public final class IrBslHoverHtml
         }
         catch (Exception e)
         {
-            // #region agent log
-            ContentAssistDebug.debugSessionLog("H12", "wrapForAssistBrowser", "fail", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"err\":" + ContentAssistDebug.jsonStr(e.getClass().getSimpleName()) //$NON-NLS-1$
-                    + ",\"msg\":" + ContentAssistDebug.jsonStr(String.valueOf(e.getMessage())) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             return trimmed;
         }
     }
