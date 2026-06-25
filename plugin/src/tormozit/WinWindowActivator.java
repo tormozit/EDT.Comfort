@@ -803,6 +803,50 @@ public final class WinWindowActivator
             WinUser.SWP_NOMOVE | WinUser.SWP_NOSIZE | WinUser.SWP_NOACTIVATE);
     }
 
+    /** Win32 EnableWindow(TRUE) для тоста, если модальный цикл отключил sibling-окно. */
+    public static void ensureToastClickable(Shell shell)
+    {
+        if (!WINDOWS || shell == null || shell.isDisposed())
+            return;
+        shell.setEnabled(true);
+        HWND hwnd = hwndFromShell(shell);
+        if (hwnd == null)
+            return;
+        setWindowEnabled(hwnd, true);
+    }
+
+    public static boolean isShellWindowEnabled(Shell shell)
+    {
+        if (!WINDOWS || shell == null || shell.isDisposed())
+            return true;
+        HWND hwnd = hwndFromShell(shell);
+        return hwnd == null || User32.INSTANCE.IsWindowEnabled(hwnd);
+    }
+
+    /** Экранные координаты top-level shell (Windows). На не-Windows — {@link Shell#setLocation}. */
+    public static void setShellScreenPosition(Shell shell, int screenX, int screenY, int width, int height)
+    {
+        if (shell == null || shell.isDisposed())
+            return;
+        if (!WINDOWS)
+        {
+            shell.setLocation(screenX, screenY);
+            if (width > 0 && height > 0)
+                shell.setSize(width, height);
+            return;
+        }
+        HWND hwnd = hwndFromShell(shell);
+        if (hwnd == null)
+            return;
+        int flags = WinUser.SWP_NOACTIVATE | WinUser.SWP_SHOWWINDOW;
+        int w = width > 0 ? width : 0;
+        int h = height > 0 ? height : 0;
+        if (w <= 0 || h <= 0)
+            flags |= WinUser.SWP_NOSIZE;
+        flags |= WinUser.SWP_NOZORDER;
+        User32.INSTANCE.SetWindowPos(hwnd, null, screenX, screenY, w, h, flags);
+    }
+
     /**
      * Снимает WS_EX_TOPMOST / HWND_TOPMOST у shell (hover с SWT.ON_TOP).
      * На не-Windows не выполняет действий.

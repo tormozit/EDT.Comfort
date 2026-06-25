@@ -78,6 +78,9 @@ public final class ContentAssistSessionReloader
     private volatile String irSideHintPublishedKey;
     private volatile boolean pendingPopupRefresh;
     private volatile boolean pendingPopupRefreshIsIr;
+    private long irWordsRequestStartedAtMs;
+    private volatile boolean irRecomputeFastResponse;
+    private volatile String preIrMergeFirstDedupKey;
 
     private static final int WORDS_TABLE_DEBOUNCE_MS = 200;
     /** Последний stamp документа при caret-событии (отличить ввод от стрелок). */
@@ -141,6 +144,7 @@ public final class ContentAssistSessionReloader
                 wordsTableCaret = -1;
                 pendingPopupRefresh = false;
                 pendingPopupRefreshIsIr = false;
+                clearIrSelectionResetState();
                 irAssistCommandOpen = false;
                 activeIrDisplayKey = null;
                 irCompletionSnapshot = null;
@@ -209,6 +213,8 @@ public final class ContentAssistSessionReloader
                 wordsTableCaret = -1;
                 pendingPopupRefresh = false;
                 pendingPopupRefreshIsIr = false;
+                clearIrSelectionResetState();
+                irWordsRequestStartedAtMs = 0;
                 irAssistCommandOpen = false;
                 activeIrDisplayKey = null;
                 irCompletionSnapshot = null;
@@ -602,6 +608,7 @@ public final class ContentAssistSessionReloader
         IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(bslEditor);
         if (session == null)
             return;
+        irWordsRequestStartedAtMs = System.currentTimeMillis();
         wordsTableReady = false;
         wordsTableCaret = caret;
         clearTransientIrSideHintState();
@@ -635,6 +642,61 @@ public final class ContentAssistSessionReloader
         }
         for (Runnable task : pending)
             task.run();
+    }
+
+    static boolean shouldResetSelectionAfterIrMerge(String newFirstDedupKey)
+    {
+        ContentAssistSessionReloader reloader = ACTIVE_RELOADER.get();
+        if (reloader == null)
+            return false;
+        if (!reloader.irRecomputeFastResponse)
+        {
+            clearIrSelectionResetState(reloader);
+            return false;
+        }
+        String pre = reloader.preIrMergeFirstDedupKey;
+        String next = newFirstDedupKey != null ? newFirstDedupKey : ""; //$NON-NLS-1$
+        boolean firstChanged = pre != null && !pre.isEmpty() && !next.isEmpty()
+            && !pre.equalsIgnoreCase(next);
+        if (firstChanged)
+        {
+            long elapsed = System.currentTimeMillis() - reloader.irWordsRequestStartedAtMs;
+            IrCompletionDebug.logFastIrMergeReset(elapsed, pre, next);
+        }
+        else
+            IrCompletionDebug.logFastIrMergeSkip("firstUnchanged", pre, next); //$NON-NLS-1$
+        clearIrSelectionResetState(reloader);
+        return firstChanged;
+    }
+
+    private static void clearIrSelectionResetState(ContentAssistSessionReloader reloader)
+    {
+        if (reloader == null)
+            return;
+        reloader.irRecomputeFastResponse = false;
+        reloader.preIrMergeFirstDedupKey = null;
+    }
+
+    private void clearIrSelectionResetState()
+    {
+        clearIrSelectionResetState(this);
+    }
+
+    private void rememberPreIrMergeFirstRow(ContentAssistant assistant)
+    {
+        preIrMergeFirstDedupKey = ContentAssistPopupSync.readFirstVisibleProposalDedupKey(assistant);
+    }
+
+    private void prepareIrRecomputeSelectionReset(boolean irRefresh,
+                                                   SmartContentAssistProcessor processor)
+    {
+        if (irRefresh && processor != null && processor.hasIrProposalsForCurrentContext())
+        {
+            long elapsed = System.currentTimeMillis() - irWordsRequestStartedAtMs;
+            irRecomputeFastResponse = elapsed < WORDS_TABLE_DEBOUNCE_MS;
+        }
+        else
+            irRecomputeFastResponse = false;
     }
 
     /** Повторная загрузка списка после reconcile (member-access после точки). */
@@ -673,7 +735,12 @@ public final class ContentAssistSessionReloader
             return;
         }
         if (wasIr)
+        {
             IrCompletionDebug.logIrPopupRefresh("flush"); //$NON-NLS-1$
+            ContentAssistPopupSync.invalidateSyncSnapshot();
+            reloader.rememberPreIrMergeFirstRow(ca);
+        }
+        reloader.prepareIrRecomputeSelectionReset(wasIr, processor);
         ContentAssistPopupSync.recomputePopupList(ca, viewer, processor);
     }
 
@@ -688,9 +755,20 @@ public final class ContentAssistSessionReloader
         if (ca == null || viewer == null || processor == null || reloader == null)
             return;
         if (irOnly && !processor.hasIrProposalsForCurrentContext())
+        {
+            // #region agent log
+            ContentAssistDebug.sessionLog("H3", "requestPopupRefresh", "skipNoIr", "{}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            // #endregion
             return;
+        }
         if (!ContentAssistPopupSync.isPopupVisible(ca))
+        {
+            // #region agent log
+            ContentAssistDebug.sessionLog("H2", "requestPopupRefresh", "skipNotVisible", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"irOnly\":" + irOnly + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
             return;
+        }
         if (ContentAssistPopupSync.isRecomputeInProgress())
         {
             reloader.pendingPopupRefresh = true;
@@ -700,7 +778,12 @@ public final class ContentAssistSessionReloader
             return;
         }
         if (irOnly)
+        {
             IrCompletionDebug.logIrPopupRefresh("now"); //$NON-NLS-1$
+            ContentAssistPopupSync.invalidateSyncSnapshot();
+            reloader.rememberPreIrMergeFirstRow(ca);
+        }
+        reloader.prepareIrRecomputeSelectionReset(irOnly, processor);
         ContentAssistPopupSync.recomputePopupList(ca, viewer, processor);
     }
 

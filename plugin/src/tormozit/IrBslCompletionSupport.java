@@ -469,6 +469,11 @@ public final class IrBslCompletionSupport
             if (!root.isArray())
                 return result;
             boolean hasPriority = root.size() > 0 && root.get(0).has("Приоритет"); //$NON-NLS-1$
+            // #region agent log
+            ContentAssistDebug.sessionLog("H4", "parseWordsJson", "hasPriority", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"rows\":" + root.size() + ",\"hasPriority\":" + hasPriority //$NON-NLS-1$
+                    + ",\"dict\":\"" + (dictionaryKey != null ? dictionaryKey : "") + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            // #endregion
             String dictKey = dictionaryKey != null ? dictionaryKey : ""; //$NON-NLS-1$
             for (JsonNode row : root)
             {

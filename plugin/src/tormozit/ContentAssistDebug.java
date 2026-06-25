@@ -1,5 +1,9 @@
 package tormozit;
 
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.eclipse.jface.text.DocumentEvent;
@@ -12,8 +16,51 @@ public final class ContentAssistDebug
 {
     private static final AtomicInteger validateCalls = new AtomicInteger();
     private static final AtomicInteger agentValidateLogs = new AtomicInteger();
+    private static final Path DEBUG_SESSION_LOG = Path.of("C:\\VC\\EDT.Comfort\\debug-0ae881.log"); //$NON-NLS-1$
+    private static final String DEBUG_SESSION_ID = "0ae881"; //$NON-NLS-1$
 
     private ContentAssistDebug() {}
+
+    // #region agent log
+    /** NDJSON в debug-0ae881.log — без флажка «Общее логирование». */
+    public static void sessionLog(String hypothesisId, String location, String message, String dataJson)
+    {
+        try
+        {
+            String data = dataJson != null && !dataJson.isEmpty() ? dataJson : "{}"; //$NON-NLS-1$
+            String line = "{\"sessionId\":\"" + DEBUG_SESSION_ID //$NON-NLS-1$
+                + "\",\"hypothesisId\":\"" + hypothesisId //$NON-NLS-1$
+                + "\",\"location\":\"" + location //$NON-NLS-1$
+                + "\",\"message\":\"" + jsonEscape(message) //$NON-NLS-1$
+                + "\",\"data\":" + data //$NON-NLS-1$
+                + ",\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
+            Files.writeString(DEBUG_SESSION_LOG, line, StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        }
+        catch (Exception ignored)
+        {
+        }
+    }
+
+    private static String jsonEscape(String value)
+    {
+        if (value == null)
+            return ""; //$NON-NLS-1$
+        return value.replace("\\", "\\\\").replace("\"", "\\\""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+    }
+
+    public static String firstProposalKey(ICompletionProposal[] proposals)
+    {
+        if (proposals == null || proposals.length == 0)
+            return ""; //$NON-NLS-1$
+        String d = proposals[0].getDisplayString();
+        if (d == null)
+            return ""; //$NON-NLS-1$
+        int colon = d.indexOf(':');
+        String key = colon > 0 ? d.substring(0, colon).trim() : d.trim();
+        return jsonEscape(key.length() > 40 ? key.substring(0, 40) : key);
+    }
+    // #endregion
 
     /** Диагностика assist (H1/H2/…) — только в «Журнал Комфорт» при «Общем логировании». */
     public static void agentLog(String hypothesisId, String location, String message, String dataJson)

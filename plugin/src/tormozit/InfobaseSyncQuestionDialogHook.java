@@ -32,18 +32,24 @@ import com.e1c.g5.dt.applications.infobases.IInfobaseApplication;
 
 /**
  * Патч диалога EDT «Выбор действия» при блокировке инфобазы: автоматический выбор
- * «Обновить динамически» по настройке из списка приложений и уведомление о переподключении ИР.
+ * «Обновить динамически» по настройке из списка приложений, уведомление о переподключении ИР
+ * и предложение отключить ИР при исключительной блокировке без динамического обновления
+ * (порт RDT {@code ПриОткрытииОкна}).
  */
 public final class InfobaseSyncQuestionDialogHook implements IStartup
 {
     private static final String PATCHED_KEY = "tormozit.syncQuestionPatched"; //$NON-NLS-1$
     private static final String AUTO_TRIGGERED_KEY = "tormozit.syncQuestionAutoTriggered"; //$NON-NLS-1$
+    private static final String DISCONNECT_TOAST_KEY = "tormozit.syncQuestionDisconnectToast"; //$NON-NLS-1$
     private static final String DIALOG_CLASS =
         "InfobaseSynchonizationQuestionDialog"; //$NON-NLS-1$
     private static final String DIALOG_TITLE = "Выбор действия"; //$NON-NLS-1$
     private static final String BTN_DYNAMIC = "Обновить динамически"; //$NON-NLS-1$
+    private static final String EXCLUSIVE_LOCK_SNIPPET = "исключительной блокировки"; //$NON-NLS-1$
     private static final String TOAST_MESSAGE =
         "БД обновлена динамически. Переподключить приложение ИР для обновления в нем метаданных?"; //$NON-NLS-1$
+    private static final String DISCONNECT_TOAST_MESSAGE =
+        "Приложение ИР блокирует обновление базы. Отключить?"; //$NON-NLS-1$
 
     private static final long PENDING_TIMEOUT_MS = 30L * 60_000;
 
@@ -117,14 +123,15 @@ public final class InfobaseSyncQuestionDialogHook implements IStartup
                 PendingDynamicUpdate pending = pendingAutoUpdate.get();
                 if (pending == null)
                     return;
+                Job job = event.getJob();
+                IStatus result = event.getResult();
                 if (pending.expired())
                 {
                     pendingAutoUpdate.compareAndSet(pending, null);
                     return;
                 }
-                if (!isUpdateJob(event.getJob()))
+                if (!isUpdateJob(job))
                     return;
-                IStatus result = event.getResult();
                 if (result == null || !result.isOK())
                     return;
                 if (!pendingAutoUpdate.compareAndSet(pending, null))
@@ -139,14 +146,22 @@ public final class InfobaseSyncQuestionDialogHook implements IStartup
     {
         Object data = shell.getData();
         if (data != null && data.getClass().getName().contains(DIALOG_CLASS))
-            return hasDynamicUpdateButton(shell);
+            return true;
         String title = shell.getText();
-        return title != null && title.contains(DIALOG_TITLE) && hasDynamicUpdateButton(shell);
+        return title != null && title.contains(DIALOG_TITLE);
     }
 
     private static boolean hasDynamicUpdateButton(Shell shell)
     {
         return findButtonByText(shell, BTN_DYNAMIC) != null;
+    }
+
+    private static boolean hasExclusiveLockText(Shell shell, Object dialog)
+    {
+        String message = getDialogMessage(dialog);
+        if (message != null && message.contains(EXCLUSIVE_LOCK_SNIPPET))
+            return true;
+        return findControlContainingText(shell, EXCLUSIVE_LOCK_SNIPPET) != null;
     }
 
     private static void schedulePatchAttempt(Display display, Shell shell, int attempt)
@@ -161,7 +176,9 @@ public final class InfobaseSyncQuestionDialogHook implements IStartup
 
             Object dialog = shell.getData();
             Button btnDynamic = findButtonByText(shell, BTN_DYNAMIC);
-            if (btnDynamic == null)
+            boolean dynamic = btnDynamic != null;
+            boolean exclusiveLock = !dynamic && hasExclusiveLockText(shell, dialog);
+            if (!dynamic && !exclusiveLock)
             {
                 if (attempt < 20)
                     schedulePatchAttempt(display, shell, attempt + 1);
@@ -174,8 +191,45 @@ public final class InfobaseSyncQuestionDialogHook implements IStartup
             }
 
             shell.setData(PATCHED_KEY, Boolean.TRUE);
-            patchDialog(display, shell, dialog, btnDynamic);
+            if (dynamic)
+                patchDialog(display, shell, dialog, btnDynamic);
+            else
+                patchExclusiveLockDialog(shell, dialog);
         });
+    }
+
+    private static void patchExclusiveLockDialog(Shell shell, Object dialog)
+    {
+        if (shell.getData(DISCONNECT_TOAST_KEY) != null)
+            return;
+
+        InfobaseReference infobase = resolveInfobase(dialog);
+        if (infobase == null)
+        {
+            if (Global.isLogEnabled())
+                Global.log("[ExclusiveLock] infobase not resolved for exclusive lock dialog"); //$NON-NLS-1$
+            return;
+        }
+        if (!IRApplication.getInstance().isConnected(infobase))
+        {
+            if (Global.isLogEnabled())
+                Global.log("[ExclusiveLock] IR not connected, skip disconnect toast for infobase " //$NON-NLS-1$
+                    + IRApplication.extractInfobaseUuid(infobase));
+            return;
+        }
+
+        shell.setData(DISCONNECT_TOAST_KEY, Boolean.TRUE);
+        if (Global.isLogEnabled())
+            Global.log("[ExclusiveLock] showing disconnect toast for infobase " //$NON-NLS-1$
+                + IRApplication.extractInfobaseUuid(infobase));
+        final InfobaseReference ib = infobase;
+        ToastNotification.show(
+            IRApplication.toastTitle(),
+            DISCONNECT_TOAST_MESSAGE,
+            6_000,
+            () -> IRApplication.disconnect(ib),
+            "Отключить", //$NON-NLS-1$
+            shell);
     }
 
     private static void patchDialog(Display display, Shell shell, Object dialog, Button btnDynamic)
@@ -192,6 +246,7 @@ public final class InfobaseSyncQuestionDialogHook implements IStartup
             && shell.getData(AUTO_TRIGGERED_KEY) == null)
         {
             shell.setData(AUTO_TRIGGERED_KEY, Boolean.TRUE);
+            shell.addDisposeListener(e -> tryReconnectToastOnAutoDialogDispose(shell));
             final InfobaseReference ib = infobase;
             display.asyncExec(() ->
             {
@@ -269,6 +324,27 @@ public final class InfobaseSyncQuestionDialogHook implements IStartup
             + IRApplication.extractInfobaseUuid(infobase));
     }
 
+    /** Запасной триггер reconnect-тоста, если job listener не сработал. */
+    private static void tryReconnectToastOnAutoDialogDispose(Shell shell)
+    {
+        if (shell == null || shell.getData(AUTO_TRIGGERED_KEY) == null)
+            return;
+        PendingDynamicUpdate pending = pendingAutoUpdate.get();
+        if (pending == null)
+            return;
+        if (pending.expired())
+        {
+            pendingAutoUpdate.compareAndSet(pending, null);
+            return;
+        }
+        if (!pendingAutoUpdate.compareAndSet(pending, null))
+            return;
+        InfobaseReference ib = pending.infobase;
+        Display display = Display.getDefault();
+        if (display != null && !display.isDisposed())
+            display.asyncExec(() -> showReconnectToast(ib));
+    }
+
     private static void showReconnectToast(InfobaseReference infobase)
     {
         if (infobase == null)
@@ -277,7 +353,7 @@ public final class InfobaseSyncQuestionDialogHook implements IStartup
         ToastNotification.show(
             IRApplication.toastTitle(),
             TOAST_MESSAGE,
-            30_000,
+            6_000,
             () -> IRApplication.getInstance().reconnectInfobase(infobase),
             "Выполнить"); //$NON-NLS-1$
     }
@@ -401,16 +477,12 @@ public final class InfobaseSyncQuestionDialogHook implements IStartup
         if (job == null)
             return false;
         String name = job.getName();
-        if (name != null)
-        {
-            String lower = name.toLowerCase();
-            if (lower.contains("обновление") //$NON-NLS-1$
-                || lower.contains("updating") //$NON-NLS-1$
-                || lower.contains("update")) //$NON-NLS-1$
-                return true;
-        }
+        if (name != null && name.contains("списка языков")) //$NON-NLS-1$
+            return false;
         String className = job.getClass().getName();
-        return className.contains("DeployWithProgressOperation") //$NON-NLS-1$
-            || className.contains("UpdateApplications"); //$NON-NLS-1$
+        if (className.contains("DeployWithProgressOperation") //$NON-NLS-1$
+            || className.contains("UpdateApplications")) //$NON-NLS-1$
+            return true;
+        return name != null && name.contains("Обновление конфигурации"); //$NON-NLS-1$
     }
 }

@@ -59,4 +59,18 @@ public final class IrCompletionDebug
         if (Global.isLogEnabled())
             Global.log(TAG, "ir popup refresh " + phase); //$NON-NLS-1$
     }
+
+    static void logFastIrMergeReset(long elapsedMs, String preFirst, String newFirst)
+    {
+        if (Global.isLogEnabled())
+            Global.log(TAG, "fastIrMergeReset elapsed=" + elapsedMs //$NON-NLS-1$
+                + "ms preFirst=" + preFirst + " newFirst=" + newFirst); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    static void logFastIrMergeSkip(String reason, String preFirst, String newFirst)
+    {
+        if (Global.isLogEnabled())
+            Global.log(TAG, "fastIrMergeSkip reason=" + reason //$NON-NLS-1$
+                + " preFirst=" + preFirst + " newFirst=" + newFirst); //$NON-NLS-1$ //$NON-NLS-2$
+    }
 }

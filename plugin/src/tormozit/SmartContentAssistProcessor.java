@@ -1,10 +1,14 @@
 package tormozit;
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Deque;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.eclipse.emf.ecore.EObject;
@@ -33,6 +37,7 @@ import org.eclipse.xtext.util.concurrent.IUnitOfWork;
 
 import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.Expression;
+import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.mcore.DuallyNamedElement;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 
@@ -205,6 +210,9 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             return;
         irProposals = snapshot.proposals;
         irSnapshotContextKey = fullListContextKey;
+        // #region agent log
+        debugSessionOrderSample("H4", "applyIrCompletion", "irSnapshot", irProposals, 12); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // #endregion
         String baseKind = "none"; //$NON-NLS-1$
         if (delegateListCache.length > 0)
         {
@@ -296,7 +304,17 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         ICompletionProposal[] merged = mergeIrForDisplay(unwrapProposals(base != null ? base : EMPTY));
         if (merged.length == 0)
             return EMPTY;
-        return buildDelegateOrderedList(merged);
+        ICompletionProposal[] result = buildDelegateOrderedList(merged);
+        // #region agent log
+        debugSessionOrderSample("H3", "popupListWithIr", "popup", result, 12); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        MemberEdtPriorityProfile popupProfile = isIrAssistOrderingEnabled()
+            ? MemberEdtPriorityProfile.analyze(unwrapProposals(base != null ? base : EMPTY))
+            : MemberEdtPriorityProfile.NONE;
+        debugIrMergeOrderSample("H3", "popupListWithIr", "popupIr", result, //$NON-NLS-1$ //$NON-NLS-2$
+            hasIrProposalsForCurrentContext() ? buildIrPriorityByKey(irProposals) : null,
+            popupProfile);
+        // #endregion
+        return result;
     }
 
     static void clearLastComputeCaret()
@@ -487,7 +505,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         if (isCacheValidForCaret(doc, caret))
         {
             if (filter == null || filter.isEmpty())
-                return buildDelegateOrderedList(fullListCache);
+                return finalizeListForIrAssistDisplay(fullListCache);
             return filterAndSort(fullListCache, filter);
         }
         ICompletionProposal[] interim = interimSourceForCaret(doc, caret);
@@ -495,7 +513,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         {
             ICompletionProposal[] merged = mergeIrForDisplay(unwrapProposals(interim));
             if (filter == null || filter.isEmpty())
-                return buildDelegateOrderedList(merged);
+                return finalizeListForIrAssistDisplay(merged);
             return filterAndSort(merged, filter);
         }
         if (isDelegateSyncProbedForContext())
@@ -895,27 +913,329 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
     private ICompletionProposal[] mergeIrProposals(ICompletionProposal[] delegateList)
     {
+        // #region agent log
+        ContentAssistDebug.sessionLog("H1", "mergeIrProposals", "enter", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"irCount\":" + irProposals.length //$NON-NLS-1$
+                + ",\"ctxMatch\":" + (irSnapshotContextKey == fullListContextKey) //$NON-NLS-1$
+                + ",\"ctxKey\":" + fullListContextKey //$NON-NLS-1$
+                + ",\"irCtxKey\":" + irSnapshotContextKey //$NON-NLS-1$
+                + ",\"delegateCount\":" + (delegateList != null ? delegateList.length : 0) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
         if (irProposals.length == 0 || irSnapshotContextKey != fullListContextKey)
             return delegateList != null ? delegateList : EMPTY;
+        MemberEdtPriorityProfile delegateProfile = isIrAssistOrderingEnabled()
+            ? MemberEdtPriorityProfile.analyze(delegateList)
+            : MemberEdtPriorityProfile.NONE;
         if (delegateList == null || delegateList.length == 0)
-            return irProposals;
-        Set<String> names = new HashSet<>();
+        {
+            Map<String, Integer> irPriorityByKey = buildIrPriorityByKey(irProposals);
+            return sortMergedList(irProposals, irPriorityByKey, delegateProfile);
+        }
+
+        Map<String, Integer> irPriorityByKey = buildIrPriorityByKey(irProposals);
+        Map<String, Deque<ICompletionProposal>> delegateByKey = indexDelegateByKey(delegateList);
+        Set<ICompletionProposal> placedDelegates =
+            java.util.Collections.newSetFromMap(new IdentityHashMap<>());
         List<ICompletionProposal> merged = new ArrayList<>(delegateList.length + irProposals.length);
+
+        for (int i = 0; i < irProposals.length; i++)
+        {
+            ICompletionProposal irP = irProposals[i];
+            String key = dedupKey(irP);
+            Deque<ICompletionProposal> queue = key.isEmpty() ? null : delegateByKey.get(key);
+            if (queue != null && !queue.isEmpty())
+            {
+                while (!queue.isEmpty())
+                {
+                    ICompletionProposal d = queue.removeFirst();
+                    merged.add(d);
+                    placedDelegates.add(unwrapProposal(d));
+                }
+            }
+            else if (!key.isEmpty())
+                merged.add(irP);
+        }
         for (ICompletionProposal p : delegateList)
         {
-            merged.add(p);
-            String key = dedupKey(p);
-            if (!key.isEmpty())
-                names.add(key);
+            if (!placedDelegates.contains(unwrapProposal(p)))
+                merged.add(p);
         }
-        for (ICompletionProposal p : irProposals)
+
+        ICompletionProposal[] result = sortMergedList(
+            merged.toArray(new ICompletionProposal[merged.size()]), irPriorityByKey,
+            delegateProfile);
+        // #region agent log
+        debugSessionOrderSample("H2", "mergeIrProposals", "irOrderMerge", result, 12); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        debugIrMergeOrderSample("H3", "mergeIrProposals", "afterSort", result, irPriorityByKey, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            delegateProfile);
+        // #endregion
+        return result;
+    }
+
+    private static Map<String, Deque<ICompletionProposal>> indexDelegateByKey(
+        ICompletionProposal[] delegateList)
+    {
+        Map<String, Deque<ICompletionProposal>> map = new HashMap<>();
+        for (ICompletionProposal p : delegateList)
         {
             String key = dedupKey(p);
-            if (!key.isEmpty() && names.contains(key))
+            if (key.isEmpty())
                 continue;
-            merged.add(p);
+            map.computeIfAbsent(key, k -> new ArrayDeque<>()).addLast(p);
         }
-        return merged.toArray(new ICompletionProposal[merged.size()]);
+        return map;
+    }
+
+    private static Map<String, Integer> buildIrPriorityByKey(ICompletionProposal[] proposals)
+    {
+        Map<String, Integer> map = new HashMap<>();
+        if (proposals == null)
+            return map;
+        for (ICompletionProposal p : proposals)
+        {
+            ICompletionProposal raw = unwrapProposal(p);
+            if (!(raw instanceof IrCompletionProposal ir))
+                continue;
+            String key = dedupKey(p);
+            if (key.isEmpty())
+                continue;
+            map.merge(key, ir.getIrPriority(), Math::max);
+        }
+        return map;
+    }
+
+    private ICompletionProposal[] sortMergedList(ICompletionProposal[] merged,
+                                                 Map<String, Integer> irPriorityByKey,
+                                                 MemberEdtPriorityProfile profile)
+    {
+        return sortListForIrAssist(merged, irPriorityByKey, profile);
+    }
+
+    /**
+     * Временно: без второго ключа compare, когда в merge участвуют слова ИР
+     * ({@code irPriorityByKey} непустой).
+     */
+    private static final boolean IR_ASSIST_SKIP_EDT_SORT_WITH_IR_WORDS = true;
+
+    private static boolean useEdtSortKey(Map<String, Integer> irPriorityByKey)
+    {
+        if (!IR_ASSIST_SKIP_EDT_SORT_WITH_IR_WORDS)
+            return true;
+        return irPriorityByKey == null || irPriorityByKey.isEmpty();
+    }
+
+    /** ИР.Приоритет ↓, [EDT.Приоритет ↓], алфавит ↑. */
+    private ICompletionProposal[] sortListForIrAssist(ICompletionProposal[] raw,
+                                                      Map<String, Integer> irPriorityByKey)
+    {
+        MemberEdtPriorityProfile profile = isIrAssistOrderingEnabled()
+            ? MemberEdtPriorityProfile.analyze(raw)
+            : MemberEdtPriorityProfile.NONE;
+        return sortListForIrAssist(raw, irPriorityByKey, profile);
+    }
+
+    private ICompletionProposal[] sortListForIrAssist(ICompletionProposal[] raw,
+                                                      Map<String, Integer> irPriorityByKey,
+                                                      MemberEdtPriorityProfile profile)
+    {
+        if (raw == null || raw.length <= 1)
+            return raw != null ? raw : EMPTY;
+        final MemberEdtPriorityProfile sortProfile = profile != null
+            ? profile
+            : MemberEdtPriorityProfile.NONE;
+        Map<String, Integer> irMap = irPriorityByKey != null
+            ? irPriorityByKey
+            : java.util.Collections.emptyMap();
+        ICompletionProposal[] copy = raw.clone();
+        Arrays.sort(copy, (a, b) -> compareForIrAssistList(a, b, irMap, sortProfile));
+        return copy;
+    }
+
+    private static int compareForIrAssistList(ICompletionProposal p1, ICompletionProposal p2,
+                                              Map<String, Integer> irPriorityByKey,
+                                              MemberEdtPriorityProfile profile)
+    {
+        Map<String, Integer> irMap = irPriorityByKey != null
+            ? irPriorityByKey
+            : java.util.Collections.emptyMap();
+        int ir1 = resolveIrPriorityForMerge(p1, irMap);
+        int ir2 = resolveIrPriorityForMerge(p2, irMap);
+        if (ir1 != ir2)
+            return Integer.compare(ir2, ir1);
+        if (useEdtSortKey(irMap))
+        {
+            int edt = compareEdtPriorityForIrAssist(p1, p2, profile);
+            if (edt != 0)
+                return edt;
+        }
+        return dedupKey(p1).compareToIgnoreCase(dedupKey(p2));
+    }
+
+    private static int compareEdtPriorityForIrAssist(ICompletionProposal p1,
+                                                     ICompletionProposal p2,
+                                                     MemberEdtPriorityProfile profile)
+    {
+        int pr1 = profile.effectiveEdtForIrSort(p1);
+        int pr2 = profile.effectiveEdtForIrSort(p2);
+        if (pr1 != pr2)
+            return Integer.compare(pr2, pr1);
+        return 0;
+    }
+
+    private static boolean isIrAssistOrderingEnabled()
+    {
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+            return false;
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        if (reloader == null)
+            return false;
+        BslXtextEditor editor = reloader.getBslEditor();
+        return IrBslExpressionHtmlSupport.resolveConnectedSession(editor) != null;
+    }
+
+    /**
+     * Доминирующий EDT-priority в выборке (первые {@link #DOMINANT_SAMPLE_LIMIT} свойств/методов);
+     * подмена propertyDominant → methodDominant только для сортировки при ИР.
+     */
+    private static final class MemberEdtPriorityProfile
+    {
+        private static final double DOMINANT_SHARE = 0.8;
+        private static final int DOMINANT_SAMPLE_LIMIT = 50;
+
+        static final MemberEdtPriorityProfile NONE = new MemberEdtPriorityProfile(false, 0, 0);
+
+        private final boolean remapActive;
+        private final int propertyDominant;
+        private final int methodDominant;
+
+        private MemberEdtPriorityProfile(boolean remapActive, int propertyDominant,
+                                        int methodDominant)
+        {
+            this.remapActive = remapActive;
+            this.propertyDominant = propertyDominant;
+            this.methodDominant = methodDominant;
+        }
+
+        boolean isRemapActive()
+        {
+            return remapActive;
+        }
+
+        int methodDominantValue()
+        {
+            return methodDominant;
+        }
+
+        int propertyDominantValue()
+        {
+            return propertyDominant;
+        }
+
+        static MemberEdtPriorityProfile analyze(ICompletionProposal[] batch)
+        {
+            if (batch == null || batch.length == 0)
+                return NONE;
+            int[] propertyPriorities = new int[DOMINANT_SAMPLE_LIMIT];
+            int propertyCount = 0;
+            int[] methodPriorities = new int[DOMINANT_SAMPLE_LIMIT];
+            int methodCount = 0;
+            for (ICompletionProposal p : batch)
+            {
+                ICompletionProposal raw = unwrapProposal(p);
+                if (!(raw instanceof ConfigurableCompletionProposal configurable))
+                    continue;
+                String kind = BslCompletionSideHintResolver.resolveElementKind(p);
+                int pri = configurable.getPriority();
+                if (IrBslExpressionHtmlSupport.KIND_PROPERTY.equals(kind))
+                {
+                    if (propertyCount < DOMINANT_SAMPLE_LIMIT)
+                        propertyPriorities[propertyCount++] = pri;
+                }
+                else if (IrBslExpressionHtmlSupport.KIND_METHOD.equals(kind))
+                {
+                    if (methodCount < DOMINANT_SAMPLE_LIMIT)
+                        methodPriorities[methodCount++] = pri;
+                }
+            }
+            Integer propDom = dominantPriority(propertyPriorities, propertyCount);
+            Integer methDom = dominantPriority(methodPriorities, methodCount);
+            if (propDom != null && methDom != null && propDom.intValue() != methDom.intValue())
+                return new MemberEdtPriorityProfile(true, propDom.intValue(), methDom.intValue());
+            if (methDom != null)
+                return new MemberEdtPriorityProfile(false, 0, methDom.intValue());
+            if (propDom != null)
+                return new MemberEdtPriorityProfile(false, propDom.intValue(), 0);
+            return NONE;
+        }
+
+        private static Integer dominantPriority(int[] priorities, int count)
+        {
+            if (count < 2)
+                return null;
+            Map<Integer, Integer> freq = new HashMap<>();
+            for (int i = 0; i < count; i++)
+                freq.merge(priorities[i], 1, Integer::sum);
+            for (Map.Entry<Integer, Integer> e : freq.entrySet())
+            {
+                if (e.getValue().intValue() > count * DOMINANT_SHARE)
+                    return e.getKey();
+            }
+            return null;
+        }
+
+        int effectiveEdtPriority(ICompletionProposal proposal)
+        {
+            ICompletionProposal raw = unwrapProposal(proposal);
+            if (!(raw instanceof ConfigurableCompletionProposal configurable))
+                return Integer.MIN_VALUE;
+            int pri = configurable.getPriority();
+            if (!remapActive)
+                return pri;
+            String kind = BslCompletionSideHintResolver.resolveElementKind(proposal);
+            if (IrBslExpressionHtmlSupport.KIND_PROPERTY.equals(kind)
+                && pri == propertyDominant)
+                return methodDominant;
+            return pri;
+        }
+
+        /** EDT-полоса для сортировки merge: Configurable + IrCompletionProposal. */
+        int effectiveEdtForIrSort(ICompletionProposal proposal)
+        {
+            ICompletionProposal raw = unwrapProposal(proposal);
+            if (raw instanceof ConfigurableCompletionProposal)
+                return effectiveEdtPriority(proposal);
+            if (raw instanceof IrCompletionProposal ir)
+                return ir.isMethod() ? methodBandForIrSort() : propertyBandForIrSort();
+            return Integer.MIN_VALUE;
+        }
+
+        private int methodBandForIrSort()
+        {
+            return methodDominant != 0 ? methodDominant : propertyDominant;
+        }
+
+        private int propertyBandForIrSort()
+        {
+            if (remapActive)
+                return methodDominant;
+            return propertyDominant != 0 ? propertyDominant : methodDominant;
+        }
+    }
+
+    private static int resolveIrPriorityForMerge(ICompletionProposal proposal,
+                                                 Map<String, Integer> irPriorityByKey)
+    {
+        ICompletionProposal raw = unwrapProposal(proposal);
+        if (raw instanceof IrCompletionProposal ir)
+            return ir.getIrPriority();
+        String key = dedupKey(proposal);
+        if (!key.isEmpty() && irPriorityByKey != null)
+        {
+            Integer inherited = irPriorityByKey.get(key);
+            if (inherited != null)
+                return inherited.intValue();
+        }
+        return Integer.MIN_VALUE;
     }
 
     private static String dedupKey(ICompletionProposal proposal)
@@ -925,6 +1245,18 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             return IrBslCompletionSupport.normalizeFilterKey(ir.getFilterName());
         return IrBslCompletionSupport.normalizeFilterKey(
             BslCompletionSideHintResolver.extractProposalName(raw.getDisplayString()));
+    }
+
+    static String dedupKeyForMerge(ICompletionProposal proposal)
+    {
+        return dedupKey(proposal);
+    }
+
+    static String firstProposalDedupKey(ICompletionProposal[] proposals)
+    {
+        if (proposals == null || proposals.length == 0)
+            return ""; //$NON-NLS-1$
+        return dedupKey(proposals[0]);
     }
 
     private void rebuildDelegateOrderMap()
@@ -1014,11 +1346,25 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         return a;
     }
 
-    private ICompletionProposal[] ensureIrInPopupList(ICompletionProposal[] built)
+    private ICompletionProposal[] finalizeListForIrAssistDisplay(ICompletionProposal[] raw)
     {
-        if (!hasIrProposalsForCurrentContext() || built == null || built.length == 0)
-            return built != null ? built : EMPTY;
-        return popupListWithIr(built);
+        if (raw == null || raw.length == 0)
+            return EMPTY;
+        // #region agent log
+        ContentAssistDebug.sessionLog("H4", "finalizeListForIrAssistDisplay", "path", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"irOrdering\":" + isIrAssistOrderingEnabled() //$NON-NLS-1$
+                + ",\"hasIrSnapshot\":" + hasIrProposalsForCurrentContext() //$NON-NLS-1$
+                + ",\"count\":" + raw.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+        if (!isIrAssistOrderingEnabled())
+        {
+            if (hasIrProposalsForCurrentContext())
+                return popupListWithIr(raw);
+            return raw;
+        }
+        if (hasIrProposalsForCurrentContext())
+            return popupListWithIr(raw);
+        return buildDelegateOrderedList(sortListForIrAssist(unwrapProposals(raw), null));
     }
 
     /** Порядок delegate при smart-фильтре и пустом префиксе (штатный priority, не алфавит). */
@@ -1034,14 +1380,14 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                 ICompletionProposal[] member = resolveMemberAccessOrderedList(viewer, offset,
                     caret, dot);
                 if (member.length > 0)
-                    return ensureIrInPopupList(member);
+                    return finalizeListForIrAssistDisplay(member);
             }
         }
 
         scheduleEagerFullListLoad(viewer);
         if (fullListReady && fullListCache.length > 0)
         {
-            ICompletionProposal[] built = buildDelegateOrderedList(fullListCache);
+            ICompletionProposal[] built = finalizeListForIrAssistDisplay(fullListCache);
             if (built.length > 0)
             {
                 lastStableDelegateList = built;
@@ -1049,17 +1395,17 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             }
         }
         if (lastStableDelegateList.length > 0)
-            return ensureIrInPopupList(lastStableDelegateList);
+            return finalizeListForIrAssistDisplay(lastStableDelegateList);
 
         ICompletionProposal[] raw = fetchFullDelegateListAtAnchor(viewer, offset, caret);
         if (raw.length > 0)
         {
-            ICompletionProposal[] built = buildDelegateOrderedList(raw);
+            ICompletionProposal[] built = finalizeListForIrAssistDisplay(raw);
             lastStableDelegateList = built;
-            return ensureIrInPopupList(built);
+            return built;
         }
         if (fullListCache.length > 0)
-            return buildDelegateOrderedList(fullListCache);
+            return finalizeListForIrAssistDisplay(fullListCache);
         return EMPTY;
     }
 
@@ -1634,7 +1980,13 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         if (terminalEmptyMemberAccess && cachedNonObjectDot == dot)
             return EMPTY;
         if (memberStockFullListDot == dot && memberStockFullList.length >= MIN_STABLE_MEMBER_CACHE)
-            return ensureIrInPopupList(buildDelegateOrderedList(memberStockFullList));
+        {
+            // #region agent log
+            ContentAssistDebug.sessionLog("H5", "resolveMemberAccess", "memberStock", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"dot\":" + dot + ",\"count\":" + memberStockFullList.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            // #endregion
+            return finalizeListForIrAssistDisplay(buildDelegateOrderedList(memberStockFullList));
+        }
 
         ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
         IDocument doc = viewer != null ? viewer.getDocument() : null;
@@ -1645,7 +1997,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             captureMemberStockFullList(probed, dot);
             ICompletionProposal[] built = buildDelegateOrderedList(probed);
             lastStableDelegateList = built;
-            return ensureIrInPopupList(built);
+            return finalizeListForIrAssistDisplay(built);
         }
 
         if (canShiftCaretForMemberCapture(viewer))
@@ -1656,7 +2008,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             {
                 ICompletionProposal[] built = buildDelegateOrderedList(memberStockFullList);
                 lastStableDelegateList = built;
-                return ensureIrInPopupList(built);
+                return finalizeListForIrAssistDisplay(built);
             }
         }
         else
@@ -1666,7 +2018,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         {
             ICompletionProposal[] built = buildDelegateOrderedList(probed);
             lastStableDelegateList = built;
-            return ensureIrInPopupList(built);
+            return finalizeListForIrAssistDisplay(built);
         }
         return EMPTY;
     }
@@ -2043,6 +2395,11 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         if (n1 != n2)
             return Integer.compare(n2, n1);
 
+        int o1 = delegateOrderOf(p1);
+        int o2 = delegateOrderOf(p2);
+        if (o1 >= 0 && o2 >= 0)
+            return Integer.compare(o1, o2);
+
         int pr1 = resolveNativePriority(p1);
         int pr2 = resolveNativePriority(p2);
         if (pr1 != pr2)
@@ -2073,6 +2430,96 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             return ((ConfigurableCompletionProposal) p).getPriority();
         return Integer.MIN_VALUE;
     }
+
+    // #region agent log
+    private static void debugSessionOrderSample(String hypothesisId, String location, String message,
+                                                ICompletionProposal[] list, int max)
+    {
+        if (list == null || list.length == 0)
+        {
+            ContentAssistDebug.sessionLog(hypothesisId, location, message, "{\"count\":0}"); //$NON-NLS-1$
+            return;
+        }
+        int n = Math.min(max, list.length);
+        StringBuilder sb = new StringBuilder(256);
+        sb.append("{\"count\":").append(list.length).append(",\"items\":["); //$NON-NLS-1$ //$NON-NLS-2$
+        for (int i = 0; i < n; i++)
+        {
+            if (i > 0)
+                sb.append(',');
+            ICompletionProposal raw = unwrapProposal(list[i]);
+            String name = displayString(raw);
+            if (name == null)
+                name = ""; //$NON-NLS-1$
+            if (name.length() > 40)
+                name = name.substring(0, 40);
+            sb.append("{\"i\":").append(i) //$NON-NLS-1$
+                .append(",\"name\":\"").append(escapeJson(name)).append('"') //$NON-NLS-1$
+                .append(",\"pri\":").append(resolveNativePriority(raw)) //$NON-NLS-1$
+                .append(",\"ir\":").append(raw instanceof IrCompletionProposal) //$NON-NLS-1$
+                .append('}');
+        }
+        sb.append("]}"); //$NON-NLS-1$
+        ContentAssistDebug.sessionLog(hypothesisId, location, message, sb.toString());
+    }
+
+    private static String escapeJson(String value)
+    {
+        return value.replace("\\", "\\\\").replace("\"", "\\\""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    private static boolean isIrMergeDebugKey(String key)
+    {
+        if (key == null || key.isEmpty())
+            return false;
+        String lower = key.toLowerCase();
+        return "наименование".equals(lower) //$NON-NLS-1$
+            || "наименованиеполное".equals(lower) //$NON-NLS-1$
+            || "ссылка".equals(lower) //$NON-NLS-1$
+            || "найтиследующий".equals(lower) //$NON-NLS-1$
+            || "количество".equals(lower); //$NON-NLS-1$
+    }
+
+    private static void debugIrMergeOrderSample(String hypothesisId, String location, String phase,
+                                                ICompletionProposal[] list,
+                                                Map<String, Integer> irPriorityByKey,
+                                                MemberEdtPriorityProfile profile)
+    {
+        if (list == null || list.length == 0)
+            return;
+        if (profile == null)
+            profile = MemberEdtPriorityProfile.NONE;
+        Map<String, Integer> irMap = irPriorityByKey != null
+            ? irPriorityByKey
+            : java.util.Collections.emptyMap();
+        StringBuilder sb = new StringBuilder(512);
+        sb.append("{\"phase\":\"").append(escapeJson(phase)).append("\",\"remap\":") //$NON-NLS-1$ //$NON-NLS-2$
+            .append(profile.isRemapActive())
+            .append(",\"edtSortOn\":").append(useEdtSortKey(irMap)) //$NON-NLS-1$
+            .append(",\"methDom\":").append(profile.methodDominantValue()) //$NON-NLS-1$
+            .append(",\"propDom\":").append(profile.propertyDominantValue()) //$NON-NLS-1$
+            .append(",\"items\":["); //$NON-NLS-1$
+        boolean any = false;
+        for (int i = 0; i < list.length; i++)
+        {
+            String key = dedupKey(list[i]);
+            if (!isIrMergeDebugKey(key))
+                continue;
+            if (any)
+                sb.append(',');
+            any = true;
+            ICompletionProposal raw = unwrapProposal(list[i]);
+            sb.append("{\"i\":").append(i) //$NON-NLS-1$
+                .append(",\"key\":\"").append(escapeJson(key)).append('"') //$NON-NLS-1$
+                .append(",\"cls\":\"").append(raw.getClass().getSimpleName()).append('"') //$NON-NLS-1$
+                .append(",\"irMerge\":").append(resolveIrPriorityForMerge(list[i], irMap)) //$NON-NLS-1$
+                .append(",\"edtSort\":").append(profile.effectiveEdtForIrSort(list[i])) //$NON-NLS-1$
+                .append(",\"mapPri\":").append(irMap.getOrDefault(key, -99999)).append('}'); //$NON-NLS-1$
+        }
+        sb.append("]}"); //$NON-NLS-1$
+        ContentAssistDebug.sessionLog(hypothesisId, location, phase, sb.toString());
+    }
+    // #endregion
 
     private static int compareDelegateOrder(ICompletionProposal p1, ICompletionProposal p2)
     {

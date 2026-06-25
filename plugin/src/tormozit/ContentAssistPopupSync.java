@@ -278,6 +278,13 @@ public final class ContentAssistPopupSync
         FILTER_TASK_GEN.incrementAndGet();
     }
 
+    /** Сброс short-circuit recompute (число строк то же, порядок после ИР другой). */
+    static void invalidateSyncSnapshot()
+    {
+        lastSyncedCount = -1;
+        lastSyncedDisplayCount = -1;
+    }
+
     public static boolean isRecomputeInProgress()
     {
         return Boolean.TRUE.equals(RECOMPUTE_GUARD.get());
@@ -342,9 +349,6 @@ public final class ContentAssistPopupSync
                 return true;
             }
 
-            final boolean resetToFirst = restoreAfterFilterToggle
-                ? SmartAssistFilterState.isSmartFilterEnabled()
-                : shouldResetSelectionToFirst();
             String filter = SmartFilterTracker.getCurrentFilter();
             ICompletionProposal[] proposals = processor.filterCachedProposalsForPopup(viewer, caret,
                 filter);
@@ -354,6 +358,12 @@ public final class ContentAssistPopupSync
                 proposals = new ICompletionProposal[0];
             final int fullProposalCount = proposals.length;
 
+            final boolean fastIrMergeReset =
+                ContentAssistSessionReloader.shouldResetSelectionAfterIrMerge(
+                    SmartContentAssistProcessor.firstProposalDedupKey(proposals));
+            final boolean resetToFirst = restoreAfterFilterToggle
+                ? SmartAssistFilterState.isSmartFilterEnabled()
+                : (shouldResetSelectionToFirst() || fastIrMergeReset);
             filter = SmartFilterTracker.getCurrentFilter();
             boolean smartEnabled = SmartAssistFilterState.isSmartFilterEnabled();
             if (!filter.equals(lastSyncedFilter))
@@ -364,6 +374,23 @@ public final class ContentAssistPopupSync
                 && displayCount == lastSyncedDisplayCount
                 && smartEnabled == lastSyncedSmartEnabled)
             {
+                // #region agent log
+                ContentAssistDebug.sessionLog("H1", "recomputePopupList", "skipSameCount", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"count\":" + proposals.length + ",\"display\":" + displayCount //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"first\":\"" + ContentAssistDebug.firstProposalKey(proposals) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                // #endregion
+                if (fastIrMergeReset)
+                {
+                    try
+                    {
+                        syncProposalSelectionOnly(popup, true);
+                    }
+                    catch (Exception e)
+                    {
+                        ContentAssistDebug.log("popupSync fastIrReset ERROR: " //$NON-NLS-1$
+                            + e.getMessage());
+                    }
+                }
                 finishSyncCycle(popup);
                 return true;
             }
@@ -1131,6 +1158,31 @@ public final class ContentAssistPopupSync
     {
         try { return getPopup(assistant); }
         catch (Exception ignored) { return null; }
+    }
+
+    static String readFirstVisibleProposalDedupKey(ContentAssistant assistant)
+    {
+        if (assistant == null)
+            return null;
+        try
+        {
+            Object popup = getPopup(assistant);
+            if (popup == null)
+                return null;
+            initPopupReflection(popup);
+            if (fFilteredProposalsField == null)
+                return null;
+            @SuppressWarnings("unchecked")
+            List<ICompletionProposal> list =
+                (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+            if (list == null || list.isEmpty())
+                return null;
+            return SmartContentAssistProcessor.dedupKeyForMerge(list.get(0));
+        }
+        catch (Exception ignored)
+        {
+            return null;
+        }
     }
 
     /** Начало вводимого идентификатора ({@code fFilterOffset}); не использовать для префикса. */

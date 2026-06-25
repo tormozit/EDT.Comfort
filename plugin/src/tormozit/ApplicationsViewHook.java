@@ -347,6 +347,11 @@ public class ApplicationsViewHook implements IStartup
 
     private static void applyApplicationsProjectPreferEditor(IWorkbenchPage page)
     {
+        applyApplicationsProjectPreferEditor(page, false);
+    }
+
+    private static void applyApplicationsProjectPreferEditor(IWorkbenchPage page, boolean forceReload)
+    {
         if (page == null)
             return;
         IEditorPart editor = page.getActiveEditor();
@@ -355,12 +360,12 @@ public class ApplicationsViewHook implements IStartup
             IProject project = ActiveProjectTracker.resolveEditorProject(editor);
             if (project != null)
             {
-                applyApplicationsProject(page, project);
+                applyApplicationsProject(page, project, forceReload);
                 return;
             }
             return;
         }
-        applyApplicationsProjectFromNavigator(page);
+        applyApplicationsProjectFromNavigator(page, forceReload);
     }
 
     private static void scheduleHookApplicationsViewsForPage(IWorkbenchPage page)
@@ -556,7 +561,8 @@ public class ApplicationsViewHook implements IStartup
 
     /**
      * Штатный Updater на LIFECYCLE_STATE_CHANGED вызывает updateViewUsingSelection
-     * (проект навигатора без учёта фокуса) — подменяем, пока активен редактор.
+     * (проект навигатора без учёта фокуса). Перехватываем lifecycle: сохраняем отбор
+     * панели и перезагружаем список через updateViewUsingProject в UI-потоке (asyncExec).
      */
     private static final class StockApplicationListenerGuard implements IApplicationListener
     {
@@ -576,15 +582,27 @@ public class ApplicationsViewHook implements IStartup
                 && event.getEventType() == IApplicationEvent.ApplicationEventType.LIFECYCLE_STATE_CHANGED)
             {
                 IWorkbenchPage page = appsView.getSite().getPage();
-                if (page != null && ActiveProjectTracker.shouldPreferEditorProject(page))
+                if (page != null)
                 {
-                    IProject expected = ActiveProjectTracker.resolveContextProject(page);
-                    if (expected != null)
+                    IProject reload = (IProject) Global.invoke(appsView, "getCurrentProject"); //$NON-NLS-1$
+                    if (reload == null)
+                        reload = ActiveProjectTracker.peek(page);
+                    if (reload == null)
+                        reload = ActiveProjectTracker.resolveContextProject(page);
+                    final IProject project = reload;
+                    Display display = appsView.getSite().getShell().getDisplay();
+                    if (display == null || display.isDisposed())
+                        display = Display.getDefault();
+                    if (display != null && !display.isDisposed())
                     {
-                        applyApplicationsProject(page, expected);
-                        return;
+                        display.asyncExec(() ->
+                        {
+                            if (project != null)
+                                applyApplicationsProject(page, project, true);
+                            else
+                                applyApplicationsProjectPreferEditor(page, true);
+                        });
                     }
-                    applyApplicationsProjectPreferEditor(page);
                     return;
                 }
             }
@@ -602,13 +620,18 @@ public class ApplicationsViewHook implements IStartup
 
     private static void applyApplicationsProject(IWorkbenchPage page, IProject project)
     {
+        applyApplicationsProject(page, project, false);
+    }
+
+    private static void applyApplicationsProject(IWorkbenchPage page, IProject project, boolean forceReload)
+    {
         if (page == null || project == null)
             return;
         IViewPart appsView = findApplicationsView(page);
         if (appsView == null)
             return;
         Object current = Global.invoke(appsView, "getCurrentProject"); //$NON-NLS-1$
-        if (project.equals(current))
+        if (project.equals(current) && !forceReload)
             return;
         Global.invoke(appsView, "updateViewUsingProject", project); //$NON-NLS-1$
         ensureHookApplicationsView(appsView);
@@ -618,11 +641,16 @@ public class ApplicationsViewHook implements IStartup
 
     private static void applyApplicationsProjectFromNavigator(IWorkbenchPage page)
     {
+        applyApplicationsProjectFromNavigator(page, false);
+    }
+
+    private static void applyApplicationsProjectFromNavigator(IWorkbenchPage page, boolean forceReload)
+    {
         if (page == null)
             return;
         if (ActiveProjectTracker.shouldPreferEditorProject(page))
         {
-            applyApplicationsProjectPreferEditor(page);
+            applyApplicationsProjectPreferEditor(page, forceReload);
             return;
         }
         IViewPart appsView = findApplicationsView(page);
@@ -630,7 +658,7 @@ public class ApplicationsViewHook implements IStartup
             return;
         IProject project = ActiveProjectTracker.getNavigatorProject(page);
         if (project != null)
-            applyApplicationsProject(page, project);
+            applyApplicationsProject(page, project, forceReload);
         else
         {
             Global.invoke(appsView, "updateViewUsingCurrentSelection"); //$NON-NLS-1$

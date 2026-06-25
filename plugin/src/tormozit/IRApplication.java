@@ -546,7 +546,7 @@ public final class IRApplication
             if (hasJobs)
                 ToastNotification.show(toastTitle(), //$NON-NLS-1$
                     "В файловой базе ИР включены регламентные задания. Рекомендую отключить.\n" //$NON-NLS-1$
-                    + "Если в коде есть их включение, подавите его проверкой файловой базы.", 10_000, //$NON-NLS-1$
+                    + "Если в коде есть их включение, подавите его проверкой файловой базы.", 5_000, //$NON-NLS-1$
                     () -> connectedSession.openJobConsole()); //$NON-NLS-1$
         }
         String[] forbiddenHandlers = {

@@ -92,6 +92,17 @@ public final class ToastNotification
      */
     public static Shell show(String title, String message, int durationMs, Runnable action, String actionLabel)
     {
+        return show(title, message, durationMs, action, actionLabel, null);
+    }
+
+    /**
+     * @param inputParentShell для кликабельности поверх modal — child конкретного shell
+     *        (тот же расчёт targetX/targetY, координаты через {@link #screenToShellLocation});
+     *        {@code null} — display-root + {@link Shell#setLocation}
+     */
+    public static Shell show(String title, String message, int durationMs, Runnable action,
+        String actionLabel, Shell inputParentShell)
+    {
         Display display = Display.getDefault();
         if (display == null || display.isDisposed()) return null;
         Shell[] holder = new Shell[1];
@@ -99,7 +110,10 @@ public final class ToastNotification
 
         display.syncExec(() ->
         {
-            Shell shell = new Shell(display, SWT.NO_TRIM | SWT.ON_TOP);
+            boolean inputChild = inputParentShell != null && !inputParentShell.isDisposed();
+            Shell shell = inputChild
+                ? new Shell(inputParentShell, SWT.NO_TRIM | SWT.ON_TOP)
+                : new Shell(display, SWT.NO_TRIM | SWT.ON_TOP);
             holder[0] = shell;
 
             Color bgColor     = display.getSystemColor(SWT.COLOR_INFO_BACKGROUND);
@@ -228,7 +242,7 @@ public final class ToastNotification
 
             // Тост выезжает СНИЗУ ВВЕРХ
             int startY = targetY + finalSize.y;
-            shell.setLocation(targetX, startY);
+            applyToastLocation(shell, targetX, startY, inputChild);
             shell.setAlpha(0);
             shell.setVisible(true);
 
@@ -241,8 +255,8 @@ public final class ToastNotification
                 {
                     if (!shell.isDisposed())
                     {
-                        shell.setLocation(targetX,
-                            startY + (targetY - startY) * step / slideSteps);
+                        int y = startY + (targetY - startY) * step / slideSteps;
+                        applyToastLocation(shell, targetX, y, inputChild);
                         shell.setAlpha(255 * step / slideSteps);
                     }
                 });
@@ -380,6 +394,27 @@ public final class ToastNotification
             candidateTop = clientBottom - toastHeight;
 
         return candidateTop;
+    }
+
+    private static void applyToastLocation(Shell shell, int screenX, int screenY, boolean inputChild)
+    {
+        if (inputChild)
+        {
+            Point loc = screenToShellLocation(shell, screenX, screenY);
+            shell.setLocation(loc.x, loc.y);
+        }
+        else
+            shell.setLocation(screenX, screenY);
+    }
+
+    /** Экранные координаты → {@link Shell#setLocation} для child shell modal-parent. */
+    private static Point screenToShellLocation(Shell shell, int screenX, int screenY)
+    {
+        Composite parent = shell.getParent();
+        if (parent == null || parent.isDisposed())
+            return new Point(screenX, screenY);
+        Point origin = parent.getLocation();
+        return new Point(screenX - origin.x, screenY - origin.y);
     }
 
     // =======================================================================
