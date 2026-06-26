@@ -21,7 +21,7 @@ public final class ContentAssistDebug
     private static final Path DEBUG_MODE_LOG = Path.of("C:\\VC\\EDT.Comfort\\debug-c201d2.log"); //$NON-NLS-1$
     private static final String DEBUG_MODE_SESSION_ID = "c201d2"; //$NON-NLS-1$
     /** Маркер сборки для literal assist — сверять в debug-c201d2.log (H00/H0). */
-    public static final String LITERAL_ASSIST_BUILD = "20260626-fix13-diag"; //$NON-NLS-1$
+    public static final String LITERAL_ASSIST_BUILD = "20260626-fix14-diag"; //$NON-NLS-1$
 
     private ContentAssistDebug() {}
 

@@ -364,6 +364,8 @@ public final class ContentAssistSessionReloader
                 if (!ComfortSettings.isReplaceListFiltersEnabled() || !popupVisible
                     || !inLiteral)
                     return;
+                if (event.isAutoActivated)
+                    return;
                 tryLiteralRepeatFilterToggle("assistSessionRestarted"); //$NON-NLS-1$
             }
 

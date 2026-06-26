@@ -68,6 +68,7 @@ public final class ContentAssistPopupSync
     private static final ThreadLocal<Boolean> FORCE_SMART_LITERAL_OPEN = new ThreadLocal<>();
     /** H74/H75: sessionOpen | toggle | debounce */
     private static final ThreadLocal<String> RECOMPUTE_TRIGGER = new ThreadLocal<>();
+    private static final AtomicInteger literalAutoSmartRouteLogs = new AtomicInteger();
     private static final IdentityHashMap<Object, Listener> POPUP_SCROLL_LISTENERS =
         new IdentityHashMap<>();
     private static final IdentityHashMap<SourceViewer, PendingDebouncedFilter> PENDING_CARET_TASKS =
@@ -251,6 +252,26 @@ public final class ContentAssistPopupSync
                 + ",\"msSinceSessionStart\":" //$NON-NLS-1$
                     + ContentAssistSessionReloader.msSinceLiteralSessionStartForLog()
                 + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+    }
+
+    /** H78: literal auto/debounce — fullSmart vs literalStockOnly (throttled). */
+    private static void logLiteralAutoSmartRoute(boolean inLiteral, String filter, int proposalN,
+                                                 String route)
+    {
+        if (!inLiteral || literalAutoSmartRouteLogs.incrementAndGet() > 10)
+            return;
+        String filterEsc = filter != null
+            ? ContentAssistDebug.jsonEscapeForLog(filter) : ""; //$NON-NLS-1$
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H78", "recomputePopupList", "autoLiteralSmart", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"autoLiteralSmart\":true" //$NON-NLS-1$
+                + ",\"smartEnabled\":" + SmartAssistFilterState.isSmartFilterEnabled() //$NON-NLS-1$
+                + ",\"route\":\"" + route //$NON-NLS-1$
+                + "\",\"filter\":\"" + filterEsc //$NON-NLS-1$
+                + "\",\"proposalN\":" + proposalN //$NON-NLS-1$
+                + ",\"trigger\":\"" + peekRecomputeTrigger() //$NON-NLS-1$
+                + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         // #endregion
     }
 
@@ -592,8 +613,11 @@ public final class ContentAssistPopupSync
                 FORCE_SMART_LITERAL_OPEN.remove();
 
             if (inLiteralRecompute && !literalIrMerge && !literalIrExpected
-                && !restoreAfterFilterToggle && !forceSmartLiteralOpen)
+                && !restoreAfterFilterToggle && !forceSmartLiteralOpen
+                && !SmartAssistFilterState.isSmartFilterEnabled())
             {
+                logLiteralAutoSmartRoute(inLiteralRecompute, SmartFilterTracker.getCurrentFilter(),
+                    -1, "literalStockOnly"); //$NON-NLS-1$
                 ContentAssistSessionReloader auditReloader =
                     ContentAssistSessionReloader.getActiveReloader();
                 ContentAssistPopupSync.auditLiteralPopupList(assistant, viewer, processor,
@@ -637,6 +661,12 @@ public final class ContentAssistPopupSync
                 proposals = processor.computeForPopupRefresh(viewer, caret);
             if (proposals == null)
                 proposals = new ICompletionProposal[0];
+            if (inLiteralRecompute && !literalIrMerge && !literalIrExpected
+                && SmartAssistFilterState.isSmartFilterEnabled())
+            {
+                logLiteralAutoSmartRoute(inLiteralRecompute, filter, proposals.length,
+                    "fullSmart"); //$NON-NLS-1$
+            }
             // #region agent log
             ContentAssistDebug.debugModeLog("H52", "recomputePopupList", "recomputeResult", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 "{\"filter\":\"" + ContentAssistDebug.jsonEscapeForLog(filter) //$NON-NLS-1$
