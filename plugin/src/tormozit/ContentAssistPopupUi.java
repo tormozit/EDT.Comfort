@@ -108,6 +108,31 @@ public final class ContentAssistPopupUi
         catch (Exception ignored) {}
     }
 
+    public static boolean isFilterBarCreated(ContentAssistant assistant)
+    {
+        try
+        {
+            Object popup = ContentAssistPopupSync.getPopupObject(assistant);
+            if (popup == null)
+                return false;
+            Shell shell = ContentAssistPopupSync.getProposalShell(popup);
+            if (shell == null || shell.isDisposed())
+                return false;
+            Composite bar = (Composite) shell.getData(BAR_DATA_KEY);
+            return bar != null && !bar.isDisposed();
+        }
+        catch (Exception ignored)
+        {
+            return false;
+        }
+    }
+
+    /** Текст «Родитель: …» без записи в label (для H17). */
+    public static String peekContextTypeLabel(SourceViewer viewer)
+    {
+        return resolveContextTypeLabel(viewer);
+    }
+
     public static void removeFilterToggle(ContentAssistant assistant)
     {
         try
@@ -171,6 +196,16 @@ public final class ContentAssistPopupUi
             viewer.getDocument(), caret);
         if (dot < 0)
         {
+            if (SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret))
+            {
+                ContentAssistSessionReloader reloader =
+                    ContentAssistSessionReloader.getActiveReloader();
+                String ctx = reloader != null ? reloader.getIrAssistContextTypeLabel() : null;
+                cachedContextLabelDot = -1;
+                cachedContextLabelText = ctx != null && !ctx.isEmpty()
+                    ? "Родитель: " + ctx : "Родитель: —"; //$NON-NLS-1$ //$NON-NLS-2$
+                return cachedContextLabelText;
+            }
             cachedContextLabelDot = -1;
             cachedContextLabelText = ""; //$NON-NLS-1$
             return ""; //$NON-NLS-1$
@@ -234,8 +269,12 @@ public final class ContentAssistPopupUi
         bar.setData(CONTEXT_LABEL_DATA_KEY, contextLabel);
         shell.setData(BAR_DATA_KEY, bar);
 
-        shell.addListener(SWT.KeyDown,
-            e -> ContentAssistSessionReloader.ctrlSpaceFilter(assistant).handleEvent(e));
+        shell.addListener(SWT.KeyDown, e -> {
+            ContentAssistSessionReloader.CtrlSpaceFilter filter =
+                ContentAssistSessionReloader.ctrlSpaceFilter(assistant);
+            if (filter != null)
+                filter.handleEvent(e);
+        });
         shell.layout(true, true);
         ContentAssistDebug.log("filterBar UI created"); //$NON-NLS-1$
         return bar;

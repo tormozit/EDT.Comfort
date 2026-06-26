@@ -4,7 +4,6 @@ import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.jface.text.IInformationControlCreator;
-import org.eclipse.jface.text.contentassist.ContentAssistant;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
 import org.eclipse.jface.text.contentassist.ICompletionProposalExtension;
 import org.eclipse.jface.text.contentassist.ICompletionProposalExtension2;
@@ -13,12 +12,6 @@ import org.eclipse.jface.text.contentassist.IContextInformation;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.custom.StyledText;
-import org.eclipse.jface.resource.ImageDescriptor;
-import org.eclipse.jface.resource.JFaceResources;
-import org.eclipse.jface.resource.LocalResourceManager;
-import org.eclipse.jface.resource.ResourceManager;
-import org.eclipse.jface.viewers.DecorationOverlayIcon;
-import org.eclipse.jface.viewers.IDecoration;
 import org.eclipse.jface.text.source.SourceViewer;
 
 import com._1c.g5.v8.dt.bsl.ui.BslSharedImages;
@@ -46,6 +39,8 @@ public final class IrCompletionProposal implements
     private final int irPriority;
     private final String stableCacheKey;
     private volatile String activationHtml;
+    /** Штатная иконка assist EDT (borrow от delegate или {@link BslAssistListImages}). */
+    private volatile Image stockAssistImage;
 
     public IrCompletionProposal(
         String displayString, String filterName, String templateText, boolean method, int irPriority,
@@ -138,10 +133,19 @@ public final class IrCompletionProposal implements
         return displayString;
     }
 
+    void applyStockAssistImage(Image image)
+    {
+        if (image != null && !image.isDisposed())
+            stockAssistImage = image;
+    }
+
     @Override
     public Image getImage()
     {
-        return ListEntryImages.resolve(method, returnsValue);
+        Image borrowed = stockAssistImage;
+        if (borrowed != null && !borrowed.isDisposed())
+            return borrowed;
+        return BslAssistListImages.resolve(method, returnsValue);
     }
 
     @Override
@@ -177,9 +181,18 @@ public final class IrCompletionProposal implements
     @Override
     public IInformationControlCreator getInformationControlCreator()
     {
-        ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
-        return BslCompletionSideHintResolver.resolveAssistBrowserCreatorForProposal(
-            assistant, null);
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        if (reloader != null)
+        {
+            IInformationControlCreator cached = reloader.getAssistBrowserCreator();
+            if (cached != null)
+                return cached;
+        }
+        SourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
+        IInformationControlCreator creator = BslCompletionSideHintResolver.resolveAssistBrowserCreator(viewer);
+        if (creator == null && reloader != null)
+            creator = BslCompletionSideHintResolver.resolveAssistBrowserCreatorFromEditor(reloader.getBslEditor());
+        return creator;
     }
 
     @Override
@@ -331,49 +344,35 @@ public final class IrCompletionProposal implements
         return document != null ? document.getLength() : 0;
     }
 
-    /** Иконки строки списка — как {@code BslProposalProvider.getDeclareMethodPropImg} / {@code getDeclareVariablePropImg}. */
-    private static final class ListEntryImages
+    /**
+     * Иконки member assist — как {@code BslProposalProvider.getExternalMethPropImg} /
+     * {@code getExternalPropertyPropImg} (не var/meth из быстрой схемы).
+     */
+    private static final class BslAssistListImages
     {
-        private static final ResourceManager RESOURCES =
-            new LocalResourceManager(JFaceResources.getResources());
-
         private static Image propertyImage;
-        private static Image functionMethodImage;
-        private static Image procedureMethodImage;
+        private static Image functionImage;
+        private static Image procedureImage;
 
-        private ListEntryImages() {}
+        private BslAssistListImages() {}
 
         static Image resolve(boolean method, boolean returnsValue)
         {
             if (!method)
             {
                 if (propertyImage == null)
-                    propertyImage = BslSharedImages.getImage(BslSharedImages.IMG_VAR);
+                    propertyImage = BslSharedImages.getImage(BslSharedImages.IMG_EXTERNAL_PROPERTY);
                 return propertyImage;
             }
-            return returnsValue ? functionMethodImage() : procedureMethodImage();
-        }
-
-        private static Image functionMethodImage()
-        {
-            if (functionMethodImage == null)
-                functionMethodImage = overlayOnMethod(BslSharedImages.IMG_FUNCTION);
-            return functionMethodImage;
-        }
-
-        private static Image procedureMethodImage()
-        {
-            if (procedureMethodImage == null)
-                procedureMethodImage = overlayOnMethod(BslSharedImages.IMG_PROCEDURE);
-            return procedureMethodImage;
-        }
-
-        private static Image overlayOnMethod(String overlayKey)
-        {
-            Image base = BslSharedImages.getImage(BslSharedImages.IMG_METHOD);
-            ImageDescriptor overlay = BslSharedImages.getImageDescriptor(overlayKey);
-            return RESOURCES.get(new DecorationOverlayIcon(
-                base, overlay, IDecoration.BOTTOM_LEFT));
+            if (returnsValue)
+            {
+                if (functionImage == null)
+                    functionImage = BslSharedImages.getImage(BslSharedImages.IMG_EXTERNAL_FUNC);
+                return functionImage;
+            }
+            if (procedureImage == null)
+                procedureImage = BslSharedImages.getImage(BslSharedImages.IMG_EXTERNAL_PROC);
+            return procedureImage;
         }
     }
 }

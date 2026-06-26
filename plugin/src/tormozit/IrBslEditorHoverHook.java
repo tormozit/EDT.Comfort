@@ -48,6 +48,7 @@ public final class IrBslEditorHoverHook implements IStartup
     @Override
     public void earlyStartup()
     {
+        ContentAssistDebug.logLiteralAssistBuildStamp();
         Display.getDefault().asyncExec(() ->
         {
             PlatformUI.getWorkbench().addWindowListener(new IWindowListener()

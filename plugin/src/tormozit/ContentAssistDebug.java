@@ -18,10 +18,42 @@ public final class ContentAssistDebug
     private static final AtomicInteger agentValidateLogs = new AtomicInteger();
     private static final Path DEBUG_SESSION_LOG = Path.of("C:\\VC\\EDT.Comfort\\debug-0ae881.log"); //$NON-NLS-1$
     private static final String DEBUG_SESSION_ID = "0ae881"; //$NON-NLS-1$
+    private static final Path DEBUG_MODE_LOG = Path.of("C:\\VC\\EDT.Comfort\\debug-c201d2.log"); //$NON-NLS-1$
+    private static final String DEBUG_MODE_SESSION_ID = "c201d2"; //$NON-NLS-1$
+    /** Маркер сборки для literal assist — сверять в debug-c201d2.log (H00/H0). */
+    public static final String LITERAL_ASSIST_BUILD = "20260626-fix8b"; //$NON-NLS-1$
 
     private ContentAssistDebug() {}
 
     // #region agent log
+    /** H00 при старте EDT — однозначная версия bytecode в debug-c201d2.log. */
+    public static void logLiteralAssistBuildStamp()
+    {
+        debugModeLog("H00", "ContentAssistDebug", "buildStamp", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"build\":\"" + LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** NDJSON в debug-c201d2.log — отладка IR Ctrl+Space (без флажка логирования). */
+    public static void debugModeLog(String hypothesisId, String location, String message,
+                                    String dataJson)
+    {
+        try
+        {
+            String data = dataJson != null && !dataJson.isEmpty() ? dataJson : "{}"; //$NON-NLS-1$
+            String line = "{\"sessionId\":\"" + DEBUG_MODE_SESSION_ID //$NON-NLS-1$
+                + "\",\"hypothesisId\":\"" + hypothesisId //$NON-NLS-1$
+                + "\",\"location\":\"" + location //$NON-NLS-1$
+                + "\",\"message\":\"" + jsonEscape(message) //$NON-NLS-1$
+                + "\",\"data\":" + data //$NON-NLS-1$
+                + ",\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
+            Files.writeString(DEBUG_MODE_LOG, line, StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        }
+        catch (Exception ignored)
+        {
+        }
+    }
+
     /** NDJSON в debug-0ae881.log — без флажка «Общее логирование». */
     public static void sessionLog(String hypothesisId, String location, String message, String dataJson)
     {
@@ -47,6 +79,12 @@ public final class ContentAssistDebug
         if (value == null)
             return ""; //$NON-NLS-1$
         return value.replace("\\", "\\\\").replace("\"", "\\\""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+    }
+
+    /** Экранирование для NDJSON data (package для reloader). */
+    static String jsonEscapeForLog(String value)
+    {
+        return jsonEscape(value);
     }
 
     public static String firstProposalKey(ICompletionProposal[] proposals)

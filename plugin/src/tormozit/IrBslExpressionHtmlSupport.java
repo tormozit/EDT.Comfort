@@ -7,6 +7,8 @@ import java.io.IOException;
 import java.nio.file.Path;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicReference;
+
+import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.swt.widgets.Display;
 
 /**
@@ -36,6 +38,22 @@ public final class IrBslExpressionHtmlSupport
         if (session == null || session.executor == null || session.executor.isShutdown())
             return null;
         return session;
+    }
+
+    /** Сессия ИР для assist: штатный путь + {@link IRApplication#getConnectedSession}. */
+    public static IRSession resolveIrSessionForAssist(BslXtextEditor editor, SourceViewer viewer)
+    {
+        IRSession session = resolveConnectedSession(editor);
+        if (session != null)
+            return session;
+        IDtProject dtProject = editor != null ? Global.getDtProjectFromBslEditor(editor) : null;
+        if (dtProject != null)
+        {
+            session = IRApplication.getConnectedSession(dtProject);
+            if (session != null && session.executor != null && !session.executor.isShutdown())
+                return session;
+        }
+        return null;
     }
 
     public static void ensureCodeEditor(IRSession session)

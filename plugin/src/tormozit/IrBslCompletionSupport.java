@@ -324,13 +324,17 @@ public final class IrBslCompletionSupport
     {
         session.applyPreparedCodeEditorSync(payload);
         long started = System.currentTimeMillis();
-        session.invokeCodeEditorQuiet("РазобратьТекущийКонтекст"); //$NON-NLS-1$
+//         Процедура РазобратьТекущийКонтекст(Знач ВзятьЛевоеОтРавенства = Ложь, выхЕстьТочкаСправа = Ложь, Знач КакВызовМетода = Неопределено, Знач НомерСтроки = 0, Знач НомерКолонки = 0,
+//          Знач ПереходитьВоВложенныйКонтекст = Ложь, Знач ПозицияВТексте = 0, Знач ТребоватьРазбор = Ложь) Экспорт 
         Object typesTable = session.invokeCodeEditorQuiet(
             "ТаблицаТиповТекущегоВыражения", false, false, true, true); //$NON-NLS-1$
         IrCompletionDebug.timing("Расчет типов контекста", started); //$NON-NLS-1$
 
         started = System.currentTimeMillis();
-        boolean filled = ComBridge.toBoolean(session.invokeCodeEditorQuiet(
+//        Функция ЗаполнитьТаблицуСлов(ТаблицаТиповКонтекста = Неопределено, Знач ПрименитьОжидаемыйТип = Истина, выхЕстьЛучшееСлово = Неопределено, Знач РазрешитьОткрытиеОкон = Истина,
+//            Знач Сортировать = Истина, Знач ДобавлятьНизкоВероятные = Ложь, Знач ОтделятьБольшиеНаборыСлов = Ложь, Знач СловоФильтр = Неопределено, Знач ЗапретГлобальногоКонтекста = Ложь,
+//            Знач ТипСловаФильтр = Неопределено, ИнлайнРежимДоступен = Ложь) Экспорт
+       boolean filled = ComBridge.toBoolean(session.invokeCodeEditorQuiet(
             "ЗаполнитьТаблицуСлов", typesTable, true, false, false, false, !autoInvoke, true)); //$NON-NLS-1$
         IrCompletionDebug.timing("Заполнение слов контекста", started); //$NON-NLS-1$
         if (!filled)

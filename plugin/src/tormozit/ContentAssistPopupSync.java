@@ -11,10 +11,12 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.IInformationControl;
 import org.eclipse.jface.text.IInformationControlExtension5;
 import org.eclipse.jface.text.contentassist.ContentAssistant;
 import org.eclipse.jface.text.IInformationControlCreator;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
+import org.eclipse.jface.text.contentassist.ICompletionProposalExtension2;
 import org.eclipse.jface.text.contentassist.ICompletionProposalExtension3;
 import org.eclipse.xtext.ui.editor.hover.html.IXtextBrowserInformationControl;
 import org.eclipse.jface.text.source.SourceViewer;
@@ -66,6 +68,9 @@ public final class ContentAssistPopupSync
     private static final int[] SESSION_POPUP_SYNC_DELAYS_MS = { 0, 30, 80, 150, 300 };
     private static final AtomicInteger SESSION_SYNC_GEN = new AtomicInteger();
     private static final IdentityHashMap<SourceViewer, Runnable> PENDING_SESSION_SYNC =
+        new IdentityHashMap<>();
+    private static final AtomicInteger FILTER_BAR_SYNC_GEN = new AtomicInteger();
+    private static final IdentityHashMap<SourceViewer, Runnable> PENDING_FILTER_BAR_SYNC =
         new IdentityHashMap<>();
 
     private static final class PendingDebouncedFilter
@@ -248,9 +253,91 @@ public final class ContentAssistPopupSync
     public static void cancelSessionPopupSync(SourceViewer viewer)
     {
         SESSION_SYNC_GEN.incrementAndGet();
+        cancelFilterBarSetup(viewer);
         if (viewer == null)
             return;
         Runnable pending = PENDING_SESSION_SYNC.remove(viewer);
+        if (pending == null)
+            return;
+        if (viewer.getTextWidget() instanceof Control)
+        {
+            Control widget = (Control) viewer.getTextWidget();
+            if (!widget.isDisposed())
+                widget.getDisplay().timerExec(-1, pending);
+        }
+    }
+
+    /**
+     * Только нижняя панель popup (флажок + «Родитель:») — без recompute/stock filter.
+     * Для literal irOnly/deferred, где полный {@link #scheduleSessionPopupSync} пропущен.
+     */
+    public static void scheduleFilterBarSetup(ContentAssistant assistant, SourceViewer viewer,
+                                               SmartContentAssistProcessor processor)
+    {
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+            return;
+        if (assistant == null || viewer == null || processor == null)
+            return;
+        cancelFilterBarSetup(viewer);
+        Control widget = viewer.getTextWidget() != null ? (Control) viewer.getTextWidget() : null;
+        if (widget == null || widget.isDisposed())
+            return;
+        Display display = widget.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+
+        final int gen = FILTER_BAR_SYNC_GEN.get();
+        final int[] step = { 0 };
+        Runnable task = new Runnable() {
+            @Override
+            public void run()
+            {
+                PENDING_FILTER_BAR_SYNC.remove(viewer);
+                if (widget.isDisposed() || gen != FILTER_BAR_SYNC_GEN.get())
+                    return;
+                if (ContentAssistSessionReloader.getActiveAssistant() != assistant)
+                    return;
+                if (!isPopupVisible(assistant))
+                {
+                    step[0]++;
+                    if (step[0] < SESSION_POPUP_SYNC_DELAYS_MS.length)
+                    {
+                        PENDING_FILTER_BAR_SYNC.put(viewer, this);
+                        display.timerExec(SESSION_POPUP_SYNC_DELAYS_MS[step[0]], this);
+                    }
+                    return;
+                }
+                try
+                {
+                    ContentAssistPopupUi.ensureFilterToggle(assistant, viewer, processor);
+                    ContentAssistPopupUi.updateContextTypeLabel(viewer);
+                    boolean barCreated = ContentAssistPopupUi.isFilterBarCreated(assistant);
+                    String contextLabel = ContentAssistPopupUi.peekContextTypeLabel(viewer);
+                    String contextEsc = contextLabel != null
+                        ? contextLabel.replace("\\", "\\\\").replace("\"", "\\\"") : ""; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    // #region agent log
+                    ContentAssistDebug.debugModeLog("H17", "scheduleFilterBarSetup", "applied", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        "{\"barCreated\":" + barCreated //$NON-NLS-1$
+                            + ",\"contextLabel\":\"" + contextEsc + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                            + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+                    // #endregion
+                }
+                catch (Exception e)
+                {
+                    ContentAssistDebug.log("filterBarSetup ERROR: " + e.getMessage()); //$NON-NLS-1$
+                }
+            }
+        };
+        PENDING_FILTER_BAR_SYNC.put(viewer, task);
+        display.timerExec(SESSION_POPUP_SYNC_DELAYS_MS[0], task);
+    }
+
+    public static void cancelFilterBarSetup(SourceViewer viewer)
+    {
+        FILTER_BAR_SYNC_GEN.incrementAndGet();
+        if (viewer == null)
+            return;
+        Runnable pending = PENDING_FILTER_BAR_SYNC.remove(viewer);
         if (pending == null)
             return;
         if (viewer.getTextWidget() instanceof Control)
@@ -337,8 +424,12 @@ public final class ContentAssistPopupSync
 
             boolean inLiteralRecompute = SmartContentAssistProcessor.isStringLiteralAssistContext(
                 viewer, caret);
+            boolean literalIrMerge = inLiteralRecompute
+                && (processor.isIrOnlyManualMode()
+                    || processor.hasIrProposalsForCurrentContext()
+                    || processor.shouldRefreshIrPopup());
 
-            if (inLiteralRecompute)
+            if (inLiteralRecompute && !literalIrMerge)
             {
                 runStockFilterRunnable(assistant);
                 finishSyncCycle(popup);
@@ -462,6 +553,20 @@ public final class ContentAssistPopupSync
                     ContentAssistDebug.log("popupSync apply ERROR: " + e.getMessage()); //$NON-NLS-1$
                 }
             }
+
+            // #region agent log
+            {
+                String filterEsc = filter != null
+                    ? filter.replace("\\", "\\\\").replace("\"", "\\\"") : ""; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                ContentAssistDebug.debugModeLog("H12", "recomputePopupList", "applied", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"inLiteral\":" + inLiteralRecompute //$NON-NLS-1$
+                        + ",\"literalManualIr\":" + processor.isIrOnlyManualMode() //$NON-NLS-1$
+                        + ",\"irOnly\":" + processor.isIrOnlyManualMode() //$NON-NLS-1$
+                        + ",\"filter\":\"" + filterEsc + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"proposalCount\":" + fullProposalCount //$NON-NLS-1$
+                        + ",\"tableRows\":" + tableItemCount(popup) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            // #endregion
 
             finishSyncCycle(popup);
             return true;
@@ -856,7 +961,8 @@ public final class ContentAssistPopupSync
                     "showInformation", ICompletionProposal.class, Object.class); //$NON-NLS-1$
                 additionalInfoShowInformationMethod.setAccessible(true);
             }
-            additionalInfoShowInformationMethod.invoke(controller, proposal, html);
+            additionalInfoShowInformationMethod.invoke(controller, proposal,
+                IrBslHoverHtml.toAssistSideHintPayload(html));
             scheduleAssistBrowserHtmlApply(assistant, html);
             return true;
         }
@@ -865,6 +971,387 @@ public final class ContentAssistPopupSync
             ContentAssistDebug.log("pinIrSideHint: " + e.getMessage()); //$NON-NLS-1$
             return false;
         }
+    }
+
+    /** ИР-only / deferred open: боковая подсказка через browser, не plain-text HTML. */
+    public static void pinIrSideHintForCurrentSelection(ContentAssistant assistant)
+    {
+        pinIrSideHintForCurrentSelection(assistant, ContentAssistSessionReloader.getActiveViewer());
+    }
+
+    /** @param viewer явный viewer для literal/deferred (async после show). */
+    public static void pinIrSideHintForCurrentSelection(ContentAssistant assistant,
+        SourceViewer viewer)
+    {
+        if (assistant == null)
+            return;
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        if (viewer == null)
+            viewer = ContentAssistSessionReloader.getActiveViewer();
+        try
+        {
+            Object popup = getPopupObject(assistant);
+            if (popup == null)
+                return;
+            initPopupReflection(popup);
+            ICompletionProposal proposal = resolveProposalByDisplay(popup, null);
+            if (proposal == null)
+                return;
+            ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(proposal);
+            if (!(raw instanceof IrCompletionProposal ir))
+                return;
+            String cacheKey = ir.getStableCacheKey();
+            String html = reloader != null ? reloader.getIrMergedHtml(cacheKey) : null;
+            if (html == null || html.isEmpty())
+                html = ir.getAdditionalProposalInfo();
+            int htmlLen = html != null ? html.length() : 0;
+            if (html == null || html.isEmpty())
+            {
+                // #region agent log
+                ContentAssistDebug.debugModeLog("H13", "pinIrSideHintForCurrentSelection", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"htmlLen\":0}"); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
+                return;
+            }
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H22", "pinIrSideHintForCurrentSelection", "beforePin", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"controlClass\":\"" + jsonEscapeControlClass(describeSideInformationControlClass(assistant)) //$NON-NLS-1$
+                    + "\",\"hasBrowser\":" + hasAssistBrowserControl(assistant) //$NON-NLS-1$
+                    + ",\"cachedCreator\":" + (reloader != null && reloader.getAssistBrowserCreator() != null) //$NON-NLS-1$
+                    + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            boolean creatorResolved = prepareAssistBrowserSidePanel(assistant, viewer);
+            boolean hasBrowserBeforePin = hasAssistBrowserControl(assistant);
+            if (!hasBrowserBeforePin)
+            {
+                refreshAdditionalInfo(assistant);
+                hasBrowserBeforePin = hasAssistBrowserControl(assistant);
+            }
+            boolean pinOk = false;
+            if (hasBrowserBeforePin)
+                pinOk = pinIrSideHint(assistant, ir, html);
+            else if (reloader != null && !reloader.isIrSideHintPublishedForKey(cacheKey))
+                publishIrActivationSideHint(assistant, html, cacheKey);
+            scheduleAssistBrowserHtmlApply(assistant, html, true);
+            boolean hasBrowserAfterApply = hasAssistBrowserControl(assistant);
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H13", "pinIrSideHintForCurrentSelection", "pinned", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"creatorResolved\":" + creatorResolved //$NON-NLS-1$
+                    + ",\"hasBrowserBeforePin\":" + hasBrowserBeforePin //$NON-NLS-1$
+                    + ",\"hasBrowserAfterApply\":" + hasBrowserAfterApply //$NON-NLS-1$
+                    + ",\"pinOk\":" + pinOk //$NON-NLS-1$
+                    + ",\"htmlLen\":" + htmlLen + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            ContentAssistDebug.debugModeLog("H18", "pinIrSideHintForCurrentSelection", "browser", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"creatorResolved\":" + creatorResolved //$NON-NLS-1$
+                    + ",\"hasBrowserBeforePin\":" + hasBrowserBeforePin //$NON-NLS-1$
+                    + ",\"hasBrowserAfterApply\":" + hasBrowserAfterApply //$NON-NLS-1$
+                    + ",\"pinOk\":" + pinOk //$NON-NLS-1$
+                    + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+        }
+        catch (Throwable t)
+        {
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H26", "pinIrSideHintForCurrentSelection", "error", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"msg\":\"" + ContentAssistDebug.jsonEscapeForLog(t.getMessage()) //$NON-NLS-1$
+                    + "\",\"className\":\"" + ContentAssistDebug.jsonEscapeForLog(t.getClass().getName()) //$NON-NLS-1$
+                    + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            ContentAssistDebug.log("pinIrSideHintForCurrentSelection: " + t.getMessage()); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * Активация первой строки literal/deferred popup — {@code selected()} до pin side hint.
+     *
+     * @return {@code true} если вызван {@link ICompletionProposalExtension2#selected}
+     */
+    public static boolean ensureInitialIrRowActivation(ContentAssistant assistant,
+        SourceViewer viewer)
+    {
+        if (assistant == null || viewer == null)
+            return false;
+        boolean selectedCalled = false;
+        String cacheKey = null;
+        int htmlLenAfter = 0;
+        try
+        {
+            notifyAdditionalInfoSelectionChanged(assistant);
+            Object popup = getPopupObject(assistant);
+            if (popup == null)
+                return false;
+            initPopupReflection(popup);
+            ICompletionProposal proposal = resolveProposalByDisplay(popup, null);
+            if (proposal == null)
+                return false;
+            ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(proposal);
+            if (raw instanceof IrCompletionProposal ir)
+                cacheKey = ir.getStableCacheKey();
+            if (proposal instanceof ICompletionProposalExtension2 ext2)
+            {
+                ext2.selected(viewer, false);
+                selectedCalled = true;
+            }
+            ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+            if (reloader != null && cacheKey != null)
+            {
+                String html = reloader.getIrMergedHtml(cacheKey);
+                if ((html == null || html.isEmpty()) && raw instanceof IrCompletionProposal ir2)
+                    html = ir2.getAdditionalProposalInfo();
+                htmlLenAfter = html != null ? html.length() : 0;
+            }
+        }
+        catch (Exception e)
+        {
+            ContentAssistDebug.log("ensureInitialIrRowActivation: " + e.getMessage()); //$NON-NLS-1$
+        }
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H19", "ensureInitialIrRowActivation", "done", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"selectedCalled\":" + selectedCalled //$NON-NLS-1$
+                + ",\"cacheKey\":" + (cacheKey != null ? "\"" + cacheKey + "\"" : "null") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + ",\"htmlLenAfter\":" + htmlLenAfter //$NON-NLS-1$
+                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+        return selectedCalled;
+    }
+
+    /**
+     * Browser side panel до первого {@code showInformation(String)} — literal irOnly без session sync.
+     *
+     * @return {@code true} если browser creator найден и закэширован
+     */
+    public static boolean prepareAssistBrowserSidePanel(ContentAssistant assistant,
+        SourceViewer viewer)
+    {
+        return ensureAssistBrowserCreatorOnController(assistant, viewer);
+    }
+
+    /**
+     * Патч browser creator на {@code AdditionalInfoController} до первого showInformation.
+     *
+     * @return {@code true} если creator найден и применён
+     */
+    public static boolean ensureAssistBrowserCreatorOnController(ContentAssistant assistant,
+        SourceViewer viewer)
+    {
+        if (assistant == null)
+            return false;
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        BslCompletionSideHintResolver.AssistBrowserCreatorTrace trace =
+            new BslCompletionSideHintResolver.AssistBrowserCreatorTrace();
+        trace.viewerHash = viewer != null ? System.identityHashCode(viewer) : -1;
+        trace.reloaderHash = reloader != null ? System.identityHashCode(reloader) : -1;
+        String controlBefore = null;
+        // #region agent log
+        try
+        {
+            trace = BslCompletionSideHintResolver.traceAssistBrowserCreatorResolution(
+                assistant, viewer, reloader);
+            ContentAssistDebug.debugModeLog("H20", "resolveCreatorChain", "trace", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                trace.toDebugJson());
+            controlBefore = describeSideInformationControlClass(assistant);
+        }
+        catch (Exception e)
+        {
+            ContentAssistDebug.debugModeLog("H26", "ensureAssistBrowserCreatorOnController", "traceError", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"msg\":\"" + ContentAssistDebug.jsonEscapeForLog(e.getMessage()) //$NON-NLS-1$
+                    + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            trace.creator = BslCompletionSideHintResolver.resolveAssistBrowserCreatorChain(
+                assistant, viewer, reloader);
+            if (trace.creator != null)
+                trace.winner = "fallback"; //$NON-NLS-1$
+            controlBefore = describeSideInformationControlClass(assistant);
+        }
+        // #endregion
+        IInformationControlCreator creator = trace.creator;
+        boolean creatorResolved = creator != null;
+        if (creator != null && reloader != null)
+            reloader.rememberAssistBrowserCreator(creator);
+        boolean creatorPatched = false;
+        if (creator != null)
+            creatorPatched = patchCreatorOnAdditionalInfoController(
+                resolveAdditionalInfoController(assistant), creator);
+        boolean hasBrowserAfterRefresh = false;
+        if (creatorPatched)
+        {
+            try
+            {
+                Object popup = getPopup(assistant);
+                if (popup != null)
+                {
+                    initPopupReflection(popup);
+                    if (configureAndMakeVisibleMethod != null && fProposalShellField != null)
+                    {
+                        Object shell = fProposalShellField.get(popup);
+                        if (shell instanceof org.eclipse.swt.widgets.Shell s
+                            && !s.isDisposed() && s.isVisible())
+                            configureAndMakeVisibleMethod.invoke(popup);
+                        else
+                            refreshAdditionalInfo(assistant);
+                    }
+                    else
+                        refreshAdditionalInfo(assistant);
+                }
+            }
+            catch (Exception e)
+            {
+                ContentAssistDebug.log("ensureAssistBrowserCreatorOnController refresh: " //$NON-NLS-1$
+                    + e.getMessage());
+            }
+            hasBrowserAfterRefresh = hasAssistBrowserControl(assistant);
+            if (creatorPatched && !hasBrowserAfterRefresh)
+                hasBrowserAfterRefresh = recreateAssistBrowserSidePanelIfNeeded(assistant, viewer);
+        }
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H22", "ensureAssistBrowserCreatorOnController", "control", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"controlBefore\":\"" + jsonEscapeControlClass(controlBefore) //$NON-NLS-1$
+                + "\",\"controlAfter\":\"" + jsonEscapeControlClass( //$NON-NLS-1$
+                    describeSideInformationControlClass(assistant))
+                + "\",\"creatorPatched\":" + creatorPatched //$NON-NLS-1$
+                + ",\"hasBrowserAfterRefresh\":" + hasBrowserAfterRefresh //$NON-NLS-1$
+                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        ContentAssistDebug.debugModeLog("H18", "ensureAssistBrowserCreatorOnController", "refresh", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"creatorResolved\":" + creatorResolved //$NON-NLS-1$
+                + ",\"creatorPatched\":" + creatorPatched //$NON-NLS-1$
+                + ",\"hasBrowserAfterRefresh\":" + hasBrowserAfterRefresh //$NON-NLS-1$
+                + ",\"winner\":\"" + trace.winner //$NON-NLS-1$
+                + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+        return creatorResolved && creatorPatched;
+    }
+
+    /** H20/H22: FQN side control или {@code null}. */
+    public static String describeSideInformationControlClass(ContentAssistant assistant)
+    {
+        IInformationControl control = resolveAnyInformationControl(assistant);
+        return control != null ? control.getClass().getName() : null;
+    }
+
+    /** Для H25 из {@link SmartCompletionProposal}. */
+    public static boolean hasAssistBrowserSidePanel(ContentAssistant assistant)
+    {
+        return hasAssistBrowserControl(assistant);
+    }
+
+    private static String jsonEscapeControlClass(String className)
+    {
+        if (className == null)
+            return "null"; //$NON-NLS-1$
+        return className.replace("\\", "\\\\").replace("\"", "\\\""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+    }
+
+    private static boolean patchCreatorOnAdditionalInfoController(
+        Object controller, IInformationControlCreator creator)
+    {
+        if (controller == null || creator == null)
+            return false;
+        try
+        {
+            Class<?> type = controller.getClass();
+            while (type != null)
+            {
+                try
+                {
+                    Method m = type.getDeclaredMethod(
+                        "setCustomInformationControlCreator", IInformationControlCreator.class); //$NON-NLS-1$
+                    m.setAccessible(true);
+                    m.invoke(controller, creator);
+                    return true;
+                }
+                catch (NoSuchMethodException ignored)
+                {
+                    type = type.getSuperclass();
+                }
+            }
+        }
+        catch (Exception ignored) {}
+        try
+        {
+            Global.setField(controller, "fInformationControlCreator", creator); //$NON-NLS-1$
+            return true;
+        }
+        catch (Exception ignored)
+        {
+            return false;
+        }
+    }
+
+    /**
+     * Plain-text side panel уже создан — dispose и пересоздать browser control.
+     *
+     * @return {@code true} если browser control появился после recreate
+     */
+    public static boolean recreateAssistBrowserSidePanelIfNeeded(ContentAssistant assistant,
+        SourceViewer viewer)
+    {
+        if (assistant == null || hasAssistBrowserControl(assistant))
+            return hasAssistBrowserControl(assistant);
+        Object controller = resolveAdditionalInfoController(assistant);
+        if (controller == null)
+            return false;
+        try
+        {
+            Global.invoke(controller, "disposeInformationControl"); //$NON-NLS-1$
+        }
+        catch (Exception ignored)
+        {
+            // refresh ниже
+        }
+        try
+        {
+            Object popup = getPopup(assistant);
+            if (popup != null)
+            {
+                initPopupReflection(popup);
+                if (configureAndMakeVisibleMethod != null)
+                    configureAndMakeVisibleMethod.invoke(popup);
+                else
+                    refreshAdditionalInfo(assistant);
+            }
+            else
+                refreshAdditionalInfo(assistant);
+        }
+        catch (Exception e)
+        {
+            ContentAssistDebug.log("recreateAssistBrowserSidePanelIfNeeded: " + e.getMessage()); //$NON-NLS-1$
+        }
+        // #region agent log
+        boolean hasBrowser = hasAssistBrowserControl(assistant);
+        ContentAssistDebug.debugModeLog("H18", "recreateAssistBrowserSidePanelIfNeeded", "recreate", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"hasBrowser\":" + hasBrowser //$NON-NLS-1$
+                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+        return hasBrowser;
+    }
+
+    private static boolean hasAssistBrowserControl(ContentAssistant assistant)
+    {
+        if (assistant == null)
+            return false;
+        if (resolveVisibleBrowserControl(assistant) != null)
+            return true;
+        IInformationControl control = resolveAnyInformationControl(assistant);
+        return control != null && IrBslHoverHtml.findControlBrowser(control) != null;
+    }
+
+    private static IInformationControl resolveAnyInformationControl(ContentAssistant assistant)
+    {
+        Object controller = resolveAdditionalInfoController(assistant);
+        if (controller == null)
+            return null;
+        Object control = Global.invoke(controller, "getCurrentInformationControl2"); //$NON-NLS-1$
+        return control instanceof IInformationControl ic ? ic : null;
+    }
+
+    private static boolean tryApplyHtmlToAssistControl(ContentAssistant assistant, String displayHtml)
+    {
+        if (assistant == null || displayHtml == null || displayHtml.isEmpty())
+            return false;
+        IXtextBrowserInformationControl browser = resolveVisibleBrowserControl(assistant);
+        if (browser != null && IrBslHoverHtml.applyHtmlToControl(browser, displayHtml))
+            return true;
+        IInformationControl control = resolveAnyInformationControl(assistant);
+        return control != null && IrBslHoverHtml.applyHtmlToControl(control, displayHtml);
     }
 
     private static ICompletionProposal resolveWrappedProposalForIr(
@@ -1487,42 +1974,67 @@ public final class ContentAssistPopupSync
 
     private static Method additionalInfoShowInformationMethod;
 
-    /** Creator браузера из EDT-строк того же popup (ИР-строки его не задают). */
-    public static IInformationControlCreator findAssistBrowserCreatorInPopup(
-        ContentAssistant assistant)
+    /** H20: состав popup и первый EDT creator с ext3. */
+    public static final class PopupCreatorScan
     {
+        public int total;
+        public int ir;
+        public int edt;
+        public int ext3WithCreator;
+        public IInformationControlCreator firstCreator;
+    }
+
+    public static PopupCreatorScan scanPopupCreators(ContentAssistant assistant)
+    {
+        PopupCreatorScan scan = new PopupCreatorScan();
         if (assistant == null)
-            return null;
+            return scan;
         try
         {
             Object popup = getPopupObject(assistant);
             if (popup == null)
-                return null;
+                return scan;
             initPopupReflection(popup);
             if (fFilteredProposalsField == null)
-                return null;
+                return scan;
             @SuppressWarnings("unchecked")
             List<ICompletionProposal> list =
                 (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
             if (list == null)
-                return null;
+                return scan;
+            scan.total = list.size();
             for (ICompletionProposal proposal : list)
             {
                 if (proposal == null)
                     continue;
                 ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(proposal);
                 if (raw instanceof IrCompletionProposal)
+                {
+                    scan.ir++;
                     continue;
+                }
+                scan.edt++;
                 if (raw instanceof ICompletionProposalExtension3 ext3)
                 {
                     IInformationControlCreator creator = ext3.getInformationControlCreator();
                     if (creator != null)
-                        return creator;
+                    {
+                        scan.ext3WithCreator++;
+                        if (scan.firstCreator == null)
+                            scan.firstCreator = creator;
+                    }
                 }
             }
         }
         catch (Exception ignored) {}
-        return null;
+        return scan;
+    }
+
+    /** Creator браузера из EDT-строк того же popup (ИР-строки его не задают). */
+    public static IInformationControlCreator findAssistBrowserCreatorInPopup(
+        ContentAssistant assistant)
+    {
+        return scanPopupCreators(assistant).firstCreator;
     }
 
     /**
@@ -1602,6 +2114,12 @@ public final class ContentAssistPopupSync
     /** Browser assist для ИР-строк создаётся с задержкой — повторяем setText. */
     private static void scheduleAssistBrowserHtmlApply(ContentAssistant assistant, Object mergedInfo)
     {
+        scheduleAssistBrowserHtmlApply(assistant, mergedInfo, false);
+    }
+
+    private static void scheduleAssistBrowserHtmlApply(ContentAssistant assistant,
+        Object mergedInfo, boolean extendedRetry)
+    {
         String rawHtml = IrBslHoverHtml.readHtml(mergedInfo);
         if (rawHtml == null || rawHtml.isEmpty())
             return;
@@ -1610,6 +2128,8 @@ public final class ContentAssistPopupSync
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
+        final int maxAttempts = extendedRetry ? 12 : 8;
+        final int delayMs = extendedRetry ? 50 : 40;
         final int[] attempts = {0};
         Runnable task = new Runnable() {
             @Override
@@ -1617,13 +2137,30 @@ public final class ContentAssistPopupSync
             {
                 if (display.isDisposed() || assistant == null)
                     return;
-                IXtextBrowserInformationControl browser = resolveVisibleBrowserControl(assistant);
-                boolean applied = browser != null
-                    && IrBslHoverHtml.applyHtmlToControl(browser, displayHtml);
-                if (!applied && attempts[0] < 8)
+                boolean applied = tryApplyHtmlToAssistControl(assistant, displayHtml);
+                IInformationControl anyControl = resolveAnyInformationControl(assistant);
+                boolean hasBrowser = anyControl != null
+                    && IrBslHoverHtml.findControlBrowser(anyControl) != null;
+                if (!applied && attempts[0] < maxAttempts)
                 {
                     attempts[0]++;
-                    display.timerExec(40, this);
+                    display.timerExec(delayMs, this);
+                    return;
+                }
+                if (extendedRetry)
+                {
+                    // #region agent log
+                    ContentAssistDebug.debugModeLog("H17", "scheduleAssistBrowserHtmlApply", "done", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        "{\"applied\":" + applied //$NON-NLS-1$
+                            + ",\"attempts\":" + attempts[0] //$NON-NLS-1$
+                            + ",\"hasBrowser\":" + hasBrowser //$NON-NLS-1$
+                            + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+                    ContentAssistDebug.debugModeLog("H18", "scheduleAssistBrowserHtmlApply", "done", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        "{\"applied\":" + applied //$NON-NLS-1$
+                            + ",\"attempts\":" + attempts[0] //$NON-NLS-1$
+                            + ",\"hasBrowser\":" + hasBrowser //$NON-NLS-1$
+                            + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+                    // #endregion
                 }
             }
         };
@@ -1986,5 +2523,34 @@ public final class ContentAssistPopupSync
             return false;
         return name.length() >= prefix.length()
             && name.regionMatches(true, 0, prefix, 0, prefix.length());
+    }
+
+    /** Ручной Ctrl+Space — штатный API JFace. */
+    public static boolean showPossibleCompletions(ContentAssistant assistant)
+    {
+        if (assistant == null)
+            return false;
+        try
+        {
+            assistant.showPossibleCompletions();
+            return true;
+        }
+        catch (Exception e)
+        {
+            ContentAssistDebug.log("showPossibleCompletions ERROR: " + e.getMessage()); //$NON-NLS-1$
+            return false;
+        }
+    }
+
+    public static void ensureEmptyListAllowed(ContentAssistant assistant, boolean allow)
+    {
+        if (assistant != null)
+            assistant.setShowEmptyList(allow);
+    }
+
+    public static void setAssistEmptyMessage(ContentAssistant assistant, String message)
+    {
+        if (assistant != null)
+            assistant.setEmptyMessage(message != null ? message : ""); //$NON-NLS-1$
     }
 }

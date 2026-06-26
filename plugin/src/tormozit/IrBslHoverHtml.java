@@ -169,10 +169,6 @@ public final class IrBslHoverHtml
         return html.toLowerCase().replaceAll("\\s+", " ").trim(); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
-    /**
-     * Полный HTML-документ assist/hover EDT ({@code addStyleToHtml}) для фрагмента без base.
-     * Без обёртки SWT Browser показывает сырой HTML и обрезает содержимое.
-     */
     public static String wrapForAssistBrowser(String content)
     {
         if (content == null || content.isBlank())
@@ -201,6 +197,21 @@ public final class IrBslHoverHtml
         {
             return trimmed;
         }
+    }
+
+    /** Payload для {@code AdditionalInfoController.showInformation} — wrapped HTML для browser. */
+    public static Object toAssistSideHintPayload(Object html)
+    {
+        if (html == null)
+            return null;
+        if (isBslBrowserInput(html))
+            return html;
+        String text = readHtml(html);
+        if (text == null || text.isEmpty())
+            return html;
+        if (isFullHtmlDocument(text))
+            return text;
+        return wrapForAssistBrowser(text);
     }
 
     private static void ensureAssistBrowserStyleMethods()

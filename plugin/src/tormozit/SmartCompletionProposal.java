@@ -706,12 +706,31 @@ public class SmartCompletionProposal implements
         if (!fromSelectedActivation
             && !ContentAssistPopupSync.isSelectedIrProposal(assistant, ir))
             return false;
+        SourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
+        int caret = SmartContentAssistProcessor.resolveSessionCaret(assistant, viewer);
+        boolean inLiteral = viewer != null && caret >= 0
+            && SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret);
+        boolean cachedCreatorBefore = reloader.getAssistBrowserCreator() != null;
         reloader.noteActiveIrDisplayKey(cacheKey);
         boolean pinned = ContentAssistPopupSync.pinIrSideHint(assistant, ir, html);
         if (pinned)
             reloader.markIrSideHintPublished(cacheKey);
         else if (!reloader.isIrSideHintPublishedForKey(cacheKey))
             ContentAssistPopupSync.publishIrActivationSideHint(assistant, html, cacheKey);
+        // #region agent log
+        if (fromSelectedActivation && !inLiteral)
+        {
+            ContentAssistDebug.debugModeLog("H25", "irActivationWarmup", "done", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"inLiteral\":false" //$NON-NLS-1$
+                    + ",\"cacheKey\":\"" + ContentAssistDebug.jsonEscapeForLog(cacheKey) //$NON-NLS-1$
+                    + "\",\"cachedCreatorBefore\":" + cachedCreatorBefore //$NON-NLS-1$
+                    + ",\"cachedCreatorAfter\":" + (reloader.getAssistBrowserCreator() != null) //$NON-NLS-1$
+                    + ",\"hasBrowserAfter\":" + ContentAssistPopupSync.hasAssistBrowserSidePanel(assistant) //$NON-NLS-1$
+                    + ",\"pinOk\":" + pinned //$NON-NLS-1$
+                    + ",\"viewerHash\":" + (viewer != null ? System.identityHashCode(viewer) : -1) //$NON-NLS-1$
+                    + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        // #endregion
         return pinned;
     }
 

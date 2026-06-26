@@ -159,6 +159,9 @@ public final class EditEmbeddedTextHandler
             int scanLimit = (openingLineNum == cursorLine)
                 ? offset - openLineInfo.getOffset()
                 : openLineText.length();
+            scanLimit = Math.min(scanLimit, openLineText.length());
+            if (scanLimit < 0)
+                return null;
 
             // Ищем последнюю незакрытую кавычку (при нечётном счётчике)
             int openQuoteIdx = -1;
