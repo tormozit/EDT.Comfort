@@ -9,8 +9,10 @@ import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.IInformationControlCreator;
+import org.eclipse.jface.text.IRegion;
 import org.eclipse.jface.text.ITextHover;
 import org.eclipse.jface.text.ITextHoverExtension;
+import org.eclipse.jface.text.Region;
 import org.eclipse.jface.text.contentassist.ContentAssistant;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
 import org.eclipse.jface.text.contentassist.ICompletionProposalExtension3;
@@ -391,6 +393,51 @@ public final class BslCompletionSideHintResolver
             return null;
         IEObjectHover hover = rsp.get(IEObjectHover.class);
         return hover != null ? hover.getClass().getName() : null;
+    }
+
+    /**
+     * Lazy-init HoverControlCreator через {@code getHoverInfo2} (как {@code BslSideHintOutlineInstall}).
+     */
+    public static IInformationControlCreator primeRspHoverCreator(SourceViewer viewer,
+        int offset, BslXtextEditor editor)
+    {
+        IInformationControlCreator existing = resolveHoverCreatorFromRsp(viewer);
+        if (existing != null)
+            return existing;
+        if (viewer == null || !(viewer.getDocument() instanceof IXtextDocument xtextDoc))
+            return null;
+        URI resourceUri = xtextDoc.getResourceURI();
+        if (resourceUri == null)
+            return null;
+        IResourceServiceProvider rsp =
+            IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(resourceUri);
+        if (rsp == null)
+            return null;
+        IEObjectHover hover = rsp.get(IEObjectHover.class);
+        if (!(hover instanceof BslDispatchingEObjectTextHover bslHover))
+            return null;
+        int probeOffset = offset >= 0 ? offset : resolveLiteralCaretForProbe(viewer);
+        if (probeOffset < 0)
+        {
+            IDocument doc = viewer.getDocument();
+            probeOffset = doc != null && doc.getLength() > 0 ? 0 : -1;
+        }
+        if (probeOffset >= 0)
+        {
+            try
+            {
+                IRegion region = new Region(probeOffset, 1);
+                bslHover.getHoverInfo2(viewer, region);
+            }
+            catch (Exception ignored)
+            {
+                // повторный getHoverControlCreator ниже
+            }
+        }
+        IInformationControlCreator creator = bslHover.getHoverControlCreator();
+        if (creator != null && editor != null)
+            rememberEditorBrowserCreator(editor, creator);
+        return creator;
     }
 
     /** RSP IEObjectHover → browser creator (unwrap htmlHover при необходимости). */

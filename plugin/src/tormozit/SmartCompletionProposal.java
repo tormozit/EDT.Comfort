@@ -184,10 +184,14 @@ public class SmartCompletionProposal implements
     @Override
     public void selected(ITextViewer viewer, boolean smartToggle)
     {
+        logProposalAtSelection(viewer);
         if (delegate instanceof IrCompletionProposal ir)
             scheduleIrWordActivation(ir);
         else
+        {
+            ensureLiteralOverlapBrowserIfNeeded(viewer);
             scheduleEdtRowActivation();
+        }
         if (delegate instanceof ICompletionProposalExtension2 ext2)
             ext2.selected(viewer, smartToggle);
     }
@@ -247,9 +251,123 @@ public class SmartCompletionProposal implements
         if (delegate instanceof IrCompletionProposal)
             return BslCompletionSideHintResolver.resolveAssistBrowserCreatorForProposal(
                 assistant, delegate);
+        if (isEdtIrOverlapRow())
+            return BslCompletionSideHintResolver.resolveAssistBrowserCreatorForProposal(
+                assistant, delegate);
         if (delegate instanceof ICompletionProposalExtension3 ext3)
             return ext3.getInformationControlCreator();
         return null;
+    }
+
+    /** EDT-строка с тем же ключом, что и слово ИР (overlap в литеральном assist). */
+    private boolean isEdtIrOverlapRow()
+    {
+        if (delegate instanceof IrCompletionProposal)
+            return false;
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+            return false;
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        if (reloader == null)
+            return false;
+        if (IrBslExpressionHtmlSupport.resolveConnectedSession(reloader.getBslEditor()) == null)
+            return false;
+        SmartContentAssistProcessor processor = ContentAssistSessionReloader.getActiveProcessor();
+        if (processor == null || !processor.hasIrProposalsForCurrentContext())
+            return false;
+        String key = SmartContentAssistProcessor.dedupKeyForMerge(delegate);
+        if (key.isEmpty())
+            return false;
+        if (processor.hasIrProposalForDedupKey(key))
+            return true;
+        String cacheKey = BslCompletionSideHintResolver.resolveIrCacheKey(delegate);
+        if (cacheKey != null && !cacheKey.isEmpty())
+        {
+            String merged = reloader.getIrMergedHtml(cacheKey);
+            if (merged != null && !merged.isEmpty())
+                return true;
+        }
+        return false;
+    }
+
+    /** Боковая подсказка assist: browser для ИР и overlap EDT+ИР. */
+    public boolean usesIrAssistBrowserForSideHint()
+    {
+        return delegate instanceof IrCompletionProposal || isEdtIrOverlapRow();
+    }
+
+    /** H41: идентичность proposal при {@code selected()} в literal assist. */
+    private void logProposalAtSelection(ITextViewer viewer)
+    {
+        if (!(viewer instanceof SourceViewer sourceViewer))
+            return;
+        int caret = SmartContentAssistProcessor.resolveWidgetCaret(sourceViewer);
+        if (caret < 0 || !SmartContentAssistProcessor.isStringLiteralAssistContext(
+            sourceViewer, caret))
+            return;
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        if (reloader == null)
+            return;
+        ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(this);
+        String displayKey = delegate.getDisplayString() != null ? delegate.getDisplayString() : ""; //$NON-NLS-1$
+        String delegateClass = raw != null ? raw.getClass().getSimpleName()
+            : delegate.getClass().getSimpleName();
+        boolean hasIrMergedHtml = hasIrMergedHtmlForSelection(reloader, raw);
+        boolean setupPhase = reloader.isLiteralOpenSetupPhase();
+        boolean literalFinishPinPending = reloader.isLiteralFinishPinPending();
+        int gen = reloader.getLiteralOpenGen();
+        long ms = reloader.msSinceLiteralOpen();
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H41", "proposalAtSelection", "selected", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"gen\":" + gen //$NON-NLS-1$
+                + ",\"msSinceOpen\":" + ms //$NON-NLS-1$
+                + ",\"displayKey\":\"" + ContentAssistDebug.jsonEscapeForLog(displayKey) //$NON-NLS-1$
+                + "\",\"delegateClass\":\"" + ContentAssistDebug.jsonEscapeForLog(delegateClass) //$NON-NLS-1$
+                + "\",\"hasIrMergedHtml\":" + hasIrMergedHtml //$NON-NLS-1$
+                + ",\"setupPhase\":" + setupPhase //$NON-NLS-1$
+                + ",\"literalFinishPinPending\":" + literalFinishPinPending //$NON-NLS-1$
+                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+    }
+
+    private static boolean hasIrMergedHtmlForSelection(ContentAssistSessionReloader reloader,
+        ICompletionProposal raw)
+    {
+        if (reloader == null || raw == null)
+            return false;
+        String cacheKey = BslCompletionSideHintResolver.resolveIrCacheKey(raw);
+        if (cacheKey != null && !cacheKey.isEmpty())
+        {
+            String merged = reloader.getIrMergedHtml(cacheKey);
+            if (merged != null && !merged.isEmpty())
+                return true;
+        }
+        String display = raw.getDisplayString();
+        if (display != null && !display.isEmpty())
+        {
+            String merged = reloader.getIrMergedHtml(display);
+            return merged != null && !merged.isEmpty();
+        }
+        return false;
+    }
+
+    private void ensureLiteralOverlapBrowserIfNeeded(ITextViewer viewer)
+    {
+        if (!isEdtIrOverlapRow())
+            return;
+        if (!(viewer instanceof SourceViewer sourceViewer))
+            return;
+        ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
+        if (assistant == null)
+            return;
+        int caret = SmartContentAssistProcessor.resolveWidgetCaret(sourceViewer);
+        if (caret < 0 || !SmartContentAssistProcessor.isStringLiteralAssistContext(
+            sourceViewer, caret))
+            return;
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        if (reloader != null && reloader.isLiteralOpenSetupPhase())
+            return;
+        if (!ContentAssistPopupSync.hasAssistBrowserSidePanel(assistant))
+            ContentAssistPopupSync.ensureAssistBrowserCreatorOnController(assistant, sourceViewer);
     }
 
     @Override
@@ -844,6 +962,14 @@ public class SmartCompletionProposal implements
             : irHtml;
         reloader.putIrMergedHtml(cacheKey, merged);
         if (ContentAssistPopupSync.isSelectedDisplay(assistant, displayKey))
-            ContentAssistPopupSync.pinMergedAdditionalInfo(assistant, displayKey, merged);
+        {
+            SourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
+            int caret = SmartContentAssistProcessor.resolveWidgetCaret(viewer);
+            boolean literalOverlap = viewer != null && caret >= 0
+                && SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret)
+                && IrBslExpressionHtmlSupport.resolveConnectedSession(reloader.getBslEditor()) != null;
+            ContentAssistPopupSync.pinMergedAdditionalInfo(assistant, displayKey, merged,
+                literalOverlap);
+        }
     }
 }

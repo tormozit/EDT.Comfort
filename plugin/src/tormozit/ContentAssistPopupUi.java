@@ -1,5 +1,6 @@
 package tormozit;
 
+import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import org.eclipse.jface.text.contentassist.ContentAssistant;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.swt.SWT;
@@ -67,7 +68,7 @@ public final class ContentAssistPopupUi
             if (toggle != null && !toggle.isDisposed())
             {
                 setToggleSelectionQuiet(toggle, SmartAssistFilterState.isSmartFilterEnabled());
-                applyFilterToggleAvailability(toggle, viewer);
+                applyFilterToggleAvailability(toggle, viewer, processor);
             }
             if (contextLabel != null && !contextLabel.isDisposed())
                 applyContextTypeLabel(contextLabel, viewer);
@@ -176,7 +177,8 @@ public final class ContentAssistPopupUi
             if (toggle != null && !toggle.isDisposed())
             {
                 setToggleSelectionQuiet(toggle, SmartAssistFilterState.isSmartFilterEnabled());
-                applyFilterToggleAvailability(toggle, viewer);
+                applyFilterToggleAvailability(toggle, viewer,
+                    ContentAssistSessionReloader.getActiveProcessor());
             }
             Label contextLabel = (Label) bar.getData(CONTEXT_LABEL_DATA_KEY);
             if (contextLabel != null && !contextLabel.isDisposed())
@@ -293,12 +295,29 @@ public final class ContentAssistPopupUi
         }
     }
 
-    private static void applyFilterToggleAvailability(Button toggle, SourceViewer viewer)
+    private static void applyFilterToggleAvailability(Button toggle, SourceViewer viewer,
+                                                      SmartContentAssistProcessor processor)
     {
         int caret = resolveViewerCaret(viewer);
         boolean inLiteral = SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret);
-        toggle.setEnabled(!inLiteral);
-        toggle.setToolTipText(inLiteral ? LITERAL_FILTER_TOOLTIP : null);
+        boolean irConnected = false;
+        if (inLiteral)
+        {
+            ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+            BslXtextEditor editor = reloader != null ? reloader.getBslEditor() : null;
+            irConnected = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(editor, viewer)
+                != null;
+        }
+        boolean enabled = !inLiteral || irConnected;
+        toggle.setEnabled(enabled);
+        toggle.setToolTipText(inLiteral && !irConnected ? LITERAL_FILTER_TOOLTIP : null);
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H57", "applyFilterToggleAvailability", "state", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"inLiteral\":" + inLiteral //$NON-NLS-1$
+                + ",\"irConnected\":" + irConnected //$NON-NLS-1$
+                + ",\"enabled\":" + enabled //$NON-NLS-1$
+                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
     }
 
     private static int resolveViewerCaret(SourceViewer viewer)

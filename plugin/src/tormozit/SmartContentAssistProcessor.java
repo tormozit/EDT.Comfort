@@ -272,14 +272,34 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         // #endregion
         if (merged.length == 0)
             return EMPTY;
-        if (filter == null || filter.isEmpty())
-            return finalizeListForIrAssistDisplay(merged);
-        return filterAndSort(merged, filter);
+        ICompletionProposal[] result = applyLiteralSmartFilter(merged, filter);
+        auditLiteralComputeReturn(viewer, resolveEditorForLiteralAudit(viewer),
+            result.length, "computeReturn", null); //$NON-NLS-1$
+        return result;
     }
 
     boolean isIrWordsResolvedForContext()
     {
         return irWordsResolved && irSnapshotContextKey == fullListContextKey;
+    }
+
+    /** Число ИР-предложений в текущем контексте (H37 audit). */
+    int resolvedIrProposalCount()
+    {
+        return isIrWordsResolvedForContext() ? irProposals.length : 0;
+    }
+
+    /** Есть ИР-слово с тем же dedup-ключом (overlap ИР+EDT в литерале). */
+    boolean hasIrProposalForDedupKey(String key)
+    {
+        if (!hasIrProposalsForCurrentContext() || key == null || key.isEmpty())
+            return false;
+        for (ICompletionProposal p : irProposals)
+        {
+            if (key.equalsIgnoreCase(dedupKey(p)))
+                return true;
+        }
+        return false;
     }
 
     private void applyIrSnapshotData(IrBslCompletionSupport.Snapshot snapshot)
@@ -297,14 +317,27 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
      */
     public void applyIrCompletion(IrBslCompletionSupport.Snapshot snapshot)
     {
+        applyIrCompletion(snapshot, true);
+    }
+
+    /**
+     * @param scheduleRefresh {@code false} — только данные snapshot; refresh отложит вызывающий код
+     */
+    public void applyIrCompletion(IrBslCompletionSupport.Snapshot snapshot,
+        boolean scheduleRefresh)
+    {
         if (snapshot == null)
             return;
+        int beforeIrN = irProposals.length;
+        int beforeFullN = fullListCache.length;
+        int incomingIrN = snapshot.proposals != null ? snapshot.proposals.length : 0;
         applyIrSnapshotData(snapshot);
         applyStockAssistImagesFromDelegate(irProposals, delegateListCache);
         if (irProposals.length == 0)
         {
             IrCompletionDebug.logApplyIrCompletion(0, "empty"); //$NON-NLS-1$
-            ContentAssistSessionReloader.requestIrPopupRefresh();
+            if (scheduleRefresh)
+                ContentAssistSessionReloader.requestIrPopupRefresh();
             return;
         }
         // #region agent log
@@ -327,9 +360,45 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                 fullListReady = true;
                 baseKind = "interim"; //$NON-NLS-1$
             }
+            else if (irProposals.length > 0)
+            {
+                fullListCache = mergeIrProposals(EMPTY);
+                rebuildDelegateOrderMap();
+                fullListReady = true;
+                baseKind = "irOnly"; //$NON-NLS-1$
+                clearDelegateSyncProbe();
+            }
         }
         IrCompletionDebug.logApplyIrCompletion(irProposals.length, baseKind);
-        ContentAssistSessionReloader.requestIrPopupRefresh();
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H50", "applyIrCompletion", "irApplied", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"irN\":" + irProposals.length //$NON-NLS-1$
+                + ",\"baseKind\":\"" + baseKind //$NON-NLS-1$
+                + "\",\"fullListReady\":" + fullListReady //$NON-NLS-1$
+                + ",\"fullListN\":" + fullListCache.length //$NON-NLS-1$
+                + ",\"delegateCacheN\":" + delegateListCache.length //$NON-NLS-1$
+                + ",\"interimN\":" + unwrapStableDelegateBase().length //$NON-NLS-1$
+                + ",\"delegateProbed\":" + isDelegateSyncProbedForContext() //$NON-NLS-1$
+                + ",\"ctxKey\":" + fullListContextKey //$NON-NLS-1$
+                + ",\"irCtxKey\":" + irSnapshotContextKey + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+        if (beforeIrN > irProposals.length || (beforeFullN > fullListCache.length && beforeFullN > 0))
+        {
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H54", "applyIrCompletion", "applyDowngrade", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"beforeIrN\":" + beforeIrN + ",\"afterIrN\":" + irProposals.length //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"incomingIrN\":" + incomingIrN //$NON-NLS-1$
+                    + ",\"beforeFullN\":" + beforeFullN + ",\"afterFullN\":" + fullListCache.length //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"baseKind\":\"" + baseKind //$NON-NLS-1$
+                    + "\",\"ctxKey\":" + fullListContextKey //$NON-NLS-1$
+                    + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+        }
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        if (reloader != null && fullListReady && fullListCache.length > irProposals.length)
+            reloader.notifyIrMergedFullList(fullListCache.length);
+        if (scheduleRefresh)
+            ContentAssistSessionReloader.requestIrPopupRefresh();
     }
 
     boolean hasIrProposalsForCurrentContext()
@@ -340,6 +409,18 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     boolean shouldRefreshIrPopup()
     {
         return hasIrProposalsForCurrentContext() || isIrWordsResolvedForContext();
+    }
+
+    /** H54: текущее число IR-предложений в processor (только диагностика). */
+    int diagIrProposalCount()
+    {
+        return irProposals.length;
+    }
+
+    /** H54: размер fullListCache (только диагностика). */
+    int diagFullListCacheCount()
+    {
+        return fullListCache.length;
     }
 
     void rebindIrSnapshotContext()
@@ -667,23 +748,43 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         if (isCacheValidForCaret(doc, caret))
         {
-            if (filter == null || filter.isEmpty())
-                return finalizeListForIrAssistDisplay(fullListCache);
-            return filterAndSort(fullListCache, filter);
+            ICompletionProposal[] result = filter == null || filter.isEmpty()
+                ? finalizeListForIrAssistDisplay(fullListCache)
+                : filterAndSort(fullListCache, filter);
+            debugFilterCachedExit(viewer, caret, filter, doc, fullListCache.length, "cache", result); //$NON-NLS-1$
+            return result;
         }
         ICompletionProposal[] interim = interimSourceForCaret(doc, caret);
         if (interim != null)
         {
             ICompletionProposal[] merged = mergeIrForDisplay(unwrapProposals(interim));
-            if (filter == null || filter.isEmpty())
-                return finalizeListForIrAssistDisplay(merged);
-            return filterAndSort(merged, filter);
+            ICompletionProposal[] result = filter == null || filter.isEmpty()
+                ? finalizeListForIrAssistDisplay(merged)
+                : filterAndSort(merged, filter);
+            debugFilterCachedExit(viewer, caret, filter, doc, interim.length, "interim", result); //$NON-NLS-1$
+            return result;
         }
         if (isDelegateSyncProbedForContext())
         {
-            if (filter == null || filter.isEmpty())
-                return EMPTY;
-            return filterAndSort(EMPTY, filter);
+            ICompletionProposal[] result;
+            String path;
+            if (hasIrProposalsForCurrentContext())
+            {
+                ICompletionProposal[] merged = mergeIrForDisplay(EMPTY);
+                result = filter == null || filter.isEmpty()
+                    ? finalizeListForIrAssistDisplay(merged)
+                    : filterAndSort(merged, filter);
+                path = "delegateProbedIr"; //$NON-NLS-1$
+            }
+            else
+            {
+                result = filter == null || filter.isEmpty()
+                    ? EMPTY
+                    : filterAndSort(EMPTY, filter);
+                path = "delegateProbed"; //$NON-NLS-1$
+            }
+            debugFilterCachedExit(viewer, caret, filter, doc, 0, path, result);
+            return result;
         }
         return null;
     }
@@ -691,6 +792,14 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     private void markDelegateSyncProbed()
     {
         delegateSyncProbedContextKey = fullListContextKey;
+        // #region agent log
+        String filter = SmartFilterTracker.getCurrentFilter();
+        ContentAssistDebug.debugModeLog("H48a", "markDelegateSyncProbed", "delegateProbedSet", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"ctxKey\":" + fullListContextKey //$NON-NLS-1$
+                + ",\"filter\":\"" + ContentAssistDebug.jsonEscapeForLog(filter != null ? filter : "") //$NON-NLS-1$ //$NON-NLS-2$
+                + "\",\"irN\":" + irProposals.length //$NON-NLS-1$
+                + ",\"irResolved\":" + isIrWordsResolvedForContext() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
     }
 
     private void clearDelegateSyncProbe()
@@ -838,6 +947,21 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
         int literalCaret = resolveInvocationCaret(viewer, offset);
         boolean inLiteral = isStringLiteralAssistContext(viewer, literalCaret);
+        String delegateName = delegate != null ? delegate.getClass().getSimpleName() : "null"; //$NON-NLS-1$
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H61", "computeCompletionProposals", "enter", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"offset\":" + offset + ",\"literalCaret\":" + literalCaret //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"inLiteral\":" + inLiteral //$NON-NLS-1$
+                + ",\"delegate\":\"" + ContentAssistDebug.jsonEscapeForLog(delegateName) //$NON-NLS-1$
+                + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        boolean repeatJFace = RepeatedInvocationDetect.isActive();
+        ContentAssistDebug.debugModeLog("H62", "computeCompletionProposals", //$NON-NLS-1$ //$NON-NLS-2$
+            repeatJFace ? "repeatProbe" : "repeatMiss", //$NON-NLS-1$ //$NON-NLS-2$
+            "{\"offset\":" + offset + ",\"inLiteral\":" + inLiteral //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"repeatJFace\":" + repeatJFace //$NON-NLS-1$
+                + ",\"stackHint\":\"" + ContentAssistDebug.jsonEscapeForLog(repeatInvocationStackHint()) //$NON-NLS-1$
+                + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
         ContentAssistSessionReloader reloader = viewer instanceof SourceViewer sv
             ? ContentAssistSessionReloader.forViewer(sv) : null;
         boolean manualDetect = ManualInvocationDetect.isActive();
@@ -864,6 +988,15 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         }
         if (irOnlyManualMode)
             return computeIrOnlyProposals(viewer, literalCaret);
+        if (ContentAssistSessionReloader.consumeLiteralRepeatFromCommand() && inLiteral)
+        {
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H62", "computeCompletionProposals", "literalCommandBypass", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"offset\":" + offset + ",\"literalCaret\":" + literalCaret //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return computeLiteralRepeatWithoutDelegate(viewer, literalCaret);
+        }
         // #region agent log
         ContentAssistDebug.debugModeLog("H9", "computeCompletionProposals", "enter", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "{\"offset\":" + offset + ",\"processor\":" + System.identityHashCode(this) //$NON-NLS-1$ //$NON-NLS-2$
@@ -876,6 +1009,66 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                 + ",\"ctxKey\":" + fullListContextKey //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"irCtxKey\":" + irSnapshotContextKey + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         // #endregion
+        if (RepeatedInvocationDetect.isActive())
+        {
+            int widgetCaret = resolveWidgetCaret(viewer);
+            int caretProbe = resolveInvocationCaret(viewer, offset);
+            SourceViewer sourceViewer = viewer instanceof SourceViewer sv ? sv : null;
+            BslXtextEditor repeatEditor = resolveEditorForLiteralAudit(viewer);
+            boolean irConnected = sourceViewer != null
+                && IrBslExpressionHtmlSupport.resolveIrSessionForAssist(repeatEditor, sourceViewer) != null;
+            boolean repeatLiteral = isStringLiteralAssistContext(viewer, caretProbe) && irConnected;
+            if (repeatLiteral)
+            {
+                // #region agent log
+                ContentAssistDebug.debugModeLog("H56", "computeCompletionProposals", "repeatBranch", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"branch\":\"literalRepeat\",\"offset\":" + offset //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"literalCaret\":" + caretProbe //$NON-NLS-1$
+                        + ",\"widgetCaret\":" + widgetCaret //$NON-NLS-1$
+                        + ",\"smartBefore\":" + SmartAssistFilterState.isSmartFilterEnabled() //$NON-NLS-1$
+                        + ",\"irConnected\":" + irConnected //$NON-NLS-1$
+                        + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
+                ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
+                if (assistant != null)
+                    ContentAssistPopupSync.captureSelectionBeforeFilterToggle(assistant);
+                SmartAssistFilterState.toggle();
+                ContentAssistSessionReloader.scheduleFilterToggleUiSync();
+                int caret = widgetCaret >= 0 ? widgetCaret : caretProbe;
+                return computeLiteralPopupRefresh(viewer, offset, caret);
+            }
+            if (!isStringLiteralAssistContext(viewer, caretProbe))
+            {
+                // #region agent log
+                ContentAssistDebug.debugModeLog("H56", "computeCompletionProposals", "repeatBranch", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"branch\":\"memberRepeat\",\"offset\":" + offset //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"literalCaret\":" + caretProbe //$NON-NLS-1$
+                        + ",\"widgetCaret\":" + widgetCaret //$NON-NLS-1$
+                        + ",\"smartBefore\":" + SmartAssistFilterState.isSmartFilterEnabled() //$NON-NLS-1$
+                        + ",\"hasIr\":" + hasIrProposalsForCurrentContext() //$NON-NLS-1$
+                        + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
+                ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
+                if (assistant != null)
+                    ContentAssistPopupSync.captureSelectionBeforeFilterToggle(assistant);
+                final boolean wasSmart = SmartAssistFilterState.isSmartFilterEnabled();
+                SmartAssistFilterState.toggle();
+                ContentAssistSessionReloader.scheduleFilterToggleUiSync();
+                int caret = caretProbe;
+                primeAssistContext(viewer, caret);
+                IDocument doc = viewer == null ? null : viewer.getDocument();
+                String filter = SmartFilterTracker.getCurrentFilter();
+                ensureFullListForContext(viewer, doc, caret);
+                if (wasSmart)
+                    applyUnfilteredReloadIfNeeded(viewer);
+                int probeOffset = resolveDelegateProbeOffset(viewer, offset, caret);
+                boolean syncSmart = wasSmart || SmartAssistFilterState.isSmartFilterEnabled();
+                ICompletionProposal[] kept = resolveProposalList(viewer, probeOffset, caret, filter,
+                    syncSmart);
+                return kept;
+            }
+        }
+
         if (inLiteral)
         {
             ICompletionProposal[] passthrough = computeLiteralPassthrough(viewer, offset, literalCaret);
@@ -885,29 +1078,6 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                     + ",\"n\":" + (passthrough != null ? passthrough.length : -1) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             // #endregion
             return passthrough;
-        }
-
-        if (RepeatedInvocationDetect.isActive())
-        {
-            ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
-            if (assistant != null)
-                ContentAssistPopupSync.captureSelectionBeforeFilterToggle(assistant);
-            final boolean wasSmart = SmartAssistFilterState.isSmartFilterEnabled();
-            SmartAssistFilterState.toggle();
-            ContentAssistSessionReloader.scheduleFilterToggleUiSync();
-            int widgetCaret = resolveWidgetCaret(viewer);
-            int caret = resolveInvocationCaret(viewer, offset);
-            primeAssistContext(viewer, caret);
-            IDocument doc = viewer == null ? null : viewer.getDocument();
-            String filter = SmartFilterTracker.getCurrentFilter();
-            ensureFullListForContext(viewer, doc, caret);
-            if (wasSmart)
-                applyUnfilteredReloadIfNeeded(viewer);
-            int probeOffset = resolveDelegateProbeOffset(viewer, offset, caret);
-            boolean syncSmart = wasSmart || SmartAssistFilterState.isSmartFilterEnabled();
-            ICompletionProposal[] kept = resolveProposalList(viewer, probeOffset, caret, filter,
-                syncSmart);
-            return kept;
         }
 
         return computeProposalsLight(viewer, offset);
@@ -928,7 +1098,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         {
             if (irOnlyManualMode)
                 return computeIrOnlyProposals(viewer, caret);
-            return computeLiteralPassthrough(viewer, offset, caret);
+            return computeLiteralPopupRefresh(viewer, offset, caret);
         }
         primeFilterTrackerOnly(viewer, caret);
         IDocument doc = viewer == null ? null : viewer.getDocument();
@@ -944,6 +1114,39 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         return result;
     }
 
+    /** Popup/toggle в литерале+ИР: smart ON — по префиксу, OFF — полный merged. */
+    private ICompletionProposal[] computeLiteralPopupRefresh(ITextViewer viewer, int offset, int caret)
+    {
+        return computeLiteralPassthrough(viewer, offset, caret);
+    }
+
+    /** Repeat Ctrl+Space в literal: список из кэша, без delegate (EDT ModeAware.nextMode). */
+    private ICompletionProposal[] computeLiteralRepeatWithoutDelegate(ITextViewer viewer, int caret)
+    {
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        ensureFullListForContext(viewer, doc, caret, false);
+        String filter = SmartFilterTracker.getCurrentFilter();
+        if (SmartAssistFilterState.isSmartFilterEnabled())
+        {
+            ICompletionProposal[] filtered = filterCachedProposalsForPopup(viewer, caret, filter);
+            if (filtered != null)
+                return filtered;
+        }
+        if (isCacheValidForCaret(doc, caret) && fullListCache.length > 0)
+            return finalizeListForIrAssistDisplay(fullListCache);
+        ICompletionProposal[] interim = interimSourceForCaret(doc, caret);
+        if (interim != null)
+            return finalizeListForIrAssistDisplay(mergeIrForDisplay(unwrapProposals(interim)));
+        return EMPTY;
+    }
+
+    private ICompletionProposal[] applyLiteralSmartFilter(ICompletionProposal[] merged, String filter)
+    {
+        if (!SmartAssistFilterState.isSmartFilterEnabled() || filter == null || filter.isEmpty())
+            return finalizeListForIrAssistDisplay(merged);
+        return filterAndSort(merged, filter);
+    }
+
     /** EDT delegate в литерале пуст на всех probe-offset'ах. */
     boolean probeLiteralDelegateEmpty(ITextViewer viewer, int caret)
     {
@@ -955,19 +1158,49 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     {
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         ensureFullListForContext(viewer, doc, caret, false);
+        String filter = SmartFilterTracker.getCurrentFilter();
         ICompletionProposal[] best = probeLiteralDelegateBest(viewer, offset, caret);
         ICompletionProposal[] edtClean = stripIrProposals(unwrapProposals(best));
         int edtN = edtClean.length;
         int irN = isIrWordsResolvedForContext() ? irProposals.length : 0;
         if (isIrWordsResolvedForContext() && irProposals.length > 0)
         {
-            ICompletionProposal[] merged = mergeIrForDisplay(edtClean);
+            String cacheSource = "probe"; //$NON-NLS-1$
+            ICompletionProposal[] merged;
+            if (edtN == 0 && fullListReady && fullListCache.length > 0
+                && irSnapshotContextKey == fullListContextKey)
+            {
+                merged = fullListCache;
+                cacheSource = "fullListCache"; //$NON-NLS-1$
+                edtN = -1;
+            }
+            else if (edtN == 0 && delegateListCache.length > 0
+                && irSnapshotContextKey == fullListContextKey)
+            {
+                merged = mergeIrForDisplay(delegateListCache);
+                cacheSource = "delegateCache"; //$NON-NLS-1$
+                edtN = delegateListCache.length;
+            }
+            else
+                merged = mergeIrForDisplay(edtClean);
+            ICompletionProposal[] result = applyLiteralSmartFilter(merged, filter);
             // #region agent log
+            int edtLeak = countEdtConfigurableProposals(result);
+            if (edtLeak > 0)
+            {
+                ContentAssistDebug.debugModeLog("H64", "computeLiteralPassthrough", "edtLeak", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"edtConfigurableN\":" + edtLeak //$NON-NLS-1$
+                        + ",\"mergedN\":" + result.length //$NON-NLS-1$
+                        + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
             ContentAssistDebug.debugModeLog("H2", "computeLiteralPassthrough", "merged", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 "{\"edtN\":" + edtN + ",\"irN\":" + irN //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"mergedN\":" + merged.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"mergedN\":" + result.length //$NON-NLS-1$
+                    + ",\"cache\":\"" + cacheSource + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
             // #endregion
-            return merged;
+            auditLiteralComputeReturn(viewer, resolveEditorForLiteralAudit(viewer),
+                result.length, "computePassthrough", null); //$NON-NLS-1$
+            return result;
         }
         ContentAssistSessionReloader reloader = viewer instanceof SourceViewer sv
             ? ContentAssistSessionReloader.forViewer(sv) : null;
@@ -984,7 +1217,13 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         ContentAssistDebug.debugModeLog("H2", "computeLiteralPassthrough", "edtOnly", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "{\"edtN\":" + edtN + ",\"irN\":" + irN + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         // #endregion
-        return edtN > 0 ? edtClean : best;
+        ICompletionProposal[] result = edtN > 0 ? edtClean : best;
+        if (isIrWordsResolvedForContext() && irN > 0)
+        {
+            auditLiteralComputeReturn(viewer, resolveEditorForLiteralAudit(viewer),
+                result != null ? result.length : 0, "computePassthrough", "edtOnlyDespiteIr"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        return result;
     }
 
     private ICompletionProposal[] probeLiteralDelegateBest(ITextViewer viewer, int offset, int caret)
@@ -1058,7 +1297,10 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         {
             int dot = ReceiverTypeLabel.findMemberAccessDot(doc, caret);
             if (dot >= 0 && cachedNonObjectDot == dot)
+            {
+                debugResolveExit(doc, caret, filter, 0, false, "terminalEmpty", EMPTY); //$NON-NLS-1$
                 return EMPTY;
+            }
         }
 
         if (!smartEnabled)
@@ -1068,22 +1310,50 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
         scheduleEagerFullListLoad(viewer);
         if (isCacheValidForCaret(doc, caret))
-            return filterAndSort(fullListCache, filter);
+        {
+            ICompletionProposal[] result = filterAndSort(fullListCache, filter);
+            debugResolveExit(doc, caret, filter, fullListCache.length, true, "cacheValid", result); //$NON-NLS-1$
+            return result;
+        }
 
         ICompletionProposal[] interim = interimSourceForCaret(doc, caret);
         if (interim != null)
-            return filterAndSort(mergeIrForDisplay(unwrapProposals(interim)), filter);
+        {
+            ICompletionProposal[] result = filterAndSort(
+                mergeIrForDisplay(unwrapProposals(interim)), filter);
+            debugResolveExit(doc, caret, filter, interim.length, false, "interim", result); //$NON-NLS-1$
+            return result;
+        }
         if (isDelegateSyncProbedForContext())
+        {
+            if (hasIrProposalsForCurrentContext())
+            {
+                ICompletionProposal[] result = filterAndSort(mergeIrForDisplay(EMPTY), filter);
+                debugResolveExit(doc, caret, filter, 0, false, "delegateProbedIr", result); //$NON-NLS-1$
+                return result;
+            }
+            debugResolveExit(doc, caret, filter, 0, false, "delegateProbed", EMPTY); //$NON-NLS-1$
             return EMPTY;
+        }
         ICompletionProposal[] raw = unwrapProposals(fetchDelegateList(viewer, offset, caret));
-        markDelegateSyncProbed();
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        if (reloader == null || !reloader.isWordsTableFetchInFlightForContext(caret))
+            markDelegateSyncProbed();
         rememberInterimDelegateList(raw);
         absorbInterimIntoCache(viewer, caret, raw);
         ICompletionProposal[] filtered = filterAndSort(mergeIrForDisplay(raw), filter);
         if (filtered.length > 0)
+        {
+            debugResolveExit(doc, caret, filter, raw.length, false, "fetchFiltered", filtered); //$NON-NLS-1$
             return filtered;
+        }
         if (fullListCache.length > 0)
-            return filterAndSort(fullListCache, filter);
+        {
+            ICompletionProposal[] result = filterAndSort(fullListCache, filter);
+            debugResolveExit(doc, caret, filter, fullListCache.length, true, "fullListFallback", result); //$NON-NLS-1$
+            return result;
+        }
+        debugResolveExit(doc, caret, filter, raw.length, false, "fetchEmpty", EMPTY); //$NON-NLS-1$
         return EMPTY;
     }
 
@@ -2619,7 +2889,12 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         }
 
         if (filtered.isEmpty())
+        {
+            // #region agent log
+            debugFilterDroppedAll(raw, filter, matcher);
+            // #endregion
             return EMPTY;
+        }
 
         Integer[] idx = new Integer[filtered.size()];
         for (int i = 0; i < idx.length; i++)
@@ -2798,6 +3073,71 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         }
         sb.append("]}"); //$NON-NLS-1$
         ContentAssistDebug.sessionLog(hypothesisId, location, phase, sb.toString());
+    }
+
+    private void debugResolveExit(IDocument doc, int caret, String filter, int interimN,
+        boolean cacheValid, String exit, ICompletionProposal[] result)
+    {
+        String prefix = doc != null && caret >= 0 ? computeIdentifierFilter(doc, caret) : ""; //$NON-NLS-1$
+        ContentAssistDebug.debugModeLog("H48", "resolveProposalList", "resolveExit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"filter\":\"" + ContentAssistDebug.jsonEscapeForLog(filter != null ? filter : "") //$NON-NLS-1$ //$NON-NLS-2$
+                + "\",\"prefix\":\"" + ContentAssistDebug.jsonEscapeForLog(prefix) //$NON-NLS-1$
+                + "\",\"cacheValid\":" + cacheValid //$NON-NLS-1$
+                + ",\"cacheN\":" + fullListCache.length //$NON-NLS-1$
+                + ",\"interimN\":" + interimN //$NON-NLS-1$
+                + ",\"delegateProbed\":" + isDelegateSyncProbedForContext() //$NON-NLS-1$
+                + ",\"irResolved\":" + isIrWordsResolvedForContext() //$NON-NLS-1$
+                + ",\"irN\":" + irProposals.length //$NON-NLS-1$
+                + ",\"ctxKey\":" + fullListContextKey //$NON-NLS-1$
+                + ",\"irCtxKey\":" + irSnapshotContextKey //$NON-NLS-1$
+                + ",\"terminalEmpty\":" + terminalEmptyMemberAccess //$NON-NLS-1$
+                + ",\"resultN\":" + (result != null ? result.length : 0) //$NON-NLS-1$
+                + ",\"exit\":\"" + exit + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private void debugFilterCachedExit(ITextViewer viewer, int caret, String filter, IDocument doc,
+        int interimN, String path, ICompletionProposal[] result)
+    {
+        String prefix = doc != null && caret >= 0 ? computeIdentifierFilter(doc, caret) : ""; //$NON-NLS-1$
+        ContentAssistDebug.debugModeLog("H49", "filterCachedProposalsForPopup", "filterCachedExit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"filter\":\"" + ContentAssistDebug.jsonEscapeForLog(filter != null ? filter : "") //$NON-NLS-1$ //$NON-NLS-2$
+                + "\",\"prefix\":\"" + ContentAssistDebug.jsonEscapeForLog(prefix) //$NON-NLS-1$
+                + "\",\"cacheValid\":" + isCacheValidForCaret(doc, caret) //$NON-NLS-1$
+                + ",\"cacheN\":" + fullListCache.length //$NON-NLS-1$
+                + ",\"interimN\":" + interimN //$NON-NLS-1$
+                + ",\"delegateProbed\":" + isDelegateSyncProbedForContext() //$NON-NLS-1$
+                + ",\"irResolved\":" + isIrWordsResolvedForContext() //$NON-NLS-1$
+                + ",\"irN\":" + irProposals.length //$NON-NLS-1$
+                + ",\"ctxKey\":" + fullListContextKey //$NON-NLS-1$
+                + ",\"irCtxKey\":" + irSnapshotContextKey //$NON-NLS-1$
+                + ",\"terminalEmpty\":" + terminalEmptyMemberAccess //$NON-NLS-1$
+                + ",\"resultN\":" + (result != null ? result.length : 0) //$NON-NLS-1$
+                + ",\"path\":\"" + path + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static void debugFilterDroppedAll(ICompletionProposal[] raw, String filter,
+        SmartCodeMatcher matcher)
+    {
+        StringBuilder sb = new StringBuilder(384);
+        sb.append("{\"filter\":\"").append(ContentAssistDebug.jsonEscapeForLog(filter != null ? filter : "")) //$NON-NLS-1$ //$NON-NLS-2$
+            .append("\",\"rawN\":").append(raw.length).append(",\"samples\":["); //$NON-NLS-1$ //$NON-NLS-2$
+        int n = Math.min(3, raw.length);
+        for (int i = 0; i < n; i++)
+        {
+            if (i > 0)
+                sb.append(',');
+            ICompletionProposal p = unwrapProposal(raw[i]);
+            String display = displayString(p);
+            if (display == null)
+                display = ""; //$NON-NLS-1$
+            if (display.length() > 48)
+                display = display.substring(0, 48);
+            sb.append("{\"display\":\"").append(escapeJson(display)).append('"') //$NON-NLS-1$
+                .append(",\"score\":").append(computeScore(matcher, raw[i])) //$NON-NLS-1$
+                .append(",\"isIr\":").append(p instanceof IrCompletionProposal).append('}'); //$NON-NLS-1$
+        }
+        sb.append("]}"); //$NON-NLS-1$
+        ContentAssistDebug.debugModeLog("H51", "filterAndSort", "filterDroppedAll", sb.toString()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
     // #endregion
 
@@ -3011,6 +3351,51 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         }
     }
 
+    /** Краткая подсказка по stack для H62 (JFace vs Xtext/EDT repeat). */
+    static String repeatInvocationStackHint()
+    {
+        boolean jfaceRepeat = false;
+        boolean xtextRepeat = false;
+        boolean bslRepeat = false;
+        for (StackTraceElement frame : Thread.currentThread().getStackTrace())
+        {
+            String cn = frame.getClassName();
+            if (cn == null)
+                continue;
+            if ("handleRepeatedInvocation".equals(frame.getMethodName()) //$NON-NLS-1$
+                && cn.contains("CompletionProposalPopup")) //$NON-NLS-1$
+                jfaceRepeat = true;
+            if (cn.contains("RepeatedContentAssistProcessor")) //$NON-NLS-1$
+                xtextRepeat = true;
+            if (cn.contains("BslRepeatedContentAssistProcessor")) //$NON-NLS-1$
+                bslRepeat = true;
+        }
+        if (jfaceRepeat)
+            return "jfaceRepeat"; //$NON-NLS-1$
+        if (bslRepeat)
+            return "bslRepeated"; //$NON-NLS-1$
+        if (xtextRepeat)
+            return "xtextRepeated"; //$NON-NLS-1$
+        return "none"; //$NON-NLS-1$
+    }
+
+    private static int countEdtConfigurableProposals(ICompletionProposal[] proposals)
+    {
+        if (proposals == null || proposals.length == 0)
+            return 0;
+        int n = 0;
+        for (ICompletionProposal proposal : proposals)
+        {
+            ICompletionProposal raw = unwrapProposal(proposal);
+            if (raw == null)
+                continue;
+            String cn = raw.getClass().getName();
+            if (cn.contains("BslConfigurable") || cn.contains("EventCompletionProposal")) //$NON-NLS-1$ //$NON-NLS-2$
+                n++;
+        }
+        return n;
+    }
+
     /** Ручной {@code showPossibleCompletions} (Ctrl+Space), не auto-activation. */
     private static final class ManualInvocationDetect
     {
@@ -3033,6 +3418,30 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             }
             return false;
         }
+    }
+
+    private static BslXtextEditor resolveEditorForLiteralAudit(ITextViewer viewer)
+    {
+        ContentAssistSessionReloader reloader = viewer instanceof SourceViewer sv
+            ? ContentAssistSessionReloader.forViewer(sv)
+            : ContentAssistSessionReloader.getActiveReloader();
+        return reloader != null ? reloader.getBslEditor() : null;
+    }
+
+    private static void auditLiteralComputeReturn(ITextViewer viewer, BslXtextEditor editor,
+        int returnedN, String computePhase, String extraReason)
+    {
+        if (!(viewer instanceof SourceViewer sv))
+            return;
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.forViewer(sv);
+        SmartContentAssistProcessor proc = reloader != null
+            ? reloader.getProcessor() : ContentAssistSessionReloader.getActiveProcessor();
+        if (proc == null)
+            proc = ContentAssistSessionReloader.getActiveProcessor();
+        if (proc == null)
+            return;
+        ContentAssistPopupSync.auditLiteralComputeReturn(sv, editor, proc, returnedN,
+            computePhase, extraReason);
     }
 
     /** Тип выражения слева от точки ({@code obj.|}). */
