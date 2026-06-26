@@ -26,13 +26,29 @@ import org.eclipse.emf.common.util.URI;
 import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
+import java.util.WeakHashMap;
 
 /**
  * Имя и тип («Метод» / «Свойство») элемента автодополнения для ИР.
  */
 public final class BslCompletionSideHintResolver
 {
+    private static final Map<BslXtextEditor, IInformationControlCreator> EDITOR_BROWSER_CREATORS =
+        new WeakHashMap<>();
+
     private BslCompletionSideHintResolver() {}
+
+    public static IInformationControlCreator getEditorBrowserCreator(BslXtextEditor editor)
+    {
+        return editor != null ? EDITOR_BROWSER_CREATORS.get(editor) : null;
+    }
+
+    public static void rememberEditorBrowserCreator(BslXtextEditor editor,
+        IInformationControlCreator creator)
+    {
+        if (editor != null && creator != null)
+            EDITOR_BROWSER_CREATORS.put(editor, creator);
+    }
 
     public static String resolveElementName(ICompletionProposal proposal)
     {
@@ -78,6 +94,7 @@ public final class BslCompletionSideHintResolver
         public IInformationControlCreator creator;
         public String winner = "none"; //$NON-NLS-1$
         public boolean fromCache;
+        public boolean fromEditorCache;
         public boolean fromHoverViewer;
         public boolean fromHoverEditor;
         public boolean fromPopup;
@@ -97,6 +114,7 @@ public final class BslCompletionSideHintResolver
             return "{\"viewerHash\":" + viewerHash //$NON-NLS-1$
                 + ",\"reloaderHash\":" + reloaderHash //$NON-NLS-1$
                 + ",\"fromCache\":" + fromCache //$NON-NLS-1$
+                + ",\"fromEditorCache\":" + fromEditorCache //$NON-NLS-1$
                 + ",\"fromHoverViewer\":" + fromHoverViewer //$NON-NLS-1$
                 + ",\"fromHoverEditor\":" + fromHoverEditor //$NON-NLS-1$
                 + ",\"fromPopup\":" + fromPopup //$NON-NLS-1$
@@ -138,6 +156,15 @@ public final class BslCompletionSideHintResolver
                 {
                     trace.fromCache = true;
                     trace.winner = "cache"; //$NON-NLS-1$
+                }
+            }
+            if (creator == null && reloader != null)
+            {
+                creator = getEditorBrowserCreator(reloader.getBslEditor());
+                if (creator != null)
+                {
+                    trace.fromEditorCache = true;
+                    trace.winner = "editorCache"; //$NON-NLS-1$
                 }
             }
             if (creator == null && viewer != null)
@@ -214,6 +241,8 @@ public final class BslCompletionSideHintResolver
         IInformationControlCreator creator = null;
         if (reloader != null)
             creator = reloader.getAssistBrowserCreator();
+        if (creator == null && reloader != null)
+            creator = getEditorBrowserCreator(reloader.getBslEditor());
         if (creator == null && viewer != null)
             creator = resolveAssistBrowserCreator(viewer);
         if (creator == null && reloader != null)
@@ -234,6 +263,158 @@ public final class BslCompletionSideHintResolver
         return creator;
     }
 
+    /** Результат cold bootstrap browser creator (fix10f). */
+    public static final class ColdCreatorBootstrapResult
+    {
+        public IInformationControlCreator creator;
+        public String winner = "none"; //$NON-NLS-1$
+    }
+
+    /**
+     * Cold literal-open: RSP hover → viewer map → тихий delegate probe → chain (fix10f).
+     */
+    public static ColdCreatorBootstrapResult resolveAssistBrowserCreatorCold(
+        BslXtextEditor editor, SourceViewer viewer, SmartContentAssistProcessor processor)
+    {
+        ColdCreatorBootstrapResult result = new ColdCreatorBootstrapResult();
+        IInformationControlCreator creator = getEditorBrowserCreator(editor);
+        if (creator != null)
+        {
+            result.creator = creator;
+            result.winner = "editorCache"; //$NON-NLS-1$
+            logColdCreatorBootstrap("editorCache", true, -1, 0, 0, null); //$NON-NLS-1$
+            return result;
+        }
+        creator = resolveHoverCreatorFromRsp(viewer);
+        if (creator != null)
+        {
+            result.creator = creator;
+            result.winner = "rspHover"; //$NON-NLS-1$
+            rememberEditorBrowserCreator(editor, creator);
+            logColdCreatorBootstrap("rspHover", true, -1, 0, 0, hoverClassName(viewer)); //$NON-NLS-1$
+            return result;
+        }
+        logColdCreatorBootstrap("rspHover", false, -1, 0, 0, hoverClassName(viewer)); //$NON-NLS-1$
+        creator = resolveHoverCreatorFromViewerMap(viewer);
+        if (creator != null)
+        {
+            result.creator = creator;
+            result.winner = "hoverMap"; //$NON-NLS-1$
+            rememberEditorBrowserCreator(editor, creator);
+            logColdCreatorBootstrap("hoverMap", true, -1, 0, 0, null); //$NON-NLS-1$
+            return result;
+        }
+        logColdCreatorBootstrap("hoverMap", false, -1, 0, 0, null); //$NON-NLS-1$
+        int literalCaret = resolveLiteralCaretForProbe(viewer);
+        ProbeDelegateBrowserResult probe = probeDelegateBrowserCreatorDetailed(
+            processor, viewer, literalCaret);
+        int delegateCount = 0;
+        int ext3Count = 0;
+        if (processor != null && viewer != null && probe.probeOffset >= 0)
+        {
+            try
+            {
+                ICompletionProposal[] proposals = processor.getDelegate()
+                    .computeCompletionProposals(viewer, probe.probeOffset);
+                if (proposals != null)
+                {
+                    delegateCount = proposals.length;
+                    for (ICompletionProposal proposal : proposals)
+                    {
+                        if (proposal == null)
+                            continue;
+                        ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(proposal);
+                        if (raw instanceof IrCompletionProposal)
+                            continue;
+                        if (raw instanceof ICompletionProposalExtension3 ext3
+                            && ext3.getInformationControlCreator() != null)
+                            ext3Count++;
+                    }
+                }
+            }
+            catch (Exception ignored)
+            {
+                // counts ниже
+            }
+        }
+        if (probe.creator != null)
+        {
+            result.creator = probe.creator;
+            result.winner = "probeDelegate"; //$NON-NLS-1$
+            rememberEditorBrowserCreator(editor, probe.creator);
+            logColdCreatorBootstrap("probeDelegate", true, probe.probeOffset, //$NON-NLS-1$
+                delegateCount, ext3Count, null);
+            return result;
+        }
+        logColdCreatorBootstrap("probeDelegate", false, probe.probeOffset, //$NON-NLS-1$
+            delegateCount, ext3Count, probe.source);
+        creator = resolveAssistBrowserCreatorChain(null, viewer,
+            ContentAssistSessionReloader.getActiveReloader());
+        if (creator != null)
+        {
+            result.creator = creator;
+            result.winner = "chain"; //$NON-NLS-1$
+            rememberEditorBrowserCreator(editor, creator);
+            logColdCreatorBootstrap("chain", true, -1, 0, 0, null); //$NON-NLS-1$
+        }
+        return result;
+    }
+
+    private static void logColdCreatorBootstrap(String step, boolean ok, int probeOffset,
+        int delegateCount, int ext3Count, String hoverClass)
+    {
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        int gen = reloader != null ? reloader.getLiteralOpenGen() : -1;
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H35", "coldCreatorBootstrap", step, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"gen\":" + gen //$NON-NLS-1$
+                + ",\"ok\":" + ok //$NON-NLS-1$
+                + ",\"probeOffset\":" + probeOffset //$NON-NLS-1$
+                + ",\"delegateCount\":" + delegateCount //$NON-NLS-1$
+                + ",\"ext3Count\":" + ext3Count //$NON-NLS-1$
+                + ",\"hoverClass\":" + (hoverClass != null //$NON-NLS-1$
+                    ? "\"" + ContentAssistDebug.jsonEscapeForLog(hoverClass) + "\"" : "null") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+    }
+
+    private static String hoverClassName(SourceViewer viewer)
+    {
+        if (viewer == null || !(viewer.getDocument() instanceof IXtextDocument xtextDoc))
+            return null;
+        URI resourceUri = xtextDoc.getResourceURI();
+        if (resourceUri == null)
+            return null;
+        IResourceServiceProvider rsp =
+            IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(resourceUri);
+        if (rsp == null)
+            return null;
+        IEObjectHover hover = rsp.get(IEObjectHover.class);
+        return hover != null ? hover.getClass().getName() : null;
+    }
+
+    /** RSP IEObjectHover → browser creator (unwrap htmlHover при необходимости). */
+    static IInformationControlCreator resolveHoverCreatorFromRsp(SourceViewer viewer)
+    {
+        if (viewer == null || !(viewer.getDocument() instanceof IXtextDocument xtextDoc))
+            return null;
+        URI resourceUri = xtextDoc.getResourceURI();
+        if (resourceUri == null)
+            return null;
+        IResourceServiceProvider rsp =
+            IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(resourceUri);
+        if (rsp == null)
+            return null;
+        IEObjectHover hover = rsp.get(IEObjectHover.class);
+        if (hover == null)
+            return null;
+        if (hover instanceof BslDispatchingEObjectTextHover bslHover)
+            return bslHover.getHoverControlCreator();
+        if (hover instanceof ITextHover textHover)
+            return hoverCreatorFromTextHover(textHover);
+        return null;
+    }
+
     /** {@link IInformationControlCreator} браузера BSL — как у штатного assist EDT. */
     public static IInformationControlCreator resolveAssistBrowserCreator()
     {
@@ -242,6 +423,9 @@ public final class BslCompletionSideHintResolver
 
     public static IInformationControlCreator resolveAssistBrowserCreator(SourceViewer viewer)
     {
+        IInformationControlCreator creator = resolveHoverCreatorFromRsp(viewer);
+        if (creator != null)
+            return creator;
         if (viewer == null || !(viewer.getDocument() instanceof IXtextDocument xtextDoc))
             return null;
         URI resourceUri = xtextDoc.getResourceURI();

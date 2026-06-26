@@ -95,8 +95,19 @@ public final class ContentAssistSessionReloader
     private volatile boolean manualDualPopupOpened;
     /** COM-запрос таблицы слов уже отправлен для {@link #wordsTableCaret}. */
     private volatile boolean wordsTableFetchInFlight;
+    /** Счётчик literal-open для H30 (fix10). */
+    private volatile int literalOpenGen;
+    private volatile long literalOpenStartedAtMs = -1;
+    /** Browser creator уже применён в open-path literal (fix10). */
+    private volatile boolean literalBrowserPrimed;
+    /** {@code finishDeferredLiteralPopupSetup}: pin отложен после {@code selected()}. */
+    private volatile boolean literalFinishPinPending;
+    /** {@code false} от {@link #beginLiteralOpenTracking} до конца finish-path (fix10d). */
+    private volatile boolean literalOpenSetupComplete;
 
     private static final int WORDS_TABLE_DEBOUNCE_MS = 200;
+    /** Задержка flush pending recompute после literal-open (fix10). */
+    private static final int LITERAL_OPEN_FLUSH_GUARD_MS = 200;
     /** Последний stamp документа при caret-событии (отличить ввод от стрелок). */
     private long lastCaretDocumentStamp = -1;
 
@@ -144,8 +155,14 @@ public final class ContentAssistSessionReloader
         if (installBrowserCreator == null)
             installBrowserCreator =
                 BslCompletionSideHintResolver.resolveAssistBrowserCreatorFromEditor(editor);
+        if (installBrowserCreator == null)
+            installBrowserCreator = BslCompletionSideHintResolver
+                .resolveAssistBrowserCreatorCold(editor, viewer, processor).creator;
         if (installBrowserCreator != null)
+        {
             this.assistBrowserCreator = installBrowserCreator;
+            BslCompletionSideHintResolver.rememberEditorBrowserCreator(editor, installBrowserCreator);
+        }
         // #region agent log
         logInstallCreatorDiagnostics(viewer, installBrowserCreator != null);
         // #endregion
@@ -286,7 +303,11 @@ public final class ContentAssistSessionReloader
                 {
                     IInformationControlCreator browserCreator = resolveFreshAssistBrowserCreator(endCaret);
                     if (browserCreator != null)
+                    {
                         rememberAssistBrowserCreator(browserCreator);
+                        BslCompletionSideHintResolver.rememberEditorBrowserCreator(
+                            bslEditor, browserCreator);
+                    }
                 }
                 // #region agent log
                 ContentAssistDebug.debugModeLog("H6", "assistSessionEnded", "lifecycle", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
@@ -337,6 +358,7 @@ public final class ContentAssistSessionReloader
                     activeIrDisplayKey = null;
                     irCompletionSnapshot = null;
                     clearIrSideHintCaches();
+                    clearLiteralOpenState();
                     synchronized (pendingAfterWordsTable)
                     {
                         pendingAfterWordsTable.clear();
@@ -677,7 +699,37 @@ public final class ContentAssistSessionReloader
     public void rememberAssistBrowserCreator(IInformationControlCreator creator)
     {
         if (creator != null)
+        {
             assistBrowserCreator = creator;
+            BslCompletionSideHintResolver.rememberEditorBrowserCreator(bslEditor, creator);
+        }
+    }
+
+    private void warmupAssistBrowserCreator(int caret)
+    {
+        if (assistBrowserCreator != null)
+            return;
+        IInformationControlCreator fresh = resolveFreshAssistBrowserCreator(caret);
+        if (fresh != null)
+            rememberAssistBrowserCreator(fresh);
+    }
+
+    private void preShowLiteralBrowserPatch(int caret)
+    {
+        warmupAssistBrowserCreator(caret);
+        if (assistBrowserCreator != null)
+            ContentAssistPopupSync.patchAssistBrowserCreatorOnly(assistant, viewer);
+    }
+
+    /**
+     * Cold literal-open: полная цепочка probe/editor/global/cold bootstrap (fix10f).
+     */
+    public IInformationControlCreator resolveAssistBrowserCreatorForLiteral()
+    {
+        int caret = SmartContentAssistProcessor.resolveSessionCaret(assistant, viewer);
+        if (caret < 0 && manualIrAssistCaret >= 0)
+            caret = manualIrAssistCaret;
+        return resolveFreshAssistBrowserCreator(caret);
     }
 
     /** ИмяТипаКонтекста ИР для подписи «Родитель:» в строковом литерале. */
@@ -808,6 +860,200 @@ public final class ContentAssistSessionReloader
         irSideHintPublishedKey = cacheKey;
     }
 
+    int getLiteralOpenGen()
+    {
+        return literalOpenGen;
+    }
+
+    long msSinceLiteralOpen()
+    {
+        if (literalOpenStartedAtMs < 0)
+            return -1;
+        return System.currentTimeMillis() - literalOpenStartedAtMs;
+    }
+
+    boolean isLiteralBrowserPrimed()
+    {
+        return literalBrowserPrimed;
+    }
+
+    void setLiteralBrowserPrimed(boolean primed)
+    {
+        literalBrowserPrimed = primed;
+    }
+
+    boolean isLiteralFinishPinPending()
+    {
+        return literalFinishPinPending;
+    }
+
+    void setLiteralFinishPinPending(boolean pending)
+    {
+        literalFinishPinPending = pending;
+    }
+
+    /** {@code true} между show и завершением {@code finishDeferredLiteralPopupSetup} (fix10d). */
+    boolean isLiteralOpenSetupPhase()
+    {
+        return literalOpenStartedAtMs >= 0 && !literalOpenSetupComplete;
+    }
+
+    void setLiteralOpenSetupComplete(boolean complete)
+    {
+        literalOpenSetupComplete = complete;
+    }
+
+    int beginLiteralOpenTracking()
+    {
+        literalOpenGen++;
+        literalOpenStartedAtMs = System.currentTimeMillis();
+        literalBrowserPrimed = false;
+        literalFinishPinPending = false;
+        literalOpenSetupComplete = false;
+        return literalOpenGen;
+    }
+
+    void logLiteralOpenPhase(ContentAssistant ca, int irN, String phase)
+    {
+        long ms = msSinceLiteralOpen();
+        int tableRows = ContentAssistPopupSync.tableItemCountForAssistant(ca);
+        boolean hasBrowser = ca != null
+            && ContentAssistPopupSync.hasAssistBrowserSidePanel(ca);
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H30", "literalOpenPhase", phase, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"gen\":" + literalOpenGen //$NON-NLS-1$
+                + ",\"msSinceOpen\":" + ms //$NON-NLS-1$
+                + ",\"tableRows\":" + tableRows //$NON-NLS-1$
+                + ",\"irN\":" + irN //$NON-NLS-1$
+                + ",\"hasBrowser\":" + hasBrowser //$NON-NLS-1$
+                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+    }
+
+    private void clearLiteralOpenState()
+    {
+        literalOpenStartedAtMs = -1;
+        literalBrowserPrimed = false;
+        literalFinishPinPending = false;
+        literalOpenSetupComplete = false;
+    }
+
+    void logLiteralListState(ContentAssistant ca, int irN, String phase)
+    {
+        int tableRows = ContentAssistPopupSync.tableItemCountForAssistant(ca);
+        boolean irResolved = processor != null && processor.isIrWordsResolvedForContext();
+        boolean firstIr = ContentAssistPopupSync.firstProposalIsIr(ca);
+        boolean listReady = irN > 0 && tableRows == irN && irResolved && firstIr;
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H31", "literalListState", phase, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"gen\":" + literalOpenGen //$NON-NLS-1$
+                + ",\"irN\":" + irN //$NON-NLS-1$
+                + ",\"tableRows\":" + tableRows //$NON-NLS-1$
+                + ",\"irResolved\":" + irResolved //$NON-NLS-1$
+                + ",\"firstIr\":" + firstIr //$NON-NLS-1$
+                + ",\"listReady\":" + listReady //$NON-NLS-1$
+                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+    }
+
+    private void logLiteralOpenFlash(ContentAssistant ca, int irN, int tableRows,
+        String recomputeReason)
+    {
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H36", "literalOpenFlash", recomputeReason, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"gen\":" + literalOpenGen //$NON-NLS-1$
+                + ",\"irN\":" + irN //$NON-NLS-1$
+                + ",\"tableRows\":" + tableRows //$NON-NLS-1$
+                + ",\"msSinceOpen\":" + msSinceLiteralOpen() //$NON-NLS-1$
+                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+    }
+
+    private void reprimeLiteralSnapshot(IrBslCompletionSupport.Snapshot snapshot, SourceViewer sv)
+    {
+        if (snapshot == null || processor == null)
+            return;
+        processor.primeIrSnapshotForDualAssist(snapshot);
+        if (sv != null)
+        {
+            IDocument doc = sv.getDocument();
+            if (doc != null)
+                processor.rememberIrSnapshotCache(snapshot, doc);
+        }
+    }
+
+    private void syncLiteralPopupAfterShow(ContentAssistant ca, SourceViewer sv,
+        IrBslCompletionSupport.Snapshot snapshot)
+    {
+        int irN = snapshot != null && snapshot.proposals != null ? snapshot.proposals.length : -1;
+        logLiteralOpenPhase(ca, irN, "show"); //$NON-NLS-1$
+        reprimeLiteralSnapshot(snapshot, sv);
+        logLiteralListState(ca, irN, "afterReprime"); //$NON-NLS-1$
+        boolean patched = ContentAssistPopupSync.patchAssistBrowserCreatorOnly(ca, sv);
+        if (!patched)
+            patched = ContentAssistPopupSync.patchAssistBrowserCreatorOnly(ca, sv);
+        logLiteralOpenPhase(ca, irN, patched ? "patchBeforeRecompute" : "patchRetry"); //$NON-NLS-1$ //$NON-NLS-2$
+        ContentAssistPopupSync.invalidateSyncSnapshot();
+        int tableRows = ContentAssistPopupSync.tableItemCountForAssistant(ca);
+        boolean irResolved = processor.isIrWordsResolvedForContext();
+        boolean firstIr = ContentAssistPopupSync.firstProposalIsIr(ca);
+        boolean snapshotReady = irN > 0 && irResolved && firstIr
+            && snapshot != null && snapshot.proposals != null
+            && snapshot.proposals.length == irN;
+        boolean tableReady = irN > 0 && tableRows == irN;
+        boolean listReady = tableReady && snapshotReady;
+        if (snapshotReady && !tableReady)
+        {
+            logLiteralOpenFlash(ca, irN, tableRows, "snapshotReady"); //$NON-NLS-1$
+            logLiteralOpenPhase(ca, irN, "skipRecompute"); //$NON-NLS-1$
+        }
+        else if (!listReady)
+        {
+            logLiteralOpenFlash(ca, irN, tableRows, "earlyRowCount"); //$NON-NLS-1$
+            ContentAssistPopupSync.recomputePopupList(ca, sv, processor);
+            logLiteralOpenPhase(ca, irN, "recompute"); //$NON-NLS-1$
+        }
+        else
+        {
+            logLiteralOpenFlash(ca, irN, tableRows, "listReady"); //$NON-NLS-1$
+            logLiteralOpenPhase(ca, irN, "skipRecompute"); //$NON-NLS-1$
+        }
+        tableRows = ContentAssistPopupSync.tableItemCountForAssistant(ca);
+        logLiteralListState(ca, irN, "afterList"); //$NON-NLS-1$
+        if (tableRows == 0 && irN > 0)
+            scheduleEmptyListRecovery(ca, sv, snapshot, irN);
+    }
+
+    private void scheduleEmptyListRecovery(ContentAssistant ca, SourceViewer sv,
+        IrBslCompletionSupport.Snapshot snapshot, int irN)
+    {
+        Control widget = viewer != null ? (Control) viewer.getTextWidget() : null;
+        if (widget == null || widget.isDisposed())
+            return;
+        Display display = widget.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        final int gen = literalOpenGen;
+        display.asyncExec(() -> {
+            if (gen != literalOpenGen || ca == null || sv == null || processor == null)
+                return;
+            if (!ContentAssistPopupSync.isPopupVisible(ca))
+                return;
+            if (ContentAssistPopupSync.tableItemCountForAssistant(ca) > 0)
+                return;
+            reprimeLiteralSnapshot(snapshot, sv);
+            ContentAssistPopupSync.invalidateSyncSnapshot();
+            ContentAssistPopupSync.recomputePopupList(ca, sv, processor);
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H31", "emptyListRecovery", "retry", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"gen\":" + gen //$NON-NLS-1$
+                    + ",\"irN\":" + irN //$NON-NLS-1$
+                    + ",\"tableRows\":" + ContentAssistPopupSync.tableItemCountForAssistant(ca) //$NON-NLS-1$
+                    + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+        });
+    }
+
     public void clearIrSideHintPublishedKey()
     {
         irSideHintPublishedKey = null;
@@ -855,6 +1101,7 @@ public final class ContentAssistSessionReloader
         manualIrAssistCaret = -1;
         manualDualPopupOpened = false;
         irWordsResolvedForCaret = -1;
+        clearLiteralOpenState();
     }
 
     private boolean isManualIrAssistAwaitingWords()
@@ -920,13 +1167,7 @@ public final class ContentAssistSessionReloader
         manualDualPopupOpened = false;
         irWordsResolvedForCaret = -1;
         ContentAssistPopupSync.ensureEmptyListAllowed(assistant, true);
-        if (assistBrowserCreator == null)
-        {
-            IInformationControlCreator probed =
-                BslCompletionSideHintResolver.probeDelegateBrowserCreator(processor, viewer, caret);
-            if (probed != null)
-                rememberAssistBrowserCreator(probed);
-        }
+        warmupAssistBrowserCreator(caret);
         // #region agent log
         ContentAssistDebug.debugModeLog("H1", "tryBeginManualDualAssist", "started", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "{\"caret\":" + caret + ",\"inFlight\":" + isWordsTableFetchInFlightForCaret(caret) //$NON-NLS-1$ //$NON-NLS-2$
@@ -1006,14 +1247,23 @@ public final class ContentAssistSessionReloader
         }
         SmartFilterTracker.setCurrentFilter(""); //$NON-NLS-1$
         ContentAssistPopupSync.ensureEmptyListAllowed(assistant, true);
+        beginLiteralOpenTracking();
+        IrBslCompletionSupport.Snapshot snap = irCompletionSnapshot;
+        int irN = snap != null && snap.proposals != null ? snap.proposals.length : -1;
+        preShowLiteralBrowserPatch(expectedCaret);
         boolean shown = ContentAssistPopupSync.showPossibleCompletions(assistant);
         manualDualPopupOpened = true;
         boolean popupVisible = shown && ContentAssistPopupSync.isPopupVisible(assistant);
+        if (popupVisible && assistBrowserCreator == null)
+        {
+            int probeCaret = liveCaret >= 0 ? liveCaret : expectedCaret;
+            IInformationControlCreator fresh = resolveFreshAssistBrowserCreator(probeCaret);
+            if (fresh != null)
+                rememberAssistBrowserCreator(fresh);
+        }
         if (popupVisible)
         {
-            ContentAssistPopupSync.ensureAssistBrowserCreatorOnController(assistant, viewer);
-            ContentAssistPopupSync.recomputePopupList(assistant, viewer, processor);
-            ContentAssistPopupSync.scheduleFilterBarSetup(assistant, viewer, processor);
+            syncLiteralPopupAfterShow(assistant, viewer, snap);
             widget.getDisplay().asyncExec(() -> finishDeferredLiteralPopupSetup(assistant, viewer));
         }
         // #region agent log
@@ -1051,16 +1301,20 @@ public final class ContentAssistSessionReloader
         SmartFilterTracker.setCurrentFilter(""); //$NON-NLS-1$
         ContentAssistPopupSync.ensureEmptyListAllowed(assistant, true);
         int irN = snapshot.proposals != null ? snapshot.proposals.length : 0;
+        beginLiteralOpenTracking();
+        preShowLiteralBrowserPatch(liveCaret);
         boolean shown = ContentAssistPopupSync.showPossibleCompletions(assistant);
         boolean popupVisible = shown && ContentAssistPopupSync.isPopupVisible(assistant);
+        if (popupVisible && assistBrowserCreator == null)
+        {
+            IInformationControlCreator fresh = resolveFreshAssistBrowserCreator(liveCaret);
+            if (fresh != null)
+                rememberAssistBrowserCreator(fresh);
+        }
         if (popupVisible)
             manualDualPopupOpened = true;
         if (popupVisible && assistant != null && viewer != null && processor != null)
-        {
-            ContentAssistPopupSync.ensureAssistBrowserCreatorOnController(assistant, viewer);
-            ContentAssistPopupSync.recomputePopupList(assistant, viewer, processor);
-            ContentAssistPopupSync.scheduleFilterBarSetup(assistant, viewer, processor);
-        }
+            syncLiteralPopupAfterShow(assistant, viewer, snapshot);
         // #region agent log
         ContentAssistDebug.debugModeLog("H10", "openDeferredIrAssistPopupNow", "show", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "{\"liveCaret\":" + liveCaret + ",\"snapshotCaret\":" + snapshotCaret //$NON-NLS-1$ //$NON-NLS-2$
@@ -1069,7 +1323,9 @@ public final class ContentAssistSessionReloader
                 + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         ContentAssistDebug.debugModeLog("H3", "openDeferredIrAssistPopup", "show", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "{\"empty\":" + (irN == 0) + ",\"irN\":" + irN + ",\"shown\":" + shown //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"popupVisible\":" + popupVisible + ",\"syncRecompute\":" + true + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"popupVisible\":" + popupVisible //$NON-NLS-1$
+                + ",\"tableRows\":" + ContentAssistPopupSync.tableItemCountForAssistant(assistant) //$NON-NLS-1$
+                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         ContentAssistDebug.debugModeLog("H16", "openDeferredIrAssistPopup", "show", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "{\"irOnly\":" + processor.isIrOnlyManualMode() //$NON-NLS-1$
                 + ",\"popupVisible\":" + popupVisible //$NON-NLS-1$
@@ -1100,9 +1356,38 @@ public final class ContentAssistSessionReloader
         if (assistant == null || viewer == null || processor == null)
             return;
         if (!ContentAssistPopupSync.isPopupVisible(assistant))
+        {
+            setLiteralOpenSetupComplete(true);
             return;
-        ContentAssistPopupSync.ensureInitialIrRowActivation(assistant, viewer);
-        ContentAssistPopupSync.pinIrSideHintForCurrentSelection(assistant, viewer);
+        }
+        IrBslCompletionSupport.Snapshot snap = irCompletionSnapshot;
+        int irN = snap != null && snap.proposals != null ? snap.proposals.length : -1;
+        setLiteralFinishPinPending(true);
+        boolean migrateRan = false;
+        try
+        {
+            ContentAssistPopupSync.ensureInitialIrRowActivation(assistant, viewer);
+            logLiteralOpenPhase(assistant, irN, "rowActivation"); //$NON-NLS-1$
+            boolean hasBrowser = ContentAssistPopupSync.migrateLiteralSidePanelToBrowser(
+                assistant, viewer);
+            migrateRan = true;
+            setLiteralBrowserPrimed(hasBrowser);
+            boolean pinOk = ContentAssistPopupSync.pinIrSideHintForCurrentSelection(
+                assistant, viewer);
+            if (!pinOk && !ContentAssistPopupSync.hasAssistBrowserSidePanel(assistant))
+                ContentAssistPopupSync.scheduleLiteralPinFallback(assistant, viewer);
+            logLiteralOpenPhase(assistant, irN, "pinSideHint"); //$NON-NLS-1$
+            ContentAssistPopupSync.scheduleFilterBarSetup(assistant, viewer, processor);
+            logLiteralOpenPhase(assistant, irN, "filterBar"); //$NON-NLS-1$
+        }
+        finally
+        {
+            setLiteralFinishPinPending(false);
+        }
+        logLiteralOpenPhase(assistant, irN, "finishDone"); //$NON-NLS-1$
+        setLiteralOpenSetupComplete(true);
+        if (migrateRan && !ContentAssistPopupSync.hasAssistBrowserSidePanel(assistant))
+            ContentAssistPopupSync.finishLiteralBrowserVisualRefresh(assistant, viewer);
         manualIrAssistPending = false;
         processor.exitIrOnlyManualMode();
     }
@@ -1112,12 +1397,17 @@ public final class ContentAssistSessionReloader
         IInformationControlCreator fresh =
             assistBrowserCreator != null ? assistBrowserCreator : null;
         if (fresh == null)
+            fresh = BslCompletionSideHintResolver.getEditorBrowserCreator(bslEditor);
+        if (fresh == null)
             fresh = BslCompletionSideHintResolver.resolveAssistBrowserCreator(viewer);
         if (fresh == null)
             fresh = BslCompletionSideHintResolver.resolveAssistBrowserCreatorFromEditor(bslEditor);
         if (fresh == null)
             fresh = BslCompletionSideHintResolver.probeDelegateBrowserCreator(
                 processor, viewer, literalCaret);
+        if (fresh == null)
+            fresh = BslCompletionSideHintResolver
+                .resolveAssistBrowserCreatorCold(bslEditor, viewer, processor).creator;
         if (fresh == null)
             fresh = BslCompletionSideHintResolver.resolveAssistBrowserCreator();
         return fresh;
@@ -1305,12 +1595,23 @@ public final class ContentAssistSessionReloader
         ContentAssistSessionReloader reloader = ACTIVE_RELOADER.get();
         if (reloader == null || !reloader.pendingPopupRefresh)
             return;
+        SmartContentAssistProcessor processor = ACTIVE_PROCESSOR.get();
+        if (reloader.pendingPopupRefreshIsIr)
+        {
+            long ms = reloader.msSinceLiteralOpen();
+            if (ms >= 0 && ms < LITERAL_OPEN_FLUSH_GUARD_MS)
+            {
+                Display display = Display.getDefault();
+                if (display != null && !display.isDisposed())
+                    display.asyncExec(ContentAssistSessionReloader::flushPendingPopupRefreshIfAny);
+                return;
+            }
+        }
         boolean wasIr = reloader.pendingPopupRefreshIsIr;
         reloader.pendingPopupRefresh = false;
         reloader.pendingPopupRefreshIsIr = false;
         ContentAssistant ca = ACTIVE_ASSISTANT.get();
         SourceViewer viewer = ACTIVE_VIEWER.get();
-        SmartContentAssistProcessor processor = ACTIVE_PROCESSOR.get();
         if (ca == null || viewer == null || processor == null)
             return;
         if (wasIr && !processor.shouldRefreshIrPopup())

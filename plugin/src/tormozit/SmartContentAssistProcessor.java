@@ -1565,7 +1565,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         }
         else if (isCacheValidForCaret(doc, caret) && fullListCache.length > raw.length)
             raw = fullListCache;
-        return buildDelegateOrderedList(raw);
+        return finalizeListForIrAssistDisplay(raw);
     }
 
     /** Probe для штатного списка: invocation / filter offset / начало слова / каретка. */
@@ -1808,7 +1808,12 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         if (inLiteralValidate)
             return matchesStockDelegateFilter(proposal, document, offset, event);
         if (!SmartAssistFilterState.isSmartFilterEnabled())
+        {
+            ICompletionProposal raw = unwrapProposal(proposal);
+            if (raw instanceof IrCompletionProposal ir)
+                return matchesIrStockPrefixFilter(ir, document, offset, event);
             return matchesStockDelegateFilter(proposal, document, offset, event);
+        }
         if (isMemberAccessContextChange(document, event))
             return true;
         String filter = computeActiveFilter(document, offset, event);
@@ -2529,11 +2534,38 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                                               DocumentEvent event)
     {
         ICompletionProposal raw = unwrapProposal(proposal);
+        if (raw instanceof IrCompletionProposal ir)
+            return matchesIrStockPrefixFilter(ir, document, offset, event);
         if (raw instanceof ICompletionProposalExtension2)
             return ((ICompletionProposalExtension2) raw).validate(document, offset, event);
         if (raw instanceof ICompletionProposalExtension)
             return ((ICompletionProposalExtension) raw).isValidFor(document, offset);
         return true;
+    }
+
+    /** Prefix match для ИР при выключенном smart-фильтре (без рекурсии через validate). */
+    private static boolean matchesIrStockPrefixFilter(IrCompletionProposal ir, IDocument document,
+        int offset, DocumentEvent event)
+    {
+        if (ir == null)
+            return false;
+        int caret = resolveFilterCaret(document, offset, event);
+        String prefix = document != null && caret >= 0
+            ? computeIdentifierFilter(document, caret) : ""; //$NON-NLS-1$
+        if (prefix.isEmpty())
+        {
+            String tracked = SmartFilterTracker.getCurrentFilter();
+            if (tracked != null && !tracked.isEmpty())
+                prefix = tracked;
+        }
+        if (prefix.isEmpty())
+            return true;
+        String name = ir.getWordValue();
+        if (name == null || name.isEmpty())
+            name = ir.getFilterName();
+        if (name == null || name.isEmpty())
+            return false;
+        return name.regionMatches(true, 0, prefix, 0, prefix.length());
     }
 
     /** Штатный префиксный отбор для popup при выключенном smart-фильтре (без повторного {@code fFilterRunnable}). */

@@ -1,0 +1,39 @@
+---
+description: При диагностике — BUILD-stamp в лог при старте плагина, чтобы однозначно видеть версию кода в прогоне
+alwaysApply: true
+---
+# BUILD-stamp при диагностике
+При **отладочной диагностике** (Cursor Debug Mode, NDJSON в `.tmp/` или `debug-*.log`, временные `#region agent log`) нужно **однозначно** знать, какой bytecode выполнялся. Не полагаться на «пересобрал» и не смотреть `plugin/bin` в git — PDE собирает в workspace.
+## Обязательно
+### 1. Константа версии
+Одна строковая константа на задачу/итерацию, меняется **при каждом** обновлении диагностик или фикса:
+```java
+public static final String LITERAL_ASSIST_BUILD = "diag-H20"; //$NON-NLS-1$
+// или MY_FEATURE_BUILD, DEBUG_BUILD — по смыслу задачи
+```
+**Менять** при каждой итерации (`diag-H20` → `diag-H21` → `20260626-fix8`).
+### 2. Запись при старте плагина
+**Один раз** при `IStartup.earlyStartup()` (или `BundleActivator.start`, если точка входа там) — **до** первого UI-сценария:
+```java
+ContentAssistDebug.debugModeLog("H00", "ContentAssistDebug", "buildStamp",
+    "{\"build\":\"" + LITERAL_ASSIST_BUILD + "\"}");
+```
+- `hypothesisId`: **`H00`** (или согласованный префикс задачи).
+- `message`: **`buildStamp`**.
+- Поле **`build`** в data — та же константа.
+Эталон точки входа: [`IrBslEditorHoverHook`](plugin/src/tormozit/IrBslEditorHoverHook.java) (`plugin.xml` → `<startup>`).
+### 3. Дублировать `build` в ключевых событиях
+В NDJSON диагностики задачи добавлять `"build":"<константа>"` в data (как в literal assist H0/H18/H20).
+## Как проверять прогон
+1. Clean + Build + **полный restart** PDE/Eclipse Application.
+2. Открыть лог задачи (например `debug-c201d2.log`).
+3. **Первая** строка с `H00` / `buildStamp` должна содержать **ожидаемый** `build`.
+4. Если `build` старый — прогон **не анализировать**; повторить restart / проверить, что бандл подхватился.
+## Недостаточно
+- Смотреть только хвост лога без H00.
+- H0 на lazy-init (например `ContentAssistSessionReloader.install` при первом редакторе) **вместо** stamp на старте — легко пропустить и спутать с прошлым запуском.
+- Сравнивать `.java` в репозитории с `plugin/bin` в git как доказательство runtime.
+## Связанные правила
+- Временные NDJSON на отладочном РМ — `comfort-logging` (п. 2).
+- После неудачной попытки — `debug-on-retry`.
+- Перед правками — `chat-snapshots`.

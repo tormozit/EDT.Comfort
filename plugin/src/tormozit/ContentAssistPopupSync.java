@@ -72,6 +72,13 @@ public final class ContentAssistPopupSync
     private static final AtomicInteger FILTER_BAR_SYNC_GEN = new AtomicInteger();
     private static final IdentityHashMap<SourceViewer, Runnable> PENDING_FILTER_BAR_SYNC =
         new IdentityHashMap<>();
+    /** Отмена устаревших htmlApply poll (fix10). */
+    private static final IdentityHashMap<ContentAssistant, Integer> HTML_APPLY_GEN =
+        new IdentityHashMap<>();
+    private static final AtomicInteger HTML_APPLY_SEQ = new AtomicInteger();
+    /** Dedupe browser HTML reload (fix10b). */
+    private static final IdentityHashMap<ContentAssistant, String> LAST_APPLIED_HTML_DIGEST =
+        new IdentityHashMap<>();
 
     private static final class PendingDebouncedFilter
     {
@@ -363,6 +370,8 @@ public final class ContentAssistPopupSync
         popupDisplayLimit = INITIAL_POPUP_DISPLAY_LIMIT;
         lastSyncedSmartEnabled = !SmartAssistFilterState.isSmartFilterEnabled();
         FILTER_TASK_GEN.incrementAndGet();
+        LAST_APPLIED_HTML_DIGEST.clear();
+        HTML_APPLY_GEN.clear();
     }
 
     /** Сброс short-circuit recompute (число строк то же, порядок после ИР другой). */
@@ -876,6 +885,131 @@ public final class ContentAssistPopupSync
         }
     }
 
+    /** Число строк popup для literal-open skip recompute (fix10). */
+    public static int tableItemCountForAssistant(ContentAssistant assistant)
+    {
+        if (assistant == null)
+            return -1;
+        try
+        {
+            Object popup = getPopup(assistant);
+            return popup != null ? tableItemCount(popup) : -1;
+        }
+        catch (Exception ignored)
+        {
+            return -1;
+        }
+    }
+
+    static void logSidePanelRefresh(String op)
+    {
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        int gen = reloader != null ? reloader.getLiteralOpenGen() : -1;
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H30", "sidePanelRefresh", op, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"gen\":" + gen //$NON-NLS-1$
+                + ",\"op\":\"" + ContentAssistDebug.jsonEscapeForLog(op) //$NON-NLS-1$
+                + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+    }
+
+    static void logBrowserContentLoad(String op, boolean skippedDuplicate)
+    {
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        int gen = reloader != null ? reloader.getLiteralOpenGen() : -1;
+        long ms = reloader != null ? reloader.msSinceLiteralOpen() : -1;
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H30", "browserContentLoad", op, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"gen\":" + gen //$NON-NLS-1$
+                + ",\"msSinceOpen\":" + ms //$NON-NLS-1$
+                + ",\"skippedDuplicate\":" + skippedDuplicate //$NON-NLS-1$
+                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+    }
+
+    static void logLiteralBrowserPhase(String phase, boolean creatorPatched, boolean hasBrowser,
+        boolean pinOk, boolean htmlApplyScheduled)
+    {
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        int gen = reloader != null ? reloader.getLiteralOpenGen() : -1;
+        ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
+        String controlClass = assistant != null
+            ? jsonEscapeControlClass(describeSideInformationControlClass(assistant)) : "null"; //$NON-NLS-1$
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H32", "literalBrowserPhase", phase, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"gen\":" + gen //$NON-NLS-1$
+                + ",\"controlClass\":\"" + controlClass //$NON-NLS-1$
+                + "\",\"creatorPatched\":" + creatorPatched //$NON-NLS-1$
+                + ",\"hasBrowser\":" + hasBrowser //$NON-NLS-1$
+                + ",\"pinOk\":" + pinOk //$NON-NLS-1$
+                + ",\"htmlApplyScheduled\":" + htmlApplyScheduled //$NON-NLS-1$
+                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+    }
+
+    public static void logLiteralSideHintSuppressed(boolean fromSelectedActivation, String reason)
+    {
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        int gen = reloader != null ? reloader.getLiteralOpenGen() : -1;
+        long ms = reloader != null ? reloader.msSinceLiteralOpen() : -1;
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H33", "literalSideHintSuppressed", reason, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"gen\":" + gen //$NON-NLS-1$
+                + ",\"msSinceOpen\":" + ms //$NON-NLS-1$
+                + ",\"fromSelectedActivation\":" + fromSelectedActivation //$NON-NLS-1$
+                + ",\"reason\":\"" + ContentAssistDebug.jsonEscapeForLog(reason) //$NON-NLS-1$
+                + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+    }
+
+    private static void logHtmlApplyPollAttempt(int attempt, boolean applied, boolean skippedDuplicate)
+    {
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        int gen = reloader != null ? reloader.getLiteralOpenGen() : -1;
+        long ms = reloader != null ? reloader.msSinceLiteralOpen() : -1;
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H33", "htmlApplyPoll", "attempt", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"gen\":" + gen //$NON-NLS-1$
+                + ",\"msSinceOpen\":" + ms //$NON-NLS-1$
+                + ",\"attempt\":" + attempt //$NON-NLS-1$
+                + ",\"applied\":" + applied //$NON-NLS-1$
+                + ",\"skippedDuplicate\":" + skippedDuplicate //$NON-NLS-1$
+                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+    }
+
+    private static String htmlDigest(String html)
+    {
+        if (html == null || html.isEmpty())
+            return ""; //$NON-NLS-1$
+        return html.length() + ":" + html.hashCode(); //$NON-NLS-1$
+    }
+
+    /** Первая строка popup — {@link IrCompletionProposal} (fix10b listReady). */
+    public static boolean firstProposalIsIr(ContentAssistant assistant)
+    {
+        if (assistant == null)
+            return false;
+        try
+        {
+            Object popup = getPopupObject(assistant);
+            if (popup == null || fFilteredProposalsField == null)
+                return false;
+            initPopupReflection(popup);
+            @SuppressWarnings("unchecked")
+            List<ICompletionProposal> list =
+                (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+            if (list == null || list.isEmpty())
+                return false;
+            ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(list.get(0));
+            return raw instanceof IrCompletionProposal;
+        }
+        catch (Exception ignored)
+        {
+            return false;
+        }
+    }
+
     private static boolean isShellVisible(Object popup)
     {
         try
@@ -895,6 +1029,7 @@ public final class ContentAssistPopupSync
 
     public static void refreshAdditionalInfo(ContentAssistant assistant)
     {
+        logSidePanelRefresh("refreshAdditionalInfo"); //$NON-NLS-1$
         try
         {
             Object popup = getPopup(assistant);
@@ -941,6 +1076,16 @@ public final class ContentAssistPopupSync
     public static boolean pinIrSideHint(
         ContentAssistant assistant, IrCompletionProposal ir, Object html)
     {
+        return pinIrSideHint(assistant, ir, html, true);
+    }
+
+    /**
+     * @param scheduleHtmlApply {@code false} — caller сам вызовет {@link #scheduleAssistBrowserHtmlApply}
+     */
+    public static boolean pinIrSideHint(
+        ContentAssistant assistant, IrCompletionProposal ir, Object html,
+        boolean scheduleHtmlApply)
+    {
         if (assistant == null || ir == null || html == null)
             return false;
         try
@@ -955,15 +1100,31 @@ public final class ContentAssistPopupSync
             ICompletionProposal proposal = resolveWrappedProposalForIr(popup, ir);
             if (proposal == null)
                 return false;
+            String rawHtml = IrBslHoverHtml.readHtml(html);
+            String digest = htmlDigest(rawHtml);
+            String prevDigest = LAST_APPLIED_HTML_DIGEST.get(assistant);
+            if (digest != null && !digest.isEmpty() && digest.equals(prevDigest)
+                && hasAssistBrowserControl(assistant))
+            {
+                logBrowserContentLoad("showInformation", true); //$NON-NLS-1$
+                return true;
+            }
             if (additionalInfoShowInformationMethod == null)
             {
                 additionalInfoShowInformationMethod = controller.getClass().getDeclaredMethod(
                     "showInformation", ICompletionProposal.class, Object.class); //$NON-NLS-1$
                 additionalInfoShowInformationMethod.setAccessible(true);
             }
+            logSidePanelRefresh("showInformation"); //$NON-NLS-1$
             additionalInfoShowInformationMethod.invoke(controller, proposal,
                 IrBslHoverHtml.toAssistSideHintPayload(html));
-            scheduleAssistBrowserHtmlApply(assistant, html);
+            if (digest != null && !digest.isEmpty())
+            {
+                LAST_APPLIED_HTML_DIGEST.put(assistant, digest);
+                logBrowserContentLoad("showInformation", false); //$NON-NLS-1$
+            }
+            if (scheduleHtmlApply)
+                scheduleAssistBrowserHtmlApply(assistant, html);
             return true;
         }
         catch (Exception e)
@@ -979,12 +1140,16 @@ public final class ContentAssistPopupSync
         pinIrSideHintForCurrentSelection(assistant, ContentAssistSessionReloader.getActiveViewer());
     }
 
-    /** @param viewer явный viewer для literal/deferred (async после show). */
-    public static void pinIrSideHintForCurrentSelection(ContentAssistant assistant,
+    /**
+     * Literal finish-path: pin после {@link #migrateLiteralSidePanelToBrowser}.
+     *
+     * @return {@code true} если {@code showInformation} вызван на browser control
+     */
+    public static boolean pinIrSideHintForCurrentSelection(ContentAssistant assistant,
         SourceViewer viewer)
     {
         if (assistant == null)
-            return;
+            return false;
         ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
         if (viewer == null)
             viewer = ContentAssistSessionReloader.getActiveViewer();
@@ -992,73 +1157,71 @@ public final class ContentAssistPopupSync
         {
             Object popup = getPopupObject(assistant);
             if (popup == null)
-                return;
+                return false;
             initPopupReflection(popup);
             ICompletionProposal proposal = resolveProposalByDisplay(popup, null);
             if (proposal == null)
-                return;
+                return false;
             ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(proposal);
             if (!(raw instanceof IrCompletionProposal ir))
-                return;
+                return false;
             String cacheKey = ir.getStableCacheKey();
             String html = reloader != null ? reloader.getIrMergedHtml(cacheKey) : null;
             if (html == null || html.isEmpty())
                 html = ir.getAdditionalProposalInfo();
-            int htmlLen = html != null ? html.length() : 0;
             if (html == null || html.isEmpty())
             {
-                // #region agent log
-                ContentAssistDebug.debugModeLog("H13", "pinIrSideHintForCurrentSelection", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"htmlLen\":0}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                return;
+                logLiteralBrowserPhase("pinDone", false, hasAssistBrowserControl(assistant), //$NON-NLS-1$
+                    false, false);
+                return false;
             }
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H22", "pinIrSideHintForCurrentSelection", "beforePin", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"controlClass\":\"" + jsonEscapeControlClass(describeSideInformationControlClass(assistant)) //$NON-NLS-1$
-                    + "\",\"hasBrowser\":" + hasAssistBrowserControl(assistant) //$NON-NLS-1$
-                    + ",\"cachedCreator\":" + (reloader != null && reloader.getAssistBrowserCreator() != null) //$NON-NLS-1$
-                    + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            boolean creatorResolved = prepareAssistBrowserSidePanel(assistant, viewer);
-            boolean hasBrowserBeforePin = hasAssistBrowserControl(assistant);
-            if (!hasBrowserBeforePin)
-            {
-                refreshAdditionalInfo(assistant);
-                hasBrowserBeforePin = hasAssistBrowserControl(assistant);
-            }
+            boolean hasBrowser = hasAssistBrowserControl(assistant);
             boolean pinOk = false;
-            if (hasBrowserBeforePin)
-                pinOk = pinIrSideHint(assistant, ir, html);
-            else if (reloader != null && !reloader.isIrSideHintPublishedForKey(cacheKey))
-                publishIrActivationSideHint(assistant, html, cacheKey);
-            scheduleAssistBrowserHtmlApply(assistant, html, true);
-            boolean hasBrowserAfterApply = hasAssistBrowserControl(assistant);
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H13", "pinIrSideHintForCurrentSelection", "pinned", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"creatorResolved\":" + creatorResolved //$NON-NLS-1$
-                    + ",\"hasBrowserBeforePin\":" + hasBrowserBeforePin //$NON-NLS-1$
-                    + ",\"hasBrowserAfterApply\":" + hasBrowserAfterApply //$NON-NLS-1$
-                    + ",\"pinOk\":" + pinOk //$NON-NLS-1$
-                    + ",\"htmlLen\":" + htmlLen + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            ContentAssistDebug.debugModeLog("H18", "pinIrSideHintForCurrentSelection", "browser", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"creatorResolved\":" + creatorResolved //$NON-NLS-1$
-                    + ",\"hasBrowserBeforePin\":" + hasBrowserBeforePin //$NON-NLS-1$
-                    + ",\"hasBrowserAfterApply\":" + hasBrowserAfterApply //$NON-NLS-1$
-                    + ",\"pinOk\":" + pinOk //$NON-NLS-1$
-                    + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
+            if (hasBrowser)
+            {
+                pinOk = pinIrSideHint(assistant, ir, html, false);
+                if (pinOk && reloader != null)
+                    reloader.markIrSideHintPublished(cacheKey);
+            }
+            logLiteralBrowserPhase("pinDone", true, hasAssistBrowserControl(assistant), //$NON-NLS-1$
+                pinOk, false);
+            return pinOk;
         }
         catch (Throwable t)
         {
-            // #region agent log
             ContentAssistDebug.debugModeLog("H26", "pinIrSideHintForCurrentSelection", "error", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 "{\"msg\":\"" + ContentAssistDebug.jsonEscapeForLog(t.getMessage()) //$NON-NLS-1$
                     + "\",\"className\":\"" + ContentAssistDebug.jsonEscapeForLog(t.getClass().getName()) //$NON-NLS-1$
                     + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             ContentAssistDebug.log("pinIrSideHintForCurrentSelection: " + t.getMessage()); //$NON-NLS-1$
+            return false;
         }
+    }
+
+    /**
+     * Один fallback через 80 ms: migrate + pin без htmlApply poll (fix10c).
+     */
+    public static void scheduleLiteralPinFallback(ContentAssistant assistant, SourceViewer viewer)
+    {
+        if (assistant == null)
+            return;
+        if (viewer == null)
+            viewer = ContentAssistSessionReloader.getActiveViewer();
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        final SourceViewer viewerRef = viewer;
+        display.timerExec(80, () -> {
+            if (display.isDisposed() || assistant == null || !isPopupVisible(assistant))
+                return;
+            if (hasAssistBrowserControl(assistant))
+                return;
+            migrateLiteralSidePanelToBrowser(assistant, viewerRef);
+            ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+            if (reloader != null)
+                reloader.setLiteralBrowserPrimed(hasAssistBrowserControl(assistant));
+            pinIrSideHintForCurrentSelection(assistant, viewerRef);
+        });
     }
 
     /**
@@ -1076,7 +1239,9 @@ public final class ContentAssistPopupSync
         int htmlLenAfter = 0;
         try
         {
-            notifyAdditionalInfoSelectionChanged(assistant);
+            ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+            if (reloader == null || !reloader.isLiteralFinishPinPending())
+                notifyAdditionalInfoSelectionChanged(assistant);
             Object popup = getPopupObject(assistant);
             if (popup == null)
                 return false;
@@ -1092,7 +1257,6 @@ public final class ContentAssistPopupSync
                 ext2.selected(viewer, false);
                 selectedCalled = true;
             }
-            ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
             if (reloader != null && cacheKey != null)
             {
                 String html = reloader.getIrMergedHtml(cacheKey);
@@ -1113,6 +1277,119 @@ public final class ContentAssistPopupSync
                 + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         // #endregion
         return selectedCalled;
+    }
+
+    /**
+     * Фаза A literal-open: только patch creator, без configureAndMakeVisible (fix10c).
+     *
+     * @return {@code true} если creator найден и применён на controller
+     */
+    public static boolean patchAssistBrowserCreatorOnly(ContentAssistant assistant,
+        SourceViewer viewer)
+    {
+        boolean creatorPatched = applyBrowserCreatorPatch(assistant, viewer);
+        logLiteralBrowserPhase("patchBeforeRecompute", creatorPatched, //$NON-NLS-1$
+            hasAssistBrowserControl(assistant), false, false);
+        return creatorPatched;
+    }
+
+    /**
+     * Фаза B literal-open: plain → browser перед pin (fix10c).
+     *
+     * @return {@code true} если browser control присутствует после migrate
+     */
+    public static boolean migrateLiteralSidePanelToBrowser(ContentAssistant assistant,
+        SourceViewer viewer)
+    {
+        if (assistant == null)
+            return false;
+        boolean creatorPatched = applyBrowserCreatorPatch(assistant, viewer);
+        boolean hasBrowser = hasAssistBrowserControl(assistant);
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        if (!hasBrowser && (reloader == null || !reloader.isLiteralOpenSetupPhase()))
+        {
+            ensureAssistBrowserCreatorOnController(assistant, viewer);
+            hasBrowser = hasAssistBrowserControl(assistant);
+        }
+        logLiteralBrowserPhase("migrateBeforePin", creatorPatched, hasBrowser, false, false); //$NON-NLS-1$
+        return hasBrowser;
+    }
+
+    /**
+     * Визуальный plain → browser после завершения literal setup (fix10f).
+     */
+    public static void finishLiteralBrowserVisualRefresh(ContentAssistant assistant,
+        SourceViewer viewer)
+    {
+        if (assistant == null || hasAssistBrowserControl(assistant))
+            return;
+        applyBrowserCreatorPatch(assistant, viewer);
+        recreateAssistBrowserSidePanelIfNeeded(assistant, viewer);
+    }
+
+    private static void logLiteralCreatorResolve(String winner, boolean cold, boolean creatorOk)
+    {
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        int gen = reloader != null ? reloader.getLiteralOpenGen() : -1;
+        long ms = reloader != null ? reloader.msSinceLiteralOpen() : -1;
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H34", "literalCreatorResolve", winner != null ? winner : "none", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"gen\":" + gen //$NON-NLS-1$
+                + ",\"msSinceOpen\":" + ms //$NON-NLS-1$
+                + ",\"cold\":" + cold //$NON-NLS-1$
+                + ",\"creatorOk\":" + creatorOk //$NON-NLS-1$
+                + ",\"winner\":\"" + ContentAssistDebug.jsonEscapeForLog( //$NON-NLS-1$
+                    winner != null ? winner : "none") //$NON-NLS-1$
+                + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+    }
+
+    private static boolean applyBrowserCreatorPatch(ContentAssistant assistant,
+        SourceViewer viewer)
+    {
+        if (assistant == null)
+            return false;
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        IInformationControlCreator creator = null;
+        String winner = null;
+        boolean cold = false;
+        try
+        {
+            BslCompletionSideHintResolver.AssistBrowserCreatorTrace trace =
+                BslCompletionSideHintResolver.traceAssistBrowserCreatorResolution(
+                    assistant, viewer, reloader);
+            creator = trace.creator;
+            winner = trace.winner;
+        }
+        catch (Exception e)
+        {
+            creator = BslCompletionSideHintResolver.resolveAssistBrowserCreatorChain(
+                assistant, viewer, reloader);
+            if (creator != null)
+                winner = "fallback"; //$NON-NLS-1$
+        }
+        if (creator == null && reloader != null)
+        {
+            creator = reloader.getAssistBrowserCreator();
+            if (creator != null)
+                winner = "cachedReloader"; //$NON-NLS-1$
+        }
+        if (creator == null && reloader != null)
+        {
+            creator = reloader.resolveAssistBrowserCreatorForLiteral();
+            if (creator != null)
+            {
+                winner = "coldLiteral"; //$NON-NLS-1$
+                cold = true;
+            }
+        }
+        logLiteralCreatorResolve(winner, cold, creator != null);
+        if (creator != null && reloader != null)
+            reloader.rememberAssistBrowserCreator(creator);
+        if (creator == null)
+            return false;
+        return patchCreatorOnAdditionalInfoController(
+            resolveAdditionalInfoController(assistant), creator);
     }
 
     /**
@@ -1165,14 +1442,34 @@ public final class ContentAssistPopupSync
         // #endregion
         IInformationControlCreator creator = trace.creator;
         boolean creatorResolved = creator != null;
+        if (!creatorResolved && reloader != null)
+        {
+            creator = reloader.getAssistBrowserCreator();
+            if (creator != null)
+            {
+                creatorResolved = true;
+                trace.winner = "cachedReloader"; //$NON-NLS-1$
+            }
+        }
+        if (!creatorResolved && reloader != null)
+        {
+            creator = reloader.resolveAssistBrowserCreatorForLiteral();
+            if (creator != null)
+            {
+                creatorResolved = true;
+                trace.winner = "coldLiteral"; //$NON-NLS-1$
+                logLiteralCreatorResolve(trace.winner, true, true);
+            }
+        }
         if (creator != null && reloader != null)
             reloader.rememberAssistBrowserCreator(creator);
         boolean creatorPatched = false;
         if (creator != null)
             creatorPatched = patchCreatorOnAdditionalInfoController(
                 resolveAdditionalInfoController(assistant), creator);
-        boolean hasBrowserAfterRefresh = false;
-        if (creatorPatched)
+        boolean hasBrowserAfterRefresh = hasAssistBrowserControl(assistant);
+        boolean deferVisualRefresh = reloader != null && reloader.isLiteralOpenSetupPhase();
+        if (creatorPatched && !hasBrowserAfterRefresh && !deferVisualRefresh)
         {
             try
             {
@@ -1185,7 +1482,10 @@ public final class ContentAssistPopupSync
                         Object shell = fProposalShellField.get(popup);
                         if (shell instanceof org.eclipse.swt.widgets.Shell s
                             && !s.isDisposed() && s.isVisible())
+                        {
+                            logSidePanelRefresh("configureAndMakeVisible"); //$NON-NLS-1$
                             configureAndMakeVisibleMethod.invoke(popup);
+                        }
                         else
                             refreshAdditionalInfo(assistant);
                     }
@@ -1286,6 +1586,7 @@ public final class ContentAssistPopupSync
     {
         if (assistant == null || hasAssistBrowserControl(assistant))
             return hasAssistBrowserControl(assistant);
+        applyBrowserCreatorPatch(assistant, viewer);
         Object controller = resolveAdditionalInfoController(assistant);
         if (controller == null)
             return false;
@@ -1297,6 +1598,7 @@ public final class ContentAssistPopupSync
         {
             // refresh ниже
         }
+        logSidePanelRefresh("recreateBrowser"); //$NON-NLS-1$
         try
         {
             Object popup = getPopup(assistant);
@@ -1304,7 +1606,10 @@ public final class ContentAssistPopupSync
             {
                 initPopupReflection(popup);
                 if (configureAndMakeVisibleMethod != null)
+                {
+                    logSidePanelRefresh("configureAndMakeVisible"); //$NON-NLS-1$
                     configureAndMakeVisibleMethod.invoke(popup);
+                }
                 else
                     refreshAdditionalInfo(assistant);
             }
@@ -1347,11 +1652,28 @@ public final class ContentAssistPopupSync
     {
         if (assistant == null || displayHtml == null || displayHtml.isEmpty())
             return false;
-        IXtextBrowserInformationControl browser = resolveVisibleBrowserControl(assistant);
-        if (browser != null && IrBslHoverHtml.applyHtmlToControl(browser, displayHtml))
+        String digest = htmlDigest(displayHtml);
+        String prevDigest = LAST_APPLIED_HTML_DIGEST.get(assistant);
+        if (digest != null && !digest.isEmpty() && digest.equals(prevDigest))
+        {
+            logBrowserContentLoad("htmlApply", true); //$NON-NLS-1$
             return true;
-        IInformationControl control = resolveAnyInformationControl(assistant);
-        return control != null && IrBslHoverHtml.applyHtmlToControl(control, displayHtml);
+        }
+        IXtextBrowserInformationControl browser = resolveVisibleBrowserControl(assistant);
+        boolean applied = false;
+        if (browser != null)
+            applied = IrBslHoverHtml.applyHtmlToControl(browser, displayHtml);
+        if (!applied)
+        {
+            IInformationControl control = resolveAnyInformationControl(assistant);
+            applied = control != null && IrBslHoverHtml.applyHtmlToControl(control, displayHtml);
+        }
+        if (applied && digest != null && !digest.isEmpty())
+        {
+            LAST_APPLIED_HTML_DIGEST.put(assistant, digest);
+            logBrowserContentLoad("htmlApply", false); //$NON-NLS-1$
+        }
+        return applied;
     }
 
     private static ICompletionProposal resolveWrappedProposalForIr(
@@ -2128,6 +2450,9 @@ public final class ContentAssistPopupSync
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
+        final int applyGen = HTML_APPLY_SEQ.incrementAndGet();
+        HTML_APPLY_GEN.put(assistant, applyGen);
+        logSidePanelRefresh("htmlApplyStart"); //$NON-NLS-1$
         final int maxAttempts = extendedRetry ? 12 : 8;
         final int delayMs = extendedRetry ? 50 : 40;
         final int[] attempts = {0};
@@ -2137,7 +2462,15 @@ public final class ContentAssistPopupSync
             {
                 if (display.isDisposed() || assistant == null)
                     return;
+                Integer currentGen = HTML_APPLY_GEN.get(assistant);
+                if (currentGen == null || currentGen.intValue() != applyGen)
+                    return;
                 boolean applied = tryApplyHtmlToAssistControl(assistant, displayHtml);
+                String digest = htmlDigest(displayHtml);
+                String prevDigest = LAST_APPLIED_HTML_DIGEST.get(assistant);
+                boolean skippedDuplicate = digest != null && !digest.isEmpty()
+                    && digest.equals(prevDigest);
+                logHtmlApplyPollAttempt(attempts[0], applied, skippedDuplicate);
                 IInformationControl anyControl = resolveAnyInformationControl(assistant);
                 boolean hasBrowser = anyControl != null
                     && IrBslHoverHtml.findControlBrowser(anyControl) != null;
@@ -2149,6 +2482,7 @@ public final class ContentAssistPopupSync
                 }
                 if (extendedRetry)
                 {
+                    logSidePanelRefresh("htmlApplyDone"); //$NON-NLS-1$
                     // #region agent log
                     ContentAssistDebug.debugModeLog("H17", "scheduleAssistBrowserHtmlApply", "done", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                         "{\"applied\":" + applied //$NON-NLS-1$

@@ -710,9 +710,19 @@ public class SmartCompletionProposal implements
         int caret = SmartContentAssistProcessor.resolveSessionCaret(assistant, viewer);
         boolean inLiteral = viewer != null && caret >= 0
             && SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret);
+        if (inLiteral && reloader.isLiteralOpenSetupPhase())
+        {
+            ContentAssistPopupSync.logLiteralSideHintSuppressed(fromSelectedActivation,
+                "setupPhase"); //$NON-NLS-1$
+            return false;
+        }
+        if (fromSelectedActivation && inLiteral && reloader.isLiteralFinishPinPending())
+            return false;
         boolean cachedCreatorBefore = reloader.getAssistBrowserCreator() != null;
         reloader.noteActiveIrDisplayKey(cacheKey);
-        boolean pinned = ContentAssistPopupSync.pinIrSideHint(assistant, ir, html);
+        boolean pinned = inLiteral
+            ? ContentAssistPopupSync.pinIrSideHint(assistant, ir, html, false)
+            : ContentAssistPopupSync.pinIrSideHint(assistant, ir, html);
         if (pinned)
             reloader.markIrSideHintPublished(cacheKey);
         else if (!reloader.isIrSideHintPublishedForKey(cacheKey))
