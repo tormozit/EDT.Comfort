@@ -21,8 +21,6 @@ public final class ContentAssistPopupUi
     private static final String BAR_DATA_KEY = FILTER_BAR_DATA_KEY;
     private static final String TOGGLE_DATA_KEY = "tormozit.filterToggleButton"; //$NON-NLS-1$
     private static final String CONTEXT_LABEL_DATA_KEY = "tormozit.contextTypeLabel"; //$NON-NLS-1$
-    private static final String LITERAL_FILTER_TOOLTIP =
-        "В строковом литерале используется штатная фильтрация EDT"; //$NON-NLS-1$
     /** Не реагировать на {@code setSelection} при программной синхронизации с Ctrl+Space. */
     private static boolean suppressToggleSelection;
     private static int cachedContextLabelDot = -1;
@@ -308,14 +306,13 @@ public final class ContentAssistPopupUi
             irConnected = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(editor, viewer)
                 != null;
         }
-        boolean enabled = !inLiteral || irConnected;
-        toggle.setEnabled(enabled);
-        toggle.setToolTipText(inLiteral && !irConnected ? LITERAL_FILTER_TOOLTIP : null);
+        toggle.setEnabled(true);
+        toggle.setToolTipText(null);
         // #region agent log
         ContentAssistDebug.debugModeLog("H57", "applyFilterToggleAvailability", "state", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "{\"inLiteral\":" + inLiteral //$NON-NLS-1$
                 + ",\"irConnected\":" + irConnected //$NON-NLS-1$
-                + ",\"enabled\":" + enabled //$NON-NLS-1$
+                + ",\"enabled\":true" //$NON-NLS-1$
                 + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         // #endregion
     }

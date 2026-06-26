@@ -64,6 +64,10 @@ public final class ContentAssistPopupSync
     private static int lastSyncedIrMergeGen = -1;
     private static final ThreadLocal<Boolean> RECOMPUTE_GUARD =
         ThreadLocal.withInitial(() -> Boolean.FALSE);
+    /** fix12: session open literal no-IR — full smart recompute вместо literalStockOnly. */
+    private static final ThreadLocal<Boolean> FORCE_SMART_LITERAL_OPEN = new ThreadLocal<>();
+    /** H74/H75: sessionOpen | toggle | debounce */
+    private static final ThreadLocal<String> RECOMPUTE_TRIGGER = new ThreadLocal<>();
     private static final IdentityHashMap<Object, Listener> POPUP_SCROLL_LISTENERS =
         new IdentityHashMap<>();
     private static final IdentityHashMap<SourceViewer, PendingDebouncedFilter> PENDING_CARET_TASKS =
@@ -190,6 +194,100 @@ public final class ContentAssistPopupSync
 
     // ---- session start sync (popup may appear after assistSessionStarted) ----
 
+    static void beginSmartLiteralSessionOpen()
+    {
+        FORCE_SMART_LITERAL_OPEN.set(Boolean.TRUE);
+        RECOMPUTE_TRIGGER.set("sessionOpen"); //$NON-NLS-1$
+    }
+
+    static void beginRecomputeTrigger(String trigger)
+    {
+        if (trigger != null && !trigger.isEmpty())
+            RECOMPUTE_TRIGGER.set(trigger);
+    }
+
+    static String peekRecomputeTrigger()
+    {
+        String trigger = RECOMPUTE_TRIGGER.get();
+        return trigger != null ? trigger : "unknown"; //$NON-NLS-1$
+    }
+
+    private static void clearRecomputeContext()
+    {
+        FORCE_SMART_LITERAL_OPEN.remove();
+        RECOMPUTE_TRIGGER.remove();
+    }
+
+    private static boolean isLiteralIrExpected(SourceViewer viewer,
+                                               SmartContentAssistProcessor processor, int caret)
+    {
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        BslXtextEditor editor = reloader != null ? reloader.getBslEditor() : null;
+        return reloader != null && (
+            IrBslExpressionHtmlSupport.resolveIrSessionForAssist(editor, viewer) != null
+            || reloader.isManualIrAssistPending()
+            || reloader.isWordsTableReady()
+            || reloader.isWordsTableFetchInFlightForContext(caret)
+            || processor.isIrOnlyManualMode());
+    }
+
+    private static void logSessionPopupSync(String phase, boolean inLiteral, boolean irExpected,
+                                            int stableNAfterSeed, String filter,
+                                            boolean shouldRecompute, boolean forceSmartOpen,
+                                            String recomputeRoute)
+    {
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H73", "sessionPopupSync", phase, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"inLiteral\":" + inLiteral //$NON-NLS-1$
+                + ",\"irExpected\":" + irExpected //$NON-NLS-1$
+                + ",\"stableNAfterSeed\":" + stableNAfterSeed //$NON-NLS-1$
+                + ",\"filter\":\"" + ContentAssistDebug.jsonEscapeForLog( //$NON-NLS-1$
+                    filter != null ? filter : "") //$NON-NLS-1$
+                + "\",\"shouldRecompute\":" + shouldRecompute //$NON-NLS-1$
+                + ",\"forceSmartOpen\":" + forceSmartOpen //$NON-NLS-1$
+                + (recomputeRoute != null
+                    ? ",\"recomputeRoute\":\"" + recomputeRoute + "\"" : "") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + ",\"openGen\":" + ContentAssistSessionReloader.literalOpenGenForLog() //$NON-NLS-1$
+                + ",\"msSinceSessionStart\":" //$NON-NLS-1$
+                    + ContentAssistSessionReloader.msSinceLiteralSessionStartForLog()
+                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+    }
+
+    private static void logSmartApplyMarker(List<ICompletionProposal> displayList, int fullCount)
+    {
+        ICompletionProposal first = displayList != null && !displayList.isEmpty()
+            ? displayList.get(0) : null;
+        boolean smart = first instanceof SmartCompletionProposal;
+        String delegateClass = "null"; //$NON-NLS-1$
+        String firstKey = ""; //$NON-NLS-1$
+        if (first != null)
+        {
+            ICompletionProposal unwrapped = SmartContentAssistProcessor.unwrapProposal(first);
+            delegateClass = unwrapped.getClass().getSimpleName();
+            String display = unwrapped.getDisplayString();
+            if (display != null)
+            {
+                int colon = display.indexOf(':');
+                firstKey = colon > 0 ? display.substring(0, colon).trim() : display.trim();
+                if (firstKey.length() > 40)
+                    firstKey = firstKey.substring(0, 40);
+            }
+        }
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H74", "applyPopupListSync", "smartApply", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"trigger\":\"" + ContentAssistDebug.jsonEscapeForLog(peekRecomputeTrigger()) //$NON-NLS-1$
+                + "\",\"firstIsSmartProposal\":" + smart //$NON-NLS-1$
+                + ",\"firstDelegateClass\":\"" + ContentAssistDebug.jsonEscapeForLog(delegateClass) //$NON-NLS-1$
+                + "\",\"proposalCount\":" + fullCount //$NON-NLS-1$
+                + ",\"firstKey\":\"" + ContentAssistDebug.jsonEscapeForLog(firstKey) //$NON-NLS-1$
+                + "\",\"openGen\":" + ContentAssistSessionReloader.literalOpenGenForLog() //$NON-NLS-1$
+                + ",\"msSinceSessionStart\":" //$NON-NLS-1$
+                    + ContentAssistSessionReloader.msSinceLiteralSessionStartForLog()
+                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+    }
+
     /**
      * Синхронизация offset'ов popup, prepend filterRunnable и пересчёт списка.
      * Повторяется с задержкой: popup часто ещё null в {@code assistSessionStarted}.
@@ -228,20 +326,53 @@ public final class ContentAssistPopupSync
                     if (isPopupVisible(assistant))
                     {
                         IDocument doc = viewer.getDocument();
+                        boolean inLiteral = caret >= 0
+                            && SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret);
+                        int stableNAfterSeed = -1;
+                        if (inLiteral)
+                        {
+                            seedStableDelegateFromVisiblePopup(assistant, processor);
+                            stableNAfterSeed = processor.literalStableDelegateCount();
+                        }
                         if (caret >= 0)
                             SmartContentAssistProcessor.primeFilterTrackerOnly(viewer, caret);
-                        if (shouldRecomputePopupList(SmartFilterTracker.getCurrentFilter(),
-                            false, doc, caret))
+                        String filter = SmartFilterTracker.getCurrentFilter();
+                        boolean irExpected = inLiteral
+                            && isLiteralIrExpected(viewer, processor, caret);
+                        boolean forceSmartOpen = inLiteral && !irExpected;
+                        boolean shouldRecompute = shouldRecomputePopupList(filter, false, doc, caret);
+                        logSessionPopupSync("beforeRecompute", inLiteral, irExpected, //$NON-NLS-1$
+                            stableNAfterSeed, filter, shouldRecompute, forceSmartOpen, null);
+                        if (forceSmartOpen)
                         {
+                            beginSmartLiteralSessionOpen();
+                            if (recomputePopupList(assistant, viewer, processor, caret))
+                            {
+                                logSessionPopupSync("afterRecompute", inLiteral, irExpected, //$NON-NLS-1$
+                                    stableNAfterSeed, filter, true, true, "fullSmart"); //$NON-NLS-1$
+                                refreshAdditionalInfo(assistant);
+                                return;
+                            }
+                        }
+                        else if (shouldRecompute)
+                        {
+                            beginRecomputeTrigger(inLiteral ? "sessionOpen" : "debounce"); //$NON-NLS-1$ //$NON-NLS-2$
                             runStockFilterRunnable(assistant);
                             if (recomputePopupList(assistant, viewer, processor, caret))
                             {
+                                logSessionPopupSync("afterRecompute", inLiteral, irExpected, //$NON-NLS-1$
+                                    stableNAfterSeed, filter, true, false,
+                                    inLiteral && !irExpected ? "literalStockOnly" : "fullSmart"); //$NON-NLS-1$ //$NON-NLS-2$
                                 refreshAdditionalInfo(assistant);
                                 return;
                             }
                         }
                         else
+                        {
+                            logSessionPopupSync("skipped", inLiteral, irExpected, //$NON-NLS-1$
+                                stableNAfterSeed, filter, false, forceSmartOpen, "skipped"); //$NON-NLS-1$
                             return;
+                        }
                     }
                 }
                 catch (Exception e)
@@ -455,10 +586,13 @@ public final class ContentAssistPopupSync
                 || literalReloader.isWordsTableFetchInFlightForContext(caret)
                 || processor.isIrOnlyManualMode());
 
+            final boolean forceSmartLiteralOpen =
+                Boolean.TRUE.equals(FORCE_SMART_LITERAL_OPEN.get());
+            if (forceSmartLiteralOpen)
+                FORCE_SMART_LITERAL_OPEN.remove();
+
             if (inLiteralRecompute && !literalIrMerge && !literalIrExpected
-                && !(restoreAfterFilterToggle
-                    && (processor.hasIrProposalsForCurrentContext()
-                        || processor.isIrWordsResolvedForContext())))
+                && !restoreAfterFilterToggle && !forceSmartLiteralOpen)
             {
                 ContentAssistSessionReloader auditReloader =
                     ContentAssistSessionReloader.getActiveReloader();
@@ -466,19 +600,32 @@ public final class ContentAssistPopupSync
                     auditReloader != null ? auditReloader.getBslEditor() : null,
                     auditReloader != null ? auditReloader.getExpectedLiteralIrCount() : -1,
                     "literalStockOnly"); //$NON-NLS-1$
+                int tableRowsBefore = tableItemCount(popup);
+                int filteredBefore = filteredProposalCount(popup);
                 // #region agent log
                 ContentAssistDebug.debugModeLog("H56", "recomputePopupList", "toggleRecompute", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     "{\"stockOnly\":true,\"restoreAfterFilterToggle\":" + restoreAfterFilterToggle //$NON-NLS-1$ //$NON-NLS-2$
                         + ",\"literalIrMerge\":false" //$NON-NLS-1$
                         + ",\"smartEnabled\":" + SmartAssistFilterState.isSmartFilterEnabled() //$NON-NLS-1$
                         + ",\"hasIr\":" + processor.hasIrProposalsForCurrentContext() //$NON-NLS-1$
+                        + ",\"tableRowsBefore\":" + tableRowsBefore //$NON-NLS-1$
+                        + ",\"filteredNBefore\":" + filteredBefore //$NON-NLS-1$
                         + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
                 // #endregion
                 runStockFilterRunnable(assistant);
                 finishSyncCycle(popup);
+                int tableRowsAfter = tableItemCount(popup);
+                int filteredAfter = filteredProposalCount(popup);
                 // #region agent log
+                ContentAssistDebug.debugModeLog("H68", "recomputePopupList", "literalStockOnly", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"tableRowsBefore\":" + tableRowsBefore //$NON-NLS-1$
+                        + ",\"tableRowsAfter\":" + tableRowsAfter //$NON-NLS-1$
+                        + ",\"filteredNBefore\":" + filteredBefore //$NON-NLS-1$
+                        + ",\"filteredNAfter\":" + filteredAfter //$NON-NLS-1$
+                        + ",\"popupVisible\":" + isPopupVisible(assistant) //$NON-NLS-1$
+                        + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
                 ContentAssistDebug.agentLog("H2", "recomputePopupList", "literalStockOnly", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"runId\":\"post-fix\",\"tableRows\":" + tableItemCount(popup) + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"runId\":\"post-fix\",\"tableRows\":" + tableRowsAfter + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 // #endregion
                 return true;
             }
@@ -637,7 +784,13 @@ public final class ContentAssistPopupSync
                         + ",\"irOnly\":" + processor.isIrOnlyManualMode() //$NON-NLS-1$
                         + ",\"filter\":\"" + filterEsc + "\"" //$NON-NLS-1$ //$NON-NLS-2$
                         + ",\"proposalCount\":" + fullProposalCount //$NON-NLS-1$
-                        + ",\"tableRows\":" + tableItemCount(popup) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"tableRows\":" + tableItemCount(popup) //$NON-NLS-1$
+                        + ",\"trigger\":\"" + ContentAssistDebug.jsonEscapeForLog( //$NON-NLS-1$
+                            peekRecomputeTrigger()) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"openGen\":" + ContentAssistSessionReloader.literalOpenGenForLog() //$NON-NLS-1$
+                        + ",\"msSinceSessionStart\":" //$NON-NLS-1$
+                            + ContentAssistSessionReloader.msSinceLiteralSessionStartForLog()
+                        + ",\"forceSmartOpen\":" + forceSmartLiteralOpen + "}"); //$NON-NLS-1$ //$NON-NLS-2$
                 if (inLiteralRecompute)
                 {
                     ContentAssistSessionReloader auditReloader =
@@ -666,6 +819,7 @@ public final class ContentAssistPopupSync
             if (viewer != null && isPopupVisible(assistant))
                 ContentAssistPopupUi.updateContextTypeLabel(viewer);
             RECOMPUTE_GUARD.set(Boolean.FALSE);
+            clearRecomputeContext();
             ContentAssistSessionReloader.flushPendingPopupRefreshIfAny();
         }
     }
@@ -680,7 +834,11 @@ public final class ContentAssistPopupSync
                                            boolean deferRestoreUntilStockFilter) throws Exception
     {
         boolean restoreNow = restoreAfterFilterToggle && !deferRestoreUntilStockFilter;
-        setProposalsAndRestoreSelection(popup, displayList, false, saved, resetToFirst, restoreNow);
+        List<ICompletionProposal> listToApply = displayList;
+        if (processor != null && processor.isIrWordsResolvedForContext()
+            && processor.resolvedIrProposalCount() > 0)
+            listToApply = SmartContentAssistProcessor.stripEmptyPlaceholderList(displayList);
+        setProposalsAndRestoreSelection(popup, listToApply, false, saved, resetToFirst, restoreNow);
 
         List<ICompletionProposal> applied = (List<ICompletionProposal>)
             fFilteredProposalsField.get(popup);
@@ -690,14 +848,20 @@ public final class ContentAssistPopupSync
         installPopupScrollWatcher(popup, assistant, viewer, processor);
 
         int tableRows = tableItemCount(popup);
-        logSyncResult(fullCount, displayList.size(), tableRows,
+        logSyncResult(fullCount, listToApply.size(), tableRows,
             SmartFilterTracker.getCurrentFilter(), resetToFirst);
+        logSmartApplyMarker(listToApply, fullCount);
 
-        if (tableRows >= 0 && tableRows != displayList.size() && !displayList.isEmpty())
-            forceTableRefresh(popup, displayList, saved, resetToFirst, restoreNow);
+        if (tableRows >= 0 && tableRows != listToApply.size() && !listToApply.isEmpty())
+            forceTableRefresh(popup, listToApply, saved, resetToFirst, restoreNow);
 
         if (runStockFilterAfter)
+        {
             runStockFilterRunnable(assistant);
+            if (processor != null && processor.isIrWordsResolvedForContext()
+                && processor.resolvedIrProposalCount() > 0)
+                purgeEmptyPlaceholderFromPopup(popup, listToApply, saved, resetToFirst, restoreNow);
+        }
 
         if (deferRestoreUntilStockFilter && restoreAfterFilterToggle)
         {
@@ -708,6 +872,38 @@ public final class ContentAssistPopupSync
             popup, assistant, viewer, processor);
         logPostRecomputeSidePanelIfLiteralIr(popup, assistant, viewer, processor, fullCount,
             tableRows, selectionNotifyCalled);
+    }
+
+    /** После stock filter: убрать JFace EmptyProposal, если в popup есть элементы ИР. */
+    private static void purgeEmptyPlaceholderFromPopup(Object popup,
+                                                       List<ICompletionProposal> fallbackList,
+                                                       SavedSelection saved, boolean resetToFirst,
+                                                       boolean restoreNow) throws Exception
+    {
+        if (popup == null || fFilteredProposalsField == null)
+            return;
+        List<ICompletionProposal> filtered =
+            (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+        if (filtered == null || filtered.isEmpty())
+            return;
+        boolean hasIr = false;
+        boolean hasEmpty = false;
+        for (ICompletionProposal p : filtered)
+        {
+            if (SmartContentAssistProcessor.unwrapProposal(p) instanceof IrCompletionProposal)
+                hasIr = true;
+            if (SmartContentAssistProcessor.isEmptyPlaceholderProposal(p))
+                hasEmpty = true;
+        }
+        if (!hasIr || !hasEmpty)
+            return;
+        List<ICompletionProposal> cleaned =
+            SmartContentAssistProcessor.stripEmptyPlaceholderList(filtered);
+        if (cleaned.size() == filtered.size())
+            return;
+        setProposalsAndRestoreSelection(popup, cleaned, false, saved, resetToFirst, restoreNow);
+        if (fComputedProposalsField != null)
+            fComputedProposalsField.set(popup, cleaned);
     }
 
     private static void runWithPopupRedrawSuppressed(Object popup, Runnable task)
@@ -776,7 +972,10 @@ public final class ContentAssistPopupSync
                 {
                     runStockFilterRunnable(assistant);
                     if (SmartAssistFilterState.isSmartFilterEnabled())
+                    {
+                        beginRecomputeTrigger("debounce"); //$NON-NLS-1$
                         recomputePopupList(assistant, viewer, processor);
+                    }
                 }
                 else
                     runStockFilterRunnable(assistant);
@@ -885,7 +1084,10 @@ public final class ContentAssistPopupSync
             processor.scheduleLoadFullListCache(viewer);
         }
         if (needRecompute)
+        {
+            beginRecomputeTrigger("debounce"); //$NON-NLS-1$
             recomputePopupList(assistant, viewer, processor);
+        }
     }
 
     /** Логирует результат синхронизации таблицы. */
@@ -979,6 +1181,62 @@ public final class ContentAssistPopupSync
         {
             return -1;
         }
+    }
+
+    /** Размер {@code fFilteredProposals} popup (диагностика H65–H69). */
+    public static int filteredProposalCountForAssistant(ContentAssistant assistant)
+    {
+        if (assistant == null)
+            return -1;
+        try
+        {
+            Object popup = getPopup(assistant);
+            return popup != null ? filteredProposalCount(popup) : -1;
+        }
+        catch (Exception ignored)
+        {
+            return -1;
+        }
+    }
+
+    private static int filteredProposalCount(Object popup)
+    {
+        try
+        {
+            if (popup == null || fFilteredProposalsField == null)
+                return -1;
+            List<ICompletionProposal> list =
+                (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+            return list != null ? list.size() : -1;
+        }
+        catch (Exception ignored)
+        {
+            return -1;
+        }
+    }
+
+    /** Заполнить stable/delegate cache из текущего popup (literal без ИР, fix11). */
+    static void seedStableDelegateFromVisiblePopup(ContentAssistant assistant,
+                                                   SmartContentAssistProcessor processor)
+    {
+        if (assistant == null || processor == null || !isPopupVisible(assistant))
+            return;
+        try
+        {
+            Object popup = getPopup(assistant);
+            if (popup == null)
+                return;
+            initPopupReflection(popup);
+            if (fFilteredProposalsField == null)
+                return;
+            List<ICompletionProposal> list =
+                (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+            if (list == null || list.isEmpty())
+                return;
+            processor.absorbStableFromPopupProposals(
+                list.toArray(new ICompletionProposal[list.size()]));
+        }
+        catch (Exception ignored) {}
     }
 
     static void logSidePanelRefresh(String op)
@@ -2416,7 +2674,10 @@ public final class ContentAssistPopupSync
                 {
                     runStockFilterRunnable(assistant);
                     if (SmartAssistFilterState.isSmartFilterEnabled())
+                    {
+                        beginRecomputeTrigger("debounce"); //$NON-NLS-1$
                         recomputePopupList(assistant, viewer, processor);
+                    }
                 }
                 else
                     runStockFilterRunnable(assistant);
@@ -2479,10 +2740,32 @@ public final class ContentAssistPopupSync
             if (original == null)
                 return;
             initPopupReflection(popup);
+            String filterPrefix = SmartFilterTracker.getCurrentFilter();
+            int tableBefore = tableItemCount(popup);
+            int filteredBefore = filteredProposalCount(popup);
+            boolean popupVisibleBefore = isPopupVisible(assistant);
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H67", "runStockFilterRunnable", "before", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"tableRows\":" + tableBefore //$NON-NLS-1$
+                    + ",\"filteredN\":" + filteredBefore //$NON-NLS-1$
+                    + ",\"popupVisible\":" + popupVisibleBefore //$NON-NLS-1$
+                    + ",\"smartEnabled\":" + SmartAssistFilterState.isSmartFilterEnabled() //$NON-NLS-1$
+                    + ",\"filterPrefix\":\"" + ContentAssistDebug.jsonEscapeForLog( //$NON-NLS-1$
+                        filterPrefix != null ? filterPrefix : "") //$NON-NLS-1$
+                    + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
             ensureFilterPending(popup);
             original.run();
             if (!SmartAssistFilterState.isSmartFilterEnabled())
                 applyPrefixSelectionIfNeeded(assistant);
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H67", "runStockFilterRunnable", "after", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"tableRows\":" + tableItemCount(popup) //$NON-NLS-1$
+                    + ",\"filteredN\":" + filteredProposalCount(popup) //$NON-NLS-1$
+                    + ",\"popupVisible\":" + isPopupVisible(assistant) //$NON-NLS-1$
+                    + ",\"smartEnabled\":" + SmartAssistFilterState.isSmartFilterEnabled() //$NON-NLS-1$
+                    + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
         }
         catch (Exception e)
         {

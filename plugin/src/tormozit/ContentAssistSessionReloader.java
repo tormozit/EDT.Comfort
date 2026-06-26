@@ -47,6 +47,7 @@ public final class ContentAssistSessionReloader
         "org.eclipse.ui.edit.text.contentAssist.proposals"; //$NON-NLS-1$
 
     private static final ThreadLocal<Boolean> LITERAL_REPEAT_FROM_COMMAND = new ThreadLocal<>();
+    private static volatile long lastLiteralToggleMs;
     private static final AtomicInteger contentAssistCommandListenerRefs = new AtomicInteger();
     private static IExecutionListener contentAssistCommandListener;
 
@@ -247,6 +248,14 @@ public final class ContentAssistSessionReloader
                 boolean preserveWordsTable = caret >= 0 && wordsTableReady
                     && (caret == wordsTableCaret
                         || (manualIrAssistPending && wordsTableCaret == manualIrAssistCaret));
+                int openGen = -1;
+                if (inLiteral)
+                {
+                    if (literalOpenStartedAtMs < 0)
+                        openGen = beginLiteralOpenTracking();
+                    else
+                        openGen = literalOpenGen;
+                }
                 // #region agent log
                 ContentAssistDebug.debugModeLog("H9", "assistSessionStarted", "session", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     "{\"auto\":" + event.isAutoActivated + ",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
@@ -254,6 +263,7 @@ public final class ContentAssistSessionReloader
                         + ",\"pending\":" + manualIrAssistPending //$NON-NLS-1$
                         + ",\"irOnly\":" + processor.isIrOnlyManualMode() //$NON-NLS-1$
                         + ",\"preserveWordsTable\":" + preserveWordsTable //$NON-NLS-1$
+                        + ",\"openGen\":" + openGen //$NON-NLS-1$
                         + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
                 // #endregion
                 if (!preserveWordsTable)
@@ -352,7 +362,7 @@ public final class ContentAssistSessionReloader
                 if (Boolean.TRUE.equals(LITERAL_REPEAT_FROM_COMMAND.get()))
                     return;
                 if (!ComfortSettings.isReplaceListFiltersEnabled() || !popupVisible
-                    || !inLiteral || !irConnected)
+                    || !inLiteral)
                     return;
                 tryLiteralRepeatFilterToggle("assistSessionRestarted"); //$NON-NLS-1$
             }
@@ -389,6 +399,14 @@ public final class ContentAssistSessionReloader
                     "{\"manualAwait\":" + manualAwait //$NON-NLS-1$
                         + ",\"irOnly\":" + irOnly //$NON-NLS-1$
                         + ",\"popupVisible\":" + popupVisible //$NON-NLS-1$
+                        + ",\"inLiteral\":" + inLiteral //$NON-NLS-1$
+                        + ",\"caret\":" + endCaret //$NON-NLS-1$
+                        + ",\"smartEnabled\":" + SmartAssistFilterState.isSmartFilterEnabled() //$NON-NLS-1$
+                        + ",\"commandFlag\":" + Boolean.TRUE.equals(LITERAL_REPEAT_FROM_COMMAND.get()) //$NON-NLS-1$
+                        + ",\"tableRows\":" + ContentAssistPopupSync.tableItemCountForAssistant(assistant) //$NON-NLS-1$
+                        + ",\"filteredN\":" + ContentAssistPopupSync.filteredProposalCountForAssistant(assistant) //$NON-NLS-1$
+                        + ",\"msSinceLastToggle\":" + (lastLiteralToggleMs > 0 //$NON-NLS-1$
+                            ? System.currentTimeMillis() - lastLiteralToggleMs : -1) //$NON-NLS-1$
                         + ",\"manualDualPopupOpened\":" + manualDualPopupOpened //$NON-NLS-1$
                         + ",\"pending\":" + manualIrAssistPending //$NON-NLS-1$
                         + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -952,6 +970,20 @@ public final class ContentAssistSessionReloader
     int getLiteralOpenGen()
     {
         return literalOpenGen;
+    }
+
+    /** H76: openGen для NDJSON вне экземпляра reloader. */
+    public static int literalOpenGenForLog()
+    {
+        ContentAssistSessionReloader reloader = getActiveReloader();
+        return reloader != null ? reloader.getLiteralOpenGen() : -1;
+    }
+
+    /** H76: ms с начала literal open. */
+    public static long msSinceLiteralSessionStartForLog()
+    {
+        ContentAssistSessionReloader reloader = getActiveReloader();
+        return reloader != null ? reloader.msSinceLiteralOpen() : -1;
     }
 
     /** Ожидаемое число ИР-строк в literal popup (H37 audit). */
@@ -2051,14 +2083,32 @@ public final class ContentAssistSessionReloader
             ContentAssistPopupUi.syncFilterToggle(ca, viewer);
             if (ca != null && viewer != null && processor != null
                 && ContentAssistPopupSync.isPopupVisible(ca))
+            {
+                ContentAssistPopupSync.beginRecomputeTrigger("toggle"); //$NON-NLS-1$
                 ContentAssistPopupSync.recomputePopupList(ca, viewer, processor);
+            }
         });
     }
 
     /** literal repeat Ctrl+Space: compute без delegate (EDT nextMode). */
     public static boolean consumeLiteralRepeatFromCommand()
     {
-        if (!Boolean.TRUE.equals(LITERAL_REPEAT_FROM_COMMAND.get()))
+        boolean hadFlag = Boolean.TRUE.equals(LITERAL_REPEAT_FROM_COMMAND.get());
+        SmartContentAssistProcessor processor = ACTIVE_PROCESSOR.get();
+        // #region agent log
+        String dataJson = "{\"consumed\":" + hadFlag; //$NON-NLS-1$
+        if (processor != null)
+        {
+            dataJson += ",\"stableN\":" + processor.literalStableDelegateCount() //$NON-NLS-1$
+                + ",\"fullListN\":" + processor.diagFullListCacheCount(); //$NON-NLS-1$
+        }
+        else
+            dataJson += ",\"processorNull\":true"; //$NON-NLS-1$
+        dataJson += ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"; //$NON-NLS-1$ //$NON-NLS-2$
+        ContentAssistDebug.debugModeLog("H66", "consumeLiteralRepeatFromCommand", //$NON-NLS-1$ //$NON-NLS-2$
+            hadFlag ? "consumed" : "miss", dataJson); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+        if (!hadFlag)
             return false;
         LITERAL_REPEAT_FROM_COMMAND.remove();
         return true;
@@ -2095,11 +2145,17 @@ public final class ContentAssistSessionReloader
                 @Override
                 public void postExecuteFailure(String commandId, ExecutionException exception)
                 {
+                    if (!CONTENT_ASSIST_PROPOSALS_COMMAND.equals(commandId))
+                        return;
+                    logContentAssistCommandPost("failure", null, exception); //$NON-NLS-1$
                 }
 
                 @Override
                 public void postExecuteSuccess(String commandId, Object returnValue)
                 {
+                    if (!CONTENT_ASSIST_PROPOSALS_COMMAND.equals(commandId))
+                        return;
+                    logContentAssistCommandPost("success", returnValue, null); //$NON-NLS-1$
                 }
             };
             commandService.addExecutionListener(contentAssistCommandListener);
@@ -2152,19 +2208,63 @@ public final class ContentAssistSessionReloader
         if (caret < 0
             || !SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret))
             return false;
-        if (IrBslExpressionHtmlSupport.resolveIrSessionForAssist(bslEditor, viewer) == null)
-            return false;
+        boolean irConnected = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(
+            bslEditor, viewer) != null;
+        int tableRowsBefore = ContentAssistPopupSync.tableItemCountForAssistant(assistant);
         // #region agent log
         ContentAssistDebug.debugModeLog("H56", "literalRepeatToggle", source, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "{\"caret\":" + caret //$NON-NLS-1$
+                + ",\"irConnected\":" + irConnected //$NON-NLS-1$
                 + ",\"smartBefore\":" + SmartAssistFilterState.isSmartFilterEnabled() //$NON-NLS-1$
+                + ",\"tableRowsBefore\":" + tableRowsBefore //$NON-NLS-1$
                 + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         // #endregion
         LITERAL_REPEAT_FROM_COMMAND.set(Boolean.TRUE);
+        lastLiteralToggleMs = System.currentTimeMillis();
+        ContentAssistPopupSync.seedStableDelegateFromVisiblePopup(assistant, processor);
         ContentAssistPopupSync.captureSelectionBeforeFilterToggle(assistant);
         SmartAssistFilterState.toggle();
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H65", "literalRepeatToggle", "flagSet", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"source\":\"" + ContentAssistDebug.jsonEscapeForLog(source) //$NON-NLS-1$
+                + "\",\"flagSet\":true" //$NON-NLS-1$
+                + ",\"stableN\":" + processor.literalStableDelegateCount() //$NON-NLS-1$
+                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
         scheduleFilterToggleUiSync();
         return true;
+    }
+
+    private static void logContentAssistCommandPost(String outcome, Object returnValue,
+                                                    ExecutionException exception)
+    {
+        ContentAssistant ca = ACTIVE_ASSISTANT.get();
+        SourceViewer viewer = ACTIVE_VIEWER.get();
+        int caret = ca != null && viewer != null
+            ? ContentAssistPopupSync.syncSessionOffsets(ca, viewer) : -1;
+        boolean inLiteral = caret >= 0 && viewer != null
+            && SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret);
+        ContentAssistSessionReloader reloader = getActiveReloader();
+        boolean irConnected = reloader != null && viewer != null
+            && IrBslExpressionHtmlSupport.resolveIrSessionForAssist(
+                reloader.getBslEditor(), viewer) != null;
+        String returnClass = returnValue != null ? returnValue.getClass().getSimpleName() : "null"; //$NON-NLS-1$
+        String err = exception != null && exception.getMessage() != null
+            ? ContentAssistDebug.jsonEscapeForLog(exception.getMessage()) : ""; //$NON-NLS-1$
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H65", "contentAssistCommand", outcome, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"popupVisible\":" + (ca != null && ContentAssistPopupSync.isPopupVisible(ca)) //$NON-NLS-1$
+                + ",\"inLiteral\":" + inLiteral //$NON-NLS-1$
+                + ",\"caret\":" + caret //$NON-NLS-1$
+                + ",\"irConnected\":" + irConnected //$NON-NLS-1$
+                + ",\"smartEnabled\":" + SmartAssistFilterState.isSmartFilterEnabled() //$NON-NLS-1$
+                + ",\"commandFlag\":" + Boolean.TRUE.equals(LITERAL_REPEAT_FROM_COMMAND.get()) //$NON-NLS-1$
+                + ",\"tableRows\":" + ContentAssistPopupSync.tableItemCountForAssistant(ca) //$NON-NLS-1$
+                + ",\"filteredN\":" + ContentAssistPopupSync.filteredProposalCountForAssistant(ca) //$NON-NLS-1$
+                + ",\"returnClass\":\"" + returnClass + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + (err.isEmpty() ? "" : ",\"error\":\"" + err + "\"") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
     }
 
     static CtrlSpaceFilter ctrlSpaceFilter(ContentAssistant assistant)
