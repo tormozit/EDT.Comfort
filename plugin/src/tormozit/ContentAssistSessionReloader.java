@@ -855,13 +855,24 @@ public final class ContentAssistSessionReloader
         ContentAssistSettings settings = ContentAssistSettings.getInstance();
         if (settings == null || !settings.isEnabled())
             return;
-        if (event == null || event.getText() == null || event.getText().length() != 1)
+        if (event == null || event.getText() == null)
             return;
-        char inserted = event.getText().charAt(0);
+        String text = event.getText();
+        if (text.isEmpty())
+            return;
+        char inserted = text.charAt(0);
         if (inserted == '\r' || inserted == '\n' || inserted == '\t')
             return;
         int insertOffset = event.getOffset();
-        int caretAfter = insertOffset + event.getText().length();
+        int caretAfter;
+        if ("\"\"".equals(text)) // вставлена пара двойных кавычек — каретка между ними
+        {
+            caretAfter = insertOffset + 1;
+        }
+        else
+        {
+            caretAfter = insertOffset + text.length();
+        }
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         boolean popupWasOpen = ContentAssistPopupSync.isPopupVisible(assistant);
         String branch = CompletionAutoOpenTrigger.diagnoseFetch(
@@ -1025,7 +1036,7 @@ public final class ContentAssistSessionReloader
         boolean irScheduled = false;
         if (session != null && !isWordsTableFetchInFlightForCaret(caret))
         {
-            irScheduled = scheduleWordsTablePreparation(caret, false);
+            irScheduled = scheduleWordsTablePreparation(caret, true);
             if (irScheduled)
                 completionAutoOpenIrScheduled = true;
         }

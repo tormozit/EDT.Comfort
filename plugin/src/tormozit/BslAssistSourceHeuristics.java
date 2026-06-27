@@ -81,8 +81,8 @@ public final class BslAssistSourceHeuristics
                 if (pendingOffset > lineStart)
                     sb.append(doc.get(lineStart, pendingOffset - lineStart));
                 sb.append(pendingChar);
-                if (pendingOffset < end)
-                    sb.append(doc.get(pendingOffset, end - pendingOffset));
+//                if (pendingOffset < end)
+//                    sb.append(doc.get(pendingOffset, end - pendingOffset));
                 return sb.toString();
             }
             return doc.get(lineStart, end - lineStart);

@@ -64,8 +64,7 @@ public final class CompletionAutoOpenTrigger
 
         if (insertedChar == '"')
         {
-            if (!BslAssistSourceHeuristics.lastTwoCharsNotEqual(
-                doc, caretAfter, insertedChar, insertOffset))
+            if (!BslAssistSourceHeuristics.lastTwoCharsNotEqual(doc, caretAfter, insertedChar, insertOffset))  
                 return null;
             if (BslAssistSourceHeuristics.isInsideStringLiteral(linePrefix))
                 return "quote"; //$NON-NLS-1$
