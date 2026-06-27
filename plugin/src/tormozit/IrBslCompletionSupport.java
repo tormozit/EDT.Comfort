@@ -200,15 +200,24 @@ public final class IrBslCompletionSupport
         public final ICompletionProposal[] proposals;
         public final int wordsTransferred;
         public final int wordsDisplayed;
+        /** {@code ЗаполнитьТаблицуСлов} вернул {@code Истина} (порт gate автооткрытия ИР). */
+        public final boolean autoOpenSuggested;
 
         Snapshot(int caret, String contextType, ICompletionProposal[] proposals,
             int wordsTransferred, int wordsDisplayed)
+        {
+            this(caret, contextType, proposals, wordsTransferred, wordsDisplayed, false);
+        }
+
+        Snapshot(int caret, String contextType, ICompletionProposal[] proposals,
+            int wordsTransferred, int wordsDisplayed, boolean autoOpenSuggested)
         {
             this.caret = caret;
             this.contextType = contextType != null ? contextType : ""; //$NON-NLS-1$
             this.proposals = proposals != null ? proposals : new ICompletionProposal[0];
             this.wordsTransferred = wordsTransferred;
             this.wordsDisplayed = wordsDisplayed;
+            this.autoOpenSuggested = autoOpenSuggested;
         }
     }
 
@@ -334,10 +343,15 @@ public final class IrBslCompletionSupport
 //        Функция ЗаполнитьТаблицуСлов(ТаблицаТиповКонтекста = Неопределено, Знач ПрименитьОжидаемыйТип = Истина, выхЕстьЛучшееСлово = Неопределено, Знач РазрешитьОткрытиеОкон = Истина,
 //            Знач Сортировать = Истина, Знач ДобавлятьНизкоВероятные = Ложь, Знач ОтделятьБольшиеНаборыСлов = Ложь, Знач СловоФильтр = Неопределено, Знач ЗапретГлобальногоКонтекста = Ложь,
 //            Знач ТипСловаФильтр = Неопределено, ИнлайнРежимДоступен = Ложь) Экспорт
-       boolean filled = ComBridge.toBoolean(session.invokeCodeEditorQuiet(
+        boolean autoOpenSuggested = ComBridge.toBoolean(session.invokeCodeEditorQuiet(
             "ЗаполнитьТаблицуСлов", typesTable, true, false, false, false, !autoInvoke, true)); //$NON-NLS-1$
         IrCompletionDebug.timing("Заполнение слов контекста", started); //$NON-NLS-1$
-        if (!filled)
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H77", "fetchCompletionSnapshot", "irFill", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"fillOk\":" + autoOpenSuggested + ",\"autoInvoke\":" + autoInvoke //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+        if (!autoOpenSuggested)
             return null;
 
         String contextType = ComBridge.toString(
@@ -383,7 +397,8 @@ public final class IrBslCompletionSupport
         session.pumpUserMessagesToUi();
 
         return new Snapshot(-1, contextType,
-            merged.toArray(new ICompletionProposal[merged.size()]), transferred, displayed);
+            merged.toArray(new ICompletionProposal[merged.size()]), transferred, displayed,
+            autoOpenSuggested);
     }
 
     private static void appendUniqueProposals(

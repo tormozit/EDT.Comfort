@@ -850,7 +850,13 @@ public final class ContentAssistPopupSync
                 ContentAssistPopupUi.updateContextTypeLabel(viewer);
             RECOMPUTE_GUARD.set(Boolean.FALSE);
             clearRecomputeContext();
-            ContentAssistSessionReloader.flushPendingPopupRefreshIfAny();
+            ContentAssistSessionReloader reloader =
+                ContentAssistSessionReloader.getActiveReloader();
+            if (reloader == null || !reloader.isLiteralOpenSetupPhase()
+                || !reloader.isPendingIrPopupRefresh())
+            {
+                ContentAssistSessionReloader.flushPendingPopupRefreshIfAny();
+            }
         }
     }
 
@@ -3799,8 +3805,8 @@ public final class ContentAssistPopupSync
         String display = p != null ? p.getDisplayString() : null;
         if (display == null || display.isEmpty())
             return false;
-        String name = BslCompletionSideHintResolver.extractProposalName(display);
-        if (name == null)
+        String name = SmartContentAssistProcessor.parseProposalListName(display);
+        if (name.isEmpty())
             return false;
         return name.length() >= prefix.length()
             && name.regionMatches(true, 0, prefix, 0, prefix.length());

@@ -59,7 +59,8 @@ public final class BslCompletionSideHintResolver
             return null;
         if (raw instanceof IrCompletionProposal ir)
             return ir.getWordValue();
-        return extractProposalName(raw.getDisplayString());
+        String name = SmartContentAssistProcessor.parseProposalListName(raw.getDisplayString());
+        return name.isEmpty() ? null : name;
     }
 
     /** Стабильный ключ кэша HTML/активации (не меняется при дорасчёте типа). */
@@ -738,17 +739,6 @@ public final class BslCompletionSideHintResolver
         return null;
     }
 
-    static String extractProposalName(String display)
-    {
-        if (display == null || display.isEmpty())
-            return null;
-        int parenIdx = display.indexOf('(');
-        String withoutParams = parenIdx >= 0 ? display.substring(0, parenIdx).trim() : display.trim();
-        int colonIdx = withoutParams.indexOf(':');
-        String name = colonIdx >= 0 ? withoutParams.substring(0, colonIdx).trim() : withoutParams;
-        return name.isEmpty() ? null : name;
-    }
-
     private static String resolveKindFromProposalEObject(ICompletionProposal raw)
     {
         if (!(raw instanceof ConfigurableCompletionProposal configurable))
@@ -779,8 +769,8 @@ public final class BslCompletionSideHintResolver
         if (!(raw instanceof ConfigurableCompletionProposal configurable))
             return null;
         String replacement = configurable.getReplacementString();
-        String name = extractProposalName(raw.getDisplayString());
-        if (replacement == null || name == null || name.isEmpty())
+        String name = SmartContentAssistProcessor.parseProposalListName(raw.getDisplayString());
+        if (replacement == null || name.isEmpty())
             return null;
         String trimmed = replacement.trim();
         if (trimmed.startsWith(name) && trimmed.length() > name.length())

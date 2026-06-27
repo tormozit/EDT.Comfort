@@ -83,7 +83,13 @@ public class SmartCompletionProposal implements
         }
         SmartCodeMatcher matcher = resolveHighlightMatcher();
         if (!matcher.isEmpty)
-            SmartMatchHighlight.applyRanges(result, matcher.getHighlightRanges(result.getString()));
+        {
+            String display = delegate.getDisplayString();
+            String nameOnly = SmartContentAssistProcessor.parseProposalListName(
+                display != null ? display : ""); //$NON-NLS-1$
+            if (!nameOnly.isEmpty())
+                SmartMatchHighlight.applyRanges(result, matcher.getHighlightRanges(nameOnly));
+        }
         return result;
     }
 

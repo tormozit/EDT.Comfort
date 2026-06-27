@@ -69,6 +69,8 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     /** Последний список в порядке delegate при smart-фильтре и пустом префиксе. */
     private ICompletionProposal[] lastStableDelegateList = EMPTY;
     private Runnable pendingEagerLoadTask;
+    /** Отмена устаревших {@link #scheduleEagerFullListLoad}. */
+    private int eagerLoadCancelGen;
     private boolean fullListReady = false;
     /** Полный список delegate загружен; иначе только interim с каретки. */
     private boolean fullListComplete = false;
@@ -182,6 +184,36 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         return after.isEmpty() ? null : after;
     }
 
+    /**
+     * Имя элемента из штатного display assist EDT: {@code Имя(…) : <Тип> ~ Родитель}.
+     * Для smart-фильтра, dedup и прокрутки списка — без типа и квалификатора родителя.
+     */
+    public static String parseProposalListName(String display)
+    {
+        if (display == null || display.isEmpty())
+            return ""; //$NON-NLS-1$
+        int parenIdx = display.indexOf('(');
+        String withoutParams = parenIdx >= 0 ? display.substring(0, parenIdx).trim() : display.trim();
+        int ownerSep = withoutParams.indexOf(" ~ "); //$NON-NLS-1$
+        if (ownerSep >= 0)
+            withoutParams = withoutParams.substring(0, ownerSep).trim();
+        int colonIdx = withoutParams.indexOf(':');
+        String name = colonIdx >= 0 ? withoutParams.substring(0, colonIdx).trim() : withoutParams;
+        return name.isEmpty() ? "" : name; //$NON-NLS-1$
+    }
+
+    static String filterMatchName(ICompletionProposal proposal)
+    {
+        ICompletionProposal raw = unwrapProposal(proposal);
+        if (raw instanceof IrCompletionProposal ir)
+        {
+            String word = ir.getWordValue();
+            if (word != null && !word.isEmpty())
+                return word;
+        }
+        return parseProposalListName(displayString(raw));
+    }
+
     public void invalidateCache()
     {
         fullListReady = false;
@@ -194,7 +226,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         memberAccessReloadScheduledSeq = -1;
         resetMemberStockFullList();
         cancelIdleFullListLoad();
-        pendingEagerLoadTask = null;
+        cancelEagerFullListLoad();
         lastTrackedFilter = ""; //$NON-NLS-1$
         terminalEmptyMemberAccess = false;
         cachedNonObjectDot = -1;
@@ -281,6 +313,19 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     boolean isIrWordsResolvedForContext()
     {
         return irWordsResolved && irSnapshotContextKey == fullListContextKey;
+    }
+
+    /** ИР snapshot актуален для caret в том же literal (префикс меняется, ctxKey — нет). */
+    boolean isIrWordsResolvedForLiteralCaret(ITextViewer viewer, int caret)
+    {
+        if (!isIrWordsResolvedForContext())
+            return false;
+        if (viewer == null || caret < 0)
+            return false;
+        IDocument doc = viewer.getDocument();
+        if (doc == null)
+            return false;
+        return computeFullListContextKey(doc, caret) == fullListContextKey;
     }
 
     /** Число ИР-предложений в текущем контексте (H37 audit). */
@@ -493,7 +538,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             return;
         irSnapshotCache = new IrBslCompletionSupport.Snapshot(
             snapshot.caret, snapshot.contextType, snapshot.proposals,
-            snapshot.wordsTransferred, snapshot.wordsDisplayed);
+            snapshot.wordsTransferred, snapshot.wordsDisplayed, snapshot.autoOpenSuggested);
         irSnapshotCacheContextKey = fullListContextKey;
         irSnapshotCacheDocStamp = doc instanceof IDocumentExtension4 ext4
             ? ext4.getModificationStamp() : -1L;
@@ -902,6 +947,9 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         }
         previous = lastTrackedFilter;
 
+        if (!next.isEmpty() || !previous.equals(next))
+            cancelEagerFullListLoad();
+
         int dot = doc != null && caret >= 0
             ? ReceiverTypeLabel.findMemberAccessDot(doc, caret) : -1;
         if (!previous.isEmpty() && next.isEmpty() && dot >= 0)
@@ -967,6 +1015,16 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             return;
         if (!SmartAssistFilterState.isSmartFilterEnabled())
             return;
+        String prefix = SmartFilterTracker.getCurrentFilter();
+        if (prefix != null && !prefix.isEmpty())
+        {
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H80", "scheduleEagerFullListLoad", "skippedPrefix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"prefix\":\"" + ContentAssistDebug.jsonEscapeForLog(prefix) //$NON-NLS-1$
+                    + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return;
+        }
         org.eclipse.swt.widgets.Control widget = viewer.getTextWidget()
             instanceof org.eclipse.swt.widgets.Control
             ? (org.eclipse.swt.widgets.Control) viewer.getTextWidget()
@@ -980,15 +1038,37 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             return;
 
         final int contextKey = fullListContextKey;
+        final int cancelGen = eagerLoadCancelGen;
         pendingEagerLoadTask = () -> {
             pendingEagerLoadTask = null;
+            if (cancelGen != eagerLoadCancelGen)
+                return;
             if (widget.isDisposed() || fullListComplete || contextKey != fullListContextKey)
+                return;
+            String livePrefix = SmartFilterTracker.getCurrentFilter();
+            if (livePrefix != null && !livePrefix.isEmpty())
                 return;
             loadFullList(viewer, false);
             if (fullListReady)
-                ContentAssistSessionReloader.refreshPopupIfOpen();
+            {
+                livePrefix = SmartFilterTracker.getCurrentFilter();
+                if (livePrefix == null || livePrefix.isEmpty())
+                    ContentAssistSessionReloader.refreshPopupIfOpen();
+            }
         };
         display.asyncExec(pendingEagerLoadTask);
+    }
+
+    private void cancelEagerFullListLoad()
+    {
+        if (pendingEagerLoadTask == null && eagerLoadCancelGen == 0)
+            return;
+        eagerLoadCancelGen++;
+        pendingEagerLoadTask = null;
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H80", "cancelEagerFullListLoad", "eagerCancelled", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
     }
 
     /** Отложенная загрузка полного списка на UI-потоке (не в hot path ввода). */
@@ -1052,6 +1132,17 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             // #region agent log
             ContentAssistDebug.debugModeLog("H1", "computeCompletionProposals", "pendingEmpty", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 "{\"caret\":" + literalCaret + ",\"inLiteral\":" + inLiteral + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return EMPTY;
+        }
+        if (reloader != null && reloader.isCompletionAutoOpenAwaitingWords())
+        {
+            // #region agent log
+            ContentAssistDebug.logAutoOpen(reloader.peekCompletionAutoOpenActiveSeq(), "H70", //$NON-NLS-1$
+                "computeCompletionProposals", "autoOpenPendingEmpty", //$NON-NLS-1$ //$NON-NLS-2$
+                "{\"caret\":" + literalCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            ContentAssistDebug.debugModeLog("H70", "computeCompletionProposals", "autoOpenPendingEmpty", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"caret\":" + literalCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             // #endregion
             return EMPTY;
         }
@@ -1345,6 +1436,75 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         return result;
     }
 
+    /** Gate EDT для автооткрытия: непустой список предложений. */
+    public static boolean mayAutoOpenFromEdt(int proposalCount)
+    {
+        return proposalCount > 0;
+    }
+
+    /** Результат probe delegate для диагностики автооткрытия. */
+    public static final class ProbeResult
+    {
+        public final ICompletionProposal[] proposals;
+        public final int count;
+        public final int bestOffset;
+        private final String offsetsSummary;
+
+        ProbeResult(ICompletionProposal[] proposals, int bestOffset, String offsetsSummary)
+        {
+            this.proposals = proposals != null ? proposals : EMPTY;
+            this.count = this.proposals.length;
+            this.bestOffset = bestOffset;
+            this.offsetsSummary = offsetsSummary != null ? offsetsSummary : ""; //$NON-NLS-1$
+        }
+
+        public String offsetsSummary()
+        {
+            return offsetsSummary;
+        }
+    }
+
+    /** Синхронный probe delegate для race автооткрытия (не только literal). */
+    public ICompletionProposal[] probeDelegateForCaret(ITextViewer viewer, int caret)
+    {
+        return probeDelegateForCaretDiag(viewer, caret).proposals;
+    }
+
+    ProbeResult probeDelegateForCaretDiag(ITextViewer viewer, int caret)
+    {
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
+        java.util.LinkedHashSet<Integer> set = new java.util.LinkedHashSet<>();
+        addProbeOffset(set, caret);
+        int dot = ReceiverTypeLabel.findMemberAccessDot(doc, caret);
+        if (dot >= 0)
+            addProbeOffset(set, dot + 1);
+        if (assistant != null)
+        {
+            addProbeOffset(set, ContentAssistPopupSync.getInvocationOffset(assistant));
+            addProbeOffset(set, ContentAssistPopupSync.getFilterOffset(assistant));
+        }
+        ICompletionProposal[] best = EMPTY;
+        int bestOffset = caret;
+        StringBuilder offsetsSummary = new StringBuilder();
+        for (Integer off : set)
+        {
+            if (off == null || off < 0)
+                continue;
+            ICompletionProposal[] raw = delegate.computeCompletionProposals(viewer, off);
+            int count = raw != null ? raw.length : 0;
+            if (offsetsSummary.length() > 0)
+                offsetsSummary.append(',');
+            offsetsSummary.append(off).append(':').append(count);
+            if (count > best.length)
+            {
+                best = raw != null ? raw : EMPTY;
+                bestOffset = off;
+            }
+        }
+        return new ProbeResult(best, bestOffset, offsetsSummary.toString());
+    }
+
     private ICompletionProposal[] probeLiteralDelegateBest(ITextViewer viewer, int offset, int caret)
     {
         IDocument doc = viewer != null ? viewer.getDocument() : null;
@@ -1458,9 +1618,10 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
         if (reloader == null || !reloader.isWordsTableFetchInFlightForContext(caret))
             markDelegateSyncProbed();
-        rememberInterimDelegateList(raw);
-        absorbInterimIntoCache(viewer, caret, raw);
         ICompletionProposal[] filtered = filterAndSort(mergeIrForDisplay(raw), filter);
+        ICompletionProposal[] cacheSeed = !filter.isEmpty() && filtered.length > 0 ? filtered : raw;
+        rememberInterimDelegateList(cacheSeed);
+        absorbInterimIntoCache(viewer, caret, cacheSeed);
         if (filtered.length > 0)
         {
             debugResolveExit(doc, caret, filter, raw.length, false, "fetchFiltered", filtered); //$NON-NLS-1$
@@ -1570,8 +1731,8 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         String display = raw.getDisplayString();
         if (display == null || display.isEmpty())
             return false;
-        String name = BslCompletionSideHintResolver.extractProposalName(display);
-        if (name == null)
+        String name = parseProposalListName(display);
+        if (name.isEmpty())
             name = display.trim();
         return isEmptyPlaceholderDisplayName(name);
     }
@@ -1979,7 +2140,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         if (raw instanceof IrCompletionProposal ir)
             return IrBslCompletionSupport.normalizeFilterKey(ir.getFilterName());
         return IrBslCompletionSupport.normalizeFilterKey(
-            BslCompletionSideHintResolver.extractProposalName(raw.getDisplayString()));
+            parseProposalListName(raw.getDisplayString()));
     }
 
     static String dedupKeyForMerge(ICompletionProposal proposal)
@@ -2292,8 +2453,6 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                 "{\"caret\":" + caret + ",\"offset\":" + offset + ",\"inLiteral\":" + inLiteralValidate //$NON-NLS-1$ //$NON-NLS-2$
                     + ",\"smart\":" + SmartAssistFilterState.isSmartFilterEnabled() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         // #endregion
-        if (inLiteralValidate)
-            return matchesStockDelegateFilter(proposal, document, offset, event);
         if (!SmartAssistFilterState.isSmartFilterEnabled())
         {
             ICompletionProposal raw = unwrapProposal(proposal);
@@ -2431,6 +2590,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
     private void loadFullList(ITextViewer viewer, boolean forceDelegateReadOnly)
     {
+        long loadStarted = System.currentTimeMillis();
         int caret = resolveWidgetCaret(viewer);
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         int dot = ReceiverTypeLabel.findMemberAccessDot(doc, caret);
@@ -2462,6 +2622,13 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         ContentAssistDebug.log("loadFullList count=" + fullListCache.length //$NON-NLS-1$
             + " dot=" + dot + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
             + (forceDelegateReadOnly ? " readOnly" : "") + " complete"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H80", "loadFullList", "done", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"loadMs\":" + (System.currentTimeMillis() - loadStarted) //$NON-NLS-1$
+                + ",\"cacheN\":" + fullListCache.length //$NON-NLS-1$
+                + ",\"caret\":" + caret //$NON-NLS-1$
+                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
         if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             && shouldScheduleMemberReload(dot))
             scheduleMemberAccessReload(viewer, dot);
@@ -3163,10 +3330,13 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         String display = displayString(unwrapProposal(proposal));
         if (display == null || display.isEmpty())
             return 0;
-        int name = matcher.computeNamePremium(display);
-        if (name <= 0)
+        String name = filterMatchName(proposal);
+        if (name.isEmpty())
             return 0;
-        return name * NAME_WEIGHT + matcher.computeParamPremium(display) * PARAM_WEIGHT;
+        int nameScore = matcher.computeNamePremium(name);
+        if (nameScore <= 0)
+            return 0;
+        return nameScore * NAME_WEIGHT + matcher.computeParamPremium(display) * PARAM_WEIGHT;
     }
 
     static ICompletionProposal unwrapProposal(ICompletionProposal proposal)
@@ -3212,11 +3382,11 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     {
         if (matcher.isEmpty)
             return 1;
-        String display = displayString(unwrapProposal(proposal));
-        if (display == null || display.isEmpty())
+        String name = filterMatchName(proposal);
+        if (name.isEmpty())
             return 0;
-        int name = matcher.computeNamePremium(display);
-        return name <= 0 ? 0 : name * NAME_WEIGHT;
+        int nameScore = matcher.computeNamePremium(name);
+        return nameScore <= 0 ? 0 : nameScore * NAME_WEIGHT;
     }
 
     static int resolveNativePriority(ICompletionProposal proposal)

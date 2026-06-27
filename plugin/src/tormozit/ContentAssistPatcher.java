@@ -47,7 +47,7 @@ public final class ContentAssistPatcher
         }
 
         ((XtextContentAssistProcessor) xtext)
-            .setCompletionProposalAutoActivationCharacters(charset);
+            .setCompletionProposalAutoActivationCharacters(resolveAutoActivationCharset(charset));
 
         applyCommonAssistSettings(contentAssist, timeout);
 
@@ -63,7 +63,7 @@ public final class ContentAssistPatcher
             wrapper = (SmartContentAssistProcessor) current;
         else
         {
-            wrapper = new SmartContentAssistProcessor(xtext, charset);
+            wrapper = new SmartContentAssistProcessor(xtext, resolveAutoActivationCharset(charset));
             contentAssist.setContentAssistProcessor(wrapper, IDocument.DEFAULT_CONTENT_TYPE);
             forceReplaceProcessor(contentAssist, IDocument.DEFAULT_CONTENT_TYPE, wrapper);
         }
@@ -72,7 +72,25 @@ public final class ContentAssistPatcher
         ContentAssistSessionReloader.install(sourceViewer, contentAssist, wrapper, editor);
 
         ContentAssistDebug.log("applyPatch OK delegate=" + xtext.getClass().getSimpleName()); //$NON-NLS-1$
+        // #region agent log
+        ContentAssistSettings settings = ContentAssistSettings.getInstance();
+        boolean autoOpenEnabled = settings != null && settings.isEnabled();
+        ContentAssistDebug.debugModeLog("H79", "ContentAssistPatcher.applyPatch", "autoOpenReady", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"comfortFiltersOn\":" + ComfortSettings.isReplaceListFiltersEnabled() //$NON-NLS-1$
+                + ",\"autoOpenEnabled\":" + autoOpenEnabled //$NON-NLS-1$
+                + ",\"nativeCharsetEmpty\":" + (autoOpenEnabled && ComfortSettings.isReplaceListFiltersEnabled()) //$NON-NLS-1$
+                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
         return true;
+    }
+
+    private static String resolveAutoActivationCharset(String charset)
+    {
+        if (ComfortSettings.isReplaceListFiltersEnabled()
+            && ContentAssistSettings.getInstance() != null
+            && ContentAssistSettings.getInstance().isEnabled())
+            return ""; //$NON-NLS-1$
+        return charset;
     }
 
     private static void applyCommonAssistSettings(ContentAssistant contentAssist, int timeout)

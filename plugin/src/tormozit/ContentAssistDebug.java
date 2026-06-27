@@ -21,7 +21,7 @@ public final class ContentAssistDebug
     private static final Path DEBUG_MODE_LOG = Path.of("C:\\VC\\EDT.Comfort\\debug-c201d2.log"); //$NON-NLS-1$
     private static final String DEBUG_MODE_SESSION_ID = "c201d2"; //$NON-NLS-1$
     /** Маркер сборки для literal assist — сверять в debug-c201d2.log (H00/H0). */
-    public static final String LITERAL_ASSIST_BUILD = "20260626-fix14-diag"; //$NON-NLS-1$
+    public static final String LITERAL_ASSIST_BUILD = "20260627-literal-freeze2"; //$NON-NLS-1$
 
     private ContentAssistDebug() {}
 
@@ -31,6 +31,17 @@ public final class ContentAssistDebug
     {
         debugModeLog("H00", "ContentAssistDebug", "buildStamp", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "{\"build\":\"" + LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** NDJSON автооткрытия assist — dataJson дополняется build и autoOpenSeq. */
+    public static void logAutoOpen(int autoOpenSeq, String hypothesisId, String location,
+        String message, String dataJson)
+    {
+        String inner = dataJson != null && !dataJson.isEmpty() ? dataJson : "{}"; //$NON-NLS-1$
+        String trimmed = inner.endsWith("}") ? inner.substring(0, inner.length() - 1) : inner; //$NON-NLS-1$
+        String data = trimmed + ",\"autoOpenSeq\":" + autoOpenSeq //$NON-NLS-1$
+            + ",\"build\":\"" + LITERAL_ASSIST_BUILD + "\"}"; //$NON-NLS-1$ //$NON-NLS-2$
+        debugModeLog(hypothesisId, location, message, data);
     }
 
     /** NDJSON в debug-c201d2.log — отладка IR Ctrl+Space (без флажка логирования). */
