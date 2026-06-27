@@ -55,7 +55,6 @@ public final class ContentAssistSessionReloader
     private static volatile long lastLiteralToggleMs;
     private static final AtomicInteger contentAssistCommandListenerRefs = new AtomicInteger();
     private static IExecutionListener contentAssistCommandListener;
-
     private static final IdentityHashMap<SourceViewer, ContentAssistSessionReloader> INSTALLED =
         new IdentityHashMap<>();
 
@@ -1000,7 +999,7 @@ public final class ContentAssistSessionReloader
         completionAutoOpenEdtOpened = false;
         completionAutoOpenIrScheduled = false;
         completionAutoOpenAwaitingLogged = false;
-        ContentAssistPopupSync.ensureEmptyListAllowed(assistant, true);
+        ContentAssistPopupSync.ensureEmptyListAllowed(assistant, false);
         warmupAssistBrowserCreator(caret);
         processor.onAssistSessionContextReady(viewer, caret);
         SmartContentAssistProcessor.ProbeResult probe = processor.probeDelegateForCaretDiag(viewer, caret);
@@ -1063,10 +1062,14 @@ public final class ContentAssistSessionReloader
     private void openCompletionAutoEdtPopup(int expectedCaret, int autoOpenSeq)
     {
         SmartFilterTracker.setCurrentFilter(""); //$NON-NLS-1$
-        ContentAssistPopupSync.ensureEmptyListAllowed(assistant, true);
+        ContentAssistPopupSync.ensureEmptyListAllowed(assistant, false); // Скорее всего не имеет эффекта
         beginLiteralOpenTracking();
         preShowLiteralBrowserPatch(expectedCaret);
         boolean shown = ContentAssistPopupSync.showPossibleCompletions(assistant);
+        
+        IDtProject dtProject = Global.getDtProjectFromBslEditor(bslEditor);
+        if (dtProject == null || !IRApplication.hasConnectedSessionForKeys(dtProject))
+            return; // Иначе непустой список затирается пустым вероятно после фиктивного слияния с ИР 
         boolean popupVisible = shown && ContentAssistPopupSync.isPopupVisible(assistant);
         if (popupVisible && assistBrowserCreator == null)
         {
