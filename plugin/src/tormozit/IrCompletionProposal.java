@@ -9,10 +9,9 @@ import org.eclipse.jface.text.contentassist.ICompletionProposalExtension;
 import org.eclipse.jface.text.contentassist.ICompletionProposalExtension2;
 import org.eclipse.jface.text.contentassist.ICompletionProposalExtension3;
 import org.eclipse.jface.text.contentassist.IContextInformation;
+import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
-import org.eclipse.swt.custom.StyledText;
-import org.eclipse.jface.text.source.SourceViewer;
 
 import com._1c.g5.v8.dt.bsl.ui.BslSharedImages;
 
@@ -41,6 +40,13 @@ public final class IrCompletionProposal implements
     private volatile String activationHtml;
     /** Штатная иконка assist EDT (borrow от delegate или {@link BslAssistListImages}). */
     private volatile Image stockAssistImage;
+    /**
+     * Позиция каретки, вычисленная в {@link #apply(IDocument, char, int)}.
+     * Возвращается из {@link #getSelection} — Eclipse применит её через
+     * {@code viewer.setSelectedRange()} в {@code CompletionProposalPopup.insertProposal()}.
+     * Значение {@code -1} означает «не вычислено».
+     */
+    private int pendingCaretAfterApply = -1;
 
     public IrCompletionProposal(
         String displayString, String filterName, String templateText, boolean method, int irPriority,
@@ -151,7 +157,9 @@ public final class IrCompletionProposal implements
     @Override
     public Point getSelection(IDocument document)
     {
-        return null;
+        int pending = pendingCaretAfterApply;
+        pendingCaretAfterApply = -1;
+        return pending >= 0 ? new Point(pending, 0) : null;
     }
 
     @Override
@@ -201,6 +209,18 @@ public final class IrCompletionProposal implements
         apply(document, (char) 0, resolveCaretOffset(document));
     }
 
+    private int resolveCaretOffset(IDocument document)
+    {
+        SourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
+        if (viewer != null)
+        {
+            Point selectedRange = viewer.getSelectedRange();
+            if (selectedRange != null)
+                return selectedRange.x;
+        }
+        return 0;
+    }
+
     @Override
     public void apply(IDocument document, char trigger, int offset)
     {
@@ -208,11 +228,15 @@ public final class IrCompletionProposal implements
             return;
         int replaceStart = getPrefixCompletionStart(document, offset);
         int replaceLen = Math.max(0, offset - replaceStart);
+        pendingCaretAfterApply = -1;
         try
         {
             InsertPlan plan = buildInsertPlan();
             document.replace(replaceStart, replaceLen, plan.text);
-            setCaretOffset(document, replaceStart + plan.caretOffset);
+            // Сохраняем позицию каретки — Eclipse применит её через getSelection().
+            // Не используем setCaretOffset(): к моменту apply() assistSessionEnded уже
+            // вызван и ACTIVE_VIEWER очищен, поэтому прямой вызов был бы no-op.
+            pendingCaretAfterApply = replaceStart + plan.caretOffset;
         }
         catch (BadLocationException e)
         {
@@ -311,14 +335,6 @@ public final class IrCompletionProposal implements
         return new InsertPlan(text, caret);
     }
 
-    private static void setCaretOffset(IDocument document, int caret)
-    {
-        SourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
-        if (viewer != null && viewer.getDocument() == document
-            && viewer.getTextWidget() instanceof StyledText styled && !styled.isDisposed())
-            styled.setCaretOffset(caret);
-    }
-
     private static final class InsertPlan
     {
         final String text;
@@ -329,19 +345,6 @@ public final class IrCompletionProposal implements
             this.text = text;
             this.caretOffset = caretOffset;
         }
-    }
-
-    private static int resolveCaretOffset(IDocument document)
-    {
-        SourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
-        if (viewer != null && viewer.getDocument() == document
-            && viewer.getTextWidget() instanceof StyledText text && !text.isDisposed())
-        {
-            int caret = text.getCaretOffset();
-            if (caret >= 0)
-                return caret;
-        }
-        return document != null ? document.getLength() : 0;
     }
 
     /**
