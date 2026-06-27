@@ -131,6 +131,13 @@ public final class ContentAssistSessionReloader
     /** Смена IR-only → merged full list — принудительный replace popup. */
     private volatile int irMergeGeneration;
     private volatile boolean irMergeGenerationBumpPending;
+    /**
+     * Флаг: сессия assist только что завершилась (assistSessionEnded уже вызван,
+     * но proposal.apply() ещё не завершился). documentChanged, которое придёт
+     * синхронно в этом же event-цикле, — это вставка proposal, а не ручной ввод.
+     * asyncExec сбросит флаг после обработки текущего SWT-события.
+     */
+    private volatile boolean suppressDocumentAutoOpenAfterSession;
     /** Автооткрытие assist (порт ИР ПриНажатииКлавишиАвтодополнение). */
     private volatile boolean completionAutoOpenPending;
     private volatile int completionAutoOpenCaret = -1;
@@ -451,6 +458,18 @@ public final class ContentAssistSessionReloader
                 uninstallSessionCaretListener();
                 ContentAssistPopupSync.cancelCaretRecompute(viewer);
                 ContentAssistPopupSync.cancelSessionPopupSync(viewer);
+
+                // proposal.apply() выполняется после assistSessionEnded — подавляем
+                // авто-открытие, которое иначе сработало бы на вставленный текст.
+                suppressDocumentAutoOpenAfterSession = true;
+                Control suppressWidget = (Control) viewer.getTextWidget();
+                if (suppressWidget != null && !suppressWidget.isDisposed())
+                {
+                    Display suppressDisplay = suppressWidget.getDisplay();
+                    if (suppressDisplay != null && !suppressDisplay.isDisposed())
+                        suppressDisplay.asyncExec(
+                            () -> suppressDocumentAutoOpenAfterSession = false);
+                }
 
                 if (!manualAwait)
                 {
@@ -861,6 +880,12 @@ public final class ContentAssistSessionReloader
             return;
         char inserted = text.charAt(0);
         if (inserted == '\r' || inserted == '\n' || inserted == '\t')
+            return;
+        // Вставка proposal через SmartCompletionProposal.apply() — игнорируем.
+        if (Boolean.TRUE.equals(SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get()))
+            return;
+        // Вставка необёрнутого proposal (пустой префикс — делегат не подключён).
+        if (suppressDocumentAutoOpenAfterSession)
             return;
         int insertOffset = event.getOffset();
         int caretAfter;

@@ -45,6 +45,9 @@ public class SmartCompletionProposal implements
     /** Как {@code ConfigurableCompletionProposal.apply(ITextViewer,…)} — флаг COMPLETE. */
     private static final int COMPLETE_STATE_MASK = 262144;
 
+    /** Флаг: мы внутри {@link #apply} — document-listener не должен запускать авто-открытие. */
+    static final ThreadLocal<Boolean> PROPOSAL_APPLY_IN_PROGRESS = new ThreadLocal<>();
+
     public SmartCompletionProposal(ICompletionProposal delegate)
     {
         this(delegate, -1);
@@ -133,9 +136,17 @@ public class SmartCompletionProposal implements
     @Override
     public void apply(IDocument document)
     {
-        if (tryApplyWordOnly(document, null, -1, null))
-            return;
-        delegate.apply(document);
+        PROPOSAL_APPLY_IN_PROGRESS.set(Boolean.TRUE);
+        try
+        {
+            if (tryApplyWordOnly(document, null, -1, null))
+                return;
+            delegate.apply(document);
+        }
+        finally
+        {
+            PROPOSAL_APPLY_IN_PROGRESS.remove();
+        }
     }
 
     // ---- ICompletionProposalExtension ---------------------------------------
@@ -143,12 +154,20 @@ public class SmartCompletionProposal implements
     @Override
     public void apply(IDocument document, char trigger, int offset)
     {
-        if (tryApplyWordOnly(document, null, offset, null))
-            return;
-        if (delegate instanceof ICompletionProposalExtension)
-            ((ICompletionProposalExtension) delegate).apply(document, trigger, offset);
-        else
-            delegate.apply(document);
+        PROPOSAL_APPLY_IN_PROGRESS.set(Boolean.TRUE);
+        try
+        {
+            if (tryApplyWordOnly(document, null, offset, null))
+                return;
+            if (delegate instanceof ICompletionProposalExtension)
+                ((ICompletionProposalExtension) delegate).apply(document, trigger, offset);
+            else
+                delegate.apply(document);
+        }
+        finally
+        {
+            PROPOSAL_APPLY_IN_PROGRESS.remove();
+        }
     }
 
     @Override
@@ -178,12 +197,20 @@ public class SmartCompletionProposal implements
     @Override
     public void apply(ITextViewer viewer, char trigger, int stateMask, int offset)
     {
-        if (viewer != null && tryApplyWordOnly(viewer.getDocument(), viewer, offset, stateMask))
-            return;
-        if (delegate instanceof ICompletionProposalExtension2)
-            ((ICompletionProposalExtension2) delegate).apply(viewer, trigger, stateMask, offset);
-        else if (viewer != null && viewer.getDocument() != null)
-            apply(viewer.getDocument(), trigger, offset);
+        PROPOSAL_APPLY_IN_PROGRESS.set(Boolean.TRUE);
+        try
+        {
+            if (viewer != null && tryApplyWordOnly(viewer.getDocument(), viewer, offset, stateMask))
+                return;
+            if (delegate instanceof ICompletionProposalExtension2)
+                ((ICompletionProposalExtension2) delegate).apply(viewer, trigger, stateMask, offset);
+            else if (viewer != null && viewer.getDocument() != null)
+                apply(viewer.getDocument(), trigger, offset);
+        }
+        finally
+        {
+            PROPOSAL_APPLY_IN_PROGRESS.remove();
+        }
     }
 
     /** Активация строки assist (Eclipse {@code selected}), не подтверждение {@code apply}. */
