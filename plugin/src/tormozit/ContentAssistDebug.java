@@ -50,15 +50,15 @@ public final class ContentAssistDebug
     {
         try
         {
-            String data = dataJson != null && !dataJson.isEmpty() ? dataJson : "{}"; //$NON-NLS-1$
-            String line = "{\"sessionId\":\"" + DEBUG_MODE_SESSION_ID //$NON-NLS-1$
-                + "\",\"hypothesisId\":\"" + hypothesisId //$NON-NLS-1$
-                + "\",\"location\":\"" + location //$NON-NLS-1$
-                + "\",\"message\":\"" + jsonEscape(message) //$NON-NLS-1$
-                + "\",\"data\":" + data //$NON-NLS-1$
-                + ",\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
-            Files.writeString(DEBUG_MODE_LOG, line, StandardCharsets.UTF_8,
-                StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+//            String data = dataJson != null && !dataJson.isEmpty() ? dataJson : "{}"; //$NON-NLS-1$
+//            String line = "{\"sessionId\":\"" + DEBUG_MODE_SESSION_ID //$NON-NLS-1$
+//                + "\",\"hypothesisId\":\"" + hypothesisId //$NON-NLS-1$
+//                + "\",\"location\":\"" + location //$NON-NLS-1$
+//                + "\",\"message\":\"" + jsonEscape(message) //$NON-NLS-1$
+//                + "\",\"data\":" + data //$NON-NLS-1$
+//                + ",\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
+//            Files.writeString(DEBUG_MODE_LOG, line, StandardCharsets.UTF_8,
+//                StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         }
         catch (Exception ignored)
         {
@@ -70,15 +70,15 @@ public final class ContentAssistDebug
     {
         try
         {
-            String data = dataJson != null && !dataJson.isEmpty() ? dataJson : "{}"; //$NON-NLS-1$
-            String line = "{\"sessionId\":\"" + DEBUG_SESSION_ID //$NON-NLS-1$
-                + "\",\"hypothesisId\":\"" + hypothesisId //$NON-NLS-1$
-                + "\",\"location\":\"" + location //$NON-NLS-1$
-                + "\",\"message\":\"" + jsonEscape(message) //$NON-NLS-1$
-                + "\",\"data\":" + data //$NON-NLS-1$
-                + ",\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
-            Files.writeString(DEBUG_SESSION_LOG, line, StandardCharsets.UTF_8,
-                StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+//            String data = dataJson != null && !dataJson.isEmpty() ? dataJson : "{}"; //$NON-NLS-1$
+//            String line = "{\"sessionId\":\"" + DEBUG_SESSION_ID //$NON-NLS-1$
+//                + "\",\"hypothesisId\":\"" + hypothesisId //$NON-NLS-1$
+//                + "\",\"location\":\"" + location //$NON-NLS-1$
+//                + "\",\"message\":\"" + jsonEscape(message) //$NON-NLS-1$
+//                + "\",\"data\":" + data //$NON-NLS-1$
+//                + ",\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
+//            Files.writeString(DEBUG_SESSION_LOG, line, StandardCharsets.UTF_8,
+//                StandardOpenOption.CREATE, StandardOpenOption.APPEND);
         }
         catch (Exception ignored)
         {

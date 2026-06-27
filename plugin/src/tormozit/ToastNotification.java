@@ -113,7 +113,7 @@ public final class ToastNotification
             boolean inputChild = inputParentShell != null && !inputParentShell.isDisposed();
             Shell shell = inputChild
                 ? new Shell(inputParentShell, SWT.NO_TRIM | SWT.ON_TOP)
-                : new Shell(display, SWT.NO_TRIM | SWT.ON_TOP);
+                : new Shell(display, SWT.NO_TRIM | SWT.ON_TOP | SWT.NO_FOCUS);
             holder[0] = shell;
 
             Color bgColor     = display.getSystemColor(SWT.COLOR_INFO_BACKGROUND);

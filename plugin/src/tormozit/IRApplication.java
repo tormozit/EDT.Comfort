@@ -374,7 +374,8 @@ public final class IRApplication
         boolean success = false;
         String descriptionOnError = ""; //$NON-NLS-1$
         long momentStart = System.currentTimeMillis();
-
+        ForegroundWindowWatcher fgWatcher = new ForegroundWindowWatcher();
+        fgWatcher.start();
         // До 2 попыток — аналог «Для НомерПопытки = 1 По 2»
         for (int attempt = 1; attempt <= 2; attempt++)
         {
@@ -425,7 +426,13 @@ public final class IRApplication
             }
         }
 
-        if (!success || comDispatch == null) { sessions.remove(key); notifyListeners(); return; }
+        if (!success || comDispatch == null) 
+        { 
+            fgWatcher.stop();
+            sessions.remove(key);
+            notifyListeners(); 
+            return; 
+        }
 
         long   duration = (System.currentTimeMillis() - momentStart) / 1000;
         String title    = "ИР - " + connectionStringNoPass.split(";")[0]; //$NON-NLS-1$ //$NON-NLS-2$
@@ -441,7 +448,7 @@ public final class IRApplication
             ComBridge.invoke(comDispatch, "УстановитьЗаголовокСистемы", title); //$NON-NLS-1$
         }
 
-     // Находим временную сессию, чтобы забрать созданный executor
+        // Находим временную сессию, чтобы забрать созданный executor
         IRSession connectingSession = sessions.get(key);
         ExecutorService currentExecutor = connectingSession != null ? connectingSession.executor : null;
 
@@ -560,6 +567,8 @@ public final class IRApplication
             catch (Exception ignored) {}
         }
         ToastNotification.show(toastTitle(), connectedMsg, 3_000); //$NON-NLS-1$
+        fgWatcher.restorePreviousWindow(pid); // Фокус могли украсть прикладные всплывающие уведомления приложения ИР 
+        fgWatcher.stop();
     }
 
     /** Корень EDT-проекта на диске (каталог, содержащий {@code src/}), для {@code УстановитьГитРепозиторийЛкс}. */
