@@ -57,6 +57,7 @@ public final class ContentAssistSessionReloader
     private static IExecutionListener contentAssistCommandListener;
     private static final IdentityHashMap<SourceViewer, ContentAssistSessionReloader> INSTALLED =
         new IdentityHashMap<>();
+    private boolean pendingAutoOpen = false;
 
     private static final ThreadLocal<ContentAssistant> ACTIVE_ASSISTANT = new ThreadLocal<>();
     private static final ThreadLocal<SourceViewer> ACTIVE_VIEWER = new ThreadLocal<>();
@@ -832,6 +833,7 @@ public final class ContentAssistSessionReloader
 
     private void onVerifyKeyForCompletionAutoOpen(VerifyEvent event)
     {
+        pendingAutoOpen = false;
         if (!ComfortSettings.isReplaceListFiltersEnabled())
             return;
         ContentAssistSettings settings = ContentAssistSettings.getInstance();
@@ -840,19 +842,22 @@ public final class ContentAssistSessionReloader
         char inserted = event.character == 0 ? 0 : (char)event.character;
         if (inserted == 0)
             return;
-        int caretAfter = event.start + 1;
+//        int startOffset = event.start; // У клавиатурного слушателя тут 0 всегда
+        int startOffset = viewer.getTextWidget().getCaretOffset();
+        int caretAfter = startOffset + 1;
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         boolean popupWasOpen = ContentAssistPopupSync.isPopupVisible(assistant);
         String branch = CompletionAutoOpenTrigger.diagnoseFetch(
-            doc, inserted, event.start, caretAfter, popupWasOpen, event.stateMask);
+            doc, inserted, startOffset, caretAfter, popupWasOpen, event.stateMask);
         int seq = completionAutoOpenActiveSeq > 0
             ? completionAutoOpenActiveSeq : completionAutoOpenSeq.get();
         // #region agent log
         if (branch != null)
         {
+            pendingAutoOpen = true;
             ContentAssistDebug.logAutoOpen(seq, "H72", "onVerifyKeyForCompletionAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
                 "verifyKey", "{\"char\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(inserted)) //$NON-NLS-1$ //$NON-NLS-2$
-                    + "\",\"caretBefore\":" + event.start + ",\"caretAfter\":" + caretAfter //$NON-NLS-1$ //$NON-NLS-2$
+                    + "\",\"caretBefore\":" + startOffset + ",\"caretAfter\":" + caretAfter //$NON-NLS-1$ //$NON-NLS-2$
                     + ",\"popupWasOpen\":" + popupWasOpen //$NON-NLS-1$
                     + ",\"shouldFetch\":true,\"triggerBranch\":\"" + branch + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
@@ -860,7 +865,7 @@ public final class ContentAssistSessionReloader
         {
             ContentAssistDebug.logAutoOpen(seq, "H72", "onVerifyKeyForCompletionAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
                 "verifySkip", "{\"char\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(inserted)) //$NON-NLS-1$ //$NON-NLS-2$
-                    + "\",\"caretBefore\":" + event.start //$NON-NLS-1$
+                    + "\",\"caretBefore\":" + startOffset //$NON-NLS-1$
                     + ",\"doit\":" + event.doit + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
         // #endregion
@@ -868,8 +873,9 @@ public final class ContentAssistSessionReloader
 
     private void onDocumentChangedForCompletionAutoOpen(DocumentEvent event)
     {
-        if (!ComfortSettings.isReplaceListFiltersEnabled())
+        if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
             return;
+        pendingAutoOpen = false;
         ContentAssistSettings settings = ContentAssistSettings.getInstance();
         if (settings == null || !settings.isEnabled())
             return;
