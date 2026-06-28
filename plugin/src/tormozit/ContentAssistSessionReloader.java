@@ -1093,10 +1093,20 @@ public final class ContentAssistSessionReloader
     private void openCompletionAutoEdtPopup(int expectedCaret, int autoOpenSeq)
     {
         SmartFilterTracker.setCurrentFilter(""); //$NON-NLS-1$
-        ContentAssistPopupSync.ensureEmptyListAllowed(assistant, false); // Скорее всего не имеет эффекта
+        ContentAssistPopupSync.ensureEmptyListAllowed(assistant, false); // false Заставляет штатную логику JFace вообще не открывать окно, если фильтрат пустой, но при этом вызывает звук Display.beep()
         beginLiteralOpenTracking();
         preShowLiteralBrowserPatch(expectedCaret);
-        boolean shown = ContentAssistPopupSync.showPossibleCompletions(assistant);
+        boolean shown = false;
+
+        // From  org.eclipse.jface.text.contentassist.ContentAssistant.AutoAssistListener.showAssist(int)
+        Object fAutoAssistListener = Global.getField(assistant, "fAutoAssistListener");
+        Global.invoke(fAutoAssistListener, "start", 1); // учитывает задержку перед открытием из настроек плагина
+        //
+        //Global.invoke(assistant, "prepareToShowCompletions", true);
+        //Object fProposalPopup = Global.getField(assistant, "fProposalPopup");
+        //Global.invoke(fProposalPopup, "showProposals", true); // Не учитывает задержку перед открытием из настроек плагина
+        //
+        //shown = ContentAssistPopupSync.showPossibleCompletions(assistant); // Для штатного механизма это безусловное открытие окна как если бы CTRL+Space нажал. Поэтому выше продублировал штатную логику автооткрытия окна  
         
         IDtProject dtProject = Global.getDtProjectFromBslEditor(bslEditor);
         if (dtProject == null || !IRApplication.hasConnectedSessionForKeys(dtProject))
