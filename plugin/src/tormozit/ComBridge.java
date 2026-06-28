@@ -125,7 +125,92 @@ public final class ComBridge
         notifyComProblemToUser("Jacob/COM недоступен: " + msg); //$NON-NLS-1$
     }
 
-    private static void notifyComProblemToUser(String message)
+    // -----------------------------------------------------------------------
+    // Byref-параметры COM (out-параметры 1С без Знач)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Создаёт Jacob {@code Variant(value, byRef=true)} для булевого out-параметра COM.
+     * После вызова читать через {@link #readByrefBool}.
+     */
+    static Object createByrefBool(boolean initialValue)
+    {
+        ensureJacob();
+        if (!ensureByrefSupport())
+            throw new UnsupportedOperationException("Jacob byref недоступен"); //$NON-NLS-1$
+        try
+        {
+            return variantByRefCtor.newInstance(initialValue, Boolean.TRUE);
+        }
+        catch (Exception e)
+        {
+            throw new RuntimeException("createByrefBool: " + e.getMessage(), e); //$NON-NLS-1$
+        }
+    }
+
+    /** Читает булево значение из byref Variant после COM-вызова. */
+    static boolean readByrefBool(Object variant)
+    {
+        if (variant == null) return false;
+        if (variant instanceof Boolean b) return b;
+        try { return (Boolean) methodVariantToBoolean.invoke(variant); }
+        catch (Exception e) { return false; }
+    }
+
+    /**
+     * Создаёт Jacob {@code Variant(value, byRef=true)} для строкового out-параметра COM.
+     * После вызова читать через {@link #readByrefString}.
+     */
+    static Object createByrefString(String initialValue)
+    {
+        ensureJacob();
+        if (!ensureByrefSupport())
+            throw new UnsupportedOperationException("Jacob byref недоступен"); //$NON-NLS-1$
+        try
+        {
+            return variantByRefCtor.newInstance(
+                initialValue != null ? initialValue : "", Boolean.TRUE); //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+            throw new RuntimeException("createByrefString: " + e.getMessage(), e); //$NON-NLS-1$
+        }
+    }
+
+    /** Читает строковое значение из byref Variant после COM-вызова. */
+    static String readByrefString(Object variant)
+    {
+        if (variant == null) return ""; //$NON-NLS-1$
+        if (variant instanceof String s) return s;
+        if (variantGetStringRef != null)
+        {
+            try
+            {
+                String v = (String) variantGetStringRef.invoke(variant);
+                return v != null ? v : ""; //$NON-NLS-1$
+            }
+            catch (Exception ignored) {}
+        }
+        return toString(variant);
+    }
+
+    /**
+     * {@code true} если COM-значение — {@code Неопределено}
+     * (Variant VT_EMPTY=0 / VT_NULL=1, или Java {@code null}).
+     */
+    static boolean isVariantUndefined(Object variant)
+    {
+        if (variant == null) return true;
+        if (variant instanceof Boolean) return false;
+        try
+        {
+            short vt = (short) methodVariantGetVt.invoke(variant);
+            return vt == 0 || vt == 1; // VT_EMPTY, VT_NULL
+        }
+        catch (Exception e) { return false; }
+    }
+
+    static void notifyComProblemToUser(String message)
     {
         String detail = formatErrorForNotification(message);
         if (detail.isEmpty())
@@ -138,8 +223,8 @@ public final class ComBridge
         display.asyncExec(() -> ToastNotification.show(IRApplication.toastTitle(), toastText, 8_000));
     }
 
-    /** Lazy init Variant(Object, boolean) + getStringRef — только для drainUserMessages. */
-    private static boolean ensureByrefSupport()
+    /** Lazy init Variant(Object, boolean) + getStringRef — только для drainUserMessages и byref-параметров. */
+    static boolean ensureByrefSupport()
     {
         if (byrefAttempted)
             return byrefAvailable;

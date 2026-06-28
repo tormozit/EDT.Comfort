@@ -123,7 +123,7 @@ public final class IrCompletionProposal implements
      */
     void applyActivation(String type, String description, boolean rawHtml)
     {
-        if (type != null && !type.isBlank())
+        if (type != null)
         {
             displayString = IrBslCompletionSupport.buildActivatedListDisplay(
                 wordValue, method, listTypeLabel, type, parentContextType);
@@ -295,7 +295,17 @@ public final class IrCompletionProposal implements
         return SmartContentAssistProcessor.computeIdentifierWordStart(document, completionOffset);
     }
 
-    private InsertPlan buildInsertPlan()
+    public String getTemplateText()
+    {
+        return templateText;
+    }
+
+    void setPendingCaretAfterApply(int offset)
+    {
+        pendingCaretAfterApply = offset;
+    }
+
+    InsertPlan buildInsertPlan()
     {
         if (templateText != null && !templateText.isEmpty())
             return planFromTemplate(templateText);
@@ -304,7 +314,7 @@ public final class IrCompletionProposal implements
         return new InsertPlan(filterName, filterName.length());
     }
 
-    private static InsertPlan planFromTemplate(String template)
+    static InsertPlan planFromTemplate(String template)
     {
         int caret = template.length();
         String text = template;
@@ -335,7 +345,7 @@ public final class IrCompletionProposal implements
         return new InsertPlan(text, caret);
     }
 
-    private static final class InsertPlan
+    static final class InsertPlan
     {
         final String text;
         final int caretOffset;

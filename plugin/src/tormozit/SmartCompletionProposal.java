@@ -22,6 +22,9 @@ import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.ui.IEditorPart;
+import org.eclipse.ui.IWorkbenchPage;
+import org.eclipse.ui.PlatformUI;
 import org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
@@ -202,6 +205,9 @@ public class SmartCompletionProposal implements
         {
             if (viewer != null && tryApplyWordOnly(viewer.getDocument(), viewer, offset, stateMask))
                 return;
+            if (delegate instanceof IrCompletionProposal ir
+                && tryApplyWithIrAdapter(ir, viewer, offset))
+                return;
             if (delegate instanceof ICompletionProposalExtension2)
                 ((ICompletionProposalExtension2) delegate).apply(viewer, trigger, stateMask, offset);
             else if (viewer != null && viewer.getDocument() != null)
@@ -240,6 +246,179 @@ public class SmartCompletionProposal implements
     public boolean validate(IDocument document, int offset, DocumentEvent event)
     {
         return matchesFilter(document, offset, event);
+    }
+
+    // ---- ICompletionProposalExtension4 --------------------------------------
+
+    /**
+     * Порт RDT {@code ПриВыбореЗначенияТ9}: перехват вставки ИР-предложения через
+     * {@code Адаптер_ПриВыбореСтрокиАвтодополнения}.
+     *
+     * @return {@code true} если вставка выполнена/подавлена адаптером
+     */
+    private boolean tryApplyWithIrAdapter(IrCompletionProposal ir, ITextViewer viewer, int offset)
+    {
+        IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(GetRef.getActiveBslEditor(PlatformUI.getWorkbench().getActiveWorkbenchWindow().getActivePage().getActivePart())); 
+        if (session == null)
+            return false;
+
+        IDocument document = viewer != null ? viewer.getDocument() : null;
+        if (document == null)
+            return false;
+
+        long started = System.currentTimeMillis();
+        IRSession.CompletionAdapterResult result;
+        try
+        {
+            final String tmpl = ir.getTemplateText();
+            result = session.executeOnComThread(() ->
+                session.invokeCompletionAdapter(
+                    ir.getWordValue(), ir.isMethod(), ir.getDictionaryKey(), tmpl));
+        }
+        catch (Exception e)
+        {
+            IrCompletionDebug.problem("адаптер apply: " + e.getMessage()); //$NON-NLS-1$
+            return false;
+        }
+        IrCompletionDebug.timing("Адаптер_ПриВыбореСтрокиАвтодополнения", started); //$NON-NLS-1$
+
+        if (result == null)
+            return false;
+
+        // Вычисляем диапазон удаления если генератор с поглощением
+        int deleteFrom = -1;
+        int deleteTo   = -1;
+        if (result.isGeneratorWithLineStart)
+        {
+            int[] range = resolveDeleteRange(result, document, session, offset, viewer);
+            deleteFrom = range[0];
+            deleteTo   = range[1];
+        }
+
+        // Удаляем диапазон перед вставкой
+        boolean didDeleteRange = false;
+        int insertOffset = offset;
+        if (deleteFrom >= 0 && deleteTo > deleteFrom)
+        {
+            try
+            {
+                document.replace(deleteFrom, deleteTo - deleteFrom, ""); //$NON-NLS-1$
+                insertOffset = deleteFrom;
+                didDeleteRange = true;
+            }
+            catch (BadLocationException e)
+            {
+                IrCompletionDebug.problem("адаптер deleteRange: " + e.getMessage()); //$NON-NLS-1$
+            }
+        }
+
+        // НовыйШаблон <> Неопределено
+        if (result.newTemplate != null)
+        {
+            if (result.newTemplate.isEmpty())
+            {
+                // Отказ — генератор вернул пустой текст
+                Display.getDefault().asyncExec(() ->
+                    ToastNotification.show(
+                        IRApplication.toastTitle(),
+                        "Генератор вернул пустой текст для вставки", 3_000)); //$NON-NLS-1$
+                return true;
+            }
+            applyIrTemplateText(ir, document, result.newTemplate, insertOffset, didDeleteRange);
+            return true;
+        }
+
+        // НовыйШаблон = Неопределено, но диапазон уже удалён — вставляем стандартный план
+        if (didDeleteRange)
+        {
+            IrCompletionProposal.InsertPlan plan = ir.buildInsertPlan();
+            try
+            {
+                document.replace(insertOffset, 0, plan.text);
+                ir.setPendingCaretAfterApply(insertOffset + plan.caretOffset);
+            }
+            catch (BadLocationException e)
+            {
+                IrCompletionDebug.problem("адаптер insertPlan: " + e.getMessage()); //$NON-NLS-1$
+            }
+            return true;
+        }
+
+        return false; // НовыйШаблон = Неопределено, без поглощения — стандартная обработка
+    }
+
+    /**
+     * Вычисляет диапазон [from, to) для удаления перед вставкой генератора.
+     * <p>Порт блока {@code ЛиГенераторСПоглощениемНачалаСтроки} из {@code ПриВыбореЗначенияТΟ}.
+     *
+     * @return массив [deleteFrom, deleteTo]; оба -1 если не вычислено
+     */
+    private static int[] resolveDeleteRange(IRSession.CompletionAdapterResult result,
+        IDocument document, IRSession session, int completionOffset, ITextViewer viewer)
+    {
+        // Приоритет — мЗаменяемыйДиапазон, уже прочитаный на COM-потоке
+        if (result.deleteFromLf >= 0 && result.deleteToLf > result.deleteFromLf)
+        {
+            String raw = session.lastSyncedRawText;
+            int from = Global.remapOffsetFromLf(raw, result.deleteFromLf);
+            int to   = Global.remapOffsetFromLf(raw, result.deleteToLf);
+            return new int[] { from, to };
+        }
+
+        // Fallback: вычисляем по строке слева от каретки
+        // Порт: УдалитьТекстС = Позиция - СтрДлина(СокрЛ(СтрокаСлева))
+        //        УдалитьТекстПо = Позиция + СтрДлина(ВыделенныйТекст)
+        try
+        {
+            int lineStart = document.getLineOffset(
+                document.getLineOfOffset(completionOffset));
+            String linePrefix = document.get(lineStart, completionOffset - lineStart);
+            String effectivePrefix = result.formatText ? linePrefix.stripLeading() : linePrefix;
+            int deleteFrom = completionOffset - effectivePrefix.length();
+            if (result.isGeneratorWithLineStart)
+            {
+                deleteFrom = lineStart;
+            }
+            int selLen = viewer instanceof SourceViewer sv
+                ? Math.max(0, sv.getSelectedRange().y) : 0;
+            int deleteTo = completionOffset + selLen;
+            return new int[] { deleteFrom, deleteTo };
+        }
+        catch (BadLocationException e)
+        {
+            IrCompletionDebug.problem("адаптер resolveRange fallback: " + e.getMessage()); //$NON-NLS-1$
+            return new int[] { -1, -1 };
+        }
+    }
+
+    /**
+     * Вставляет текст шаблона с разбором маркера каретки.
+     * Если {@code rangeAlreadyDeleted}, {@code replaceLen=0}; иначе заменяет идентификаторный префикс.
+     */
+    private static void applyIrTemplateText(IrCompletionProposal ir, IDocument document,
+        String template, int insertOffset, boolean rangeAlreadyDeleted)
+    {
+        IrCompletionProposal.InsertPlan plan = IrCompletionProposal.planFromTemplate(template);
+        int replaceLen;
+        if (rangeAlreadyDeleted)
+        {
+            replaceLen = 0;
+        }
+        else
+        {
+            int prefixStart = SmartContentAssistProcessor.computeIdentifierWordStart(
+                document, insertOffset);
+            replaceLen = Math.max(0, insertOffset - prefixStart);
+        }
+        try
+        {
+            document.replace(insertOffset, replaceLen, plan.text);
+            ir.setPendingCaretAfterApply(insertOffset + plan.caretOffset);
+        }
+        catch (BadLocationException e)
+        {
+            IrCompletionDebug.problem("адаптер applyTemplate: " + e.getMessage()); //$NON-NLS-1$
+        }
     }
 
     // ---- ICompletionProposalExtension4 --------------------------------------
@@ -824,9 +1003,9 @@ public class SmartCompletionProposal implements
     {
         String cacheKey = ir.getStableCacheKey();
         String oldDisplay = ir.getDisplayString();
-        if (desc.type != null && !desc.type.isBlank())
+        if (desc.type != null)
             ir.applyActivation(desc.type, desc.description, desc.rawHtml);
-        else if (desc.description != null && !desc.description.isBlank())
+        else if (desc.description != null)
             ir.applyActivation("", desc.description, desc.rawHtml); //$NON-NLS-1$
         String newDisplay = ir.getDisplayString();
         String html = ir.getAdditionalProposalInfo();

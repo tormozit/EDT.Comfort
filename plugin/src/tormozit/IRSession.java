@@ -73,7 +73,7 @@ public final class IRSession
         /** Последний модуль и текст, ушедший в ИР через {@link #setText} (для обратного remap диапазона). */
         private String lastSyncedModuleName = ""; //$NON-NLS-1$
         /** {@code doc.get()} на момент sync — координаты для {@link #syncCodeEditorFromIR}. */
-        private String lastSyncedRawText = ""; //$NON-NLS-1$
+        String lastSyncedRawText = ""; //$NON-NLS-1$
         private String lastSyncedLfText = ""; //$NON-NLS-1$
 
         /** Кэш HWND главного окна ИР (native value) для повторных modal-сессий. */
@@ -713,6 +713,98 @@ public final class IRSession
             return result;
         }
 
+
+    // -----------------------------------------------------------------------
+    // Адаптер вставки автодополнения (порт RDT ПриВыбореЗначенияТΟ)
+    // -----------------------------------------------------------------------
+
+    /** Результат {@code Адаптер_ПриВыбореСтрокиАвтодополнения} (порт RDT). */
+    public static final class CompletionAdapterResult
+    {
+        /** {@code null} — адаптер не вернул шаблон (НовыйШаблон = Неопределено). */
+        public final String newTemplate;
+        /** Порт выходного Параметра ФорматироватьТекст. */
+        public final boolean formatText;
+        /** Порт выходного Параметра ЛиГенераторСПоглощениемНачалаСтроки. */
+        public final boolean isGeneratorWithLineStart;
+        /** 0-based LF-смещение начала удаляемого диапазона, {@code -1} если не задан. */
+        public final int deleteFromLf;
+        /** 0-based LF-смещение конца удаляемого диапазона, {@code -1} если не задан. */
+        public final int deleteToLf;
+
+        CompletionAdapterResult(String newTemplate, boolean formatText,
+            boolean isGeneratorWithLineStart, int deleteFromLf, int deleteToLf)
+        {
+            this.newTemplate = newTemplate;
+            this.formatText = formatText;
+            this.isGeneratorWithLineStart = isGeneratorWithLineStart;
+            this.deleteFromLf = deleteFromLf;
+            this.deleteToLf = deleteToLf;
+        }
+    }
+
+    /**
+     * Порт RDT {@code Адаптер_ПриВыбореСтрокиАвтодополнения}.
+     * Вызывать только из COM-потока {@link #executor}.
+     *
+     * @return {@code null} если {@code codeEditor} недоступен
+     */
+    public CompletionAdapterResult invokeCompletionAdapter(
+        String wordValue, boolean isMethod, String dictionaryKey, String currentTemplate)
+    {
+        ensureCodeEditor();
+        if (codeEditor == null)
+            return null;
+
+        // Byref-параметры (выходные, без Знач)
+        Object templateVar   = ComBridge.createByrefString(currentTemplate != null ? currentTemplate : ""); //$NON-NLS-1$
+        Object formatTextVar = ComBridge.createByrefBool(false);
+        Object isGeneratorVar = ComBridge.createByrefBool(false);
+
+        // Функция Адаптер_ПриВыбореСтрокиАвтодополнения(
+        //   Знач Значение, Знач ЭтоМетод, Знач КлючСловаря,
+        //   ШаблонДляВставки, ФорматироватьТекст, ЛиГенераторСПоглощениемНачалаСтроки
+        // ) Экспорт
+        Object raw = invokeCodeEditorQuiet(
+            "Адаптер_ПриВыбореСтрокиАвтодополнения", //$NON-NLS-1$
+            wordValue,
+            isMethod,
+            dictionaryKey != null ? dictionaryKey : "", //$NON-NLS-1$
+            templateVar,
+            formatTextVar,
+            isGeneratorVar);
+
+        // Читаем выходные byref-параметры
+        boolean formatText   = ComBridge.readByrefBool(formatTextVar);
+        boolean isGenerator  = ComBridge.readByrefBool(isGeneratorVar);
+
+        // Функция возвращает НовыйШаблон или Неопределено
+        String newTemplate = ComBridge.isVariantUndefined(raw) ? null : ComBridge.toString(raw);
+
+        // Если генератор с поглощением — читаем мЗаменяемыйДиапазон
+        int deleteFromLf = -1;
+        int deleteToLf   = -1;
+        if (isGenerator)
+        {
+            try
+            {
+                Object comRange = ComBridge.getProperty(codeEditor, "мЗаменяемыйДиапазон"); //$NON-NLS-1$
+                if (comRange != null)
+                {
+                    deleteFromLf = (int) ComBridge.toLong(
+                        ComBridge.getProperty(comRange, "Начало")) - 1; //$NON-NLS-1$
+                    deleteToLf = (int) ComBridge.toLong(
+                        ComBridge.getProperty(comRange, "Конец")) - 1; //$NON-NLS-1$
+                }
+            }
+            catch (Exception e)
+            {
+                IrCompletionDebug.problem("адаптер range: " + e.getMessage()); //$NON-NLS-1$
+            }
+        }
+
+        return new CompletionAdapterResult(newTemplate, formatText, isGenerator, deleteFromLf, deleteToLf);
+    }
 
     /**
          * Проактивная отмена: удаление cancel-файла (ИР прерывает {@code ОписаниеХТМЛВыражения}).

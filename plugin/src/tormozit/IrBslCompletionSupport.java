@@ -64,7 +64,7 @@ public final class IrBslCompletionSupport
         String word, boolean method, String listTypeLabel, String calculatedType,
         String parentContextType)
     {
-        if (calculatedType == null || calculatedType.isBlank())
+        if (calculatedType == null)
             return buildInitialListDisplay(word, method, listTypeLabel, parentContextType);
         String name = formatListEntryName(word, method);
         String calc = wrapAngleType(calculatedType);
@@ -145,7 +145,7 @@ public final class IrBslCompletionSupport
             }
             String type = readActivationComField(comResult, "Тип"); //$NON-NLS-1$
             String description = readActivationComField(comResult, "Описание"); //$NON-NLS-1$
-            if ((type == null || type.isEmpty()) && (description == null || description.isEmpty()))
+            if ((type == null) && (description == null))
                 return null;
             boolean rawHtml = description != null && !description.isEmpty()
                 && description.charAt(0) == '<';
@@ -184,10 +184,9 @@ public final class IrBslCompletionSupport
         }
         catch (RuntimeException ignored)
         {
-            // fallback: 1С:Структура через Свойство()
+            //
         }
-        String fromStructure = ComBridge.structureField(comObject, fieldName);
-        return fromStructure != null ? fromStructure : ""; //$NON-NLS-1$
+        return ""; //$NON-NLS-1$
     }
 
     private IrBslCompletionSupport() {}
