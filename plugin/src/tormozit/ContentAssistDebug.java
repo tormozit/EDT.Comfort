@@ -1,9 +1,13 @@
 package tormozit;
 
+import java.io.BufferedWriter;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.eclipse.jface.text.DocumentEvent;
@@ -22,6 +26,50 @@ public final class ContentAssistDebug
     private static final String DEBUG_MODE_SESSION_ID = "c201d2"; //$NON-NLS-1$
     /** Маркер сборки для literal assist — сверять в debug-c201d2.log (H00/H0). */
     public static final String LITERAL_ASSIST_BUILD = "20260627-literal-freeze2"; //$NON-NLS-1$
+
+    /**
+     * Асинхронная очередь для disk-write логов — никакого I/O на UI-потоке.
+     * Ёмкость 50 000 строк (~5 МБ); при переполнении строки отбрасываются без исключения.
+     */
+    private static final BlockingQueue<String> DEBUG_MODE_QUEUE = new LinkedBlockingQueue<>(50_000);
+    private static final BlockingQueue<String> SESSION_QUEUE = new LinkedBlockingQueue<>(10_000);
+
+    static
+    {
+        startAsyncWriter("ContentAssistDebugModeWriter", DEBUG_MODE_LOG, DEBUG_MODE_QUEUE); //$NON-NLS-1$
+        startAsyncWriter("ContentAssistSessionWriter", DEBUG_SESSION_LOG, SESSION_QUEUE); //$NON-NLS-1$
+    }
+
+    private static void startAsyncWriter(String threadName, Path logPath, BlockingQueue<String> queue)
+    {
+        Thread t = new Thread(() ->
+        {
+            try (BufferedWriter bw = Files.newBufferedWriter(logPath, StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.APPEND))
+            {
+                while (!Thread.currentThread().isInterrupted())
+                {
+                    String line = queue.take(); // blocks until available
+                    bw.write(line);
+                    // drain the rest of the batch to reduce flush calls
+                    String next;
+                    while ((next = queue.poll()) != null)
+                        bw.write(next);
+                    bw.flush();
+                }
+            }
+            catch (InterruptedException ignored)
+            {
+                Thread.currentThread().interrupt();
+            }
+            catch (IOException e)
+            {
+                // best-effort logging — ignore write failures
+            }
+        }, threadName);
+        t.setDaemon(true);
+        t.start();
+    }
 
     private ContentAssistDebug() {}
 
@@ -50,15 +98,14 @@ public final class ContentAssistDebug
     {
         try
         {
-            String data = dataJson != null && !dataJson.isEmpty() ? dataJson : "{}"; //$NON-NLS-1$
-            String line = "{\"sessionId\":\"" + DEBUG_MODE_SESSION_ID //$NON-NLS-1$
-                + "\",\"hypothesisId\":\"" + hypothesisId //$NON-NLS-1$
-                + "\",\"location\":\"" + location //$NON-NLS-1$
-                + "\",\"message\":\"" + jsonEscape(message) //$NON-NLS-1$
-                + "\",\"data\":" + data //$NON-NLS-1$
-                + ",\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
-            Files.writeString(DEBUG_MODE_LOG, line, StandardCharsets.UTF_8,
-                StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+//            String data = dataJson != null && !dataJson.isEmpty() ? dataJson : "{}"; //$NON-NLS-1$
+//            String line = "{\"sessionId\":\"" + DEBUG_MODE_SESSION_ID //$NON-NLS-1$
+//                + "\",\"hypothesisId\":\"" + hypothesisId //$NON-NLS-1$
+//                + "\",\"location\":\"" + location //$NON-NLS-1$
+//                + "\",\"message\":\"" + jsonEscape(message) //$NON-NLS-1$
+//                + "\",\"data\":" + data //$NON-NLS-1$
+//                + ",\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
+//            DEBUG_MODE_QUEUE.offer(line); // non-blocking; drops if queue full
         }
         catch (Exception ignored)
         {
@@ -77,8 +124,7 @@ public final class ContentAssistDebug
                 + "\",\"message\":\"" + jsonEscape(message) //$NON-NLS-1$
                 + "\",\"data\":" + data //$NON-NLS-1$
                 + ",\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
-            Files.writeString(DEBUG_SESSION_LOG, line, StandardCharsets.UTF_8,
-                StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+            SESSION_QUEUE.offer(line); // non-blocking; drops if queue full
         }
         catch (Exception ignored)
         {

@@ -1061,7 +1061,11 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
     private void cancelEagerFullListLoad()
     {
-        if (pendingEagerLoadTask == null && eagerLoadCancelGen == 0)
+        // Выходим без лога если реально нечего отменять.
+        // Старое условие "&& eagerLoadCancelGen == 0" пропускало все повторные вызовы после
+        // первой отмены: eagerLoadCancelGen уже > 0, поэтому каждый из 5-6 вызовов на символ
+        // уходил в Files.writeString на UI-потоке даже при pendingEagerLoadTask == null.
+        if (pendingEagerLoadTask == null)
             return;
         eagerLoadCancelGen++;
         pendingEagerLoadTask = null;

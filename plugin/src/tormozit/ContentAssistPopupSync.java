@@ -2704,9 +2704,13 @@ public final class ContentAssistPopupSync
                     ContentAssistSessionReloader.getActiveProcessor();
                 int caret = SmartContentAssistProcessor.resolveWidgetCaret(viewer);
                 IDocument doc = viewer.getDocument();
-                if (assistant != null && processor != null
-                    && shouldRecomputePopupList(SmartFilterTracker.getCurrentFilter(), false,
-                        doc, caret))
+                // Пропускаем второй runStockFilterRunnable если sessionPopupSync (delay=0)
+                // уже применил тот же фильтр: shouldRecomputePopupList вернёт false, и
+                // повторный validate() по 1000+ proposals на UI-потоке бессмысленен.
+                String currentFilter = SmartFilterTracker.getCurrentFilter();
+                boolean shouldRecompute = assistant != null && processor != null
+                    && shouldRecomputePopupList(currentFilter, false, doc, caret);
+                if (shouldRecompute)
                 {
                     runStockFilterRunnable(assistant);
                     if (SmartAssistFilterState.isSmartFilterEnabled())
@@ -2715,8 +2719,13 @@ public final class ContentAssistPopupSync
                         recomputePopupList(assistant, viewer, processor);
                     }
                 }
-                else
+                else if (!SmartAssistFilterState.isSmartFilterEnabled())
+                {
+                    // Smart-фильтр выключен — stock runnable нужен для синхронизации Table.
                     runStockFilterRunnable(assistant);
+                }
+                // else: smart-filter включён и recompute не нужен —
+                //       sessionPopupSync (delay=0) уже обновил popup, второй прогон пропускаем.
             }
             catch (Exception e)
             {
