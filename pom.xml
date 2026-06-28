@@ -6,7 +6,7 @@
 
   <groupId>tormozit</groupId>
   <artifactId>comfort.parent</artifactId>
-  <version>1.0.0.16-SNAPSHOT</version>
+  <version>1.0.0.17-SNAPSHOT</version>
   <packaging>pom</packaging>
 
   <prerequisites>
