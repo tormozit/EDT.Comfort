@@ -327,7 +327,7 @@ public final class IrCompletionProposal implements
         if (marker >= 0)
         {
             caret = marker;
-            text = template.substring(0, marker) + template.substring(marker + 4);
+            text = template.substring(0, marker) + template.substring(marker + 3);
         }
         else
         {
@@ -335,7 +335,7 @@ public final class IrCompletionProposal implements
             if (marker >= 0)
             {
                 caret = marker;
-                text = template.substring(0, marker) + template.substring(marker + 4);
+                text = template.substring(0, marker) + template.substring(marker + 3);
             }
             else
             {
@@ -352,8 +352,8 @@ public final class IrCompletionProposal implements
 
     static final class InsertPlan
     {
-        final String text;
-        final int caretOffset;
+        String text;
+        int caretOffset;
 
         InsertPlan(String text, int caretOffset)
         {

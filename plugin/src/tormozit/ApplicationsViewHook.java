@@ -784,7 +784,16 @@ public class ApplicationsViewHook implements IStartup
                         Object el = cell.getElement();
                         InfobaseReference ib = getInfobase(el);
                         IProject project     = (IProject) Global.getField(el, "project"); //$NON-NLS-1$
-                        RuntimeInstallation inst = getRuntimeInstallation(project, ib);
+                        RuntimeInstallation inst;
+                        try
+                        {
+                            inst = getRuntimeInstallation(project, ib);
+                        }
+                        catch (Exception e)
+                        {
+                            Global.log("getRuntimeInstallation: " + e.getMessage()); //$NON-NLS-1$
+                            return;
+                        }
                         cell.setText(inst != null ? inst.getVersionWithBuild() : ""); //$NON-NLS-1$
                     }
                 };
@@ -896,29 +905,26 @@ public class ApplicationsViewHook implements IStartup
 
     static RuntimeInstallation getRuntimeInstallation(IProject project, InfobaseReference infobase)
     {
-        if (project == null || infobase == null) return null;
-        try
-        {
-            BundleContext ctx = Global.ourContext();
-            if (ctx == null) return null;
-            ServiceReference<?> ref = ctx.getServiceReference(
-                "com._1c.g5.v8.dt.platform.services.core.infobases.sync.IInfobaseSynchronizationManager"); //$NON-NLS-1$
-            if (ref == null) return null;
-            Object syncMgr = ctx.getService(ref);
-            if (syncMgr == null) return null;
-            IResolvableRuntimeInstallation resolvable =
-                (IResolvableRuntimeInstallation) Global.invoke(
-                    syncMgr, "getInstallation", project, infobase); //$NON-NLS-1$
-            if (resolvable == null) return null;
-            return resolvable.resolve(
-                List.of("com._1c.g5.v8.dt.platform.services.core.componentTypes.ThickClient"), //$NON-NLS-1$
-                infobase.getAppArch());
-        }
-        catch (Exception e)
-        {
-            Global.log("getRuntimeInstallation: " + e.getMessage()); //$NON-NLS-1$
+        if (project == null || infobase == null) 
             return null;
-        }
+        BundleContext ctx = Global.ourContext();
+        if (ctx == null) 
+            return null;
+        ServiceReference<?> ref = ctx.getServiceReference(
+            "com._1c.g5.v8.dt.platform.services.core.infobases.sync.IInfobaseSynchronizationManager"); //$NON-NLS-1$
+        if (ref == null) 
+            return null;
+        Object syncMgr = ctx.getService(ref);
+        if (syncMgr == null) 
+            return null;
+        IResolvableRuntimeInstallation resolvable =
+            (IResolvableRuntimeInstallation) Global.invoke(
+                syncMgr, "getInstallation", project, infobase); //$NON-NLS-1$
+        if (resolvable == null) 
+            return null;
+        return resolvable.resolve(
+            List.of("com._1c.g5.v8.dt.platform.services.core.componentTypes.ThickClient"), //$NON-NLS-1$
+            infobase.getAppArch());
     }
 
     // =======================================================================

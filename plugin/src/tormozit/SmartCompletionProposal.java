@@ -26,6 +26,8 @@ import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal;
+import org.eclipse.xtext.ui.editor.model.IXtextDocument;
+import org.eclipse.jface.text.source.SourceViewer;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 
@@ -258,7 +260,8 @@ public class SmartCompletionProposal implements
      */
     private boolean tryApplyWithIrAdapter(IrCompletionProposal ir, ITextViewer viewer, int offset)
     {
-        IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(GetRef.getActiveBslEditor(PlatformUI.getWorkbench().getActiveWorkbenchWindow().getActivePage().getActivePart())); 
+        BslXtextEditor activeBslEditor = GetRef.getActiveBslEditor(PlatformUI.getWorkbench().getActiveWorkbenchWindow().getActivePage().getActivePart());
+        IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(activeBslEditor); 
         if (session == null)
             return false;
 
@@ -285,16 +288,17 @@ public class SmartCompletionProposal implements
         if (result == null)
             return false;
 
+        // Отступ строки вставки — вычисляем ДО любых изменений документа
+        String lineIndent = result.formatText ? computeLineIndent(document, offset) : ""; //$NON-NLS-1$
+
         // Вычисляем диапазон удаления если генератор с поглощением
         int deleteFrom = -1;
         int deleteTo   = -1;
-//        if (result.isGeneratorWithLineStart)
-//        {
-            int[] range = resolveDeleteRange(result, document, session, offset, viewer);
+        if (result.newTemplate != null || result.isGeneratorWithLineStart) {
+           int[] range = resolveDeleteRange(result, document, session, offset, viewer);
             deleteFrom = range[0];
             deleteTo   = range[1];
-//        }
-
+        }
         // Удаляем диапазон перед вставкой
         boolean didDeleteRange = false;
         int insertOffset = offset;
@@ -324,29 +328,20 @@ public class SmartCompletionProposal implements
                         "Генератор вернул пустой текст для вставки", 3_000)); //$NON-NLS-1$
                 return true;
             }
-            applyIrTemplateText(ir, document, result.newTemplate, insertOffset, didDeleteRange);
+            // Адаптер вернул шаблон — вставляем его
+            applyIrInsertion(ir, document, result.newTemplate, insertOffset, didDeleteRange, result.formatText, lineIndent, result.isGeneratorWithLineStart, activeBslEditor);
             return true;
         }
 
-        // НовыйШаблон = Неопределено, но диапазон уже удалён — вставляем стандартный план
-        if (didDeleteRange)
-        {
-            IrCompletionProposal.InsertPlan plan = ir.buildInsertPlan();
-            try
-            {
-                document.replace(insertOffset, 0, plan.text);
-                ir.setPendingCaretAfterApply(insertOffset + plan.caretOffset);
-            }
-            catch (BadLocationException e)
-            {
-                IrCompletionDebug.problem("адаптер insertPlan: " + e.getMessage()); //$NON-NLS-1$
-            }
-            return true;
-        }
+        // НовыйШаблон = Неопределено, без поглощения — стандартная обработка
+        if (!didDeleteRange)
+            return false;
 
-        return false; // НовыйШаблон = Неопределено, без поглощения — стандартная обработка
+        // НовыйШаблон = Неопределено, диапазон удалён — вставляем стандартный план
+        applyIrInsertion(ir, document, null, insertOffset, true, result.formatText, lineIndent, result.isGeneratorWithLineStart, activeBslEditor);
+        return true;
     }
-
+    
     /**
      * Вычисляет диапазон [from, to) для удаления перед вставкой генератора.
      * <p>Порт блока {@code ЛиГенераторСПоглощениемНачалаСтроки} из {@code ПриВыбореЗначенияТΟ}.
@@ -364,8 +359,6 @@ public class SmartCompletionProposal implements
             int to   = Global.remapOffsetFromLf(raw, result.deleteToLf);
             return new int[] { from, to };
         }
-
-        // Fallback: вычисляем по строке слева от каретки
         // Порт: УдалитьТекстС = Позиция - СтрДлина(СокрЛ(СтрокаСлева))
         //        УдалитьТекстПо = Позиция + СтрДлина(ВыделенныйТекст)
         try
@@ -392,15 +385,23 @@ public class SmartCompletionProposal implements
     }
 
     /**
-     * Вставляет текст шаблона с разбором маркера каретки.
-     * Если {@code rangeAlreadyDeleted}, {@code replaceLen=0}; иначе заменяет идентификаторный префикс.
+     * Вставляет текст в документ по итогам адаптера.
+     * <p>Если {@code template != null} — использует его (адаптерный шаблон от ИР);
+     * иначе — стандартный план proposal ({@link IrCompletionProposal#buildInsertPlan()}).
+     * <p>Если {@code rangeAlreadyDeleted=true}, перед вставкой ничего не удаляется;
+     * иначе заменяет идентификаторный префикс перед {@code insertOffset}.
+     *
+     * @return длина вставленного текста; {@code 0} при ошибке
      */
-    private static void applyIrTemplateText(IrCompletionProposal ir, IDocument document,
-        String template, int insertOffset, boolean rangeAlreadyDeleted)
+    private static void applyIrInsertion(IrCompletionProposal ir, IDocument document,
+        String template, int insertOffset, boolean rangeAlreadyDeleted, boolean formatText,
+        String lineIndent, boolean indentFirstLine, BslXtextEditor editor)
     {
-        IrCompletionProposal.InsertPlan plan = IrCompletionProposal.planFromTemplate(template);
+        IrCompletionProposal.InsertPlan plan = template != null
+            ? IrCompletionProposal.planFromTemplate(template)
+            : ir.buildInsertPlan();
         int replaceLen;
-        if (rangeAlreadyDeleted)
+        if (rangeAlreadyDeleted || template == null)
         {
             replaceLen = 0;
         }
@@ -410,15 +411,100 @@ public class SmartCompletionProposal implements
                 document, insertOffset);
             replaceLen = Math.max(0, insertOffset - prefixStart);
         }
+        // Отступ вычисляем ДО вставки, по полной строке (не обрезая по каретке)
         try
         {
             document.replace(insertOffset, replaceLen, plan.text);
+            int insertedLength = plan.text.length();
+            if (formatText && !lineIndent.isEmpty() && insertedLength > 0)
+            {
+                formatInsertedRegion(insertOffset, insertedLength, lineIndent, indentFirstLine, editor);
+                if (indentFirstLine)
+                {
+                    plan.caretOffset += lineIndent.length();
+                }
+            }
             ir.setPendingCaretAfterApply(insertOffset + plan.caretOffset);
         }
         catch (BadLocationException e)
         {
-            IrCompletionDebug.problem("адаптер applyTemplate: " + e.getMessage()); //$NON-NLS-1$
+            IrCompletionDebug.problem("адаптер applyInsertion: " + e.getMessage()); //$NON-NLS-1$
         }
+    }
+
+    /**
+     * Форматирует вставленный фрагмент штатным форматтером EDT/BSL.
+     * <p>Выделяет регион {@code [offset, offset+length)}, вызывает
+     * {@code viewer.doOperation(FORMAT)} и откладывает через {@code asyncExec},
+     * чтобы не конфликтовать с завершением сессии автодополнения.
+     */
+    /**
+     * Выравнивает вставленный многострочный фрагмент по отступу строки вставки.
+     * <p>Берёт лидирующие пробельные символы строки, в которую попал {@code offset},
+     * и добавляет их в начало каждой непервой строки вставленного текста.
+     * Работает независимо от AST и применимо к любому тексту.
+     */
+    /**
+     * Выравнивает вставленный многострочный фрагмент по заранее вычисленному отступу.
+     * Добавляет {@code lineIndent} в начало каждой непервой строки вставки.
+     *
+     * @param lineIndent лидирующие пробельные символы строки вставки,
+     *                   захваченные до выполнения вставки
+     */
+    private static void formatInsertedRegion(int offset, int length, String lineIndent,
+        boolean indentFirstLine, BslXtextEditor activeBslEditor)
+    {
+        if (activeBslEditor == null || length <= 0 || lineIndent.isEmpty())
+            return;
+        org.eclipse.jface.text.source.ISourceViewer viewer =
+            activeBslEditor.getInternalSourceViewer();
+        if (viewer == null)
+            return;
+        IDocument document = viewer.getDocument();
+        if (document == null)
+            return;
+        try
+        {
+            String inserted = document.get(offset, length);
+            // Непервые строки — всегда добавляем отступ
+            String formatted = inserted.replace("\n", "\n" + lineIndent); //$NON-NLS-1$ //$NON-NLS-2$
+            // Первая строка — только если генератор начинается с начала строки
+            if (indentFirstLine)
+                formatted = lineIndent + formatted;
+            if (!formatted.equals(inserted))
+                document.replace(offset, length, formatted);
+        }
+        catch (BadLocationException e)
+        {
+            IrCompletionDebug.problem("formatInsertedRegion: " + e.getMessage()); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * Возвращает лидирующие пробельные символы полной строки, содержащей {@code offset}.
+     * Использует всю строку целиком — не обрезает по позиции каретки.
+     */
+    private static String computeLineIndent(IDocument document, int offset)
+    {
+        try
+        {
+            int line           = document.getLineOfOffset(offset);
+            org.eclipse.jface.text.IRegion lineInfo = document.getLineInformation(line);
+            return leadingWhitespace(document.get(lineInfo.getOffset(), lineInfo.getLength()));
+        }
+        catch (BadLocationException e)
+        {
+            return ""; //$NON-NLS-1$
+        }
+    }
+
+    /** Возвращает лидирующие пробельные символы строки (до первого непробельного). */
+    private static String leadingWhitespace(String line)
+    {
+        int i = 0;
+        while (i < line.length() && Character.isWhitespace(line.charAt(i)))
+            i++;
+        return line.substring(0, i);
     }
 
     // ---- ICompletionProposalExtension4 --------------------------------------

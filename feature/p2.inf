@@ -1,0 +1,9 @@
+# Update descriptor for feature.group IU.
+# Tells p2 that this version replaces any previous version of the same feature,
+# so "Install New Software" correctly updates instead of installing alongside.
+units.0.id=tormozit.comfort.feature.feature.group
+units.0.version=$version$
+units.0.update.id=tormozit.comfort.feature.feature.group
+units.0.update.range=[0.0.0,$version$)
+units.0.update.severity=0
+units.0.update.description=EDT Comfort update
