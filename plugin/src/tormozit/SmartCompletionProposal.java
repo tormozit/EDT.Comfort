@@ -288,12 +288,12 @@ public class SmartCompletionProposal implements
         // Вычисляем диапазон удаления если генератор с поглощением
         int deleteFrom = -1;
         int deleteTo   = -1;
-        if (result.isGeneratorWithLineStart)
-        {
+//        if (result.isGeneratorWithLineStart)
+//        {
             int[] range = resolveDeleteRange(result, document, session, offset, viewer);
             deleteFrom = range[0];
             deleteTo   = range[1];
-        }
+//        }
 
         // Удаляем диапазон перед вставкой
         boolean didDeleteRange = false;
