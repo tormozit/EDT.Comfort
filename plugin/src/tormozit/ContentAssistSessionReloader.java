@@ -1033,35 +1033,12 @@ public final class ContentAssistSessionReloader
         ContentAssistPopupSync.ensureEmptyListAllowed(assistant, false);
         warmupAssistBrowserCreator(caret);
         processor.onAssistSessionContextReady(viewer, caret);
-        SmartContentAssistProcessor.ProbeResult probe = processor.probeDelegateForCaretDiag(viewer, caret);
-        int edtN = probe.count;
-        boolean edtGate = SmartContentAssistProcessor.mayAutoOpenFromEdt(edtN);
+        completionAutoOpenEdtOpened = true;
         // #region agent log
-        ContentAssistDebug.logAutoOpen(autoOpenSeq, "H73", "beginCompletionAutoOpen", "begin", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + caret //$NON-NLS-1$
-                + ",\"hasIrSession\":" + (IrBslExpressionHtmlSupport.resolveIrSessionForAssist(bslEditor, viewer) != null) //$NON-NLS-1$
-                + ",\"wordsReady\":" + wordsTableReady + ",\"wordsCaret\":" + wordsTableCaret //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"inFlight\":" + wordsTableFetchInFlight + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        ContentAssistDebug.logAutoOpen(autoOpenSeq, "H73", "beginCompletionAutoOpen", "edtProbe", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + caret + ",\"edtN\":" + edtN //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"edtGate\":" + edtGate //$NON-NLS-1$
-                + ",\"bestOffset\":" + probe.bestOffset //$NON-NLS-1$
-                + ",\"probeOffsets\":\"" + probe.offsetsSummary() + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        ContentAssistDebug.debugModeLog("H71", "beginCompletionAutoOpen", "edtProbe", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + caret + ",\"edtN\":" + edtN //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"edtGate\":" + edtGate //$NON-NLS-1$
-                + ",\"autoOpenSeq\":" + autoOpenSeq //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        ContentAssistDebug.logAutoOpen(autoOpenSeq, "H73", "beginCompletionAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
+            "edtOpenBeforeShow", "{\"edtOpenedFlag\":true}"); //$NON-NLS-1$ //$NON-NLS-2$
         // #endregion
-        if (edtGate)
-        {
-            completionAutoOpenEdtOpened = true;
-            // #region agent log
-            ContentAssistDebug.logAutoOpen(autoOpenSeq, "H73", "beginCompletionAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
-                "edtOpenBeforeShow", "{\"edtOpenedFlag\":true}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            openCompletionAutoEdtPopup(caret, autoOpenSeq);
-        }
+        openCompletionAutoEdtPopup(caret, autoOpenSeq);
         IRSession session = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(bslEditor, viewer);
         boolean irScheduled = false;
         if (session != null && !isWordsTableFetchInFlightForCaret(caret))
@@ -1070,16 +1047,8 @@ public final class ContentAssistSessionReloader
             if (irScheduled)
                 completionAutoOpenIrScheduled = true;
         }
-        if (!edtGate && !irScheduled)
-            clearCompletionAutoOpenState("bothGatesFail", autoOpenSeq); //$NON-NLS-1$
-        else if (edtGate && !irScheduled)
+        if (!irScheduled)
             completionAutoOpenPending = false;
-        // #region agent log
-        ContentAssistDebug.logAutoOpen(autoOpenSeq, "H73", "beginCompletionAutoOpen", "beginDone", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"edtOpened\":" + completionAutoOpenEdtOpened //$NON-NLS-1$
-                + ",\"irScheduled\":" + irScheduled //$NON-NLS-1$
-                + ",\"pending\":" + completionAutoOpenPending + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
     }
 
     private void logBeginEarlyReturn(int autoOpenSeq, String reason, int caret)

@@ -363,14 +363,14 @@ public class SmartCompletionProposal implements
         //        УдалитьТекстПо = Позиция + СтрДлина(ВыделенныйТекст)
         try
         {
-            int lineStart = document.getLineOffset(
-                document.getLineOfOffset(completionOffset));
-            String linePrefix = document.get(lineStart, completionOffset - lineStart);
-            String effectivePrefix = result.formatText ? linePrefix.stripLeading() : linePrefix;
+            int wordStart = SmartContentAssistProcessor.computeIdentifierWordStart(
+                document, completionOffset);
+            String effectivePrefix = document.get(wordStart, completionOffset - wordStart);
             int deleteFrom = completionOffset - effectivePrefix.length();
             if (result.isGeneratorWithLineStart)
             {
-                deleteFrom = lineStart;
+                deleteFrom = document.getLineOffset(
+                    document.getLineOfOffset(completionOffset));
             }
             int selLen = viewer instanceof SourceViewer sv
                 ? Math.max(0, sv.getSelectedRange().y) : 0;
