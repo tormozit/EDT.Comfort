@@ -35,7 +35,7 @@ public final class IrCompletionProposal implements
     private final String templateText;
     private final boolean method;
     private final boolean returnsValue;
-    private final int irPriority;
+    private int irPriority;
     private final String stableCacheKey;
     private volatile String activationHtml;
     /** Штатная иконка assist EDT (borrow от delegate или {@link BslAssistListImages}). */
@@ -66,6 +66,11 @@ public final class IrCompletionProposal implements
         this.stableCacheKey = buildStableCacheKey(this.filterName, this.dictionaryKey);
     }
 
+    public void setIrPriority(int priority)
+    {
+        this.irPriority = priority;
+    }
+    
     public static String buildStableCacheKey(String filterName, String dictionaryKey)
     {
         String filter = filterName != null ? filterName : ""; //$NON-NLS-1$

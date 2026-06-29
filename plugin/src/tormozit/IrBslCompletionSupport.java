@@ -6,8 +6,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
 
@@ -360,8 +362,8 @@ public final class IrBslCompletionSupport
         int transferred = 0;
         int displayed = 0;
         List<ICompletionProposal> merged = new ArrayList<>();
-        Set<String> seenFilters = new LinkedHashSet<>();
-
+        Map<String, IrCompletionProposal> seenMap = new LinkedHashMap<>();
+        
         String contextSeparator = resolveContextSeparator(session);
         for (String setName : collectWordSetNames(session))
         {
@@ -371,13 +373,13 @@ public final class IrBslCompletionSupport
                 List<WordEntry> fetched = fetchWordSet(session, setName, contextSeparator, setName);
                 session.putCachedWordSet(setName, fetched);
                 transferred += fetched.size();
-                appendUniqueProposals(merged, seenFilters, fetched, contextType);
+                mergeProposals(merged, seenMap, fetched, contextType);
                 displayed += fetched.size();
             }
             else
             {
                 IrCompletionDebug.step("cache", "hit set=\"" + setName + "\" size=" + cached.size()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                appendUniqueProposals(merged, seenFilters, cached, contextType);
+                mergeProposals(merged, seenMap, cached, contextType);
                 displayed += cached.size();
             }
         }
@@ -385,7 +387,7 @@ public final class IrBslCompletionSupport
         List<WordEntry> mainTable = fetchWordSet(session, "", contextSeparator, ""); //$NON-NLS-1$
         transferred += mainTable.size();
         displayed += mainTable.size();
-        appendUniqueProposals(merged, seenFilters, mainTable, contextType);
+        mergeProposals(merged, seenMap, mainTable, contextType);
 
         IrCompletionDebug.timing("Передача слов", started); //$NON-NLS-1$
         IrCompletionDebug.log("Выражение contextType=" + contextType //$NON-NLS-1$
@@ -400,20 +402,27 @@ public final class IrBslCompletionSupport
             autoOpenSuggested);
     }
 
-    private static void appendUniqueProposals(
-        List<ICompletionProposal> target, Set<String> seenFilters, List<WordEntry> words,
-        String parentContextType)
+    private static void mergeProposals(
+        List<ICompletionProposal> target, Map<String, IrCompletionProposal> seenMap,
+        List<WordEntry> words, String parentContextType)
     {
         for (WordEntry entry : words)
         {
             String key = normalizeFilterKey(entry.filterName);
-            if (key.isEmpty() || seenFilters.contains(key))
+            if (key.isEmpty())
                 continue;
-            seenFilters.add(key);
-            target.add(entry.toProposal(parentContextType));
+            IrCompletionProposal existing = seenMap.get(key);
+            if (existing != null)
+            {
+                existing.setIrPriority(entry.priority);
+                continue;
+            }
+            IrCompletionProposal proposal = entry.toProposal(parentContextType);
+            seenMap.put(key, proposal);
+            target.add(proposal);
         }
     }
-
+    
     static String normalizeFilterKey(String filter)
     {
         if (filter == null)
