@@ -113,4 +113,6 @@ $devPropertiesPath = Join-Path $launchOsgi 'dev.properties'
 Update-PdeOsgiComfortVersion -BundlesInfoPath $bundlesInfoPath -DevPropertiesPath $devPropertiesPath -Qualifier $qualifier
 Write-Host "Updated: launch/backup/osgi -> $qualifier"
 
+Repair-ComfortWorkspaceOsgiVersion -Qualifier $qualifier
+
 Write-Host "Done. OSGi version template: $qualifier (timestamp подставится при сборке)"
