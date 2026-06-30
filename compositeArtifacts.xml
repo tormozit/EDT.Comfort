@@ -1,0 +1,18 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<?compositeArtifactRepository version='1.0.0'?>
+<repository name='EDT Comfort' type='org.eclipse.equinox.internal.p2.artifact.repository.CompositeArtifactRepository' version='1.0.0'>
+  <properties size='1'>
+    <property name='p2.timestamp' value='1782797138896'/>
+  </properties>
+  <children size='9'>
+    <child location='1.0.0.18/'/>
+    <child location='1.0.0.17/'/>
+    <child location='1.0.0.16/'/>
+    <child location='1.0.0.15/'/>
+    <child location='1.0.0.14/'/>
+    <child location='1.0.0.13/'/>
+    <child location='1.0.0.12/'/>
+    <child location='1.0.0.11/'/>
+    <child location='1.0.0.10/'/>
+  </children>
+</repository>
