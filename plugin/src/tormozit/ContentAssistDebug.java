@@ -98,14 +98,14 @@ public final class ContentAssistDebug
     {
         try
         {
-            String data = dataJson != null && !dataJson.isEmpty() ? dataJson : "{}"; //$NON-NLS-1$
-            String line = "{\"sessionId\":\"" + DEBUG_MODE_SESSION_ID //$NON-NLS-1$
-                + "\",\"hypothesisId\":\"" + hypothesisId //$NON-NLS-1$
-                + "\",\"location\":\"" + location //$NON-NLS-1$
-                + "\",\"message\":\"" + jsonEscape(message) //$NON-NLS-1$
-                + "\",\"data\":" + data //$NON-NLS-1$
-                + ",\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
-            DEBUG_MODE_QUEUE.offer(line); // non-blocking; drops if queue full
+//            String data = dataJson != null && !dataJson.isEmpty() ? dataJson : "{}"; //$NON-NLS-1$
+//            String line = "{\"sessionId\":\"" + DEBUG_MODE_SESSION_ID //$NON-NLS-1$
+//                + "\",\"hypothesisId\":\"" + hypothesisId //$NON-NLS-1$
+//                + "\",\"location\":\"" + location //$NON-NLS-1$
+//                + "\",\"message\":\"" + jsonEscape(message) //$NON-NLS-1$
+//                + "\",\"data\":" + data //$NON-NLS-1$
+//                + ",\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
+//            DEBUG_MODE_QUEUE.offer(line); // non-blocking; drops if queue full
         }
         catch (Exception ignored)
         {
@@ -117,14 +117,14 @@ public final class ContentAssistDebug
     {
         try
         {
-            String data = dataJson != null && !dataJson.isEmpty() ? dataJson : "{}"; //$NON-NLS-1$
-            String line = "{\"sessionId\":\"" + DEBUG_SESSION_ID //$NON-NLS-1$
-                + "\",\"hypothesisId\":\"" + hypothesisId //$NON-NLS-1$
-                + "\",\"location\":\"" + location //$NON-NLS-1$
-                + "\",\"message\":\"" + jsonEscape(message) //$NON-NLS-1$
-                + "\",\"data\":" + data //$NON-NLS-1$
-                + ",\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
-            SESSION_QUEUE.offer(line); // non-blocking; drops if queue full
+//            String data = dataJson != null && !dataJson.isEmpty() ? dataJson : "{}"; //$NON-NLS-1$
+//            String line = "{\"sessionId\":\"" + DEBUG_SESSION_ID //$NON-NLS-1$
+//                + "\",\"hypothesisId\":\"" + hypothesisId //$NON-NLS-1$
+//                + "\",\"location\":\"" + location //$NON-NLS-1$
+//                + "\",\"message\":\"" + jsonEscape(message) //$NON-NLS-1$
+//                + "\",\"data\":" + data //$NON-NLS-1$
+//                + ",\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
+//            SESSION_QUEUE.offer(line); // non-blocking; drops if queue full
         }
         catch (Exception ignored)
         {

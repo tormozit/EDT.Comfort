@@ -101,6 +101,20 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     private int irSnapshotContextKey = Integer.MIN_VALUE;
     /** Штатный список delegate без слов ИР. */
     private ICompletionProposal[] delegateListCache = EMPTY;
+    /**
+     * Выделенный однопоточный executor только для слияния/сортировки ИР+delegate
+     * ({@link #mergeIrProposalsCore}). Не использует {@code session.executor} (COM-поток),
+     * чтобы не ставить CPU-работу в очередь перед COM-вызовами.
+     */
+    private static final java.util.concurrent.ExecutorService IR_MERGE_EXECUTOR =
+        java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+            Thread t = new Thread(r, "tormozit-ir-merge"); //$NON-NLS-1$
+            t.setDaemon(true);
+            return t;
+        });
+    /** Поколение последнего запланированного фонового merge ({@link #applyIrCompletion}). */
+    private final java.util.concurrent.atomic.AtomicInteger mergeGeneration =
+        new java.util.concurrent.atomic.AtomicInteger();
     private int irSnapshotCacheContextKey = Integer.MIN_VALUE;
     private long irSnapshotCacheDocStamp = -1L;
     private IrBslCompletionSupport.Snapshot irSnapshotCache;
