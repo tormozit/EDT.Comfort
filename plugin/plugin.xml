@@ -510,15 +510,6 @@
             style="toggle"
             tooltip="Показать только объекты активного набора; вытесняет фильтр подсистем (Комфорт)"/>
       </menuContribution>
-      <menuContribution
-          allPopups="false"
-          locationURI="popup:com._1c.g5.v8.dt.navigator.ui.navigator.popup?after=group.edit">
-        <menu label="Комфорт">
-          <command
-              commandId="tormozit.navigator.addToObjectSet"
-              style="push"/>
-        </menu>
-      </menuContribution>
    </extension>
 
   <extension point="org.eclipse.ui.views">

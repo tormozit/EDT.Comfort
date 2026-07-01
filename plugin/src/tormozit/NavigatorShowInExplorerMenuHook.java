@@ -27,9 +27,11 @@ import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.navigator.CommonViewer;
 
 /**
- * Добавляет «Показать в проводнике» в подменю Open With навигатора EDT.
- * Декларативный {@code popup:org.eclipse.ui.OpenWithMenu} не работает — OpenWithMenu
- * заполняется динамически через JFace {@code ContributionItem}.
+ * Добавляет «Показать в проводнике» в подменю «Комфорт» навигатора EDT.
+ * <p>
+ * Раньше команда добавлялась в штатное подменю Open With (см. {@code hookOpenWithSubmenu}).
+ * Если потребуется вернуть — заменить вызов {@link #hookComfortSubmenu} на
+ * {@code hookOpenWithSubmenu(menu, viewer)} в {@link #tryHook}.
  */
 public final class NavigatorShowInExplorerMenuHook implements IStartup
 {
@@ -123,7 +125,8 @@ public final class NavigatorShowInExplorerMenuHook implements IStartup
             @Override
             public void menuShown(MenuEvent e)
             {
-                hookOpenWithSubmenu(menu, viewer);
+                // Чтобы вернуть в Open With — заменить на hookOpenWithSubmenu(menu, viewer)
+                hookComfortSubmenu(menu, viewer);
             }
         };
         menu.addMenuListener(listener);
@@ -134,6 +137,10 @@ public final class NavigatorShowInExplorerMenuHook implements IStartup
         });
     }
 
+    /*
+     * Закомментировано — код перенесён в подменю «Комфорт».
+     * Раскомментировать для возврата в Open With.
+     *
     private static void hookOpenWithSubmenu(Menu contextMenu, CommonViewer viewer)
     {
         MenuItem openWith = findOpenWithCascade(contextMenu);
@@ -195,6 +202,69 @@ public final class NavigatorShowInExplorerMenuHook implements IStartup
         subMenu.addDisposeListener(ev -> {
             if (!subMenu.isDisposed())
                 subMenu.removeMenuListener(subListener);
+        });
+    }
+    */
+
+    private static void hookComfortSubmenu(Menu contextMenu, CommonViewer viewer)
+    {
+        MenuItem anchor = ComfortSubmenuHelper.findAnchorAfterEditGroup(contextMenu);
+        Menu comfortSub = ComfortSubmenuHelper.findOrCreateComfortSubmenu(
+            contextMenu, contextMenu.getShell(), anchor);
+        if (comfortSub == null || comfortSub.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(comfortSub.getData(HOOK_MARKER)))
+            return;
+
+        MenuAdapter subListener = new MenuAdapter()
+        {
+            private final List<MenuItem> added = new ArrayList<>(2);
+
+            @Override
+            public void menuShown(MenuEvent e)
+            {
+                ISelection selection = viewer.getSelection();
+                if (!(selection instanceof IStructuredSelection structured) || structured.isEmpty())
+                    return;
+                if (NavigatorResourceResolver.resolveFirst(structured) == null)
+                    return;
+
+                MenuItem item = new MenuItem(comfortSub, SWT.PUSH);
+                item.setText(ITEM_TEXT);
+                item.setToolTipText(ITEM_TOOLTIP);
+                item.addSelectionListener(new SelectionAdapter()
+                {
+                    @Override
+                    public void widgetSelected(SelectionEvent ev)
+                    {
+                        ISelection current = viewer.getSelection();
+                        if (current instanceof IStructuredSelection currentStructured)
+                            NavigatorShowInExplorerHandler.showInExplorer(currentStructured, comfortSub.getShell());
+                    }
+                });
+                added.add(item);
+            }
+
+            @Override
+            public void menuHidden(MenuEvent e)
+            {
+                List<MenuItem> snapshot = new ArrayList<>(added);
+                added.clear();
+                comfortSub.getDisplay().asyncExec(() -> {
+                    for (MenuItem mi : snapshot)
+                    {
+                        if (!mi.isDisposed())
+                            mi.dispose();
+                    }
+                });
+            }
+        };
+
+        comfortSub.addMenuListener(subListener);
+        comfortSub.setData(HOOK_MARKER, Boolean.TRUE);
+        comfortSub.addDisposeListener(ev -> {
+            if (!comfortSub.isDisposed())
+                comfortSub.removeMenuListener(subListener);
         });
     }
 

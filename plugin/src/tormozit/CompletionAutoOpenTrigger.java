@@ -26,7 +26,27 @@ public final class CompletionAutoOpenTrigger
         String linePrefix = BslAssistSourceHeuristics.linePrefixToCaret(
             doc, caretAfter, insertedChar, insertOffset);
         if (BslAssistSourceHeuristics.isInsideLineComment(linePrefix))
+        {
+            // В комментарии разрешаем только member-access: точка после идентификатора, или буквы после точки
+            if (insertedChar == '.')
+            {
+                if (!BslAssistSourceHeuristics.lastTwoCharsNotEqual(
+                    doc, caretAfter, insertedChar, insertOffset))
+                    return null;
+                String parent = BslAssistSourceHeuristics.parentContextBeforeDot(
+                    doc, caretAfter, insertedChar, insertOffset);
+                if (parent != null && !parent.isEmpty())
+                    return "dot";
+                return null;
+            }
+            if (isPrintableKey(stateMask, insertedChar))
+            {
+                if (SmartContentAssistProcessor.ReceiverTypeLabel.findMemberAccessDot(doc, insertOffset) >= 0)
+                    return "printable";
+                return null;
+            }
             return null;
+        }
 
         if (isPrintableKey(stateMask, insertedChar))
             return "printable"; //$NON-NLS-1$

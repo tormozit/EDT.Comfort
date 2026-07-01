@@ -925,7 +925,23 @@ public final class ContentAssistSessionReloader
                 + "\",\"offset\":" + insertOffset + ",\"caretAfter\":" + caretAfter //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"shouldFetch\":true,\"triggerBranch\":\"" + branch + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         // #endregion
-        scheduleCompletionAutoOpen(caretAfter, seq);
+        if ("space".equals(branch))
+        {
+            // Пробел: не открываем EDT-попап, только ИР решает через ЗаполнитьТаблицуСлов
+            if (!isWordsTableFetchInFlightForCaret(caretAfter)
+                && scheduleWordsTablePreparation(caretAfter, true))
+            {
+                completionAutoOpenPending = true;
+                completionAutoOpenCaret = caretAfter;
+                completionAutoOpenIrScheduled = true;
+                completionAutoOpenEdtOpened = false;
+                completionAutoOpenActiveSeq = seq;
+            }
+        }
+        else
+        {
+            scheduleCompletionAutoOpen(caretAfter, seq);
+        }
     }
 
     private void scheduleCompletionAutoOpen(int expectedCaretAfter, int autoOpenSeq)

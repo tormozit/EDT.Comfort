@@ -36,6 +36,8 @@ public final class ContentAssistDebug
 
     static
     {
+        try { Files.deleteIfExists(DEBUG_MODE_LOG); } catch (IOException e) { /* best-effort */ }
+        try { Files.deleteIfExists(DEBUG_SESSION_LOG); } catch (IOException e) { /* best-effort */ }
         startAsyncWriter("ContentAssistDebugModeWriter", DEBUG_MODE_LOG, DEBUG_MODE_QUEUE); //$NON-NLS-1$
         startAsyncWriter("ContentAssistSessionWriter", DEBUG_SESSION_LOG, SESSION_QUEUE); //$NON-NLS-1$
     }

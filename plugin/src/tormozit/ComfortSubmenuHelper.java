@@ -175,7 +175,69 @@ final class ComfortSubmenuHelper
         return bindingLocale == null || bindingLocale.isBlank() || bindingLocale.equals(locale);
     }
 
+    /**
+     * Ищет пункт «Open With» / «Open with» / «Открыть с помощью» (CASCADE) в меню навигатора.
+     */
+    static MenuItem findOpenWithCascade(Menu menu)
+    {
+        if (menu == null || menu.isDisposed())
+            return null;
+        for (MenuItem item : menu.getItems())
+        {
+            if (item.isDisposed() || (item.getStyle() & SWT.CASCADE) == 0)
+                continue;
+            String text = item.getText();
+            if (text == null)
+                continue;
+            String normalized = text.replace("&", "").trim(); //$NON-NLS-1$ //$NON-NLS-2$
+            if (normalized.equalsIgnoreCase("Open With") //$NON-NLS-1$
+                    || normalized.equalsIgnoreCase("Open with") //$NON-NLS-1$
+                    || normalized.equalsIgnoreCase("Открыть с помощью")) //$NON-NLS-1$
+                return item;
+        }
+        return null;
+    }
+
+    /**
+     * Возвращает anchor-элемент, после которого следует вставлять подменю «Комфорт» —
+     * последний пункт группы edit (перед вторым разделителем после «Open With»).
+     * Если определить позицию не удалось, возвращает {@code null} (вставка в конец).
+     */
+    static MenuItem findAnchorAfterEditGroup(Menu menu)
+    {
+        MenuItem openWith = findOpenWithCascade(menu);
+        if (openWith == null || openWith.isDisposed())
+            return null;
+        MenuItem[] items = menu.getItems();
+        int startIndex = menu.indexOf(openWith);
+        if (startIndex < 0)
+            return null;
+        int separatorCount = 0;
+        for (int i = startIndex + 1; i < items.length; i++)
+        {
+            if (items[i].isDisposed())
+                continue;
+            if ((items[i].getStyle() & SWT.SEPARATOR) != 0)
+            {
+                separatorCount++;
+                if (separatorCount == 2)
+                    return i > 0 ? items[i - 1] : null;
+            }
+        }
+        return null;
+    }
+
     static Menu findOrCreateComfortSubmenu(Menu parentMenu, Shell shell)
+    {
+        return findOrCreateComfortSubmenu(parentMenu, shell, null);
+    }
+
+    /**
+     * Находит существующее подменю «Комфорт» в {@code parentMenu} либо создаёт новое.
+     * Если {@code anchor} не {@code null} и подменю не найдено, новый пункт вставляется
+     * сразу после {@code anchor} (в противном случае — в конец).
+     */
+    static Menu findOrCreateComfortSubmenu(Menu parentMenu, Shell shell, MenuItem anchor)
     {
         if (parentMenu == null || parentMenu.isDisposed())
             return null;
@@ -199,7 +261,12 @@ final class ComfortSubmenuHelper
             }
         }
 
-        MenuItem comfortRoot = new MenuItem(parentMenu, SWT.CASCADE);
+        int index = anchor != null && !anchor.isDisposed() && anchor.getParent() == parentMenu
+            ? parentMenu.indexOf(anchor) + 1
+            : -1;
+        MenuItem comfortRoot = index >= 0
+            ? new MenuItem(parentMenu, SWT.CASCADE, index)
+            : new MenuItem(parentMenu, SWT.CASCADE);
         comfortRoot.setText(SUBMENU_TEXT);
         comfortRoot.setData(SUBMENU_MARKER, Boolean.TRUE);
         Menu comfortSub = new Menu(shell != null && !shell.isDisposed() ? shell : parentMenu.getShell(), SWT.DROP_DOWN);

@@ -88,9 +88,17 @@ public final class DebugVariablePresentationHook implements IStartup
             return;
         display.asyncExec(() ->
         {
-            scheduleInstall(0);
-            installDebugTreeLabelListeners();
-            installDebugLaunchRepatch();
+            try
+            {
+                scheduleInstall(0);
+                installDebugTreeLabelListeners();
+                installDebugLaunchRepatch();
+            }
+            catch (Exception e)
+            {
+                DebugVariablePresentationDebug.step("earlyStartup",
+                    "asyncExec exception: " + e.getClass().getSimpleName() + " " + e.getMessage());
+            }
         });
     }
 
@@ -113,9 +121,10 @@ public final class DebugVariablePresentationHook implements IStartup
                 public void launchRemoved(org.eclipse.debug.core.ILaunch launch) { }
             });
         }
-        catch (Exception ignored)
+        catch (Exception e)
         {
-            // отладчик ещё не инициализирован
+            DebugVariablePresentationDebug.step("installDebugLaunchRepatch",
+                "exception: " + e.getClass().getSimpleName() + " " + e.getMessage());
         }
     }
 
@@ -130,7 +139,19 @@ public final class DebugVariablePresentationHook implements IStartup
             return;
         }
         if (tryInstallLabelProvider())
+        {
+            if (attempt > 0)
+                DebugVariablePresentationDebug.step("scheduleInstall",
+                    "succeeded on attempt=" + attempt);
             return;
+        }
+        if (attempt == 0 || attempt == 10 || attempt == 30)
+        {
+            Bundle bundle = Platform.getBundle(BUNDLE_DEBUG_UI);
+            String bundleState = bundle != null ? String.valueOf(bundle.getState()) : "null";
+            DebugVariablePresentationDebug.step("scheduleInstall",
+                "attempt=" + attempt + " bundleState=" + bundleState);
+        }
         if (attempt < 48)
             display.timerExec(attempt < 8 ? 50 : 100, () -> scheduleInstall(attempt + 1));
     }
@@ -138,15 +159,31 @@ public final class DebugVariablePresentationHook implements IStartup
     static boolean tryInstallLabelProvider()
     {
         if (!ComfortSettings.isImproveDebuggerWindowsEnabled())
+        {
+            DebugVariablePresentationDebug.step("tryInstallLabelProvider",
+                "improveDebuggerWindows disabled");
             return false;
+        }
         int guicePatches = patchViaGuiceInjector();
         if (guicePatches > 0)
+        {
+            DebugVariablePresentationDebug.step("tryInstallLabelProvider",
+                "patched " + guicePatches + " via GuiceInjector");
             return true;
+        }
         int managerPatches = patchAllLabelProviderHostsFromManager();
         if (managerPatches > 0)
+        {
+            DebugVariablePresentationDebug.step("tryInstallLabelProvider",
+                "patched " + managerPatches + " via AdapterManager");
             return true;
+        }
         if (hasPatchedLabelProviderHost())
+        {
+            DebugVariablePresentationDebug.step("tryInstallLabelProvider",
+                "already patched");
             return true;
+        }
         return false;
     }
 
@@ -158,23 +195,33 @@ public final class DebugVariablePresentationHook implements IStartup
                 "com._1c.g5.v8.dt.internal.debug.ui.DebugUiPlugin"); //$NON-NLS-1$
             Object plugin = pluginClass.getMethod("getDefault").invoke(null); //$NON-NLS-1$
             if (plugin == null)
+            {
+                DebugVariablePresentationDebug.step("patchViaGuiceInjector", "plugin=null");
                 return 0;
+            }
             Method getInjectorMethod = pluginClass.getDeclaredMethod("getInjector"); //$NON-NLS-1$
             getInjectorMethod.setAccessible(true);
             Injector injector = (Injector) getInjectorMethod.invoke(plugin);
             if (injector == null)
+            {
+                DebugVariablePresentationDebug.step("patchViaGuiceInjector", "injector=null");
                 return 0;
+            }
             Class<?> factoryClass = loadDebugUiClass(
                 "com._1c.g5.v8.dt.internal.debug.ui.BslDebugElementAdapterFactory"); //$NON-NLS-1$
             @SuppressWarnings("unchecked") //$NON-NLS-1$
             Object factory = injector.getInstance((Class<Object>) factoryClass);
             if (factory == null)
+            {
+                DebugVariablePresentationDebug.step("patchViaGuiceInjector", "factory=null");
                 return 0;
+            }
             return patchLabelProviderHost(factory) ? 1 : 0;
         }
         catch (Exception e)
         {
-             //$NON-NLS-1$ //$NON-NLS-2$
+            DebugVariablePresentationDebug.step("patchViaGuiceInjector",
+                "exception: " + e.getClass().getSimpleName() + " " + e.getMessage());
             return 0;
         }
     }
@@ -186,14 +233,10 @@ public final class DebugVariablePresentationHook implements IStartup
             throw new ClassNotFoundException(className + " (bundle missing)"); //$NON-NLS-1$
         if (bundle.getState() != Bundle.ACTIVE)
         {
-            try
-            {
-                bundle.start(Bundle.START_TRANSIENT);
-            }
-            catch (Exception ignored)
-            {
-                // activation optional
-            }
+            DebugVariablePresentationDebug.step("loadDebugUiClass",
+                "bundle not active, state=" + bundle.getState() + " — retry later");
+            throw new ClassNotFoundException(
+                className + " (bundle state=" + bundle.getState() + ")"); //$NON-NLS-1$ //$NON-NLS-2$
         }
         return bundle.loadClass(className);
     }
@@ -206,9 +249,10 @@ public final class DebugVariablePresentationHook implements IStartup
         {
             Platform.getAdapterManager().loadAdapter(sample, LABEL_PROVIDER_CLASS);
         }
-        catch (Exception ignored)
+        catch (Exception e)
         {
-            // адаптер ещё не зарегистрирован
+            DebugVariablePresentationDebug.step("forceLoadLabelAdapter",
+                "exception: " + e.getClass().getSimpleName() + " " + e.getMessage());
         }
     }
 
@@ -254,9 +298,10 @@ public final class DebugVariablePresentationHook implements IStartup
                 }
             }
         }
-        catch (Exception ignored)
+        catch (Exception e)
         {
-            // identity match недоступен
+            DebugVariablePresentationDebug.step("patchLabelProviderHostByRuntimeProvider",
+                "exception: " + e.getClass().getSimpleName() + " " + e.getMessage());
         }
         return false;
     }
@@ -318,6 +363,8 @@ public final class DebugVariablePresentationHook implements IStartup
         }
         catch (Exception e)
         {
+            DebugVariablePresentationDebug.step("patchAllLabelProviderHostsFromManager",
+                "exception: " + e.getClass().getSimpleName() + " " + e.getMessage());
         }
         return patched;
     }
@@ -345,9 +392,10 @@ public final class DebugVariablePresentationHook implements IStartup
                 }
             }
         }
-        catch (Exception ignored)
+        catch (Exception e)
         {
-            // manager ещё не готов
+            DebugVariablePresentationDebug.step("hasPatchedLabelProviderHost",
+                "exception: " + e.getClass().getSimpleName() + " " + e.getMessage());
         }
         return false;
     }
@@ -571,6 +619,8 @@ public final class DebugVariablePresentationHook implements IStartup
         }
         catch (Exception e)
         {
+            DebugVariablePresentationDebug.step("hookInspectorTreeViewer",
+                "exception: " + e.getClass().getSimpleName() + " " + e.getMessage());
         }
     }
 
@@ -663,6 +713,8 @@ public final class DebugVariablePresentationHook implements IStartup
         }
         catch (Exception e)
         {
+            DebugVariablePresentationDebug.step("createInspectorLabelUpdateListener",
+                "exception: " + e.getClass().getSimpleName() + " " + e.getMessage());
             return null;
         }
     }
@@ -810,6 +862,8 @@ public final class DebugVariablePresentationHook implements IStartup
         }
         catch (Exception e)
         {
+            DebugVariablePresentationDebug.step("applyLabelUpdateToViewer",
+                "exception: " + e.getClass().getSimpleName() + " " + e.getMessage());
         }
     }
 
@@ -826,6 +880,8 @@ public final class DebugVariablePresentationHook implements IStartup
         }
         catch (Exception e)
         {
+            DebugVariablePresentationDebug.step("paintStockValueLabel",
+                "exception: " + e.getClass().getSimpleName() + " " + e.getMessage());
             return;
         }
         if (!(treeObj instanceof Tree tree) || tree.isDisposed())
@@ -883,9 +939,10 @@ public final class DebugVariablePresentationHook implements IStartup
             if (provider != null)
                 Global.invoke(provider, "update", path); //$NON-NLS-1$
         }
-        catch (Exception ignored)
+        catch (Exception e)
         {
-            // repaint optional
+            DebugVariablePresentationDebug.step("paintInspectorValueLabel",
+                "repaint exception: " + e.getClass().getSimpleName() + " " + e.getMessage());
         }
         Object treeObj = viewer.getData(INSPECTOR_TREE_KEY);
         if (!(treeObj instanceof Tree tree) || tree.isDisposed())

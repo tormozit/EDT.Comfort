@@ -753,14 +753,10 @@ public final class BslInspectSupport
             throw new ClassNotFoundException(className + " (bundle " + BUNDLE_DEBUG_UI + " not installed)"); //$NON-NLS-1$ //$NON-NLS-2$
         if (bundle.getState() != Bundle.ACTIVE)
         {
-            try
-            {
-                bundle.start(Bundle.START_TRANSIENT);
-            }
-            catch (Exception ignored)
-            {
-                // bundle activation optional
-            }
+            // Не стартуем бандл принудительно — EDT сама его активирует.
+            // Вызывающий код retry-ит при необходимости.
+            throw new ClassNotFoundException(
+                className + " (bundle state=" + bundle.getState() + ")"); //$NON-NLS-1$ //$NON-NLS-2$
         }
         return bundle.loadClass(className);
     }

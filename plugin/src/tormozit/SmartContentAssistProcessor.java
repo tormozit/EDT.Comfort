@@ -11,6 +11,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.Status;
+import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.IDocument;
@@ -131,6 +135,13 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     private boolean irWordsResolved;
     /** Ручной Ctrl+Space — popup только со словами ИР (literal и др.). */
     private boolean irOnlyManualMode;
+
+    // ---- Асинхронная/конкурентная загрузка delegate (EDT compute) ---------------
+
+    /** Job для фоновой загрузки delegate (EDT). */
+    private Job asyncDelegateLoadJob;
+    /** Поколение для отмены устаревших async-загрузок. */
+    private int asyncDelegateLoadGen;
 
     public SmartContentAssistProcessor(IContentAssistProcessor delegate, String activationChars)
     {
@@ -861,8 +872,14 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
         int probeOffset = resolveDelegateProbeOffset(viewer, offset, caret);
         String filter = SmartFilterTracker.getCurrentFilter();
-        return resolveProposalList(viewer, probeOffset, caret, filter,
-            SmartAssistFilterState.isSmartFilterEnabled());
+        boolean smart = SmartAssistFilterState.isSmartFilterEnabled();
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H-DIAG", "computeProposalsLight", "enter",
+            "{\"caret\":" + caret + ",\"probeOffset\":" + probeOffset
+                + ",\"smart\":" + smart
+                + ",\"filter\":\"" + ContentAssistDebug.jsonEscapeForLog(filter) + "\"}");
+        // #endregion
+        return resolveProposalList(viewer, probeOffset, caret, filter, smart);
     }
 
     private static void applyStockAssistImagesFromDelegate(
@@ -1133,13 +1150,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             String livePrefix = SmartFilterTracker.getCurrentFilter();
             if (livePrefix != null && !livePrefix.isEmpty())
                 return;
-            loadFullList(viewer, false);
-            if (fullListReady)
-            {
-                livePrefix = SmartFilterTracker.getCurrentFilter();
-                if (livePrefix == null || livePrefix.isEmpty())
-                    ContentAssistSessionReloader.refreshPopupIfOpen();
-            }
+            scheduleAsyncDelegateLoad(viewer);
         };
         display.asyncExec(pendingEagerLoadTask);
     }
@@ -1215,6 +1226,16 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         // #endregion
         if (manualDetect && reloader != null)
             reloader.tryBeginManualDualAssist(literalCaret);
+        boolean diagIrPending = reloader != null && reloader.isManualIrAssistPending();
+        boolean diagIrResolved = isIrWordsResolvedForContext();
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H-DIAG", "computeCompletionProposals", "afterTryBeginManualDualAssist",
+            "{\"caret\":" + literalCaret
+                + ",\"inLiteral\":" + inLiteral
+                + ",\"manualIrAssistPending\":" + diagIrPending
+                + ",\"irWordsResolved\":" + diagIrResolved
+                + ",\"willReturnEmpty\":" + (diagIrPending && !diagIrResolved) + "}");
+        // #endregion
         if (reloader != null && reloader.isManualIrAssistPending()
             && !isIrWordsResolvedForContext())
         {
@@ -1644,7 +1665,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             memberAccessReloadScheduledSeq = -1;
             clearDelegateSyncProbe();
             if (dot < 0)
-                loadFullList(viewer, true);
+                scheduleAsyncDelegateLoad(viewer);
             // member-access: полный список — в async fetchStockDelegateList (без sync probe на Ctrl+Space)
         }
         SmartAssistFilterState.clearUnfilteredReloadPending();
@@ -1672,7 +1693,14 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         }
 
         if (!smartEnabled)
+        {
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H-DIAG", "resolveProposalList", "alphabetical",
+                "{\"smartEnabled\":false,\"filter\":\"" + ContentAssistDebug.jsonEscapeForLog(filter)
+                    + "\",\"caret\":" + caret + "}");
+            // #endregion
             return resolveAlphabeticalList(viewer, offset, caret);
+        }
         if (filter.isEmpty())
             return resolveDelegateOrderedList(viewer, offset, caret);
 
@@ -1703,26 +1731,56 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             debugResolveExit(doc, caret, filter, 0, false, "delegateProbed", EMPTY); //$NON-NLS-1$
             return EMPTY;
         }
+        // Первичное открытие (попап ещё не виден) — синхронная загрузка delegate
+        if (!isPopupVisible())
+        {
+            ICompletionProposal[] raw = unwrapProposals(fetchDelegateList(viewer, offset, caret));
+            ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+            if (reloader == null || !reloader.isWordsTableFetchInFlightForContext(caret))
+                markDelegateSyncProbed();
+            ICompletionProposal[] filtered = filterAndSort(mergeIrForDisplay(raw), filter);
+            ICompletionProposal[] cacheSeed = !filter.isEmpty() && filtered.length > 0 ? filtered : raw;
+            rememberInterimDelegateList(cacheSeed);
+            absorbInterimIntoCache(viewer, caret, cacheSeed);
+            if (filtered.length > 0)
+            {
+                debugResolveExit(doc, caret, filter, raw.length, false, "fetchFiltered", filtered);
+                return filtered;
+            }
+            if (fullListCache.length > 0)
+            {
+                ICompletionProposal[] result = filterAndSort(fullListCache, filter);
+                debugResolveExit(doc, caret, filter, fullListCache.length, true, "fullListFallback", result);
+                return result;
+            }
+            debugResolveExit(doc, caret, filter, raw.length, false, "fetchEmpty", EMPTY);
+            return EMPTY;
+        }
+        // Попап уже открыт — быстрый sync probe (1 delegate.compute, ~1-5ms);
+        // тяжёлый loadFullList остаётся в async Job.
+        if (hasIrProposalsForCurrentContext())
+        {
+            ICompletionProposal[] result = filterAndSort(mergeIrForDisplay(EMPTY), filter);
+            debugResolveExit(doc, caret, filter, 0, false, "h84IrOnly", result);
+            return result;
+        }
         ICompletionProposal[] raw = unwrapProposals(fetchDelegateList(viewer, offset, caret));
-        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
-        if (reloader == null || !reloader.isWordsTableFetchInFlightForContext(caret))
-            markDelegateSyncProbed();
         ICompletionProposal[] filtered = filterAndSort(mergeIrForDisplay(raw), filter);
         ICompletionProposal[] cacheSeed = !filter.isEmpty() && filtered.length > 0 ? filtered : raw;
         rememberInterimDelegateList(cacheSeed);
         absorbInterimIntoCache(viewer, caret, cacheSeed);
         if (filtered.length > 0)
         {
-            debugResolveExit(doc, caret, filter, raw.length, false, "fetchFiltered", filtered); //$NON-NLS-1$
+            debugResolveExit(doc, caret, filter, raw.length, false, "h84Probe", filtered);
             return filtered;
         }
         if (fullListCache.length > 0)
         {
             ICompletionProposal[] result = filterAndSort(fullListCache, filter);
-            debugResolveExit(doc, caret, filter, fullListCache.length, true, "fullListFallback", result); //$NON-NLS-1$
+            debugResolveExit(doc, caret, filter, fullListCache.length, true, "h84CacheFallback", result);
             return result;
         }
-        debugResolveExit(doc, caret, filter, raw.length, false, "fetchEmpty", EMPTY); //$NON-NLS-1$
+        debugResolveExit(doc, caret, filter, raw.length, false, "h84ProbeEmpty", EMPTY);
         return EMPTY;
     }
 
@@ -2383,12 +2441,21 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
         int[] offsets = stockProbeOffsets(assistant, caret, dot, doc);
         ICompletionProposal[] raw = probeDelegateAtOffsets(viewer, offsets, dot);
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H-DIAG", "fetchStockDelegateList", "probeResult",
+            "{\"offsets\":" + java.util.Arrays.toString(offsets)
+                + ",\"dot\":" + dot + ",\"rawLen\":" + raw.length + "}");
+        // #endregion
         int probe = -1;
         if (raw.length == 0)
         {
             probe = resolveDelegateProbeOffset(viewer, offset, caret);
             ICompletionProposal[] fallback = delegate.computeCompletionProposals(viewer, probe);
             raw = unwrapProposals(fallback != null ? fallback : EMPTY);
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H-DIAG", "fetchStockDelegateList", "fallback",
+                "{\"probe\":" + probe + ",\"fallbackLen\":" + raw.length + "}");
+            // #endregion
         }
         if (dot >= 0)
         {
@@ -2406,7 +2473,12 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         }
         else if (isCacheValidForCaret(doc, caret) && fullListCache.length > raw.length)
             raw = fullListCache;
-        return finalizeListForIrAssistDisplay(raw);
+        ICompletionProposal[] result = finalizeListForIrAssistDisplay(raw);
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H-DIAG", "fetchStockDelegateList", "exit",
+            "{\"resultLen\":" + result.length + "}");
+        // #endregion
+        return result;
     }
 
     /** Probe для штатного списка: invocation / filter offset / начало слова / каретка. */
@@ -2599,19 +2671,10 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                 return;
             if (!SmartFilterTracker.getCurrentFilter().isEmpty())
             {
-                rescheduleIdleFullListLoad(viewer, readOnly);
+                scheduleAsyncDelegateLoad(viewer);
                 return;
             }
-            loadFullList(viewer, readOnly);
-            if (contextKey != fullListContextKey)
-            {
-                fullListReady = false;
-                fullListComplete = false;
-                assignFullListCache(EMPTY);
-                return;
-            }
-            if (fullListReady && SmartFilterTracker.getCurrentFilter().isEmpty())
-                ContentAssistSessionReloader.refreshPopupIfOpen();
+            scheduleAsyncDelegateLoad(viewer);
         };
         display.timerExec(IDLE_FULL_LIST_MS, pendingIdleLoadTask);
     }
@@ -2725,6 +2788,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             memberAccessReloadScheduledSeq = -1;
             resetMemberStockFullList();
             cancelIdleFullListLoad();
+            cancelAsyncDelegateLoad();
             clearDelegateSyncProbe();
             ContentAssistDebug.log("fullList context change key=" + contextKey //$NON-NLS-1$
                 + " caret=" + caret); //$NON-NLS-1$
@@ -2741,7 +2805,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                         scheduleMemberStockCapture(viewer, dot);
                 }
             }
-            rescheduleIdleFullListLoad(viewer, false);
+            scheduleAsyncDelegateLoad(viewer);
             return;
         }
         if (doc != null && caret >= 0 && !terminalEmptyMemberAccess)
@@ -2888,17 +2952,28 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         if (dot < 0)
         {
             ICompletionProposal[] best = EMPTY;
+            // #region agent log
+            StringBuilder diag = new StringBuilder();
+            // #endregion
             for (int off : offsets)
             {
                 if (off < 0)
                     continue;
                 ICompletionProposal[] raw = delegate.computeCompletionProposals(viewer, off);
                 int count = raw != null ? raw.length : 0;
+                // #region agent log
+                diag.append("{\"off\":" + off + ",\"count\":" + count + "},");
+                // #endregion
                 if (count == 0)
                     continue;
                 if (count > best.length)
                     best = raw;
             }
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H-DIAG", "probeDelegateAtOffsets", "dotLt0",
+                "{\"probes\":[" + (diag.length() > 0 ? diag.substring(0, diag.length() - 1) : "")
+                    + "],\"bestLen\":" + best.length + "}");
+            // #endregion
             return best;
         }
         ICompletionProposal[] best = EMPTY;
@@ -2916,6 +2991,110 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                 break;
         }
         return best;
+    }
+
+    // ---- Асинхронная загрузка delegate (EDT compute) в фоновом Job -------------
+
+    /** Отменяет текущий async-загрузчик delegate. */
+    private void cancelAsyncDelegateLoad()
+    {
+        asyncDelegateLoadGen++;
+        if (asyncDelegateLoadJob != null)
+        {
+            asyncDelegateLoadJob.cancel();
+            asyncDelegateLoadJob = null;
+        }
+    }
+
+    /**
+     * Запускает фоновую загрузку delegate (через {@code doc.readOnly(computeCompletionProposals)})
+     * в {@link Job}, чтобы не блокировать UI-поток.
+     * Все UI-зависимые данные (caret, dot, offsets) захватываются на EDT ДО создания Job.
+     */
+    private void scheduleAsyncDelegateLoad(ITextViewer viewer)
+    {
+        if (viewer == null)
+            return;
+        IDocument doc = viewer.getDocument();
+        if (!(doc instanceof IXtextDocument xtextDoc))
+            return;
+        if (fullListReady && fullListComplete && fullListCache.length > 0)
+            return; // уже загружено
+        if (!isPopupVisible())
+            return; // H80 делает синхронную загрузку, async не нужен
+        ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
+        cancelAsyncDelegateLoad();
+
+        // ---- захват UI-состояния на EDT ----
+        final int ctxKey = fullListContextKey;
+        final int loadGen = ++asyncDelegateLoadGen;
+        final int caret = resolveWidgetCaret(viewer);
+        final int dot = ReceiverTypeLabel.findMemberAccessDot(doc, caret);
+        final int[] offsets;
+        if (dot >= 0)
+            offsets = memberAccessProbeOffsets(caret, dot, assistant, doc);
+        else
+            offsets = completionProbeOffsets(assistant, caret, dot, doc);
+        if (offsets == null || offsets.length == 0)
+            return;
+        // -----------------------------------
+
+        asyncDelegateLoadJob = new Job("SCAP delegate async") { //$NON-NLS-1$
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                if (monitor.isCanceled() || ctxKey != fullListContextKey
+                    || loadGen != asyncDelegateLoadGen)
+                    return Status.CANCEL_STATUS;
+                if (computeFullListContextKey(doc, caret) != ctxKey)
+                    return Status.CANCEL_STATUS;
+                ICompletionProposal[] raw;
+                try
+                {
+                    raw = xtextDoc.readOnly(new IUnitOfWork<ICompletionProposal[], XtextResource>() {
+                        @Override
+                        public ICompletionProposal[] exec(XtextResource state) throws Exception
+                        {
+                            return probeDelegateAtOffsets(viewer, offsets, dot);
+                        }
+                    });
+                }
+                catch (Exception e)
+                {
+                    ContentAssistDebug.log("async delegate readOnly ERROR: " + e.getMessage()); //$NON-NLS-1$
+                    return Status.CANCEL_STATUS;
+                }
+                if (raw == null || raw.length == 0 || loadGen != asyncDelegateLoadGen
+                    || ctxKey != fullListContextKey)
+                    return Status.CANCEL_STATUS;
+
+                final ICompletionProposal[] result = raw;
+                org.eclipse.swt.widgets.Display.getDefault().asyncExec(() -> {
+                    if (loadGen != asyncDelegateLoadGen || ctxKey != fullListContextKey)
+                        return;
+                    onAsyncDelegateLoadComplete(result, ctxKey);
+                });
+                return Status.OK_STATUS;
+            }
+        };
+        asyncDelegateLoadJob.setSystem(true);
+        asyncDelegateLoadJob.schedule();
+    }
+
+    /**
+     * Обрабатывает результат фоновой загрузки delegate на UI-потоке.
+     * Обновляет кэш и триггерит обновление popup.
+     */
+    private void onAsyncDelegateLoadComplete(ICompletionProposal[] proposals, int ctxKey)
+    {
+        if (ctxKey != fullListContextKey)
+            return;
+        if (fullListReady && fullListCache.length > 0)
+            return;
+        assignFullListCache(unwrapProposals(proposals));
+        fullListReady = true;
+        fullListComplete = true;
+        ContentAssistSessionReloader.refreshPopupIfOpen();
     }
 
     private static int[] completionProbeOffsets(ContentAssistant assistant, int caret, int dot,

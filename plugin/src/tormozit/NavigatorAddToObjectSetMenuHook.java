@@ -3,6 +3,7 @@ package tormozit;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.util.LocalSelectionTransfer;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.SWTError;
 import org.eclipse.swt.dnd.DND;
 import org.eclipse.swt.dnd.DragSource;
 import org.eclipse.swt.dnd.DragSourceAdapter;
@@ -190,7 +191,11 @@ public final class NavigatorAddToObjectSetMenuHook implements IStartup
     {
         if (isComfortSubmenu(contextMenu))
             return;
-        Menu comfortMenu = ComfortSubmenuHelper.findOrCreateComfortSubmenu(contextMenu, contextMenu.getShell());
+        if (contextMenu == null || contextMenu.isDisposed())
+            return;
+        MenuItem anchor = ComfortSubmenuHelper.findAnchorAfterEditGroup(contextMenu);
+        Menu comfortMenu = ComfortSubmenuHelper.findOrCreateComfortSubmenu(
+            contextMenu, contextMenu.getShell(), anchor);
         if (comfortMenu == null)
             return;
         MenuItem item = findOrCreateItem(navigator, comfortMenu);
@@ -260,7 +265,16 @@ public final class NavigatorAddToObjectSetMenuHook implements IStartup
         Tree tree = viewer.getTree();
         if (tree == null || tree.isDisposed() || Boolean.TRUE.equals(tree.getData(DRAG_MARKER)))
             return;
-        DragSource source = new DragSource(tree, DND.DROP_COPY | DND.DROP_MOVE);
+        DragSource source;
+        try
+        {
+            source = new DragSource(tree, DND.DROP_COPY | DND.DROP_MOVE);
+        }
+        catch (RuntimeException | SWTError e)
+        {
+            Global.log("DragSource init error: " + e); //$NON-NLS-1$
+            return;
+        }
         source.setTransfer(new Transfer[] { LocalSelectionTransfer.getTransfer() });
         source.addDragListener(new DragSourceAdapter()
         {

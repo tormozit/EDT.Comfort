@@ -1,8 +1,6 @@
 package tormozit;
 
-import java.util.ArrayList;
 import java.util.Collections;
-import java.util.List;
 import java.util.Set;
 import java.util.WeakHashMap;
 
@@ -27,8 +25,6 @@ import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.forms.editor.IFormPage;
-import org.eclipse.ui.handlers.IHandlerActivation;
-import org.eclipse.ui.handlers.IHandlerService;
 import org.eclipse.ui.preferences.ScopedPreferenceStore;
 import org.eclipse.ui.texteditor.ITextEditor;
 import org.eclipse.ui.texteditor.ITextEditorActionDefinitionIds;
@@ -46,8 +42,6 @@ public final class TextEditorIdentifierSelectionHook implements IStartup
 {
     private static final String XTEXT_UI_PLUGIN = "org.eclipse.xtext.ui"; //$NON-NLS-1$
     private static final String SUB_WORD_NAVIGATION = "subWordNavigation"; //$NON-NLS-1$
-    private static final String HANDLER_HOOK_KEY = "tormozit.identifierWordHandlers"; //$NON-NLS-1$
-    private static final String HANDLER_ACTIVATIONS_KEY = "tormozit.identifierWordHandlerActivations"; //$NON-NLS-1$
     private static final String KEY_INTERCEPTOR_KEY = "tormozit.identifierWordKeyInterceptor"; //$NON-NLS-1$
     private static final String EDITOR_ACTIONS_KEY = "tormozit.identifierWordEditorActions"; //$NON-NLS-1$
 
@@ -112,8 +106,6 @@ public final class TextEditorIdentifierSelectionHook implements IStartup
             disableSubWordOnEditor(textEditor);
         if (textEditor != null)
             replaceWordNavigationActions(textEditor, textWidget);
-        if (textEditor != null && textEditor.getSite() != null)
-            activateWordNavigationHandlers(textEditor, textWidget);
     }
 
     private static void replaceWordNavigationActions(ITextEditor editor, StyledText text)
@@ -258,46 +250,7 @@ public final class TextEditorIdentifierSelectionHook implements IStartup
         return null;
     }
 
-    private static void activateWordNavigationHandlers(ITextEditor textEditor, StyledText textWidget)
-    {
-        if (Boolean.TRUE.equals(textWidget.getData(HANDLER_HOOK_KEY)))
-            return;
 
-        IHandlerService handlerService = textEditor.getSite().getService(IHandlerService.class);
-        if (handlerService == null)
-            return;
-
-        @SuppressWarnings("unchecked")
-        List<IHandlerActivation> previous =
-            (List<IHandlerActivation>) textWidget.getData(HANDLER_ACTIVATIONS_KEY);
-        if (previous != null)
-        {
-            for (IHandlerActivation activation : previous)
-                handlerService.deactivateHandler(activation);
-        }
-
-        List<IHandlerActivation> activations = new ArrayList<>();
-        activations.add(handlerService.activateHandler(
-            IdentifierWordNavigationHandler.CMD_SELECT_WORD_PREVIOUS,
-            new IdentifierWordNavigationHandler()));
-        activations.add(handlerService.activateHandler(
-            IdentifierWordNavigationHandler.CMD_SELECT_WORD_NEXT,
-            new IdentifierWordNavigationHandler()));
-        activations.add(handlerService.activateHandler(
-            IdentifierWordNavigationHandler.CMD_GOTO_WORD_PREVIOUS,
-            new IdentifierWordNavigationHandler()));
-        activations.add(handlerService.activateHandler(
-            IdentifierWordNavigationHandler.CMD_GOTO_WORD_NEXT,
-            new IdentifierWordNavigationHandler()));
-
-        textWidget.setData(HANDLER_HOOK_KEY, Boolean.TRUE);
-        textWidget.setData(HANDLER_ACTIVATIONS_KEY, activations);
-        textWidget.addDisposeListener(e ->
-        {
-            for (IHandlerActivation activation : activations)
-                handlerService.deactivateHandler(activation);
-        });
-    }
 
     private void hookWorkbench()
     {
