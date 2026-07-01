@@ -11,35 +11,32 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
+import org.eclipse.core.resources.IResourceChangeEvent;
+import org.eclipse.core.resources.IResourceChangeListener;
+import org.eclipse.core.resources.IResourceDelta;
+import org.eclipse.core.resources.IResourceDeltaVisitor;
+import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.CoreException;
-import org.eclipse.emf.ecore.EObject;
-import org.osgi.framework.BundleContext;
-import org.osgi.framework.ServiceReference;
 
-import com._1c.g5.v8.dt.common.Pair;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
-import com._1c.g5.v8.dt.platform.services.core.infobases.sync.IInfobaseSynchronizationListener;
-import com._1c.g5.v8.dt.platform.services.core.infobases.sync.IInfobaseSynchronizationManager;
-import com._1c.g5.v8.dt.platform.services.core.infobases.sync.InfobaseEqualityState;
-import com._1c.g5.v8.dt.platform.services.core.infobases.sync.v2.IInfobaseSynchronizationStateManager;
-import com._1c.g5.v8.dt.platform.services.core.infobases.sync.v2.IUpdateInfobaseFlow;
 import com._1c.g5.v8.dt.platform.services.model.InfobaseReference;
-import com.e1c.g5.dt.core.api.naming.INamingService;
 
 /**
- * Сбор изменённых BSL-модулей через штатный механизм EDT (dirty-state per инфобаза).
+ * Лёгкий сборщик изменённых BSL-модулей на основе Eclipse Resource Delta.
+ * <p>
+ * Не использует тяжёлый {@code IUpdateInfobaseFlow} и штатный синхронизатор базы.
+ * Отслеживает только изменения файловой системы (POST_CHANGE), что даёт
+ * O(количество изменённых .bsl) вместо O(вся EMF-модель проекта).
  */
 public final class IRModuleChangeCollector
 {
-    private static final String STATE_MANAGER_CLASS =
-        "com._1c.g5.v8.dt.platform.services.core.infobases.sync.v2.IInfobaseSynchronizationStateManager"; //$NON-NLS-1$
-
     private static final ThreadLocal<MessageDigest> CONTENT_MD5 = ThreadLocal.withInitial(() -> {
         try
         {
@@ -55,6 +52,11 @@ public final class IRModuleChangeCollector
         StandardCharsets.UTF_8.newEncoder()
             .onMalformedInput(CodingErrorAction.REPLACE)
             .onUnmappableCharacter(CodingErrorAction.REPLACE));
+
+    /** Проект → набор относительных путей к изменённым .bsl файлам. */
+    private static final Map<IProject, Set<String>> PENDING_BSL_PATHS = new ConcurrentHashMap<>();
+
+    private static volatile boolean listenerInstalled = false;
 
     private IRModuleChangeCollector() {}
 
@@ -74,6 +76,12 @@ public final class IRModuleChangeCollector
         }
     }
 
+    /**
+     * Возвращает накопленные изменения BSL-модулей для проекта.
+     * <p>
+     * Убраны вызовы {@code isProjectDirty}, {@code isFlowActive} и {@code startUpdateInfobaseFlow}.
+     * Работа идёт напрямую с индексом файловых изменений.
+     */
     static List<ModuleSyncEntry> collectPendingModules(
         IRSession session,
         IProject project,
@@ -84,13 +92,7 @@ public final class IRModuleChangeCollector
         if (session == null || project == null || infobase == null)
             return result;
 
-        IInfobaseSynchronizationStateManager stateMgr = getStateManager();
-        INamingService naming = Global.getOsgiService(INamingService.class);
-        if (stateMgr == null || naming == null)
-        {
-            IRModuleSyncDebug.problem("сервисы синхронизации EDT недоступны"); //$NON-NLS-1$
-            return result;
-        }
+        ensureListenerInstalled();
 
         IDtProject dtProject = Global.getDtProjectFromWorkspaceProject(project);
         if (dtProject == null)
@@ -99,74 +101,135 @@ public final class IRModuleChangeCollector
             return result;
         }
 
-        boolean dirty;
-        try
-        {
-            dirty = stateMgr.isProjectDirty(project, infobase);
-        }
-        catch (Exception e)
-        {
-            IRModuleSyncDebug.problem("isProjectDirty: " + e.getMessage()); //$NON-NLS-1$
-            return result;
-        }
-
-        if (!dirty)
+        Set<String> pending = PENDING_BSL_PATHS.get(project);
+        if (pending == null || pending.isEmpty())
         {
             IRModuleSyncDebug.logCollect(0, false);
             return result;
         }
 
-        if (stateMgr.isFlowActive(infobase))
-        {
-            IRModuleSyncDebug.problem("flow уже активен для инфобазы — пропуск collect"); //$NON-NLS-1$
-            return result;
-        }
+        // Снимаем копию, чтобы не блокировать listener на время IO
+        List<String> paths = new ArrayList<>(pending);
 
-        IUpdateInfobaseFlow flow = null;
-        try
+        for (String bslPath : paths)
         {
-            flow = stateMgr.startUpdateInfobaseFlow(dtProject, infobase);
-            flow.start();
-            @SuppressWarnings("unchecked")
-            Pair<Set<EObject>, Set<EObject>> changes = flow.collectAddedAndModifiedInEdtObjects();
-            Set<EObject> all = new HashSet<>();
-            if (changes.getFirst() != null)
-                all.addAll(changes.getFirst());
-            if (changes.getSecond() != null)
-                all.addAll(changes.getSecond());
+            IFile file = project.getFile(bslPath);
+            if (!file.exists())
+                continue;
 
-            for (EObject obj : all)
+            String moduleName = GetRef.resolveSetTextModuleName(file);
+            if (moduleName == null || moduleName.isEmpty())
+                continue;
+            if (exceptModuleName != null && !exceptModuleName.isEmpty()
+                && exceptModuleName.equals(moduleName))
+                continue;
+
+            try
             {
-                ModuleSyncEntry entry = toModuleEntry(obj, naming, project, session);
-                if (entry == null)
-                    continue;
-                if (exceptModuleName != null
-                        && !exceptModuleName.isEmpty()
-                        && exceptModuleName.equals(entry.moduleName))
-                    continue;
-                result.add(entry);
-            }
-            IRModuleSyncDebug.logCollect(result.size(), true);
-        }
-        catch (Exception e)
-        {
-            IRModuleSyncDebug.problem("collect: " + e.getMessage()); //$NON-NLS-1$
-        }
-        finally
-        {
-            if (flow != null)
-            {
-                try
+                byte[] bytes;
+                try (InputStream in = file.getContents())
                 {
-                    flow.cancel();
+                    bytes = in.readAllBytes();
                 }
-                catch (Exception ignored) {}
+                String text = new String(bytes, StandardCharsets.UTF_8);
+                byte[] hash = fingerprintUtf8(bytes);
+                if (session.isAlreadyPushed(bslPath, hash))
+                    continue;
+
+                result.add(new ModuleSyncEntry(bslPath, moduleName, text, hash));
+            }
+            catch (CoreException | IOException e)
+            {
+                IRModuleSyncDebug.problem("read " + bslPath + ": " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
+
+        // Удаляем обработанные пути. Если файл не существовал или isAlreadyPushed —
+        // он всё равно больше не считается pending.
+        pending.removeAll(paths);
+        if (pending.isEmpty())
+            PENDING_BSL_PATHS.remove(project);
+
+        IRModuleSyncDebug.logCollect(result.size(), true);
         return result;
     }
 
-    /** Fingerprint содержимого (MD5, 16 байт) для дедупликации push в ИР. Без полного {@code getBytes}. */
+    /** Сброс накопленных изменений для проекта (например, после ручной синхронизации). */
+    static void flush(IProject project)
+    {
+        if (project != null)
+            PENDING_BSL_PATHS.remove(project);
+    }
+
+    // -------------------------------------------------------------------------
+    // Resource Change Listener
+    // -------------------------------------------------------------------------
+
+    public static synchronized void ensureListenerInstalled()
+    {
+        if (listenerInstalled)
+            return;
+        listenerInstalled = true;
+
+        ResourcesPlugin.getWorkspace().addResourceChangeListener(
+            new IResourceChangeListener()
+            {
+                @Override
+                public void resourceChanged(IResourceChangeEvent event)
+                {
+                    if (event.getDelta() == null)
+                        return;
+                    try
+                    {
+                        event.getDelta().accept(new IResourceDeltaVisitor()
+                        {
+                            @Override
+                            public boolean visit(IResourceDelta delta) throws CoreException
+                            {
+                                if (!(delta.getResource() instanceof IFile file))
+                                    return true; // папки и проекты — обходим дальше
+
+                                if (!file.getName().endsWith(".bsl")) //$NON-NLS-1$
+                                    return false; // не BSL — не интересует
+
+                                int kind = delta.getKind();
+                                IProject project = file.getProject();
+                                String path = file.getProjectRelativePath().toString();
+
+                                if (kind == IResourceDelta.REMOVED)
+                                {
+                                    Set<String> set = PENDING_BSL_PATHS.get(project);
+                                    if (set != null)
+                                        set.remove(path);
+                                    return false;
+                                }
+
+                                if (kind == IResourceDelta.ADDED
+                                    || (kind == IResourceDelta.CHANGED
+                                        && (delta.getFlags() & IResourceDelta.CONTENT) != 0))
+                                {
+                                    PENDING_BSL_PATHS
+                                        .computeIfAbsent(project, k -> ConcurrentHashMap.newKeySet())
+                                        .add(path);
+                                }
+
+                                return false; // файл — терминальный узел
+                            }
+                        });
+                    }
+                    catch (CoreException e)
+                    {
+                        IRModuleSyncDebug.problem("ResourceDelta: " + e.getMessage()); //$NON-NLS-1$
+                    }
+                }
+            },
+            IResourceChangeEvent.POST_CHANGE);
+    }
+
+    // -------------------------------------------------------------------------
+    // Fingerprint / Hash
+    // -------------------------------------------------------------------------
+
     static byte[] contentFingerprint(String text)
     {
         MessageDigest md = CONTENT_MD5.get();
@@ -194,94 +257,9 @@ public final class IRModuleChangeCollector
         }
     }
 
-    private static ModuleSyncEntry toModuleEntry(
-        EObject obj,
-        INamingService naming,
-        IProject project,
-        IRSession session)
-    {
-        if (obj == null)
-            return null;
-        String path = naming.getFilePath(obj);
-        if (path == null || !path.endsWith(".bsl")) //$NON-NLS-1$
-            return null;
-
-        String bslPath = path.replace('\\', '/');
-        IFile file = project.getFile(bslPath);
-        if (!file.exists())
-            return null;
-
-        String moduleName = GetRef.resolveSetTextModuleName(file);
-        if (moduleName == null || moduleName.isEmpty())
-            return null;
-
-        try
-        {
-            byte[] bytes;
-            try (InputStream in = file.getContents())
-            {
-                bytes = in.readAllBytes();
-            }
-            String text = new String(bytes, StandardCharsets.UTF_8);
-            byte[] hash = fingerprintUtf8(bytes);
-            if (session.isAlreadyPushed(bslPath, hash))
-                return null;
-            return new ModuleSyncEntry(bslPath, moduleName, text, hash);
-        }
-        catch (CoreException | IOException e)
-        {
-            IRModuleSyncDebug.problem("read " + bslPath + ": " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
-            return null;
-        }
-    }
-
-    /** MD5 по уже прочитанным UTF-8 байтам (без повторного getBytes). */
     private static byte[] fingerprintUtf8(byte[] utf8)
     {
         byte[] input = utf8 != null ? utf8 : new byte[0];
         return CONTENT_MD5.get().digest(input);
-    }
-
-    private static IInfobaseSynchronizationStateManager getStateManager()
-    {
-        BundleContext ctx = Global.ourContext();
-        if (ctx == null)
-            return null;
-        ServiceReference<?> ref = ctx.getServiceReference(STATE_MANAGER_CLASS);
-        if (ref == null)
-            return null;
-        Object svc = ctx.getService(ref);
-        return svc instanceof IInfobaseSynchronizationStateManager mgr ? mgr : null;
-    }
-
-    private static final String SYNC_MANAGER_CLASS =
-        "com._1c.g5.v8.dt.platform.services.core.infobases.sync.IInfobaseSynchronizationManager"; //$NON-NLS-1$
-
-    /** Подписка на dirty-state EDT (диагностика; список собирается on-demand). */
-    static void installDirtyListener()
-    {
-        BundleContext ctx = Global.ourContext();
-        if (ctx == null)
-            return;
-        ServiceReference<?> ref = ctx.getServiceReference(SYNC_MANAGER_CLASS);
-        if (ref == null)
-            return;
-        Object svc = ctx.getService(ref);
-        if (!(svc instanceof IInfobaseSynchronizationManager syncMgr))
-            return;
-        syncMgr.addInfobaseSynchronizationListener(new IInfobaseSynchronizationListener()
-        {
-            @Override
-            public void synchronizationStateChanged(InfobaseReference infobase, boolean dirty)
-            {
-                if (dirty && IRApplication.getInstance().isConnected(infobase))
-                    IRModuleSyncDebug.logDirty(infobase);
-            }
-
-            @Override
-            public void equalityStateChanged(InfobaseReference infobase, InfobaseEqualityState state)
-            {
-            }
-        });
     }
 }

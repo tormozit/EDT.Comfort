@@ -68,7 +68,7 @@ public class Activator extends AbstractUIPlugin
             ObjectSetsAddTargetState.getInstance().ensureForProject(set.projectName);
 
         ComfortUpdateChecker.startDailyScheduler();
-        IRModuleChangeCollector.installDirtyListener();
+        IRModuleChangeCollector.ensureListenerInstalled();
     }
 
     @Override

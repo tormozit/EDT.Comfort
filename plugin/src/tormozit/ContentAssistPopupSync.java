@@ -562,6 +562,7 @@ public final class ContentAssistPopupSync
         if (Boolean.TRUE.equals(RECOMPUTE_GUARD.get()))
             return false;
         RECOMPUTE_GUARD.set(Boolean.TRUE);
+        final long _t0 = System.nanoTime();
         try
         {
             Object popup = getPopup(assistant);
@@ -658,7 +659,15 @@ public final class ContentAssistPopupSync
             ICompletionProposal[] proposals = processor.filterCachedProposalsForPopup(viewer, caret,
                 filter);
             if (proposals == null)
+            {
+                // #region agent log
+                ContentAssistDebug.debugModeLog("H84", "recomputePopupList", "fallbackToCompute", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"filter\":\"" + ContentAssistDebug.jsonEscapeForLog(filter) //$NON-NLS-1$
+                        + "\",\"inLiteral\":" + inLiteralRecompute //$NON-NLS-1$
+                        + ",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
                 proposals = processor.computeForPopupRefresh(viewer, caret);
+            }
             if (proposals == null)
                 proposals = new ICompletionProposal[0];
             if (inLiteralRecompute && !literalIrMerge && !literalIrExpected
@@ -846,6 +855,11 @@ public final class ContentAssistPopupSync
         }
         finally
         {
+            long elapsedMs = (System.nanoTime() - _t0) / 1_000_000;
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H83", "recomputePopupList", "exit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"ms\":" + elapsedMs + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
             if (viewer != null && isPopupVisible(assistant))
                 ContentAssistPopupUi.updateContextTypeLabel(viewer);
             RECOMPUTE_GUARD.set(Boolean.FALSE);
@@ -3848,5 +3862,31 @@ public final class ContentAssistPopupSync
     {
         if (assistant != null)
             assistant.setEmptyMessage(message != null ? message : ""); //$NON-NLS-1$
+    }
+
+    /**
+     * Возвращает порядковый номер выделенной строки в таблице popup (0-based).
+     * -1 если popup не виден, таблица не создана или выделения нет.
+     */
+    static int readSelectedRowIndex(ContentAssistant assistant)
+    {
+        if (assistant == null)
+            return -1;
+        try
+        {
+            Object popup = getPopupObject(assistant);
+            if (popup == null)
+                return -1;
+            org.eclipse.swt.widgets.Table table =
+                (org.eclipse.swt.widgets.Table) Global.getField(popup, "fProposalTable"); //$NON-NLS-1$
+            if (table == null || table.isDisposed())
+                return -1;
+            int idx = table.getSelectionIndex();
+            return idx >= 0 ? idx : -1;
+        }
+        catch (Exception ignored)
+        {
+            return -1;
+        }
     }
 }

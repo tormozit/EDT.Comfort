@@ -115,6 +115,15 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     /** Поколение последнего запланированного фонового merge ({@link #applyIrCompletion}). */
     private final java.util.concurrent.atomic.AtomicInteger mergeGeneration =
         new java.util.concurrent.atomic.AtomicInteger();
+    /**
+     * Мемо-кэш последнего результата {@link #mergeIrProposals} по identity входов.
+     * Используется, чтобы не пересчитывать merge заново при каждом нажатии клавиши
+     * в mergeIrForDisplay (11 точек вызова), если ни IR-снэпшот, ни delegate-база не менялись.
+     */
+    private ICompletionProposal[] lastMergeDelegateList;
+    private ICompletionProposal[] lastMergeIrProposalsRef;
+    private int lastMergeIrCtxKey = Integer.MIN_VALUE;
+    private ICompletionProposal[] lastMergeResult;
     private int irSnapshotCacheContextKey = Integer.MIN_VALUE;
     private long irSnapshotCacheDocStamp = -1L;
     private IrBslCompletionSupport.Snapshot irSnapshotCache;
@@ -391,7 +400,6 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         int beforeFullN = fullListCache.length;
         int incomingIrN = snapshot.proposals != null ? snapshot.proposals.length : 0;
         applyIrSnapshotData(snapshot);
-        applyStockAssistImagesFromDelegate(irProposals, delegateListCache);
         if (irProposals.length == 0)
         {
             IrCompletionDebug.logApplyIrCompletion(0, "empty"); //$NON-NLS-1$
@@ -402,11 +410,12 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         // #region agent log
         debugSessionOrderSample("H4", "applyIrCompletion", "irSnapshot", irProposals, 12); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         // #endregion
-        String baseKind = "none"; //$NON-NLS-1$
+        String baseKind;
+        ICompletionProposal[] delegateBase;
+        boolean clearProbeOnEmptyBase = false;
         if (delegateListCache.length > 0)
         {
-            rebuildMergedFullListCache();
-            fullListReady = true;
+            delegateBase = delegateListCache;
             baseKind = "delegate"; //$NON-NLS-1$
         }
         else
@@ -414,20 +423,74 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             ICompletionProposal[] interim = unwrapStableDelegateBase();
             if (interim.length > 0)
             {
-                fullListCache = mergeIrProposals(interim);
-                rebuildDelegateOrderMap();
-                fullListReady = true;
+                delegateBase = interim;
                 baseKind = "interim"; //$NON-NLS-1$
             }
-            else if (irProposals.length > 0)
+            else
             {
-                fullListCache = mergeIrProposals(EMPTY);
-                rebuildDelegateOrderMap();
-                fullListReady = true;
+                delegateBase = EMPTY;
                 baseKind = "irOnly"; //$NON-NLS-1$
-                clearDelegateSyncProbe();
+                clearProbeOnEmptyBase = true;
             }
         }
+        // applyStockAssistImagesFromDelegate трогает SWT Image — остаётся на UI-потоке.
+        applyStockAssistImagesFromDelegate(irProposals, delegateBase);
+        MemberEdtPriorityProfile delegateProfile = isIrAssistOrderingEnabled()
+            ? MemberEdtPriorityProfile.analyze(delegateBase)
+            : MemberEdtPriorityProfile.NONE;
+        // Само слияние+сортировка (до нескольких сотен мс на больших списках) — в фоне,
+        // чтобы не блокировать UI-поток (см. mergeIrProposals в логах, median 147ms/max 1881ms).
+        int gen = mergeGeneration.incrementAndGet();
+        int ctxKeyAtSchedule = fullListContextKey;
+        ICompletionProposal[] irProposalsSnapshot = irProposals;
+        ICompletionProposal[] delegateBaseSnapshot = delegateBase;
+        String baseKindFinal = baseKind;
+        boolean clearProbeOnEmptyBaseFinal = clearProbeOnEmptyBase;
+        IR_MERGE_EXECUTOR.execute(() -> {
+            ICompletionProposal[] merged;
+            try
+            {
+                merged = mergeIrProposalsCore(irProposalsSnapshot, delegateBaseSnapshot,
+                    delegateProfile);
+            }
+            catch (RuntimeException e)
+            {
+                ContentAssistDebug.log("mergeIrProposalsCore ERROR: " + e.getMessage()); //$NON-NLS-1$
+                return;
+            }
+            org.eclipse.swt.widgets.Display display = org.eclipse.swt.widgets.Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            display.asyncExec(() -> applyMergedFullListCache(gen, ctxKeyAtSchedule, merged,
+                baseKindFinal, clearProbeOnEmptyBaseFinal, beforeIrN, beforeFullN, incomingIrN,
+                scheduleRefresh));
+        });
+    }
+
+    /**
+     * Применяет результат фонового {@link #mergeIrProposalsCore} на UI-потоке.
+     * Если за время вычисления пришёл более новый merge или сменился контекст —
+     * результат отбрасывается ({@link #fullListCache} остаётся прежним, popup не дёргается).
+     */
+    private void applyMergedFullListCache(int gen, int ctxKeyAtSchedule,
+        ICompletionProposal[] merged, String baseKind, boolean clearProbeOnEmptyBase,
+        int beforeIrN, int beforeFullN, int incomingIrN, boolean scheduleRefresh)
+    {
+        if (gen != mergeGeneration.get() || ctxKeyAtSchedule != fullListContextKey)
+        {
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H50", "applyIrCompletion", "mergeStaleDiscarded", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"gen\":" + gen + ",\"currentGen\":" + mergeGeneration.get() //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"ctxKeyAtSchedule\":" + ctxKeyAtSchedule //$NON-NLS-1$
+                    + ",\"currentCtxKey\":" + fullListContextKey + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return;
+        }
+        fullListCache = merged;
+        rebuildDelegateOrderMap();
+        fullListReady = true;
+        if (clearProbeOnEmptyBase)
+            clearDelegateSyncProbe();
         IrCompletionDebug.logApplyIrCompletion(irProposals.length, baseKind);
         // #region agent log
         ContentAssistDebug.debugModeLog("H50", "applyIrCompletion", "irApplied", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
@@ -807,6 +870,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     {
         if (irList == null || irList.length == 0)
             return;
+        long t0 = System.nanoTime();
         java.util.Map<String, org.eclipse.swt.graphics.Image> images = new java.util.HashMap<>();
         if (delegateList != null)
         {
@@ -829,6 +893,13 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             if (img != null)
                 ir.applyStockAssistImage(img);
         }
+        long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H80", "applyStockAssistImagesFromDelegate", "exit",
+            "{\"irN\":" + irList.length + ",\"delegateN\":"
+                + (delegateList != null ? delegateList.length : 0)
+                + ",\"ms\":" + elapsedMs + "}");
+        // #endregion
     }
 
     /**
@@ -1823,6 +1894,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
     private ICompletionProposal[] mergeIrProposals(ICompletionProposal[] delegateList)
     {
+        long t0 = System.nanoTime();
         // #region agent log
         ContentAssistDebug.sessionLog("H1", "mergeIrProposals", "enter", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "{\"irCount\":" + irProposals.length //$NON-NLS-1$
@@ -1832,7 +1904,32 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                 + ",\"delegateCount\":" + (delegateList != null ? delegateList.length : 0) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         // #endregion
         if (irProposals.length == 0 || irSnapshotContextKey != fullListContextKey)
+        {
+            long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H82", "mergeIrProposals", "early", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"exit\":\"early\"" //$NON-NLS-1$
+                    + ",\"irCount\":" + irProposals.length //$NON-NLS-1$
+                    + ",\"delegateCount\":" + (delegateList != null ? delegateList.length : 0) //$NON-NLS-1$
+                    + ",\"ms\":" + elapsedMs + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
             return delegateList != null ? delegateList : EMPTY;
+        }
+        if (Arrays.equals(delegateList, lastMergeDelegateList) && irProposals == lastMergeIrProposalsRef
+            && irSnapshotContextKey == lastMergeIrCtxKey && lastMergeResult != null)
+        {
+            long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H60", "mergeIrProposals", "memoHit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"irCount\":" + irProposals.length //$NON-NLS-1$
+                    + ",\"delegateCount\":" + (delegateList != null ? delegateList.length : 0) //$NON-NLS-1$
+                    + ",\"ms\":" + elapsedMs + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return lastMergeResult;
+        }
+        ICompletionProposal[] delegateListKey = delegateList;
+        ICompletionProposal[] irProposalsKey = irProposals;
+        int irCtxKeyForCache = irSnapshotContextKey;
         if (delegateList != null && delegateList.length > 0)
             delegateList = stripEmptyPlaceholderProposals(delegateList);
         applyStockAssistImagesFromDelegate(irProposals, delegateList);
@@ -1842,8 +1939,13 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         if (delegateList == null || delegateList.length == 0)
         {
             Map<String, Integer> irPriorityByKey = buildIrPriorityByKey(irProposals);
-            return stripEmptyPlaceholderProposals(
+            ICompletionProposal[] r0 = stripEmptyPlaceholderProposals(
                 sortMergedList(irProposals, irPriorityByKey, delegateProfile));
+            lastMergeDelegateList = delegateListKey;
+            lastMergeIrProposalsRef = irProposalsKey;
+            lastMergeIrCtxKey = irCtxKeyForCache;
+            lastMergeResult = r0;
+            return r0;
         }
 
         Map<String, Integer> irPriorityByKey = buildIrPriorityByKey(irProposals);
@@ -1855,6 +1957,79 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         for (int i = 0; i < irProposals.length; i++)
         {
             ICompletionProposal irP = irProposals[i];
+            String key = dedupKey(irP);
+            Deque<ICompletionProposal> queue = key.isEmpty() ? null : delegateByKey.get(key);
+            if (queue != null && !queue.isEmpty())
+            {
+                while (!queue.isEmpty())
+                {
+                    ICompletionProposal d = queue.removeFirst();
+                    merged.add(d);
+                    placedDelegates.add(unwrapProposal(d));
+                }
+            }
+            else if (!key.isEmpty())
+                merged.add(irP);
+        }
+        for (ICompletionProposal p : delegateList)
+        {
+            if (!placedDelegates.contains(unwrapProposal(p)))
+                merged.add(p);
+        }
+
+        ICompletionProposal[] result = sortMergedList(
+            merged.toArray(new ICompletionProposal[merged.size()]), irPriorityByKey,
+            delegateProfile);
+        // #region agent log
+        debugSessionOrderSample("H2", "mergeIrProposals", "irOrderMerge", result, 12); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        debugIrMergeOrderSample("H3", "mergeIrProposals", "afterSort", result, irPriorityByKey, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            delegateProfile);
+        // #endregion
+        ICompletionProposal[] finalResult = stripEmptyPlaceholderProposals(result);
+        lastMergeDelegateList = delegateListKey;
+        lastMergeIrProposalsRef = irProposalsKey;
+        lastMergeIrCtxKey = irCtxKeyForCache;
+        lastMergeResult = finalResult;
+        long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H82", "mergeIrProposals", "exit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"exit\":\"normal\"" //$NON-NLS-1$
+                + ",\"irCount\":" + irProposals.length //$NON-NLS-1$
+                + ",\"delegateCount\":" + (delegateListKey != null ? delegateListKey.length : 0) //$NON-NLS-1$
+                + ",\"resultN\":" + finalResult.length //$NON-NLS-1$
+                + ",\"ms\":" + elapsedMs + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+        return finalResult;
+    }
+
+    /**
+     * Чистая версия {@link #mergeIrProposals} для фонового потока ({@link #applyIrCompletion}):
+     * без обращения к SWT ({@code applyStockAssistImagesFromDelegate} уже выполнен на UI-потоке
+     * вызывающим кодом) и без проверки контекста (актуальность результата проверяется отдельно,
+     * через {@link #mergeGeneration}, после возврата на UI-поток).
+     */
+    private ICompletionProposal[] mergeIrProposalsCore(ICompletionProposal[] irProposalsSnap,
+        ICompletionProposal[] delegateList, MemberEdtPriorityProfile delegateProfile)
+    {
+        if (delegateList != null && delegateList.length > 0)
+            delegateList = stripEmptyPlaceholderProposals(delegateList);
+        if (delegateList == null || delegateList.length == 0)
+        {
+            Map<String, Integer> irPriorityByKey = buildIrPriorityByKey(irProposalsSnap);
+            return stripEmptyPlaceholderProposals(
+                sortMergedList(irProposalsSnap, irPriorityByKey, delegateProfile));
+        }
+
+        Map<String, Integer> irPriorityByKey = buildIrPriorityByKey(irProposalsSnap);
+        Map<String, Deque<ICompletionProposal>> delegateByKey = indexDelegateByKey(delegateList);
+        Set<ICompletionProposal> placedDelegates =
+            java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+        List<ICompletionProposal> merged =
+            new ArrayList<>(delegateList.length + irProposalsSnap.length);
+
+        for (int i = 0; i < irProposalsSnap.length; i++)
+        {
+            ICompletionProposal irP = irProposalsSnap[i];
             String key = dedupKey(irP);
             Deque<ICompletionProposal> queue = key.isEmpty() ? null : delegateByKey.get(key);
             if (queue != null && !queue.isEmpty())
@@ -2573,7 +2748,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             tryTerminalNonObjectMemberAccess(viewer, doc, caret);
     }
 
-    private static int computeFullListContextKey(IDocument doc, int caret)
+    static int computeFullListContextKey(IDocument doc, int caret)
     {
         if (doc == null || caret < 0)
             return Integer.MIN_VALUE;
@@ -3281,6 +3456,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         if (raw == null || raw.length == 0)
             return EMPTY;
 
+        long t0 = System.nanoTime();
         SmartCodeMatcher matcher = new SmartCodeMatcher(filter);
         List<ICompletionProposal> filtered = new ArrayList<>(raw.length);
 
@@ -3293,7 +3469,11 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         if (filtered.isEmpty())
         {
             // #region agent log
+            long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
             debugFilterDroppedAll(raw, filter, matcher);
+            ContentAssistDebug.debugModeLog("H81", "filterAndSort", "droppedAll", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"rawN\":" + raw.length //$NON-NLS-1$
+                    + ",\"ms\":" + elapsedMs + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             // #endregion
             return EMPTY;
         }
@@ -3312,13 +3492,25 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             int order = delegateOrderOf(p);
             result[i] = wrapProposal(p, order >= 0 ? order : idx[i]);
         }
-        logFilterAndSortExitThrottled(result);
+        long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
+        logFilterAndSortExitThrottled(result, elapsedMs);
+        // #region agent log
+        String trigger = ContentAssistPopupSync.peekRecomputeTrigger();
+        if (!"sessionOpen".equals(trigger) && trigger != null && result.length > 0) //$NON-NLS-1$
+        {
+            ContentAssistDebug.debugModeLog("H81", "filterAndSort", "exit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"trigger\":\"" + ContentAssistDebug.jsonEscapeForLog(trigger) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"resultN\":" + result.length //$NON-NLS-1$
+                    + ",\"firstKey\":\"" + ContentAssistDebug.firstProposalKey(result) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"ms\":" + elapsedMs + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        // #endregion
         return result;
     }
 
     private static int filterAndSortLoggedOpenGen = -1;
 
-    private void logFilterAndSortExitThrottled(ICompletionProposal[] result)
+    private void logFilterAndSortExitThrottled(ICompletionProposal[] result, long elapsedMs)
     {
         if (!"sessionOpen".equals(ContentAssistPopupSync.peekRecomputeTrigger())) //$NON-NLS-1$
             return;
@@ -3335,6 +3527,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                 + ",\"firstKey\":\"" + firstKey + "\"" //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"smartWrapped\":true" //$NON-NLS-1$
                 + ",\"openGen\":" + openGen //$NON-NLS-1$
+                + ",\"ms\":" + elapsedMs //$NON-NLS-1$
                 + ",\"msSinceSessionStart\":" //$NON-NLS-1$
                     + ContentAssistSessionReloader.msSinceLiteralSessionStartForLog()
                 + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$

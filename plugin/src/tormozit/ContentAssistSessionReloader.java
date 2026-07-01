@@ -103,8 +103,7 @@ public final class ContentAssistSessionReloader
     private volatile boolean pendingPopupRefresh;
     private volatile boolean pendingPopupRefreshIsIr;
     private long irWordsRequestStartedAtMs;
-    private volatile boolean irRecomputeFastResponse;
-    private volatile String preIrMergeFirstDedupKey;
+    private volatile int preIrMergeSelectedRow = -1;
     /** Каретка ручного Ctrl+Space (popup был закрыт). */
     private volatile int manualIrAssistCaret = -1;
     /** Ожидаем отложенное открытие popup только с ИР. */
@@ -2422,6 +2421,7 @@ public final class ContentAssistSessionReloader
                 if (assistant != null && viewer != null)
                     ContentAssistPopupSync.recomputePopupList(assistant, viewer, processor);
                 clearCompletionAutoOpenState(decision, autoOpenSeq);
+                setLiteralOpenSetupComplete(true);
             }
             else if (irGate && !popupVisible)
             {
@@ -2436,6 +2436,7 @@ public final class ContentAssistSessionReloader
                 if (assistant != null && viewer != null)
                     ContentAssistPopupSync.recomputePopupList(assistant, viewer, processor);
                 clearCompletionAutoOpenState(decision, autoOpenSeq);
+                setLiteralOpenSetupComplete(true);
             }
             else
             {
@@ -2517,32 +2518,15 @@ public final class ContentAssistSessionReloader
         ContentAssistSessionReloader reloader = ACTIVE_RELOADER.get();
         if (reloader == null)
             return false;
-        if (!reloader.irRecomputeFastResponse)
-        {
-            clearIrSelectionResetState(reloader);
-            return false;
-        }
-        String pre = reloader.preIrMergeFirstDedupKey;
-        String next = newFirstDedupKey != null ? newFirstDedupKey : ""; //$NON-NLS-1$
-        boolean firstChanged = pre != null && !pre.isEmpty() && !next.isEmpty()
-            && !pre.equalsIgnoreCase(next);
-        if (firstChanged)
-        {
-            long elapsed = System.currentTimeMillis() - reloader.irWordsRequestStartedAtMs;
-            IrCompletionDebug.logFastIrMergeReset(elapsed, pre, next);
-        }
-        else
-            IrCompletionDebug.logFastIrMergeSkip("firstUnchanged", pre, next); //$NON-NLS-1$
         clearIrSelectionResetState(reloader);
-        return firstChanged;
+        return reloader.preIrMergeSelectedRow <= 1;
     }
 
     private static void clearIrSelectionResetState(ContentAssistSessionReloader reloader)
     {
         if (reloader == null)
             return;
-        reloader.irRecomputeFastResponse = false;
-        reloader.preIrMergeFirstDedupKey = null;
+        reloader.preIrMergeSelectedRow = -1;
     }
 
     private void clearIrSelectionResetState()
@@ -2550,21 +2534,9 @@ public final class ContentAssistSessionReloader
         clearIrSelectionResetState(this);
     }
 
-    private void rememberPreIrMergeFirstRow(ContentAssistant assistant)
+    private void rememberPreIrMergeSelectionState(ContentAssistant assistant)
     {
-        preIrMergeFirstDedupKey = ContentAssistPopupSync.readFirstVisibleProposalDedupKey(assistant);
-    }
-
-    private void prepareIrRecomputeSelectionReset(boolean irRefresh,
-                                                   SmartContentAssistProcessor processor)
-    {
-        if (irRefresh && processor != null && processor.shouldRefreshIrPopup())
-        {
-            long elapsed = System.currentTimeMillis() - irWordsRequestStartedAtMs;
-            irRecomputeFastResponse = elapsed < WORDS_TABLE_DEBOUNCE_MS;
-        }
-        else
-            irRecomputeFastResponse = false;
+        preIrMergeSelectedRow = ContentAssistPopupSync.readSelectedRowIndex(assistant);
     }
 
     /** Повторная загрузка списка после reconcile (member-access после точки). */
@@ -2628,9 +2600,8 @@ public final class ContentAssistSessionReloader
             logLiteralMergeTimeline("flush"); //$NON-NLS-1$
             IrCompletionDebug.logIrPopupRefresh("flush"); //$NON-NLS-1$
             ContentAssistPopupSync.invalidateSyncSnapshot();
-            reloader.rememberPreIrMergeFirstRow(ca);
+            reloader.rememberPreIrMergeSelectionState(ca);
         }
-        reloader.prepareIrRecomputeSelectionReset(wasIr, processor);
         ContentAssistPopupSync.recomputePopupList(ca, viewer, processor);
     }
 
@@ -2687,9 +2658,8 @@ public final class ContentAssistSessionReloader
             logLiteralMergeTimeline("now"); //$NON-NLS-1$
             IrCompletionDebug.logIrPopupRefresh("now"); //$NON-NLS-1$
             ContentAssistPopupSync.invalidateSyncSnapshot();
-            reloader.rememberPreIrMergeFirstRow(ca);
+            reloader.rememberPreIrMergeSelectionState(ca);
         }
-        reloader.prepareIrRecomputeSelectionReset(irOnly, processor);
         ContentAssistPopupSync.recomputePopupList(ca, viewer, processor);
     }
 

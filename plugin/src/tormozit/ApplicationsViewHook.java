@@ -905,6 +905,11 @@ public class ApplicationsViewHook implements IStartup
 
     static RuntimeInstallation getRuntimeInstallation(IProject project, InfobaseReference infobase)
     {
+        if (project == null || infobase == null) 
+        {    
+//            Global.log("getRuntimeInstallation(): Infobase or project is null");
+            return null;
+        }
         BundleContext ctx = Global.ourContext();
         ServiceReference<?> ref = ctx.getServiceReference(
             "com._1c.g5.v8.dt.platform.services.core.infobases.sync.IInfobaseSynchronizationManager"); //$NON-NLS-1$
