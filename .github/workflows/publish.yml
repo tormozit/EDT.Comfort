@@ -163,7 +163,7 @@ jobs:
 
           echo "Version folders (${dir_count}): ${version_dirs[*]}"
           echo "deploy tree:"
-          find deploy -maxdepth 3 -type f | head -30
+          find deploy -maxdepth 3 -type f | head -30 || true
 
       - name: Push to gh-pages branch
         uses: peaceiris/actions-gh-pages@v4
