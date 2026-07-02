@@ -59,7 +59,7 @@ public final class GlobalLog
                 buffer.append('\n');
             buffer.append(line);
             lineCount++;
-            appendToFile(line);
+//            appendToFile(line);
         }
         notifyListeners(trimmed ? RESYNC : line);
     }

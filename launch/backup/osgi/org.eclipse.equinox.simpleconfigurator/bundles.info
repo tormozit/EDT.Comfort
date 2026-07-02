@@ -1292,4 +1292,4 @@ org.slf4j.api,1.7.2.v20121108-1250,file:/C:/VC/EDT-plugin-WS/.metadata/.plugins/
 org.slf4j.impl.log4j12,1.7.2.v20131105-2200,file:/C:/VC/EDT-plugin-WS/.metadata/.plugins/org.eclipse.pde.core/.bundle_pool/plugins/org.slf4j.impl.log4j12_1.7.2.v20131105-2200.jar,4,false
 org.tukaani.xz,1.9.0,file:/C:/VC/EDT-plugin-WS/.metadata/.plugins/org.eclipse.pde.core/.bundle_pool/plugins/org.tukaani.xz_1.9.0.jar,4,false
 org.yaml.snakeyaml,1.27.0,file:/C:/VC/EDT-plugin-WS/.metadata/.plugins/org.eclipse.pde.core/.bundle_pool/plugins/org.yaml.snakeyaml_1.27.0.jar,4,false
-tormozit.comfort,1.0.0.18-qualifier,file:/C:/VC/EDT.Comfort/plugin/,4,false
+tormozit.comfort,1.0.0.19-qualifier,file:/C:/VC/EDT.Comfort/plugin/,4,false
