@@ -33,10 +33,12 @@ import org.osgi.framework.ServiceReference;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseAccessManager;
 import com._1c.g5.v8.dt.platform.services.core.infobases.IInfobaseAccessSettings;
+import com._1c.g5.v8.dt.platform.services.model.AppArch;
 import com._1c.g5.v8.dt.platform.services.model.Arch;
 import com._1c.g5.v8.dt.platform.services.model.IConnectionString;
 import com._1c.g5.v8.dt.platform.services.model.InfobaseReference;
 import com._1c.g5.v8.dt.platform.services.model.RuntimeInstallation;
+import com._1c.g5.v8.dt.platform.services.core.runtimes.environments.IResolvableRuntimeInstallation;
 import com._1c.g5.wiring.ServiceAccess;
 import com._1c.g5.wiring.ServiceSupplier;
 import com.e1c.g5.dt.applications.IApplication;
@@ -310,7 +312,9 @@ public final class IRApplication
             return t;
         });
 
-        sessions.put(key, newSession(executor));
+        IRSession connectingSession = newSession(executor);
+        sessions.put(key, connectingSession);
+        connectingSession.application = element;
         notifyListeners();
 
         // Запускаем подключение строго в контексте этого потока
@@ -378,9 +382,26 @@ public final class IRApplication
         String connectionString = buildConnectionString(infobase, true);
         RuntimeInstallation runtimeInstallation = ApplicationsViewHook.getRuntimeInstallation(project, infobase);
         if (runtimeInstallation == null)
+        {
             IRConnectDebug.logRuntimeInstallationNull(project, infobase);
-        String platformVersion = runtimeInstallation.getVersion().toString();
-        boolean configBitness64 = runtimeInstallation.getArch() == Arch.X86_64; 
+            // Fallback: тот же путь, что EDT для «Запустить конфигуратор»
+            IRSession currentSession = sessions.get(key);
+            IInfobaseApplication application = currentSession != null ? currentSession.application : null;
+            runtimeInstallation = resolveRuntimeViaApplication(project, application);
+        }
+        String platformVersion;
+        boolean configBitness64;
+        if (runtimeInstallation != null)
+        {
+            platformVersion = runtimeInstallation.getVersion().toString();
+            configBitness64 = runtimeInstallation.getArch() == Arch.X86_64;
+        }
+        else
+        {
+            IRConnectDebug.log("RuntimeInstallation не определён ни одним путём — дефолтные значения"); //$NON-NLS-1$
+            platformVersion = "8.3"; //$NON-NLS-1$
+            configBitness64 = true;
+        }
         String className = buildComClassName(platformVersion);
         String connectionStringNoPass = removePassword(connectionString);
         Object comDispatch = null;
@@ -436,8 +457,10 @@ public final class IRApplication
                     sessions.remove(key); notifyListeners(); return;
                 }
                 Global.log("Попытка " + attempt + " неудача. Повтор..."); //$NON-NLS-1$ //$NON-NLS-2$
-                // Еще есть красивый способо com._1c.g5.v8.dt.internal.platform.services.core.infobases.sync.connections.DesignerSessionInfobaseConnection.getBaseDirectory()
-                registerComClass(className, runtimeInstallation.getLocation().getPath(), attempt, configBitness64);
+                if (runtimeInstallation != null)
+                {
+                    registerComClass(className, runtimeInstallation.getLocation().getPath(), attempt, configBitness64);
+                }
             }
         }
 
@@ -463,13 +486,15 @@ public final class IRApplication
             ComBridge.invoke(comDispatch, "УстановитьЗаголовокСистемы", title); //$NON-NLS-1$
         }
 
-        // Находим временную сессию, чтобы забрать созданный executor
+        // Находим временную сессию, чтобы забрать созданный executor и application
         IRSession connectingSession = sessions.get(key);
         ExecutorService currentExecutor = connectingSession != null ? connectingSession.executor : null;
+        IInfobaseApplication savedApplication = connectingSession != null ? connectingSession.application : null;
 
         IRSession irSession = new IRSession(
             State.CONNECTING, LocalDateTime.now(), pid, platformVersion,
             comDispatch, processObj, title, project, currentExecutor, infobase);
+        irSession.application = savedApplication;
         sessions.put(key, irSession);
         notifyListeners();
 
@@ -538,6 +563,7 @@ public final class IRApplication
             State.CONNECTED, LocalDateTime.now(), irSession.pid, irSession.platformVersion,
             irSession.root, irSession.processObj, irSession.appTitle, irSession.project,
             irSession.executor, irSession.infobase);
+        connectedSession.application = irSession.application;
         connectedSession.moduleRoot = irSession.moduleRoot;
         connectedSession.codeEditor = irSession.codeEditor;
         sessions.put(key, connectedSession);
@@ -983,6 +1009,56 @@ public final class IRApplication
         sessions.remove(key);
         if (!quiet)
             notifyListeners();
+    }
+
+    // =======================================================================
+    // Резолв RuntimeInstallation через LaunchRuntimeInstallationProvider
+    // (тот же путь, что EDT использует для «Запустить конфигуратор»)
+    // =======================================================================
+
+    private static RuntimeInstallation resolveRuntimeViaApplication(IProject project, IInfobaseApplication application)
+    {
+        if (project == null || application == null)
+            return null;
+        try
+        {
+            Object provider = Class.forName(
+                "com._1c.g5.v8.dt.debug.core.LaunchRuntimeInstallationProvider") //$NON-NLS-1$
+                .getDeclaredConstructor().newInstance();
+            @SuppressWarnings("unchecked")
+            Optional<IResolvableRuntimeInstallation> opt =
+                (Optional<IResolvableRuntimeInstallation>) Global.invoke(
+                    provider, "getInstallation", project, application); //$NON-NLS-1$
+            if (opt == null || !opt.isPresent())
+            {
+                IRConnectDebug.log("LaunchRuntimeInstallationProvider.getInstallation вернул empty"); //$NON-NLS-1$
+                return null;
+            }
+            IResolvableRuntimeInstallation resolvable = opt.get();
+            IRConnectDebug.log("resolvable из LaunchRuntimeInstallationProvider: " + resolvable.getClass().getName()); //$NON-NLS-1$
+            try
+            {
+                RuntimeInstallation result = resolvable.resolve(
+                    List.of("com._1c.g5.v8.dt.platform.services.core.componentTypes.ThickClient"), //$NON-NLS-1$
+                    AppArch.X86_64);
+                if (result != null)
+                    return result;
+            }
+            catch (Exception ignored) {}
+            try
+            {
+                return resolvable.resolve(
+                    List.of("com._1c.g5.v8.dt.platform.services.core.componentTypes.ThickClient"), //$NON-NLS-1$
+                    AppArch.X86);
+            }
+            catch (Exception ignored) {}
+            return null;
+        }
+        catch (Exception e)
+        {
+            IRConnectDebug.log("resolveRuntimeViaApplication: " + e.getMessage()); //$NON-NLS-1$
+            return null;
+        }
     }
 
     public static String buildConnectionString(InfobaseReference infobase, boolean withUser)

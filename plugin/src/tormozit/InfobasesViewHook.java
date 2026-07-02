@@ -150,6 +150,8 @@ public final class InfobasesViewHook implements IStartup
 
     private static boolean tryPatch(IViewPart view, int attempt)
     {
+        try
+        {
         if (attempt == 0 || attempt % 5 == 0)
             InfobasesViewDebug.log("tryPatch #" + attempt + " class=" + view.getClass().getName()); //$NON-NLS-1$ //$NON-NLS-2$
 
@@ -254,7 +256,17 @@ public final class InfobasesViewHook implements IStartup
 
         if (focusControl != null)
         {
-            FilterInputBoxListNavigation.installTreeNavigation(focusControl, tree);
+            FilterInputBoxListNavigation.installTreeNavigation(focusControl, tree, () -> {
+                if (tree != null && !tree.isDisposed() && tree.getItemCount() > 0)
+                {
+                    if (tree.getSelectionCount() == 0)
+                        tree.setSelection(tree.getItem(0));
+                    tree.setFocus();
+                    tree.showSelection();
+                    return true;
+                }
+                return false;
+            });
             focusControl.addDisposeListener(e -> {
                 if (pending[0] != null && !focusControl.getDisplay().isDisposed())
                     focusControl.getDisplay().timerExec(-1, pending[0]);
@@ -264,6 +276,13 @@ public final class InfobasesViewHook implements IStartup
         tree.setData(PATCHED_KEY, Boolean.TRUE);
         InfobasesViewDebug.log("tryPatch #" + attempt + " PATCH OK " + InfobasesViewDebug.filtersDesc(viewer)); //$NON-NLS-1$ //$NON-NLS-2$
         return true;
+        }
+        catch (Exception e)
+        {
+            InfobasesViewDebug.log("tryPatch #" + attempt + " EXCEPTION: " + e.getClass().getSimpleName() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " " + e.getMessage()); //$NON-NLS-1$
+            return false;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -305,26 +324,19 @@ public final class InfobasesViewHook implements IStartup
             {
                 ensureSmartFilter(viewer, smartFilter);
                 disableNativeFilter(view, viewer, "applyFilter-before"); //$NON-NLS-1$
-            }
-            else
-            {
-                removeSmartFilter(viewer, smartFilter);
-            }
-
-            viewer.refresh();
-            ensureHighlightLabelProvider(viewer, highlight);
-
-            if (filtering)
-            {
-                ensureSmartFilter(viewer, smartFilter);
+                viewer.refresh();
+                ensureHighlightLabelProvider(viewer, highlight);
                 disableNativeFilter(view, viewer, "applyFilter-after"); //$NON-NLS-1$
                 smartFilter.applyTreeExpansion(viewer);
                 viewer.refresh();
                 ensureHighlightLabelProvider(viewer, highlight);
             }
-            else if (clearingFilter && savedSelection != null)
+            else
             {
-                restoreSelectionAndExpand(viewer, smartFilter, savedSelection);
+                removeSmartFilter(viewer, smartFilter);
+                viewer.refresh();
+                if (clearingFilter && savedSelection != null)
+                    restoreSelectionAndExpand(viewer, smartFilter, savedSelection);
             }
 
             tree.setData(LAST_PAT_KEY, safePattern);
@@ -353,14 +365,13 @@ public final class InfobasesViewHook implements IStartup
         InfobasesViewDebug.log("removeSmartFilter: removed"); //$NON-NLS-1$
     }
 
-    /** Сбрасываем нативный {@code InfobaseByNameFilter}: очищаем паттерн и снимаем с viewer-а. */
+    /** Сбрасываем нативный {@code InfobaseByNameFilter}: удаляем из viewer-а. */
     private static void disableNativeFilter(IViewPart view, CommonViewer viewer, String where)
     {
         Object nativeFilter = Global.getField(view, "filter"); //$NON-NLS-1$
         if (nativeFilter != null)
         {
-            Global.invoke(nativeFilter, "setSearchText", ""); //$NON-NLS-1$ //$NON-NLS-2$
-            InfobasesViewDebug.log("disableNativeFilter[" + where + "]: cleared pattern in " //$NON-NLS-1$ //$NON-NLS-2$
+            InfobasesViewDebug.log("disableNativeFilter[" + where + "]: found " //$NON-NLS-1$ //$NON-NLS-2$
                     + nativeFilter.getClass().getSimpleName());
         }
         else
@@ -520,7 +531,6 @@ public final class InfobasesViewHook implements IStartup
             InfobasesViewDebug.log("installHighlight: StyledCellLabelProvider -> SmartStyledCellLabelWrapper"); //$NON-NLS-1$
             SmartStyledCellLabelWrapper wrapper = new SmartStyledCellLabelWrapper((StyledCellLabelProvider) rawLp);
             wrapper.setHighlightPattern(initialPattern);
-            viewer.setLabelProvider(wrapper);
             return wrapper;
         }
 
@@ -529,7 +539,6 @@ public final class InfobasesViewHook implements IStartup
             InfobasesViewDebug.log("installHighlight: CellLabelProvider -> CellLabelHighlightWrapper"); //$NON-NLS-1$
             CellLabelHighlightWrapper wrapper = new CellLabelHighlightWrapper((CellLabelProvider) rawLp);
             wrapper.setHighlightPattern(initialPattern);
-            viewer.setLabelProvider(wrapper);
             return wrapper;
         }
 

@@ -576,9 +576,8 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         if ("rows".equals(phase)) //$NON-NLS-1$
         {
             int collectionTotal = model != null && model.totalSize > 0 ? model.totalSize : total;
-            int autoLimit = DebugCollectionLoadScheduler.AUTO_LOAD_ROW_LIMIT;
-            if (collectionTotal > autoLimit)
-                return loaded + "/" + collectionTotal + " (авто до " + autoLimit + ")"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            if (collectionTotal > 2048)
+                return loaded + "/" + collectionTotal; //$NON-NLS-1$
             if (collectionTotal > 0)
                 return percentProgressDetail(loaded, collectionTotal);
             if (model != null && model.totalSize == 0)
@@ -969,12 +968,11 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             return;
         boolean ready = isCloneReady();
         cloneItem.setEnabled(ready);
-        int autoLimit = DebugCollectionLoadScheduler.AUTO_LOAD_ROW_LIMIT;
         if (ready)
             cloneItem.setToolTipText("Открыть копию окна коллекции" + Global.pluginSignForTooltip()); //$NON-NLS-1$
         else
             cloneItem.setToolTipText(
-                "Дождитесь завершения автозагрузки (до " + autoLimit + " строк)" + Global.pluginSignForTooltip()); //$NON-NLS-1$ //$NON-NLS-2$
+                "Дождитесь завершения автозагрузки" + Global.pluginSignForTooltip()); //$NON-NLS-1$
     }
 
     private boolean isCloneReady()

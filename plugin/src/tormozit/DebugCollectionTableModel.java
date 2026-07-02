@@ -64,11 +64,11 @@ final class DebugCollectionTableModel
 
     private static final int CELL_CACHE_LIMIT_MIN = 12000;
 
-    /** Ёмкость под автоподгрузку browse: rows×cols + запас; иначе LRU вытесняет viewport и цикл 0→N→0. */
+    /** Ёмкость кэша: rows×cols + запас; иначе LRU вытесняет viewport и цикл 0→N→0. */
     int cellCacheCapacity()
     {
         int rows = totalSize > 0
-            ? Math.min(totalSize, DebugCollectionLoadScheduler.AUTO_LOAD_ROW_LIMIT)
+            ? Math.min(totalSize, 2048)
             : 512;
         int cols = Math.max(1, columns.columnCount());
         long need = (long) rows * cols + 512L;

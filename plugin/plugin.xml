@@ -43,6 +43,7 @@
     <startup class="tormozit.DebugExpressionsChangeValueHook"/>
     <startup class="tormozit.InfobaseSyncQuestionDialogHook"/>
     <startup class="tormozit.FilterBySubsystemsDialogHook"/>
+    <startup class="tormozit.GitChangedFileMenuHook"/>
   </extension>
 
   <extension point="org.eclipse.ui.contexts">

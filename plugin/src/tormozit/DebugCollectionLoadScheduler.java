@@ -28,8 +28,6 @@ final class DebugCollectionLoadScheduler
 {
     static final int BATCH_SIZE = 24;
     static final int OVERSCAN = 8;
-    /** Автоподгрузка browse/prefetch; фильтр и полный обход — без cap. */
-    static final int AUTO_LOAD_ROW_LIMIT = 1000;
 
     interface ProgressListener
     {
@@ -552,14 +550,17 @@ final class DebugCollectionLoadScheduler
         return batchFrom <= sizeTo && batchTo >= sizeFrom;
     }
 
-    private static int browseUpperBound(int total)
+    private int browseUpperBound(int total)
     {
         if (total <= 0)
             return 0;
-        return Math.min(total, AUTO_LOAD_ROW_LIMIT);
+        // Только viewport + небольшой буфер, без prefetch на 1000 строк
+        int vpLast = Math.max(0, viewportLast.get());
+        int bound = Math.max(vpLast + BATCH_SIZE + OVERSCAN, BATCH_SIZE);
+        return Math.min(total, bound);
     }
 
-    /** Автоподгрузка 0..min(total, {@link #AUTO_LOAD_ROW_LIMIT}) — все ячейки схемы заполнены. */
+    /** Все ячейки viewport-диапазона заполнены. */
     boolean isAutoPrefetchComplete()
     {
         if (disposed.get() || model.columns.columnCount() <= 0)
@@ -622,9 +623,6 @@ final class DebugCollectionLoadScheduler
     {
         int loaded = model.countRowsFullyLoaded(0, Math.max(0, browseBound - 1), colFrom, colTo);
         int reportTotal = total > 0 ? total : browseBound;
-        if (total > AUTO_LOAD_ROW_LIMIT)
-            DebugCollectionDebug.step("load", "prefetch " + loaded + "/" + total //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " autoLimit=" + AUTO_LOAD_ROW_LIMIT); //$NON-NLS-1$
         fireProgress(loaded, reportTotal, "rows"); //$NON-NLS-1$
     }
 
@@ -638,7 +636,7 @@ final class DebugCollectionLoadScheduler
         if (!rowValues.isEmpty())
             DebugCollectionBatchEvaluator.evaluateBatch(model.frame, rowValues);
 
-        // Round 2: property-дети видимых колонок — только после Round 1 (свойства строки уже
+        // Round 2: property-дети видимых колонок — после Round 1 (свойства строки уже
         // должны быть перечислимы, иначе rowPropertySource вернёт null).
         List<IBslValue> propValues = model.collectPropertyValuesForBatchEvaluate(from, count, colFrom, colTo);
         if (!propValues.isEmpty())

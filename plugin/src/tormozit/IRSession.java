@@ -33,6 +33,7 @@ import org.eclipse.xtext.util.TextRegion;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.platform.services.model.InfobaseReference;
+import com.e1c.g5.dt.applications.infobases.IInfobaseApplication;
 import com.sun.jna.platform.win32.WinDef.HWND;
 import java.util.ArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -59,6 +60,7 @@ public final class IRSession
          *  В этом случае getModule() использует эту форму вместо root (COM-приложения). */
         public Object moduleRoot = null;
         public InfobaseReference infobase;
+        public IInfobaseApplication application;
         public Object codeEditor = null; // ирКлсПолеТекстаПрограммы
         public TextRegion changedTextRange = null;
         public String newTextOfRange = "";
