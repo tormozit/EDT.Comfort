@@ -279,6 +279,7 @@ public final class IRApplication
 
     public void connectInfobaseApplication(IInfobaseApplication element)
     {
+        IRConnectDebug.logConnectStart(element);
         InfobaseReference infobase = ApplicationsViewHook.getInfobaseFromApplication(element);
         String key = sessionKey(infobase);
 
@@ -289,6 +290,18 @@ public final class IRApplication
         else if (existing != null && existing.state == State.CONNECTING)
             return;
         IProject activeProject = (IProject) Global.getField(element, "project");
+        if (activeProject == null)
+        {
+            // Диагностика issue #88: на некоторых версиях EDT поле "project" не резолвится,
+            // но публичный метод getProject() работает (см. IRApplication.getSession(IDtProject)).
+            Object viaMethod = Global.invoke(element, "getProject");
+            IRConnectDebug.problem("Global.getField(element, \"project\") == null; "
+                + "Global.invoke(element, \"getProject\") = " + viaMethod);
+            if (viaMethod instanceof IProject)
+                activeProject = (IProject) viaMethod;
+        }
+        final IProject resolvedProject = activeProject;
+        IRConnectDebug.logResolvedInfobaseAndProject(element, infobase, resolvedProject);
 
         // Создаем поток-одиночку для этой сессии. Поток будет жить, пока сессия активна.
         ExecutorService executor = Executors.newSingleThreadExecutor(r -> {
@@ -305,7 +318,7 @@ public final class IRApplication
             ComBridge.initComThread(); // Инициализируем STA для потока ОДИН раз при старте
             try
             {
-                doConnect(activeProject, infobase);
+                doConnect(resolvedProject, infobase);
             }
             catch (Exception e)
             {
@@ -364,6 +377,8 @@ public final class IRApplication
         String key = sessionKey(infobase);
         String connectionString = buildConnectionString(infobase, true);
         RuntimeInstallation runtimeInstallation = ApplicationsViewHook.getRuntimeInstallation(project, infobase);
+        if (runtimeInstallation == null)
+            IRConnectDebug.logRuntimeInstallationNull(project, infobase);
         String platformVersion = runtimeInstallation.getVersion().toString();
         boolean configBitness64 = runtimeInstallation.getArch() == Arch.X86_64; 
         String className = buildComClassName(platformVersion);

@@ -1,5 +1,8 @@
 package tormozit;
 
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.PrintWriter;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -12,10 +15,15 @@ import org.eclipse.ui.PlatformUI;
 
 /**
  * Кольцевой буфер общего отладочного журнала ({@link GlobalLogView}).
+ * Дополнительно зеркалит каждую строку в файл сессии ({@link #SESSION_LOG_FILE}) —
+ * без обрезки по размеру, чтобы его можно было читать напрямую с диска после сцены.
  */
 public final class GlobalLog
 {
     public static final String VIEW_ID = "tormozit.GlobalLogView"; //$NON-NLS-1$
+
+    /** Файл полного журнала текущей сессии — перезаписывается при каждом запуске плагина. */
+    public static final String SESSION_LOG_FILE = "C:\\VC\\EDT.Comfort\\comfort-session.log"; //$NON-NLS-1$
 
     /** Сигнал представлению перечитать {@link #getFullText()} после обрезки буфера. */
     static final String RESYNC = "\u0000"; //$NON-NLS-1$
@@ -29,6 +37,8 @@ public final class GlobalLog
     private static int lineCount;
     private static final CopyOnWriteArrayList<Consumer<String>> listeners =
         new CopyOnWriteArrayList<>();
+    private static PrintWriter fileWriter;
+    private static boolean fileWriterFailed;
 
     private GlobalLog() {}
 
@@ -49,6 +59,7 @@ public final class GlobalLog
                 buffer.append('\n');
             buffer.append(line);
             lineCount++;
+            appendToFile(line);
         }
         notifyListeners(trimmed ? RESYNC : line);
     }
@@ -58,6 +69,23 @@ public final class GlobalLog
         synchronized (LOCK)
         {
             return buffer.toString();
+        }
+    }
+
+    private static void appendToFile(String line)
+    {
+        if (fileWriterFailed)
+            return;
+        try
+        {
+            if (fileWriter == null)
+                fileWriter = new PrintWriter(new FileWriter(SESSION_LOG_FILE, false), true);
+            fileWriter.println(line);
+        }
+        catch (IOException e)
+        {
+            fileWriterFailed = true;
+            fileWriter = null;
         }
     }
 

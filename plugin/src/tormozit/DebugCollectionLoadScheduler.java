@@ -310,12 +310,10 @@ final class DebugCollectionLoadScheduler
         return shellVisible.get();
     }
 
-    private boolean isLoadJobBusy()
-    {
-        if (loadJob == null)
-            return false;
+    private boolean isLoadJobBusy() {
+        if (loadJob == null) return false;
         int state = loadJob.getState();
-        return state == Job.RUNNING || state == Job.WAITING;
+        return state == Job.RUNNING || state == Job.WAITING || state == Job.SLEEPING;
     }
 
     private void scheduleContextJob()
@@ -426,10 +424,12 @@ final class DebugCollectionLoadScheduler
             boolean more = batch.more;
             int cellsWritten = batch.cellsWritten;
 
-            boolean canRetry = model.totalSize != 0 && ((more && cellsWritten > 0) || loadPending.get());
+            // canRetry: перезапускаемся если есть ещё работа, даже если все ячейки в PLACEHOLDER (pending)
+            boolean canRetry = model.totalSize != 0 
+                && (more || loadPending.get());
             if (canRetry && !disposed.get() && isShellActiveForLoad() && loadJob != null)
             {
-                int delay = cellsWritten > 0 ? 50 : 150;
+                int delay = cellsWritten > 0 ? 50 : 500; // Большая задержка если все PLACEHOLDER — дать evaluate время
                 loadJob.schedule(delay);
                 if (cellsWritten <= 0)
                     DebugCollectionDebug.step("load", "deferred retry delay=" + delay); //$NON-NLS-1$ //$NON-NLS-2$
@@ -494,7 +494,7 @@ final class DebugCollectionLoadScheduler
             }
             int cellsWritten = fillCellsInBatch(from, count, colFrom, colTo);
             boolean more = hasMoreWork(colFrom, colTo, total, browseBound);
-            if (isAutoPrefetchComplete())
+            if (isAutoPrefetchComplete() && from < browseBound)
                 more = false;
             if (cellsWritten <= 0)
             {
@@ -632,7 +632,20 @@ final class DebugCollectionLoadScheduler
     {
         colFrom = Math.max(0, colFrom);
         colTo = Math.min(colTo, model.columns.columnCount() - 1);
+
+        // Round 1: собственные значения строк одним комбинированным запросом вместо N отдельных evaluate().
+        List<IBslValue> rowValues = model.collectRowValuesForBatchEvaluate(from, count);
+        if (!rowValues.isEmpty())
+            DebugCollectionBatchEvaluator.evaluateBatch(model.frame, rowValues);
+
+        // Round 2: property-дети видимых колонок — только после Round 1 (свойства строки уже
+        // должны быть перечислимы, иначе rowPropertySource вернёт null).
+        List<IBslValue> propValues = model.collectPropertyValuesForBatchEvaluate(from, count, colFrom, colTo);
+        if (!propValues.isEmpty())
+            DebugCollectionBatchEvaluator.evaluateBatch(model.frame, propValues);
+
         int written = 0;
+        int placeholders = 0;
         for (int row = from; row < from + count; row++)
         {
             for (int col = colFrom; col <= colTo; col++)
@@ -641,11 +654,16 @@ final class DebugCollectionLoadScheduler
                     continue;
                 String text = model.extractCellTextInJob(row, col);
                 if (text == null)
+                {
                     text = DebugCollectionTableModel.PLACEHOLDER;
+                    placeholders++;
+                }
                 model.setCellText(row, col, text);
-                written++;
+                if (!DebugCollectionTableModel.PLACEHOLDER.equals(text))
+                    written++;
             }
         }
+        DebugCollectionDebug.step("fillBatch", "from=" + from + " count=" + count + " written=" + written + " placeholders=" + placeholders);
         return written;
     }
 

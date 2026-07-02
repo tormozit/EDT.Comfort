@@ -1322,8 +1322,6 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
     {
         if (scheduler == null || model == null || table == null || table.isDisposed())
             return;
-        if (scheduler.isLoadActive())
-            return;
         int colFrom = 0;
         int colTo = Math.max(0, model.columns.columnCount() - 1);
         if (table == dataTable())
@@ -1622,8 +1620,12 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
     private void applyFilterNow()
     {
         if (filterInput == null || filterInput.isDisposed())
+        {
+            DebugCollectionDebug.step("filter", "SKIP filterInput null");
             return;
+        }
         String text = filterInput.getText();
+        DebugCollectionDebug.step("filter", "text=[" + text + "]");
         if (text == null || text.isBlank())
         {
             cancelFilterScan();
@@ -1642,10 +1644,13 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             if (splitTable != null)
                 splitTable.clearAll();
             scheduleViewportLoad();
+            DebugCollectionDebug.step("filter", "scheduled viewport after filter");
             return;
         }
         rowFilter.beginScan(total);
+        DebugCollectionDebug.step("filter", "beginScan total=" + total);
         scheduler.scheduleFilterScan(rowFilter, () -> {
+            DebugCollectionDebug.step("filter", "scanDone visible=" + rowFilter.visibleCount(total) + " cancelled=" + rowFilter.isCancelled());
             if (rowFilter.isCancelled())
                 return;
             updateTableItemCount(rowFilter.visibleCount(total));
@@ -1672,7 +1677,10 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
     private void scheduleViewportLoad()
     {
         if (splitTable == null || scheduler == null)
+        {
+            DebugCollectionDebug.step("viewport", "SKIP splitTable=" + (splitTable != null) + " scheduler=" + (scheduler != null));
             return;
+        }
         Table data = dataTable();
         if (data == null || data.isDisposed())
             return;
@@ -1680,8 +1688,11 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         int last = first + visibleRowCountEstimate();
         int logicalFirst = displayIndexToLogical(first);
         int logicalLast = displayIndexToLogical(Math.min(last, splitTable.getItemCount() - 1));
+        DebugCollectionDebug.step("viewport", "first=" + first + " last=" + last + " logical=" + logicalFirst + ".." + logicalLast + " itemCount=" + splitTable.getItemCount());
         if (logicalFirst >= 0 && logicalLast >= logicalFirst)
             scheduler.requestViewport(logicalFirst, logicalLast);
+        else
+            DebugCollectionDebug.step("viewport", "SKIP logical range invalid");
     }
 
     private int visibleRowCountEstimate()

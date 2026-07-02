@@ -2,6 +2,7 @@ package tormozit;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -279,7 +280,8 @@ final class DebugCollectionTableModel
             return false;
         synchronized (data)
         {
-            return data.contentLoaded;
+            boolean filled = data.contentLoaded && !PLACEHOLDER.equals(data.baseText);
+            return filled;
         }
     }
 
@@ -299,12 +301,9 @@ final class DebugCollectionTableModel
         {
             if (data.contentLoaded)
                 return data.displayText != null ? data.displayText : ""; //$NON-NLS-1$
-            if (data.displayText != null && !data.displayText.isEmpty())
-                return data.displayText;
-            if (data.baseText != null && !data.baseText.isEmpty())
-                return data.baseText;
+            // Если не загружено — показываем PLACEHOLDER, но кэш остаётся "пустым" для перезагрузки
+            return PLACEHOLDER;
         }
-        return PLACEHOLDER;
     }
 
     String getCellBaseText(int logicalRow, int visibleCol)
@@ -326,10 +325,19 @@ final class DebugCollectionTableModel
         CellData data = cellData(logicalRow, visibleCol);
         synchronized (data)
         {
-            data.contentLoaded = true;
             if (baseText == null)
                 baseText = ""; //$NON-NLS-1$
             data.baseText = baseText;
+            // Не считать PLACEHOLDER загруженным — перезагрузим при следующем batch'е
+            if (PLACEHOLDER.equals(baseText))
+            {
+                data.contentLoaded = false;
+//                DebugCollectionDebug.step("setCellText", "row=" + logicalRow + " col=" + visibleCol + " DEFERRED (pending value)");
+            }
+            else
+            {
+                data.contentLoaded = true;
+            }
             if (data.sizeState == SizeState.READY && data.nestedSize >= 0)
                 data.displayText = cellTextWithNestedSize(data.baseText, data.nestedSize);
             else if (PLACEHOLDER.equals(baseText))
@@ -629,5 +637,65 @@ final class DebugCollectionTableModel
         if (value == null || value.isEvaluated() || value.isPending())
             return;
         value.evaluate();
+    }
+
+    /**
+     * Round 1 батч-загрузки: собственные значения строк батча, ещё не evaluated/pending —
+     * кандидаты на комбинированный запрос {@link DebugCollectionBatchEvaluator#evaluateBatch}.
+     * Без этого TYPE/VALUE/PROPERTY колонки идут по одному evaluate() на строку.
+     */
+    List<IBslValue> collectRowValuesForBatchEvaluate(int from, int count) throws DebugException
+    {
+        List<IBslValue> result = new ArrayList<>();
+        for (int row = from; row < from + count; row++)
+        {
+            IBslVariable rowVar = rowVariables.get(row);
+            if (rowVar == null)
+            {
+                rowVar = indexedValue.getVariable(row);
+                if (rowVar != null)
+                    rowVariables.put(row, rowVar);
+            }
+            if (rowVar == null)
+                continue;
+            IBslValue value = rowVar.getValue();
+            if (value != null && !value.isEvaluated() && !value.isPending())
+                result.add(value);
+        }
+        return result;
+    }
+
+    /**
+     * Round 2 батч-загрузки: значения property-детей в видимом диапазоне колонок — вызывать
+     * ПОСЛЕ {@link #collectRowValuesForBatchEvaluate} и его evaluate (иначе {@code rowPropertySource}
+     * ещё не может перечислить свойства строки).
+     */
+    List<IBslValue> collectPropertyValuesForBatchEvaluate(int from, int count, int colFrom, int colTo)
+            throws DebugException
+    {
+        List<IBslValue> result = new ArrayList<>();
+        int lastCol = Math.min(colTo, columns.columnCount() - 1);
+        for (int col = Math.max(0, colFrom); col <= lastCol; col++)
+        {
+            DebugCollectionColumnModel.Column colDef = columns.columnAt(col);
+            if (colDef == null || colDef.kind != DebugCollectionColumnModel.Kind.PROPERTY)
+                continue;
+            for (int row = from; row < from + count; row++)
+            {
+                IBslVariable rowVar = rowVariables.get(row);
+                if (rowVar == null)
+                    continue;
+                IBslVariable[] props = rowPropertySource(row, rowVar);
+                if (props == null)
+                    continue;
+                IBslVariable child = findPropertyVariable(props, colDef.propertyName);
+                if (child == null)
+                    continue;
+                IBslValue value = child.getValue();
+                if (value != null && !value.isEvaluated() && !value.isPending())
+                    result.add(value);
+            }
+        }
+        return result;
     }
 }

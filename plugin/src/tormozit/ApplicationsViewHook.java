@@ -905,21 +905,34 @@ public class ApplicationsViewHook implements IStartup
 
     static RuntimeInstallation getRuntimeInstallation(IProject project, InfobaseReference infobase)
     {
+        IRConnectDebug.logRuntimeInstallationLookupStart(project, infobase);
         if (project == null || infobase == null) 
         {    
-//            Global.log("getRuntimeInstallation(): Infobase or project is null");
             return null;
         }
         BundleContext ctx = Global.ourContext();
         ServiceReference<?> ref = ctx.getServiceReference(
             "com._1c.g5.v8.dt.platform.services.core.infobases.sync.IInfobaseSynchronizationManager"); //$NON-NLS-1$
+        IRConnectDebug.logServiceReference(ref);
         Object syncMgr = ctx.getService(ref);
+        IRConnectDebug.logSyncMgr(syncMgr);
         IResolvableRuntimeInstallation resolvable =
             (IResolvableRuntimeInstallation) Global.invoke(
                 syncMgr, "getInstallation", project, infobase); //$NON-NLS-1$
-        return resolvable.resolve(
-            List.of("com._1c.g5.v8.dt.platform.services.core.componentTypes.ThickClient"), //$NON-NLS-1$
-            infobase.getAppArch());
+        IRConnectDebug.logResolvable(syncMgr, resolvable);
+        try
+        {
+            RuntimeInstallation result = resolvable.resolve(
+                List.of("com._1c.g5.v8.dt.platform.services.core.componentTypes.ThickClient"), //$NON-NLS-1$
+                infobase.getAppArch());
+            IRConnectDebug.logResolveResult(result);
+            return result;
+        }
+        catch (Exception e)
+        {
+            IRConnectDebug.logResolveException(e, project, infobase);
+            throw e;
+        }
     }
 
     // =======================================================================
