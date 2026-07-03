@@ -82,6 +82,41 @@ final class DebugCollectionPropertyVariables
     }
 
     /**
+     * Свойства строки для отображения ячеек — как {@code IndexedValuesViewDelegate.getPropertyText}
+     * / {@code getContextVariables(IValue)}: без фильтра placeholder для schema.
+     */
+    static IBslVariable[] propertyVariablesForRow(IBslVariable rowVar) throws DebugException
+    {
+        if (rowVar == null)
+            return null;
+        return propertyVariablesForValue(rowVar.getValue());
+    }
+
+    static IBslVariable[] propertyVariablesForValue(IBslValue value) throws DebugException
+    {
+        if (value == null || value.isPending())
+            return null;
+        if (!value.isEvaluated())
+            value.evaluate();
+        if (value.isPending())
+            return null;
+
+        if (value instanceof IBslIndexedValue indexed)
+        {
+            IBslVariable[] ctx = indexed.getContextVariables();
+            if (ctx != null && ctx.length > 0)
+                return ctx;
+            IBslVariable[] vars = indexed.getVariables();
+            if (vars != null && vars.length > 0)
+                return vars;
+            return null;
+        }
+
+        IBslVariable[] vars = value.getVariables();
+        return vars != null && vars.length > 0 ? vars : null;
+    }
+
+    /**
      * Context-свойства элемента строки ({@code getContextVariables()} или {@code getVariables()}).
      * {@code null} — value/context ещё не готов.
      */

@@ -9,6 +9,7 @@ import java.nio.file.Files;
 
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
+import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.Adapters;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.TreeSelection;
@@ -47,6 +48,9 @@ public final class Global
    
     /** ID универсального редактора свойств объекта EDT. */
     static final String PROPERTIES_SHEET_ID  = "org.eclipse.ui.views.properties.PropertySheet"; //$NON-NLS-1$
+
+    /** ID панели истории коммитов EGit. */
+    static final String TEAM_HISTORY_VIEW_ID = "org.eclipse.team.ui.GenericHistoryView"; //$NON-NLS-1$
 
     private Global() {}
 
@@ -250,12 +254,45 @@ public final class Global
     // Проекты
     // =========================================================================
 
+    /** Извлекает {@link IProject} из панели истории коммитов EGit (GenericHistoryView). */
+    private static IProject getProjectFromHistoryView(IWorkbenchPart part)
+    {
+        try
+        {
+            Object page = call(part, "getHistoryPage");
+            if (page == null)
+                return null;
+            Object repo = getField(page, "currentRepo");
+            if (!(repo instanceof org.eclipse.jgit.lib.Repository))
+                return null;
+            File workTree = ((org.eclipse.jgit.lib.Repository) repo).getWorkTree();
+            if (workTree != null)
+            {
+                String repoAbs = workTree.getAbsolutePath().replace('\\', '/');
+                for (IProject p : ResourcesPlugin.getWorkspace().getRoot().getProjects())
+                {
+                    if (!p.isOpen())
+                        continue;
+                    String projAbs = p.getLocation().toFile().getAbsolutePath().replace('\\', '/');
+                    if (repoAbs.equals(projAbs) || repoAbs.startsWith(projAbs + "/"))
+                        return p;
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            log("getProjectFromHistoryView error: " + e);
+        }
+        return null;
+    }
+
     /**
      * Возвращает активный {@link IProject} из нескольких источников (в порядке приоритета):
      * <ol>
      *   <li>Файл, открытый в активном редакторе ({@code IEditorInput → IFile → IProject}).</li>
      *   <li>Редактор сравнения конфигураций EDT — через сессию сравнения
      *       ({@link CompareConfigOpenObjectHandler#getProjectFromEditor}).</li>
+
      *   <li>Выделенный элемент в навигаторе EDT.</li>
      * </ol>
      *
@@ -273,7 +310,9 @@ public final class Global
         {
             IFile file = editorToFile(editor);
             if (file != null)
+            {
                 return file.getProject();
+            }
         }
 
         // 2. Из редактора сравнения конфигураций
@@ -326,6 +365,12 @@ public final class Global
                     if (p != null)
                         return p;
                 }
+            }
+            if (TEAM_HISTORY_VIEW_ID.equals(part.getSite().getId()))
+            {
+                IProject p = getProjectFromHistoryView(part);
+                if (p != null)
+                    return p;
             }
         }
         return getActiveProject(page, showMessage);

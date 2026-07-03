@@ -931,7 +931,7 @@ public class ApplicationsViewHook implements IStartup
         catch (Exception e)
         {
             IRConnectDebug.logResolveException(e, project, infobase);
-            throw e;
+            return null;
         }
     }
 

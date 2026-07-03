@@ -1,9 +1,20 @@
 package tormozit;
 
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.function.Consumer;
 
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.debug.core.DebugException;
+import org.eclipse.debug.core.DebugPlugin;
+import org.eclipse.debug.core.IDebugEventSetListener;
+import org.eclipse.debug.core.model.IDebugElement;
+import org.eclipse.debug.core.model.IDebugTarget;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Listener;
@@ -13,27 +24,31 @@ import org.eclipse.swt.widgets.Table;
 import com._1c.g5.v8.dt.debug.core.model.IBslVariable;
 import com._1c.g5.v8.dt.debug.core.model.values.IBslIndexedValue;
 import com._1c.g5.v8.dt.debug.core.model.values.IBslValue;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
 
 /**
- * Фоновая подгрузка строк коллекции micro-порциями; UI thread не блокируется.
+ * Загрузка коллекции по async-схеме штатной панели «Значения»:
+ * kick {@code indexedValue.getVariables()} в core, viewport — {@code getVariables(from, count)},
+ * refresh по {@code DebugEvent.CHANGE} detail 256/512 на {@link IBslIndexedValue}.
  */
 final class DebugCollectionLoadScheduler
 {
-    static final int BATCH_SIZE = 24;
-    static final int OVERSCAN = 8;
+    private static final long DEBUG_REFRESH_DELAY_MS = 150L;
+    private static final long MIN_DEBUG_REFRESH_INTERVAL_MS = 400L;
+    private static final long PENDING_DIRTY_DEBOUNCE_MS = 500L;
+    private static final long VIEWPORT_KICK_DELAY_MS = 150L;
+    private static final int DEBUG_DETAIL_STATE = 256;
+    private static final int DEBUG_DETAIL_CONTENT = 512;
+    private static final int OVERSCAN = 8;
+    private static final int CONTEXT_RESOLVE_MAX_ATTEMPTS = 2;
 
     interface ProgressListener
     {
         void onProgress(int loaded, int total, String phase);
 
-        void onRowsReady(int first, int count);
+        void onRowsReady(int displayFirst, int displayCount);
+
+        /** Точечная перерисовка одной logical-строки (как EDT viewer.update). */
+        void onRepaintLogicalRow(int logicalRow);
     }
 
     private final DebugCollectionTableModel model;
@@ -43,32 +58,49 @@ final class DebugCollectionLoadScheduler
     private Table tableForViewport;
     private Shell shellForPause;
     private final java.util.concurrent.atomic.AtomicBoolean disposed = new java.util.concurrent.atomic.AtomicBoolean();
-    private final java.util.concurrent.atomic.AtomicInteger viewportFirst = new java.util.concurrent.atomic.AtomicInteger(-1);
+    private final java.util.concurrent.atomic.AtomicInteger viewportFirst = new java.util.concurrent.atomic.AtomicInteger(0);
     private final java.util.concurrent.atomic.AtomicInteger viewportLast = new java.util.concurrent.atomic.AtomicInteger(-1);
-    /** Диапазон колонок для pass 1 (текст) — все видимые в схеме. */
-    private final java.util.concurrent.atomic.AtomicInteger viewportColFrom = new java.util.concurrent.atomic.AtomicInteger(0);
-    private final java.util.concurrent.atomic.AtomicInteger viewportColTo = new java.util.concurrent.atomic.AtomicInteger(-1);
-    /** Pass 2: `[N]` только для ячеек, видимых на экране — снимок с UI thread. */
-    private final java.util.concurrent.atomic.AtomicInteger sizeRowFrom = new java.util.concurrent.atomic.AtomicInteger(-1);
-    private final java.util.concurrent.atomic.AtomicInteger sizeRowTo = new java.util.concurrent.atomic.AtomicInteger(-1);
-    private final java.util.concurrent.atomic.AtomicInteger sizeColFrom = new java.util.concurrent.atomic.AtomicInteger(1);
-    private final java.util.concurrent.atomic.AtomicInteger sizeColTo = new java.util.concurrent.atomic.AtomicInteger(-1);
-    private final java.util.concurrent.atomic.AtomicBoolean loadPending = new java.util.concurrent.atomic.AtomicBoolean(false);
-    /** Снимок видимости shell — только с UI thread, Job читает эти значения. */
     private final java.util.concurrent.atomic.AtomicBoolean shellVisible = new java.util.concurrent.atomic.AtomicBoolean(true);
     private final java.util.concurrent.atomic.AtomicBoolean shellMinimized = new java.util.concurrent.atomic.AtomicBoolean(false);
     private Listener shellStateListener;
-    private volatile Job loadJob;
-    private volatile Job sizeJob;
+    private volatile Job variablesJob;
     private volatile Job filterJob;
     private volatile Job contextJob;
+    private volatile Job viewportKickJob;
+    private volatile Job inputUpdateJob;
+    private final java.util.concurrent.atomic.AtomicInteger lastKickedFirst =
+        new java.util.concurrent.atomic.AtomicInteger(-1);
+    private final java.util.concurrent.atomic.AtomicInteger lastKickedLast =
+        new java.util.concurrent.atomic.AtomicInteger(-1);
     private final java.util.concurrent.atomic.AtomicInteger contextResolveAttempts =
         new java.util.concurrent.atomic.AtomicInteger();
+    private final java.util.concurrent.atomic.AtomicInteger sizeRowFrom =
+        new java.util.concurrent.atomic.AtomicInteger(-1);
+    private final java.util.concurrent.atomic.AtomicInteger sizeRowTo =
+        new java.util.concurrent.atomic.AtomicInteger(-1);
+    private final java.util.concurrent.atomic.AtomicInteger sizeColFrom =
+        new java.util.concurrent.atomic.AtomicInteger(1);
+    private final java.util.concurrent.atomic.AtomicInteger sizeColTo =
+        new java.util.concurrent.atomic.AtomicInteger(-1);
     private final java.util.concurrent.atomic.AtomicInteger sizePassGeneration =
         new java.util.concurrent.atomic.AtomicInteger();
-    /** Инкремент при смене схемы — устаревшие батчи не трогают UI. */
-    private final java.util.concurrent.atomic.AtomicInteger loadGeneration =
+    private IDebugEventSetListener debugEventListener;
+    private Runnable debugRefreshDebounce;
+    private Runnable viewportKickDebounce;
+    private Runnable inputUpdateDebounce;
+    private final java.util.concurrent.atomic.AtomicBoolean initialLoadSettled =
+        new java.util.concurrent.atomic.AtomicBoolean();
+    private final java.util.concurrent.atomic.AtomicInteger debugEventCoalesceCount =
         new java.util.concurrent.atomic.AtomicInteger();
+    private final java.util.concurrent.atomic.AtomicBoolean debugRefreshArmed =
+        new java.util.concurrent.atomic.AtomicBoolean();
+    private final java.util.concurrent.atomic.AtomicBoolean priorityKickScheduled =
+        new java.util.concurrent.atomic.AtomicBoolean();
+    private final java.util.BitSet dirtyLogicalRows = new java.util.BitSet();
+    private final Object dirtyRowsLock = new Object();
+    private volatile long lastDebugRefreshAt;
+    private Runnable pendingDirtyDebounce;
+    private Runnable priorityViewportRunnable;
 
     DebugCollectionLoadScheduler(
         DebugCollectionTableModel model,
@@ -81,8 +113,8 @@ final class DebugCollectionLoadScheduler
         this.progress = progress;
         this.contextColumnsListener = contextColumnsListener;
         DebugCollectionSizeResolver.resetForNewWindow();
-        DebugCollectionStringFormatResolver.resetForNewWindow();
         contextResolveAttempts.set(0);
+        model.setDirtyRowHandler(this::markDirtyLogicalRowDebounced);
     }
 
     void bindTable(Table table)
@@ -104,7 +136,6 @@ final class DebugCollectionLoadScheduler
         shellStateListener = e -> {
             if (e.type == SWT.Hide)
             {
-                // Hide может прийти от Win32 pin без реального скрытия — перечитываем после события.
                 Display d = shell.getDisplay();
                 if (d != null && !d.isDisposed())
                     d.asyncExec(this::updateShellActiveSnapshot);
@@ -118,7 +149,6 @@ final class DebugCollectionLoadScheduler
         shell.addListener(SWT.Deiconify, shellStateListener);
     }
 
-    /** Снимок видимости shell — только с UI thread. */
     private void updateShellActiveSnapshot()
     {
         Shell shell = shellForPause;
@@ -134,58 +164,90 @@ final class DebugCollectionLoadScheduler
 
     void scheduleInitialLoad()
     {
+        DebugCollectionAgentLog.beginSession();
+        initialLoadSettled.set(false);
+        debugEventCoalesceCount.set(0);
+        synchronized (dirtyRowsLock)
+        {
+            dirtyLogicalRows.clear();
+        }
         updateShellActiveSnapshot();
         viewportFirst.set(0);
-        viewportLast.set(BATCH_SIZE + OVERSCAN);
-        captureColumnViewport();
-        captureSizeViewport(0, BATCH_SIZE + OVERSCAN, tableForViewport);
-        scheduleContextJob();
-        scheduleSizeJob();
-        scheduleLoadJob("initial"); //$NON-NLS-1$
+        viewportLast.set(OVERSCAN);
+        installDebugEventListener();
+        scheduleVariablesJob("initial", true); //$NON-NLS-1$
     }
 
-    /** Клон окна: схема и размер уже в модели — догрузка только пробелов viewport. */
     void scheduleFromClone(int logicalFirst, int logicalLast)
     {
+        DebugCollectionAgentLog.beginSession();
+        initialLoadSettled.set(true);
+        debugEventCoalesceCount.set(0);
         updateShellActiveSnapshot();
-        int first = Math.max(0, logicalFirst - OVERSCAN);
-        int last = logicalLast + OVERSCAN;
-        viewportFirst.set(first);
-        viewportLast.set(last);
-        captureColumnViewport();
-        captureSizeViewport(first, last, tableForViewport);
+        captureViewport(logicalFirst, logicalLast);
+        installDebugEventListener();
         if (model.totalSize < 0)
-            scheduleSizeJob();
+            scheduleVariablesJob("clone"); //$NON-NLS-1$
         else
             fireProgress(model.loadedRowCount, model.totalSize, "rows"); //$NON-NLS-1$
-        scheduleLoadJob("clone"); //$NON-NLS-1$
-        scheduleSizePass();
+        refreshViewportRows();
     }
 
     void requestViewport(int first, int last)
     {
         if (disposed.get() || !isShellActiveForLoad())
             return;
-        int logicalFirst = Math.max(0, first - OVERSCAN);
-        int logicalLast = last + OVERSCAN;
-        viewportFirst.set(logicalFirst);
-        viewportLast.set(logicalLast);
-        captureColumnViewport();
-        captureSizeViewport(logicalFirst, logicalLast, tableForViewport);
-        scheduleLoadJob("viewport"); //$NON-NLS-1$
+        captureViewport(first, last);
+        scheduleViewportKickDebounced();
         scheduleSizePass();
     }
 
-    /** Pass 1: все колонки схемы — свойства строки приходят пачкой из getVariables. */
-    void captureColumnViewport()
+    /** Немедленный kick видимой страницы (End, большой скачок) — coalesced {@link Job#INTERACTIVE}. */
+    void requestViewportPriority(int first, int last)
     {
-        int maxCol = Math.max(0, model.columns.columnCount() - 1);
-        viewportColFrom.set(0);
-        viewportColTo.set(maxCol);
-        DebugCollectionDebug.step("load", "cols=0.." + maxCol); //$NON-NLS-1$ //$NON-NLS-2$
+        if (disposed.get() || !isShellActiveForLoad())
+            return;
+        if (viewportKickDebounce != null && display != null && !display.isDisposed())
+            display.timerExec(-1, viewportKickDebounce);
+        viewportKickDebounce = null;
+        captureViewport(first, last);
+        schedulePriorityViewportKickCoalesced();
     }
 
-    /** Pass 2: logical rows на экране + горизонтально видимые model-колонки data-таблицы. */
+    private void schedulePriorityViewportKickCoalesced()
+    {
+        if (display == null || display.isDisposed() || disposed.get())
+            return;
+        if (!priorityKickScheduled.compareAndSet(false, true))
+            return;
+        Runnable schedule = () -> {
+            if (display.isDisposed() || disposed.get())
+            {
+                priorityKickScheduled.set(false);
+                return;
+            }
+            if (priorityViewportRunnable != null)
+                display.timerExec(-1, priorityViewportRunnable);
+            priorityViewportRunnable = () -> {
+                priorityViewportRunnable = null;
+                priorityKickScheduled.set(false);
+                if (disposed.get() || !isShellActiveForLoad())
+                    return;
+                submitViewportKickJob("priority", true); //$NON-NLS-1$
+            };
+            display.asyncExec(priorityViewportRunnable);
+        };
+        if (display.getThread() == Thread.currentThread())
+            schedule.run();
+        else
+            display.asyncExec(schedule);
+    }
+
+    void captureColumnViewport()
+    {
+        // Схема EDT: колонки определяются при resolve context, не по viewport.
+    }
+
     void captureSizeViewport(int logicalFirst, int logicalLast, Table dataTable)
     {
         int total = model.totalSize;
@@ -199,13 +261,19 @@ final class DebugCollectionLoadScheduler
         sizeRowTo.set(logicalLast);
 
         int maxCol = Math.max(0, model.columns.columnCount() - 1);
-        int[] cols = DebugCollectionViewportTracker.visibleModelColumnRange(
-            dataTable, model.columns.columnCount(), model.columns.fixedColumnCount());
-        sizeColFrom.set(Math.min(maxCol, Math.max(1, cols[0])));
-        sizeColTo.set(Math.min(maxCol, cols[1]));
+        int colFrom = 1;
+        int colTo = maxCol;
+        if (dataTable != null && !dataTable.isDisposed())
+        {
+            int[] cols = DebugCollectionViewportTracker.visibleModelColumnRange(
+                dataTable, model.columns.columnCount(), model.columns.fixedColumnCount());
+            colFrom = Math.min(maxCol, Math.max(1, cols[0]));
+            colTo = Math.min(maxCol, cols[1]);
+        }
+        sizeColFrom.set(colFrom);
+        sizeColTo.set(colTo);
     }
 
-    /** Pass 2: getSize для вложенных коллекций — только size viewport. */
     void scheduleSizePass()
     {
         if (disposed.get() || !isShellActiveForLoad())
@@ -241,14 +309,19 @@ final class DebugCollectionLoadScheduler
 
     boolean isLoadActive()
     {
-        return loadPending.get() || isLoadJobBusy();
+        return isJobBusy(variablesJob);
+    }
+
+    boolean isAutoPrefetchComplete()
+    {
+        return model.isRowsLoaded();
     }
 
     void scheduleFilterScan(DebugCollectionRowFilter filter, Runnable onDone)
     {
         if (disposed.get() || filter == null)
             return;
-        cancelFilterJob();
+        cancelJob(filterJob);
         filterJob = Job.create("Комфорт: фильтр коллекции", monitor -> { //$NON-NLS-1$
             runFilterScan(filter, monitor, onDone);
             return org.eclipse.core.runtime.Status.OK_STATUS;
@@ -259,15 +332,19 @@ final class DebugCollectionLoadScheduler
 
     void cancelFilterScan()
     {
-        cancelFilterJob();
+        cancelJob(filterJob);
     }
 
-    /** После смены схемы колонок — отменить текущий load, иначе батч пишет в старую модель. */
     void resetLoadJobForSchemaChange()
     {
-        loadGeneration.incrementAndGet();
-        cancelJob(loadJob);
-        loadPending.set(false);
+        model.invalidateAllCells();
+        if (model.isRowsLoaded())
+            repaintBoundTable();
+        else
+        {
+            scheduleCollectionRekick("schema"); //$NON-NLS-1$
+            refreshBoundTable();
+        }
     }
 
     void cancelAll()
@@ -276,42 +353,600 @@ final class DebugCollectionLoadScheduler
         shellVisible.set(false);
         sizePassGeneration.incrementAndGet();
         removeShellStateListener();
+        removeDebugEventListener();
         DebugCollectionSizeResolver.cancelAll();
-        DebugCollectionStringFormatResolver.cancelAll();
-        cancelJob(loadJob);
-        cancelJob(sizeJob);
+        cancelJob(variablesJob);
         cancelJob(filterJob);
         cancelJob(contextJob);
+        cancelJob(viewportKickJob);
+        cancelJob(inputUpdateJob);
     }
 
-    private void removeShellStateListener()
+    private void captureViewport(int logicalFirst, int logicalLast)
     {
-        if (shellStateListener == null)
+        int total = model.totalSize;
+        if (total > 0 && logicalLast >= total)
+            logicalLast = total - 1;
+        if (logicalFirst < 0)
+            logicalFirst = 0;
+        if (logicalLast < logicalFirst)
+            logicalLast = logicalFirst;
+        viewportFirst.set(Math.max(0, logicalFirst - OVERSCAN));
+        viewportLast.set(logicalLast + OVERSCAN);
+    }
+
+    private void scheduleVariablesJob(String reason)
+    {
+        scheduleVariablesJob(reason, false);
+    }
+
+    private void scheduleVariablesJob(String reason, boolean scheduleContextAfter)
+    {
+        if (disposed.get() || !isShellActiveForLoad())
             return;
-        Shell shell = shellForPause;
-        if (shell != null && !shell.isDisposed())
-        {
-            shell.removeListener(SWT.Show, shellStateListener);
-            shell.removeListener(SWT.Hide, shellStateListener);
-            shell.removeListener(SWT.Iconify, shellStateListener);
-            shell.removeListener(SWT.Deiconify, shellStateListener);
-        }
-        shellStateListener = null;
+        cancelJob(variablesJob);
+        variablesJob = Job.create("Комфорт: коллекция", monitor -> { //$NON-NLS-1$
+            if (disposed.get() || monitor.isCanceled() || !isShellActiveForLoad())
+                return org.eclipse.core.runtime.Status.OK_STATUS;
+            DebugCollectionDebug.step("load.order", reason + ": variablesJob start"); //$NON-NLS-1$ //$NON-NLS-2$
+            try
+            {
+                int size = model.indexedValue.getSize();
+                model.totalSize = size;
+                fireProgress(0, size, "size"); //$NON-NLS-1$
+                if (size == 0)
+                {
+                    model.noteCollectionKicked(0);
+                    fireProgress(0, 0, "rows"); //$NON-NLS-1$
+                    return org.eclipse.core.runtime.Status.OK_STATUS;
+                }
+                if ("initial".equals(reason)) //$NON-NLS-1$
+                    model.clearLiveRowCache();
+                if (model.loadedRowCount < size)
+                {
+                    IBslVariable[] vars = model.indexedValue.getVariables();
+                    int varCount = vars != null ? vars.length : 0;
+                    model.noteCollectionKicked(size);
+                    DebugCollectionDebug.step("load.rows", //$NON-NLS-1$
+                        reason + " totalSize=" + size + " vars.length=" + varCount); //$NON-NLS-1$ //$NON-NLS-2$
+                    // #region agent log
+                    DebugCollectionAgentLog.log("H-edtKick", "LoadScheduler.scheduleVariablesJob", "collectionKick", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        "{\"reason\":\"" + reason + "\",\"totalSize\":" + size //$NON-NLS-1$ //$NON-NLS-2$
+                            + ",\"varsLength\":" + varCount + ",\"mapSize\":" + 0 + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    // #endregion
+                    logRowVariableSample();
+                }
+                fireProgress(model.loadedRowCount, size, "rows"); //$NON-NLS-1$
+                initialLoadSettled.set(true);
+                DebugCollectionDebug.step("load", reason + " rows=" + size); //$NON-NLS-1$ //$NON-NLS-2$
+                if (scheduleContextAfter)
+                    scheduleContextJob();
+                requestViewportPriority(viewportFirst.get(), viewportLast.get());
+                repaintBoundTable();
+            }
+            catch (DebugException e)
+            {
+                DebugCollectionDebug.problem("getVariables: " + e.getMessage()); //$NON-NLS-1$
+            }
+            return org.eclipse.core.runtime.Status.OK_STATUS;
+        });
+        variablesJob.setSystem(true);
+        variablesJob.schedule();
     }
 
-    private boolean isShellActiveForLoad()
+    private void logRowVariableSample()
     {
-        if (disposed.get())
-            return false;
-        if (shellMinimized.get())
-            return false;
-        return shellVisible.get();
+        StringBuilder sb = new StringBuilder();
+        for (int row : new int[] { 0, 23, 24 })
+        {
+            if (model.totalSize > 0 && row >= model.totalSize)
+                continue;
+            try
+            {
+                IBslVariable variable = model.indexedValue != null
+                    ? model.indexedValue.getVariable(row) : null;
+                String name = variable != null ? variable.getName() : "null"; //$NON-NLS-1$
+                if (sb.length() > 0)
+                    sb.append(','); //$NON-NLS-1$
+                sb.append(" i=").append(row).append(" name=").append(name); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (DebugException e)
+            {
+                DebugCollectionDebug.problem("rowSample: " + e.getMessage()); //$NON-NLS-1$
+            }
+        }
+        if (sb.length() > 0)
+            DebugCollectionDebug.step("load.rows", "rowSample" + sb); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
-    private boolean isLoadJobBusy() {
-        if (loadJob == null) return false;
-        int state = loadJob.getState();
-        return state == Job.RUNNING || state == Job.WAITING || state == Job.SLEEPING;
+    private void installDebugEventListener()
+    {
+        if (debugEventListener != null || disposed.get())
+            return;
+        debugEventListener = events -> {
+            if (disposed.get() || !isShellActiveForLoad())
+                return;
+            IBslIndexedValue indexed = model.indexedValue;
+            if (indexed == null)
+                return;
+            IDebugTarget collectionTarget = debugTargetOf(indexed);
+            boolean sawContent = false;
+            boolean sawState = false;
+            boolean sawRoot = false;
+            for (org.eclipse.debug.core.DebugEvent event : events)
+            {
+                if (event.getKind() != org.eclipse.debug.core.DebugEvent.CHANGE)
+                    continue;
+                Object source = event.getSource();
+                if (!isRelevantDebugSource(source, indexed, collectionTarget))
+                    continue;
+                if (source == indexed || indexed.equals(source))
+                    sawRoot = true;
+                int detail = event.getDetail();
+                if (detail == DEBUG_DETAIL_CONTENT)
+                    sawContent = true;
+                else if (detail == DEBUG_DETAIL_STATE)
+                    sawState = true;
+                markDirtyForDebugSource(source, indexed);
+            }
+            if (!sawContent && !sawState)
+                return;
+            debugEventCoalesceCount.incrementAndGet();
+            if (sawContent && sawRoot && !initialLoadSettled.get())
+                scheduleInputUpdateDebounced();
+            if (sawContent || sawState)
+                scheduleDebugRefreshDebounced();
+        };
+        DebugPlugin.getDefault().addDebugEventListener(debugEventListener);
+        DebugCollectionDebug.step("load", "debugEventListener"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private void removeDebugEventListener()
+    {
+        if (debugEventListener == null)
+            return;
+        DebugPlugin.getDefault().removeDebugEventListener(debugEventListener);
+        debugEventListener = null;
+    }
+
+    private void scheduleDebugRefreshDebounced()
+    {
+        if (display == null || display.isDisposed())
+            return;
+        if (!debugRefreshArmed.compareAndSet(false, true))
+            return;
+        Runnable schedule = () -> {
+            if (display.isDisposed() || disposed.get())
+            {
+                debugRefreshArmed.set(false);
+                return;
+            }
+            if (debugRefreshDebounce != null)
+                display.timerExec(-1, debugRefreshDebounce);
+            debugRefreshDebounce = () -> {
+                debugRefreshDebounce = null;
+                debugRefreshArmed.set(false);
+                if (disposed.get() || !isShellActiveForLoad())
+                    return;
+                long now = System.currentTimeMillis();
+                long sinceLast = now - lastDebugRefreshAt;
+                if (sinceLast < MIN_DEBUG_REFRESH_INTERVAL_MS)
+                {
+                    int wait = (int) (MIN_DEBUG_REFRESH_INTERVAL_MS - sinceLast);
+                    if (!debugRefreshArmed.compareAndSet(false, true))
+                        return;
+                    display.timerExec(wait, () -> scheduleDebugRefreshDebounced());
+                    return;
+                }
+                lastDebugRefreshAt = now;
+                int coalesced = debugEventCoalesceCount.getAndSet(0);
+                int dirtyCount = repaintDirtyLogicalRowsInViewport();
+                if (dirtyCount <= 0)
+                    return;
+                DebugCollectionDebug.step("load", "debugRefresh"); //$NON-NLS-1$ //$NON-NLS-2$
+                // #region agent log
+                DebugCollectionAgentLog.log("H-refresh", "LoadScheduler.scheduleDebugRefreshDebounced", "uiRefresh", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"from\":" + viewportFirst.get() + ",\"to\":" + viewportLast.get() //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"eventBatches\":" + coalesced + ",\"dirtyRows\":" + dirtyCount + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                // #endregion
+            };
+            display.timerExec((int) DEBUG_REFRESH_DELAY_MS, debugRefreshDebounce);
+        };
+        if (display.getThread() == Thread.currentThread())
+            schedule.run();
+        else
+            display.asyncExec(schedule);
+    }
+
+    private void scheduleInputUpdateDebounced()
+    {
+        if (display == null || display.isDisposed() || disposed.get())
+            return;
+        Runnable schedule = () -> {
+            if (display.isDisposed() || disposed.get())
+                return;
+            if (inputUpdateDebounce != null)
+                display.timerExec(-1, inputUpdateDebounce);
+            inputUpdateDebounce = () -> {
+                inputUpdateDebounce = null;
+                if (disposed.get() || !isShellActiveForLoad() || model.indexedValue == null)
+                    return;
+                cancelJob(inputUpdateJob);
+                inputUpdateJob = Job.create("Комфорт: коллекция (input)", monitor -> { //$NON-NLS-1$
+                    if (disposed.get() || monitor.isCanceled() || !isShellActiveForLoad())
+                        return org.eclipse.core.runtime.Status.OK_STATUS;
+                    try
+                    {
+                        model.indexedValue.getVariables();
+                        DebugCollectionDebug.step("load", "inputUpdate: getVariables"); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                    catch (DebugException e)
+                    {
+                        DebugCollectionDebug.problem("inputUpdate getVariables: " + e.getMessage()); //$NON-NLS-1$
+                    }
+                    return org.eclipse.core.runtime.Status.OK_STATUS;
+                });
+                inputUpdateJob.setSystem(true);
+                inputUpdateJob.schedule();
+            };
+            display.timerExec((int) DEBUG_REFRESH_DELAY_MS, inputUpdateDebounce);
+        };
+        if (display.getThread() == Thread.currentThread())
+            schedule.run();
+        else
+            display.asyncExec(schedule);
+    }
+
+    private void scheduleCollectionRekick(String reason)
+    {
+        if (disposed.get() || !isShellActiveForLoad() || model.indexedValue == null)
+            return;
+        lastKickedFirst.set(-1);
+        lastKickedLast.set(-1);
+        Job rekick = Job.create("Комфорт: коллекция (refresh)", monitor -> { //$NON-NLS-1$
+            if (disposed.get() || monitor.isCanceled() || !isShellActiveForLoad())
+                return org.eclipse.core.runtime.Status.OK_STATUS;
+            try
+            {
+                model.indexedValue.getVariables();
+                DebugCollectionDebug.step("load", reason + ": getVariables re-kick"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (DebugException e)
+            {
+                DebugCollectionDebug.problem("rekick getVariables: " + e.getMessage()); //$NON-NLS-1$
+            }
+            scheduleViewportKickDebounced();
+            return org.eclipse.core.runtime.Status.OK_STATUS;
+        });
+        rekick.setSystem(true);
+        rekick.schedule();
+    }
+
+    private void scheduleViewportKickDebounced()
+    {
+        if (display == null || display.isDisposed())
+            return;
+        Runnable schedule = () -> {
+            if (display.isDisposed() || disposed.get())
+                return;
+            if (viewportKickDebounce != null)
+                display.timerExec(-1, viewportKickDebounce);
+            viewportKickDebounce = () -> {
+                viewportKickDebounce = null;
+                if (disposed.get() || !isShellActiveForLoad())
+                    return;
+                submitViewportKickJob("viewport", false); //$NON-NLS-1$
+            };
+            display.timerExec((int) VIEWPORT_KICK_DELAY_MS, viewportKickDebounce);
+        };
+        if (display.getThread() == Thread.currentThread())
+            schedule.run();
+        else
+            display.asyncExec(schedule);
+    }
+
+    private void submitViewportKickJob(String reason, boolean priority)
+    {
+        int from = viewportFirst.get();
+        int to = viewportLast.get();
+        int total = model.totalSize;
+        if (total <= 0 || to < from || model.indexedValue == null)
+            return;
+        if (from >= total)
+            return;
+        to = Math.min(to, total - 1);
+        if (!priority && from == lastKickedFirst.get() && to == lastKickedLast.get())
+            return;
+        if (priority && isJobBusy(viewportKickJob)
+            && from == lastKickedFirst.get() && to == lastKickedLast.get())
+            return;
+        lastKickedFirst.set(from);
+        lastKickedLast.set(to);
+        int count = to - from + 1;
+        cancelJob(viewportKickJob);
+        final int kickFrom = from;
+        final int kickCount = count;
+        viewportKickJob = Job.create("Комфорт: коллекция (viewport)", monitor -> { //$NON-NLS-1$
+            if (disposed.get() || monitor.isCanceled() || !isShellActiveForLoad())
+                return org.eclipse.core.runtime.Status.OK_STATUS;
+            try
+            {
+                model.indexedValue.getVariables(kickFrom, kickCount);
+                DebugCollectionDebug.step("load", reason + " page=" + kickFrom + "+" + kickCount); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                // #region agent log
+                DebugCollectionAgentLog.log("H-viewportKick", "LoadScheduler.submitViewportKickJob", "pageKick", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"reason\":\"" + reason + "\",\"from\":" + kickFrom //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"count\":" + kickCount + ",\"priority\":" + priority + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                // #endregion
+                if (priority && display != null && !display.isDisposed())
+                {
+                    markDirtyViewport();
+                    display.asyncExec(() -> {
+                        if (!disposed.get() && isShellActiveForLoad())
+                            repaintDirtyLogicalRowsInViewport();
+                    });
+                }
+                scheduleSizePass();
+            }
+            catch (DebugException e)
+            {
+                DebugCollectionDebug.problem("viewport getVariables: " + e.getMessage()); //$NON-NLS-1$
+            }
+            return org.eclipse.core.runtime.Status.OK_STATUS;
+        });
+        viewportKickJob.setSystem(true);
+        if (priority)
+            viewportKickJob.setPriority(Job.INTERACTIVE);
+        viewportKickJob.schedule();
+    }
+
+    /** Перерисовка видимых строк без invalidate и без viewport kick (как EDT RefreshValuesDelegateJob). */
+    void repaintBoundTable()
+    {
+        if (display == null || display.isDisposed() || disposed.get())
+            return;
+        display.asyncExec(() -> {
+            if (disposed.get() || !isShellActiveForLoad())
+                return;
+            Table table = tableForViewport;
+            if (table == null || table.isDisposed())
+                return;
+            int itemCount = table.getItemCount();
+            if (itemCount <= 0)
+                return;
+            int top = Math.max(0, table.getTopIndex());
+            int visible = estimateVisibleRowCount(table);
+            int last = Math.min(itemCount - 1, top + visible - 1);
+            if (last < top)
+                return;
+            captureViewport(top, last);
+            fireRowsReady(top, last - top + 1);
+        });
+    }
+
+    /** Сброс кэша ячеек и принудительный SetData для видимых строк таблицы (display-индексы). */
+    void refreshBoundTable()
+    {
+        if (display == null || display.isDisposed() || disposed.get())
+            return;
+        display.asyncExec(() -> {
+            if (disposed.get() || !isShellActiveForLoad())
+                return;
+            model.invalidateAllCells();
+            Table table = tableForViewport;
+            if (table == null || table.isDisposed())
+                return;
+            int itemCount = table.getItemCount();
+            if (itemCount <= 0)
+                return;
+            int top = Math.max(0, table.getTopIndex());
+            int visible = estimateVisibleRowCount(table);
+            int last = Math.min(itemCount - 1, top + visible - 1);
+            if (last < top)
+                return;
+            captureViewport(top, last);
+            fireRowsReady(top, last - top + 1);
+        });
+    }
+
+    private void markDirtyLogicalRowDebounced(int logicalRow)
+    {
+        if (logicalRow < 0)
+            return;
+        synchronized (dirtyRowsLock)
+        {
+            dirtyLogicalRows.set(logicalRow);
+        }
+        if (display == null || display.isDisposed() || disposed.get())
+            return;
+        Runnable schedule = () -> {
+            if (display.isDisposed() || disposed.get())
+                return;
+            if (pendingDirtyDebounce != null)
+                display.timerExec(-1, pendingDirtyDebounce);
+            pendingDirtyDebounce = () -> {
+                pendingDirtyDebounce = null;
+                scheduleDebugRefreshDebounced();
+            };
+            display.timerExec((int) PENDING_DIRTY_DEBOUNCE_MS, pendingDirtyDebounce);
+        };
+        if (display.getThread() == Thread.currentThread())
+            schedule.run();
+        else
+            display.asyncExec(schedule);
+    }
+
+    private void markDirtyForDebugSource(Object source, IBslIndexedValue indexed)
+    {
+        if (source == indexed || indexed.equals(source))
+        {
+            if (!initialLoadSettled.get())
+                markDirtyViewport();
+            return;
+        }
+        int row = resolveLogicalRowInViewport(source, indexed);
+        if (row >= 0)
+        {
+            synchronized (dirtyRowsLock)
+            {
+                dirtyLogicalRows.set(row);
+            }
+            return;
+        }
+        if (source instanceof IBslValue || source instanceof IBslVariable)
+            markDirtyViewport();
+    }
+
+    private void markDirtyViewport()
+    {
+        int from = viewportFirst.get();
+        int to = viewportLast.get();
+        if (to < from)
+            return;
+        synchronized (dirtyRowsLock)
+        {
+            dirtyLogicalRows.set(from, to + 1);
+        }
+    }
+
+    private int resolveLogicalRowInViewport(Object source, IBslIndexedValue indexed)
+    {
+        if (source == null || indexed == null)
+            return -1;
+        int from = viewportFirst.get();
+        int to = viewportLast.get();
+        int total = model.totalSize;
+        if (total > 0)
+            to = Math.min(to, total - 1);
+        if (to < from)
+            return -1;
+        try
+        {
+            for (int row = from; row <= to; row++)
+            {
+                IBslVariable rowVar = model.getRowVariable(row);
+                if (rowVar == null)
+                    rowVar = indexed.getVariable(row);
+                if (rowVar == null)
+                    continue;
+                if (source == rowVar || rowVar.equals(source))
+                    return row;
+                IBslValue rowValue = rowVar.getValue();
+                if (source instanceof IBslValue value)
+                {
+                    if (value == rowValue || value.equals(rowValue))
+                        return row;
+                    IBslVariable[] props = DebugCollectionPropertyVariables.propertyVariablesForRow(rowVar);
+                    if (props != null)
+                    {
+                        for (IBslVariable prop : props)
+                        {
+                            if (prop == null)
+                                continue;
+                            if (source == prop || prop.equals(source))
+                                return row;
+                            IBslValue propValue = prop.getValue();
+                            if (value == propValue || value.equals(propValue))
+                                return row;
+                        }
+                    }
+                }
+                if (source instanceof IBslVariable var)
+                {
+                    IBslVariable[] props = DebugCollectionPropertyVariables.propertyVariablesForRow(rowVar);
+                    if (props != null)
+                    {
+                        for (IBslVariable prop : props)
+                        {
+                            if (prop == null)
+                                continue;
+                            if (var == prop || var.equals(prop))
+                                return row;
+                        }
+                    }
+                }
+            }
+        }
+        catch (DebugException e)
+        {
+            DebugCollectionDebug.problem("resolveLogicalRow: " + e.getMessage()); //$NON-NLS-1$
+        }
+        return -1;
+    }
+
+    /** @return число перерисованных logical-строк в viewport */
+    private int repaintDirtyLogicalRowsInViewport()
+    {
+        int vpFrom = viewportFirst.get();
+        int vpTo = viewportLast.get();
+        int total = model.totalSize;
+        if (total > 0)
+            vpTo = Math.min(vpTo, total - 1);
+        if (vpTo < vpFrom || progress == null)
+            return 0;
+        int[] dirtyRows;
+        synchronized (dirtyRowsLock)
+        {
+            int count = 0;
+            for (int row = vpFrom; row <= vpTo; row++)
+            {
+                if (dirtyLogicalRows.get(row))
+                    count++;
+            }
+            if (count == 0)
+                return 0;
+            dirtyRows = new int[count];
+            int idx = 0;
+            for (int row = vpFrom; row <= vpTo; row++)
+            {
+                if (dirtyLogicalRows.get(row))
+                {
+                    dirtyRows[idx++] = row;
+                    dirtyLogicalRows.clear(row);
+                }
+            }
+        }
+        for (int row : dirtyRows)
+        {
+            model.invalidateLogicalRow(row);
+            progress.onRepaintLogicalRow(row);
+        }
+        return dirtyRows.length;
+    }
+
+    private static IDebugTarget debugTargetOf(Object source)
+    {
+        if (source instanceof IDebugElement element)
+            return element.getDebugTarget();
+        return null;
+    }
+
+    private static boolean isRelevantDebugSource(
+        Object source,
+        IBslIndexedValue indexed,
+        IDebugTarget collectionTarget)
+    {
+        if (source == indexed || indexed.equals(source))
+            return true;
+        if (collectionTarget == null || !(source instanceof IDebugElement element))
+            return false;
+        IDebugTarget sourceTarget = element.getDebugTarget();
+        return sourceTarget != null && sourceTarget.equals(collectionTarget);
+    }
+
+    private static int estimateVisibleRowCount(Table table)
+    {
+        if (table == null || table.isDisposed())
+            return 24;
+        int itemHeight = table.getItemHeight();
+        if (itemHeight <= 0)
+            return 24;
+        return table.getClientArea().height / itemHeight + 2;
+    }
+
+    private void refreshViewportRows()
+    {
+        repaintBoundTable();
     }
 
     private void scheduleContextJob()
@@ -338,14 +973,8 @@ final class DebugCollectionLoadScheduler
             boolean metadataOnly = DebugCollectionPropertyVariables.isRowMetadataContext(result);
             boolean indexedPlaceholders = DebugCollectionPropertyVariables.isIndexedPlaceholderContext(result);
             if ((result.length == 0 || metadataOnly || indexedPlaceholders) && !disposed.get()
-                && !monitor.isCanceled() && contextResolveAttempts.incrementAndGet() <= 8)
+                && !monitor.isCanceled() && contextResolveAttempts.incrementAndGet() <= CONTEXT_RESOLVE_MAX_ATTEMPTS)
             {
-                if (metadataOnly)
-                    DebugCollectionDebug.step("columns.ctx", "metadata-retry attempt=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + contextResolveAttempts.get());
-                else if (indexedPlaceholders)
-                    DebugCollectionDebug.step("columns.ctx", "placeholder-retry attempt=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + contextResolveAttempts.get());
                 Job followUp = Job.create("Комфорт: колонки коллекции (retry)", m -> { //$NON-NLS-1$
                     scheduleContextJobInternal();
                     return org.eclipse.core.runtime.Status.OK_STATUS;
@@ -371,312 +1000,6 @@ final class DebugCollectionLoadScheduler
         contextJob.schedule();
     }
 
-    private void scheduleSizeJob()
-    {
-        if (disposed.get())
-            return;
-        cancelJob(sizeJob);
-        sizeJob = Job.create("Комфорт: размер коллекции", monitor -> { //$NON-NLS-1$
-            try
-            {
-                int size = model.indexedValue.getSize();
-                model.totalSize = size;
-                fireProgress(0, size, "size"); //$NON-NLS-1$
-                if (size == 0)
-                    fireProgress(0, 0, "rows"); //$NON-NLS-1$
-            }
-            catch (DebugException e)
-            {
-                DebugCollectionDebug.problem("getSize: " + e.getMessage()); //$NON-NLS-1$
-            }
-            scheduleLoadJob("afterSize"); //$NON-NLS-1$
-            return org.eclipse.core.runtime.Status.OK_STATUS;
-        });
-        sizeJob.setSystem(true);
-        sizeJob.schedule();
-    }
-
-    private void scheduleLoadJob(String reason)
-    {
-        if (disposed.get() || !isShellActiveForLoad())
-        {
-            DebugCollectionDebug.step("load", "skip " + reason //$NON-NLS-1$ //$NON-NLS-2$
-                + " vis=" + shellVisible.get() + " min=" + shellMinimized.get()); //$NON-NLS-1$ //$NON-NLS-2$
-            return;
-        }
-        loadPending.set(true);
-        if (isLoadJobBusy())
-            return;
-        startLoadJob(reason);
-    }
-
-    private void startLoadJob(String reason)
-    {
-        cancelJob(loadJob);
-        loadJob = Job.create("Комфорт: загрузка коллекции", monitor -> { //$NON-NLS-1$
-            loadPending.set(false);
-            if (disposed.get() || monitor.isCanceled() || !isShellActiveForLoad())
-                return org.eclipse.core.runtime.Status.OK_STATUS;
-
-            LoadBatchResult batch = runLoadBatch(monitor);
-            boolean more = batch.more;
-            int cellsWritten = batch.cellsWritten;
-
-            // canRetry: перезапускаемся если есть ещё работа, даже если все ячейки в PLACEHOLDER (pending)
-            boolean canRetry = model.totalSize != 0 
-                && (more || loadPending.get());
-            if (canRetry && !disposed.get() && isShellActiveForLoad() && loadJob != null)
-            {
-                int delay = cellsWritten > 0 ? 50 : 500; // Большая задержка если все PLACEHOLDER — дать evaluate время
-                loadJob.schedule(delay);
-                if (cellsWritten <= 0)
-                    DebugCollectionDebug.step("load", "deferred retry delay=" + delay); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            return org.eclipse.core.runtime.Status.OK_STATUS;
-        });
-        loadJob.setSystem(true);
-        loadJob.schedule(0);
-        DebugCollectionDebug.step("load", reason); //$NON-NLS-1$
-    }
-
-    private static final class LoadBatchResult
-    {
-        final boolean more;
-        final int cellsWritten;
-
-        LoadBatchResult(boolean more, int cellsWritten)
-        {
-            this.more = more;
-            this.cellsWritten = cellsWritten;
-        }
-    }
-
-    private LoadBatchResult runLoadBatch(org.eclipse.core.runtime.IProgressMonitor monitor)
-    {
-        final int batchGeneration = loadGeneration.get();
-        int total = model.totalSize;
-        if (total < 0)
-            return new LoadBatchResult(false, 0);
-        if (total == 0)
-            return new LoadBatchResult(false, 0);
-
-        int colFrom = viewportColFrom.get();
-        int colTo = viewportColTo.get();
-        if (colTo < 0)
-            colTo = Math.max(0, model.columns.columnCount() - 1);
-
-        int browseBound = browseUpperBound(total);
-        int from = resolveNextWorkRow(colFrom, colTo, total, browseBound);
-        if (from < 0)
-            return new LoadBatchResult(false, 0);
-
-        int count = batchCount(from, total, browseBound);
-        if (count <= 0)
-            return new LoadBatchResult(hasMoreWork(colFrom, colTo, total, browseBound), 0);
-
-        try
-        {
-            boolean needVars = false;
-            for (int row = from; row < from + count; row++)
-            {
-                if (model.getRowVariable(row) == null)
-                {
-                    needVars = true;
-                    break;
-                }
-            }
-            if (needVars)
-            {
-                IBslVariable[] batch = model.indexedValue.getVariables(from, count);
-                model.putRowVariables(from, batch);
-            }
-            int cellsWritten = fillCellsInBatch(from, count, colFrom, colTo);
-            boolean more = hasMoreWork(colFrom, colTo, total, browseBound);
-            if (isAutoPrefetchComplete() && from < browseBound)
-                more = false;
-            if (cellsWritten <= 0)
-            {
-                DebugCollectionDebug.step("load", //$NON-NLS-1$
-                    "batch deferred rows=" + from + "+" + count //$NON-NLS-1$ //$NON-NLS-2$
-                        + " cols=" + colFrom + ".." + colTo); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            if (batchGeneration != loadGeneration.get())
-                return new LoadBatchResult(hasMoreWork(colFrom, colTo, total, browseBound), 0);
-
-            fireBrowseProgress(colFrom, colTo, browseBound, total);
-            if (cellsWritten > 0 && batchIntersectsRowViewport(from, count))
-                fireRowsReady(from, count);
-            if (cellsWritten > 0)
-            {
-                final int formatFrom = from;
-                final int formatCount = count;
-                DebugCollectionStringFormatResolver.scheduleBatch(model, from, count, colFrom, colTo, display,
-                    () -> {
-                        if (batchIntersectsRowViewport(formatFrom, formatCount))
-                            fireRowsReady(formatFrom, formatCount);
-                    });
-            }
-            if (cellsWritten > 0 && batchIntersectsSizeViewport(from, count))
-                scheduleSizePass();
-            return new LoadBatchResult(more, cellsWritten);
-        }
-        catch (DebugException e)
-        {
-            DebugCollectionDebug.problem("getVariables: " + e.getMessage()); //$NON-NLS-1$
-            return new LoadBatchResult(hasMoreWork(colFrom, colTo, total, browseBound), 0);
-        }
-    }
-
-    private boolean batchIntersectsRowViewport(int batchFrom, int batchCount)
-    {
-        int vpFirst = Math.max(0, viewportFirst.get());
-        int vpLast = viewportLast.get();
-        int total = model.totalSize;
-        if (total > 0 && vpLast >= total)
-            vpLast = total - 1;
-        if (vpLast < vpFirst || batchCount <= 0)
-            return false;
-        int batchTo = batchFrom + batchCount - 1;
-        return batchFrom <= vpLast && batchTo >= vpFirst;
-    }
-
-    private boolean batchIntersectsSizeViewport(int batchFrom, int batchCount)
-    {
-        int sizeFrom = sizeRowFrom.get();
-        int sizeTo = sizeRowTo.get();
-        if (sizeFrom < 0 || sizeTo < sizeFrom || batchCount <= 0)
-            return false;
-        int batchTo = batchFrom + batchCount - 1;
-        return batchFrom <= sizeTo && batchTo >= sizeFrom;
-    }
-
-    private int browseUpperBound(int total)
-    {
-        if (total <= 0)
-            return 0;
-        // Только viewport + небольшой буфер, без prefetch на 1000 строк
-        int vpLast = Math.max(0, viewportLast.get());
-        int bound = Math.max(vpLast + BATCH_SIZE + OVERSCAN, BATCH_SIZE);
-        return Math.min(total, bound);
-    }
-
-    /** Все ячейки viewport-диапазона заполнены. */
-    boolean isAutoPrefetchComplete()
-    {
-        if (disposed.get() || model.columns.columnCount() <= 0)
-            return false;
-        int total = model.totalSize;
-        if (total == 0)
-            return true;
-        int browseBound = browseUpperBound(total);
-        if (browseBound <= 0)
-            return false;
-        int colTo = Math.max(0, model.columns.columnCount() - 1);
-        int loaded = model.countRowsFullyLoaded(0, browseBound - 1, 0, colTo);
-        return loaded >= browseBound;
-    }
-
-    private int resolveNextWorkRow(int colFrom, int colTo, int total, int browseBound)
-    {
-        if (total == 0)
-            return -1;
-        if (browseBound <= 0)
-            return -1;
-
-        int vpFirst = Math.max(0, viewportFirst.get());
-        int vpLast = viewportLast.get();
-        if (total > 0 && vpLast >= total)
-            vpLast = total - 1;
-        if (vpLast < vpFirst)
-            vpLast = Math.min(vpFirst + BATCH_SIZE - 1, total > 0 ? total - 1 : vpFirst + BATCH_SIZE - 1);
-
-        int vpWork = findNextWork(vpFirst, vpLast, colFrom, colTo);
-        int frontier = Math.min(browseBound, model.loadedRowCount);
-        int beyondWork = frontier < browseBound
-            ? findNextWork(frontier, browseBound - 1, colFrom, colTo)
-            : -1;
-
-        // Не зацикливаться на viewport 0..N, пока дальше по коллекции ещё нет переменных/ячеек.
-        if (beyondWork >= 0 && (vpWork < 0 || beyondWork >= frontier && vpWork < frontier))
-            return beyondWork;
-        if (vpWork >= 0)
-            return vpWork;
-
-        return findNextWork(0, browseBound - 1, colFrom, colTo);
-    }
-
-    private boolean hasMoreWork(int colFrom, int colTo, int total, int browseBound)
-    {
-        return resolveNextWorkRow(colFrom, colTo, total, browseBound) >= 0;
-    }
-
-    private static int batchCount(int from, int total, int browseBound)
-    {
-        int upper = total > 0 ? total : from + BATCH_SIZE;
-        int count = Math.min(BATCH_SIZE, upper - from);
-        if (from < browseBound)
-            count = Math.min(count, browseBound - from);
-        return count;
-    }
-
-    private void fireBrowseProgress(int colFrom, int colTo, int browseBound, int total)
-    {
-        int loaded = model.countRowsFullyLoaded(0, Math.max(0, browseBound - 1), colFrom, colTo);
-        int reportTotal = total > 0 ? total : browseBound;
-        fireProgress(loaded, reportTotal, "rows"); //$NON-NLS-1$
-    }
-
-    private int fillCellsInBatch(int from, int count, int colFrom, int colTo) throws DebugException
-    {
-        colFrom = Math.max(0, colFrom);
-        colTo = Math.min(colTo, model.columns.columnCount() - 1);
-
-        // Round 1: собственные значения строк одним комбинированным запросом вместо N отдельных evaluate().
-        List<IBslValue> rowValues = model.collectRowValuesForBatchEvaluate(from, count);
-        if (!rowValues.isEmpty())
-            DebugCollectionBatchEvaluator.evaluateBatch(model.frame, rowValues);
-
-        // Round 2: property-дети видимых колонок — после Round 1 (свойства строки уже
-        // должны быть перечислимы, иначе rowPropertySource вернёт null).
-        List<IBslValue> propValues = model.collectPropertyValuesForBatchEvaluate(from, count, colFrom, colTo);
-        if (!propValues.isEmpty())
-            DebugCollectionBatchEvaluator.evaluateBatch(model.frame, propValues);
-
-        int written = 0;
-        int placeholders = 0;
-        for (int row = from; row < from + count; row++)
-        {
-            for (int col = colFrom; col <= colTo; col++)
-            {
-                if (model.isCellFilled(row, col))
-                    continue;
-                String text = model.extractCellTextInJob(row, col);
-                if (text == null)
-                {
-                    text = DebugCollectionTableModel.PLACEHOLDER;
-                    placeholders++;
-                }
-                model.setCellText(row, col, text);
-                if (!DebugCollectionTableModel.PLACEHOLDER.equals(text))
-                    written++;
-            }
-        }
-        DebugCollectionDebug.step("fillBatch", "from=" + from + " count=" + count + " written=" + written + " placeholders=" + placeholders);
-        return written;
-    }
-
-    private int findNextWork(int first, int last, int colFrom, int colTo)
-    {
-        if (last < first)
-            return -1;
-        for (int i = first; i <= last; i++)
-        {
-            if (model.needsRowLoad(i, colFrom, colTo))
-                return i;
-        }
-        return -1;
-    }
-
     private void runFilterScan(DebugCollectionRowFilter filter, org.eclipse.core.runtime.IProgressMonitor monitor, Runnable onDone)
     {
         int total = model.totalSize;
@@ -685,36 +1008,77 @@ final class DebugCollectionLoadScheduler
             asyncDone(onDone);
             return;
         }
+        try
+        {
+            if (model.loadedRowCount < total)
+            {
+                model.indexedValue.getVariables();
+                model.noteCollectionKicked(total);
+            }
+        }
+        catch (DebugException e)
+        {
+            DebugCollectionDebug.problem("filter getVariables: " + e.getMessage()); //$NON-NLS-1$
+            asyncDone(onDone);
+            return;
+        }
+
         java.util.BitSet matches = new java.util.BitSet(total);
-        int processed = 0;
-        for (int from = 0; from < total; from += BATCH_SIZE)
+        for (int row = 0; row < total; row++)
         {
             if (monitor.isCanceled() || disposed.get() || filter.isCancelled())
                 break;
-            int count = Math.min(BATCH_SIZE, total - from);
             try
             {
-                IBslVariable[] batch = model.indexedValue.getVariables(from, count);
-                model.putRowVariables(from, batch);
-                for (int i = 0; i < count; i++)
-                {
-                    int row = from + i;
-                    String text = model.rowFilterText(row, filter.isPresentationOnly());
-                    if (filter.matcher().matches(text))
-                        matches.set(row);
-                }
+                String text = model.rowFilterText(row, filter.isPresentationOnly());
+                if (filter.matcher().matches(text))
+                    matches.set(row);
             }
             catch (DebugException e)
             {
                 DebugCollectionDebug.problem("filter scan: " + e.getMessage()); //$NON-NLS-1$
             }
-            processed = from + count;
-            fireProgress(processed, total, "filter"); //$NON-NLS-1$
-            filter.setProgress(processed, total, matches);
+            if (row % 64 == 63 || row == total - 1)
+            {
+                fireProgress(row + 1, total, "filter"); //$NON-NLS-1$
+                filter.setProgress(row + 1, total, matches);
+            }
         }
         if (!filter.isCancelled())
             filter.finishScan(matches);
         asyncDone(onDone);
+    }
+
+    private boolean isShellActiveForLoad()
+    {
+        if (disposed.get())
+            return false;
+        if (shellMinimized.get())
+            return false;
+        return shellVisible.get();
+    }
+
+    private static boolean isJobBusy(Job job)
+    {
+        if (job == null)
+            return false;
+        int state = job.getState();
+        return state == Job.RUNNING || state == Job.WAITING || state == Job.SLEEPING;
+    }
+
+    private void removeShellStateListener()
+    {
+        if (shellStateListener == null)
+            return;
+        Shell shell = shellForPause;
+        if (shell != null && !shell.isDisposed())
+        {
+            shell.removeListener(SWT.Show, shellStateListener);
+            shell.removeListener(SWT.Hide, shellStateListener);
+            shell.removeListener(SWT.Iconify, shellStateListener);
+            shell.removeListener(SWT.Deiconify, shellStateListener);
+        }
+        shellStateListener = null;
     }
 
     private void fireProgress(int loaded, int total, String phase)
@@ -753,13 +1117,8 @@ final class DebugCollectionLoadScheduler
             job.cancel();
     }
 
-    private void cancelFilterJob()
-    {
-        cancelJob(filterJob);
-    }
-
     /**
-     * Колонки property: union имён из строк (как EDT {@code getMutualProperties}) или
+     * Схема колонок: union property-имён из строк (как EDT {@code getMutualProperties}) или
      * {@code getContextVariables()} коллекции.
      */
     private static final class DebugCollectionContextColumnsResolver
@@ -775,41 +1134,20 @@ final class DebugCollectionLoadScheduler
             if (indexed == null)
                 return new IBslVariable[0];
 
-            IBslVariable[] rowUnion = resolveRowSampleUnion(indexed);
+            IBslVariable[] mutual = resolveMutualFromIndexed(indexed);
+            if (DebugCollectionPropertyVariables.isAcceptableColumnContext(mutual))
+            {
+                IBslVariable[] chosen = capColumns(mutual);
+                DebugCollectionDebug.step("columns.ctx", "mutual=" + mutual.length); //$NON-NLS-1$ //$NON-NLS-2$
+                return chosen;
+            }
+
             IBslVariable[] direct = indexed.getContextVariables();
             if (direct == null)
                 direct = new IBslVariable[0];
 
-            if (DebugCollectionPropertyVariables.isAcceptableColumnContext(rowUnion))
-            {
-                IBslVariable[] chosen = capColumns(rowUnion);
-                DebugCollectionDebug.step("columns.ctx", //$NON-NLS-1$
-                    "rowUnion=" + rowUnion.length //$NON-NLS-1$
-                        + (direct.length > 0 ? " direct=" + direct.length : "")); //$NON-NLS-1$ //$NON-NLS-2$
-                return chosen;
-            }
-
-            if (isTabularCollectionType(indexed))
-            {
-                IBslVariable[] tableSchema = resolveValueTableSchemaColumns(indexed);
-                if (DebugCollectionPropertyVariables.isAcceptableColumnContext(tableSchema))
-                {
-                    IBslVariable[] chosen = capColumns(tableSchema);
-                    DebugCollectionDebug.step("columns.ctx", "tableSchema=" + tableSchema.length); //$NON-NLS-1$ //$NON-NLS-2$
-                    return chosen;
-                }
-            }
-
-            IBslVariable[] rowVars = resolveRowVariablesUnion(indexed);
-            if (DebugCollectionPropertyVariables.isAcceptableColumnContext(rowVars))
-            {
-                IBslVariable[] chosen = capColumns(rowVars);
-                DebugCollectionDebug.step("columns.ctx", "rowVars=" + rowVars.length); //$NON-NLS-1$ //$NON-NLS-2$
-                return chosen;
-            }
-
-            if (direct.length > 0 && direct.length <= MAX_DIRECT_CONTEXT_COLS
-                && DebugCollectionPropertyVariables.isAcceptableColumnContext(direct))
+            if (DebugCollectionPropertyVariables.isAcceptableColumnContext(direct)
+                && direct.length > 0 && direct.length <= MAX_DIRECT_CONTEXT_COLS)
             {
                 DebugCollectionDebug.step("columns.ctx", "direct=" + direct.length); //$NON-NLS-1$ //$NON-NLS-2$
                 return direct;
@@ -819,15 +1157,26 @@ final class DebugCollectionLoadScheduler
             {
                 IBslVariable[] union = capColumns(direct);
                 DebugCollectionDebug.step("columns.ctx", //$NON-NLS-1$
-                    "direct=" + direct.length + " wide→directUnion=" + union.length); //$NON-NLS-1$ //$NON-NLS-2$
+                    "direct=" + direct.length + " wide→union=" + union.length); //$NON-NLS-1$ //$NON-NLS-2$
                 return union;
             }
 
-            IBslVariable[] mutual = resolveMutualFromRows(indexed);
-            if (DebugCollectionPropertyVariables.isAcceptableColumnContext(mutual))
+            IBslVariable[] rowUnion = resolveRowSampleUnion(indexed);
+            if (DebugCollectionPropertyVariables.isAcceptableColumnContext(rowUnion))
             {
-                DebugCollectionDebug.step("columns.ctx", "mutual=" + mutual.length); //$NON-NLS-1$ //$NON-NLS-2$
-                return mutual;
+                IBslVariable[] chosen = capColumns(rowUnion);
+                DebugCollectionDebug.step("columns.ctx", "rowUnion=" + rowUnion.length); //$NON-NLS-1$ //$NON-NLS-2$
+                return chosen;
+            }
+
+            if (isTabularCollectionType(indexed))
+            {
+                IBslVariable[] tableSchema = resolveValueTableSchemaColumns(indexed);
+                if (DebugCollectionPropertyVariables.isAcceptableColumnContext(tableSchema))
+                {
+                    DebugCollectionDebug.step("columns.ctx", "tableSchema=" + tableSchema.length); //$NON-NLS-1$ //$NON-NLS-2$
+                    return capColumns(tableSchema);
+                }
             }
 
             if (direct.length > 0 && DebugCollectionPropertyVariables.isAcceptableColumnContext(direct))
@@ -838,7 +1187,39 @@ final class DebugCollectionLoadScheduler
             return new IBslVariable[0];
         }
 
-        /** Union property-имён из первых строк — как EDT {@code getMutualProperties}. */
+        /** Как EDT {@code getMutualProperties}: union имён property по строкам sample. */
+        private static IBslVariable[] resolveMutualFromIndexed(IBslIndexedValue indexed) throws DebugException
+        {
+            int size = indexed.getSize();
+            if (size <= 0)
+                return new IBslVariable[0];
+
+            int count = Math.min(size, SAMPLE_ROWS);
+            IBslVariable[] rows = indexed.getVariables(0, count);
+            if (rows == null || rows.length == 0)
+                return new IBslVariable[0];
+
+            Set<String> union = new LinkedHashSet<>();
+            Map<String, IBslVariable> templates = new LinkedHashMap<>();
+            for (IBslVariable row : rows)
+            {
+                Set<String> rowNames = new LinkedHashSet<>();
+                collectPropertyNames(row, rowNames, templates);
+                union.addAll(rowNames);
+            }
+            if (union.isEmpty())
+                return new IBslVariable[0];
+
+            List<IBslVariable> result = new ArrayList<>();
+            for (String name : union)
+            {
+                IBslVariable template = templates.get(name);
+                if (template != null)
+                    result.add(template);
+            }
+            return result.toArray(new IBslVariable[0]);
+        }
+
         private static IBslVariable[] resolveRowSampleUnion(IBslIndexedValue indexed) throws DebugException
         {
             int size = indexed.getSize();
@@ -856,56 +1237,10 @@ final class DebugCollectionLoadScheduler
                 if (row == null)
                     continue;
                 IBslValue value = row.getValue();
-                if (value == null || value.isPending())
+                if (value == null)
                     continue;
-                if (!value.isEvaluated())
-                    value.evaluate();
-                if (value.isPending())
-                    continue;
-
                 IBslVariable[] props = DebugCollectionPropertyVariables.propertySource(value);
                 if (props == null)
-                    continue;
-                for (IBslVariable prop : props)
-                {
-                    if (prop == null)
-                        continue;
-                    String name = prop.getName();
-                    if (name == null || name.isBlank())
-                        continue;
-                    templates.putIfAbsent(name, prop);
-                }
-            }
-            return templates.values().toArray(new IBslVariable[0]);
-        }
-
-        /** Union имён из {@code getVariables()} строк — поля данных ТаблицаЗначений и др. */
-        private static IBslVariable[] resolveRowVariablesUnion(IBslIndexedValue indexed) throws DebugException
-        {
-            int size = indexed.getSize();
-            if (size <= 0)
-                return new IBslVariable[0];
-
-            int count = Math.min(size, SAMPLE_ROWS);
-            IBslVariable[] rows = indexed.getVariables(0, count);
-            if (rows == null || rows.length == 0)
-                return new IBslVariable[0];
-
-            Map<String, IBslVariable> templates = new LinkedHashMap<>();
-            for (IBslVariable row : rows)
-            {
-                if (row == null)
-                    continue;
-                IBslValue value = row.getValue();
-                if (value == null || value.isPending())
-                    continue;
-                if (!value.isEvaluated())
-                    value.evaluate();
-                if (value.isPending())
-                    continue;
-
-                IBslVariable[] props = value.getVariables();
-                if (props == null || props.length == 0)
                     continue;
                 for (IBslVariable prop : props)
                 {
@@ -932,21 +1267,19 @@ final class DebugCollectionLoadScheduler
                 return new IBslVariable[0];
 
             IBslValue columnsValue = columnsVar.getValue();
-            if (columnsValue == null || columnsValue.isPending())
-                return new IBslVariable[0];
-            if (!columnsValue.isEvaluated())
-                columnsValue.evaluate();
-            if (columnsValue.isPending())
+            if (columnsValue == null)
                 return new IBslVariable[0];
 
             if (columnsValue instanceof IBslIndexedValue columnsIndexed)
             {
-                int size = columnsIndexed.getSize();
-                if (size <= 0)
+                int colSize = columnsIndexed.getSize();
+                if (colSize <= 0)
                     return new IBslVariable[0];
-                IBslVariable[] defs = columnsIndexed.getVariables(0, size);
+                IBslVariable[] defs = columnsIndexed.getVariables();
                 if (defs == null || defs.length == 0)
                     return new IBslVariable[0];
+                if (defs.length > MAX_COLUMN_COUNT)
+                    defs = Arrays.copyOf(defs, MAX_COLUMN_COUNT);
                 Map<String, IBslVariable> templates = new LinkedHashMap<>();
                 for (IBslVariable def : defs)
                 {
@@ -1010,47 +1343,8 @@ final class DebugCollectionLoadScheduler
             if (direct.length <= MAX_COLUMN_COUNT)
                 return direct;
             DebugCollectionDebug.step("columns.ctx", //$NON-NLS-1$
-                "directUnion capped " + direct.length + "→" + MAX_COLUMN_COUNT); //$NON-NLS-1$ //$NON-NLS-2$
+                "capped " + direct.length + "→" + MAX_COLUMN_COUNT); //$NON-NLS-1$ //$NON-NLS-2$
             return Arrays.copyOf(direct, MAX_COLUMN_COUNT);
-        }
-
-        private static IBslVariable[] resolveMutualFromRows(IBslIndexedValue indexed) throws DebugException
-        {
-            int size = indexed.getSize();
-            if (size <= 0)
-                return new IBslVariable[0];
-
-            int count = Math.min(size, SAMPLE_ROWS);
-            IBslVariable[] rows = indexed.getVariables(0, count);
-            if (rows == null || rows.length == 0)
-                return new IBslVariable[0];
-
-            Set<String> mutual = null;
-            Map<String, IBslVariable> templates = new LinkedHashMap<>();
-            for (IBslVariable row : rows)
-            {
-                Set<String> rowNames = new LinkedHashSet<>();
-                collectPropertyNames(row, rowNames, templates);
-                if (rowNames.isEmpty())
-                    continue;
-                if (mutual == null)
-                    mutual = new LinkedHashSet<>(rowNames);
-                else
-                    mutual.retainAll(rowNames);
-            }
-
-            if (mutual == null || mutual.isEmpty())
-                return new IBslVariable[0];
-
-            List<IBslVariable> result = new ArrayList<>();
-            for (String name : mutual)
-            {
-                IBslVariable template = templates.get(name);
-                if (template != null)
-                    result.add(template);
-            }
-            DebugCollectionDebug.step("columns.ctx", "mutualRows=" + rows.length); //$NON-NLS-1$ //$NON-NLS-2$
-            return result.toArray(new IBslVariable[0]);
         }
 
         private static void collectPropertyNames(
@@ -1079,5 +1373,4 @@ final class DebugCollectionLoadScheduler
             }
         }
     }
-
 }

@@ -1,4 +1,4 @@
-package tormozit;
+﻿package tormozit;
 
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.debug.core.DebugException;
@@ -56,13 +56,14 @@ final class DebugCollectionSizeResolver
             return;
         if (colTo < colFrom)
             return;
-        if (colTo < colFrom)
-            return;
         Job.create("Комфорт: размер ячеек коллекции", monitor -> { //$NON-NLS-1$
             if (cancelled.get() || monitor.isCanceled())
                 return org.eclipse.core.runtime.Status.OK_STATUS;
             int resolved = 0;
             int pending = 0;
+            int skip = 0;
+            int na = 0;
+            int error = 0;
             for (int row = rowFrom; row < rowFrom + rowCount; row++)
             {
                 if (monitor.isCanceled() || cancelled.get())
@@ -74,16 +75,30 @@ final class DebugCollectionSizeResolver
                     {
                         if (isSizePassSkippedColumn(model, col))
                             continue;
-                        String outcome = resolveCellSize(model, row, col);
-                        switch (outcome)
+                        ResolveOutcome outcome = resolveCellSize(model, row, col);
+                        switch (outcome.outcome)
                         {
-                            case "size" -> resolved++; //$NON-NLS-1$
+                            case "size" -> { //$NON-NLS-1$
+                                resolved++;
+                                logSizeCellSample(row, col, outcome);
+                            }
                             case "pending" -> pending++; //$NON-NLS-1$
+                            case "skip" -> skip++; //$NON-NLS-1$
+                            case "na" -> na++; //$NON-NLS-1$
+                            case "error" -> error++; //$NON-NLS-1$
                             default -> { }
                         }
                     }
                 }
             }
+            // #region agent log
+            DebugCollectionAgentLog.log("H-sizeBatch", "SizeResolver.scheduleBatch", "done", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"rowFrom\":" + rowFrom + ",\"rowCount\":" + rowCount //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"colFrom\":" + colFrom + ",\"colTo\":" + colTo //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"retry\":" + retryAttempt //$NON-NLS-1$
+                    + ",\"resolved\":" + resolved + ",\"pending\":" + pending //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"skip\":" + skip + ",\"na\":" + na + ",\"error\":" + error + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            // #endregion
             if (pending > 0 && retryAttempt < MAX_PENDING_RETRIES && !cancelled.get() && !monitor.isCanceled())
             {
                 Job retry = Job.create("Комфорт: размер ячеек коллекции (повтор)", m -> { //$NON-NLS-1$
@@ -98,6 +113,29 @@ final class DebugCollectionSizeResolver
         }).schedule();
     }
 
+    private static void logSizeCellSample(int row, int col, ResolveOutcome outcome)
+    {
+        if (row % 64 != 0 && row < 1700)
+            return;
+        // #region agent log
+        DebugCollectionAgentLog.log("H-sizeCell", "SizeResolver.resolveCellSize", "resolved", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"row\":" + row + ",\"col\":" + col //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"size\":" + outcome.size + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+    }
+
+    private static final class ResolveOutcome
+    {
+        final String outcome;
+        final int size;
+
+        ResolveOutcome(String outcome, int size)
+        {
+            this.outcome = outcome;
+            this.size = size;
+        }
+    }
+
     private static boolean isSizePassSkippedColumn(DebugCollectionTableModel model, int col)
     {
         DebugCollectionColumnModel.Column column = model.columns.columnAt(col);
@@ -107,8 +145,8 @@ final class DebugCollectionSizeResolver
             || column.kind == DebugCollectionColumnModel.Kind.TYPE;
     }
 
-    /** @return {@code size} | {@code na} | {@code pending} | {@code skip} | {@code error} */
-    private static String resolveCellSize(DebugCollectionTableModel model, int row, int col)
+    /** @return outcome + size when {@code size} */
+    private static ResolveOutcome resolveCellSize(DebugCollectionTableModel model, int row, int col)
     {
         DebugCollectionTableModel.CellData data = model.cellData(row, col);
         try
@@ -117,14 +155,11 @@ final class DebugCollectionSizeResolver
             {
                 if (data.sizeState == DebugCollectionTableModel.SizeState.READY
                     || data.sizeState == DebugCollectionTableModel.SizeState.NA)
-                    return "skip"; //$NON-NLS-1$
+                    return new ResolveOutcome("skip", -1); //$NON-NLS-1$
                 if (!data.contentLoaded)
                 {
-                    synchronized (data)
-                    {
-                        data.sizeState = DebugCollectionTableModel.SizeState.UNKNOWN;
-                    }
-                    return "pending"; //$NON-NLS-1$
+                    data.sizeState = DebugCollectionTableModel.SizeState.UNKNOWN;
+                    return new ResolveOutcome("pending", -1); //$NON-NLS-1$
                 }
             }
             model.markCellSizePending(row, col);
@@ -135,7 +170,7 @@ final class DebugCollectionSizeResolver
                 {
                     data.sizeState = DebugCollectionTableModel.SizeState.NA;
                 }
-                return "na"; //$NON-NLS-1$
+                return new ResolveOutcome("na", -1); //$NON-NLS-1$
             }
             if (value.isPending())
             {
@@ -143,7 +178,7 @@ final class DebugCollectionSizeResolver
                 {
                     data.sizeState = DebugCollectionTableModel.SizeState.UNKNOWN;
                 }
-                return "pending"; //$NON-NLS-1$
+                return new ResolveOutcome("pending", -1); //$NON-NLS-1$
             }
             if (!value.isEvaluated())
                 value.evaluate();
@@ -153,7 +188,7 @@ final class DebugCollectionSizeResolver
                 {
                     data.sizeState = DebugCollectionTableModel.SizeState.UNKNOWN;
                 }
-                return "pending"; //$NON-NLS-1$
+                return new ResolveOutcome("pending", -1); //$NON-NLS-1$
             }
             if (!(value instanceof IBslIndexedValue indexed))
             {
@@ -161,19 +196,19 @@ final class DebugCollectionSizeResolver
                 {
                     data.sizeState = DebugCollectionTableModel.SizeState.NA;
                 }
-                return "na"; //$NON-NLS-1$
+                return new ResolveOutcome("na", -1); //$NON-NLS-1$
             }
             int size = indexed.getSize();
             if (size >= 0)
             {
                 model.setCellSize(row, col, size);
-                return "size"; //$NON-NLS-1$
+                return new ResolveOutcome("size", size); //$NON-NLS-1$
             }
             synchronized (data)
             {
                 data.sizeState = DebugCollectionTableModel.SizeState.UNKNOWN;
             }
-            return "pending"; //$NON-NLS-1$
+            return new ResolveOutcome("pending", -1); //$NON-NLS-1$
         }
         catch (DebugException e)
         {
@@ -182,7 +217,7 @@ final class DebugCollectionSizeResolver
             {
                 data.sizeState = DebugCollectionTableModel.SizeState.UNKNOWN;
             }
-            return "error"; //$NON-NLS-1$
+            return new ResolveOutcome("error", -1); //$NON-NLS-1$
         }
     }
 }

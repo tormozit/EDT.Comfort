@@ -99,6 +99,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
     private ToolItem cloneItem;
     private Runnable viewportDebounce;
     private Runnable rowsReadyDebounce;
+    private int lastViewportLogicalFirst = -1;
     private int rowsReadyClearFirst = -1;
     private int rowsReadyClearLast = -1;
     private Listener filterEraseListenerIndex;
@@ -443,8 +444,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             || col.kind == DebugCollectionColumnModel.Kind.TYPE)
             return null;
         String baseText = model.getCellBaseText(logicalRow, visibleCol);
-        if (baseText == null || baseText.isEmpty()
-            || DebugCollectionTableModel.PLACEHOLDER.equals(baseText))
+        if (baseText == null || baseText.isEmpty())
             return null;
         try
         {
@@ -613,22 +613,44 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
     }
 
     @Override
-    public void onRowsReady(int first, int count)
+    public void onRepaintLogicalRow(int logicalRow)
+    {
+        if (splitTable == null || logicalRow < 0)
+            return;
+        int display = logicalToDisplayIndex(logicalRow);
+        if (display < 0 || display >= splitTable.getItemCount())
+            return;
+        splitTable.clear(display, display);
+    }
+
+    private int logicalToDisplayIndex(int logicalRow)
+    {
+        int total = effectiveTotalSize();
+        if (rowFilter != null && rowFilter.isActive())
+            return rowFilter.displayIndexForLogicalRow(logicalRow, total);
+        return logicalRow;
+    }
+
+    @Override
+    public void onRowsReady(int displayFirst, int count)
     {
         if (splitTable == null)
             return;
-        int last = Math.min(first + count, splitTable.getItemCount()) - 1;
-        if (last < first)
+        int itemCount = splitTable.getItemCount();
+        if (itemCount <= 0 || count <= 0)
+            return;
+        int displayLast = Math.min(itemCount - 1, displayFirst + count - 1);
+        if (displayLast < displayFirst)
             return;
         if (rowsReadyClearFirst < 0)
         {
-            rowsReadyClearFirst = first;
-            rowsReadyClearLast = last;
+            rowsReadyClearFirst = displayFirst;
+            rowsReadyClearLast = displayLast;
         }
         else
         {
-            rowsReadyClearFirst = Math.min(rowsReadyClearFirst, first);
-            rowsReadyClearLast = Math.max(rowsReadyClearLast, last);
+            rowsReadyClearFirst = Math.min(rowsReadyClearFirst, displayFirst);
+            rowsReadyClearLast = Math.max(rowsReadyClearLast, displayLast);
         }
         Table data = dataTable();
         if (data == null || data.isDisposed())
@@ -657,6 +679,10 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         int count = rebuilt.allColumns().size();
         model.columns.replaceColumns(new java.util.ArrayList<>(rebuilt.allColumns()));
         boolean wideUnion = count > DebugCollectionColumnVisibilityStore.WIDE_SCHEMA_THRESHOLD;
+        // #region agent log
+        DebugCollectionAgentLog.log("H-schema", "Window.onContextColumnsReady", "schema", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"cols\":" + count + ",\"wideUnion\":" + wideUnion + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // #endregion
         model.columns.applyVisibility(
             DebugCollectionColumnVisibilityStore.visibilityFor(pathKey, count, model.columns),
             wideUnion
@@ -666,7 +692,8 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         refreshPresentationCombo();
         if (scheduler != null)
             scheduler.resetLoadJobForSchemaChange();
-        model.clearCellCache();
+        else
+            model.clearCellCache();
         if (splitTable != null)
         {
             Table index = indexTable();
@@ -688,7 +715,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             }
         }
         if (splitTable != null)
-            splitTable.clearDataAll();
+            splitTable.clearAll();
         if (model.totalSize >= 0)
             updateTableItemCount(model.totalSize);
         if (scheduler != null)
@@ -699,18 +726,14 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
                 data.getDisplay().asyncExec(() -> {
                     if (shell == null || shell.isDisposed() || scheduler == null)
                         return;
-                    scheduler.captureColumnViewport();
-                    scheduleViewportLoad();
+                    scheduleViewportCapture();
                 });
             }
             else
-            {
-                scheduler.captureColumnViewport();
-                scheduleViewportLoad();
-            }
+                scheduleViewportCapture();
         }
         else
-            scheduleViewportLoad();
+            scheduleViewportCapture();
         updateColumnSettingsButton();
         refreshPresentationCombo();
         updateCloneButtonState();
@@ -979,9 +1002,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
     {
         if (model == null || model.columns.modelColumnCount() <= 1)
             return false;
-        if (scheduler == null)
-            return false;
-        return scheduler.isAutoPrefetchComplete();
+        return model.isRowsLoaded();
     }
 
     private void createTable(Composite parent)
@@ -1008,8 +1029,8 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
 
     private void hookShellEvents()
     {
-        shell.addListener(SWT.Show, e -> scheduleViewportLoadDebounced());
-        shell.addListener(SWT.Deiconify, e -> scheduleViewportLoadDebounced());
+        shell.addListener(SWT.Show, e -> scheduleViewportCaptureDebounced());
+        shell.addListener(SWT.Deiconify, e -> scheduleViewportCaptureDebounced());
     }
 
     private void installKeyContext()
@@ -1169,7 +1190,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
                     @Override
                     public void widgetSelected(SelectionEvent e)
                     {
-                        scheduleViewportLoadDebounced();
+                        onVerticalScroll();
                     }
                 });
         }
@@ -1186,7 +1207,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
                     @Override
                     public void widgetSelected(SelectionEvent e)
                     {
-                        scheduleViewportLoadDebounced();
+                        onVerticalScroll();
                     }
                 });
             ScrollBar horizontal = data.getHorizontalBar();
@@ -1196,7 +1217,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
                     @Override
                     public void widgetSelected(SelectionEvent e)
                     {
-                        scheduleViewportLoadDebounced();
+                        scheduleViewportCaptureDebounced();
                     }
                 });
             data.addControlListener(new ControlAdapter()
@@ -1204,7 +1225,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
                 @Override
                 public void controlResized(ControlEvent e)
                 {
-                    scheduleViewportLoadDebounced();
+                    scheduleViewportCaptureDebounced();
                 }
             });
         }
@@ -1292,7 +1313,6 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             String text = model.getCellDisplayText(logical, col);
             item.setText(col, text != null ? text : ""); //$NON-NLS-1$
         }
-        requestRowLoadIfNeeded(logical, index);
     }
 
     private void onSetDataData(Event event)
@@ -1307,32 +1327,26 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
 
         Table data = dataTable();
         int dataCols = data != null ? data.getColumnCount() : 0;
+        int maxDataLen = 0;
         for (int dataCol = 0; dataCol < dataCols; dataCol++)
         {
             int visibleCol = model.columns.visibleIndexForDataColumn(dataCol);
             String text = model.getCellDisplayText(logical, visibleCol);
+            int len = text != null ? text.length() : 0;
+            if (len > maxDataLen)
+                maxDataLen = len;
             item.setText(dataCol, text != null ? text : ""); //$NON-NLS-1$
         }
-        requestRowLoadIfNeeded(logical, data);
-    }
-
-    private void requestRowLoadIfNeeded(int logical, Table table)
-    {
-        if (scheduler == null || model == null || table == null || table.isDisposed())
-            return;
-        int colFrom = 0;
-        int colTo = Math.max(0, model.columns.columnCount() - 1);
-        if (table == dataTable())
+        // #region agent log
+        if (logical == 0 || logical == 16 || logical == 24 || logical == 100 || logical == 500
+            || logical >= 1700)
         {
-            int[] cols = DebugCollectionViewportTracker.visibleModelColumnRange(
-                table, model.columns.columnCount(), model.columns.fixedColumnCount());
-            colFrom = cols[0];
-            colTo = cols[1];
+            DebugCollectionAgentLog.log("H-setData", "Window.onSetDataData", "cellPaint", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"logical\":" + logical + ",\"display\":" + displayIndex //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"cols\":" + model.columns.columnCount() //$NON-NLS-1$
+                    + ",\"maxDataLen\":" + maxDataLen + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
-        else if (table == indexTable())
-            colTo = Math.max(0, model.columns.fixedColumnCount() - 1);
-        if (model.needsRowLoad(logical, colFrom, colTo))
-            scheduleViewportLoadDebounced();
+        // #endregion
     }
 
     private void onTableKeyDown(Event event)
@@ -1359,11 +1373,29 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         {
             inspectSelectionOnEnter(tableFromEventWidget(event.widget));
             event.doit = false;
+            return;
+        }
+        int key = event.keyCode;
+        if (key == SWT.END || key == SWT.HOME || key == SWT.PAGE_DOWN || key == SWT.PAGE_UP)
+        {
+            Table data = dataTable();
+            if (data != null && !data.isDisposed())
+                data.getDisplay().asyncExec(this::scheduleViewportCapturePriority);
         }
     }
 
     private void onTableTraverse(Event event)
     {
+        if (event.type == SWT.Traverse)
+        {
+            int detail = event.detail;
+            if (detail == SWT.TRAVERSE_PAGE_NEXT || detail == SWT.TRAVERSE_PAGE_PREVIOUS)
+            {
+                Table data = dataTable();
+                if (data != null && !data.isDisposed())
+                    data.getDisplay().asyncExec(this::scheduleViewportCapturePriority);
+            }
+        }
         if (!isTableInspectEnter(event))
             return;
         inspectSelectionOnEnter(tableFromEventWidget(event.widget));
@@ -1611,7 +1643,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
                 DebugCollectionFilterViewportAnchor.restoreLogicalRow(data, anchorLogical, total, interaction);
                 splitTable.setTopIndex(data.getTopIndex());
             }
-            scheduleViewportLoad();
+            scheduleViewportCapture();
         }
     }
 
@@ -1641,7 +1673,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             updateTableItemCount(total);
             if (splitTable != null)
                 splitTable.clearAll();
-            scheduleViewportLoad();
+            scheduleViewportCapture();
             DebugCollectionDebug.step("filter", "scheduled viewport after filter");
             return;
         }
@@ -1654,11 +1686,35 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             updateTableItemCount(rowFilter.visibleCount(total));
             if (splitTable != null)
                 splitTable.clearAll();
-            scheduleViewportLoad();
+            scheduleViewportCapture();
         });
     }
 
-    private void scheduleViewportLoadDebounced()
+    private void onVerticalScroll()
+    {
+        if (splitTable == null)
+        {
+            scheduleViewportCaptureDebounced();
+            return;
+        }
+        int first = splitTable.getTopIndex();
+        int logicalFirst = displayIndexToLogical(first);
+        int visible = visibleRowCountEstimate();
+        if (lastViewportLogicalFirst >= 0 && logicalFirst >= 0)
+        {
+            int delta = Math.abs(logicalFirst - lastViewportLogicalFirst);
+            if (delta > Math.max(visible / 2, 8))
+            {
+                Table data = dataTable();
+                if (data != null && !data.isDisposed())
+                    data.getDisplay().asyncExec(this::scheduleViewportCapturePriority);
+                return;
+            }
+        }
+        scheduleViewportCaptureDebounced();
+    }
+
+    private void scheduleViewportCaptureDebounced()
     {
         Table data = dataTable();
         if (data == null || data.isDisposed())
@@ -1667,30 +1723,57 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             data.getDisplay().timerExec(-1, viewportDebounce);
         viewportDebounce = () -> {
             viewportDebounce = null;
-            scheduleViewportLoad();
+            scheduleViewportCapture();
         };
         data.getDisplay().timerExec(150, viewportDebounce);
     }
 
-    private void scheduleViewportLoad()
+    /** Запомнить viewport для refresh по DebugEvent; SetData грузит ячейки лениво. */
+    private void scheduleViewportCapture()
     {
-        if (splitTable == null || scheduler == null)
-        {
-            DebugCollectionDebug.step("viewport", "SKIP splitTable=" + (splitTable != null) + " scheduler=" + (scheduler != null));
+        captureViewportRange(false);
+    }
+
+    private void scheduleViewportCapturePriority()
+    {
+        captureViewportRange(true);
+    }
+
+    private void captureViewportRange(boolean priority)
+    {
+        if (splitTable == null || scheduler == null || model == null)
             return;
-        }
         Table data = dataTable();
         if (data == null || data.isDisposed())
             return;
         int first = splitTable.getTopIndex();
         int last = first + visibleRowCountEstimate();
+        int itemCount = splitTable.getItemCount();
+        int displayLast = Math.min(last, itemCount - 1);
         int logicalFirst = displayIndexToLogical(first);
-        int logicalLast = displayIndexToLogical(Math.min(last, splitTable.getItemCount() - 1));
-        DebugCollectionDebug.step("viewport", "first=" + first + " last=" + last + " logical=" + logicalFirst + ".." + logicalLast + " itemCount=" + splitTable.getItemCount());
-        if (logicalFirst >= 0 && logicalLast >= logicalFirst)
-            scheduler.requestViewport(logicalFirst, logicalLast);
+        int logicalLast = displayIndexToLogical(displayLast);
+        if (logicalFirst < 0 || logicalLast < logicalFirst)
+            return;
+        lastViewportLogicalFirst = logicalFirst;
+        if (priority)
+        {
+            for (int row = logicalFirst; row <= logicalLast; row++)
+                model.invalidateLogicalRow(row);
+            splitTable.clear(first, displayLast);
+            // #region agent log
+            DebugCollectionAgentLog.log("H-endPaint", "Window.captureViewportRange", "priorityClear", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"logicalFirst\":" + logicalFirst + ",\"logicalLast\":" + logicalLast //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"displayTop\":" + first + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            scheduler.captureSizeViewport(logicalFirst, logicalLast, data);
+            scheduler.requestViewportPriority(logicalFirst, logicalLast);
+        }
         else
-            DebugCollectionDebug.step("viewport", "SKIP logical range invalid");
+        {
+            scheduler.captureSizeViewport(logicalFirst, logicalLast, data);
+            scheduler.requestViewport(logicalFirst, logicalLast);
+        }
+        scheduler.scheduleSizePass();
     }
 
     private int visibleRowCountEstimate()
@@ -1864,7 +1947,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             splitTable.clearAll();
         if (scheduler != null)
             scheduler.captureColumnViewport();
-        scheduleViewportLoad();
+        scheduleViewportCapture();
         updateColumnSettingsButton();
         refreshPresentationCombo();
         applyFilterIfNonEmpty();
@@ -1935,7 +2018,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         refreshVisibleTableRows();
         updateFilterByPresentationCheckbox();
         if (needsVisibilityUpdate)
-            scheduleViewportLoadDebounced();
+                        scheduleViewportCaptureDebounced();
         else
             applyFilterIfNonEmpty();
     }

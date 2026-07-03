@@ -1,20 +1,24 @@
 package tormozit;
 
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.List;
 
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
+import org.eclipse.core.resources.ResourcesPlugin;
+import org.eclipse.core.runtime.IPath;
+import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.ISelectionProvider;
 import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
 import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.events.SelectionEvent;
-import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
@@ -22,7 +26,10 @@ import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
+import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.Tree;
+import org.eclipse.swt.widgets.TreeItem;
+import org.eclipse.swt.widgets.Widget;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.IViewReference;
@@ -34,18 +41,24 @@ import org.eclipse.ui.PlatformUI;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 
+import org.eclipse.e4.ui.model.application.ui.basic.MPart;
+
 /**
  * Добавляет «Открыть в Навигаторе» и «Открыть объект» в подменю «Комфорт»
- * контекстного меню изменённых файлов в EGit-представлениях
- * ({@code StagingView}, {@code RepositoryExplorerView}).
+ * контекстного меню изменённых файлов в EGit/EDT-представлениях
+ * ({@code StagingView}, {@code RepositoryExplorerView}, {@code GenericHistoryView}).
  */
 public final class GitChangedFileMenuHook implements IStartup
 {
     private static final String ROOT_MARKER = "tormozit.gitChangedFileRootHook"; //$NON-NLS-1$
     private static final String SUB_MARKER  = "tormozit.gitChangedFileSubHook";  //$NON-NLS-1$
 
-    private static final String STAGING_VIEW_ID = "org.eclipse.egit.ui.StagingView"; //$NON-NLS-1$
-    private static final String REPOS_VIEW_ID   = "org.eclipse.egit.ui.RepositoryExplorerView"; //$NON-NLS-1$
+    private static final String DT_STAGING_VIEW_ID  = "com._1c.g5.v8.dt.internal.team.ui.views.DtStagingView"; //$NON-NLS-1$
+    private static final String DT_TEAM_VIEW_ID     = "com._1c.g5.v8.dt.team.ui.development.view"; //$NON-NLS-1$
+    private static final String EGIT_STAGING_VIEW_ID = "org.eclipse.egit.ui.StagingView"; //$NON-NLS-1$
+    private static final String EGIT_REPOS_VIEW_ID   = "org.eclipse.egit.ui.RepositoryExplorerView"; //$NON-NLS-1$
+    private static final String EGIT_HISTORY_VIEW_ID  = "org.eclipse.egit.ui.HistoryView"; //$NON-NLS-1$
+    private static final String TEAM_HISTORY_VIEW_ID   = "org.eclipse.team.ui.GenericHistoryView"; //$NON-NLS-1$
 
     private static final String NAV_ITEM_TEXT = "Открыть в Навигаторе"; //$NON-NLS-1$
     private static final String OBJ_ITEM_TEXT = "Открыть объект";       //$NON-NLS-1$
@@ -60,86 +73,318 @@ public final class GitChangedFileMenuHook implements IStartup
                 return;
             display.addFilter(SWT.MenuDetect, GitChangedFileMenuHook::handleMenuDetect);
             Global.log("GitChangedFileMenu: MenuDetect filter installed"); //$NON-NLS-1$
-            dumpViewIds();
         });
     }
 
-    private static void dumpViewIds()
+    // ========================================================================
+    // Entry point — диагностика event.widget
+    // ========================================================================
+
+    private static void handleMenuDetect(Event event)
     {
+        if (!(event.widget instanceof Control target) || target.isDisposed())
+        {
+            Global.log("GitChangedFileMenu: event.widget is not a Control: "
+                + (event.widget != null ? event.widget.getClass().getName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+
+        Global.log("GitChangedFileMenu: MenuDetect widget="
+            + target.getClass().getName() //$NON-NLS-1$
+            + " hasMenu=" + (target.getMenu() != null)); //$NON-NLS-1$
+
+        // Ищем control, у которого есть меню (может быть на родителе)
+        Control menuControl = target;
+        while (menuControl != null && !menuControl.isDisposed() && menuControl.getMenu() == null)
+            menuControl = menuControl.getParent();
+
+        if (menuControl == null || menuControl.isDisposed())
+        {
+            Global.log("GitChangedFileMenu: no control with menu found"); //$NON-NLS-1$
+            return;
+        }
+
+        if (menuControl != target)
+        {
+            Global.log("GitChangedFileMenu: menu on parent class="
+                + menuControl.getClass().getName()); //$NON-NLS-1$
+        }
+
+        IViewPart view = findGitViewContaining(target);
+        if (view == null)
+            return;
+
+        tryAttachMenuListener(menuControl, view, 0);
+    }
+
+    // ========================================================================
+    // Поиск git-представления по control (4 подхода)
+    // ========================================================================
+
+    private static IViewPart findGitViewContaining(Control control)
+    {
+        IViewPart result;
+
+        // 1) Walk parent chain: ищем IEclipseContext с MPart
+        result = findByContextWalk(control);
+        if (result != null)
+        {
+            Global.log("GitChangedFileMenu: found by contextWalk view="
+                + result.getSite().getId()); //$NON-NLS-1$
+            return result;
+        }
+        Global.log("GitChangedFileMenu: contextWalk failed"); //$NON-NLS-1$
+
+        // 2) ViewPart.getControl() via reflection → isDescendantOf
+        result = findByViewPartGetControl(control);
+        if (result != null)
+        {
+            Global.log("GitChangedFileMenu: found by ViewPart.getControl view="
+                + result.getSite().getId()); //$NON-NLS-1$
+            return result;
+        }
+        Global.log("GitChangedFileMenu: ViewPart.getControl failed"); //$NON-NLS-1$
+
+        // 3) MPart.getWidget() → isDescendantOf
+        result = findByMPartWidget(control);
+        if (result != null)
+        {
+            Global.log("GitChangedFileMenu: found by MPart.getWidget view="
+                + result.getSite().getId()); //$NON-NLS-1$
+            return result;
+        }
+        Global.log("GitChangedFileMenu: MPart.getWidget failed"); //$NON-NLS-1$
+
+        // 4) Fallback: active part
         try
         {
-            IWorkbenchWindow window = activeWindow();
-            if (window == null)
-                return;
-            for (IWorkbenchPage page : window.getPages())
+            IWorkbenchPage page = activePage();
+            if (page != null)
             {
-                for (IViewReference ref : page.getViewReferences())
+                IWorkbenchPart active = page.getActivePart();
+                if (active != null)
                 {
-                    IViewPart view = ref.getView(false);
-                    if (view == null)
+                    String activeId = active.getSite() != null ? active.getSite().getId() : "no-site";
+                    Global.log("GitChangedFileMenu: activePart id=" + activeId); //$NON-NLS-1$
+                    if (isGitView(active))
                     {
-                        Global.log("GitChangedFileMenu: viewRef id=" + ref.getId() + " (not loaded)"); //$NON-NLS-1$ //$NON-NLS-2$
+                        Global.log("GitChangedFileMenu: found by activePart view="
+                            + activeId); //$NON-NLS-1$
+                        return (IViewPart) active;
                     }
-                    else
-                    {
-                        Global.log("GitChangedFileMenu: view id=" + view.getSite().getId() //$NON-NLS-1$
-                            + " class=" + view.getClass().getName()); //$NON-NLS-1$
-                    }
+                }
+                else
+                {
+                    Global.log("GitChangedFileMenu: activePart is null"); //$NON-NLS-1$
                 }
             }
         }
         catch (Exception e)
         {
-            Global.log("GitChangedFileMenu: dumpViewIds error: " + e); //$NON-NLS-1$
+            Global.log("GitChangedFileMenu: activePart error: " + e); //$NON-NLS-1$
         }
+        Global.log("GitChangedFileMenu: activePart failed"); //$NON-NLS-1$
+
+        return null;
     }
 
-    private static void handleMenuDetect(Event event)
+    // ========================================================================
+    // Approach 1: контекстный walk (parent chain, IEclipseContext → MPart)
+    // ========================================================================
+
+    private static IViewPart findByContextWalk(Control control)
     {
-        Global.log("GitChangedFileMenu: MenuDetect widget="
-            + (event.widget == null ? "null" : event.widget.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
-
-        // Находим Table или Tree — как сам event.widget, так и его предков
-        Control target = resolveMenuControl(event);
-        if (target == null)
-        {
-            Global.log("GitChangedFileMenu: no Table/Tree found"); //$NON-NLS-1$
-            return;
-        }
-        Global.log("GitChangedFileMenu: resolved control="
-            + target.getClass().getName()); //$NON-NLS-1$ //$NON-NLS-2$
-
-        IViewPart view = findGitViewForControl(target);
-        if (view == null)
-        {
-            Global.log("GitChangedFileMenu: findGitView returned null"); //$NON-NLS-1$
-            return;
-        }
-
-        tryAttachMenuListener(target, view, 0);
-    }
-
-    /**
-     * Возвращает сам event.widget, если это Table или Tree,
-     * либо первый Table/Tree среди предков.
-     */
-    private static Control resolveMenuControl(Event event)
-    {
-        if (!(event.widget instanceof Control c))
+        IWorkbenchPage page = activePage();
+        if (page == null)
             return null;
 
-        if (c instanceof Table || c instanceof Tree)
-            return c;
-
-        Composite parent = c.getParent();
-        while (parent != null)
+        for (Control c = control; c != null && !c.isDisposed(); c = c.getParent())
         {
-            if (parent instanceof Table || parent instanceof Tree)
-                return parent;
-            parent = parent.getParent();
+            Object ctx = c.getData(
+                "org.eclipse.e4.ui.workbench.IPresentationEngine.ACTIVE_CONTEXT"); //$NON-NLS-1$
+            if (ctx == null)
+                continue;
+
+            try
+            {
+                Method getMethod = ctx.getClass().getMethod("get", Class.class); //$NON-NLS-1$
+                Object mpart = getMethod.invoke(ctx, MPart.class);
+                if (mpart == null)
+                    continue;
+
+                Method getElementId = mpart.getClass().getMethod("getElementId"); //$NON-NLS-1$
+                String elementId = (String) getElementId.invoke(mpart);
+                if (elementId == null)
+                    continue;
+
+                IViewPart view = page.findView(elementId);
+                if (isGitView(view))
+                    return view;
+            }
+            catch (Exception ignored)
+            {
+            }
         }
         return null;
     }
+
+    // ========================================================================
+    // Approach 2: ViewPart.getControl() via reflection
+    // ========================================================================
+
+    private static IViewPart findByViewPartGetControl(Control control)
+    {
+        try
+        {
+            IWorkbenchPage page = activePage();
+            if (page == null)
+                return null;
+
+            logAllViewReferences(page, "ViewPart");
+
+            for (IViewReference ref : page.getViewReferences())
+            {
+                IViewPart view = ref.getView(false);
+                if (view == null || !isGitView(view))
+                    continue;
+
+                Control root = getViewControlViaViewPart(view);
+                if (root == null)
+                {
+                    Global.log("GitChangedFileMenu: ViewPart.getControl null for "
+                        + view.getSite().getId()); //$NON-NLS-1$
+                    continue;
+                }
+
+                if (isDescendantOf(control, root))
+                {
+                    Global.log("GitChangedFileMenu: ViewPart.getControl OK for "
+                        + view.getSite().getId()); //$NON-NLS-1$
+                    return view;
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            Global.log("GitChangedFileMenu: ViewPart.getControl error: " + e); //$NON-NLS-1$
+        }
+        return null;
+    }
+
+    /**
+     * Пытается получить корневой Control представления через
+     * {@code ViewPart.getControl()} (protected, через рефлексию).
+     */
+    private static Control getViewControlViaViewPart(IViewPart view)
+    {
+        try
+        {
+            // Пробуем getControl() — protected в ViewPart
+            for (java.lang.reflect.Method m : view.getClass().getMethods())
+            {
+                if (!"getControl".equals(m.getName()) || m.getParameterCount() != 0) //$NON-NLS-1$
+                    continue;
+                m.setAccessible(true);
+                Object result = m.invoke(view);
+                if (result instanceof Control c)
+                    return c;
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+        return null;
+    }
+
+    // ========================================================================
+    // Approach 3: MPart.getWidget()
+    // ========================================================================
+
+    private static IViewPart findByMPartWidget(Control control)
+    {
+        try
+        {
+            IWorkbenchPage page = activePage();
+            if (page == null)
+                return null;
+
+            logAllViewReferences(page, "MPart");
+
+            for (IViewReference ref : page.getViewReferences())
+            {
+                IViewPart view = ref.getView(false);
+                if (view == null || !isGitView(view))
+                    continue;
+
+                Control root = getViewControlViaMPart(view);
+                if (root == null)
+                {
+                    Global.log("GitChangedFileMenu: MPart.getWidget null for "
+                        + view.getSite().getId()); //$NON-NLS-1$
+                    continue;
+                }
+
+                if (isDescendantOf(control, root))
+                {
+                    Global.log("GitChangedFileMenu: MPart.getWidget OK for "
+                        + view.getSite().getId()); //$NON-NLS-1$
+                    return view;
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            Global.log("GitChangedFileMenu: MPart.getWidget error: " + e); //$NON-NLS-1$
+        }
+        return null;
+    }
+
+    private static Control getViewControlViaMPart(IViewPart view)
+    {
+        try
+        {
+            Object mpart = view.getSite().getService(MPart.class);
+            if (mpart == null)
+            {
+                Global.log("GitChangedFileMenu: MPart service null for "
+                    + view.getSite().getId()); //$NON-NLS-1$
+                return null;
+            }
+
+            Method getWidget = MPart.class.getMethod("getWidget"); //$NON-NLS-1$
+            Object widget = getWidget.invoke(mpart);
+            if (widget instanceof Control c)
+                return c;
+
+            Global.log("GitChangedFileMenu: MPart.getWidget returned non-Control: "
+                + (widget != null ? widget.getClass().getName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (Exception e)
+        {
+            Global.log("GitChangedFileMenu: MPart.getWidget exception: " + e); //$NON-NLS-1$
+        }
+        return null;
+    }
+
+    // ========================================================================
+    // Utilities: isDescendantOf
+    // ========================================================================
+
+    private static boolean isDescendantOf(Control child, Control ancestor)
+    {
+        if (child == null || ancestor == null || child.isDisposed() || ancestor.isDisposed())
+            return false;
+        for (Control c = child; c != null && !c.isDisposed(); c = c.getParent())
+        {
+            if (c == ancestor)
+                return true;
+        }
+        return false;
+    }
+
+    // ========================================================================
+    // tryAttachMenuListener
+    // ========================================================================
 
     private static void tryAttachMenuListener(Control control, IViewPart view, int attempt)
     {
@@ -165,6 +410,7 @@ public final class GitChangedFileMenuHook implements IStartup
             + view.getSite().getId() + " attempt=" + attempt); //$NON-NLS-1$ //$NON-NLS-2$
 
         menu.setData(ROOT_MARKER, Boolean.TRUE);
+        menu.setData("menuControl", control); //$NON-NLS-1$
         menu.addMenuListener(buildRootMenuListener(view));
     }
 
@@ -204,6 +450,40 @@ public final class GitChangedFileMenuHook implements IStartup
     // Подменю «Комфорт» — добавляет пункты при каждом открытии
     // ========================================================================
 
+    /** @return selection from the widget's own Table/Tree items, or null */
+    private static ISelection selectionOfClickedControl(Widget submenuWidget)
+    {
+        if (!(submenuWidget instanceof Menu submenu))
+            return null;
+        MenuItem parentItem = submenu.getParentItem();
+        if (parentItem == null)
+            return null;
+        Menu rootMenu = parentItem.getParent();
+        if (rootMenu == null)
+            return null;
+        Object data = rootMenu.getData("menuControl"); //$NON-NLS-1$
+        if (!(data instanceof Control control) || control.isDisposed())
+            return null;
+
+        Object element = null;
+        if (control instanceof Table table)
+        {
+            TableItem[] items = table.getSelection();
+            if (items.length > 0)
+                element = items[0].getData();
+        }
+        else if (control instanceof Tree tree)
+        {
+            TreeItem[] items = tree.getSelection();
+            if (items.length > 0)
+                element = items[0].getData();
+        }
+
+        if (element != null)
+            return new StructuredSelection(element);
+        return null;
+    }
+
     private static MenuAdapter buildItemsMenuListener(IViewPart view)
     {
         return new MenuAdapter()
@@ -214,22 +494,53 @@ public final class GitChangedFileMenuHook implements IStartup
             public void menuShown(MenuEvent e)
             {
                 ISelection selection = selectionOf(view);
-                if (!(selection instanceof IStructuredSelection structured) || structured.size() != 1)
+
+                // Try to get selection from the viewer that owns the clicked control
+                ISelection viewerSel = selectionOfClickedControl(e.widget);
+                if (viewerSel instanceof IStructuredSelection vs && vs.size() == 1)
+                    selection = vs;
+
+                if (selection == null)
+                {
+                    Global.log("GitChangedFileMenu: selection is null"); //$NON-NLS-1$
                     return;
+                }
+                if (!(selection instanceof IStructuredSelection structured))
+                {
+                    Global.log("GitChangedFileMenu: selection class="
+                        + selection.getClass().getName()); //$NON-NLS-1$
+                    return;
+                }
+                if (structured.size() != 1)
+                {
+                    Global.log("GitChangedFileMenu: selection size=" + structured.size()); //$NON-NLS-1$
+                    return;
+                }
 
                 Object element = structured.getFirstElement();
                 Global.log("GitChangedFileMenu: resolve element class="
                     + element.getClass().getName() + " toString=" + element); //$NON-NLS-1$ //$NON-NLS-2$
 
-                EObject eObject = resolveToEObject(element);
+                IFile file = resolveFile(view, element);
+                if (file == null || !file.exists())
+                {
+                    Global.log("GitChangedFileMenu: file not resolved"); //$NON-NLS-1$
+                    return;
+                }
+
+                EObject eObject = resolveEObject(file);
                 if (eObject == null)
                 {
                     Global.log("GitChangedFileMenu: EObject not resolved"); //$NON-NLS-1$
                     return;
                 }
 
+                Global.log("GitChangedFileMenu: resolved IFile=" + file.getFullPath() //$NON-NLS-1$
+                    + " EObject=" + eObject); //$NON-NLS-1$
+
                 Menu submenu = (Menu) e.widget;
                 Shell shell = submenu.getShell();
+                IFile capturedFile = file;
                 EObject captured = eObject;
 
                 MenuItem navItem = new MenuItem(submenu, SWT.PUSH);
@@ -251,7 +562,7 @@ public final class GitChangedFileMenuHook implements IStartup
                     @Override
                     public void widgetSelected(SelectionEvent ev)
                     {
-                        openInEditor(captured, shell);
+                        openInEditor(captured, capturedFile, shell);
                     }
                 });
                 addedItems.add(objItem);
@@ -278,20 +589,12 @@ public final class GitChangedFileMenuHook implements IStartup
     // Resolution
     // ========================================================================
 
-    private static EObject resolveToEObject(Object element)
-    {
-        IFile file = resolveFile(element);
-        if (file == null || !file.exists())
-            return null;
-
-        return resolveEObject(file);
-    }
-
-    private static IFile resolveFile(Object element)
+    private static IFile resolveFile(IViewPart view, Object element)
     {
         if (element instanceof IFile file)
             return file;
 
+        // IAdaptable (PlatformObject subclasses like StagingEntry)
         if (element instanceof org.eclipse.core.runtime.IAdaptable adaptable)
         {
             IFile adapted = adaptable.getAdapter(IFile.class);
@@ -299,6 +602,33 @@ public final class GitChangedFileMenuHook implements IStartup
                 return adapted;
         }
 
+        // StagingEntry.getFile() via reflection — returns IFile directly
+        try
+        {
+            Object f = Global.call(element, "getFile"); //$NON-NLS-1$
+            if (f instanceof IFile file)
+                return file;
+        }
+        catch (Exception ignored)
+        {
+        }
+
+        // StagingEntry.getLocation() via reflection — returns absolute IPath
+        try
+        {
+            Object loc = Global.call(element, "getLocation"); //$NON-NLS-1$
+            if (loc instanceof IPath p)
+            {
+                IFile[] files = ResourcesPlugin.getWorkspace().getRoot().findFilesForLocation(p);
+                if (files != null && files.length > 0)
+                    return files[0];
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+
+        // Fallback: getPath() → project-relative path → IFile
         String path = null;
 
         if (element instanceof String str)
@@ -319,7 +649,7 @@ public final class GitChangedFileMenuHook implements IStartup
 
         if (path != null)
         {
-            IProject project = resolveProject();
+            IProject project = resolveProject(view, element);
             if (project != null)
             {
                 String normalized = path.replace('\\', '/');
@@ -332,10 +662,51 @@ public final class GitChangedFileMenuHook implements IStartup
         return null;
     }
 
-    private static IProject resolveProject()
+    private static IProject resolveProject(IViewPart view, Object element)
     {
+        // Try to get project from the part that triggered the menu (e.g. history view)
+        if (view != null)
+        {
+            IProject p = Global.getActiveProject(view, false);
+            if (p != null)
+                return p;
+        }
+
         IWorkbenchPage page = activePage();
-        return page != null ? Global.getActiveProject(page, false) : null;
+        if (page == null)
+            return null;
+
+        // Try from active page
+        IProject project = Global.getActiveProject(page, false);
+        if (project != null)
+            return project;
+
+        // Fallback: try to extract project from StagingEntry's repository path
+        try
+        {
+            Object repo = Global.call(element, "getRepository"); //$NON-NLS-1$
+            if (repo != null)
+            {
+                Object workTree = Global.call(repo, "getWorkTree"); //$NON-NLS-1$
+                if (workTree instanceof java.io.File workDir)
+                {
+                    String repoPath = workDir.getAbsolutePath().replace('\\', '/');
+                    for (IProject p : ResourcesPlugin.getWorkspace().getRoot().getProjects())
+                    {
+                        if (!p.isOpen())
+                            continue;
+                        String projPath = p.getLocation().toFile().getAbsolutePath().replace('\\', '/');
+                        if (repoPath.equals(projPath) || repoPath.startsWith(projPath + "/"))
+                            return p;
+                    }
+                }
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+
+        return null;
     }
 
     private static EObject resolveEObject(IFile file)
@@ -362,12 +733,32 @@ public final class GitChangedFileMenuHook implements IStartup
     // OpenHelper — открытие объекта в редакторе EDT
     // ========================================================================
 
-    private static void openInEditor(EObject eObject, Shell shell)
+    private static void openInEditor(EObject eObject, IFile file, Shell shell)
     {
         try
         {
             Class<?> cls = Class.forName("com._1c.g5.v8.dt.ui.util.OpenHelper"); //$NON-NLS-1$
             Object helper = cls.getConstructor().newInstance();
+
+            // For .bsl files: use platform URI to open parent object with module page
+            if (file != null && "bsl".equalsIgnoreCase(file.getFileExtension())) //$NON-NLS-1$
+            {
+                URI moduleUri = URI.createPlatformResourceURI(file.getFullPath().toString(), true)
+                                   .appendFragment("/0"); //$NON-NLS-1$
+                for (java.lang.reflect.Method m : cls.getMethods())
+                {
+                    if (!"openEditor".equals(m.getName()) || m.getParameterCount() != 2) //$NON-NLS-1$
+                        continue;
+                    if (m.getParameterTypes()[0].equals(URI.class)
+                        && m.getParameterTypes()[1].equals(ISelection.class))
+                    {
+                        m.invoke(helper, moduleUri, null);
+                        return;
+                    }
+                }
+            }
+
+            // Default: openEditor(EObject)
             for (java.lang.reflect.Method m : cls.getMethods())
             {
                 if (!"openEditor".equals(m.getName()) || m.getParameterCount() != 1) //$NON-NLS-1$
@@ -384,55 +775,25 @@ public final class GitChangedFileMenuHook implements IStartup
         }
     }
 
-    // ========================================================================
-    // Finding EGit view by widget hierarchy (не полагаясь на activePart)
-    // ========================================================================
-
-    private static IViewPart findGitViewForControl(Control control)
-    {
-        IWorkbenchWindow window = activeWindow();
-        if (window == null)
-            return null;
-
-        for (IWorkbenchPage page : window.getPages())
-        {
-            for (IViewReference ref : page.getViewReferences())
-            {
-                IViewPart view = ref.getView(false);
-                if (view == null || !isGitView(view))
-                    continue;
-
-                if (controlBelongsToView(control, view))
-                    return view;
-            }
-        }
-        return null;
-    }
-
-    private static boolean controlBelongsToView(Control control, IViewPart view)
+    private static void logAllViewReferences(IWorkbenchPage page, String tag)
     {
         try
         {
-            if (view.getViewSite() == null)
-                return false;
-
-            IWorkbenchPart part = view.getViewSite().getPart();
-            Object pc = Global.call(view, "getPartControl"); //$NON-NLS-1$
-            if (!(pc instanceof Composite viewComposite))
-                return false;
-
-            Composite parent = control.getParent();
-            while (parent != null)
+            StringBuilder sb = new StringBuilder("GitChangedFileMenu: " + tag + " views=["); //$NON-NLS-1$ //$NON-NLS-2$
+            for (IViewReference ref : page.getViewReferences())
             {
-                if (parent == viewComposite)
-                    return true;
-                parent = parent.getParent();
+                if (sb.length() > 40)
+                    sb.append(", "); //$NON-NLS-1$
+                IViewPart v = ref.getView(false);
+                sb.append(v != null ? v.getSite().getId() : ref.getId() + "(not-created)");
             }
+            sb.append("]"); //$NON-NLS-1$
+            Global.log(sb.toString());
         }
-        catch (Exception ignored)
+        catch (Exception e)
         {
+            Global.log("GitChangedFileMenu: logViews error: " + e); //$NON-NLS-1$
         }
-        return false;
     }
 
     // ========================================================================
@@ -462,7 +823,9 @@ public final class GitChangedFileMenuHook implements IStartup
         if (part == null || part.getSite() == null)
             return false;
         String id = part.getSite().getId();
-        return STAGING_VIEW_ID.equals(id) || REPOS_VIEW_ID.equals(id);
+        return DT_STAGING_VIEW_ID.equals(id) || DT_TEAM_VIEW_ID.equals(id)
+            || EGIT_STAGING_VIEW_ID.equals(id) || EGIT_REPOS_VIEW_ID.equals(id)
+            || EGIT_HISTORY_VIEW_ID.equals(id) || TEAM_HISTORY_VIEW_ID.equals(id);
     }
 
     private static ISelection selectionOf(IWorkbenchPart view)

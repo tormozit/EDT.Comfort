@@ -2,7 +2,6 @@ package tormozit;
 
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -15,12 +14,13 @@ import com._1c.g5.v8.dt.debug.core.model.values.IBslIndexedValue;
 import com._1c.g5.v8.dt.debug.core.model.values.IBslValue;
 
 /**
- * Кэш строк и ячеек коллекции; все runtime-вызовы — только из {@link DebugCollectionLoadScheduler}.
+ * Модель коллекции: строки — из {@link IBslIndexedValue} (как input штатного {@code TableViewer}),
+ * текст ячеек — лениво при {@code SWT.SetData} через {@link #getCellDisplayText}, с мемо-кэшем до
+ * {@link #invalidateAllCells()}. {@link #rowVariables} — только для clone-import.
  */
 final class DebugCollectionTableModel
 {
-    static final String PLACEHOLDER = "…"; //$NON-NLS-1$
-
+    private static final String EVALUATING_ROW_TEXT = "…"; //$NON-NLS-1$
     static final class CellKey
     {
         final int row;
@@ -47,33 +47,21 @@ final class DebugCollectionTableModel
         }
     }
 
+    enum SizeState
+    {
+        UNKNOWN, PENDING, READY, NA
+    }
+
     static final class CellData
     {
         String baseText = ""; //$NON-NLS-1$
         String displayText = ""; //$NON-NLS-1$
         SizeState sizeState = SizeState.UNKNOWN;
         int nestedSize = -1;
-        /** Ячейка хотя бы раз заполнена Job-ом (в т.ч. пустым значением). */
         boolean contentLoaded;
     }
 
-    enum SizeState
-    {
-        UNKNOWN, PENDING, READY, NA
-    }
-
     private static final int CELL_CACHE_LIMIT_MIN = 12000;
-
-    /** Ёмкость кэша: rows×cols + запас; иначе LRU вытесняет viewport и цикл 0→N→0. */
-    int cellCacheCapacity()
-    {
-        int rows = totalSize > 0
-            ? Math.min(totalSize, 2048)
-            : 512;
-        int cols = Math.max(1, columns.columnCount());
-        long need = (long) rows * cols + 512L;
-        return (int) Math.min(Integer.MAX_VALUE, Math.max(CELL_CACHE_LIMIT_MIN, need));
-    }
     private static final int ROW_CHILDREN_CACHE_LIMIT = 2000;
 
     final IBslIndexedValue indexedValue;
@@ -84,6 +72,8 @@ final class DebugCollectionTableModel
 
     volatile int totalSize = -1;
     volatile int loadedRowCount;
+
+    private volatile java.util.function.IntConsumer dirtyRowHandler;
 
     private final ConcurrentHashMap<Integer, IBslVariable> rowVariables = new ConcurrentHashMap<>();
     private final Map<Integer, IBslVariable[]> rowChildrenCache =
@@ -108,6 +98,16 @@ final class DebugCollectionTableModel
                 return size() > cellCacheCapacity();
             }
         };
+
+    int cellCacheCapacity()
+    {
+        int rows = totalSize > 0
+            ? Math.min(totalSize, 2048)
+            : 512;
+        int cols = Math.max(1, columns.columnCount());
+        long need = (long) rows * cols + 512L;
+        return (int) Math.min(Integer.MAX_VALUE, Math.max(CELL_CACHE_LIMIT_MIN, need));
+    }
 
     DebugCollectionTableModel(
         IBslIndexedValue indexedValue,
@@ -152,6 +152,29 @@ final class DebugCollectionTableModel
         loadedRowCount = Math.max(loadedRowCount, from + vars.length);
     }
 
+    void setDirtyRowHandler(java.util.function.IntConsumer handler)
+    {
+        dirtyRowHandler = handler;
+    }
+
+    void noteCollectionKicked(int size)
+    {
+        totalSize = size;
+        loadedRowCount = size;
+    }
+
+    void clearLiveRowCache()
+    {
+        rowVariables.clear();
+        rowChildrenCache.clear();
+        loadedRowCount = 0;
+    }
+
+    boolean isRowsLoaded()
+    {
+        return totalSize >= 0 && loadedRowCount >= totalSize;
+    }
+
     void importCachesFrom(DebugCollectionTableModel source)
     {
         if (source == null || source == this)
@@ -192,6 +215,22 @@ final class DebugCollectionTableModel
 
     void clearCellCache()
     {
+        invalidateAllCells();
+    }
+
+    void invalidateLogicalRow(int logicalRow)
+    {
+        if (logicalRow < 0)
+            return;
+        synchronized (cellCache)
+        {
+            cellCache.entrySet().removeIf(e -> e.getKey().row == logicalRow);
+        }
+        rowChildrenCache.remove(logicalRow);
+    }
+
+    void invalidateAllCells()
+    {
         synchronized (cellCache)
         {
             cellCache.clear();
@@ -199,7 +238,6 @@ final class DebugCollectionTableModel
         rowChildrenCache.clear();
     }
 
-    /** Переложить кэш ячеек при смене порядка visible-колонок (смена «Представления»). */
     void remapCellCacheForVisibleLayout(int[] oldVisibleToModel)
     {
         if (oldVisibleToModel == null || oldVisibleToModel.length == 0)
@@ -239,49 +277,60 @@ final class DebugCollectionTableModel
         return -1;
     }
 
-    /** Строка или ячейки viewport ещё не заполнены (после смены колонок rowVar может уже быть). */
-    boolean needsRowLoad(int row, int colFrom, int colTo)
+    /** Текст ячейки для SetData — ленивое разрешение как у штатного LabelProvider. */
+    String getCellDisplayText(int logicalRow, int visibleCol)
     {
-        if (row < 0)
-            return false;
-        colFrom = Math.max(0, colFrom);
-        colTo = Math.min(colTo, columns.columnCount() - 1);
-        for (int c = colFrom; c <= colTo; c++)
-        {
-            if (!isCellFilled(row, c))
-                return true;
-        }
-        return false;
-    }
-
-    /** Число строк в диапазоне, у которых заполнены все видимые колонки. */
-    int countRowsFullyLoaded(int first, int last, int colFrom, int colTo)
-    {
-        if (last < first)
-            return 0;
-        int count = 0;
-        for (int row = first; row <= last; row++)
-        {
-            if (!needsRowLoad(row, colFrom, colTo))
-                count++;
-        }
-        return count;
-    }
-
-    boolean isCellFilled(int row, int col)
-    {
-        CellKey key = new CellKey(row, col);
-        CellData data;
+        CellKey key = new CellKey(logicalRow, visibleCol);
+        CellData cached;
         synchronized (cellCache)
         {
-            data = cellCache.get(key);
+            cached = cellCache.get(key);
         }
-        if (data == null)
-            return false;
-        synchronized (data)
+        if (cached != null)
         {
-            boolean filled = data.contentLoaded && !PLACEHOLDER.equals(data.baseText);
-            return filled;
+            synchronized (cached)
+            {
+                if (cached.contentLoaded)
+                    return cached.displayText != null ? cached.displayText : ""; //$NON-NLS-1$
+            }
+        }
+        String text = resolveCellTextLive(logicalRow, visibleCol);
+        if (shouldCacheCell(logicalRow, visibleCol, text))
+            cacheCellText(logicalRow, visibleCol, text);
+        // #region agent log
+        if (EVALUATING_ROW_TEXT.equals(text) && logicalRow % 64 == 0 && visibleCol == 4)
+        {
+            DebugCollectionColumnModel.Column col = columns.columnAt(visibleCol);
+            String kind = col != null ? col.kind.name() : "?"; //$NON-NLS-1$
+            DebugCollectionAgentLog.log("H-cell", "TableModel.getCellDisplayText", "pendingCell", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"row\":" + logicalRow + ",\"col\":" + visibleCol //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"kind\":\"" + kind + "\",\"text\":\"…\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        // #endregion
+        return text;
+    }
+
+    private boolean shouldCacheCell(int logicalRow, int visibleCol, String text)
+    {
+        DebugCollectionColumnModel.Column col = columns.columnAt(visibleCol);
+        if (col != null && col.kind == DebugCollectionColumnModel.Kind.INDEX)
+            return true;
+        if (!hasResolvableRow(logicalRow))
+            return false;
+        if (text == null || text.isEmpty() || EVALUATING_ROW_TEXT.equals(text))
+            return false;
+        return true;
+    }
+
+    private boolean hasResolvableRow(int logicalRow)
+    {
+        try
+        {
+            return rowVariable(logicalRow) != null;
+        }
+        catch (DebugException e)
+        {
+            return false;
         }
     }
 
@@ -291,18 +340,6 @@ final class DebugCollectionTableModel
         synchronized (cellCache)
         {
             return cellCache.computeIfAbsent(key, k -> new CellData());
-        }
-    }
-
-    String getCellDisplayText(int logicalRow, int visibleCol)
-    {
-        CellData data = cellData(logicalRow, visibleCol);
-        synchronized (data)
-        {
-            if (data.contentLoaded)
-                return data.displayText != null ? data.displayText : ""; //$NON-NLS-1$
-            // Если не загружено — показываем PLACEHOLDER, но кэш остаётся "пустым" для перезагрузки
-            return PLACEHOLDER;
         }
     }
 
@@ -320,30 +357,23 @@ final class DebugCollectionTableModel
         return "(" + size + ") " + baseText; //$NON-NLS-1$ //$NON-NLS-2$
     }
 
-    void setCellText(int logicalRow, int visibleCol, String baseText)
+    private void cacheCellText(int logicalRow, int visibleCol, String text)
     {
         CellData data = cellData(logicalRow, visibleCol);
         synchronized (data)
         {
-            if (baseText == null)
-                baseText = ""; //$NON-NLS-1$
-            data.baseText = baseText;
-            // Не считать PLACEHOLDER загруженным — перезагрузим при следующем batch'е
-            if (PLACEHOLDER.equals(baseText))
-            {
-                data.contentLoaded = false;
-//                DebugCollectionDebug.step("setCellText", "row=" + logicalRow + " col=" + visibleCol + " DEFERRED (pending value)");
-            }
-            else
+            if (text == null)
+                text = ""; //$NON-NLS-1$
+            if (text.equals(data.baseText) && data.sizeState == SizeState.READY && data.nestedSize >= 0)
             {
                 data.contentLoaded = true;
+                return;
             }
-            if (data.sizeState == SizeState.READY && data.nestedSize >= 0)
-                data.displayText = cellTextWithNestedSize(data.baseText, data.nestedSize);
-            else if (PLACEHOLDER.equals(baseText))
-                data.displayText = PLACEHOLDER;
-            else
-                data.displayText = data.baseText;
+            data.baseText = text;
+            data.contentLoaded = true;
+            data.sizeState = SizeState.UNKNOWN;
+            data.nestedSize = -1;
+            data.displayText = text;
         }
     }
 
@@ -368,25 +398,45 @@ final class DebugCollectionTableModel
         }
     }
 
+    String resolveCellTextLive(int logicalRow, int visibleCol)
+    {
+        try
+        {
+            String text = extractCellText(logicalRow, visibleCol);
+            return text != null ? text : ""; //$NON-NLS-1$
+        }
+        catch (DebugException e)
+        {
+            DebugCollectionDebug.problem("cellText: " + e.getMessage()); //$NON-NLS-1$
+            return ""; //$NON-NLS-1$
+        }
+    }
+
+    /** Для фонового фильтра — тот же путь, что и для SetData. */
     String extractCellTextInJob(int logicalRow, int visibleCol) throws DebugException
+    {
+        return extractCellText(logicalRow, visibleCol);
+    }
+
+    String extractCellText(int logicalRow, int visibleCol) throws DebugException
     {
         DebugCollectionColumnModel.Column col = columns.columnAt(visibleCol);
         if (col == null)
             return ""; //$NON-NLS-1$
 
-        IBslVariable rowVar = rowVariables.get(logicalRow);
+        IBslVariable rowVar = rowVariable(logicalRow);
         if (rowVar == null)
         {
-            rowVar = indexedValue.getVariable(logicalRow);
-            if (rowVar != null)
-                rowVariables.put(logicalRow, rowVar);
-        }
-        if (rowVar == null)
+            if (col.kind == DebugCollectionColumnModel.Kind.INDEX)
+                return formatIndex(logicalRow);
+            if (isCollectionEvaluating())
+                return EVALUATING_ROW_TEXT;
             return ""; //$NON-NLS-1$
+        }
 
         return switch (col.kind)
         {
-            case INDEX -> formatIndex(logicalRow, rowVar);
+            case INDEX -> formatIndex(logicalRow);
             case TYPE -> formatType(rowVar);
             case VALUE -> formatValue(rowVar);
             case PROPERTY -> formatProperty(logicalRow, rowVar, col.propertyName);
@@ -408,13 +458,13 @@ final class DebugCollectionTableModel
             int visibleCol = columns.visibleIndexOfModelColumn(modelIdx);
             if (visibleCol < 0)
                 return ""; //$NON-NLS-1$
-            String text = extractCellTextInJob(logicalRow, visibleCol);
+            String text = extractCellText(logicalRow, visibleCol);
             return text != null ? text : ""; //$NON-NLS-1$
         }
         StringBuilder sb = new StringBuilder();
         for (int c = 0; c < columns.columnCount(); c++)
         {
-            String text = extractCellTextInJob(logicalRow, c);
+            String text = extractCellText(logicalRow, c);
             if (text != null && !text.isEmpty())
             {
                 if (sb.length() > 0)
@@ -430,13 +480,7 @@ final class DebugCollectionTableModel
         DebugCollectionColumnModel.Column col = columns.columnAt(visibleCol);
         if (col == null)
             return null;
-        IBslVariable rowVar = rowVariables.get(logicalRow);
-        if (rowVar == null)
-        {
-            rowVar = indexedValue.getVariable(logicalRow);
-            if (rowVar != null)
-                rowVariables.put(logicalRow, rowVar);
-        }
+        IBslVariable rowVar = rowVariable(logicalRow);
         if (rowVar == null)
             return null;
         return switch (col.kind)
@@ -446,6 +490,30 @@ final class DebugCollectionTableModel
         };
     }
 
+    private boolean isCollectionEvaluating()
+    {
+        return indexedValue != null && indexedValue.isPending();
+    }
+
+    /** Как {@code IndexedValuesViewDelegate}: строка из core, без локального bulk-map. */
+    private IBslVariable rowVariable(int logicalRow) throws DebugException
+    {
+        IBslVariable imported = rowVariables.get(logicalRow);
+        if (imported != null)
+            return imported;
+        if (indexedValue == null)
+            return null;
+
+        IBslVariable rowVar = indexedValue.getVariable(logicalRow);
+        if (rowVar != null)
+            return rowVar;
+
+        IBslVariable[] page = indexedValue.getVariables(logicalRow, 1);
+        if (page != null && page.length > 0 && page[0] != null)
+            return page[0];
+        return null;
+    }
+
     private IBslValue resolvePropertyValue(int logicalRow, IBslVariable rowVar, String propertyName)
             throws DebugException
     {
@@ -453,39 +521,33 @@ final class DebugCollectionTableModel
         return child != null ? child.getValue() : null;
     }
 
-    private static String formatIndex(int logicalRow, IBslVariable rowVar)
+    private static String formatIndex(int logicalRow)
     {
         return String.valueOf(logicalRow);
     }
 
+    /** Как {@code IndexedValuesViewDelegate$4}: {@code getReferenceTypeName()}. */
     private static String formatType(IBslVariable rowVar) throws DebugException
     {
-        IBslValue value = rowVar.getValue();
-        if (value == null)
-            return ""; //$NON-NLS-1$
-        if (value.isPending())
-            return null;
-        ensureEvaluated(value);
-        if (value.isPending())
-            return null;
-        String typeName = value.getValueTypeName();
+        String typeName = rowVar.getReferenceTypeName();
         return typeName != null ? typeName : ""; //$NON-NLS-1$
     }
 
+    /** Как {@code IndexedValuesViewDelegate$3}: {@code getValueString()} после sync evaluate. */
     private static String formatValue(IBslVariable rowVar) throws DebugException
     {
         IBslValue value = rowVar.getValue();
         if (value == null)
             return ""; //$NON-NLS-1$
-        if (value.isPending())
-            return null;
-        ensureEvaluated(value);
-        if (value.isPending())
-            return null;
         if (value.isUnreadable())
             return "<unreadable>"; //$NON-NLS-1$
-        String detail = value.getDetailString();
-        String text = detail != null ? detail : ""; //$NON-NLS-1$
+        if (!value.isEvaluated())
+            value.evaluate();
+        if (value.isPending())
+            return EVALUATING_ROW_TEXT;
+        String text = value.getValueString();
+        if (text == null)
+            text = ""; //$NON-NLS-1$
         return DebugStringValueFormat.formatForCollectionWindow(text, value);
     }
 
@@ -494,18 +556,16 @@ final class DebugCollectionTableModel
     {
         if (propertyName == null || propertyName.isBlank())
             return ""; //$NON-NLS-1$
-        IBslVariable[] props = rowPropertySource(logicalRow, rowVar);
-        if (props == null)
-            return null;
-        if (props.length == 0)
-            return ""; //$NON-NLS-1$
-        IBslVariable child = findPropertyVariable(props, propertyName);
+        IBslVariable child = findNamedChild(logicalRow, rowVar, propertyName);
         if (child == null)
             return ""; //$NON-NLS-1$
         return formatPropertyValueString(child);
     }
 
-    /** Как EDT: pass 1 — тип/краткое представление; pass 2 — {@code (N) тип} в {@link DebugCollectionSizeResolver}. */
+    /**
+     * Pass 1 — скаляры: {@code getValueString()} как EDT; коллекции: sync {@code getSize()} → {@code (N) тип}.
+     * Pass 2 — {@link DebugCollectionSizeResolver} для pending {@code getSize()}.
+     */
     private static String formatPropertyValueString(IBslVariable child) throws DebugException
     {
         if (child == null)
@@ -513,32 +573,60 @@ final class DebugCollectionTableModel
         IBslValue childValue = child.getValue();
         if (childValue == null)
             return ""; //$NON-NLS-1$
-        if (childValue.isPending())
-            return null;
+        if (childValue.isUnreadable())
+            return "<unreadable>"; //$NON-NLS-1$
         if (childValue instanceof IBslIndexedValue indexed)
+            return formatIndexedWithSize(indexed);
+        try
         {
-            String typeName = indexed.getValueTypeName();
-            if (typeName != null && !typeName.isBlank())
-                return typeName.trim();
-            return "Коллекция"; //$NON-NLS-1$
+            String text = childValue.getValueString();
+            if (text != null && !text.isBlank())
+                return DebugStringValueFormat.formatForCollectionWindow(text, childValue);
         }
-        if (DebugStringValueFormat.isStringValue(childValue))
+        catch (DebugException e)
         {
-            String detail = childValue.getDetailString();
-            if (detail != null && !detail.isEmpty())
-                return DebugStringValueFormat.formatForCollectionWindow(detail, childValue);
+            DebugCollectionDebug.problem("propertyText: " + e.getMessage()); //$NON-NLS-1$
         }
-        String cached = childValue.getValueString();
-        if (cached != null && !cached.isEmpty())
-            return DebugStringValueFormat.formatForCollectionWindow(cached, childValue);
-        if (!childValue.isEvaluated())
-            childValue.evaluate();
-        if (childValue.isPending())
+        return ""; //$NON-NLS-1$
+    }
+
+    private static String formatIndexedWithSize(IBslIndexedValue indexed) throws DebugException
+    {
+        String typeName = indexed.getValueTypeName();
+        if (typeName == null || typeName.isBlank())
+            typeName = "Коллекция"; //$NON-NLS-1$
+        else
+            typeName = typeName.trim();
+        try
+        {
+            int size = indexed.getSize();
+            if (size >= 0)
+                return cellTextWithNestedSize(typeName, size);
+        }
+        catch (DebugException e)
+        {
+            DebugCollectionDebug.problem("indexedSize: " + e.getMessage()); //$NON-NLS-1$
+        }
+        return typeName;
+    }
+
+    private IBslVariable[] propertyContextForRow(IBslVariable rowVar) throws DebugException
+    {
+        if (rowVar == null)
             return null;
-        String text = childValue.getValueString();
-        if (text == null)
-            return ""; //$NON-NLS-1$
-        return DebugStringValueFormat.formatForCollectionWindow(text, childValue);
+        IBslValue rowValue = rowVar.getValue();
+        if (rowValue == null)
+            return null;
+        if (rowValue instanceof IBslIndexedValue indexed)
+        {
+            IBslVariable[] ctx = indexed.getContextVariables();
+            if (ctx != null && ctx.length > 0)
+                return ctx;
+        }
+        IBslVariable[] vars = rowValue.getVariables();
+        if (vars != null && vars.length > 0)
+            return vars;
+        return DebugCollectionPropertyVariables.propertyVariablesForRow(rowVar);
     }
 
     private IBslVariable findNamedChild(int logicalRow, IBslVariable rowVar, String propertyName)
@@ -546,11 +634,22 @@ final class DebugCollectionTableModel
     {
         if (rowVar == null || propertyName == null)
             return null;
-        IBslVariable[] props = rowPropertySource(logicalRow, rowVar);
-        if (props == null || props.length == 0)
-            props = rawRowVariables(rowVar);
+        IBslVariable[] props = rowChildrenCache.get(logicalRow);
         if (props == null)
+        {
+            props = propertyContextForRow(rowVar);
+            if (props != null && props.length > 0)
+                rowChildrenCache.put(logicalRow, props);
+        }
+        if (props == null || props.length == 0)
+            props = propertyContextForRow(rowVar);
+        if (props == null)
+        {
+            IBslValue rowValue = rowVar.getValue();
+            if (rowValue != null && rowValue.isPending())
+                notifyDirtyRow(logicalRow);
             return null;
+        }
         IBslVariable child = findPropertyVariable(props, propertyName);
         if (child == null && DebugCollectionPropertyVariables.isIndexedPlaceholderContext(props))
         {
@@ -577,22 +676,6 @@ final class DebugCollectionTableModel
         return -1;
     }
 
-    private static IBslVariable[] rawRowVariables(IBslVariable rowVar) throws DebugException
-    {
-        if (rowVar == null)
-            return null;
-        IBslValue value = rowVar.getValue();
-        if (value == null || value.isPending())
-            return null;
-        if (!value.isEvaluated())
-            value.evaluate();
-        if (value.isPending())
-            return null;
-        IBslVariable[] vars = value.getVariables();
-        return vars != null && vars.length > 0 ? vars : null;
-    }
-
-    /** EDT: {@code property.equals(child.getName())}, затем ignoreCase. */
     private static IBslVariable findPropertyVariable(IBslVariable[] props, String propertyName)
     {
         if (props == null || propertyName == null)
@@ -616,86 +699,10 @@ final class DebugCollectionTableModel
         return null;
     }
 
-    private IBslVariable[] rowPropertySource(int logicalRow, IBslVariable rowVar) throws DebugException
+    private void notifyDirtyRow(int logicalRow)
     {
-        if (rowVar == null)
-            return null;
-        IBslVariable[] cached = rowChildrenCache.get(logicalRow);
-        if (cached != null)
-            return cached;
-
-        IBslVariable[] source = DebugCollectionPropertyVariables.propertySource(rowVar.getValue());
-        if (source == null || source.length == 0)
-            return null;
-        rowChildrenCache.put(logicalRow, source);
-        return source;
-    }
-
-    /** Один evaluate на value; без повторного вызова для pending/evaluated. */
-    private static void ensureEvaluated(IBslValue value) throws DebugException
-    {
-        if (value == null || value.isEvaluated() || value.isPending())
-            return;
-        value.evaluate();
-    }
-
-    /**
-     * Round 1 батч-загрузки: собственные значения строк батча, ещё не evaluated/pending —
-     * кандидаты на комбинированный запрос {@link DebugCollectionBatchEvaluator#evaluateBatch}.
-     * Без этого TYPE/VALUE/PROPERTY колонки идут по одному evaluate() на строку.
-     */
-    List<IBslValue> collectRowValuesForBatchEvaluate(int from, int count) throws DebugException
-    {
-        List<IBslValue> result = new ArrayList<>();
-        for (int row = from; row < from + count; row++)
-        {
-            IBslVariable rowVar = rowVariables.get(row);
-            if (rowVar == null)
-            {
-                rowVar = indexedValue.getVariable(row);
-                if (rowVar != null)
-                    rowVariables.put(row, rowVar);
-            }
-            if (rowVar == null)
-                continue;
-            IBslValue value = rowVar.getValue();
-            if (value != null && !value.isEvaluated() && !value.isPending())
-                result.add(value);
-        }
-        return result;
-    }
-
-    /**
-     * Round 2 батч-загрузки: значения property-детей в видимом диапазоне колонок — вызывать
-     * ПОСЛЕ {@link #collectRowValuesForBatchEvaluate} и его evaluate (иначе {@code rowPropertySource}
-     * ещё не может перечислить свойства строки).
-     */
-    List<IBslValue> collectPropertyValuesForBatchEvaluate(int from, int count, int colFrom, int colTo)
-            throws DebugException
-    {
-        List<IBslValue> result = new ArrayList<>();
-        int lastCol = Math.min(colTo, columns.columnCount() - 1);
-        for (int col = Math.max(0, colFrom); col <= lastCol; col++)
-        {
-            DebugCollectionColumnModel.Column colDef = columns.columnAt(col);
-            if (colDef == null || colDef.kind != DebugCollectionColumnModel.Kind.PROPERTY)
-                continue;
-            for (int row = from; row < from + count; row++)
-            {
-                IBslVariable rowVar = rowVariables.get(row);
-                if (rowVar == null)
-                    continue;
-                IBslVariable[] props = rowPropertySource(row, rowVar);
-                if (props == null)
-                    continue;
-                IBslVariable child = findPropertyVariable(props, colDef.propertyName);
-                if (child == null)
-                    continue;
-                IBslValue value = child.getValue();
-                if (value != null && !value.isEvaluated() && !value.isPending())
-                    result.add(value);
-            }
-        }
-        return result;
+        java.util.function.IntConsumer handler = dirtyRowHandler;
+        if (handler != null)
+            handler.accept(logicalRow);
     }
 }

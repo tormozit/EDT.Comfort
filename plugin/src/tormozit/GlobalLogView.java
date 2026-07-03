@@ -181,7 +181,7 @@ public final class GlobalLogView extends ViewPart
             return;
         findText = value.trim();
         findGeneration++;
-        findPos = -1;
+        findPos = logText.getCaretOffset() - 1;
         findNext(true);
     }
 
@@ -214,7 +214,7 @@ public final class GlobalLogView extends ViewPart
             return;
 
         findPos = idx;
-        logText.setSelection(idx, findText.length());
+        logText.setSelection(idx, idx + findText.length());
         logText.showSelection();
         highlightFindMatch(idx, findText.length());
     }
