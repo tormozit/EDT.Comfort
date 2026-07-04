@@ -35,8 +35,13 @@ import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.IViewReference;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchPart;
+import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.contexts.IContextActivation;
+import org.eclipse.ui.contexts.IContextService;
+import org.eclipse.ui.IPartListener2;
+import org.eclipse.ui.IWindowListener;
 
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
@@ -63,6 +68,8 @@ public final class GitChangedFileMenuHook implements IStartup
     private static final String NAV_ITEM_TEXT = "Открыть в Навигаторе"; //$NON-NLS-1$
     private static final String OBJ_ITEM_TEXT = "Открыть объект";       //$NON-NLS-1$
 
+    private static final String GIT_CONTEXT_ID = "tormozit.gitChangedFile.context"; //$NON-NLS-1$
+
     @Override
     public void earlyStartup()
     {
@@ -74,7 +81,95 @@ public final class GitChangedFileMenuHook implements IStartup
             display.addFilter(SWT.MenuDetect, GitChangedFileMenuHook::handleMenuDetect);
             Global.log("GitChangedFileMenu: MenuDetect filter installed"); //$NON-NLS-1$
         });
+
+        // Установка слушателя активации/деактивации контекста для git-представлений
+        PlatformUI.getWorkbench().addWindowListener(new IWindowListener()
+        {
+            @Override
+            public void windowOpened(IWorkbenchWindow w) { hookPartListener(w); }
+            @Override
+            public void windowActivated(IWorkbenchWindow w) {}
+            @Override
+            public void windowDeactivated(IWorkbenchWindow w) {}
+            @Override
+            public void windowClosed(IWorkbenchWindow w) { unhookPartListener(w); }
+        });
+        for (IWorkbenchWindow w : PlatformUI.getWorkbench().getWorkbenchWindows())
+            hookPartListener(w);
     }
+
+    private static void hookPartListener(IWorkbenchWindow window)
+    {
+        window.getPartService().addPartListener(gitViewPartListener);
+    }
+
+    private static void unhookPartListener(IWorkbenchWindow window)
+    {
+        window.getPartService().removePartListener(gitViewPartListener);
+    }
+
+    private static IContextActivation gitContextActivation;
+    private static IContextService contextService;
+
+    private static IContextService contextService()
+    {
+        if (contextService == null)
+            contextService = PlatformUI.getWorkbench().getService(IContextService.class);
+        return contextService;
+    }
+
+    private static final IPartListener2 gitViewPartListener = new IPartListener2()
+    {
+        @Override
+        public void partActivated(IWorkbenchPartReference ref)
+        {
+            IWorkbenchPart part = ref.getPart(false);
+            if (!(part instanceof IWorkbenchPart))
+                return;
+
+            IContextService cs = contextService();
+            if (cs == null)
+                return;
+
+            if (isGitView(part))
+            {
+                if (gitContextActivation == null)
+                {
+                    gitContextActivation = cs.activateContext(GIT_CONTEXT_ID);
+                    Global.log("GitChangedFileMenu: context activated for " + part.getSite().getId()); //$NON-NLS-1$
+                }
+            }
+            else if (gitContextActivation != null)
+            {
+                cs.deactivateContext(gitContextActivation);
+                gitContextActivation = null;
+                Global.log("GitChangedFileMenu: context deactivated (non-git part=" + part.getSite().getId() + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        @Override
+        public void partClosed(IWorkbenchPartReference ref)
+        {
+            IWorkbenchPart part = ref.getPart(false);
+            if (part instanceof IWorkbenchPart && isGitView(part) && gitContextActivation != null)
+            {
+                IContextService cs = contextService();
+                if (cs != null)
+                {
+                    cs.deactivateContext(gitContextActivation);
+                    gitContextActivation = null;
+                    Global.log("GitChangedFileMenu: context deactivated (closed)"); //$NON-NLS-1$
+                }
+            }
+        }
+
+        @Override public void partOpened(IWorkbenchPartReference ref) {}
+        @Override public void partBroughtToTop(IWorkbenchPartReference ref) {}
+        @Override public void partDeactivated(IWorkbenchPartReference ref) {}
+        @Override public void partHidden(IWorkbenchPartReference ref) {}
+        @Override public void partVisible(IWorkbenchPartReference ref) {}
+        @Override public void partInputChanged(IWorkbenchPartReference ref) {}
+    };
 
     // ========================================================================
     // Entry point — диагностика event.widget
@@ -450,6 +545,43 @@ public final class GitChangedFileMenuHook implements IStartup
     // Подменю «Комфорт» — добавляет пункты при каждом открытии
     // ========================================================================
 
+    /**
+     * Берёт selection напрямую из Table/Tree под фокусом.
+     * Используется handler'ами клавиатурных привязок как fallback,
+     * когда {@code page.getSelection()} возвращает неверный тип
+     * (например, SWTCommit вместо FileDiff в HistoryView).
+     */
+    public static ISelection selectionFromFocusControl()
+    {
+        Display d = Display.getCurrent();
+        if (d == null)
+            return null;
+        Control control = d.getFocusControl();
+        if (control == null || control.isDisposed())
+            return null;
+        Control c = control;
+        while (c != null && !c.isDisposed() && !(c instanceof Table) && !(c instanceof Tree))
+            c = c.getParent();
+        if (c == null || c.isDisposed())
+            return null;
+        Object element = null;
+        if (c instanceof Table table)
+        {
+            TableItem[] items = table.getSelection();
+            if (items.length > 0)
+                element = items[0].getData();
+        }
+        else if (c instanceof Tree tree)
+        {
+            TreeItem[] items = tree.getSelection();
+            if (items.length > 0)
+                element = items[0].getData();
+        }
+        if (element != null)
+            return new StructuredSelection(element);
+        return null;
+    }
+
     /** @return selection from the widget's own Table/Tree items, or null */
     private static ISelection selectionOfClickedControl(Widget submenuWidget)
     {
@@ -544,7 +676,8 @@ public final class GitChangedFileMenuHook implements IStartup
                 EObject captured = eObject;
 
                 MenuItem navItem = new MenuItem(submenu, SWT.PUSH);
-                navItem.setText(NAV_ITEM_TEXT);
+                navItem.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
+                    NAV_ITEM_TEXT, "tormozit.git.showInNavigator", GIT_CONTEXT_ID));
                 navItem.addSelectionListener(new SelectionAdapter()
                 {
                     @Override
@@ -556,7 +689,8 @@ public final class GitChangedFileMenuHook implements IStartup
                 addedItems.add(navItem);
 
                 MenuItem objItem = new MenuItem(submenu, SWT.PUSH);
-                objItem.setText(OBJ_ITEM_TEXT);
+                objItem.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
+                    OBJ_ITEM_TEXT, "tormozit.git.openObject", GIT_CONTEXT_ID));
                 objItem.addSelectionListener(new SelectionAdapter()
                 {
                     @Override
@@ -589,7 +723,7 @@ public final class GitChangedFileMenuHook implements IStartup
     // Resolution
     // ========================================================================
 
-    private static IFile resolveFile(IViewPart view, Object element)
+    public static IFile resolveFile(IWorkbenchPart view, Object element)
     {
         if (element instanceof IFile file)
             return file;
@@ -662,7 +796,7 @@ public final class GitChangedFileMenuHook implements IStartup
         return null;
     }
 
-    private static IProject resolveProject(IViewPart view, Object element)
+    private static IProject resolveProject(IWorkbenchPart view, Object element)
     {
         // Try to get project from the part that triggered the menu (e.g. history view)
         if (view != null)
@@ -709,7 +843,7 @@ public final class GitChangedFileMenuHook implements IStartup
         return null;
     }
 
-    private static EObject resolveEObject(IFile file)
+    public static EObject resolveEObject(IFile file)
     {
         try
         {
@@ -733,7 +867,7 @@ public final class GitChangedFileMenuHook implements IStartup
     // OpenHelper — открытие объекта в редакторе EDT
     // ========================================================================
 
-    private static void openInEditor(EObject eObject, IFile file, Shell shell)
+    public static void openInEditor(EObject eObject, IFile file, Shell shell)
     {
         try
         {
@@ -818,7 +952,7 @@ public final class GitChangedFileMenuHook implements IStartup
         return window != null ? window.getActivePage() : null;
     }
 
-    private static boolean isGitView(IWorkbenchPart part)
+    public static boolean isGitView(IWorkbenchPart part)
     {
         if (part == null || part.getSite() == null)
             return false;

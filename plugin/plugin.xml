@@ -63,6 +63,10 @@
         id="tormozit.objectSets.context"
         name="Панель «Наборы объектов»"
         parentId="org.eclipse.ui.contexts.window"/>
+    <context
+        id="tormozit.gitChangedFile.context"
+        name="Представления git-файлов"
+        parentId="org.eclipse.ui.contexts.window"/>
   </extension>
 
   <extension point="org.eclipse.ui.bindings">
@@ -168,6 +172,18 @@
           schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
           sequence="M1+T">
     </key>
+    <key
+        commandId="tormozit.git.openObject"
+        contextId="tormozit.gitChangedFile.context"
+        schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
+        sequence="F2">
+    </key>
+    <key
+        commandId="tormozit.git.showInNavigator"
+        contextId="tormozit.gitChangedFile.context"
+        schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
+        sequence="M1+T">
+    </key>
   </extension>
 
   <extension point="org.eclipse.ui.commands">
@@ -249,6 +265,16 @@
         name="Показать в навигаторе"
         categoryId="tormozit.commands.global"
         description="Показать объект-владелец выбранного поля «Объект.*» дерева реквизитов формы в навигаторе (Комфорт)"/>
+    <command
+        id="tormozit.git.openObject"
+        name="Открыть объект"
+        categoryId="tormozit.commands.global"
+        description="Открыть выбранный объект конфигурации из git-представления в редакторе (Комфорт)"/>
+    <command
+        id="tormozit.git.showInNavigator"
+        name="Показать в навигаторе"
+        categoryId="tormozit.commands.global"
+        description="Показать объект из git-представления в дереве навигатора (Комфорт)"/>
     <command
         id="tormozit.OpenConfigurationObject"
         name="Открыть объект конфигурации"
@@ -476,6 +502,14 @@
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.DebugCollectionInspectHandler"
         commandId="tormozit.collectionInspect">
+    </handler>
+    <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.GitOpenObjectHandler"
+        commandId="tormozit.git.openObject">
+    </handler>
+    <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.GitShowInNavigatorHandler"
+        commandId="tormozit.git.showInNavigator">
     </handler>
   </extension>
 
