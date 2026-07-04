@@ -140,6 +140,7 @@ final class DebugCollectionSizeResolver
                 return org.eclipse.core.runtime.Status.OK_STATUS;
             int resolved = 0;
             int skipped = 0;
+            long[] lastHeartbeatMs = { 0L };
             Set<Integer> batchRows = new LinkedHashSet<>();
             for (int batchStart = 0; batchStart < cells.size(); batchStart += BATCH_SIZE)
             {
@@ -195,6 +196,21 @@ final class DebugCollectionSizeResolver
                         for (int row : rows)
                             onRowResolved.accept(row);
                     });
+                }
+                // Heartbeat для долгих проходов — без этого проход глубоко в коллекции может
+                // молчать 15-20+ секунд без единой записи в логе, пока его не отменят/он завершится;
+                // isPassBusy() в это время блокирует любые не-priority проходы.
+                long elapsedMs = System.currentTimeMillis() - startMs;
+                if (elapsedMs - lastHeartbeatMs[0] >= 2000)
+                {
+                    lastHeartbeatMs[0] = elapsedMs;
+                    // #region agent log
+                    DebugCollectionAgentLog.log("H-sizePass", "SizeResolver.schedulePass", "heartbeat", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        "{\"generation\":" + generation //$NON-NLS-1$ //$NON-NLS-2$
+                            + ",\"elapsedMs\":" + elapsedMs //$NON-NLS-1$ //$NON-NLS-2$
+                            + ",\"processed\":" + Math.min(cells.size(), batchEnd) + ",\"of\":" + cells.size() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                            + ",\"resolvedSoFar\":" + resolved + ",\"skippedSoFar\":" + skipped + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    // #endregion
                 }
             }
             boolean needsRetry = skipped > 0;

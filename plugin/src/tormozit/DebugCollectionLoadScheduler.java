@@ -38,6 +38,7 @@ final class DebugCollectionLoadScheduler
     private static final long VIEWPORT_KICK_DELAY_MS = 150L;
     private static final long SIZE_PASS_DEBOUNCE_MS = 120L;
     private static final long SIZE_PASS_RETRY_DEBOUNCE_MS = 180L;
+    private static final long SIZE_PASS_RETRY_MAX_DELAY_MS = 5000L;
     private static final long SIZE_REPAINT_DEBOUNCE_MS = 80L;
     private static final int DEBUG_DETAIL_STATE = 256;
     private static final int DEBUG_DETAIL_CONTENT = 512;
@@ -106,6 +107,12 @@ final class DebugCollectionLoadScheduler
         new java.util.concurrent.atomic.AtomicBoolean();
     private final java.util.concurrent.atomic.AtomicBoolean firstSizePassCompleted =
         new java.util.concurrent.atomic.AtomicBoolean();
+    // Счётчик подряд идущих "пустых" retry (needsRetry=true, но без реального прогресса) —
+    // без него scheduleSizeRetryDebounced() долбит ровно каждые 180мс НАВСЕГДА, даже когда
+    // застрявшие ячейки провисят там же (contentLoaded=false, вне viewport) и в принципе не могут
+    // продвинуться без нового скролла. Видели в логе: 68 подряд retry по ~1мс каждый за 13 секунд.
+    private final java.util.concurrent.atomic.AtomicInteger sizeRetryNoProgressStreak =
+        new java.util.concurrent.atomic.AtomicInteger();
     private IDebugEventSetListener debugEventListener;
     private Runnable debugRefreshDebounce;
     private Runnable viewportKickDebounce;
@@ -431,6 +438,7 @@ final class DebugCollectionLoadScheduler
         if (viewportChanged)
         {
             sizePassOverscanPhase.set(false);
+            sizeRetryNoProgressStreak.set(0);
             int gen = sizePassGeneration.incrementAndGet();
             viewportGeneration.incrementAndGet();
             DebugCollectionSizeResolver.cancelPass(gen);
@@ -445,6 +453,10 @@ final class DebugCollectionLoadScheduler
         {
             if (DebugCollectionSizeResolver.isPassBusy())
             {
+                // #region agent log
+                DebugCollectionAgentLog.log("H-sizePassBusy", "LoadScheduler.runSizePass", "deferredBusy", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"reason\":\"" + reason + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
                 sizeRetryPending.set(true);
                 return;
             }
@@ -518,13 +530,25 @@ final class DebugCollectionLoadScheduler
                 if (progress != null && !disposed.get())
                     progress.onRepaintLogicalRow(logicalRow);
             },
-            () -> fireRowsReadyDebounced(readyFrom, readyCount),
+            () -> {
+                sizeRetryNoProgressStreak.set(0); // реальный прогресс — сбрасываем бэкофф
+                fireRowsReadyDebounced(readyFrom, readyCount);
+            },
             needsRetry -> {
                 if (disposed.get() || !isShellActiveForLoad())
                     return;
                 firstSizePassCompleted.set(true);
                 if (needsRetry)
-                    scheduleSizeRetryDebounced();
+                {
+                    int streak = sizeRetryNoProgressStreak.incrementAndGet();
+                    long delay = Math.min(SIZE_PASS_RETRY_MAX_DELAY_MS,
+                        SIZE_PASS_RETRY_DEBOUNCE_MS << Math.min(streak, 8));
+                    // #region agent log
+                    DebugCollectionAgentLog.log("H-sizeRetryBackoff", "LoadScheduler.executeSizePass", "backoff", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        "{\"streak\":" + streak + ",\"delayMs\":" + delay + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    // #endregion
+                    scheduleSizeRetryDebounced(delay);
+                }
                 else if (!includeOverscan)
                 {
                     sizePassOverscanPhase.set(true);
