@@ -16,7 +16,7 @@ import com._1c.g5.v8.dt.debug.core.model.values.IBslValue;
 /**
  * Модель коллекции: строки — из {@link IBslIndexedValue} (как input штатного {@code TableViewer}),
  * текст ячеек — лениво при {@code SWT.SetData} через {@link #getCellDisplayText}, с мемо-кэшем до
- * {@link #invalidateAllCells()}. {@link #rowVariables} — только для clone-import.
+ * {@link #invalidateAllCells()}. {@link #rowVariables} — опциональный импорт (clone); live-строки — через {@link IBslIndexedValue}.
  */
 final class DebugCollectionTableModel
 {
@@ -136,7 +136,15 @@ final class DebugCollectionTableModel
 
     IBslVariable getRowVariable(int logicalRow)
     {
-        return rowVariables.get(logicalRow);
+        try
+        {
+            return rowVariable(logicalRow);
+        }
+        catch (DebugException e)
+        {
+            DebugCollectionDebug.problem("getRowVariable: " + e.getMessage()); //$NON-NLS-1$
+            return null;
+        }
     }
 
     void putRowVariables(int from, IBslVariable[] vars)
