@@ -1,13 +1,16 @@
 package tormozit;
 import java.lang.reflect.Field;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
+import java.util.Objects;
+import java.util.function.IntSupplier;
 
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
-import org.eclipse.jface.dialogs.IDialogSettings; // Добавлен импорт
+import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.viewers.AbstractTreeViewer;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.ViewerFilter;
@@ -16,10 +19,8 @@ import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
-import org.eclipse.jface.viewers.ITableLabelProvider;
 import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.swt.SWT;
-import org.eclipse.swt.custom.BusyIndicator;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
@@ -27,7 +28,6 @@ import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Text;
-import org.eclipse.swt.widgets.Tree;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IPartService;
 import org.eclipse.ui.IWorkbenchPart;
@@ -43,8 +43,11 @@ import com._1c.g5.v8.dt.compare.ui.partialmodel.node.AbstractNodeWithLabels;
 public class CompareConfigSearchDialogHook
 {
     private static final String PATCHED_KEY = "tormozit.searchPatched"; //$NON-NLS-1$
+    private static final String SESSION_KEY = "tormozit.compareSearchSession"; //$NON-NLS-1$
     private static final String DIALOG_CLASS = "ComparisonTreeSearchDialog"; //$NON-NLS-1$
-    
+    private static final int PROGRESS_INTERVAL_MS = 2000;
+    private static final int COLLECT_CANCEL_CHECK_INTERVAL = 256;
+
     // Ключи настроек для хранения в dialog_settings.xml
     private static final String SETTINGS_SECTION = "TormozitCompareConfigSearchSettings"; //$NON-NLS-1$
     private static final String KEY_SEARCH_All_rows = "searchAllRows"; //$NON-NLS-1$
@@ -58,7 +61,7 @@ public class CompareConfigSearchDialogHook
                 return;
             Shell shell = (Shell)event.widget;
             if (shell.getData(PATCHED_KEY) != null)
-                return; 
+                return;
 
             Object dialog = shell.getData();
             if (dialog == null)
@@ -82,53 +85,49 @@ public class CompareConfigSearchDialogHook
 
         Composite parent = btnCase != null ? btnCase.getParent() : btnNext.getParent();
 
-        // Получаем сохраненные настройки диалога
         IDialogSettings settings = getDialogSettings();
 
         Button cbSearchAllRows = new Button(parent, SWT.CHECK);
         cbSearchAllRows.setText("По всем строкам");
         cbSearchAllRows.setToolTipText("Стандартный поиск EDT ищет только по строкам имен объектов. Этот флажок включает просмотр всех строк" + Global.pluginSignForTooltip());
         cbSearchAllRows.setLayoutData(new GridData(GridData.BEGINNING, GridData.CENTER, false, false));
-        
-        // Восстановление состояния при открытии (по умолчанию true, если настройки еще не создавались)
+
         boolean loadDetailed = settings.get(KEY_SEARCH_All_rows) == null ? true : settings.getBoolean(KEY_SEARCH_All_rows);
         cbSearchAllRows.setSelection(loadDetailed);
 
-        // Сохранение при изменении состояния флажка строк
         cbSearchAllRows.addListener(SWT.Selection, event -> {
             settings.put(KEY_SEARCH_All_rows, cbSearchAllRows.getSelection());
         });
 
         if (btnCase != null)
             cbSearchAllRows.moveBelow(btnCase);
-        
+
         Button cbSearchAllColumns = new Button(parent, SWT.CHECK);
         cbSearchAllColumns.setText("По всем колонкам");
         cbSearchAllColumns.setToolTipText("Дополнительно к поиску в колонках значений еще искать в колонке \"Объект\"" + Global.pluginSignForTooltip());
         cbSearchAllColumns.setLayoutData(new GridData(GridData.BEGINNING, GridData.CENTER, false, false));
 
-        // Восстановление состояния при открытии (по умолчанию true, если настройки еще не создавались)
         boolean loadObjectCol = settings.get(KEY_SEARCH_All_columns) == null ? true : settings.getBoolean(KEY_SEARCH_All_columns);
         cbSearchAllColumns.setSelection(loadObjectCol);
 
-        // Сохранение при изменении состояния флажка колонок
         cbSearchAllColumns.addListener(SWT.Selection, event -> {
             settings.put(KEY_SEARCH_All_columns, cbSearchAllColumns.getSelection());
         });
-        
+
         if (btnCase != null)
             cbSearchAllColumns.moveBelow(btnCase);
-        
-        interceptButton(btnNext, cbSearchAllRows, dialog, false, cbSearchAllColumns);
-        interceptButton(btnPrev, cbSearchAllRows, dialog, true, cbSearchAllColumns);
+
+        CompareConfigSearchSession session = new CompareConfigSearchSession(shell, dialog, btnNext, btnPrev);
+        shell.setData(SESSION_KEY, session);
+        shell.addListener(SWT.Close, event -> session.onShellClose());
+
+        interceptButton(btnNext, cbSearchAllRows, session, false, cbSearchAllColumns);
+        interceptButton(btnPrev, cbSearchAllRows, session, true, cbSearchAllColumns);
 
         parent.layout(true, true);
         shell.pack();
     }
-    
-    /**
-     * Вспомогательный метод для получения секции настроек плагина.
-     */
+
     private static IDialogSettings getDialogSettings()
     {
         IDialogSettings topSettings = Activator.getDefault().getDialogSettings();
@@ -140,7 +139,7 @@ public class CompareConfigSearchDialogHook
         return section;
     }
 
-    private static void interceptButton(Button button, Button cbSearchAllRows, Object dialog, boolean backward, Button cbSearchAllColumns)
+    private static void interceptButton(Button button, Button cbSearchAllRows, CompareConfigSearchSession session, boolean backward, Button cbSearchAllColumns)
     {
         Listener[] original = button.getListeners(SWT.Selection);
         for (Listener l : original)
@@ -155,137 +154,18 @@ public class CompareConfigSearchDialogHook
             }
             else
             {
-                performFullTreeSearch(dialog, backward, cbSearchAllColumns.getSelection());
+                if (session.isRunning())
+                    return;
+                session.startSearch(backward, cbSearchAllColumns.getSelection());
             }
         });
     }
 
-    // ---- Поиск по всей модели дерева ----
-
-    private static void performFullTreeSearch(Object dialog, boolean backward, boolean cbSearchAllColumns)
+    private static int computeTreeCacheKey(AbstractTreeViewer viewer, Object input)
     {
-        Text textFilter = (Text)getField(dialog, "textFilter"); //$NON-NLS-1$
-        if (textFilter == null || textFilter.isDisposed())
-            return;
-
-        String query = textFilter.getText();
-        if (query.isEmpty())
-            return;
-
-        Button cbCase = (Button)getField(dialog, "buttonCaseSensitive"); //$NON-NLS-1$
-        boolean caseSensitive = cbCase != null && cbCase.getSelection();
-        String effectiveQuery = caseSensitive ? query : query.toLowerCase();
-
-        if (Global.isLogEnabled())
-            Global.log("CompareSearch", "start query=\"" + query + "\" backward=" + backward + " allColumns=" + cbSearchAllColumns); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-
-        AbstractTreeViewer viewer = getTreeViewerFromDialog(dialog);
-        if (viewer == null)
-            return;
-            
-        IContentProvider cp = viewer.getContentProvider();
-        if (!(cp instanceof ITreeContentProvider))
-            return;
-        ITreeContentProvider provider = (ITreeContentProvider) cp;
-
-        // Собираем все элементы модели (включая нераскрытые) на UI-потоке
-        long t0 = System.currentTimeMillis();
-        List<Object> items = new ArrayList<>();
-        BusyIndicator.showWhile(Display.getCurrent(), () ->
-        {
-            Object[] roots = provider.getElements(viewer.getInput());
-            if (roots != null)
-            {
-                for (Object root : roots)
-                {
-                    items.add(root);
-                    collectModelItems(root, provider, items, viewer);
-                }
-            }
-        });
-        long collectMs = System.currentTimeMillis() - t0;
-
-        if (items.isEmpty())
-            return;
-
-        if (Global.isLogEnabled())
-            Global.log("CompareSearch", "collected " + items.size() + " items in " + collectMs + "ms"); //$NON-NLS-1$ //$NON-NLS-2$
-
-        // Фиксируем ссылки для фонового потока
-        IBaseLabelProvider labelProvider = viewer.getLabelProvider();
-
-        // Определяем текущую позицию
-        ISelection sel = viewer.getSelection();
-        int startIdx = (sel instanceof IStructuredSelection && !sel.isEmpty())
-            ? items.indexOf(((IStructuredSelection) sel).getFirstElement())
-            : -1;
-
-        int n = items.size();
-        int step = backward ? n - 1 : 1;
-
-        // Фоновый поиск через Job с прогрессом и кнопкой "Отмена"
-        Job job = new Job("Поиск по дереву сравнения...") //$NON-NLS-1$
-        {
-            @Override
-            protected IStatus run(IProgressMonitor monitor)
-            {
-                monitor.beginTask("Поиск по дереву сравнения...", n); //$NON-NLS-1$
-
-                for (int i = 1; i <= n; i++)
-                {
-                    if (monitor.isCanceled())
-                    {
-                        if (Global.isLogEnabled())
-                            Global.log("CompareSearch", "cancelled by user at i=" + i); //$NON-NLS-1$
-                        return Status.CANCEL_STATUS;
-                    }
-
-                    int idx = (startIdx + i * step) % n;
-                    Object candidate = items.get(idx);
-
-                    if (isMatched(candidate, effectiveQuery, caseSensitive, labelProvider, cbSearchAllColumns))
-                    {
-                        Object found = candidate;
-                        Display.getDefault().asyncExec(() ->
-                        {
-                            if (textFilter.isDisposed())
-                                return;
-                            viewer.setSelection(new StructuredSelection(found), true);
-                            if (!viewer.getSelection().isEmpty())
-                                clearStatus(dialog);
-                        });
-
-                        if (Global.isLogEnabled())
-                            Global.log("CompareSearch", "found at i=" + i + " idx=" + idx); //$NON-NLS-1$ //$NON-NLS-2$
-
-                        monitor.done();
-                        return Status.OK_STATUS;
-                    }
-
-                    if (Global.isLogEnabled() && i % 500 == 0)
-                        Global.log("CompareSearch", "progress " + i + "/" + n); //$NON-NLS-1$ //$NON-NLS-2$
-
-                    monitor.worked(1);
-                }
-
-                // Ничего не найдено
-                Display.getDefault().asyncExec(() ->
-                {
-                    if (!textFilter.isDisposed())
-                        setStatus(dialog, "Совпадений не найдено"); //$NON-NLS-1$
-                });
-
-                if (Global.isLogEnabled())
-                    Global.log("CompareSearch", "no match after " + n + " items"); //$NON-NLS-1$
-
-                monitor.done();
-                return Status.OK_STATUS;
-            }
-        };
-        job.setUser(true);
-        job.schedule();
+        return Objects.hash(Arrays.hashCode(viewer.getFilters()), System.identityHashCode(input));
     }
-    
+
     public static boolean isNodeMatchFilters(
         Object element,
         AbstractTreeViewer viewer)
@@ -300,31 +180,69 @@ public class CompareConfigSearchDialogHook
 
         return true;
     }
-    
-    /** Рекурсивно собирает все элементы модели, используя провайдер контента и фильтры. */
-    private static void collectModelItems(Object parent, ITreeContentProvider provider, List<Object> result, AbstractTreeViewer viewer)
+
+    private static boolean collectModelItems(
+        Object parent,
+        ITreeContentProvider provider,
+        List<Object> result,
+        AbstractTreeViewer viewer,
+        CollectProgress progress)
     {
         Object[] children = provider.getChildren(parent);
         if (children != null)
         {
             for (Object child : children)
             {
+                if (!progress.tick())
+                    return false;
                 if (isNodeMatchFilters(child, viewer))
                 {
                     result.add(child);
+                    progress.nodeAdded();
                 }
-                collectModelItems(child, provider, result, viewer);
+                if (!collectModelItems(child, provider, result, viewer, progress))
+                    return false;
             }
+        }
+        return true;
+    }
+
+    private static final class CollectProgress
+    {
+        private final int generation;
+        private final IntSupplier activeGeneration;
+        private final IProgressMonitor monitor;
+        private final Runnable onNodeAdded;
+        private int nodesSinceCheck;
+
+        CollectProgress(int generation, IntSupplier activeGeneration, IProgressMonitor monitor, Runnable onNodeAdded)
+        {
+            this.generation = generation;
+            this.activeGeneration = activeGeneration;
+            this.monitor = monitor;
+            this.onNodeAdded = onNodeAdded;
+        }
+
+        boolean tick()
+        {
+            if (++nodesSinceCheck < COLLECT_CANCEL_CHECK_INTERVAL)
+                return true;
+            nodesSinceCheck = 0;
+            return !monitor.isCanceled() && generation == activeGeneration.getAsInt();
+        }
+
+        void nodeAdded()
+        {
+            onNodeAdded.run();
         }
     }
 
-    /** Проверяет совпадение текста в ячейках модели через LabelProvider. */
     private static boolean isMatched(Object element, String query, boolean caseSensitive, IBaseLabelProvider baseLabelProvider, boolean cbSearchAllColumns)
     {
         if (baseLabelProvider instanceof ILabelProvider) {
             String text;
             if (element instanceof AbstractNodeWithLabels) {
-                AbstractNodeWithLabels node = (AbstractNodeWithLabels) element; 
+                AbstractNodeWithLabels node = (AbstractNodeWithLabels) element;
                 text = node.getSideLabel(ComparisonSide.MAIN);
                 if (text != null && (caseSensitive ? text.contains(query) : text.toLowerCase().contains(query)))
                 {
@@ -342,7 +260,7 @@ public class CompareConfigSearchDialogHook
                 }
             }
             if (cbSearchAllColumns && element instanceof AbstractDirectPartialModelNode) {
-                AbstractDirectPartialModelNode node = (AbstractDirectPartialModelNode) element; 
+                AbstractDirectPartialModelNode node = (AbstractDirectPartialModelNode) element;
                 text = node.getLabel();
                 if (text != null && (caseSensitive ? text.contains(query) : text.toLowerCase().contains(query)))
                 {
@@ -352,8 +270,6 @@ public class CompareConfigSearchDialogHook
         }
         return false;
     }
-
-    // ---- Статус-строка диалога ----
 
     private static void setStatus(Object dialog, String message)
     {
@@ -369,7 +285,14 @@ public class CompareConfigSearchDialogHook
         setStatus(dialog, ""); //$NON-NLS-1$
     }
 
-    // ---- Получение TreeViewer из диалога ----
+    private static void updateDialog(Object dialog)
+    {
+        try
+        {
+            dialog.getClass().getMethod("update").invoke(dialog); //$NON-NLS-1$
+        }
+        catch (Exception ignored) {}
+    }
 
     private static AbstractTreeViewer getTreeViewerFromDialog(Object dialog)
     {
@@ -397,8 +320,6 @@ public class CompareConfigSearchDialogHook
         return (viewer instanceof AbstractTreeViewer) ? (AbstractTreeViewer)viewer : null;
     }
 
-    // ---- Утилиты рефлексии ----
-
     private static Object getField(Object obj, String name)
     {
         Class<?> cls = obj.getClass();
@@ -421,5 +342,309 @@ public class CompareConfigSearchDialogHook
         if (o == null) return null;
         try { return o.getClass().getMethod(name).invoke(o); }
         catch (Exception ignored) { return null; }
+    }
+
+    /**
+     * Фоновый прерываемый поиск по всему дереву сравнения (флажок «По всем строкам»).
+     */
+    private static final class CompareConfigSearchSession
+    {
+        private final Shell shell;
+        private final Object dialog;
+        private final Button btnNext;
+        private final Button btnPrev;
+
+        private volatile Job activeJob;
+        private volatile int scanned;
+        private volatile int total;
+        private volatile int collected;
+        private volatile boolean collecting;
+        private volatile boolean running;
+        private int activeGeneration;
+        private Runnable progressTick;
+
+        private List<Object> cachedItems;
+        private Object cachedInput;
+        private int cachedFilterHash;
+
+        CompareConfigSearchSession(Shell shell, Object dialog, Button btnNext, Button btnPrev)
+        {
+            this.shell = shell;
+            this.dialog = dialog;
+            this.btnNext = btnNext;
+            this.btnPrev = btnPrev;
+        }
+
+        boolean isRunning()
+        {
+            return running;
+        }
+
+        void onShellClose()
+        {
+            cancel();
+            invalidateCache();
+        }
+
+        void cancel()
+        {
+            stopProgressTimer();
+            Job job = activeJob;
+            activeJob = null;
+            if (job != null)
+                job.cancel();
+            if (running)
+            {
+                running = false;
+                activeGeneration++;
+            }
+        }
+
+        private void invalidateCache()
+        {
+            cachedItems = null;
+            cachedInput = null;
+            cachedFilterHash = 0;
+        }
+
+        private boolean isCacheValid(Object input, int filterHash)
+        {
+            return cachedItems != null && cachedInput == input && cachedFilterHash == filterHash;
+        }
+
+        private void saveCache(Object input, int filterHash, List<Object> items)
+        {
+            cachedInput = input;
+            cachedFilterHash = filterHash;
+            cachedItems = items;
+        }
+
+        void startSearch(boolean backward, boolean searchAllColumns)
+        {
+            cancel();
+            activeGeneration++;
+
+            Text textFilter = (Text)getField(dialog, "textFilter"); //$NON-NLS-1$
+            if (textFilter == null || textFilter.isDisposed())
+                return;
+
+            String query = textFilter.getText();
+            if (query.isEmpty())
+                return;
+
+            Button cbCase = (Button)getField(dialog, "buttonCaseSensitive"); //$NON-NLS-1$
+            boolean caseSensitive = cbCase != null && cbCase.getSelection();
+            String effectiveQuery = caseSensitive ? query : query.toLowerCase();
+
+            AbstractTreeViewer viewer = getTreeViewerFromDialog(dialog);
+            if (viewer == null)
+                return;
+
+            IContentProvider cp = viewer.getContentProvider();
+            if (!(cp instanceof ITreeContentProvider))
+                return;
+            ITreeContentProvider provider = (ITreeContentProvider) cp;
+
+            IBaseLabelProvider labelProvider = viewer.getLabelProvider();
+            ISelection sel = viewer.getSelection();
+            Object input = viewer.getInput();
+            int filterHash = computeTreeCacheKey(viewer, input);
+            boolean cacheHit = isCacheValid(input, filterHash);
+
+            final int generation = activeGeneration;
+            running = true;
+            collecting = !cacheHit;
+            scanned = 0;
+            total = cacheHit ? cachedItems.size() : 0;
+            collected = 0;
+
+            setSearchButtonsEnabled(false);
+            startProgressTimer(generation);
+
+            if (Global.isLogEnabled())
+                Global.log("CompareSearch", "start query=\"" + query + "\" backward=" + backward + " allColumns=" + searchAllColumns + " cacheHit=" + cacheHit); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+
+            Job job = new Job("Поиск по дереву сравнения...") //$NON-NLS-1$
+            {
+                @Override
+                protected IStatus run(IProgressMonitor monitor)
+                {
+                    if (generation != activeGeneration)
+                        return Status.CANCEL_STATUS;
+
+                    List<Object> items;
+                    if (cacheHit)
+                    {
+                        items = cachedItems;
+                    }
+                    else
+                    {
+                        long t0 = System.currentTimeMillis();
+                        items = new ArrayList<>();
+                        CollectProgress progress = new CollectProgress(
+                            generation,
+                            () -> activeGeneration,
+                            monitor,
+                            () -> collected++);
+
+                        Object[] roots = provider.getElements(input);
+                        if (roots != null)
+                        {
+                            for (Object root : roots)
+                            {
+                                if (!progress.tick())
+                                    return finishCancelled(generation);
+                                items.add(root);
+                                progress.nodeAdded();
+                                if (!collectModelItems(root, provider, items, viewer, progress))
+                                    return finishCancelled(generation);
+                            }
+                        }
+                        long collectMs = System.currentTimeMillis() - t0;
+
+                        if (Global.isLogEnabled())
+                            Global.log("CompareSearch", "collected " + items.size() + " items in " + collectMs + "ms"); //$NON-NLS-1$ //$NON-NLS-2$
+
+                        saveCache(input, filterHash, items);
+                        collecting = false;
+                    }
+
+                    int n = items.size();
+                    total = n;
+                    scanned = 0;
+
+                    if (n <= 0)
+                    {
+                        finishOnUi(generation, false, false);
+                        return Status.OK_STATUS;
+                    }
+
+                    int startIdx = (sel instanceof IStructuredSelection && !sel.isEmpty())
+                        ? items.indexOf(((IStructuredSelection) sel).getFirstElement())
+                        : -1;
+
+                    monitor.beginTask("Поиск по дереву сравнения...", n); //$NON-NLS-1$
+
+                    for (int i = 1; i <= n; i++)
+                    {
+                        if (monitor.isCanceled() || generation != activeGeneration)
+                            return finishCancelled(generation);
+
+                        int idx = backward
+                            ? Math.floorMod(startIdx - i, n)
+                            : (startIdx + i) % n;
+                        Object candidate = items.get(idx);
+
+                        if (isMatched(candidate, effectiveQuery, caseSensitive, labelProvider, searchAllColumns))
+                        {
+                            Object found = candidate;
+                            Display.getDefault().asyncExec(() ->
+                            {
+                                if (generation != activeGeneration || textFilter.isDisposed())
+                                    return;
+                                viewer.setSelection(new StructuredSelection(found), true);
+                                finishOnUi(generation, false, true);
+                            });
+
+                            if (Global.isLogEnabled())
+                                Global.log("CompareSearch", "found at i=" + i + " idx=" + idx); //$NON-NLS-1$ //$NON-NLS-2$
+
+                            monitor.done();
+                            return Status.OK_STATUS;
+                        }
+
+                        scanned = i;
+
+                        if (Global.isLogEnabled() && i % 500 == 0)
+                            Global.log("CompareSearch", "progress " + i + "/" + n); //$NON-NLS-1$ //$NON-NLS-2$
+
+                        monitor.worked(1);
+                    }
+
+                    if (Global.isLogEnabled())
+                        Global.log("CompareSearch", "no match after " + n + " items"); //$NON-NLS-1$
+
+                    finishOnUi(generation, false, false);
+                    monitor.done();
+                    return Status.OK_STATUS;
+                }
+            };
+            activeJob = job;
+            job.setSystem(true);
+            job.schedule();
+        }
+
+        private IStatus finishCancelled(int generation)
+        {
+            if (Global.isLogEnabled())
+                Global.log("CompareSearch", "cancelled"); //$NON-NLS-1$
+            finishOnUi(generation, true, false);
+            return Status.CANCEL_STATUS;
+        }
+
+        private void finishOnUi(int generation, boolean cancelled, boolean found)
+        {
+            Display display = shell != null && !shell.isDisposed() ? shell.getDisplay() : null;
+            if (display == null || display.isDisposed())
+            {
+                running = false;
+                activeJob = null;
+                stopProgressTimer();
+                return;
+            }
+            display.asyncExec(() ->
+            {
+                if (generation != activeGeneration)
+                    return;
+                stopProgressTimer();
+                activeJob = null;
+                running = false;
+                if (shell.isDisposed())
+                    return;
+                if (cancelled)
+                    clearStatus(dialog);
+                else if (found)
+                    setStatus(dialog, "Найдено"); //$NON-NLS-1$
+                else
+                    setStatus(dialog, "Не найдено"); //$NON-NLS-1$
+                updateDialog(dialog);
+            });
+        }
+
+        private void setSearchButtonsEnabled(boolean enabled)
+        {
+            if (btnNext != null && !btnNext.isDisposed())
+                btnNext.setEnabled(enabled);
+            if (btnPrev != null && !btnPrev.isDisposed())
+                btnPrev.setEnabled(enabled);
+        }
+
+        private void startProgressTimer(int generation)
+        {
+            stopProgressTimer();
+            Display display = shell.getDisplay();
+            progressTick = () ->
+            {
+                if (generation != activeGeneration || !running || shell.isDisposed())
+                    return;
+                if (collecting)
+                    setStatus(dialog, "Сбор узлов… " + collected); //$NON-NLS-1$
+                else
+                    setStatus(dialog, "Поиск…"); //$NON-NLS-1$
+                if (running && generation == activeGeneration && !shell.isDisposed())
+                    display.timerExec(PROGRESS_INTERVAL_MS, progressTick);
+            };
+            display.timerExec(PROGRESS_INTERVAL_MS, progressTick);
+        }
+
+        private void stopProgressTimer()
+        {
+            if (progressTick == null)
+                return;
+            Display display = shell != null && !shell.isDisposed() ? shell.getDisplay() : null;
+            if (display != null && !display.isDisposed())
+                display.timerExec(-1, progressTick);
+            progressTick = null;
+        }
     }
 }
