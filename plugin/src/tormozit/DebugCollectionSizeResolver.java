@@ -5,10 +5,13 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.concurrent.CompletionService;
+import java.util.concurrent.ExecutorCompletionService;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntConsumer;
 
@@ -27,9 +30,9 @@ import com._1c.g5.v8.dt.debug.core.model.values.IBslValue;
  */
 final class DebugCollectionSizeResolver
 {
-    private static final int MAX_CONCURRENT_EVALUATE = 2;
+    private static final int MAX_CONCURRENT_EVALUATE = 1;
     private static final int EVALUATE_POLL_MAX = 60;
-    private static final int BATCH_SIZE = 12;
+    private static final int BATCH_SIZE = 6;
 
     private static final AtomicInteger cancelled = new AtomicInteger();
     private static final AtomicInteger activeGeneration = new AtomicInteger(-1);
@@ -142,50 +145,66 @@ final class DebugCollectionSizeResolver
             int skipped = 0;
             long[] lastHeartbeatMs = { 0L };
             Set<Integer> batchRows = new LinkedHashSet<>();
-            for (int batchStart = 0; batchStart < cells.size(); batchStart += BATCH_SIZE)
+            // Раньше: партиями по BATCH_SIZE, с барьером — весь пул ждал, пока ДОСЧИТАЮТСЯ все
+            // ячейки текущей партии, прежде чем в пул уходила следующая. Если хоть одна ячейка партии
+            // упиралась в полный EVALUATE_POLL_MAX (6с), остальные 5 воркеров всё это время простаивали,
+            // хотя могли бы уже забирать следующие ячейки. Видели в логе: +6 ячеек ровно каждые 6с подряд
+            // несколько раз — явный барьерный эффект. Теперь все ячейки отправляются в пул сразу,
+            // а результаты разбираются по мере готовности (ExecutorCompletionService) — воркер,
+            // освободившийся раньше остальных, тут же берёт следующую ячейку, не дожидаясь соседей.
+            CompletionService<ResolveOutcome> completionService = new ExecutorCompletionService<>(evaluateExecutor);
+            int submitted = 0;
+            for (int[] cell : cells)
+            {
+                final int row = cell[0];
+                final int col = cell[1];
+                completionService.submit((Callable<ResolveOutcome>) () -> {
+                    if (cancelled.get() != 0 || generation != activeGeneration.get())
+                        return new ResolveOutcome("stale", -1); //$NON-NLS-1$
+                    return resolveCellSize(model, row, col, generation);
+                });
+                submitted++;
+            }
+            for (int processed = 0; processed < submitted; processed++)
             {
                 if (monitor.isCanceled() || cancelled.get() != 0 || generation != activeGeneration.get())
                     break;
-                int batchEnd = Math.min(cells.size(), batchStart + BATCH_SIZE);
-                List<Future<ResolveOutcome>> futures = new ArrayList<>(batchEnd - batchStart);
-                for (int i = batchStart; i < batchEnd; i++)
+                Future<ResolveOutcome> future;
+                try
                 {
-                    if (monitor.isCanceled() || cancelled.get() != 0 || generation != activeGeneration.get())
-                        break;
-                    int[] cell = cells.get(i);
-                    final int row = cell[0];
-                    final int col = cell[1];
-                    futures.add(evaluateExecutor.submit((Callable<ResolveOutcome>) () -> {
-                        if (cancelled.get() != 0 || generation != activeGeneration.get())
-                            return new ResolveOutcome("stale", -1); //$NON-NLS-1$
-                        return resolveCellSize(model, row, col, generation);
-                    }));
+                    future = completionService.poll(200, TimeUnit.MILLISECONDS);
                 }
-                for (Future<ResolveOutcome> future : futures)
+                catch (InterruptedException e)
                 {
-                    if (monitor.isCanceled() || cancelled.get() != 0 || generation != activeGeneration.get())
-                        break;
-                    try
-                    {
-                        ResolveOutcome outcome = future.get();
-                        if ("size".equals(outcome.outcome)) //$NON-NLS-1$
-                        {
-                            resolved++;
-                            if (outcome.row >= 0)
-                                batchRows.add(outcome.row);
-                            logSizeCellSample(outcome.row, outcome.col, outcome);
-                        }
-                        else if ("pending".equals(outcome.outcome)) //$NON-NLS-1$
-                            skipped++;
-                    }
-                    catch (Exception e)
-                    {
-                        if (!(e instanceof InterruptedException))
-                            DebugCollectionDebug.problem("sizePass future: " + e); //$NON-NLS-1$
-                        Thread.currentThread().interrupt();
-                    }
+                    Thread.currentThread().interrupt();
+                    break;
                 }
-                if (!batchRows.isEmpty() && onRowResolved != null && !display.isDisposed() && cancelled.get() == 0)
+                if (future == null)
+                {
+                    processed--; // ничего не готово за этот тик — не считаем как обработанное, ждём ещё
+                    continue;
+                }
+                try
+                {
+                    ResolveOutcome outcome = future.get();
+                    if ("size".equals(outcome.outcome)) //$NON-NLS-1$
+                    {
+                        resolved++;
+                        if (outcome.row >= 0)
+                            batchRows.add(outcome.row);
+                        logSizeCellSample(outcome.row, outcome.col, outcome);
+                    }
+                    else if ("pending".equals(outcome.outcome)) //$NON-NLS-1$
+                        skipped++;
+                }
+                catch (Exception e)
+                {
+                    if (!(e instanceof InterruptedException))
+                        DebugCollectionDebug.problem("sizePass future: " + e); //$NON-NLS-1$
+                    Thread.currentThread().interrupt();
+                }
+                // Отдаём в UI небольшими порциями по мере готовности, не дожидаясь всего прохода.
+                if (batchRows.size() >= BATCH_SIZE && onRowResolved != null && !display.isDisposed() && cancelled.get() == 0)
                 {
                     int[] rows = batchRows.stream().mapToInt(Integer::intValue).toArray();
                     batchRows.clear();
@@ -208,10 +227,22 @@ final class DebugCollectionSizeResolver
                     DebugCollectionAgentLog.log("H-sizePass", "SizeResolver.schedulePass", "heartbeat", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                         "{\"generation\":" + generation //$NON-NLS-1$ //$NON-NLS-2$
                             + ",\"elapsedMs\":" + elapsedMs //$NON-NLS-1$ //$NON-NLS-2$
-                            + ",\"processed\":" + Math.min(cells.size(), batchEnd) + ",\"of\":" + cells.size() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                            + ",\"processed\":" + (processed + 1) + ",\"of\":" + cells.size() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                             + ",\"resolvedSoFar\":" + resolved + ",\"skippedSoFar\":" + skipped + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     // #endregion
                 }
+            }
+            // Хвост — то, что не набралось до BATCH_SIZE перед выходом из цикла.
+            if (!batchRows.isEmpty() && onRowResolved != null && !display.isDisposed() && cancelled.get() == 0)
+            {
+                int[] rows = batchRows.stream().mapToInt(Integer::intValue).toArray();
+                final int batchGen = generation;
+                display.asyncExec(() -> {
+                    if (cancelled.get() != 0 || batchGen != activeGeneration.get())
+                        return;
+                    for (int row : rows)
+                        onRowResolved.accept(row);
+                });
             }
             boolean needsRetry = skipped > 0;
             boolean stale = generation != activeGeneration.get();

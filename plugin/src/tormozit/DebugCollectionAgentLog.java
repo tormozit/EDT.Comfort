@@ -7,7 +7,7 @@ final class DebugCollectionAgentLog
 {
     private static final String LOG_PATH = "C:\\VC\\EDT.Comfort\\debug-e49ee4.log"; //$NON-NLS-1$
 
-    static final String BUILD = "diag-H22"; //$NON-NLS-1$
+    static final String BUILD = "diag-vscroll-clean"; //$NON-NLS-1$
 
     private static volatile String sessionId = ""; //$NON-NLS-1$
 

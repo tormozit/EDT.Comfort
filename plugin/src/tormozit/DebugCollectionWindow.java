@@ -85,7 +85,6 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
     private Combo presentationField;
     private Text collectionPathField;
     private boolean applyingPresentation;
-    private Label progressLabel;
     private DebugCollectionTableModel model;
     private DebugCollectionLoadScheduler scheduler;
     private DebugCollectionRowFilter rowFilter;
@@ -145,7 +144,6 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
                 indexedValue, frame, path, DebugCollectionColumnModel.minimal(), typeTitle);
 
         shell = new Shell(display, SWT.SHELL_TRIM | SWT.MAX | SWT.RESIZE);
-        shell.setText(buildTitle(typeTitle));
         GridLayout shellLayout = new GridLayout(1, false);
         shellLayout.marginHeight = 0;
         shellLayout.marginWidth = 0;
@@ -156,7 +154,6 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         createToolbar(shell);
         createFilterRow(shell);
         createTable(shell);
-        createProgress(shell);
 
         rowFilter = cloneSnapshot != null ? cloneSnapshot.toRowFilter() : new DebugCollectionRowFilter(""); //$NON-NLS-1$
         findSession = new DebugCollectionFindSession(this);
@@ -181,6 +178,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         else
             updateTableItemCount(0);
 
+        updateWindowTitle();
         shell.pack();
         DebugCollectionWindowGeometryStore.applyToShell(shell);
         shell.open();
@@ -548,64 +546,13 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             dataInteraction.selectCell(dataItem, Math.max(0, visibleColumn - fixed));
     }
 
-    private static String loadedProgressText(String detail)
-    {
-        return "Загружено " + detail; //$NON-NLS-1$
-    }
-
-    private static String percentProgressDetail(int loaded, int total)
-    {
-        int percent = total > 0 ? (int) ((long) loaded * 100L / total) : 0;
-        return percent + "% (" + loaded + "/" + total + ")"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-    }
-
-    /**
-     * Текст детализации прогресса без префикса «Загружено».
-     * {@code null} — промежуточное «Загрузка…».
-     */
-    private String formatProgressDetail(int loaded, int total, String phase)
-    {
-        if (total <= 0 && !"rows".equals(phase)) //$NON-NLS-1$
-            return null;
-
-        if ("size".equals(phase)) //$NON-NLS-1$
-            return total == 0 ? "100% (0/0)" : "100% (" + total + "/" + total + ")"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-
-        if ("filter".equals(phase)) //$NON-NLS-1$
-            return percentProgressDetail(loaded, total);
-
-        if ("rows".equals(phase)) //$NON-NLS-1$
-        {
-            int collectionTotal = model != null && model.totalSize > 0 ? model.totalSize : total;
-            if (collectionTotal > 2048)
-                return loaded + "/" + collectionTotal; //$NON-NLS-1$
-            if (collectionTotal > 0)
-                return percentProgressDetail(loaded, collectionTotal);
-            if (model != null && model.totalSize == 0)
-                return "100% (0/0)"; //$NON-NLS-1$
-            return loaded + " строк"; //$NON-NLS-1$
-        }
-
-        return percentProgressDetail(loaded, total);
-    }
-
     @Override
     public void onProgress(int loaded, int total, String phase)
     {
-        if (progressLabel == null || progressLabel.isDisposed())
-            return;
-
-        String detail = formatProgressDetail(loaded, total, phase);
-        if (detail == null)
-        {
-            progressLabel.setText("Загрузка…"); //$NON-NLS-1$
-            return;
-        }
-        progressLabel.setText(loadedProgressText(detail));
-
         if ("size".equals(phase)) //$NON-NLS-1$
         {
             updateTableItemCount(total);
+            updateWindowTitle();
             if (total == 0)
                 updateCloneButtonState();
         }
@@ -771,12 +718,40 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         return "Коллекция"; //$NON-NLS-1$
     }
 
-    private String buildTitle(String typeTitle)
+    private String buildTitleSuffix(String typeTitle, int visibleCount, int totalCount)
     {
-        String suffix = typeTitle;
+        StringBuilder suffix = new StringBuilder();
+        if (totalCount >= 0)
+        {
+            if (rowFilter != null && rowFilter.isActive())
+                suffix.append('(').append(visibleCount).append('/').append(totalCount).append(')');
+            else
+                suffix.append('(').append(visibleCount).append(')');
+        }
+        if (typeTitle != null && !typeTitle.isBlank())
+        {
+            if (suffix.length() > 0)
+                suffix.append(' ');
+            suffix.append(typeTitle.trim());
+        }
         if (cloneIndex > 0)
-            suffix = suffix + " (" + cloneIndex + ")"; //$NON-NLS-1$ //$NON-NLS-2$
-        return Global.withPluginWindowTitle("Коллекция", suffix); //$NON-NLS-1$
+        {
+            if (suffix.length() > 0)
+                suffix.append(' ');
+            suffix.append('(').append(cloneIndex).append(')');
+        }
+        return suffix.toString();
+    }
+
+    private void updateWindowTitle()
+    {
+        if (shell == null || shell.isDisposed())
+            return;
+        int totalCount = model != null && model.totalSize >= 0 ? model.totalSize : -1;
+        int visibleCount = splitTable != null ? splitTable.getItemCount()
+            : totalCount >= 0 ? totalCount : -1;
+        shell.setText(Global.withPluginWindowTitle("Коллекция", //$NON-NLS-1$
+            buildTitleSuffix(resolveTypeTitle(), visibleCount, totalCount)));
     }
 
     private void createToolbar(Composite parent)
@@ -820,7 +795,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         });
 
         columnSettingsItem = new ToolItem(bar, SWT.PUSH);
-        columnSettingsItem.setText("⚙"); //$NON-NLS-1$
+        columnSettingsItem.setText("⚙ Колонки"); //$NON-NLS-1$
         columnSettingsItem.addSelectionListener(new SelectionAdapter()
         {
             @Override
@@ -980,7 +955,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             return;
         int hidden = model.columns.hiddenColumnCount();
         if (hidden <= 0)
-            columnSettingsItem.setText("⚙"); //$NON-NLS-1$
+            columnSettingsItem.setText("⚙ Колонки"); //$NON-NLS-1$
         else
             columnSettingsItem.setText("⚙ обрезано " + hidden + " колонок"); //$NON-NLS-1$ //$NON-NLS-2$
         columnSettingsItem.setToolTipText("Настройка колонок"); //$NON-NLS-1$
@@ -1019,13 +994,6 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         model.columns.syncSplitTables(splitTable.indexTable(), splitTable.dataTable());
         splitTable.syncIndexColumnLayout();
         splitTable.installIndexColumnSizing();
-    }
-
-    private void createProgress(Composite parent)
-    {
-        progressLabel = new Label(parent, SWT.NONE);
-        progressLabel.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
-        progressLabel.setText(loadedProgressText(percentProgressDetail(0, 0)));
     }
 
     private void hookShellEvents()
@@ -1801,6 +1769,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             count = 0;
         if (splitTable != null)
             splitTable.setItemCount(count);
+        updateWindowTitle();
     }
 
     private void openColumnDialog()
@@ -2193,11 +2162,14 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
      */
     private static final class DebugCollectionSplitTable
     {
+        private static final int FALLBACK_VERTICAL_SCROLLBAR_WIDTH = 17;
+
         private final Composite panel;
         private final SashForm sash;
         private final Composite indexPane;
         private final Label indexBottomSpacer;
         private final Composite indexTableStack;
+        private final Composite dataTableStack;
         private final Table indexTable;
         private final Table dataTable;
         private boolean syncingScroll;
@@ -2212,13 +2184,15 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         private Runnable pendingSyncRowAreaAlignment;
 
         private DebugCollectionSplitTable(Composite panel, SashForm sash, Composite indexPane,
-            Label indexBottomSpacer, Composite indexTableStack, Table indexTable, Table dataTable)
+            Label indexBottomSpacer, Composite indexTableStack, Composite dataTableStack,
+            Table indexTable, Table dataTable)
         {
             this.panel = panel;
             this.sash = sash;
             this.indexPane = indexPane;
             this.indexBottomSpacer = indexBottomSpacer;
             this.indexTableStack = indexTableStack;
+            this.dataTableStack = dataTableStack;
             this.indexTable = indexTable;
             this.dataTable = dataTable;
         }
@@ -2270,7 +2244,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             dataTable.setLinesVisible(true);
 
             DebugCollectionSplitTable split = new DebugCollectionSplitTable(panel, sash, indexPane,
-                indexBottomSpacer, indexTableStack, indexTable, dataTable);
+                indexBottomSpacer, indexTableStack, dataTableStack, indexTable, dataTable);
             split.installVerticalScrollSync();
             split.installSelectionSync();
             split.installSashSizing();
@@ -2432,7 +2406,8 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
          */
         void syncRowAreaAlignment()
         {
-            if (syncingRowArea || indexPane.isDisposed() || indexTable.isDisposed() || dataTable.isDisposed())
+            if (syncingRowArea || indexPane.isDisposed() || indexTable.isDisposed() || dataTable.isDisposed()
+                || dataTableStack.isDisposed())
                 return;
             syncingRowArea = true;
             try
@@ -2447,23 +2422,44 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
                     changed = true;
                 }
 
-                int dataHeader = dataTable.getHeaderVisible() ? dataTable.getHeaderHeight() : 0;
-                int indexHeader = indexTable.getHeaderVisible() ? indexTable.getHeaderHeight() : 0;
-                int topInset = Math.max(0, dataHeader - indexHeader);
                 GridData indexGd = (GridData) indexTableStack.getLayoutData();
-                if (indexGd.verticalIndent != topInset)
+                if (indexGd.verticalIndent != 0)
                 {
-                    indexGd.verticalIndent = topInset;
+                    indexGd.verticalIndent = 0;
                     changed = true;
                 }
 
                 if (changed)
                     indexPane.layout(true);
+
+                layoutIndexColumnHostAligned(bottomInset);
             }
             finally
             {
                 syncingRowArea = false;
             }
+        }
+
+        private void layoutIndexColumnHostAligned(int bottomInset)
+        {
+            if (indexTable.isDisposed() || dataTableStack.isDisposed())
+                return;
+            Composite indexColumnHost = indexTable.getParent();
+            if (indexColumnHost == null || indexColumnHost.isDisposed())
+                return;
+            int dataStackH = dataTableStack.getClientArea().height;
+            if (dataStackH <= 0)
+                dataStackH = dataTableStack.getBounds().height;
+            int targetStackH = Math.max(0, dataStackH - bottomInset);
+            int dataHeader = dataTable.getHeaderVisible() ? dataTable.getHeaderHeight() : 0;
+            int indexHeader = indexTable.getHeaderVisible() ? indexTable.getHeaderHeight() : 0;
+            int topInset = Math.max(0, dataHeader - indexHeader);
+            Rectangle stackArea = indexTableStack.getClientArea();
+            int stackW = stackArea.width;
+            if (stackW <= 0)
+                stackW = indexTableStack.getBounds().width;
+            int hostH = Math.max(0, targetStackH - topInset);
+            indexColumnHost.setBounds(0, topInset, stackW, hostH);
         }
 
         private void scheduleSyncRowAreaAlignment()
@@ -2479,7 +2475,23 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
                 pendingSyncRowAreaAlignment = null;
                 syncRowAreaAlignment();
             };
-            display.timerExec(50, pendingSyncRowAreaAlignment);
+            display.timerExec(0, pendingSyncRowAreaAlignment);
+        }
+
+        private void wireHorizontalBarRowAreaSync(ScrollBar bar)
+        {
+            if (bar == null || bar.isDisposed())
+                return;
+            bar.addListener(SWT.Show, e -> scheduleSyncRowAreaAlignment());
+            bar.addListener(SWT.Hide, e -> scheduleSyncRowAreaAlignment());
+            bar.addSelectionListener(new SelectionAdapter()
+            {
+                @Override
+                public void widgetSelected(SelectionEvent e)
+                {
+                    scheduleSyncRowAreaAlignment();
+                }
+            });
         }
 
         /** Слушатель перетаскивания границы колонок фиксированной панели. */
@@ -2506,10 +2518,13 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
 
         void setItemCount(int count)
         {
+            boolean countChanged = !indexTable.isDisposed() && count != indexTable.getItemCount();
             if (!indexTable.isDisposed())
                 indexTable.setItemCount(count);
             if (!dataTable.isDisposed())
                 dataTable.setItemCount(count);
+            if (countChanged)
+                scheduleSyncFixedPaneLayout("setItemCount"); //$NON-NLS-1$
         }
 
         void clearAll()
@@ -2596,7 +2611,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             sash.addListener(SWT.Selection, e -> {
                 if (indexTable.isDisposed())
                     return;
-                scheduleSyncFixedPaneLayout();
+                scheduleSyncFixedPaneLayout("sashSelection"); //$NON-NLS-1$
             });
             sash.addListener(SWT.Resize, e -> applyInitialSashWeightsOnce());
         }
@@ -2609,12 +2624,23 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
                 @Override
                 public void controlResized(ControlEvent e)
                 {
-                    scheduleSyncFixedPaneLayout();
+                    scheduleSyncFixedPaneLayout("indexStackResize"); //$NON-NLS-1$
                 }
             });
+            ScrollBar verticalBar = indexTable.getVerticalBar();
+            if (verticalBar != null)
+            {
+                verticalBar.addListener(SWT.Show, e -> scheduleSyncFixedPaneLayout("vbarShow")); //$NON-NLS-1$
+                verticalBar.addListener(SWT.Hide, e -> scheduleSyncFixedPaneLayout("vbarHide")); //$NON-NLS-1$
+            }
         }
 
         private void scheduleSyncFixedPaneLayout()
+        {
+            scheduleSyncFixedPaneLayout("unknown"); //$NON-NLS-1$
+        }
+
+        private void scheduleSyncFixedPaneLayout(String source)
         {
             if (indexTable.isDisposed())
                 return;
@@ -2627,7 +2653,16 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
                 pendingSyncFixedPaneLayout = null;
                 syncFixedPaneLayout();
             };
-            display.timerExec(50, pendingSyncFixedPaneLayout);
+            display.timerExec(syncFixedPaneLayoutDelayMs(source), pendingSyncFixedPaneLayout);
+        }
+
+        private static int syncFixedPaneLayoutDelayMs(String source)
+        {
+            if ("indexStackResize".equals(source) || "sashSelection".equals(source) //$NON-NLS-1$ //$NON-NLS-2$
+                || "vbarShow".equals(source) || "vbarHide".equals(source) //$NON-NLS-1$ //$NON-NLS-2$
+                || "setItemCount".equals(source)) //$NON-NLS-1$
+                return 0;
+            return 50;
         }
 
         private void installRowAreaAlignmentSync()
@@ -2642,20 +2677,12 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             };
             dataTable.addControlListener(resizeListener);
             indexTable.addControlListener(resizeListener);
+            indexTableStack.addControlListener(resizeListener);
+            dataTableStack.addControlListener(resizeListener);
             sash.addListener(SWT.Resize, e -> scheduleSyncRowAreaAlignment());
 
-            ScrollBar hBar = dataTable.getHorizontalBar();
-            if (hBar != null)
-            {
-                hBar.addSelectionListener(new SelectionAdapter()
-                {
-                    @Override
-                    public void widgetSelected(SelectionEvent e)
-                    {
-                        scheduleSyncRowAreaAlignment();
-                    }
-                });
-            }
+            wireHorizontalBarRowAreaSync(dataTable.getHorizontalBar());
+            wireHorizontalBarRowAreaSync(indexTable.getHorizontalBar());
 
             indexPane.getDisplay().asyncExec(this::scheduleSyncRowAreaAlignment);
         }
@@ -2670,6 +2697,30 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
                 return 0;
             int scrollRange = bar.getMaximum() - bar.getMinimum() - bar.getThumb() + 1;
             return scrollRange > 0 ? height : 0;
+        }
+
+        /** Резерв под вертикальный скролл index-таблицы — без горизонтального. */
+        private static int verticalScrollBarOccupiedWidth(Table table)
+        {
+            if (table == null || table.isDisposed())
+                return 0;
+            ScrollBar bar = table.getVerticalBar();
+            if (bar != null && !bar.isDisposed() && bar.isVisible() && bar.getSize().x > 0)
+                return 0;
+            int itemCount = table.getItemCount();
+            if (itemCount <= 0)
+                return 0;
+            int rowHeight = table.getItemHeight() + (table.getLinesVisible() ? 1 : 0);
+            int headerHeight = table.getHeaderVisible() ? table.getHeaderHeight() : 0;
+            int contentHeight = headerHeight + itemCount * rowHeight;
+            int availableHeight = table.getClientArea().height;
+            if (availableHeight <= 0)
+                availableHeight = table.getBounds().height;
+            if (contentHeight <= availableHeight)
+                return 0;
+            if (bar != null && !bar.isDisposed() && bar.getSize().x > 0)
+                return bar.getSize().x;
+            return FALLBACK_VERTICAL_SCROLLBAR_WIDTH;
         }
 
         private void syncIndexColumnToFillPane()
@@ -2707,7 +2758,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             initialSashWeightsApplied = true;
             applySashWeightsForColumnWidth(DebugCollectionFixedPaneWidthStore.load());
             if (!indexTable.isDisposed())
-                scheduleSyncFixedPaneLayout();
+                scheduleSyncFixedPaneLayout("applyInitialSash"); //$NON-NLS-1$
         }
 
         /** Две колонки — «Индекс» + «Тип»; три — + «Представление» с сохранёнными ширинами. */
@@ -2715,6 +2766,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         {
             if (syncingIndexPaneLayout || indexTable.isDisposed() || indexTable.getColumnCount() <= 0)
                 return;
+            int[] colsBefore = indexColumnWidths();
             syncingIndexPaneLayout = true;
             try
             {
@@ -2722,7 +2774,10 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
                     syncFixedPaneColumnWidths();
                 else
                     syncIndexColumnToFillPane();
-                DebugCollectionColumnModel.applyIndexTableColumnLayout(indexTable);
+                clampIndexColumnsToClientArea();
+                if (columnWidthsChanged(colsBefore, indexColumnWidths()))
+                    DebugCollectionColumnModel.applyIndexTableColumnLayout(indexTable);
+                trimIndexHorizontalScrollIfNeeded();
             }
             finally
             {
@@ -2741,7 +2796,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
                 int width = DebugCollectionIndexColumnWidthStore.clamp(column.getWidth());
                 DebugCollectionIndexColumnWidthStore.save(width);
                 if (indexTable.getColumnCount() > 1)
-                    scheduleSyncFixedPaneLayout();
+                    scheduleSyncFixedPaneLayout("columnHeaderResize"); //$NON-NLS-1$
                 else
                     persistIndexColumnWidth(width);
             }
@@ -2749,13 +2804,13 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             {
                 DebugCollectionTypeColumnWidthStore.save(column.getWidth());
                 if (indexTable.getColumnCount() > 1)
-                    scheduleSyncFixedPaneLayout();
+                    scheduleSyncFixedPaneLayout("columnHeaderResize"); //$NON-NLS-1$
             }
             else if (columnIndex == 2)
             {
                 DebugCollectionPresentationColumnWidthStore.save(column.getWidth());
                 if (indexTable.getColumnCount() > 2)
-                    scheduleSyncFixedPaneLayout();
+                    scheduleSyncFixedPaneLayout("columnHeaderResize"); //$NON-NLS-1$
             }
             if (indexTable.getColumnCount() <= 1)
                 applySashWeightsForColumnWidth(fixedPaneWidth());
@@ -2830,13 +2885,127 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         /** Ширина клиентской области index-таблицы без усечения до MAX колонки «Индекс». */
         private int fixedPaneInnerWidth()
         {
+            return indexColumnSpanMaxWidth();
+        }
+
+        /** Сумма ширин колонок, умещающаяся в client area (минус vscroll и линии сетки). */
+        private int indexColumnSpanMaxWidth()
+        {
+            if (indexTable.isDisposed())
+                return DebugCollectionIndexColumnWidthStore.MIN_WIDTH;
             int client = indexTable.getClientArea().width;
             if (client <= 0)
                 client = indexTable.getBounds().width;
-            if (indexTable.getLinesVisible() && client > 0)
-                client = Math.max(DebugCollectionIndexColumnWidthStore.MIN_WIDTH,
-                    client - indexTable.getGridLineWidth());
+            client -= verticalScrollBarOccupiedWidth(indexTable);
+            client -= fixedPaneGridLineReserve();
             return Math.max(DebugCollectionIndexColumnWidthStore.MIN_WIDTH, client);
+        }
+
+        private int fixedPaneGridLineReserve()
+        {
+            if (!indexTable.getLinesVisible() || indexTable.getColumnCount() <= 1)
+                return 0;
+            return indexTable.getGridLineWidth() * (indexTable.getColumnCount() - 1);
+        }
+
+        /** Подгонка суммы колонок под client area — без горизонтального скролла. */
+        private void clampIndexColumnsToClientArea()
+        {
+            if (syncingIndexLayout || indexTable.isDisposed())
+                return;
+            int colCount = indexTable.getColumnCount();
+            if (colCount <= 0)
+                return;
+            int maxSum = indexColumnSpanMaxWidth();
+            int sum = 0;
+            for (int i = 0; i < colCount; i++)
+                sum += indexTable.getColumn(i).getWidth();
+            if (sum <= maxSum)
+                return;
+            int overflow = sum - maxSum;
+            syncingIndexLayout = true;
+            try
+            {
+                for (int i = colCount - 1; i >= 0 && overflow > 0; i--)
+                {
+                    TableColumn column = indexTable.getColumn(i);
+                    int minW = minWidthForFixedColumn(i);
+                    int shrink = Math.min(overflow, Math.max(0, column.getWidth() - minW));
+                    if (shrink <= 0)
+                        continue;
+                    column.setWidth(column.getWidth() - shrink);
+                    overflow -= shrink;
+                }
+            }
+            finally
+            {
+                syncingIndexLayout = false;
+            }
+        }
+
+        private void trimIndexHorizontalScrollIfNeeded()
+        {
+            if (syncingIndexLayout || indexTable.isDisposed())
+                return;
+            int colCount = indexTable.getColumnCount();
+            if (colCount <= 0)
+                return;
+            int scrollRange = indexHorizontalScrollRange(indexTable);
+            if (scrollRange <= 0)
+                return;
+            syncingIndexLayout = true;
+            try
+            {
+                TableColumn column = indexTable.getColumn(colCount - 1);
+                int minW = minWidthForFixedColumn(colCount - 1);
+                column.setWidth(Math.max(minW, column.getWidth() - scrollRange));
+            }
+            finally
+            {
+                syncingIndexLayout = false;
+            }
+        }
+
+        private static int minWidthForFixedColumn(int columnIndex)
+        {
+            if (columnIndex == 0)
+                return DebugCollectionIndexColumnWidthStore.MIN_WIDTH;
+            if (columnIndex == 1)
+                return DebugCollectionTypeColumnWidthStore.MIN_WIDTH;
+            return DebugCollectionPresentationColumnWidthStore.MIN_WIDTH;
+        }
+
+        private int[] indexColumnWidths()
+        {
+            if (indexTable.isDisposed())
+                return new int[0];
+            int count = indexTable.getColumnCount();
+            int[] widths = new int[count];
+            for (int i = 0; i < count; i++)
+                widths[i] = indexTable.getColumn(i).getWidth();
+            return widths;
+        }
+
+        private static int indexHorizontalScrollRange(Table table)
+        {
+            ScrollBar bar = table.getHorizontalBar();
+            if (bar == null || bar.isDisposed())
+                return 0;
+            return bar.getMaximum() - bar.getMinimum() - bar.getThumb() + 1;
+        }
+
+        private static boolean columnWidthsChanged(int[] before, int[] after)
+        {
+            if (before == null || after == null)
+                return before != after;
+            if (before.length != after.length)
+                return true;
+            for (int i = 0; i < before.length; i++)
+            {
+                if (Math.abs(before[i] - after[i]) >= 2)
+                    return true;
+            }
+            return false;
         }
 
         private void installVerticalScrollSync()
