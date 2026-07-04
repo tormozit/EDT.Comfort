@@ -1,5 +1,8 @@
 # Project rules
 
+## Язык ответа
+По умолчанию отвечать на русском языке.
+
 ## Java
 Java 17 is required for compilation. Use:
 ```
@@ -10,6 +13,9 @@ Set `JAVA_HOME` to this path before running Maven.
 ## Мaven
 Build is via Tycho (eclipse-plugin packaging). Full build requires the EDT target platform.
 The Maven installation is at `C:\Program Files\apache-maven`.
+
+## Логи
+Если в корне проекта есть файл `debug-*.log` — читать его сразу до любых вопросов пользователю. В логе — NDJSON-диагностика выполнения.
 
 ## Build
 ```powershell

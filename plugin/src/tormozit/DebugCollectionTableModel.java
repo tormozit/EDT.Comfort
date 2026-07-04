@@ -229,6 +229,44 @@ final class DebugCollectionTableModel
         rowChildrenCache.remove(logicalRow);
     }
 
+    /**
+     * Как {@link #invalidateLogicalRow}, но не трогает ячейки с уже готовым размером
+     * ({@code READY}) или помеченные {@code NA}. Используется при возврате строки в viewport
+     * после прокрутки (priority-путь) — раньше безусловный wipe заставлял уже посчитанную
+     * {@code "(N) Тип"} на мгновение превращаться обратно в голый {@code "Тип"} до повторного
+     * (пусть и мгновенного, т.к. evaluate() на стороне 1C уже сделан) прохода {@link
+     * DebugCollectionSizeResolver} — отсюда и заметное мигание при повторном показе уже
+     * посчитанной ячейки.
+     */
+    void invalidateLogicalRowPreservingReadySizes(int logicalRow)
+    {
+        if (logicalRow < 0)
+            return;
+        boolean[] preservedAny = { false };
+        synchronized (cellCache)
+        {
+            for (java.util.Map.Entry<CellKey, CellData> e : cellCache.entrySet())
+            {
+                if (e.getKey().row != logicalRow)
+                    continue;
+                CellData data = e.getValue();
+                synchronized (data)
+                {
+                    if (data.sizeState == SizeState.READY || data.sizeState == SizeState.NA)
+                    {
+                        preservedAny[0] = true;
+                    }
+                    else
+                    {
+                        data.contentLoaded = false;
+                    }
+                }
+            }
+        }
+        if (!preservedAny[0])
+            rowChildrenCache.remove(logicalRow);
+    }
+
     void invalidateAllCells()
     {
         synchronized (cellCache)
@@ -290,8 +328,10 @@ final class DebugCollectionTableModel
         {
             synchronized (cached)
             {
+                if (cached.displayText != null)
+                    return cached.displayText;
                 if (cached.contentLoaded)
-                    return cached.displayText != null ? cached.displayText : ""; //$NON-NLS-1$
+                    return ""; //$NON-NLS-1$
             }
         }
         String text = resolveCellTextLive(logicalRow, visibleCol);
@@ -362,18 +402,66 @@ final class DebugCollectionTableModel
         CellData data = cellData(logicalRow, visibleCol);
         synchronized (data)
         {
+            boolean pendingMarker = false;
+            int parsedSize = -1;
             if (text == null)
                 text = ""; //$NON-NLS-1$
-            if (text.equals(data.baseText) && data.sizeState == SizeState.READY && data.nestedSize >= 0)
+            if (text.startsWith("("))
+            {
+                int closeParen = text.indexOf(") ");
+                if (closeParen > 1)
+                {
+                    String inner = text.substring(1, closeParen);
+                    text = text.substring(closeParen + 2);
+                    if (".".equals(inner))
+                    {
+                        pendingMarker = true;
+                    }
+                    else
+                    {
+                        try
+                        {
+                            parsedSize = Integer.parseInt(inner);
+                        }
+                        catch (NumberFormatException e)
+                        {
+                            text = "(" + inner + ") " + text;
+                        }
+                    }
+                }
+            }
+            if (text.equals(data.baseText) && (data.sizeState == SizeState.READY || data.sizeState == SizeState.PENDING))
             {
                 data.contentLoaded = true;
                 return;
             }
             data.baseText = text;
             data.contentLoaded = true;
-            data.sizeState = SizeState.UNKNOWN;
-            data.nestedSize = -1;
-            data.displayText = text;
+            if (pendingMarker)
+            {
+                if (data.sizeState == SizeState.READY && data.nestedSize >= 0)
+                {
+                    data.displayText = cellTextWithNestedSize(text, data.nestedSize);
+                }
+                else
+                {
+                    data.sizeState = SizeState.UNKNOWN;
+                    data.nestedSize = -1;
+                    data.displayText = "(.) " + text;
+                }
+            }
+            else if (parsedSize >= 0)
+            {
+                data.nestedSize = parsedSize;
+                data.sizeState = SizeState.READY;
+                data.displayText = cellTextWithNestedSize(text, parsedSize);
+            }
+            else
+            {
+                data.sizeState = SizeState.UNKNOWN;
+                data.nestedSize = -1;
+                data.displayText = text;
+            }
         }
     }
 
@@ -597,17 +685,15 @@ final class DebugCollectionTableModel
             typeName = "Коллекция"; //$NON-NLS-1$
         else
             typeName = typeName.trim();
-        try
+        if (!indexed.isEvaluated())
+            indexed.evaluate();
+        if (indexed.isEvaluated() && !indexed.isPending())
         {
             int size = indexed.getSize();
             if (size >= 0)
-                return cellTextWithNestedSize(typeName, size);
+                return "(" + size + ") " + typeName;
         }
-        catch (DebugException e)
-        {
-            DebugCollectionDebug.problem("indexedSize: " + e.getMessage()); //$NON-NLS-1$
-        }
-        return typeName;
+        return "(.) " + typeName;
     }
 
     private IBslVariable[] propertyContextForRow(IBslVariable rowVar) throws DebugException

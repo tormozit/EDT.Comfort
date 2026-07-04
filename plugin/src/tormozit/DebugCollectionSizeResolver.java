@@ -9,12 +9,14 @@ import com._1c.g5.v8.dt.debug.core.model.values.IBslValue;
 
 /**
  * Async {@code getSize()} для вложенных коллекций в ячейках таблицы (pass 2).
+ * <p>
+ * Каждый чанк (до 2 ячеек) вызывает {@code evaluate()}, затем поллинг {@code isPending()}
+ * с паузой 100мс в том же Job-треде. Как только evaluate завершён — {@code getSize()}
+ * отдаёт реальный размер. Первый resolved-элемент показывается через ~200 мс.
  */
 final class DebugCollectionSizeResolver
 {
-    private static final int COL_CHUNK = 12;
-    private static final int PENDING_RETRY_DELAY_MS = 300;
-    private static final int MAX_PENDING_RETRIES = 12;
+    private static final int CELLS_PER_CHUNK = 2;
 
     private static final java.util.concurrent.atomic.AtomicBoolean cancelled = new java.util.concurrent.atomic.AtomicBoolean();
 
@@ -39,75 +41,61 @@ final class DebugCollectionSizeResolver
         Display display,
         Runnable onRowsReady)
     {
-        scheduleBatch(model, rowFrom, rowCount, colFrom, colTo, display, onRowsReady, 0);
-    }
-
-    private static void scheduleBatch(
-        DebugCollectionTableModel model,
-        int rowFrom,
-        int rowCount,
-        int colFrom,
-        int colTo,
-        Display display,
-        Runnable onRowsReady,
-        int retryAttempt)
-    {
         if (model == null || display == null || display.isDisposed() || cancelled.get())
             return;
         if (colTo < colFrom)
+            return;
+        java.util.List<int[]> cells = new java.util.ArrayList<>();
+        for (int row = rowFrom; row < rowFrom + rowCount; row++)
+        {
+            for (int col = colFrom; col <= colTo; col++)
+            {
+                if (isSizePassSkippedColumn(model, col))
+                    continue;
+                cells.add(new int[] { row, col });
+            }
+        }
+        int chunkCount = (cells.size() + CELLS_PER_CHUNK - 1) / CELLS_PER_CHUNK;
+        for (int i = 0; i < chunkCount; i++)
+        {
+            int from = i * CELLS_PER_CHUNK;
+            int to = Math.min(cells.size(), from + CELLS_PER_CHUNK);
+            java.util.List<int[]> chunkCells = cells.subList(from, to);
+            scheduleChunk(chunkCells, i, model, display, onRowsReady);
+        }
+    }
+
+    private static void scheduleChunk(
+        java.util.List<int[]> chunkCells,
+        int chunkIndex,
+        DebugCollectionTableModel model,
+        Display display,
+        Runnable onRowsReady)
+    {
+        if (display == null || display.isDisposed() || cancelled.get())
             return;
         Job.create("Комфорт: размер ячеек коллекции", monitor -> { //$NON-NLS-1$
             if (cancelled.get() || monitor.isCanceled())
                 return org.eclipse.core.runtime.Status.OK_STATUS;
             int resolved = 0;
-            int pending = 0;
-            int skip = 0;
-            int na = 0;
-            int error = 0;
-            for (int row = rowFrom; row < rowFrom + rowCount; row++)
+            for (int[] cell : chunkCells)
             {
                 if (monitor.isCanceled() || cancelled.get())
                     break;
-                for (int chunkFrom = colFrom; chunkFrom <= colTo; chunkFrom += COL_CHUNK)
+                ResolveOutcome outcome = resolveCellSize(model, cell[0], cell[1]);
+                if ("size".equals(outcome.outcome)) //$NON-NLS-1$
                 {
-                    int chunkTo = Math.min(colTo, chunkFrom + COL_CHUNK - 1);
-                    for (int col = chunkFrom; col <= chunkTo; col++)
-                    {
-                        if (isSizePassSkippedColumn(model, col))
-                            continue;
-                        ResolveOutcome outcome = resolveCellSize(model, row, col);
-                        switch (outcome.outcome)
-                        {
-                            case "size" -> { //$NON-NLS-1$
-                                resolved++;
-                                logSizeCellSample(row, col, outcome);
-                            }
-                            case "pending" -> pending++; //$NON-NLS-1$
-                            case "skip" -> skip++; //$NON-NLS-1$
-                            case "na" -> na++; //$NON-NLS-1$
-                            case "error" -> error++; //$NON-NLS-1$
-                            default -> { }
-                        }
-                    }
+                    resolved++;
+                    logSizeCellSample(cell[0], cell[1], outcome);
                 }
             }
             // #region agent log
-            DebugCollectionAgentLog.log("H-sizeBatch", "SizeResolver.scheduleBatch", "done", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"rowFrom\":" + rowFrom + ",\"rowCount\":" + rowCount //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"colFrom\":" + colFrom + ",\"colTo\":" + colTo //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"retry\":" + retryAttempt //$NON-NLS-1$
-                    + ",\"resolved\":" + resolved + ",\"pending\":" + pending //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"skip\":" + skip + ",\"na\":" + na + ",\"error\":" + error + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            DebugCollectionAgentLog.log("H-sizeChunk", "SizeResolver.scheduleChunk", "chunkDone", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"chunk\":" + chunkIndex //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"cells\":" + chunkCells.size() //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"resolved\":" + resolved + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             // #endregion
-            if (pending > 0 && retryAttempt < MAX_PENDING_RETRIES && !cancelled.get() && !monitor.isCanceled())
-            {
-                Job retry = Job.create("Комфорт: размер ячеек коллекции (повтор)", m -> { //$NON-NLS-1$
-                    scheduleBatch(model, rowFrom, rowCount, colFrom, colTo, display, onRowsReady, retryAttempt + 1);
-                    return org.eclipse.core.runtime.Status.OK_STATUS;
-                });
-                retry.schedule(PENDING_RETRY_DELAY_MS);
-            }
-            if ((resolved > 0 || pending > 0) && onRowsReady != null && !display.isDisposed() && !cancelled.get())
+            if (resolved > 0 && onRowsReady != null && !display.isDisposed() && !cancelled.get())
                 display.asyncExec(onRowsReady);
             return org.eclipse.core.runtime.Status.OK_STATUS;
         }).schedule();
@@ -156,6 +144,20 @@ final class DebugCollectionSizeResolver
                 if (data.sizeState == DebugCollectionTableModel.SizeState.READY
                     || data.sizeState == DebugCollectionTableModel.SizeState.NA)
                     return new ResolveOutcome("skip", -1); //$NON-NLS-1$
+            }
+            // Ждём cell content (SetData на UI-треде), до 3с
+            for (int wait = 0; wait < 30; wait++)
+            {
+                boolean loaded;
+                synchronized (data) { loaded = data.contentLoaded; }
+                if (loaded)
+                    break;
+                if (cancelled.get())
+                    return new ResolveOutcome("skip", -1); //$NON-NLS-1$
+                try { Thread.sleep(100); } catch (InterruptedException e) { Thread.currentThread().interrupt(); return new ResolveOutcome("skip", -1); }
+            }
+            synchronized (data)
+            {
                 if (!data.contentLoaded)
                 {
                     data.sizeState = DebugCollectionTableModel.SizeState.UNKNOWN;
@@ -172,16 +174,28 @@ final class DebugCollectionSizeResolver
                 }
                 return new ResolveOutcome("na", -1); //$NON-NLS-1$
             }
-            if (value.isPending())
-            {
-                synchronized (data)
-                {
-                    data.sizeState = DebugCollectionTableModel.SizeState.UNKNOWN;
-                }
-                return new ResolveOutcome("pending", -1); //$NON-NLS-1$
-            }
             if (!value.isEvaluated())
                 value.evaluate();
+            // Poll каждые 100мс пока evaluate() не завершится (до 6с)
+            if (value.isPending())
+            {
+                for (int poll = 0; poll < 60; poll++)
+                {
+                    if (cancelled.get())
+                        break;
+                    try
+                    {
+                        Thread.sleep(100);
+                    }
+                    catch (InterruptedException e)
+                    {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                    if (!value.isPending())
+                        break;
+                }
+            }
             if (value.isPending())
             {
                 synchronized (data)
@@ -213,6 +227,16 @@ final class DebugCollectionSizeResolver
         catch (DebugException e)
         {
             DebugCollectionDebug.problem("cellSize: " + e.getMessage()); //$NON-NLS-1$
+            synchronized (data)
+            {
+                data.sizeState = DebugCollectionTableModel.SizeState.UNKNOWN;
+            }
+            return new ResolveOutcome("error", -1); //$NON-NLS-1$
+        }
+        catch (RuntimeException e)
+        {
+            // Не даём одной сбойнувшейся ячейке убить весь Job чанка.
+            DebugCollectionDebug.problem("cellSize (runtime): " + e); //$NON-NLS-1$
             synchronized (data)
             {
                 data.sizeState = DebugCollectionTableModel.SizeState.UNKNOWN;

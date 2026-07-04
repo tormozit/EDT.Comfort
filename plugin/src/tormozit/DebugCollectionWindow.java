@@ -1758,7 +1758,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         if (priority)
         {
             for (int row = logicalFirst; row <= logicalLast; row++)
-                model.invalidateLogicalRow(row);
+                model.invalidateLogicalRowPreservingReadySizes(row);
             splitTable.clear(first, displayLast);
             // #region agent log
             DebugCollectionAgentLog.log("H-endPaint", "Window.captureViewportRange", "priorityClear", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
@@ -2532,6 +2532,10 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
                 indexTable.clear(first, last);
             if (!dataTable.isDisposed())
                 dataTable.clear(first, last);
+            if (!indexTable.isDisposed())
+                indexTable.redraw();
+            if (!dataTable.isDisposed())
+                dataTable.redraw();
         }
 
         int getTopIndex()

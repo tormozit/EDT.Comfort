@@ -908,7 +908,13 @@ final class DebugCollectionLoadScheduler
         }
         for (int row : dirtyRows)
         {
-            model.invalidateLogicalRow(row);
+            // Где бы даже ни пришла причина dirty (реальный debug CHANGE или просто повторный
+            // вход в viewport после скролла через markDirtyViewport/submitViewportKickJob), не трогаем
+            // уже готовые размеры (READY/NA) — иначе именно этот путь (а не только
+            // Window.captureViewportRange) сводил на нет защиту от мигания при прокрутке: submitViewportKickJob
+            // с priority=true сам вызывает markDirtyViewport() + этот метод сразу после того, как
+            // captureViewportRange уже аккуратно почистил кэш щадящим вариантом.
+            model.invalidateLogicalRowPreservingReadySizes(row);
             progress.onRepaintLogicalRow(row);
         }
         return dirtyRows.length;
