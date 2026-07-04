@@ -625,7 +625,7 @@ final class DebugCollectionTableModel
         if (value == null)
             return ""; //$NON-NLS-1$
         if (value.isUnreadable())
-            return "<unreadable>"; //$NON-NLS-1$
+            return UnreadablePresentation(); //$NON-NLS-1$
         if (!value.isEvaluated())
             value.evaluate();
         if (value.isPending())
@@ -634,6 +634,11 @@ final class DebugCollectionTableModel
         if (text == null)
             text = ""; //$NON-NLS-1$
         return DebugStringValueFormat.formatForCollectionWindow(text, value);
+    }
+
+    public static String UnreadablePresentation()
+    {
+        return "<недоступно>";
     }
 
     private String formatProperty(int logicalRow, IBslVariable rowVar, String propertyName)
@@ -659,7 +664,7 @@ final class DebugCollectionTableModel
         if (childValue == null)
             return ""; //$NON-NLS-1$
         if (childValue.isUnreadable())
-            return "<unreadable>"; //$NON-NLS-1$
+            return UnreadablePresentation(); //$NON-NLS-1$
         if (childValue instanceof IBslIndexedValue indexed)
             return formatIndexedWithSize(indexed);
         try

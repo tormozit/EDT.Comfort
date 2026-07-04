@@ -937,7 +937,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         pathGd.minimumWidth = 120;
         collectionPathField.setLayoutData(pathGd);
         collectionPathField.setText(pathKeyFromPath());
-        collectionPathField.setToolTipText("Путь к коллекции; выделите текст и Ctrl+C"); //$NON-NLS-1$
+        collectionPathField.setToolTipText("Путь к коллекции"); //$NON-NLS-1$
         installReadOnlyTextCopySupport(collectionPathField);
     }
 
@@ -3238,7 +3238,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
 
             Label hint = new Label(area, SWT.WRAP);
             hint.setText(
-                "Отметьте видимые колонки. Двойной щелчок по строке — активировать колонку в таблице. «По алфавиту» — сортировка списка; «Вверх» / «Вниз» — порядок выделенной строки; Ctrl+F — поиск."); //$NON-NLS-1$
+                "Отметьте видимые колонки. Двойной щелчок по строке — активировать колонку в таблице. «По алфавиту» — сортировка списка. «Вверх» / «Вниз» меняет позиции колонок. Ctrl+F — поиск. Настройки запоминаются в привязке к пути и типу колллекции до конца сессии."); //$NON-NLS-1$
             hint.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false, 2, 1));
 
             Composite actionBar = new Composite(area, SWT.NONE);
