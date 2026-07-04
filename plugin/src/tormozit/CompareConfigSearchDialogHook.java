@@ -3,6 +3,10 @@ import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.Status;
+import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.jface.dialogs.IDialogSettings; // Добавлен импорт
 import org.eclipse.jface.viewers.AbstractTreeViewer;
 import org.eclipse.jface.viewers.StructuredSelection;
@@ -15,6 +19,7 @@ import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.ITableLabelProvider;
 import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.custom.BusyIndicator;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
@@ -171,6 +176,9 @@ public class CompareConfigSearchDialogHook
         boolean caseSensitive = cbCase != null && cbCase.getSelection();
         String effectiveQuery = caseSensitive ? query : query.toLowerCase();
 
+        if (Global.isLogEnabled())
+            Global.log("CompareSearch", "start query=\"" + query + "\" backward=" + backward + " allColumns=" + cbSearchAllColumns); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+
         AbstractTreeViewer viewer = getTreeViewerFromDialog(dialog);
         if (viewer == null)
             return;
@@ -180,49 +188,102 @@ public class CompareConfigSearchDialogHook
             return;
         ITreeContentProvider provider = (ITreeContentProvider) cp;
 
-        // Собираем ВСЕ элементы модели (включая нераскрытые)
+        // Собираем все элементы модели (включая нераскрытые) на UI-потоке
+        long t0 = System.currentTimeMillis();
         List<Object> items = new ArrayList<>();
-        Object[] roots = provider.getElements(viewer.getInput());
-        if (roots != null)
+        BusyIndicator.showWhile(Display.getCurrent(), () ->
         {
-            for (Object root : roots)
+            Object[] roots = provider.getElements(viewer.getInput());
+            if (roots != null)
             {
-                items.add(root);
-                collectModelItems(root, provider, items, viewer);
+                for (Object root : roots)
+                {
+                    items.add(root);
+                    collectModelItems(root, provider, items, viewer);
+                }
             }
-        }
-        
+        });
+        long collectMs = System.currentTimeMillis() - t0;
+
         if (items.isEmpty())
             return;
 
-        // Определяем текущую позицию по модели
+        if (Global.isLogEnabled())
+            Global.log("CompareSearch", "collected " + items.size() + " items in " + collectMs + "ms"); //$NON-NLS-1$ //$NON-NLS-2$
+
+        // Фиксируем ссылки для фонового потока
+        IBaseLabelProvider labelProvider = viewer.getLabelProvider();
+
+        // Определяем текущую позицию
         ISelection sel = viewer.getSelection();
-        int current = -1;
-        if (sel instanceof IStructuredSelection && !sel.isEmpty())
-        {
-            current = items.indexOf(((IStructuredSelection) sel).getFirstElement());
-        }
+        int startIdx = (sel instanceof IStructuredSelection && !sel.isEmpty())
+            ? items.indexOf(((IStructuredSelection) sel).getFirstElement())
+            : -1;
 
         int n = items.size();
         int step = backward ? n - 1 : 1;
 
-        for (int i = 1; i <= n; i++)
+        // Фоновый поиск через Job с прогрессом и кнопкой "Отмена"
+        Job job = new Job("Поиск по дереву сравнения...") //$NON-NLS-1$
         {
-            int idx = (current + i * step) % n;
-            Object candidate = items.get(idx);
-            
-            if (isMatched(candidate, effectiveQuery, caseSensitive, viewer, cbSearchAllColumns))
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
             {
-                viewer.setSelection(new StructuredSelection(candidate), true);
-                if (!viewer.getSelection().isEmpty())
-                {
-                    clearStatus(dialog);
-                    return;
-                }
-            }
-        }
+                monitor.beginTask("Поиск по дереву сравнения...", n); //$NON-NLS-1$
 
-        setStatus(dialog, "Совпадений не найдено"); //$NON-NLS-1$
+                for (int i = 1; i <= n; i++)
+                {
+                    if (monitor.isCanceled())
+                    {
+                        if (Global.isLogEnabled())
+                            Global.log("CompareSearch", "cancelled by user at i=" + i); //$NON-NLS-1$
+                        return Status.CANCEL_STATUS;
+                    }
+
+                    int idx = (startIdx + i * step) % n;
+                    Object candidate = items.get(idx);
+
+                    if (isMatched(candidate, effectiveQuery, caseSensitive, labelProvider, cbSearchAllColumns))
+                    {
+                        Object found = candidate;
+                        Display.getDefault().asyncExec(() ->
+                        {
+                            if (textFilter.isDisposed())
+                                return;
+                            viewer.setSelection(new StructuredSelection(found), true);
+                            if (!viewer.getSelection().isEmpty())
+                                clearStatus(dialog);
+                        });
+
+                        if (Global.isLogEnabled())
+                            Global.log("CompareSearch", "found at i=" + i + " idx=" + idx); //$NON-NLS-1$ //$NON-NLS-2$
+
+                        monitor.done();
+                        return Status.OK_STATUS;
+                    }
+
+                    if (Global.isLogEnabled() && i % 500 == 0)
+                        Global.log("CompareSearch", "progress " + i + "/" + n); //$NON-NLS-1$ //$NON-NLS-2$
+
+                    monitor.worked(1);
+                }
+
+                // Ничего не найдено
+                Display.getDefault().asyncExec(() ->
+                {
+                    if (!textFilter.isDisposed())
+                        setStatus(dialog, "Совпадений не найдено"); //$NON-NLS-1$
+                });
+
+                if (Global.isLogEnabled())
+                    Global.log("CompareSearch", "no match after " + n + " items"); //$NON-NLS-1$
+
+                monitor.done();
+                return Status.OK_STATUS;
+            }
+        };
+        job.setUser(true);
+        job.schedule();
     }
     
     public static boolean isNodeMatchFilters(
@@ -258,9 +319,8 @@ public class CompareConfigSearchDialogHook
     }
 
     /** Проверяет совпадение текста в ячейках модели через LabelProvider. */
-    private static boolean isMatched(Object element, String query, boolean caseSensitive, AbstractTreeViewer viewer, boolean cbSearchAllColumns)
+    private static boolean isMatched(Object element, String query, boolean caseSensitive, IBaseLabelProvider baseLabelProvider, boolean cbSearchAllColumns)
     {
-        IBaseLabelProvider baseLabelProvider = viewer.getLabelProvider();
         if (baseLabelProvider instanceof ILabelProvider) {
             String text;
             if (element instanceof AbstractNodeWithLabels) {

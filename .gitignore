@@ -19,3 +19,6 @@ target/target/
 
 # Локальные пути PDE headless (site/scripts/pde-local.properties)
 site/scripts/pde-local.properties
+
+# Снапшоты opencode перед правками (генерируются автоматически)
+.opencode/snapshots/

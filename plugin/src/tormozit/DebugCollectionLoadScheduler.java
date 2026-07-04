@@ -36,6 +36,9 @@ final class DebugCollectionLoadScheduler
     private static final long MIN_DEBUG_REFRESH_INTERVAL_MS = 400L;
     private static final long PENDING_DIRTY_DEBOUNCE_MS = 500L;
     private static final long VIEWPORT_KICK_DELAY_MS = 150L;
+    private static final long SIZE_PASS_DEBOUNCE_MS = 120L;
+    private static final long SIZE_PASS_RETRY_DEBOUNCE_MS = 180L;
+    private static final long SIZE_REPAINT_DEBOUNCE_MS = 80L;
     private static final int DEBUG_DETAIL_STATE = 256;
     private static final int DEBUG_DETAIL_CONTENT = 512;
     private static final int OVERSCAN = 8;
@@ -51,11 +54,18 @@ final class DebugCollectionLoadScheduler
         void onRepaintLogicalRow(int logicalRow);
     }
 
+    /** display-индекс таблицы → logical-строка модели (фильтр / split). */
+    interface LogicalRowMapper
+    {
+        int toLogical(int displayIndex);
+    }
+
     private final DebugCollectionTableModel model;
     private final Display display;
     private final ProgressListener progress;
     private final Consumer<IBslVariable[]> contextColumnsListener;
     private Table tableForViewport;
+    private LogicalRowMapper logicalRowMapper;
     private Shell shellForPause;
     private final java.util.concurrent.atomic.AtomicBoolean disposed = new java.util.concurrent.atomic.AtomicBoolean();
     private final java.util.concurrent.atomic.AtomicInteger viewportFirst = new java.util.concurrent.atomic.AtomicInteger(0);
@@ -78,12 +88,24 @@ final class DebugCollectionLoadScheduler
         new java.util.concurrent.atomic.AtomicInteger(-1);
     private final java.util.concurrent.atomic.AtomicInteger sizeRowTo =
         new java.util.concurrent.atomic.AtomicInteger(-1);
+    private final java.util.concurrent.atomic.AtomicInteger sizeRowCoreFrom =
+        new java.util.concurrent.atomic.AtomicInteger(-1);
+    private final java.util.concurrent.atomic.AtomicInteger sizeRowCoreTo =
+        new java.util.concurrent.atomic.AtomicInteger(-1);
     private final java.util.concurrent.atomic.AtomicInteger sizeColFrom =
         new java.util.concurrent.atomic.AtomicInteger(1);
     private final java.util.concurrent.atomic.AtomicInteger sizeColTo =
         new java.util.concurrent.atomic.AtomicInteger(-1);
     private final java.util.concurrent.atomic.AtomicInteger sizePassGeneration =
         new java.util.concurrent.atomic.AtomicInteger();
+    private final java.util.concurrent.atomic.AtomicInteger viewportGeneration =
+        new java.util.concurrent.atomic.AtomicInteger();
+    private final java.util.concurrent.atomic.AtomicBoolean sizePassOverscanPhase =
+        new java.util.concurrent.atomic.AtomicBoolean();
+    private final java.util.concurrent.atomic.AtomicBoolean sizeRetryPending =
+        new java.util.concurrent.atomic.AtomicBoolean();
+    private final java.util.concurrent.atomic.AtomicBoolean firstSizePassCompleted =
+        new java.util.concurrent.atomic.AtomicBoolean();
     private IDebugEventSetListener debugEventListener;
     private Runnable debugRefreshDebounce;
     private Runnable viewportKickDebounce;
@@ -101,6 +123,11 @@ final class DebugCollectionLoadScheduler
     private volatile long lastDebugRefreshAt;
     private Runnable pendingDirtyDebounce;
     private Runnable priorityViewportRunnable;
+    private Runnable sizePassDebounce;
+    private Runnable sizeRetryDebounce;
+    private Runnable sizeRowsReadyDebounce;
+    private int sizeRepaintRowFrom = -1;
+    private int sizeRepaintRowTo = -1;
 
     DebugCollectionLoadScheduler(
         DebugCollectionTableModel model,
@@ -120,6 +147,11 @@ final class DebugCollectionLoadScheduler
     void bindTable(Table table)
     {
         tableForViewport = table;
+    }
+
+    void bindLogicalRowMapper(LogicalRowMapper mapper)
+    {
+        logicalRowMapper = mapper;
     }
 
     void bindShell(Shell shell)
@@ -166,6 +198,9 @@ final class DebugCollectionLoadScheduler
     {
         DebugCollectionAgentLog.beginSession();
         initialLoadSettled.set(false);
+        firstSizePassCompleted.set(false);
+        sizePassOverscanPhase.set(false);
+        sizeRetryPending.set(false);
         debugEventCoalesceCount.set(0);
         synchronized (dirtyRowsLock)
         {
@@ -182,6 +217,9 @@ final class DebugCollectionLoadScheduler
     {
         DebugCollectionAgentLog.beginSession();
         initialLoadSettled.set(true);
+        firstSizePassCompleted.set(true);
+        sizePassOverscanPhase.set(false);
+        sizeRetryPending.set(false);
         debugEventCoalesceCount.set(0);
         updateShellActiveSnapshot();
         captureViewport(logicalFirst, logicalLast);
@@ -199,7 +237,6 @@ final class DebugCollectionLoadScheduler
             return;
         captureViewport(first, last);
         scheduleViewportKickDebounced();
-        scheduleSizePass();
     }
 
     /** Немедленный kick видимой страницы (End, большой скачок) — coalesced {@link Job#INTERACTIVE}. */
@@ -257,6 +294,8 @@ final class DebugCollectionLoadScheduler
             logicalFirst = 0;
         if (logicalLast < logicalFirst)
             logicalLast = logicalFirst;
+        sizeRowCoreFrom.set(logicalFirst);
+        sizeRowCoreTo.set(logicalLast);
         sizeRowFrom.set(logicalFirst);
         sizeRowTo.set(logicalLast);
 
@@ -274,7 +313,33 @@ final class DebugCollectionLoadScheduler
         sizeColTo.set(colTo);
     }
 
-    void scheduleSizePass()
+    private void captureSizeViewportFromBoundTable()
+    {
+        Table table = tableForViewport;
+        if (table == null || table.isDisposed())
+            return;
+        int itemCount = table.getItemCount();
+        if (itemCount <= 0)
+            return;
+        int top = Math.max(0, table.getTopIndex());
+        int visible = estimateVisibleRowCount(table);
+        int last = Math.min(itemCount - 1, top + visible - 1);
+        if (last < top)
+            return;
+        LogicalRowMapper mapper = logicalRowMapper;
+        int logicalFirst = mapper != null ? mapper.toLogical(top) : top;
+        int logicalLast = mapper != null ? mapper.toLogical(last) : last;
+        if (logicalFirst < 0 || logicalLast < logicalFirst)
+            return;
+        captureSizeViewport(logicalFirst, logicalLast, table);
+    }
+
+    void scheduleSizePassDebounced()
+    {
+        scheduleSizePassDebounced(SIZE_PASS_DEBOUNCE_MS);
+    }
+
+    void scheduleSizePassDebounced(long delayMs)
     {
         if (disposed.get() || !isShellActiveForLoad())
             return;
@@ -282,29 +347,238 @@ final class DebugCollectionLoadScheduler
             return;
         if (display == null || display.isDisposed())
             return;
-        int gen = sizePassGeneration.incrementAndGet();
-        display.asyncExec(() -> {
-            if (disposed.get() || gen != sizePassGeneration.get())
+        Runnable schedule = () -> {
+            if (display.isDisposed() || disposed.get())
                 return;
-            executeSizePass();
-        });
+            if (sizePassDebounce != null)
+                display.timerExec(-1, sizePassDebounce);
+            sizePassDebounce = () -> {
+                sizePassDebounce = null;
+                if (disposed.get() || !isShellActiveForLoad())
+                    return;
+                if (isJobBusy(viewportKickJob))
+                {
+                    scheduleSizePassDebounced(SIZE_PASS_DEBOUNCE_MS);
+                    return;
+                }
+                captureSizeViewportFromBoundTable();
+                runSizePass(true, "kick"); //$NON-NLS-1$
+            };
+            display.timerExec((int) delayMs, sizePassDebounce);
+        };
+        if (display.getThread() == Thread.currentThread())
+            schedule.run();
+        else
+            display.asyncExec(schedule);
     }
 
-    private void executeSizePass()
+    void notifyCellContentReady(int logicalRow, int visibleCol)
     {
-        int rowFrom = sizeRowFrom.get();
-        int rowTo = sizeRowTo.get();
+        if (disposed.get() || !isShellActiveForLoad() || logicalRow < 0 || visibleCol < 0)
+            return;
+        if (!firstSizePassCompleted.get())
+            return;
+        if (DebugCollectionSizeResolver.isSizePassSkippedColumn(model, visibleCol))
+            return;
+        DebugCollectionTableModel.CellData data = model.cellData(logicalRow, visibleCol);
+        synchronized (data)
+        {
+            if (!data.contentLoaded)
+                return;
+            if (data.sizeState != DebugCollectionTableModel.SizeState.UNKNOWN
+                && data.sizeState != DebugCollectionTableModel.SizeState.PENDING)
+                return;
+        }
+        scheduleSizeRetryDebounced();
+    }
+
+    private void scheduleSizeRetryDebounced()
+    {
+        scheduleSizeRetryDebounced(SIZE_PASS_RETRY_DEBOUNCE_MS);
+    }
+
+    private void scheduleSizeRetryDebounced(long delayMs)
+    {
+        if (disposed.get() || !isShellActiveForLoad())
+            return;
+        if (model.totalSize == 0)
+            return;
+        if (display == null || display.isDisposed())
+            return;
+        Runnable schedule = () -> {
+            if (display.isDisposed() || disposed.get())
+                return;
+            if (sizeRetryDebounce != null)
+                display.timerExec(-1, sizeRetryDebounce);
+            sizeRetryDebounce = () -> {
+                sizeRetryDebounce = null;
+                if (disposed.get() || !isShellActiveForLoad())
+                    return;
+                runSizePass(false, "retry"); //$NON-NLS-1$
+            };
+            display.timerExec((int) delayMs, sizeRetryDebounce);
+        };
+        if (display.getThread() == Thread.currentThread())
+            schedule.run();
+        else
+            display.asyncExec(schedule);
+    }
+
+    private void runSizePass(boolean viewportChanged, String reason)
+    {
+        if (display == null || display.isDisposed())
+            return;
+        if (viewportChanged)
+        {
+            sizePassOverscanPhase.set(false);
+            int gen = sizePassGeneration.incrementAndGet();
+            viewportGeneration.incrementAndGet();
+            DebugCollectionSizeResolver.cancelPass(gen);
+            sizeRetryPending.set(false);
+            display.asyncExec(() -> {
+                if (disposed.get() || gen != sizePassGeneration.get())
+                    return;
+                executeSizePass(gen, reason, true);
+            });
+        }
+        else
+        {
+            if (DebugCollectionSizeResolver.isPassBusy())
+            {
+                sizeRetryPending.set(true);
+                return;
+            }
+            int gen = sizePassGeneration.get();
+            if (gen <= 0)
+                gen = sizePassGeneration.incrementAndGet();
+            final int passGen = gen;
+            display.asyncExec(() -> {
+                if (disposed.get() || passGen != sizePassGeneration.get())
+                    return;
+                executeSizePass(passGen, reason, false);
+            });
+        }
+    }
+
+    private void executeSizePass(int generation, String reason, boolean cancelPrevious)
+    {
+        int coreFrom = sizeRowCoreFrom.get();
+        int coreTo = sizeRowCoreTo.get();
+        int overscanFrom = viewportFirst.get();
+        int overscanTo = viewportLast.get();
         int colFrom = sizeColFrom.get();
         int colTo = sizeColTo.get();
-        if (rowFrom < 0 || rowTo < rowFrom || colTo < colFrom)
+        if (coreFrom < 0 || coreTo < coreFrom)
+        {
+            captureSizeViewportFromBoundTable();
+            coreFrom = sizeRowCoreFrom.get();
+            coreTo = sizeRowCoreTo.get();
+        }
+        if (colTo < colFrom)
+        {
+            colFrom = 1;
+            colTo = Math.max(1, model.columns.columnCount() - 1);
+        }
+        if (coreFrom < 0 || coreTo < coreFrom || colTo < colFrom)
             return;
-        int rowCount = rowTo - rowFrom + 1;
-        final int readyFrom = rowFrom;
-        final int readyCount = rowCount;
+        int total = model.totalSize;
+        if (total > 0)
+        {
+            coreTo = Math.min(coreTo, total - 1);
+            overscanTo = Math.min(overscanTo, total - 1);
+        }
+        if (overscanFrom < 0)
+            overscanFrom = coreFrom;
+        if (overscanTo < coreTo)
+            overscanTo = coreTo;
+        final boolean includeOverscan = sizePassOverscanPhase.get();
+        final int readyFrom = coreFrom;
+        final int readyCount = coreTo - coreFrom + 1;
+        final int viewportGen = viewportGeneration.get();
         DebugCollectionDebug.step("load", //$NON-NLS-1$
-            "size rows=" + rowFrom + ".." + rowTo + " cols=" + colFrom + ".." + colTo); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-        DebugCollectionSizeResolver.scheduleBatch(model, rowFrom, rowCount, colFrom, colTo, display,
-            () -> fireRowsReady(readyFrom, readyCount));
+            "size core=" + coreFrom + ".." + coreTo //$NON-NLS-1$ //$NON-NLS-2$
+                + " overscan=" + overscanFrom + ".." + overscanTo //$NON-NLS-1$ //$NON-NLS-2$
+                + " cols=" + colFrom + ".." + colTo //$NON-NLS-1$ //$NON-NLS-2$
+                + " phase=" + (includeOverscan ? "overscan" : "core")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        DebugCollectionSizeResolver.schedulePass(
+            model,
+            coreFrom,
+            coreTo,
+            overscanFrom,
+            overscanTo,
+            colFrom,
+            colTo,
+            display,
+            generation,
+            cancelPrevious,
+            includeOverscan,
+            reason,
+            viewportGen,
+            logicalRow -> {
+                if (progress != null && !disposed.get())
+                    progress.onRepaintLogicalRow(logicalRow);
+            },
+            () -> fireRowsReadyDebounced(readyFrom, readyCount),
+            needsRetry -> {
+                if (disposed.get() || !isShellActiveForLoad())
+                    return;
+                firstSizePassCompleted.set(true);
+                if (needsRetry)
+                    scheduleSizeRetryDebounced();
+                else if (!includeOverscan)
+                {
+                    sizePassOverscanPhase.set(true);
+                    scheduleSizeRetryDebounced();
+                }
+                if (sizeRetryPending.getAndSet(false))
+                    scheduleSizeRetryDebounced();
+            });
+    }
+
+    private void fireRowsReadyDebounced(int from, int count)
+    {
+        if (progress == null || display == null || display.isDisposed())
+            return;
+        int to = from + Math.max(0, count - 1);
+        synchronized (this)
+        {
+            if (sizeRepaintRowFrom < 0)
+            {
+                sizeRepaintRowFrom = from;
+                sizeRepaintRowTo = to;
+            }
+            else
+            {
+                sizeRepaintRowFrom = Math.min(sizeRepaintRowFrom, from);
+                sizeRepaintRowTo = Math.max(sizeRepaintRowTo, to);
+            }
+        }
+        Runnable schedule = () -> {
+            if (display.isDisposed() || disposed.get())
+                return;
+            if (sizeRowsReadyDebounce != null)
+                display.timerExec(-1, sizeRowsReadyDebounce);
+            sizeRowsReadyDebounce = () -> {
+                sizeRowsReadyDebounce = null;
+                int repaintFrom;
+                int repaintTo;
+                synchronized (DebugCollectionLoadScheduler.this)
+                {
+                    repaintFrom = sizeRepaintRowFrom;
+                    repaintTo = sizeRepaintRowTo;
+                    sizeRepaintRowFrom = -1;
+                    sizeRepaintRowTo = -1;
+                }
+                if (repaintFrom < 0 || disposed.get())
+                    return;
+                fireRowsReady(repaintFrom, repaintTo - repaintFrom + 1);
+            };
+            display.timerExec((int) SIZE_REPAINT_DEBOUNCE_MS, sizeRowsReadyDebounce);
+        };
+        if (display.getThread() == Thread.currentThread())
+            schedule.run();
+        else
+            display.asyncExec(schedule);
     }
 
     boolean isLoadActive()
@@ -352,6 +626,18 @@ final class DebugCollectionLoadScheduler
         disposed.set(true);
         shellVisible.set(false);
         sizePassGeneration.incrementAndGet();
+        if (display != null && !display.isDisposed())
+        {
+            if (sizePassDebounce != null)
+                display.timerExec(-1, sizePassDebounce);
+            if (sizeRetryDebounce != null)
+                display.timerExec(-1, sizeRetryDebounce);
+            if (sizeRowsReadyDebounce != null)
+                display.timerExec(-1, sizeRowsReadyDebounce);
+            sizePassDebounce = null;
+            sizeRetryDebounce = null;
+            sizeRowsReadyDebounce = null;
+        }
         removeShellStateListener();
         removeDebugEventListener();
         DebugCollectionSizeResolver.cancelAll();
@@ -682,11 +968,21 @@ final class DebugCollectionLoadScheduler
                 {
                     markDirtyViewport();
                     display.asyncExec(() -> {
-                        if (!disposed.get() && isShellActiveForLoad())
+                        if (!disposed.get() && isShellActiveForLoad() && firstSizePassCompleted.get())
                             repaintDirtyLogicalRowsInViewport();
                     });
                 }
-                scheduleSizePass();
+                if (display != null && !display.isDisposed())
+                {
+                    display.asyncExec(() -> {
+                        if (disposed.get() || !isShellActiveForLoad())
+                            return;
+                        captureSizeViewportFromBoundTable();
+                        scheduleSizePassDebounced();
+                    });
+                }
+                else
+                    scheduleSizePassDebounced();
             }
             catch (DebugException e)
             {
@@ -799,8 +1095,13 @@ final class DebugCollectionLoadScheduler
 
     private void markDirtyViewport()
     {
-        int from = viewportFirst.get();
-        int to = viewportLast.get();
+        int from = sizeRowCoreFrom.get();
+        int to = sizeRowCoreTo.get();
+        if (from < 0 || to < from)
+        {
+            from = viewportFirst.get();
+            to = viewportLast.get();
+        }
         if (to < from)
             return;
         synchronized (dirtyRowsLock)
@@ -877,6 +1178,8 @@ final class DebugCollectionLoadScheduler
     /** @return число перерисованных logical-строк в viewport */
     private int repaintDirtyLogicalRowsInViewport()
     {
+        if (!firstSizePassCompleted.get())
+            return 0;
         int vpFrom = viewportFirst.get();
         int vpTo = viewportLast.get();
         int total = model.totalSize;

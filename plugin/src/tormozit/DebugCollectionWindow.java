@@ -166,6 +166,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         dataInteraction.install();
         scheduler = new DebugCollectionLoadScheduler(model, display, this, this::onContextColumnsReady);
         scheduler.bindTable(splitTable.dataTable());
+        scheduler.bindLogicalRowMapper(this::displayIndexToLogical);
         scheduler.bindShell(shell);
         hookTableEvents();
         hookContextMenu();
@@ -1773,7 +1774,6 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             scheduler.captureSizeViewport(logicalFirst, logicalLast, data);
             scheduler.requestViewport(logicalFirst, logicalLast);
         }
-        scheduler.scheduleSizePass();
     }
 
     private int visibleRowCountEstimate()

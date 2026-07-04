@@ -245,24 +245,24 @@ final class DebugCollectionTableModel
         boolean[] preservedAny = { false };
         synchronized (cellCache)
         {
-            for (java.util.Map.Entry<CellKey, CellData> e : cellCache.entrySet())
-            {
+            cellCache.entrySet().removeIf(e -> {
                 if (e.getKey().row != logicalRow)
-                    continue;
+                    return false;
                 CellData data = e.getValue();
                 synchronized (data)
                 {
                     if (data.sizeState == SizeState.READY || data.sizeState == SizeState.NA)
                     {
                         preservedAny[0] = true;
+                        return false;
                     }
-                    else
-                    {
-                        data.contentLoaded = false;
-                    }
+                    return true;
                 }
-            }
+            });
         }
+        // Если в строке остались непреодолённые (не READY/NA) ячейки, их rowChildrenCache трогать
+        // не будем — иначе именно тот механизм из findNamedChild, что даёт SizeResolver стабильную
+        // ссылку на IBslValue между повторами, обнулится и async evaluate() придётся начинать заново.
         if (!preservedAny[0])
             rowChildrenCache.remove(logicalRow);
     }
@@ -328,10 +328,8 @@ final class DebugCollectionTableModel
         {
             synchronized (cached)
             {
-                if (cached.displayText != null)
-                    return cached.displayText;
                 if (cached.contentLoaded)
-                    return ""; //$NON-NLS-1$
+                    return cached.displayText != null ? cached.displayText : ""; //$NON-NLS-1$
             }
         }
         String text = resolveCellTextLive(logicalRow, visibleCol);
@@ -437,18 +435,11 @@ final class DebugCollectionTableModel
             }
             data.baseText = text;
             data.contentLoaded = true;
+            data.sizeState = SizeState.UNKNOWN;
+            data.nestedSize = -1;
             if (pendingMarker)
             {
-                if (data.sizeState == SizeState.READY && data.nestedSize >= 0)
-                {
-                    data.displayText = cellTextWithNestedSize(text, data.nestedSize);
-                }
-                else
-                {
-                    data.sizeState = SizeState.UNKNOWN;
-                    data.nestedSize = -1;
-                    data.displayText = "(.) " + text;
-                }
+                data.displayText = "(.) " + text;
             }
             else if (parsedSize >= 0)
             {
@@ -458,8 +449,6 @@ final class DebugCollectionTableModel
             }
             else
             {
-                data.sizeState = SizeState.UNKNOWN;
-                data.nestedSize = -1;
                 data.displayText = text;
             }
         }
@@ -685,14 +674,10 @@ final class DebugCollectionTableModel
             typeName = "Коллекция"; //$NON-NLS-1$
         else
             typeName = typeName.trim();
+        // Kickstart EDT evaluation now (UI thread during SetData),
+        // so SizeResolver сразу получит реальный getSize() без 5s задержки.
         if (!indexed.isEvaluated())
             indexed.evaluate();
-        if (indexed.isEvaluated() && !indexed.isPending())
-        {
-            int size = indexed.getSize();
-            if (size >= 0)
-                return "(" + size + ") " + typeName;
-        }
         return "(.) " + typeName;
     }
 

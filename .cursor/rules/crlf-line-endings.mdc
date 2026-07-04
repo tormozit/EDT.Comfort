@@ -2,47 +2,17 @@
 description: CRLF на Windows, защита от двойных разделителей и авто-ремонт после правок
 alwaysApply: true
 ---
+
 # Разделители строк — CRLF (Windows)
-Целевая среда — **Windows**. Итоговые файлы — **CRLF** (`\r\n`). Не допускать артефакт «пустая строка после каждой строки кода» (двойной CRLF).
-## Норма
-- Новые и изменённые файлы — **CRLF** на диске.
-- В патчах `StrReplace` — **обычный `\n`** между строками; инструмент сам запишет CRLF. **Не** вставлять `\r\n` вручную в `old_string` / `new_string`.
-- В `Write` — тоже **`\n`**, не литералы `\r\n` в каждой строке содержимого.
-- Между строками кода в патче — **один** перевод строки. **Запрещено** `\n\n` между соседними строками кода (это главная причина двойного CRLF на Windows).
-## Признак поломки
-После `Read` файла: почти каждая строка кода отделена пустой строкой; файл внезапно в ~1.5–2 раза длиннее соседних классов; в hex/редакторе — **`0D 0D 0A`** (`\r\r\n`, CR+CRLF) или `\r\n\r\n` после большинства строк.
-**Не копировать** такой вид из `Read` в следующий патч — сначала починить файл (см. ниже).
-## Защита в git (pre-commit)
-Один раз установить хук — перед каждым коммитом чинит **staged** `.java` / `.xml` / `.properties` / `.mdc` / `.ps1` / `.md` / `.txt` / `.launch`:
+
+Файлы на диске — **CRLF**. В `StrReplace`/`Write` — `\n` между строками (не `\r\n`, не `\n\n` между строками кода).
+
+**Поломка:** «шахматка» пустых строк, `0D 0D 0A` / `\r\n\r\n` — не копировать в патч; сначала ремонт.
+
+**Git hook:** см. `.cursor/scripts/install-git-eol-hook.ps1`, проверка — `check-double-eol.ps1`.
+
+**После записи** в `plugin/src/**`, `plugin/plugin.xml`, `META-INF/**`:
 ```powershell
-powershell -NoProfile -File "C:\VC\EDT.Comfort\.cursor\scripts\install-git-eol-hook.ps1"
+powershell -NoProfile -File "C:\VC\EDT.Comfort\.cursor\scripts\repair-double-eol.ps1" -Path "C:\VC\EDT.Comfort\plugin\src\tormozit\Foo.java"
 ```
-Проверка всего репозитория без записи (exit 1 при находках):
-```powershell
-powershell -NoProfile -File "C:\VC\EDT.Comfort\.cursor\scripts\check-double-eol.ps1"
-```
-## Авто-ремонт (обязательно для агента)
-После **любой** записи в `plugin/src/**`, `plugin/plugin.xml`, `plugin/META-INF/**`:
-1. Запустить ремонт **для затронутых файлов** (или всего `plugin/src`, если правок много):
-   ```powershell
-   powershell -NoProfile -File "C:\VC\EDT.Comfort\.cursor\scripts\repair-double-eol.ps1" -Path "C:\VC\EDT.Comfort\plugin\src\tormozit\Foo.java"
-   ```
-2. Для проверки репозитория без записи:
-   ```powershell
-   powershell -NoProfile -File "C:\VC\EDT.Comfort\.cursor\scripts\repair-double-eol.ps1" -Scan
-   ```
-3. Если скрипт сообщил `REPAIRED` — **не считать задачу завершённой**, пока не убедишься, что `Read` показывает обычную плотность строк (как в `FilterInputBox.java`).
-Скрипт: `.cursor/scripts/repair-double-eol.ps1` — нормализует `\r\r\n` → `\r\n`, убирает лишние пустые строки от двойного CRLF, сохраняя осмысленные разрывы (`package` / `import` / `}` / javadoc).
-## При правке существующего файла
-- Если файл уже на **CRLF** — не смешивать с LF-only.
-- Точечный `StrReplace`: `old_string` брать из файла **без** лишних пустых строк; если `Read` показывает «шахматку» — сначала `-Path` ремонт, потом правка.
-## Область
-- Исходники плагина: `plugin/src/**`, `plugin/plugin.xml`, `plugin/META-INF/**`
-- Правила и скрипты: `.cursor/**`, `launch/**`, `site/**`
-## Запрещено
-- `\n\n` между строками кода в `StrReplace` / `Write`.
-- Явные `\r\n` в каждой строке патча при том, что инструмент и так нормализует EOL.
-- Копировать из `Read` испорченный «разряженный» файл в `new_string`.
-- Оставлять файл с двойным CRLF после своей правки, если ремонт доступен.
-## Связь с git
-В `plugin/.gitattributes` стоит `* text=auto`; локально на Windows рабочие копии ожидаются с **CRLF**.
+При `REPAIRED` — проверить плотность строк через `Read`. Область также: `.cursor/**`, `launch/**`, `site/**`. `plugin/.gitattributes`: `text=auto`, локально CRLF.

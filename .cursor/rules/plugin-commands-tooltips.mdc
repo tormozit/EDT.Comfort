@@ -5,59 +5,13 @@ alwaysApply: true
 
 # Подпись «(Комфорт)» в UI плагина
 
-## Подпись
+`Global.pluginSignForTooltip()` / `Global.withPluginWindowTitle()` — не дублировать ` (Комфорт)` вручную.
 
-Используй `Global.pluginSignForTooltip()` и `Global.withPluginWindowTitle()` — не дублируй строку ` (Комфорт)` вручную.
+| Где | Заголовок окна | Тултип/description | label/name/setText |
+|-----|----------------|-------------------|-------------------|
+| Кастомный Shell/Dialog плагина | с суффиксом | без | без |
+| Меню EDT, plugin.xml, хуки view/редакторов | — | с суффиксом | без |
+| Внутри окна коллекции/скелета | — | без | без |
+| Eclipse View, Preferences, тосты, окна EDT | без | по контексту | без |
 
-## Заголовки кастомных окон
-
-Суффикс ` (Комфорт)` в **title shell/dialog** — только для UI, **полностью описанного в коде плагина**: отдельные `Shell` / `Dialog`, которых **нет в штатном EDT**.
-
-```java
-shell.setText(Global.withPluginWindowTitle("Коллекция " + typeTitle));
-// InputDialog: Global.withPluginWindowTitle("Поиск")
-```
-
-**Не добавлять суффикс в заголовок:**
-
-- Eclipse View (workbench-вкладки, в т.ч. «Журнал Комфорт»);
-- страницы Preferences;
-- тосты;
-- окна и диалоги EDT (в т.ч. с нашими хуками).
-
-## Тултипы и description команд
-
-### Вне кастомных окон плагина
-
-Меню EDT, хуки в штатных view/редакторах, `plugin.xml`, toolbar Eclipse View — тултип/description **с** суффиксом:
-
-- **`plugin.xml`**: атрибуты `description` у `<command>` и `tooltip` у пунктов меню/тулбара.
-- **Динамические пункты меню** (SWT `MenuItem`): `item.setToolTipText("…" + Global.pluginSignForTooltip())`.
-- **Действия в хуках** редакторов/представлений EDT: тот же шаблон для `setToolTipText`.
-
-### Внутри кастомных окон плагина
-
-Окно коллекции, скелет, их toolbar и контекстное меню — тултип **без** суффикса:
-
-```java
-item.setToolTipText("Видимость и порядок колонок");
-```
-
-## Текст команды
-
-`name`, `label`, `setText` у кнопок и пунктов меню — **без** подписи; подпись только в заголовке окна или в тултипе/description (см. правила выше).
-
-## Примеры
-
-```xml
-description="Копировать ссылку на текущий объект или строку модуля (Комфорт)"
-tooltip="Последние посещённые методы и объекты метаданных (Комфорт)"
-```
-
-```java
-// Values → «Показать коллекцию» (внешняя команда EDT)
-item.setToolTipText("Открыть коллекцию в отдельном окне" + Global.pluginSignForTooltip());
-
-// Toolbar внутри DebugCollectionWindow
-settings.setToolTipText("Видимость и порядок колонок");
-```
+Примеры: `shell.setText(Global.withPluginWindowTitle("Коллекция …"))`; `item.setToolTipText("…" + Global.pluginSignForTooltip())` вне окна; внутри — `setToolTipText("Видимость и порядок колонок")`.

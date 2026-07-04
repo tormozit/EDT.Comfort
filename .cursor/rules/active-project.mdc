@@ -5,51 +5,10 @@ alwaysApply: true
 
 # Активный проект EDT
 
-## Разовое чтение — `Global.getActiveProject`
+**Разово:** `Global.getActiveProject(part/page, showMessage)` — не дублировать обход навигатора/`IFile.getProject()`. `showMessage=true` только для тоста «Нет активного проекта». Эталон: `Global.java`.
 
-Для **одноразового** определения активного проекта (handler, команда, переход) используй **`Global.getActiveProject`** — не дублируй логику обходом навигатора, `IFile.getProject()` из «случайного» редактора или `ResourcesPlugin.getWorkspace().getRoot().getProject(name)`.
+**Реактивный UI:** `ActiveProjectTracker` — `bootstrapPage`, `addListener`/`removeListener`, `peek` / `resolveContextProject`. Не свои `IPartListener2` для проекта. `Global.isNavigatorPart` — проверка навигатора.
 
-```java
-IWorkbenchPage page = ...;
-IWorkbenchPart activePart = page != null ? page.getActivePart() : null;
-IProject project = Global.getActiveProject(activePart, false);
-```
+**Запрещено:** проект только из `getActiveEditor()` в обход Global/tracker; прямой обход навигатора где хватает Global; `getActiveProject(page)` при фокусе в навигаторе + открытом редакторе; дублировать window-level хуки.
 
-- **`getActiveProject(IWorkbenchPart part, boolean showMessage)`** — когда важен **контекст фокуса**: навигатор → проект из выделения, редактор → проект файла, иначе fallback по странице.
-- **`getActiveProject(IWorkbenchPage page, boolean showMessage)`** — когда активная часть неизвестна или не нужна (fallback: редактор → сравнение → выделение навигатора).
-- **`showMessage`** — `true` только если пользователю нужно показать тост «Отсутствует активный проект»; для фильтров и фоновой логики — `false`.
-
-Эталон: [`Global.java`](plugin/src/tormozit/Global.java).
-
-## Реактивный UI — `ActiveProjectTracker`
-
-Если UI **должен обновляться** при смене контекстного проекта (фильтр «По проекту», синхронизация панелей и т.п.) — подписывайся на **`ActiveProjectTracker`**, не ставь свои `IPartListener2` / `PostSelectionListener` для проекта.
-
-```java
-ActiveProjectTracker.bootstrapPage(page);
-ActiveProjectTracker.addListener(page, (p, previous, current) -> refreshUi());
-// dispose: ActiveProjectTracker.removeListener(page, listener);
-
-IProject project = ActiveProjectTracker.peek(page);
-if (project == null)
-    project = ActiveProjectTracker.resolveContextProject(page);
-```
-
-Tracker включает grace после restore, retry при неготовом редакторе, guard навигатора и focus guard — по образцу [`ApplicationsViewHook`](plugin/src/tormozit/ApplicationsViewHook.java).
-
-Эталон: [`ActiveProjectTracker.java`](plugin/src/tormozit/ActiveProjectTracker.java), [`RecentPlacesView.installContextProjectListener`](plugin/src/tormozit/RecentPlacesView.java).
-
-**`Global.isNavigatorPart(IWorkbenchPart)`** — проверка навигатора EDT / Project Explorer; не дублировать по view id.
-
-## Запрещено
-
-- Брать проект только из `page.getActiveEditor()` / `editor.getEditorInput()` в обход `Global` / tracker, если нужен «активный проект EDT» в широком смысле.
-- Ходить в дерево навигатора напрямую (`CommonNavigator`, `TreeSelection`) там, где достаточно `Global.getActiveProject` или `ActiveProjectTracker`.
-- Использовать `getActiveProject(page, …)` там, где фокус в навигаторе и при этом открыт редактор — проект навигатора не попадёт в фильтр.
-- Дублировать window-level хуки смены проекта — только через tracker.
-
-## Когда допустимо обходить Global / tracker
-
-- Разбор **конкретной** записи с известным `projectName` (переход к месту из «Последних мест») — `RecentPlacesHandler.resolveProject`.
-- Явная привязка к **заданному** `IProject` / `IFile`, а не к «текущему активному» в IDE.
-- Доменная синхронизация штатной панели «Приложения» EDT — `ApplicationsViewHook.applyApplicationsProject` и stock-guard поверх listener tracker.
+**Исключения:** запись с известным `projectName`; явный `IProject`/`IFile`; `ApplicationsViewHook.applyApplicationsProject`.

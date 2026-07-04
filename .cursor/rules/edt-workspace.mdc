@@ -5,62 +5,23 @@ alwaysApply: true
 
 # EDT workspace (EDT.Comfort)
 
-## Где лежат бандлы EDT
+## Бандлы EDT
 
-**Не искать** в `C:\Program Files\1C\...`, на `D:\`/`E:\` и т.п., пока не попросили явно.
-
-Для этого проекта целевая платформа и JAR-ы EDT — в workspace плагина:
+Не искать в `Program Files\1C\…` без явной просьбы. Target platform:
 
 - Workspace: `C:\VC\EDT-plugin-WS`
-- Бандлы (target platform / bundle pool):
-  `C:\VC\EDT-plugin-WS\.metadata\.plugins\org.eclipse.pde.core\.bundle_pool\plugins\`
+- JAR: `C:\VC\EDT-plugin-WS\.metadata\.plugins\org.eclipse.pde.core\.bundle_pool\plugins\`
 
-Пример: `com._1c.g5.v8.dt.platform.services.ui_*.jar` — там же.
+## Распаковка и разбор
 
-## Распаковка архивов (JAR, ZIP и т.п.)
+Временные файлы — только `.tmp/` (напр. `.tmp\mdprops\`). **Не** распаковывать в корень/`plugin/`. `jar xf`/`unzip` — `working_directory` в `.tmp\<имя>`; иначе `com/`, `org/` в корне — удалить.
 
-**Временные файлы для ускорения анализов — только в `.tmp/`.**
+`javap` только: `C:\Program Files\1C\1CE\components\axiom-jdk-full-17.0.16+12-x86_64\bin\javap.exe`
 
-**Никогда** не распаковывать в корень репозитория, в `plugin/` или другие рабочие каталоги.
+Разбор класса: найти JAR в `.bundle_pool` → `jar xf` в `.tmp\…` → `javap` / `jar tf` / grep.
 
-Всегда использовать подкаталог **`.tmp/`** в корне проекта (уже в `.gitignore`):
+## Репозиторий и сборка
 
-```text
-C:\VC\EDT.Comfort\.tmp\mdprops\   — пример для разбора бандла
-```
+Исходники: `C:\VC\EDT.Comfort\plugin\`. Запуск — PDE workspace `EDT-plugin-WS`. **Maven запрещён** — сборка в PDE; после правок сообщить о пересборке, не запускать `mvn`.
 
-Перед распаковкой: `mkdir .tmp\<имя>` (или `New-Item -ItemType Directory`). Рабочую директорию для `jar xf` / `unzip` задавать явно (`cd .tmp\…` или `-C .tmp\…`).
-
-После анализа временные файлы можно удалить; в git они не попадают.
-
-### Типичная ошибка: папка `com/` в корне репозитория
-
-`jar xf` / `unzip` **всегда** создают `com/`, `org/`, `META-INF/` в **текущей** директории — это структура пакетов из JAR, а не отдельная «папка агента».
-
-- **Запрещено** вызывать `jar xf` из корня `EDT.Comfort`, из `plugin/` и без явного каталога назначения.
-- **Обязательный шаблон** для shell-команд:
-  - `working_directory: C:\VC\EDT.Comfort\.tmp\<имя-анализа>`, **или**
-  - `New-Item …\.tmp\<имя>` + `Set-Location` / `Push-Location` **до** `jar xf`.
-- **`javap` не в PATH** — вызывать только по полному пути:
-  `C:\Program Files\1C\1CE\components\axiom-jdk-full-17.0.16+12-x86_64\bin\javap.exe`
-  (не `javap` без пути).
-- Если случайно появились `com/`, `org/`, `plugin.xml` в корне — удалить и не коммитить.
-
-## Когда нужен внутренний код EDT
-
-1. Сначала `dir /s /b` или поиск по `*.jar` в `.bundle_pool\plugins\`.
-2. Для разбора класса: распаковать нужный `.class` в `.tmp\…` (`jar xf …/SomeBundle_*.jar path/to/Class.class` из `.tmp\bundle-name\`), затем `javap` по пути выше, либо читать строки/константы из `.class` (grep, `strings`, hex-просмотр) или искать по JAR (`jar tf`, `Select-String` по распакованному каталогу).
-
-## Связь с репозиторием
-
-- Исходники плагина: `C:\VC\EDT.Comfort\plugin\`
-- Запуск/отладка — через Eclipse PDE workspace `C:\VC\EDT-plugin-WS`, не через установленный EDT в Program Files.
-- **Launch / OSGi:** не трогать основной `Eclipse Application` без явной просьбы; восстановление — `launch/restore-main.ps1`. Подробности — правило `pde-launch-osgi.mdc`.
-
-## Сборка плагина
-
-**Не запускать Maven** (`mvn`, `mvn compile`, `mvn package` и т.п.) для сборки или проверки компиляции — пользователь собирает плагин сам (PDE / Eclipse).
-
-- Не предлагать «пересоберите через mvn» и не запускать сборку «для проверки» после правок.
-- После изменений в коде достаточно сообщить, что нужно пересобрать в PDE; не вызывать Maven в терминале.
-- Распаковка JAR в `.tmp/` для анализа EDT — по-прежнему допустима (это не сборка плагина). Для дизассемблирования — `javap.exe` по пути из раздела выше.
+Launch/OSGi — см. `pde-launch-osgi.mdc`; восстановление — `launch/restore-main.ps1`.

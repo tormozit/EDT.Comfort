@@ -7,6 +7,8 @@ final class DebugCollectionAgentLog
 {
     private static final String LOG_PATH = "C:\\VC\\EDT.Comfort\\debug-e49ee4.log"; //$NON-NLS-1$
 
+    static final String BUILD = "diag-H22"; //$NON-NLS-1$
+
     private static volatile String sessionId = ""; //$NON-NLS-1$
 
     private DebugCollectionAgentLog() {}
@@ -27,6 +29,8 @@ final class DebugCollectionAgentLog
                 java.nio.file.StandardOpenOption.CREATE,
                 java.nio.file.StandardOpenOption.TRUNCATE_EXISTING,
                 java.nio.file.StandardOpenOption.WRITE);
+            log("H00", "DebugCollectionAgentLog", "buildStamp", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"build\":\"" + BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (Exception ignored)
         {

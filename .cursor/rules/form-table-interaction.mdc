@@ -5,101 +5,35 @@ alwaysApply: true
 
 # Таблицы в формах (плагин Комфорт)
 
-Для **новых** и дорабатываемых `Table` / много колоночных `Tree` в кастомных окнах и диалогах плагина — единое поведение выбора ячейки.
-
-Целевая среда — **Windows + SWT** (см. `swt-windows-ui.mdc`).
+Для **новых** и дорабатываемых `Table` / много колоночных `Tree` в кастомных окнах — единое поведение. Среда: **Windows + SWT**.
 
 ## Обязательно
 
-### 1. Кликабельность любой ячейки
-
-- ЛКМ в **любой** колонке выбирает строку **и** активную ячейку (`activeColumn`), не только первую колонку.
-- Координаты: `table.getItem(new Point(x, y))` + `columnAt(x, y, item)` по `item.getBounds(col)`.
-- После выбора: `table.setSelection(item)` и перерисовка строки.
-
-### 2. Копирование — только активная ячейка
-
-- **Ctrl+C** и пункт контекстного меню «Копировать» (с `\tCtrl+C` в подписи при необходимости).
-- В буфер — **только текст активной ячейки**, не строка целиком и не все колонки.
-- Источник текста — отображаемое значение (`host.getCellDisplayText(...)` или `item.getText(activeColumn)`), `null` → `""`.
-- Для хука штатного Copy в EDT (инспектор) — подмена действия, как в `DebugInspectorTreeEnhancement.hookGlobalCopyAction()`.
-
-### 3. Подсветка текущей строки и ячейки
-
-- **Строка:** все ячейки выбранной строки — общий фон (`rowSelectionBackground()`), чуть сильнее при фокусе таблицы.
-- **Активная ячейка:** тот же ряд, но фон ещё темнее (`activeCellBackground(rowBg)`).
-- **Рамка активной ячейки:** `SWT.PaintItem` — `drawRectangle` по `item.getBounds(activeColumn)`.
-- Реализация фона — `SWT.EraseItem` (сброс `SWT.BACKGROUND` в `detail`).
-- При `FocusIn` / `FocusOut` — сброс кэша цветов и перерисовка выбранной строки.
-
-### 4. Подсветка заголовка текущей колонки и линия под шапкой
-
-- Заголовок колонки `activeColumn` — **тонкая accent-линия (2 px) снизу** ячейки шапки; нативный текст и фон заголовка не перекрывать.
-- **Постоянная линия 1 px** под шапкой на **ширину клиентской области таблицы** (без вертикального скроллбара); цвет — как у линий между строками (±8 к фону списка, как в SWT).
-- Accent-линия колонки — **над** разделителем (`y = headerH - 2 - 1`), не перекрывает его.
-- **Прокрутка не меняет** текущую строку и `activeColumn` — подсвечивать по-прежнему ту же колонку.
-- Обновлять overlay только когда меняется **какая** колонка активна (`selectCell`) или интенсивность при фокусе (`FocusIn` / `FocusOut`), а также при resize / reorder / горизонтальном скролле.
-- При **drag-resize** ширины колонки accent подстраивается только на паузе (`SWT.Resize` на `TableColumn`), не на каждый пиксель — принятое ограничение Windows+SWT.
-- На Windows — overlay-`Canvas` (`FormTableInteraction`): `headerSeparator` (1 px) + `headerHighlight` (2 px accent), не сплошная заливка ячейки.
-- Overlay **только** на `tableStack` с `setLayout(null)`; `Table` — внутри `columnHost` с `TableColumnLayout`. **Не** добавлять overlay-детей в `GridLayout` / `SashForm` напрямую (ломает вёрстку).
-
-```java
-Composite tableStack = new Composite(parent, SWT.NONE);
-tableStack.setLayout(null);
-tableStack.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
-
-Composite columnHost = new Composite(tableStack, SWT.NONE);
-columnHost.setLayout(new TableColumnLayout(true));
-
-Table table = new Table(columnHost, ...);
-// FormTableInteraction.install() — overlay на tableStack
-```
-
-### 5. Перестановка колонок и сохранение порядка
-
-- Form-таблицы (диалоги): **`TableColumn.setMoveable(true)`** — через `FormTableInteraction` (по умолчанию включено).
-- **Opt-out** для коллекции: `interaction.setColumnReorderEnabled(false)` в `DebugCollectionTableInteraction` (порядок index/data там другой).
-- После reorder `activeColumn` — **ссылка на `TableColumn`**, не визуальный индекс; `cellText` в диалогах — по `col == nameColumn`, не `switch (column)`.
-- Порядок колонок — **`Table.getColumnOrder()` / `setColumnOrder(int[])`**; persist в `IDialogSettings` через `FormTableColumnOrder` (формат `"0,2,1,3"`, creation indices).
-- **Load** после создания всех колонок, **до** `FormTableInteraction.install()`; **save** в `close()` вместе с ширинами. Ширины привязаны к `TableColumn` — после reorder не ломаются.
-
-```java
-FormTableColumnOrder.load(settings, KEY_COL_ORDER, table);
-// ... install interaction ...
-FormTableColumnOrder.save(settings, KEY_COL_ORDER, table);
-```
+1. **Клик и выбор:** ЛКМ в любой колонке → строка + `activeColumn` (`getItem(Point)` + `columnAt` по `getBounds`); `setSelection` + перерисовка.
+2. **Копирование:** Ctrl+C / «Копировать» — только текст активной ячейки (`getCellDisplayText` / `getText(activeColumn)`); для EDT-инспектора — подмена Copy как в `DebugInspectorTreeEnhancement.hookGlobalCopyAction()`.
+3. **Подсветка строки/ячейки:** `EraseItem` — фон строки (`rowSelectionBackground`), активной ячейки темнее (`activeCellBackground`); `PaintItem` — рамка по `getBounds(activeColumn)`; при `FocusIn`/`FocusOut` — сброс кэша цветов.
+4. **Заголовок колонки:** accent 2 px снизу активной колонки; линия 1 px под шапкой на ширину клиента; overlay `Canvas` на `tableStack` (`setLayout(null)`), таблица в `columnHost` + `TableColumnLayout` — см. `FormTableInteraction` (`headerSeparator` + `headerHighlight`). Accent над разделителем; scroll не сбрасывает `activeColumn`; при drag-resize колонки — accent на паузе (`SWT.Resize`).
+5. **Порядок колонок:** `setMoveable(true)` в `FormTableInteraction`; opt-out коллекции — `setColumnReorderEnabled(false)`. После reorder `activeColumn` — ссылка на `TableColumn`; persist — `FormTableColumnOrder` + `IDialogSettings` (`"0,2,1,3"`). Load до `install()`, save в `close()`.
 
 ## Эталоны
 
 | Контрол | Класс |
 |---------|--------|
-| `Table` (диалоги, «Последние места») | `FormTableInteraction` + `tableStack` |
-| `Table` (коллекция, скелет) | `DebugCollectionTableInteraction` + `DebugCollectionTableHost` + `tableStack` |
-| `Tree` (инспектор отладки) | `DebugInspectorTreeEnhancement` |
-
-Подключение таблицы:
-
-```java
-interaction = new DebugCollectionTableInteraction(table, host);
-interaction.install();
-```
+| Table (диалоги) | `FormTableInteraction` + `tableStack` |
+| Table (коллекция) | `DebugCollectionTableInteraction` + `DebugCollectionTableHost` |
+| Tree (инспектор) | `DebugInspectorTreeEnhancement` |
 
 Окна: `DebugCollectionWindow`, `DebugCollectionSkeletonWindow`.
 
+## Исключения
+
+- Штатная таблица EDT — не ломать UX.
+- Пикер одной сущности — достаточно подсветки строки.
+- Без заголовков (`setHeaderVisible(false)`) — п. 4 не применяется.
+
 ## Запрещено
 
-- Копировать строку / несколько колонок по Ctrl+C или «Копировать», если пользователь выделил одну ячейку.
-- Оставлять выбор только по первой колонке при `FULL_SELECTION`.
-- Полагаться на штатный clipboard EDT без перехвата, если он копирует не ту ячейку.
-- Дублировать логику подсветки/копирования в каждом окне — выносить в общий interaction-хелпер по образцу `DebugCollectionTableInteraction`.
+- Копировать строку/несколько колонок при выделенной одной ячейке; выбор только по первой колонке при `FULL_SELECTION`; штатный clipboard EDT без перехвата; дублировать логику в каждом окне.
+- Overlay в `GridLayout`/`SashForm` напрямую.
 
-## Когда допустимо отступить
-
-- **Штатная таблица EDT** (окно «Значения», property sheet и т.п.) — не ломать UX; только слушать/расширять.
-- Таблица-**пикер одной сущности** (одна логическая колонка данных, выбор строки = выбор записи) — достаточно подсветки строки; копирование по смыслу записи, не ячейки грида.
-- Таблица **без заголовков** (`setHeaderVisible(false)`) — п. 4 не применяется.
-
-## Связанные правила
-
-- Подсветка совпадений фильтра в таблице коллекции — `DebugCollectionFilterEraseSupport` (не перекрывать подсветку выбранной строки; `filterSkipItem`).
-- Тултипы пунктов меню вне кастомного окна — `plugin-commands-tooltips.mdc`.
+Фильтр коллекции: `DebugCollectionFilterEraseSupport` (`filterSkipItem`). Тултипы вне окна — `plugin-commands-tooltips.mdc`.
