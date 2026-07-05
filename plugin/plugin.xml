@@ -44,6 +44,7 @@
     <startup class="tormozit.InfobaseSyncQuestionDialogHook"/>
     <startup class="tormozit.FilterBySubsystemsDialogHook"/>
     <startup class="tormozit.GitChangedFileMenuHook"/>
+    <startup class="tormozit.BslFastSearchKeyBindingHook"/> 
   </extension>
 
   <extension point="org.eclipse.ui.contexts">
@@ -183,6 +184,18 @@
         contextId="tormozit.gitChangedFile.context"
         schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
         sequence="M1+T">
+    </key>
+    <key
+        commandId="tormozit.BslFastSearchForward"
+        contextId="org.eclipse.xtext.ui.XtextEditorScope"
+        schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
+        sequence="M1+F3">
+    </key>
+    <key
+        commandId="tormozit.BslFastSearchBack"
+        contextId="org.eclipse.xtext.ui.XtextEditorScope"
+        schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
+        sequence="M1+M2+F3">
     </key>
   </extension>
 
@@ -325,6 +338,16 @@
         name="Инспектировать"
         categoryId="tormozit.commands.global"
         description="Открыть выбранный элемент коллекции в инспекторе. По умолчанию F2 в окне «Коллекция»; сочетание настраивается в Клавиши → Комфорт (Комфорт)"/>
+    <command
+        id="tormozit.BslFastSearchForward"
+        name="Быстрый поиск вперёд (Комфорт)"
+        categoryId="tormozit.commands.global"
+        description="То же, что штатный «Быстрый поиск вперёд» EDT, но всегда правильно переходит, учитывает настройки окна поиска и идентификатор под кареткой захватывается с учётом {@code _} (Комфорт)"/>
+    <command
+        id="tormozit.BslFastSearchBack"
+        name="Быстрый поиск назад (Комфорт)"
+        categoryId="tormozit.commands.global"
+        description="То же, что штатный «Быстрый поиск назад» EDT, но всегда правильно переходит, учитывает настройки окна поиска и идентификатор под кареткой захватывается с учётом {@code _} (Комфорт)"/>
   </extension>
 
   <extension point="org.eclipse.ui.handlers">
@@ -370,6 +393,20 @@
     <handler
         class="tormozit.IdentifierWordNavigationHandler"
         commandId="org.eclipse.ui.edit.text.goto.wordNext"/>
+    <handler
+        class="tormozit.BslFastSearchHandler"
+        commandId="tormozit.BslFastSearchForward">
+      <activeWhen>
+        <reference definitionId="com._1c.g5.v8.dt.bsl.Bsl.Editor.opened"/>
+      </activeWhen>
+    </handler>
+    <handler
+        class="tormozit.BslFastSearchHandler"
+        commandId="tormozit.BslFastSearchBack">
+      <activeWhen>
+        <reference definitionId="com._1c.g5.v8.dt.bsl.Bsl.Editor.opened"/>
+      </activeWhen>
+    </handler>
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.RecentPlacesHandler"
         commandId="tormozit.RecentPlaces">
