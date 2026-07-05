@@ -44,7 +44,9 @@ public class ComfortPreferencePage
 
     private static final String REPLACE_LIST_FILTERS_TOOLTIP =
             "Текст фильтра будет дробиться на фрагменты пробелами и будет требоваться и подсвечиваться вхождение каждого фрагмента с мягким учетом порядка.\n"
-            + "Влияет на навигатор, список баз, быструю схему модуля, диалоги выбора типа и открытия объекта метаданных, список автодополнения"; //$NON-NLS-1$
+            + "Влияет на навигатор, список баз, быструю схему модуля, диалоги выбора типа и открытия объекта метаданных, список автодополнения.\n"
+            + "Также включает доработки панели глобального поиска: фильтр с подсветкой над правой таблицей, счётчик вхождений в дереве, "
+            + "объединённый показ вхождений всех потомков при выборе ветки-группы (с колонкой «Путь»), открытие первого вхождения по двойному клику на узле."; //$NON-NLS-1$
 
     public ComfortPreferencePage()
     {
@@ -75,7 +77,7 @@ public class ComfortPreferencePage
 
         BooleanFieldEditor replaceListFiltersField = new BooleanFieldEditor(
             ComfortSettings.PREF_REPLACE_LIST_FILTERS,
-            "Заменять фильтры по подстроке в списках",
+            "Улучшать списки",
             getFieldEditorParent());
         addField(replaceListFiltersField);
         setFieldTooltip(replaceListFiltersField, REPLACE_LIST_FILTERS_TOOLTIP);
@@ -104,12 +106,12 @@ public class ComfortPreferencePage
 
         addField(new BooleanFieldEditor(
             ContentAssistSettings.PREF_ENABLED,
-            "Автооткрытие подсказки",
+            "Автооткрытие автодополнения при вводе",
             codeEditorGroup));
 
         IntegerFieldEditor timeoutField = new IntegerFieldEditor(
             ContentAssistSettings.PREF_TIMEOUT,
-            "Автооткрытие подсказки: Задержка (мс)",
+            "Автооткрытие автодополнения: Задержка (мс)",
             codeEditorGroup);
         timeoutField.setValidRange(0, 10_000);
         addField(timeoutField);

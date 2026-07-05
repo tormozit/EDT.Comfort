@@ -9,7 +9,11 @@ import org.eclipse.ui.preferences.ScopedPreferenceStore;
  */
 public final class ComfortSettings
 {
-    /** Ключ булевой настройки «Заменять фильтры в списках». */
+    /**
+     * Ключ булевой настройки «Улучшать списки» (имя ключа исторически осталось прежним).
+     * Управляет заменой фильтров по подстроке в списках (навигатор, список баз и т.д.),
+     * а также доработками панели глобального поиска ({@link SearchViewAggregationHook}, issue #79).
+     */
     public static final String PREF_REPLACE_LIST_FILTERS = "comfort.replaceListFilters"; //$NON-NLS-1$
 
     /** Ключ: общий отладочный журнал ({@link GlobalLogView}). */
