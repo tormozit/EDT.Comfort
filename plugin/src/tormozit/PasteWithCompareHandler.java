@@ -29,7 +29,7 @@ public class PasteWithCompareHandler extends AbstractHandler
         try
         {
             Shell shell = resolveShell(evaluationContext);
-            TextEditorSupport.Context ctx = resolveContext(evaluationContext, null);
+            TextEditor.Context ctx = resolveContext(evaluationContext, null);
             enabled = PasteWithCompareActions.isAvailable(shell, ctx);
         }
         catch (Exception ignored)
@@ -43,15 +43,15 @@ public class PasteWithCompareHandler extends AbstractHandler
     public Object execute(ExecutionEvent event) throws ExecutionException
     {
         Shell shell = HandlerUtil.getActiveShell(event);
-        TextEditorSupport.Context ctx = resolveContext(null, event);
+        TextEditor.Context ctx = resolveContext(null, event);
         PasteWithCompareActions.run(shell, ctx);
         return null;
     }
 
-    private static TextEditorSupport.Context resolveContext(
+    private static TextEditor.Context resolveContext(
             Object evaluationContext, ExecutionEvent event)
     {
-        TextEditorSupport.Context ctx = TextEditorSupport.resolveContextFromFocus();
+        TextEditor.Context ctx = TextEditor.resolveContextFromFocus();
         if (ctx != null)
             return ctx;
 
@@ -69,7 +69,7 @@ public class PasteWithCompareHandler extends AbstractHandler
         if (part == null && editor instanceof IWorkbenchPart wp)
             part = wp;
 
-        return TextEditorSupport.resolveContext(part, editor);
+        return TextEditor.resolveContext(part, editor);
     }
 
     private static Shell resolveShell(Object evaluationContext)

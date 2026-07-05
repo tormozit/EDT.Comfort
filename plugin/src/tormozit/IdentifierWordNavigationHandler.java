@@ -31,9 +31,9 @@ public final class IdentifierWordNavigationHandler extends AbstractHandler
         String commandId = event.getCommand().getId();
         IEditorPart editorPart = HandlerUtil.getActiveEditor(event);
         IWorkbenchPart part = HandlerUtil.getActivePart(event);
-        ITextEditor textEditor = TextEditorSupport.resolveTextEditor(editorPart);
+        ITextEditor textEditor = TextEditor.resolveTextEditor(editorPart);
         if (textEditor == null && part instanceof IEditorPart ep)
-            textEditor = TextEditorSupport.resolveTextEditor(ep);
+            textEditor = TextEditor.resolveTextEditor(ep);
 
         StyledText text = resolveStyledText(textEditor);
         if (text == null)
@@ -54,7 +54,7 @@ public final class IdentifierWordNavigationHandler extends AbstractHandler
     {
         if (textEditor == null)
             return null;
-        ISourceViewer viewer = TextEditorSupport.getSourceViewer(textEditor);
+        ISourceViewer viewer = TextEditor.getSourceViewer(textEditor);
         if (viewer == null)
             return null;
         Control widget = viewer.getTextWidget();

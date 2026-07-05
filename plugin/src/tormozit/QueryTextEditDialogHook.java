@@ -212,7 +212,7 @@ public final class QueryTextEditDialogHook implements IStartup
         final ISourceViewer viewer = qlContext.viewer;
         final Object queryDialog = resolveDialog(shell);
         pasteItem.setEnabled(PasteWithCompareActions.isAvailable(shell,
-            TextEditorSupport.buildContext(viewer, TextEditorSupport.QL_COMPARE_EXTENSION,
+            TextEditor.buildContext(viewer, TextEditor.QL_COMPARE_EXTENSION,
                 isQlEditorEditable(qlEditor))));
         pasteItem.addSelectionListener(new SelectionAdapter()
         {
@@ -220,7 +220,7 @@ public final class QueryTextEditDialogHook implements IStartup
             public void widgetSelected(SelectionEvent ev)
             {
                 PasteWithCompareActions.run(shell,
-                    TextEditorSupport.buildContext(viewer, TextEditorSupport.QL_COMPARE_EXTENSION,
+                    TextEditor.buildContext(viewer, TextEditor.QL_COMPARE_EXTENSION,
                         isQlEditorEditable(qlEditor)));
             }
         });
@@ -614,7 +614,7 @@ public final class QueryTextEditDialogHook implements IStartup
     /**
      * Контекст «Вставить со сравнением» для модального «Редактора запроса» по фокусу.
      */
-    static TextEditorSupport.Context tryBuildPasteContext(Control focus)
+    static TextEditor.Context tryBuildPasteContext(Control focus)
     {
         if (focus == null || focus.isDisposed())
             return null;
@@ -629,9 +629,9 @@ public final class QueryTextEditDialogHook implements IStartup
         if (qlContext == null || qlContext.viewer == null)
             return null;
 
-        return TextEditorSupport.buildContext(
+        return TextEditor.buildContext(
             qlContext.viewer,
-            TextEditorSupport.QL_COMPARE_EXTENSION,
+            TextEditor.QL_COMPARE_EXTENSION,
             isQlEditorEditable(qlContext.qlEditor));
     }
 

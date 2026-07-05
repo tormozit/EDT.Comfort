@@ -32,7 +32,7 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
  * Поиск активного текстового редактора (в т.ч. вложенного в {@link DtGranularEditor})
  * и замена выделенного фрагмента.
  */
-public final class TextEditorSupport
+public final class TextEditor
 {
     /** Расширение файла для выбора merge-viewer Eclipse Compare (см. {@code extensions} в plugin.xml EDT). */
     private static final String FALLBACK_COMPARE_EXTENSION = "txt"; //$NON-NLS-1$
@@ -40,7 +40,7 @@ public final class TextEditorSupport
     /** Расширение языка запросов EDT ({@code com._1c.g5.v8.dt.ql}). */
     static final String QL_COMPARE_EXTENSION = "ql"; //$NON-NLS-1$
 
-    private TextEditorSupport()
+    private TextEditor()
     {
     }
 
@@ -164,7 +164,16 @@ public final class TextEditorSupport
         return false;
     }
 
-    private static ISourceViewer resolveViewerFromFocus(Control focus)
+    public static ISourceViewer resolveViewerFromFocus()
+    {
+        Display display = Display.getCurrent();
+        if (display == null) return null;
+        Control focus = display.getFocusControl();
+        if (focus == null || focus.isDisposed()) return null;
+        return resolveViewerFromFocus(focus);
+    }
+
+    public static ISourceViewer resolveViewerFromFocus(Control focus)
     {
         for (Control c = focus; c != null && !c.isDisposed(); c = c.getParent())
         {
@@ -233,11 +242,12 @@ public final class TextEditorSupport
     private static ITextEditor embeddedTextEditor(DtGranularEditor<?> granular)
     {
         IFormPage activePage = granular.getActivePageInstance();
-        if (!(activePage instanceof DtGranularEditorXtextEditorPage<?> xtextPage))
-            return null;
-        IEditorPart embedded = xtextPage.getEmbeddedEditor();
-        if (embedded instanceof ITextEditor textEditor)
-            return textEditor;
+        if (activePage instanceof DtGranularEditorXtextEditorPage<?> xtextPage)
+        {
+            IEditorPart embedded = xtextPage.getEmbeddedEditor();
+            if (embedded instanceof ITextEditor textEditor)
+                return textEditor;
+        }
         return null;
     }
 
@@ -309,7 +319,7 @@ public final class TextEditorSupport
         }
         catch (Exception e)
         {
-            Global.log("TextEditorSupport.resolveCompareViewerType: " + e); //$NON-NLS-1$
+            Global.log("TextEditor.resolveCompareViewerType: " + e); //$NON-NLS-1$
         }
 
         if (editor instanceof BslXtextEditor)
@@ -353,7 +363,7 @@ public final class TextEditorSupport
             }
             catch (BadLocationException e)
             {
-                Global.log("TextEditorSupport.replaceSelectionAndSelect: " + e); //$NON-NLS-1$
+                Global.log("TextEditor.replaceSelectionAndSelect: " + e); //$NON-NLS-1$
                 return;
             }
         }

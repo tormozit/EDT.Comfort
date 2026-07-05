@@ -459,7 +459,7 @@ public final class IRSession
             if (editor == null)
                 return;
             syncTextEditorFromIR(editor.getInternalSourceViewer(), 0);
-            TextEditorSupport.focusBslEditor(editor);
+            TextEditor.focusBslEditor(editor);
         }
 
         /** Возврат правок из поля ИР в произвольный {@link ISourceViewer} (BSL, запрос и т.п.). */
@@ -479,7 +479,7 @@ public final class IRSession
                 if (doc == null)
                     return;
 
-                int offsetAdjust = TextEditorSupport.saveSelectionBoundsForUndo(viewer);
+                int offsetAdjust = TextEditor.saveSelectionBoundsForUndo(viewer);
                 final int replaceOffset = changedTextRange.getOffset() + offsetAdjust;
                 final int replaceLength = changedTextRange.getLength();
                 final String insertText = newTextOfRange;
@@ -522,7 +522,7 @@ public final class IRSession
         public void syncQueryEditorFromIR(ISourceViewer viewer)
         {
             syncTextEditorFromIR(viewer, 0);
-            TextEditorSupport.focusSourceViewer(viewer);
+            TextEditor.focusSourceViewer(viewer);
         }
 
         /** Порт ПередатьГраницыВыделенияИзПолеТекстаПрограммы. */

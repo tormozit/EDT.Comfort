@@ -63,7 +63,15 @@ public final class TextEditorIdentifierSelectionHook implements IStartup
     {
         if (display == null || display.isDisposed())
             return;
+        display.addFilter(SWT.FocusIn, TextEditorIdentifierSelectionHook::handleFocusIn);
         display.addFilter(SWT.KeyDown, TextEditorIdentifierSelectionHook::handleKeyDown);
+    }
+
+    /** При получении фокуса любым {@link StyledText} устанавливаем идентификаторную навигацию. */
+    private static void handleFocusIn(Event event)
+    {
+        if (event.widget instanceof StyledText text && !text.isDisposed())
+            installOnStyledText(text);
     }
 
     /** Подключает границы идентификатора к {@link StyledText} без {@link ITextEditor}. */
@@ -81,7 +89,7 @@ public final class TextEditorIdentifierSelectionHook implements IStartup
         if (textEditor == null)
             return;
 
-        ISourceViewer viewer = TextEditorSupport.getSourceViewer(textEditor);
+        ISourceViewer viewer = TextEditor.getSourceViewer(textEditor);
         if (viewer == null)
         {
             Display.getDefault().asyncExec(() -> attachToTextEditor(textEditor));
@@ -250,8 +258,6 @@ public final class TextEditorIdentifierSelectionHook implements IStartup
         return null;
     }
 
-
-
     private void hookWorkbench()
     {
         if (PlatformUI.getWorkbench() == null)
@@ -360,8 +366,6 @@ public final class TextEditorIdentifierSelectionHook implements IStartup
         if (!(e.widget instanceof StyledText text))
             return;
         if (text.isDisposed() || text.getBlockSelection())
-            return;
-        if (TextEditorSupport.resolveContextFromFocus((Control) text) == null)
             return;
 
         boolean toLeft = e.keyCode == SWT.ARROW_LEFT;

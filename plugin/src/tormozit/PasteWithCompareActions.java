@@ -40,10 +40,10 @@ public final class PasteWithCompareActions
 
     public static void run(Shell shell, IWorkbenchPart part, IEditorPart editorPart)
     {
-        run(shell, TextEditorSupport.resolveContext(part, editorPart));
+        run(shell, TextEditor.resolveContext(part, editorPart));
     }
 
-    public static void run(Shell shell, TextEditorSupport.Context ctx)
+    public static void run(Shell shell, TextEditor.Context ctx)
     {
         if (ctx == null)
         {
@@ -59,7 +59,7 @@ public final class PasteWithCompareActions
             return;
         }
 
-        String clipboardText = TextEditorSupport.readClipboardText(shell);
+        String clipboardText = TextEditor.readClipboardText(shell);
         if (clipboardText == null || clipboardText.isEmpty())
         {
             ToastNotification.show(MENU_LABEL,
@@ -78,7 +78,7 @@ public final class PasteWithCompareActions
             if (newText == null)
                 return;
 
-            TextEditorSupport.replaceSelectionAndSelect(ctx, newText);
+            TextEditor.replaceSelectionAndSelect(ctx, newText);
         }
         catch (Exception e)
         {
@@ -90,14 +90,14 @@ public final class PasteWithCompareActions
 
     public static boolean isAvailable(Shell shell, IWorkbenchPart part, IEditorPart editorPart)
     {
-        return isAvailable(shell, TextEditorSupport.resolveContext(part, editorPart));
+        return isAvailable(shell, TextEditor.resolveContext(part, editorPart));
     }
 
-    public static boolean isAvailable(Shell shell, TextEditorSupport.Context ctx)
+    public static boolean isAvailable(Shell shell, TextEditor.Context ctx)
     {
         return ctx != null
             && ctx.editable
-            && TextEditorSupport.clipboardHasText(shell);
+            && TextEditor.clipboardHasText(shell);
     }
 
     /**

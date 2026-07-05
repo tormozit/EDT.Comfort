@@ -139,7 +139,7 @@ public class TextEditorMenuHook implements IStartup
         if (textEditor.getSite() == null)
             return;
 
-        ISourceViewer viewer = TextEditorSupport.getSourceViewer(textEditor);
+        ISourceViewer viewer = TextEditor.getSourceViewer(textEditor);
         if (!(viewer instanceof SourceViewer sourceViewer))
         {
             Display.getDefault().asyncExec(() -> attachComfortMenu(textEditor, editorPart, part));
@@ -203,7 +203,7 @@ public class TextEditorMenuHook implements IStartup
         static void attachContext(
             StyledText textWidget,
             String hookMarker,
-            Supplier<TextEditorSupport.Context> contextSupplier)
+            Supplier<TextEditor.Context> contextSupplier)
         {
             if (textWidget == null || textWidget.isDisposed())
                 return;
