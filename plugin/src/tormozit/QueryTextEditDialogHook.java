@@ -29,7 +29,7 @@ public final class QueryTextEditDialogHook implements IStartup
 {
     private static final String SHELL_REGISTERED_KEY =
         "tormozit.queryTextEditShellRegistered"; //$NON-NLS-1$
-    private static final String HOOK_MARKER = "tormozit.queryEditorComfortMenuHooked"; //$NON-NLS-1$
+    static final String HOOK_MARKER_QUERY = "tormozit.queryEditorComfortMenuHooked"; //$NON-NLS-1$
     private static final String COMFORT_SUBMENU_MARKER =
         "tormozit.queryEditorComfortSubmenu"; //$NON-NLS-1$
     private static final String DIALOG_CLASS_SUFFIX = "QueryTextEditDialog"; //$NON-NLS-1$
@@ -152,10 +152,10 @@ public final class QueryTextEditDialogHook implements IStartup
     {
         if (!isRootEditorContextMenu(menu, control))
             return;
-        if (menu.isDisposed() || Boolean.TRUE.equals(menu.getData(HOOK_MARKER)))
+        if (menu.isDisposed() || Boolean.TRUE.equals(menu.getData(HOOK_MARKER_QUERY)))
             return;
 
-        menu.setData(HOOK_MARKER, Boolean.TRUE);
+        menu.setData(HOOK_MARKER_QUERY, Boolean.TRUE);
         menu.addMenuListener(new MenuAdapter()
         {
             @Override

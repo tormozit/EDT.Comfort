@@ -451,6 +451,9 @@ public final class IRSession
                 pumpUserMessagesToUi();
                 return null;
             });
+            // setText с "" moduleName не сохраняет lastSyncedRawText — сохраняем явно
+            lastSyncedRawText = text;
+            lastSyncedLfText = Global.normalizeLineSeparators(text);
         }
 
         // порт ПередатьИзмененияИзПоляТекстаВОкноМодуля + ПередатьГраницыВыделенияИзПолеТекстаПрограммы

@@ -25,7 +25,10 @@ import org.eclipse.ui.texteditor.ITextEditor;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import com._1c.g5.v8.dt.dcs.ui.DataCompositionSchemaEditor;
+import com._1c.g5.v8.dt.dcs.ui.datasets.DataSets;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
+import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorEmbeddedEditorPage;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
 
 /**
@@ -111,7 +114,17 @@ public final class TextEditor
 
         ISourceViewer viewer = resolveViewerFromFocus(focus);
         if (viewer == null)
-            return null;
+        {
+            viewer = resolveViewerFromDialog(focus);
+            if (viewer == null)
+                return null;
+
+            boolean editable = true;
+            Control textWidget = viewer.getTextWidget();
+            if (textWidget instanceof StyledText styledText)
+                editable = styledText.getEditable();
+            return buildContext(viewer, QL_COMPARE_EXTENSION, editable);
+        }
 
         boolean editable = true;
         Control textWidget = viewer.getTextWidget();
@@ -136,11 +149,44 @@ public final class TextEditor
                 return null;
 
             ITextEditor textEditor = resolveTextEditor(activeEditor);
-            if (textEditor == null)
-                return null;
-            if (!focusInEditorViewer(focus, textEditor))
-                return null;
-            return buildContext(textEditor);
+            if (textEditor != null)
+            {
+                if (!focusInEditorViewer(focus, textEditor))
+                    return null;
+                return buildContext(textEditor);
+            }
+
+            // DCS: DtGranularEditor → DCS page → DataSets → queryEditor → viewer
+            if (activeEditor instanceof DtGranularEditor<?> granular)
+            {
+                IFormPage activePage = granular.getActivePageInstance();
+                if (activePage instanceof DtGranularEditorEmbeddedEditorPage<?> embeddedPage)
+                {
+                    IEditorPart embedded = embeddedPage.getEmbeddedEditor();
+                    if (embedded instanceof DataCompositionSchemaEditor dcsEditor
+                        && !dcsEditor.getPages().isEmpty())
+                    {
+                        Object firstPage = dcsEditor.getPages().get(0);
+                        if (firstPage instanceof DataSets dataSets)
+                        {
+                            var qlEditor = dataSets.getQueryEditor();
+                            if (qlEditor != null)
+                            {
+                                var viewerObj = qlEditor.getViewer();
+                                if (viewerObj instanceof ISourceViewer viewer
+                                    && focusInEditorViewer(focus, viewer))
+                                {
+                                    boolean editable = viewer.getTextWidget()
+                                        instanceof StyledText st && st.getEditable();
+                                    return buildContext(viewer, QL_COMPARE_EXTENSION, editable);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            return null;
         }
         catch (Exception ignored)
         {
@@ -153,6 +199,11 @@ public final class TextEditor
         ISourceViewer viewer = getSourceViewer(editor);
         if (viewer == null)
             return false;
+        return focusInEditorViewer(focus, viewer);
+    }
+
+    private static boolean focusInEditorViewer(Control focus, ISourceViewer viewer)
+    {
         Control textWidget = viewer.getTextWidget();
         if (textWidget == null || textWidget.isDisposed())
             return false;
@@ -188,6 +239,84 @@ public final class TextEditor
                 if (viewerObj instanceof ISourceViewer sourceViewer)
                     return sourceViewer;
             }
+
+            Object embedded = Global.invoke(c, "getEmbeddedQlEditor"); //$NON-NLS-1$
+            if (embedded != null)
+            {
+                Object embeddedViewer = Global.invoke(embedded, "getViewer"); //$NON-NLS-1$
+                if (embeddedViewer instanceof ISourceViewer sourceViewer)
+                    return sourceViewer;
+            }
+        }
+        return null;
+    }
+
+    /** Ищет {@link ISourceViewer} в модальных диалогах (DynamicListQueryDialog и т.п.). */
+    public static ISourceViewer resolveViewerFromDialog(Control focus)
+    {
+        if (focus == null || focus.isDisposed())
+            return null;
+        Shell shell = focus.getShell();
+        if (shell == null || shell.isDisposed())
+            return null;
+
+        Object dialog = resolveDialogOnWidget(shell);
+        if (dialog == null)
+            return null;
+
+        // qlEditor → getViewer()
+        Object qlEditor = Global.getField(dialog, "qlEditor"); //$NON-NLS-1$
+        if (qlEditor != null)
+        {
+            Object viewerObj = Global.invoke(qlEditor, "getViewer"); //$NON-NLS-1$
+            if (viewerObj instanceof ISourceViewer viewer
+                && viewer.getTextWidget() == focus)
+                return viewer;
+
+            Object embedded = Global.getField(qlEditor, "embeddedQlEditor"); //$NON-NLS-1$
+            if (embedded != null)
+            {
+                Object embeddedViewer = Global.invoke(embedded, "getViewer"); //$NON-NLS-1$
+                if (embeddedViewer instanceof ISourceViewer viewer
+                    && viewer.getTextWidget() == focus)
+                    return viewer;
+            }
+        }
+
+        // embeddedTemplateEditor → getViewer() (DynamicListQueryDialog)
+        Object tplEditor = Global.getField(dialog, "embeddedTemplateEditor"); //$NON-NLS-1$
+        if (tplEditor != null)
+        {
+            Object viewerObj = Global.invoke(tplEditor, "getViewer"); //$NON-NLS-1$
+            if (viewerObj instanceof ISourceViewer viewer
+                && viewer.getTextWidget() == focus)
+                return viewer;
+        }
+
+        // getEmbeddedQlEditor() → getViewer()
+        Object embedded = Global.invoke(dialog, "getEmbeddedQlEditor"); //$NON-NLS-1$
+        if (embedded != null)
+        {
+            Object viewerObj = Global.invoke(embedded, "getViewer"); //$NON-NLS-1$
+            if (viewerObj instanceof ISourceViewer viewer
+                && viewer.getTextWidget() == focus)
+                return viewer;
+        }
+
+        return null;
+    }
+
+    private static Object resolveDialogOnWidget(org.eclipse.swt.widgets.Widget widget)
+    {
+        if (widget == null || widget.isDisposed())
+            return null;
+        for (String key : new String[] { null,
+            "org.eclipse.jface.window.Window", //$NON-NLS-1$
+            "org.eclipse.jface.dialogs.Dialog.dialog" }) //$NON-NLS-1$
+        {
+            Object data = key == null ? widget.getData() : widget.getData(key);
+            if (data != null)
+                return data;
         }
         return null;
     }

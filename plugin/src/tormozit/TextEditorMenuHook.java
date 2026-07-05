@@ -22,7 +22,10 @@ import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.forms.editor.IFormPage;
 import org.eclipse.ui.texteditor.ITextEditor;
 
+import com._1c.g5.v8.dt.dcs.ui.DataCompositionSchemaEditor;
+import com._1c.g5.v8.dt.dcs.ui.datasets.DataSets;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
+import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorEmbeddedEditorPage;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
 import java.util.ArrayList;
 import java.util.function.Supplier;
@@ -32,9 +35,11 @@ import org.eclipse.swt.events.MenuEvent;
 import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.events.SelectionEvent;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Shell;
+import com._1c.g5.v8.dt.core.platform.IDtProject;
 
 /**
  * Подменю «Комфорт» в контекстном меню текстовых редакторов Workbench.
@@ -51,6 +56,13 @@ public class TextEditorMenuHook implements IStartup
     {
         Display.getDefault().asyncExec(() ->
         {
+            Display display = Display.getDefault();
+            if (display != null && !display.isDisposed())
+            {
+                display.addFilter(SWT.MenuDetect, TextEditorMenuHook::handleMenuDetect);
+                display.addFilter(SWT.KeyDown, TextEditorMenuHook::handleDisplayKeyDown);
+            }
+
             PlatformUI.getWorkbench().addWindowListener(new IWindowListener()
             {
                 @Override public void windowOpened(IWorkbenchWindow w)     { hookWindow(w); }
@@ -163,6 +175,181 @@ public class TextEditorMenuHook implements IStartup
         TextEditorIdentifierSelectionHook.attachToTextEditor(textEditor);
     }
 
+    /** Display-фильтр для {@code StyledText} без ITextEditor (DCS, DynamicListQueryDialog и т.п.). */
+    private static void handleMenuDetect(Event event)
+    {
+        if (!(event.widget instanceof StyledText text) || text.isDisposed())
+        {
+            Global.log("MenuHook", "handleMenuDetect: not StyledText or disposed");
+            return;
+        }
+        if (Boolean.TRUE.equals(text.getData(HOOK_MARKER)))
+        {
+            Global.log("MenuHook", "handleMenuDetect: already hooked (HOOK_MARKER)");
+            return;
+        }
+
+        Menu existingMenu = text.getMenu();
+        if (existingMenu != null && !existingMenu.isDisposed()
+            && Boolean.TRUE.equals(existingMenu.getData(QueryTextEditDialogHook.HOOK_MARKER_QUERY)))
+        {
+            Global.log("MenuHook", "handleMenuDetect: skipped (QueryTextEditDialog)");
+            return;
+        }
+
+        Global.log("MenuHook", "handleMenuDetect: resolving viewer for class="
+            + text.getClass().getName());
+
+        ISourceViewer viewer = TextEditor.resolveViewerFromFocus(text);
+        String ext = null;
+
+        if (viewer == null)
+        {
+            Global.log("MenuHook", "handleMenuDetect: resolveViewerFromFocus=null, trying activeEditor");
+            viewer = resolveViewerFromActiveEditor(text);
+            if (viewer != null)
+                ext = TextEditor.QL_COMPARE_EXTENSION;
+        }
+
+        if (viewer == null)
+        {
+            Global.log("MenuHook", "handleMenuDetect: resolveViewerFromFocus+activeEditor=null, trying dialog");
+            viewer = TextEditor.resolveViewerFromDialog(text);
+            if (viewer != null)
+                ext = TextEditor.QL_COMPARE_EXTENSION;
+        }
+
+        if (viewer == null)
+        {
+            Global.log("MenuHook", "handleMenuDetect: viewer not found");
+            return;
+        }
+
+        Global.log("MenuHook", "handleMenuDetect: viewer found=" + viewer.getClass().getName()
+            + " ext=" + ext);
+        boolean editable = text.getEditable();
+        TextEditorComfortMenu.attachContextWithViewer(text, HOOK_MARKER, viewer, ext, editable);
+    }
+
+    /** Display-фильтр Ctrl+Alt+V / Alt+Shift+F для модальных диалогов (куда Key Binding Service не доставляет события). */
+    private static void handleDisplayKeyDown(Event event)
+    {
+        // Ctrl+Alt+V ── вставка со сравнением
+        if (event.keyCode == 'v'
+            && (event.stateMask & SWT.MOD1) != 0
+            && (event.stateMask & SWT.MOD3) != 0)
+        {
+            if (!(event.widget instanceof StyledText text) || text.isDisposed())
+                return;
+            Shell shell = text.getShell();
+            if (shell == null || shell.isDisposed())
+                return;
+            TextEditor.Context ctx = TextEditor.resolveContextFromFocus();
+            if (ctx == null)
+                return;
+            event.doit = false;
+            PasteWithCompareActions.run(shell, ctx);
+            return;
+        }
+
+        // Alt+Shift+F ── форматирование текста ИР (только для диалогов с QL-редактором, при подключённом ИР)
+        if (event.keyCode == 'f'
+            && (event.stateMask & SWT.MOD2) != 0
+            && (event.stateMask & SWT.MOD3) != 0)
+        {
+            if (!(event.widget instanceof StyledText text) || text.isDisposed())
+                return;
+            ISourceViewer viewer = TextEditor.resolveViewerFromDialog(text);
+            if (viewer == null || !IrFormatTextHandler.isApplicableQuery(viewer))
+                return;
+            IDtProject dtProject = IrFormatTextHandler.resolveDtProjectForQuery(null);
+            if (dtProject == null)
+                return;
+            IRSession irSession = IRApplication.getSession(dtProject);
+            if (irSession == null || irSession.executor == null)
+                return;
+            event.doit = false;
+            IrFormatTextHandler.formatQuery(viewer, null);
+        }
+    }
+
+    /** Разрешает {@link ISourceViewer} через активный редактор Workbench для DCS и подобных. */
+    private static ISourceViewer resolveViewerFromActiveEditor(StyledText text)
+    {
+        IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+        if (window == null) { Global.log("MenuHook", "resolveAE: window=null"); return null; }
+        IWorkbenchPage page = window.getActivePage();
+        if (page == null) { Global.log("MenuHook", "resolveAE: page=null"); return null; }
+        IEditorPart activeEditor = page.getActiveEditor();
+        if (activeEditor == null) { Global.log("MenuHook", "resolveAE: activeEditor=null"); return null; }
+
+        Global.log("MenuHook", "resolveAE: activeEditor=" + activeEditor.getClass().getName()
+            + " siteId=" + activeEditor.getSite().getId());
+
+        if (activeEditor instanceof DtGranularEditor<?> granular)
+        {
+            IFormPage activePage = granular.getActivePageInstance();
+            if (activePage instanceof DtGranularEditorEmbeddedEditorPage<?> embeddedPage)
+            {
+                Global.log("MenuHook", "resolveAE: embeddedPage class=" + activePage.getClass().getName());
+
+                IEditorPart embedded = embeddedPage.getEmbeddedEditor();
+                if (embedded instanceof DataCompositionSchemaEditor dcsEditor)
+                {
+                    Global.log("MenuHook", "resolveAE: dcsEditor pages=" + dcsEditor.getPages().size());
+
+                    if (!dcsEditor.getPages().isEmpty())
+                    {
+                        Object firstPage = dcsEditor.getPages().get(0);
+                        Global.log("MenuHook", "resolveAE: firstPage class=" + firstPage.getClass().getName());
+
+                        if (firstPage instanceof DataSets dataSets)
+                        {
+                            var qlEditor = dataSets.getQueryEditor();
+                            Global.log("MenuHook", "resolveAE: qlEditor=" + (qlEditor != null ? qlEditor.getClass().getName() : "null"));
+
+                            if (qlEditor != null)
+                            {
+                                var viewer = qlEditor.getViewer();
+                                Global.log("MenuHook", "resolveAE: viewer=" + (viewer != null ? viewer.getClass().getName() : "null"));
+
+                                if (viewer != null)
+                                {
+                                    StyledText wt = viewer.getTextWidget();
+                                    boolean match = wt == text;
+                                    Global.log("MenuHook", "resolveAE: textWidget match=" + match);
+                                    if (match)
+                                        return viewer;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            Global.log("MenuHook", "resolveAE: firstPage not DataSets");
+                        }
+                    }
+                }
+                else
+                {
+                    Global.log("MenuHook", "resolveAE: embedded not DataCompositionSchemaEditor, class="
+                        + (embedded != null ? embedded.getClass().getName() : "null"));
+                }
+            }
+            else
+            {
+                Global.log("MenuHook", "resolveAE: activePage class="
+                    + (activePage != null ? activePage.getClass().getName() : "null"));
+            }
+        }
+        else
+        {
+            Global.log("MenuHook", "resolveAE: activeEditor not DtGranularEditor, class="
+                + activeEditor.getClass().getName());
+        }
+
+        return null;
+    }
+
     /**
      * Подменю «Комфорт» в контекстном меню текстовых редакторов.
      */
@@ -172,6 +359,36 @@ public class TextEditorMenuHook implements IStartup
 
         private TextEditorComfortMenu()
         {
+        }
+
+        static void attachContextWithViewer(
+            StyledText textWidget,
+            String hookMarker,
+            ISourceViewer viewer,
+            String ext,
+            boolean editable)
+        {
+            if (textWidget == null || textWidget.isDisposed())
+                return;
+            if (Boolean.TRUE.equals(textWidget.getData(hookMarker)))
+                return;
+
+            Menu menu = textWidget.getMenu();
+            if (menu == null || menu.isDisposed())
+                return;
+
+            textWidget.setData(hookMarker, Boolean.TRUE);
+            String useExt = ext;
+            attachToMenu(menu, hookMarker, viewer, () ->
+            {
+                Shell shell = textWidget.getShell();
+                TextEditor.Context ctx = TextEditor.buildContext(viewer, useExt, editable);
+                if (ctx == null)
+                    return null;
+                return new MenuBinding(shell,
+                    () -> PasteWithCompareActions.isAvailable(shell, ctx),
+                    () -> PasteWithCompareActions.run(shell, ctx));
+            });
         }
 
         static void attachWorkbench(
@@ -234,6 +451,15 @@ public class TextEditorMenuHook implements IStartup
             String hookMarker,
             Supplier<MenuBinding> bindingSupplier)
         {
+            attachToMenu(menu, hookMarker, null, bindingSupplier);
+        }
+
+        static void attachToMenu(
+            Menu menu,
+            String hookMarker,
+            ISourceViewer viewer,
+            Supplier<MenuBinding> bindingSupplier)
+        {
             if (menu == null || menu.isDisposed())
                 return;
             if (Boolean.TRUE.equals(menu.getData(hookMarker)))
@@ -241,7 +467,7 @@ public class TextEditorMenuHook implements IStartup
 
             menu.setData(hookMarker, Boolean.TRUE);
 
-            MenuAdapter listener = buildMenuListener(bindingSupplier);
+            MenuAdapter listener = buildMenuListener(bindingSupplier, viewer);
             menu.addMenuListener(listener);
 
             menu.addDisposeListener(e ->
@@ -252,6 +478,11 @@ public class TextEditorMenuHook implements IStartup
         }
 
         private static MenuAdapter buildMenuListener(Supplier<MenuBinding> bindingSupplier)
+        {
+            return buildMenuListener(bindingSupplier, null);
+        }
+
+        private static MenuAdapter buildMenuListener(Supplier<MenuBinding> bindingSupplier, ISourceViewer viewer)
         {
             return new MenuAdapter()
             {
@@ -288,6 +519,25 @@ public class TextEditorMenuHook implements IStartup
                         }
                     });
                     addedItems.add(pasteItem);
+
+                    if (viewer != null && IrFormatTextHandler.isApplicableQuery(viewer))
+                    {
+                        MenuItem formatItem = new MenuItem(comfortSub, SWT.PUSH);
+                        formatItem.setText(IrFormatTextHandler.MENU_LABEL);
+                        formatItem.setToolTipText(
+                            "Форматировать текст через приложение ИР"
+                                + Global.pluginSignForTooltip());
+                        formatItem.setEnabled(true);
+                        formatItem.addSelectionListener(new SelectionAdapter()
+                        {
+                            @Override
+                            public void widgetSelected(SelectionEvent ev)
+                            {
+                                IrFormatTextHandler.formatQuery(viewer, null);
+                            }
+                        });
+                        addedItems.add(formatItem);
+                    }
                 }
 
                 @Override
