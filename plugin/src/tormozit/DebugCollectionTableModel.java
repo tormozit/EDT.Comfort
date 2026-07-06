@@ -343,17 +343,26 @@ final class DebugCollectionTableModel
         String text = resolveCellTextLive(logicalRow, visibleCol);
         if (shouldCacheCell(logicalRow, visibleCol, text))
             cacheCellText(logicalRow, visibleCol, text);
-        // #region agent log
-        if (EVALUATING_ROW_TEXT.equals(text) && logicalRow % 64 == 0 && visibleCol == 4)
-        {
-            DebugCollectionColumnModel.Column col = columns.columnAt(visibleCol);
-            String kind = col != null ? col.kind.name() : "?"; //$NON-NLS-1$
-            DebugCollectionAgentLog.log("H-cell", "TableModel.getCellDisplayText", "pendingCell", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"row\":" + logicalRow + ",\"col\":" + visibleCol //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"kind\":\"" + kind + "\",\"text\":\"…\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        // #endregion
         return text;
+    }
+
+    /** Кэш SetData для колонок вне viewport — без live-resolve на UI-потоке. */
+    String getCellDisplayTextIfCached(int logicalRow, int visibleCol)
+    {
+        CellKey key = new CellKey(logicalRow, visibleCol);
+        CellData cached;
+        synchronized (cellCache)
+        {
+            cached = cellCache.get(key);
+        }
+        if (cached == null)
+            return ""; //$NON-NLS-1$
+        synchronized (cached)
+        {
+            if (cached.contentLoaded)
+                return cached.displayText != null ? cached.displayText : ""; //$NON-NLS-1$
+        }
+        return ""; //$NON-NLS-1$
     }
 
     private boolean shouldCacheCell(int logicalRow, int visibleCol, String text)

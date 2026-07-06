@@ -97,8 +97,13 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
     private ToolItem columnSettingsItem;
     private ToolItem cloneItem;
     private Runnable viewportDebounce;
+    private Runnable hscrollRefreshDebounce;
     private Runnable rowsReadyDebounce;
     private int lastViewportLogicalFirst = -1;
+    private static final long SHELL_BORDER_RESIZE_END_MS = 120L;
+    private Runnable shellBorderResizeEndDebounce;
+    /** Граница Shell в drag — отложить split-layout до конца жеста. */
+    private static volatile boolean shellBorderResizeActive;
     private int rowsReadyClearFirst = -1;
     private int rowsReadyClearLast = -1;
     private Listener filterEraseListenerIndex;
@@ -627,10 +632,6 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         int count = rebuilt.allColumns().size();
         model.columns.replaceColumns(new java.util.ArrayList<>(rebuilt.allColumns()));
         boolean wideUnion = count > DebugCollectionColumnVisibilityStore.WIDE_SCHEMA_THRESHOLD;
-        // #region agent log
-        DebugCollectionAgentLog.log("H-schema", "Window.onContextColumnsReady", "schema", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"cols\":" + count + ",\"wideUnion\":" + wideUnion + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        // #endregion
         model.columns.applyVisibility(
             DebugCollectionColumnVisibilityStore.visibilityFor(pathKey, count, model.columns),
             wideUnion
@@ -1000,6 +1001,48 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
     {
         shell.addListener(SWT.Show, e -> scheduleViewportCaptureDebounced());
         shell.addListener(SWT.Deiconify, e -> scheduleViewportCaptureDebounced());
+        installShellBorderResizeCoalesce();
+    }
+
+    private void installShellBorderResizeCoalesce()
+    {
+        if (shell == null || shell.isDisposed())
+            return;
+        shell.addListener(SWT.Resize, e -> onShellBorderResizeTick());
+    }
+
+    private void onShellBorderResizeTick()
+    {
+        if (shell == null || shell.isDisposed())
+            return;
+        if (!shellBorderResizeActive)
+        {
+            shellBorderResizeActive = true;
+            if (splitTable != null)
+                splitTable.onShellBorderResizeBegin();
+        }
+        scheduleShellBorderResizeEnd();
+    }
+
+    private void scheduleShellBorderResizeEnd()
+    {
+        if (shell == null || shell.isDisposed())
+            return;
+        Display display = shell.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        if (shellBorderResizeEndDebounce != null)
+            display.timerExec(-1, shellBorderResizeEndDebounce);
+        shellBorderResizeEndDebounce = () -> {
+            shellBorderResizeEndDebounce = null;
+            if (shell == null || shell.isDisposed() || !shellBorderResizeActive)
+                return;
+            shellBorderResizeActive = false;
+            if (splitTable != null)
+                splitTable.flushDeferredLayoutAfterShellBorderResize();
+            scheduleViewportCaptureDebounced();
+        };
+        display.timerExec((int) SHELL_BORDER_RESIZE_END_MS, shellBorderResizeEndDebounce);
     }
 
     private void installKeyContext()
@@ -1186,7 +1229,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
                     @Override
                     public void widgetSelected(SelectionEvent e)
                     {
-                        scheduleViewportCaptureDebounced();
+                        onHorizontalScroll();
                     }
                 });
             data.addControlListener(new ControlAdapter()
@@ -1296,26 +1339,55 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
 
         Table data = dataTable();
         int dataCols = data != null ? data.getColumnCount() : 0;
-        int maxDataLen = 0;
+        int dataFirst = 0;
+        int dataLast = dataCols > 0 ? dataCols - 1 : -1;
+        if (data != null && !data.isDisposed() && dataCols > 0)
+        {
+            dataFirst = DebugCollectionViewportTracker.firstVisibleColumn(data);
+            dataLast = DebugCollectionViewportTracker.lastVisibleColumn(data);
+        }
         for (int dataCol = 0; dataCol < dataCols; dataCol++)
         {
             int visibleCol = model.columns.visibleIndexForDataColumn(dataCol);
-            String text = model.getCellDisplayText(logical, visibleCol);
-            int len = text != null ? text.length() : 0;
-            if (len > maxDataLen)
-                maxDataLen = len;
+            boolean inViewport = dataCol >= dataFirst && dataCol <= dataLast;
+            String text = inViewport
+                ? model.getCellDisplayText(logical, visibleCol)
+                : model.getCellDisplayTextIfCached(logical, visibleCol);
             item.setText(dataCol, text != null ? text : ""); //$NON-NLS-1$
         }
-        // #region agent log
-        if (logical == 0 || logical == 16 || logical == 24 || logical == 100 || logical == 500
-            || logical >= 1700)
-        {
-            DebugCollectionAgentLog.log("H-setData", "Window.onSetDataData", "cellPaint", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"logical\":" + logical + ",\"display\":" + displayIndex //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"cols\":" + model.columns.columnCount() //$NON-NLS-1$
-                    + ",\"maxDataLen\":" + maxDataLen + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        // #endregion
+    }
+
+    private void onHorizontalScroll()
+    {
+        scheduleViewportCaptureDebounced();
+        Table data = dataTable();
+        if (data == null || data.isDisposed())
+            return;
+        if (hscrollRefreshDebounce != null)
+            data.getDisplay().timerExec(-1, hscrollRefreshDebounce);
+        hscrollRefreshDebounce = () -> {
+            hscrollRefreshDebounce = null;
+            refreshVisibleDataRowsForColumnScroll();
+        };
+        data.getDisplay().timerExec(50, hscrollRefreshDebounce);
+    }
+
+    /** После горизонтального скролла — SetData заново для видимых строк и новых колонок. */
+    private void refreshVisibleDataRowsForColumnScroll()
+    {
+        if (splitTable == null)
+            return;
+        Table data = dataTable();
+        if (data == null || data.isDisposed())
+            return;
+        int itemCount = splitTable.getItemCount();
+        if (itemCount <= 0)
+            return;
+        int top = splitTable.getTopIndex();
+        int last = Math.min(itemCount - 1, top + visibleRowCountEstimate());
+        if (last < top)
+            return;
+        splitTable.clear(top, last);
     }
 
     private void onTableKeyDown(Event event)
@@ -1729,11 +1801,6 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             for (int row = logicalFirst; row <= logicalLast; row++)
                 model.invalidateLogicalRowPreservingReadySizes(row);
             splitTable.clear(first, displayLast);
-            // #region agent log
-            DebugCollectionAgentLog.log("H-endPaint", "Window.captureViewportRange", "priorityClear", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"logicalFirst\":" + logicalFirst + ",\"logicalLast\":" + logicalLast //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"displayTop\":" + first + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             scheduler.captureSizeViewport(logicalFirst, logicalLast, data);
             scheduler.requestViewportPriority(logicalFirst, logicalLast);
         }
@@ -2182,6 +2249,10 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         private boolean initialSashWeightsApplied;
         private Runnable pendingSyncFixedPaneLayout;
         private Runnable pendingSyncRowAreaAlignment;
+        private String pendingFixedPaneLayoutSource = "unknown"; //$NON-NLS-1$
+        private boolean pendingFixedPaneDuringShellBorderResize;
+        private boolean pendingRowAreaDuringShellBorderResize;
+        private boolean shellBorderRedrawFrozen;
 
         private DebugCollectionSplitTable(Composite panel, SashForm sash, Composite indexPane,
             Label indexBottomSpacer, Composite indexTableStack, Composite dataTableStack,
@@ -2273,7 +2344,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         {
             if (indexTable.isDisposed() || indexTable.getColumnCount() <= 0)
                 return;
-            syncFixedPaneLayout();
+            syncFixedPaneLayout("syncIndexColumnLayout"); //$NON-NLS-1$
             Table data = dataTable();
             if (data != null && !data.isDisposed() && data.getColumnCount() > 0)
                 DebugCollectionColumnModel.applyIndexTableColumnLayout(data, false);
@@ -2462,10 +2533,64 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             indexColumnHost.setBounds(0, topInset, stackW, hostH);
         }
 
+        void onShellBorderResizeBegin()
+        {
+            if (shellBorderRedrawFrozen)
+                return;
+            shellBorderRedrawFrozen = true;
+            if (!indexTable.isDisposed())
+                indexTable.setRedraw(false);
+            if (!dataTable.isDisposed())
+                dataTable.setRedraw(false);
+        }
+
+        void flushDeferredLayoutAfterShellBorderResize()
+        {
+            boolean fixed = pendingFixedPaneDuringShellBorderResize;
+            boolean row = pendingRowAreaDuringShellBorderResize;
+            pendingFixedPaneDuringShellBorderResize = false;
+            pendingRowAreaDuringShellBorderResize = false;
+            try
+            {
+                if (fixed)
+                    syncFixedPaneLayout(pendingFixedPaneLayoutSource);
+                if (row)
+                    syncRowAreaAlignment();
+            }
+            finally
+            {
+                if (shellBorderRedrawFrozen)
+                {
+                    shellBorderRedrawFrozen = false;
+                    if (!indexTable.isDisposed())
+                    {
+                        indexTable.setRedraw(true);
+                        indexTable.redraw();
+                    }
+                    if (!dataTable.isDisposed())
+                    {
+                        dataTable.setRedraw(true);
+                        dataTable.redraw();
+                    }
+                }
+            }
+        }
+
         private void scheduleSyncRowAreaAlignment()
         {
             if (indexPane.isDisposed())
                 return;
+            if (shellBorderResizeActive)
+            {
+                pendingRowAreaDuringShellBorderResize = true;
+                Display display = indexPane.getDisplay();
+                if (display != null && !display.isDisposed() && pendingSyncRowAreaAlignment != null)
+                {
+                    display.timerExec(-1, pendingSyncRowAreaAlignment);
+                    pendingSyncRowAreaAlignment = null;
+                }
+                return;
+            }
             Display display = indexPane.getDisplay();
             if (display == null || display.isDisposed())
                 return;
@@ -2644,14 +2769,25 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         {
             if (indexTable.isDisposed())
                 return;
+            pendingFixedPaneLayoutSource = source != null ? source : "unknown"; //$NON-NLS-1$
             Display display = indexTable.getDisplay();
             if (display == null || display.isDisposed())
                 return;
+            if (shellBorderResizeActive)
+            {
+                pendingFixedPaneDuringShellBorderResize = true;
+                if (pendingSyncFixedPaneLayout != null)
+                {
+                    display.timerExec(-1, pendingSyncFixedPaneLayout);
+                    pendingSyncFixedPaneLayout = null;
+                }
+                return;
+            }
             if (pendingSyncFixedPaneLayout != null)
                 display.timerExec(-1, pendingSyncFixedPaneLayout);
             pendingSyncFixedPaneLayout = () -> {
                 pendingSyncFixedPaneLayout = null;
-                syncFixedPaneLayout();
+                syncFixedPaneLayout(pendingFixedPaneLayoutSource);
             };
             display.timerExec(syncFixedPaneLayoutDelayMs(source), pendingSyncFixedPaneLayout);
         }
@@ -2762,7 +2898,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         }
 
         /** Две колонки — «Индекс» + «Тип»; три — + «Представление» с сохранёнными ширинами. */
-        private void syncFixedPaneLayout()
+        private void syncFixedPaneLayout(String source)
         {
             if (syncingIndexPaneLayout || indexTable.isDisposed() || indexTable.getColumnCount() <= 0)
                 return;

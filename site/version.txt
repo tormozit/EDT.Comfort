@@ -21,4 +21,4 @@
 #   https://tormozit.github.io/EDT.Comfort/1.0.0.10/ — фиксированная версия
 #
 # Один раз: GitHub → Settings → Pages → Deploy from branch → gh-pages / (root)
-comfort.release=1.0.0.19
+comfort.release=1.0.0.20

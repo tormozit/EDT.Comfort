@@ -78,14 +78,6 @@ final class DebugCollectionSizeResolver
     /** Отменить текущий pass; {@code exceptGeneration} — generation нового прохода (не отменять свой). */
     static void cancelPass(int exceptGeneration)
     {
-        int prev = activeGeneration.get();
-        if (prev != exceptGeneration && prev >= 0)
-        {
-            // #region agent log
-            DebugCollectionAgentLog.log("H-sizePass", "SizeResolver.cancelPass", "cancel", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"prevGen\":" + prev + ",\"newGen\":" + exceptGeneration + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            // #endregion
-        }
         activeGeneration.set(exceptGeneration);
         Job job = passJob;
         if (job != null)
@@ -125,25 +117,12 @@ final class DebugCollectionSizeResolver
             model, coreRowFrom, coreRowTo, overscanRowFrom, overscanRowTo, colFrom, colTo, includeOverscan);
         if (cells.isEmpty())
             return;
-        final long startMs = System.currentTimeMillis();
-        final String passReason = reason != null ? reason : ""; //$NON-NLS-1$
-        // #region agent log
-        DebugCollectionAgentLog.log("H-sizePass", "SizeResolver.schedulePass", "start", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"generation\":" + generation //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"queued\":" + cells.size() //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"coreFrom\":" + coreRowFrom + ",\"coreTo\":" + coreRowTo //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"workers\":" + MAX_CONCURRENT_EVALUATE //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"reason\":\"" + passReason + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"viewportGen\":" + viewportGen //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"includeOverscan\":" + includeOverscan + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        // #endregion
         final Job[] created = new Job[1];
         created[0] = Job.create("Комфорт: размер ячеек коллекции", monitor -> { //$NON-NLS-1$
             if (cancelled.get() != 0 || monitor.isCanceled() || generation != activeGeneration.get())
                 return org.eclipse.core.runtime.Status.OK_STATUS;
             int resolved = 0;
             int skipped = 0;
-            long[] lastHeartbeatMs = { 0L };
             Set<Integer> batchRows = new LinkedHashSet<>();
             // Раньше: партиями по BATCH_SIZE, с барьером — весь пул ждал, пока ДОСЧИТАЮТСЯ все
             // ячейки текущей партии, прежде чем в пул уходила следующая. Если хоть одна ячейка партии
@@ -192,7 +171,6 @@ final class DebugCollectionSizeResolver
                         resolved++;
                         if (outcome.row >= 0)
                             batchRows.add(outcome.row);
-                        logSizeCellSample(outcome.row, outcome.col, outcome);
                     }
                     else if ("pending".equals(outcome.outcome)) //$NON-NLS-1$
                         skipped++;
@@ -216,21 +194,6 @@ final class DebugCollectionSizeResolver
                             onRowResolved.accept(row);
                     });
                 }
-                // Heartbeat для долгих проходов — без этого проход глубоко в коллекции может
-                // молчать 15-20+ секунд без единой записи в логе, пока его не отменят/он завершится;
-                // isPassBusy() в это время блокирует любые не-priority проходы.
-                long elapsedMs = System.currentTimeMillis() - startMs;
-                if (elapsedMs - lastHeartbeatMs[0] >= 2000)
-                {
-                    lastHeartbeatMs[0] = elapsedMs;
-                    // #region agent log
-                    DebugCollectionAgentLog.log("H-sizePass", "SizeResolver.schedulePass", "heartbeat", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        "{\"generation\":" + generation //$NON-NLS-1$ //$NON-NLS-2$
-                            + ",\"elapsedMs\":" + elapsedMs //$NON-NLS-1$ //$NON-NLS-2$
-                            + ",\"processed\":" + (processed + 1) + ",\"of\":" + cells.size() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                            + ",\"resolvedSoFar\":" + resolved + ",\"skippedSoFar\":" + skipped + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    // #endregion
-                }
             }
             // Хвост — то, что не набралось до BATCH_SIZE перед выходом из цикла.
             if (!batchRows.isEmpty() && onRowResolved != null && !display.isDisposed() && cancelled.get() == 0)
@@ -246,20 +209,6 @@ final class DebugCollectionSizeResolver
             }
             boolean needsRetry = skipped > 0;
             boolean stale = generation != activeGeneration.get();
-            long durationMs = System.currentTimeMillis() - startMs;
-            // #region agent log
-            if (!stale)
-            {
-                DebugCollectionAgentLog.log("H-sizePass", "SizeResolver.schedulePass", "done", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"generation\":" + generation //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"resolved\":" + resolved //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"skipped\":" + skipped //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"needsRetry\":" + needsRetry //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"reason\":\"" + passReason + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"viewportGen\":" + viewportGen //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"durationMs\":" + durationMs + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            }
-            // #endregion
             if (!stale && resolved > 0 && onRowsReady != null && !display.isDisposed() && cancelled.get() == 0)
                 display.asyncExec(onRowsReady);
             if (!stale && onPassFinished != null)
@@ -314,17 +263,6 @@ final class DebugCollectionSizeResolver
                 cells.add(new int[] { row, col });
             }
         }
-    }
-
-    private static void logSizeCellSample(int row, int col, ResolveOutcome outcome)
-    {
-        if (row % 64 != 0 && row < 1700)
-            return;
-        // #region agent log
-        DebugCollectionAgentLog.log("H-sizeCell", "SizeResolver.resolveCellSize", "resolved", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"row\":" + row + ",\"col\":" + col //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"size\":" + outcome.size + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
     }
 
     private static final class ResolveOutcome

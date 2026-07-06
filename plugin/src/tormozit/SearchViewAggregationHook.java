@@ -1,8 +1,5 @@
 package tormozit;
 
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.text.MessageFormat;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -458,9 +455,7 @@ public final class SearchViewAggregationHook implements IStartup
                 return false;
             if (path.equals(other.path))
                 return true;
-            String a = normalizePath(path);
-            String b = normalizePath(other.path);
-            return !a.isEmpty() && a.equals(b);
+            return pathsEqual(path, other.path);
         }
 
         @Override
@@ -521,14 +516,8 @@ public final class SearchViewAggregationHook implements IStartup
                 applyTableSortOrder(tableViewer, false);
                 hidePathColumn(tableViewer);
                 List<TableRowKey> previousSelection = copySavedSelection(tableViewer);
-                // #region agent log
-                agentDebugLog("H1", "postListener:terminalBranch", "terminal restore", //$NON-NLS-1$ //$NON-NLS-2$
-                    "{\"cachedKeys\":" + jsonEscape(describeRowKeys(previousSelection)) //$NON-NLS-1$
-                        + ",\"nodePath\":" + jsonEscape(nodePathForSelection(selectedNodes)) //$NON-NLS-1$
-                        + ",\"live\":" + jsonEscape(describeTableSelectionState(tableViewer)) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
                 if (!previousSelection.isEmpty())
-                    restoreTableSelection(treeViewer, tableViewer, selectedNodes, previousSelection, true, 0);
+                    scheduleRestoreTableSelection(treeViewer, tableViewer, selectedNodes, previousSelection, true);
             }
             catch (Exception e)
             {
@@ -573,28 +562,10 @@ public final class SearchViewAggregationHook implements IStartup
         log("aggregation: cachedSelection=" + describeRowKeys(previousSelection) //$NON-NLS-1$
             + " liveBeforeChangeSource=" + describeTableSelectionState(tableViewer)); //$NON-NLS-1$
 
-        // #region agent log
-        agentDebugLog("H2", "postListener:aggregationBranch", "needsAggregation=true, will restore", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"cachedKeys\":" + jsonEscape(describeRowKeys(previousSelection)) //$NON-NLS-1$
-                + ",\"live\":" + jsonEscape(describeTableSelectionState(tableViewer)) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-
         Object[] items = nodesForChangeSource.toArray();
-        Table table = tableViewer.getTable();
-        // #region agent log
-        agentDebugLog("H1", "applyAggregation:changeSource", "before changeSource", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"source\":" + jsonEscape(source) //$NON-NLS-1$
-                + ",\"searchRunning\":" + searchQueryRunning //$NON-NLS-1$
-                + ",\"nodes\":" + items.length //$NON-NLS-1$
-                + ",\"paths\":" + pathByItem.size() //$NON-NLS-1$
-                + ",\"topIndex\":" + (table != null && !table.isDisposed() ? table.getTopIndex() : -1) //$NON-NLS-1$
-                + ",\"itemCount\":" + (table != null && !table.isDisposed() ? table.getItemCount() : -1) //$NON-NLS-1$
-                + ",\"tableFocus\":" + (table != null && !table.isDisposed() && table.isFocusControl()) //$NON-NLS-1$
-                + ",\"live\":" + jsonEscape(describeTableSelectionState(tableViewer)) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
         Global.invoke(model, "changeSource", (Object) items); //$NON-NLS-1$
         showPathColumn(tableViewer);
-        restoreTableSelection(treeViewer, tableViewer, selectedNodes, previousSelection, false, 0);
+        scheduleRestoreTableSelection(treeViewer, tableViewer, selectedNodes, previousSelection, false);
 
         log("aggregation: nodes=" + items.length + " paths=" + pathByItem.size() //$NON-NLS-1$ //$NON-NLS-2$
             + " for " + selectedNodes.size() + " selected node(s)" //$NON-NLS-1$ //$NON-NLS-2$
@@ -622,7 +593,7 @@ public final class SearchViewAggregationHook implements IStartup
 
         List<Object> treeContext = treeViewer.getStructuredSelection().toList();
         if (isTerminalTreeSelection(treeContext)
-            && !isTableReadyForTreeSelection(tableViewer, treeContext, true))
+            && !isTableReadyForRestore(tableViewer, treeContext, true))
         {
             log("saveSelection(" + source + "): таблица ещё не соответствует узлу дерева " //$NON-NLS-1$ //$NON-NLS-2$
                 + describeTableSelectionState(tableViewer));
@@ -643,10 +614,6 @@ public final class SearchViewAggregationHook implements IStartup
         }
 
         SAVED_TABLE_SELECTION_BY_VIEWER.put(tableViewer, keys);
-        // #region agent log
-        agentDebugLog("H4", "saveTableSelection", source, //$NON-NLS-1$ //$NON-NLS-2$
-            "{\"keys\":" + jsonEscape(describeRowKeys(keys)) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
         log("saveSelection(" + source + "): " + describeRowKeys(keys) //$NON-NLS-1$ //$NON-NLS-2$
             + " " + describeTableSelectionState(tableViewer)); //$NON-NLS-1$
     }
@@ -681,9 +648,19 @@ public final class SearchViewAggregationHook implements IStartup
             return false;
         if (a.equals(b))
             return true;
-        String na = normalizePath(a);
-        String nb = normalizePath(b);
-        return !na.isEmpty() && na.equals(nb);
+        String na = canonicalizeMdPath(a);
+        String nb = canonicalizeMdPath(b);
+        if (!na.isEmpty() && na.equals(nb))
+            return true;
+        return pathsCompatible(na, nb);
+    }
+
+    /** Модульный путь длиннее пути узла формы или наоборот — одна и та же ветка. */
+    private static boolean pathsCompatible(String a, String b)
+    {
+        if (a == null || b == null || a.isEmpty() || b.isEmpty())
+            return false;
+        return a.startsWith(b + ".") || b.startsWith(a + "."); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static String nodePathForSelection(List<Object> selectedNodes)
@@ -693,29 +670,92 @@ public final class SearchViewAggregationHook implements IStartup
         return buildCanonicalPathFromNode(selectedNodes.get(0));
     }
 
-    /** Таблица соответствует выбранному узлу дерева (не агрегат родителя и не прошлый узел). */
-    private static boolean isTableReadyForTreeSelection(TableViewer tableViewer, List<Object> selectedNodes,
+    /** Таблица показывает строки текущего узла, а не предыдущий состав (DeferredContentProvider догрузил). */
+    private static boolean isTableReadyForRestore(TableViewer tableViewer, List<Object> contextNodes,
             boolean terminal)
     {
         Table table = tableViewer.getTable();
-        if (table == null || table.isDisposed() || selectedNodes.isEmpty())
-            return true;
-        if (!terminal)
+        if (table == null || table.isDisposed() || contextNodes == null || contextNodes.isEmpty())
             return true;
 
         int tableCount = table.getItemCount();
-        int expected = expectedTableItemCount(selectedNodes);
-        if (expected <= 0)
-            return tableCount >= 0;
         if (tableCount == 0)
             return false;
-        // Агрегированный список родителя
-        if (tableCount > expected + 5)
+
+        if (terminal)
+            return isTerminalTableContentReady(table, contextNodes.get(0), tableCount);
+
+        Map<Object, String> pathMap = PATH_MAPS_BY_TABLE_VIEWER.get(tableViewer);
+        if (pathMap == null || pathMap.isEmpty())
+            return tableCount == 0;
+
+        int belong = 0;
+        int foreign = 0;
+        for (TableItem item : table.getItems())
+        {
+            Object data = item.getData();
+            if (data == null)
+                continue;
+            if (pathMap.containsKey(data))
+                belong++;
+            else
+                foreign++;
+        }
+        if (foreign > 0)
             return false;
-        // Ещё таблица предыдущего узла (меньше строк, чем у выбранного)
-        if (tableCount + 5 < expected)
+        return belong > 0;
+    }
+
+    private static boolean isTerminalTableContentReady(Table table, Object terminalNode, int tableCount)
+    {
+        Object items = Global.invoke(terminalNode, "getTableItems"); //$NON-NLS-1$
+        if (!(items instanceof List<?> expectedItems))
             return false;
-        return true;
+        if (expectedItems.isEmpty())
+            return tableCount == 0;
+
+        int belong = 0;
+        int foreign = 0;
+        for (TableItem item : table.getItems())
+        {
+            Object data = item.getData();
+            if (data == null)
+                continue;
+            if (expectedItems.contains(data))
+                belong++;
+            else
+                foreign++;
+        }
+        if (foreign > 0)
+            return false;
+        return belong > 0;
+    }
+
+    private static boolean rowBelongsToCurrentContext(TableViewer tableViewer, List<Object> contextNodes,
+            Object row, boolean terminal)
+    {
+        if (row == null || contextNodes == null || contextNodes.isEmpty())
+            return false;
+        if (terminal)
+        {
+            if (contextNodes.size() != 1)
+                return false;
+            Object items = Global.invoke(contextNodes.get(0), "getTableItems"); //$NON-NLS-1$
+            return items instanceof List<?> list && list.contains(row);
+        }
+        Map<Object, String> pathMap = PATH_MAPS_BY_TABLE_VIEWER.get(tableViewer);
+        return pathMap != null && pathMap.containsKey(row);
+    }
+
+    /** Не вызывать синхронно сразу после {@code changeSource} — таблица ещё со старыми строками. */
+    private static void scheduleRestoreTableSelection(TreeViewer treeViewer, TableViewer tableViewer,
+            List<Object> contextNodes, List<TableRowKey> previousKeys, boolean terminal)
+    {
+        Table table = tableViewer.getTable();
+        if (table == null || table.isDisposed())
+            return;
+        table.getDisplay().asyncExec(
+            () -> restoreTableSelection(treeViewer, tableViewer, contextNodes, previousKeys, terminal, 0));
     }
 
     private static int expectedTableItemCount(List<Object> selectedNodes)
@@ -744,45 +784,111 @@ public final class SearchViewAggregationHook implements IStartup
 
     private static String buildCanonicalPathFromNode(Object node)
     {
-        return buildShortPathFromNode(node);
+        return buildCanonicalMdPathFromNode(node);
     }
 
     /**
-     * Короткий путь как в «Последних местах»: {@code Справочник.Валюты.МодульОбъекта},
-     * без {@code " / "} и без корня конфигурации.
+     * MD-путь из цепочки узлов дерева поиска: типы в ед.ч., пары «Тип.Имя».
      */
-    private static String buildShortPathFromNode(Object node)
+    private static String buildCanonicalMdPathFromNode(Object node)
     {
-        List<String> parts = new ArrayList<>();
+        List<String> labels = new ArrayList<>();
         for (Object cur = node; cur != null; cur = Global.invoke(cur, "getParent")) //$NON-NLS-1$
         {
             String label = stripColonFragment(normalizePath(extractLabel(cur)));
             if (!label.isEmpty())
-                parts.add(0, label);
+                labels.add(0, label);
         }
-        if (parts.isEmpty())
+        if (labels.isEmpty())
             return ""; //$NON-NLS-1$
-        if (parts.size() > 1 && !parts.get(0).contains(".")) //$NON-NLS-1$
-            parts.remove(0);
+        if (labels.size() > 1 && !labels.get(0).contains(".") && !isMdTypeSegment(labels.get(0))) //$NON-NLS-1$
+            labels.remove(0);
 
-        String deepest = parts.get(parts.size() - 1);
+        String deepest = labels.get(labels.size() - 1);
         if (deepest.contains(".")) //$NON-NLS-1$
-            return trimPathDisplaySuffix(deepest);
+            return canonicalizeMdPath(trimPathDisplaySuffix(deepest));
 
         StringBuilder path = new StringBuilder();
+        for (int i = 0; i < labels.size(); )
+        {
+            String segment = labels.get(i);
+            String typeRu = toSingularRuType(segment);
+            if (typeRu != null && i + 1 < labels.size())
+            {
+                if (path.length() > 0)
+                    path.append('.');
+                path.append(typeRu).append('.').append(labels.get(i + 1));
+                i += 2;
+            }
+            else if (segment.contains(".")) //$NON-NLS-1$
+            {
+                return canonicalizeMdPath(trimPathDisplaySuffix(segment));
+            }
+            else
+            {
+                i++;
+            }
+        }
+        return canonicalizeMdPath(trimPathDisplaySuffix(path.toString()));
+    }
+
+    private static boolean isMdTypeSegment(String segment)
+    {
+        return toSingularRuType(segment) != null;
+    }
+
+    private static String toSingularRuType(String segment)
+    {
+        if (segment == null || segment.isEmpty())
+            return null;
+        String ru = MdTypeMapping.anyToRu(segment);
+        if (ru != null)
+            return ru;
+        return MdTypeMapping.ruPluralToRu(segment);
+    }
+
+    /** Единый MD-путь для колонки «Путь» и сравнения ключей. */
+    private static String canonicalizeMdPath(String path)
+    {
+        if (path == null || path.isEmpty())
+            return ""; //$NON-NLS-1$
+        path = stripColonFragment(trimPathDisplaySuffix(normalizePath(path)));
+        if (path.isEmpty())
+            return ""; //$NON-NLS-1$
+
+        String[] parts = path.split("\\.", -1); //$NON-NLS-1$
+        StringBuilder sb = new StringBuilder();
         for (String part : parts)
         {
-            if (part.contains(".")) //$NON-NLS-1$
-            {
-                path.setLength(0);
-                path.append(part);
-            }
-            else if (path.length() > 0)
-                path.append('.').append(part);
-            else
-                path.append(part);
+            if (part.isEmpty())
+                continue;
+            String typeRu = toSingularRuType(part);
+            if (typeRu != null)
+                part = typeRu;
+            if (sb.length() > 0)
+                sb.append('.');
+            sb.append(part);
         }
-        return trimPathDisplaySuffix(path.toString());
+        return ensureFormContextSuffix(sb.toString());
+    }
+
+    /** Контекст формы: {@code …Форма.ИмяФормы.Форма}. */
+    private static String ensureFormContextSuffix(String path)
+    {
+        if (path == null || path.isEmpty())
+            return ""; //$NON-NLS-1$
+        if (path.endsWith(".Форма")) //$NON-NLS-1$
+            return path;
+        int lastDot = path.lastIndexOf('.');
+        if (lastDot >= 0)
+        {
+            String last = path.substring(lastDot + 1);
+            if (MdTypeMapping.isModuleTypeSuffix(last))
+                return path;
+        }
+        if (path.contains(".Форма.")) //$NON-NLS-1$
+            return path + ".Форма"; //$NON-NLS-1$
+        return path;
     }
 
     /** Путь для колонки «Путь» — короткий MD-путь без дублирования колонки «Свойство». */
@@ -790,8 +896,10 @@ public final class SearchViewAggregationHook implements IStartup
     {
         String path = modulePathFromTableItem(tableItem);
         if (path == null || path.isEmpty())
-            path = buildShortPathFromNode(ownerNode);
-        return stripColonFragment(trimPathDisplaySuffix(path));
+            path = mdPathFromTableItemFile(tableItem);
+        if (path == null || path.isEmpty())
+            path = buildCanonicalMdPathFromNode(ownerNode);
+        return canonicalizeMdPath(path);
     }
 
     /** Убирает суффикс {@code :...} — он показывается в колонке «Свойство». */
@@ -816,10 +924,19 @@ public final class SearchViewAggregationHook implements IStartup
 
     private static String modulePathFromTableItem(Object tableItem)
     {
+        String path = projectRelativePathFromTableItem(tableItem);
+        if (path == null || path.isEmpty())
+            return null;
+        GetRef.ModuleRef ref = GetRef.pathToModuleRef(path);
+        return ref != null ? ref.modulePath : null;
+    }
+
+    private static String projectRelativePathFromTableItem(Object tableItem)
+    {
         try
         {
             Object match = Global.invoke(tableItem, "getData"); //$NON-NLS-1$
-            if (match == null || !match.getClass().getName().contains("TextSearchFileMatch")) //$NON-NLS-1$
+            if (match == null)
                 return null;
             Object file = Global.invoke(match, "getFile"); //$NON-NLS-1$
             if (file == null)
@@ -828,10 +945,26 @@ public final class SearchViewAggregationHook implements IStartup
             if (relPath == null)
                 return null;
             Object pathStr = Global.invoke(relPath, "toString"); //$NON-NLS-1$
-            if (!(pathStr instanceof String))
+            return pathStr instanceof String ? (String) pathStr : null;
+        }
+        catch (Exception ignored)
+        {
+            return null;
+        }
+    }
+
+    /** Путь из {@code Match.getFile()} — модуль или полное имя МД (форма, макет…). */
+    private static String mdPathFromTableItemFile(Object tableItem)
+    {
+        try
+        {
+            String path = projectRelativePathFromTableItem(tableItem);
+            if (path == null || path.isEmpty())
                 return null;
-            GetRef.ModuleRef ref = GetRef.pathToModuleRef((String) pathStr);
-            return ref != null ? ref.modulePath : null;
+            GetRef.ModuleRef ref = GetRef.pathToModuleRef(path);
+            if (ref != null && ref.modulePath != null && !ref.modulePath.isEmpty())
+                return ref.modulePath;
+            return GetRef.pathToFullName(path);
         }
         catch (Exception ignored)
         {
@@ -950,7 +1083,7 @@ public final class SearchViewAggregationHook implements IStartup
                 if (data == null)
                     continue;
                 TableRowKey candidate = rowKeyForElement(treeViewer, tableViewer, data);
-                if (key.matches(candidate))
+                if (key.matches(candidate) && rowBelongsToCurrentContext(tableViewer, selectedNodes, data, false))
                 {
                     found.add(data);
                     break;
@@ -965,18 +1098,16 @@ public final class SearchViewAggregationHook implements IStartup
         if (selectedNodes.size() != 1)
             return Collections.emptyList();
 
-        String nodePath = buildCanonicalPathFromNode(selectedNodes.get(0));
         List<Object> found = new ArrayList<>();
         for (TableRowKey key : wanted)
         {
-            if (!pathsEqual(key.path, nodePath))
-                continue;
             for (TableItem item : table.getItems())
             {
                 Object data = item.getData();
                 if (data == null)
                     continue;
-                if (key.property.equals(extractPropertyText(data)))
+                if (key.property.equals(extractPropertyText(data))
+                    && rowBelongsToCurrentContext(null, selectedNodes, data, true))
                 {
                     found.add(data);
                     break;
@@ -1079,33 +1210,12 @@ public final class SearchViewAggregationHook implements IStartup
         }
     }
 
-    private static volatile long lastScrollLogMs;
-
     private static void installTableCopyHandler(TreeViewer treeViewer, TableViewer tableViewer)
     {
         Table table = tableViewer.getTable();
         if (table == null || table.isDisposed() || table.getData(COPY_HOOKED_KEY) != null)
             return;
         table.setData(COPY_HOOKED_KEY, Boolean.TRUE);
-        org.eclipse.swt.widgets.ScrollBar vBar = table.getVerticalBar();
-        if (vBar != null)
-        {
-            vBar.addListener(SWT.Selection, event -> {
-                if (!ComfortSettings.isReplaceListFiltersEnabled())
-                    return;
-                long now = System.currentTimeMillis();
-                if (now - lastScrollLogMs < 400)
-                    return;
-                lastScrollLogMs = now;
-                // #region agent log
-                agentDebugLog("H3", "table:scroll", "user scroll", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"topIndex\":" + table.getTopIndex() //$NON-NLS-1$
-                        + ",\"itemCount\":" + table.getItemCount() //$NON-NLS-1$
-                        + ",\"visibleCount\":" + table.getClientArea().height //$NON-NLS-1$
-                        + ",\"searchRunning\":" + searchQueryRunning + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-            });
-        }
         table.addListener(SWT.KeyDown, event -> {
             if (!ComfortSettings.isReplaceListFiltersEnabled())
                 return;
@@ -1240,14 +1350,6 @@ public final class SearchViewAggregationHook implements IStartup
         Comparator order = pathThenProperty
             ? (a, b) -> compareRowsByPathProperty(tableViewer, a, b)
             : Comparator.naturalOrder();
-        // #region agent log
-        Table table = tableViewer.getTable();
-        agentDebugLog("H2", "applyTableSortOrder", "setSortOrder", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"pathThenProperty\":" + pathThenProperty //$NON-NLS-1$
-                + ",\"topIndex\":" + (table != null && !table.isDisposed() ? table.getTopIndex() : -1) //$NON-NLS-1$
-                + ",\"itemCount\":" + (table != null && !table.isDisposed() ? table.getItemCount() : -1) //$NON-NLS-1$
-                + ",\"tableFocus\":" + (table != null && !table.isDisposed() && table.isFocusControl()) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
         Global.invoke(provider, "setSortOrder", order); //$NON-NLS-1$
     }
 
@@ -1298,21 +1400,12 @@ public final class SearchViewAggregationHook implements IStartup
         if (table == null || table.isDisposed())
             return;
 
-        if (terminal && !isTableReadyForTreeSelection(tableViewer, contextNodes, true))
+        if (!isTableReadyForRestore(tableViewer, contextNodes, terminal))
         {
-            if (attempt == 0)
-            {
-                // #region agent log
-                agentDebugLog("H5", "restoreTableSelection:waitTable", "terminal table not ready", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"keys\":" + jsonEscape(describeRowKeys(previousKeys)) //$NON-NLS-1$
-                        + ",\"expected\":" + expectedTableItemCount(contextNodes) //$NON-NLS-1$
-                        + ",\"live\":" + jsonEscape(describeTableSelectionState(tableViewer)) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-            }
             if (attempt >= 40)
                 return;
             table.getDisplay().timerExec(100,
-                () -> restoreTableSelection(treeViewer, tableViewer, contextNodes, previousKeys, true, attempt + 1));
+                () -> restoreTableSelection(treeViewer, tableViewer, contextNodes, previousKeys, terminal, attempt + 1));
             return;
         }
 
@@ -1320,14 +1413,6 @@ public final class SearchViewAggregationHook implements IStartup
 
         if (attempt == 0)
         {
-            // #region agent log
-            agentDebugLog("H3", "restoreTableSelection:start", terminal ? "terminal" : "aggregation", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"mode\":\"" + (terminal ? "terminal" : "aggregation") + "\"," //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"wantedKeys\":" + jsonEscape(describeRowKeys(previousKeys)) //$NON-NLS-1$
-                    + ",\"nodePath\":" + jsonEscape(nodePathForSelection(contextNodes)) //$NON-NLS-1$
-                    + ",\"matched\":" + matched.size() //$NON-NLS-1$
-                    + ",\"live\":" + jsonEscape(describeTableSelectionState(tableViewer)) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             log("restoreTableSelection: " + (terminal ? "terminal" : "aggregation") //$NON-NLS-1$ //$NON-NLS-2$
                 + " keys=" + describeRowKeys(previousKeys) //$NON-NLS-1$
                 + " matched=" + matched.size() //$NON-NLS-1$
@@ -1337,13 +1422,6 @@ public final class SearchViewAggregationHook implements IStartup
         if (!matched.isEmpty())
         {
             tableViewer.setData(RESTORING_SELECTION_KEY, Boolean.TRUE);
-            // #region agent log
-            agentDebugLog("H4", "restoreTableSelection:setSelection", "programmatic select", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"attempt\":" + attempt //$NON-NLS-1$
-                    + ",\"matched\":" + matched.size() //$NON-NLS-1$
-                    + ",\"terminal\":" + terminal //$NON-NLS-1$
-                    + ",\"live\":" + jsonEscape(describeTableSelectionState(tableViewer)) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             try
             {
                 tableViewer.setSelection(new org.eclipse.jface.viewers.StructuredSelection(matched), true);
@@ -1408,10 +1486,6 @@ public final class SearchViewAggregationHook implements IStartup
 
         tree.setData(TREE_COUNT_LABEL_HOOKED_KEY, Boolean.TRUE);
         log("installTreeMatchCountLabelProvider: OK"); //$NON-NLS-1$
-        // #region agent log
-        agentDebugLog("T1", "installTreeMatchCountLabelProvider", "wrapped tree label provider", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"rawProvider\":" + jsonEscape(rawLp != null ? rawLp.getClass().getName() : "null") + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        // #endregion
     }
 
     private static void injectTreeStyledStringProvider(DelegatingStyledCellLabelProvider provider,
@@ -1543,11 +1617,6 @@ public final class SearchViewAggregationHook implements IStartup
             }
 
             StyledString fixed = styledTextWithTotalCount(element, totalCount);
-            // #region agent log
-            agentDebugLog("T2", "MatchTreeCountLabelWrapper:getStyledText", "recursive count applied", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"total\":" + totalCount //$NON-NLS-1$
-                    + ",\"label\":" + jsonEscape(fixed.getString()) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             return fixed;
         }
 
@@ -1601,31 +1670,6 @@ public final class SearchViewAggregationHook implements IStartup
     {
         Global.log("SearchViewAggregation", message); //$NON-NLS-1$
     }
-
-    // #region agent log
-    private static final Path AGENT_DEBUG_LOG = Path.of("C:\\VC\\EDT.Comfort\\debug-547274.log"); //$NON-NLS-1$
-
-    private static void agentDebugLog(String hypothesisId, String location, String message, String dataJson)
-    {
-        try
-        {
-            String line = "{\"sessionId\":\"547274\",\"hypothesisId\":\"" + hypothesisId //$NON-NLS-1$
-                + "\",\"location\":\"" + location + "\",\"message\":\"" + message //$NON-NLS-1$ //$NON-NLS-2$
-                + "\",\"data\":" + dataJson + ",\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$ //$NON-NLS-2$
-            Files.writeString(AGENT_DEBUG_LOG, line, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-        }
-        catch (Exception ignored)
-        {
-        }
-    }
-
-    private static String jsonEscape(String s)
-    {
-        if (s == null)
-            return "\"\""; //$NON-NLS-1$
-        return "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
-    }
-    // #endregion
 
     public SearchViewAggregationHook() {}
 }

@@ -203,7 +203,6 @@ final class DebugCollectionLoadScheduler
 
     void scheduleInitialLoad()
     {
-        DebugCollectionAgentLog.beginSession();
         initialLoadSettled.set(false);
         firstSizePassCompleted.set(false);
         sizePassOverscanPhase.set(false);
@@ -222,7 +221,6 @@ final class DebugCollectionLoadScheduler
 
     void scheduleFromClone(int logicalFirst, int logicalLast)
     {
-        DebugCollectionAgentLog.beginSession();
         initialLoadSettled.set(true);
         firstSizePassCompleted.set(true);
         sizePassOverscanPhase.set(false);
@@ -453,10 +451,6 @@ final class DebugCollectionLoadScheduler
         {
             if (DebugCollectionSizeResolver.isPassBusy())
             {
-                // #region agent log
-                DebugCollectionAgentLog.log("H-sizePassBusy", "LoadScheduler.runSizePass", "deferredBusy", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"reason\":\"" + reason + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
                 sizeRetryPending.set(true);
                 return;
             }
@@ -543,10 +537,6 @@ final class DebugCollectionLoadScheduler
                     int streak = sizeRetryNoProgressStreak.incrementAndGet();
                     long delay = Math.min(SIZE_PASS_RETRY_MAX_DELAY_MS,
                         SIZE_PASS_RETRY_DEBOUNCE_MS << Math.min(streak, 8));
-                    // #region agent log
-                    DebugCollectionAgentLog.log("H-sizeRetryBackoff", "LoadScheduler.executeSizePass", "backoff", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        "{\"streak\":" + streak + ",\"delayMs\":" + delay + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    // #endregion
                     scheduleSizeRetryDebounced(delay);
                 }
                 else if (!includeOverscan)
@@ -719,11 +709,6 @@ final class DebugCollectionLoadScheduler
                     model.noteCollectionKicked(size);
                     DebugCollectionDebug.step("load.rows", //$NON-NLS-1$
                         reason + " totalSize=" + size + " vars.length=" + varCount); //$NON-NLS-1$ //$NON-NLS-2$
-                    // #region agent log
-                    DebugCollectionAgentLog.log("H-edtKick", "LoadScheduler.scheduleVariablesJob", "collectionKick", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        "{\"reason\":\"" + reason + "\",\"totalSize\":" + size //$NON-NLS-1$ //$NON-NLS-2$
-                            + ",\"varsLength\":" + varCount + ",\"mapSize\":" + 0 + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    // #endregion
                     logRowVariableSample();
                 }
                 fireProgress(model.loadedRowCount, size, "rows"); //$NON-NLS-1$
@@ -849,16 +834,11 @@ final class DebugCollectionLoadScheduler
                     return;
                 }
                 lastDebugRefreshAt = now;
-                int coalesced = debugEventCoalesceCount.getAndSet(0);
+                debugEventCoalesceCount.getAndSet(0);
                 int dirtyCount = repaintDirtyLogicalRowsInViewport();
                 if (dirtyCount <= 0)
                     return;
                 DebugCollectionDebug.step("load", "debugRefresh"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #region agent log
-                DebugCollectionAgentLog.log("H-refresh", "LoadScheduler.scheduleDebugRefreshDebounced", "uiRefresh", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"from\":" + viewportFirst.get() + ",\"to\":" + viewportLast.get() //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"eventBatches\":" + coalesced + ",\"dirtyRows\":" + dirtyCount + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                // #endregion
             };
             display.timerExec((int) DEBUG_REFRESH_DELAY_MS, debugRefreshDebounce);
         };
@@ -983,11 +963,6 @@ final class DebugCollectionLoadScheduler
             {
                 model.indexedValue.getVariables(kickFrom, kickCount);
                 DebugCollectionDebug.step("load", reason + " page=" + kickFrom + "+" + kickCount); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                // #region agent log
-                DebugCollectionAgentLog.log("H-viewportKick", "LoadScheduler.submitViewportKickJob", "pageKick", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"reason\":\"" + reason + "\",\"from\":" + kickFrom //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"count\":" + kickCount + ",\"priority\":" + priority + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                // #endregion
                 if (priority && display != null && !display.isDisposed())
                 {
                     markDirtyViewport();
