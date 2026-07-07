@@ -18,6 +18,10 @@ import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.ILabelProviderListener;
+import org.eclipse.jface.text.ITextSelection;
+import org.eclipse.jface.text.TextSelection;
+import org.eclipse.jface.viewers.IOpenListener;
+import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.StructuredSelection;
@@ -57,6 +61,7 @@ import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableColumn;
 import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.Tree;
+import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IViewPart;
@@ -67,7 +72,12 @@ import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.IEditorInput;
+import org.eclipse.ui.IEditorPart;
+import org.eclipse.ui.PartInitException;
 import org.eclipse.ui.handlers.IHandlerService;
+import org.eclipse.ui.part.FileEditorInput;
+import org.eclipse.ui.texteditor.ITextEditor;
 
 public final class FileSearchResultsHook implements IStartup
 {
@@ -75,6 +85,11 @@ public final class FileSearchResultsHook implements IStartup
     private static final String PAGE_CLASS_MARKER = "FileSearchPage";
     private static final String HOOKED_KEY = "tormozit.fileSearchResultsHooked";
     private static final String COPY_HOOKED_KEY = "tormozit.fileSearchResultsCopyHooked";
+    private static final String TREE_OPEN_HOOKED_KEY = "tormozit.fileSearchTreeOpenHooked";
+
+    /** Как в {@code org.eclipse.ui.actions.OpenWithMenu}: не переиспользовать чужой редактор по тому же input. */
+    private static final int OPEN_WITH_MATCH =
+        IWorkbenchPage.MATCH_INPUT | IWorkbenchPage.MATCH_ID | IWorkbenchPage.MATCH_IGNORE_SIZE;
 
     private static volatile boolean searchQueryRunning;
 
@@ -284,6 +299,7 @@ public final class FileSearchResultsHook implements IStartup
         registerCopyHandler(tableViewer);
         registerOpenHandler(tableViewer, treeViewer, page);
         registerContextMenu(tableViewer, treeViewer, page);
+        registerTreeContextMenu(treeViewer, page);
         registerGlobalCopyHandler(tableViewer, page, view);
 
         sashForm.setWeights(new int[] {
@@ -670,9 +686,46 @@ public final class FileSearchResultsHook implements IStartup
             {
                 if (!ComfortSettings.isReplaceListFiltersEnabled())
                     return;
-                openSelectedRow(tableViewer, treeViewer, page);
+                openFileInEditor(tableViewer, treeViewer, page);
             }
         });
+        replaceTreeOpenHandler(treeViewer, page);
+    }
+
+    private static void replaceTreeOpenHandler(TreeViewer treeViewer, Object page)
+    {
+        if (Boolean.TRUE.equals(treeViewer.getData(TREE_OPEN_HOOKED_KEY)))
+            return;
+        treeViewer.setData(TREE_OPEN_HOOKED_KEY, Boolean.TRUE);
+        try
+        {
+            Object listenerListObj = Global.getField(treeViewer, "openListeners");
+            Object[] saved = listenerListObj != null
+                ? (Object[]) Global.invoke(listenerListObj, "getListeners")
+                : new Object[0];
+            if (listenerListObj != null)
+                Global.invoke(listenerListObj, "clear");
+            treeViewer.addOpenListener(event -> {
+                if (!ComfortSettings.isReplaceListFiltersEnabled())
+                {
+                    for (Object o : saved)
+                    {
+                        if (o instanceof IOpenListener ol)
+                            ol.open(event);
+                    }
+                    return;
+                }
+                openFileInEditorFromTree(treeViewer, page);
+            });
+        }
+        catch (Exception e)
+        {
+            log("replaceTreeOpenHandler: " + e);
+            treeViewer.addOpenListener(ev -> {
+                if (ComfortSettings.isReplaceListFiltersEnabled())
+                    openFileInEditorFromTree(treeViewer, page);
+            });
+        }
     }
 
     private static void registerContextMenu(TableViewer tableViewer,
@@ -682,7 +735,7 @@ public final class FileSearchResultsHook implements IStartup
         if (table == null || table.isDisposed())
             return;
         MenuManager menuManager = new MenuManager();
-        menuManager.add(new Action("Открыть")
+        menuManager.add(new Action("Открыть редактор объекта")
         {
             @Override
             public void run()
@@ -690,6 +743,16 @@ public final class FileSearchResultsHook implements IStartup
                 if (!ComfortSettings.isReplaceListFiltersEnabled())
                     return;
                 openSelectedRow(tableViewer, treeViewer, page);
+            }
+        });
+        menuManager.add(new Action("Открыть редактор файла")
+        {
+            @Override
+            public void run()
+            {
+                if (!ComfortSettings.isReplaceListFiltersEnabled())
+                    return;
+                openFileInEditor(tableViewer, treeViewer, page);
             }
         });
         menuManager.add(new Action("Копировать")
@@ -743,6 +806,299 @@ public final class FileSearchResultsHook implements IStartup
                     matched.add(fm);
             }
             return matched.toArray(new Match[0]);
+        }
+        return null;
+    }
+
+    private static final String TREE_MENU_ITEM_KEY = "tormozit.fileSearchTreeMenuItemAdded";
+    private static final String TREE_MENU_LISTENER_KEY = "tormozit.fileSearchTreeMenuListener";
+
+    private static void registerTreeContextMenu(TreeViewer treeViewer, Object page)
+    {
+        Tree tree = treeViewer.getTree();
+        if (tree == null || tree.isDisposed())
+            return;
+
+        // Remove old listener if re-registering
+        Listener oldListener = (Listener) tree.getData(TREE_MENU_LISTENER_KEY);
+        if (oldListener != null)
+            tree.removeListener(SWT.MenuDetect, oldListener);
+
+        Listener listener = event -> {
+            Menu menu = tree.getMenu();
+            if (menu == null || menu.isDisposed())
+            {
+                menu = new Menu(tree);
+                tree.setMenu(menu);
+            }
+            if (Boolean.TRUE.equals(menu.getData(TREE_MENU_ITEM_KEY)))
+                return;
+            menu.setData(TREE_MENU_ITEM_KEY, Boolean.TRUE);
+
+            new MenuItem(menu, SWT.SEPARATOR);
+            MenuItem menuItem = new MenuItem(menu, SWT.PUSH);
+            menuItem.setText("Открыть редактор файла");
+            menuItem.addListener(SWT.Selection, e -> openFileInEditorFromTree(treeViewer, page));
+        };
+
+        tree.setData(TREE_MENU_LISTENER_KEY, listener);
+        tree.addListener(SWT.MenuDetect, listener);
+    }
+
+    private static void openFileInEditor(TableViewer tableViewer, TreeViewer treeViewer, Object page)
+    {
+        Table table = tableViewer.getTable();
+        if (table == null || table.isDisposed())
+            return;
+        TableItem[] selection = table.getSelection();
+        if (selection == null || selection.length == 0)
+            return;
+        Object data = selection[0].getData();
+        if (!(data instanceof FileSearchRow row))
+            return;
+        if (row.iFile == null || row.lineElement == null)
+            return;
+
+        openFileInEditorImpl(row.iFile, row.lineElement, treeViewer, page, row);
+    }
+
+    /**
+     * ID встроенного в Eclipse простого текстового редактора ({@code org.eclipse.ui.editors.text.EditorsUI.DEFAULT_TEXT_EDITOR_ID}).
+     * Задан литералом, чтобы не тянуть зависимость от бандла org.eclipse.ui.editors.
+     */
+    private static final String DEFAULT_TEXT_EDITOR_ID = "org.eclipse.ui.DefaultTextEditor";
+
+    /** «Открыть с помощью → Редактор XML» (org.eclipse.wst.xml.ui). */
+    private static final String XML_EDITOR_ID =
+        "org.eclipse.wst.xml.ui.internal.tabletree.XMLMultiPageEditorPart";
+
+    private static final java.util.Set<String> XML_SOURCE_EXTENSIONS = java.util.Set.of(
+        "form", "cmi", "xml", "mxlx", "mdo");
+
+    private static void openFileInEditorImpl(IFile file, LineElement lineElement,
+            TreeViewer treeViewer, Object page, FileSearchRow row)
+    {
+        if (file == null || lineElement == null)
+            return;
+        int[] bounds = resolveMatchBounds(file, lineElement, treeViewer, row);
+
+        if (isBslModuleFile(file))
+            openBslMatchInObjectEditor(file, bounds);
+        else
+            openMatchInSourceEditor(file, bounds);
+    }
+
+    private static boolean isBslModuleFile(IFile file)
+    {
+        return file != null && "bsl".equalsIgnoreCase(file.getFileExtension());
+    }
+
+    private static int[] resolveMatchBounds(IFile file, LineElement lineElement,
+            TreeViewer treeViewer, FileSearchRow row)
+    {
+        Match[] matches = findMatches(treeViewer, file, lineElement);
+        if (matches != null && matches.length > 0 && matches[0] instanceof FileMatch fm)
+            return new int[] { fm.getOffset(), Math.max(fm.getLength(), 1) };
+
+        if (row != null && row.matchOffsets != null && row.matchOffsets.length > 0
+            && row.matchLengths != null && row.matchLengths.length > 0)
+        {
+            int offset = lineElement.getOffset() + row.matchOffsets[0];
+            return new int[] { offset, Math.max(row.matchLengths[0], 1) };
+        }
+
+        if (lineElement.getLine() > 0)
+            return new int[] { lineElement.getOffset(), 1 };
+
+        return new int[] { 0, 1 };
+    }
+
+    private static void openBslMatchInObjectEditor(IFile file, int[] bounds)
+    {
+        IWorkbenchPage wbPage = PlatformUI.getWorkbench()
+            .getActiveWorkbenchWindow().getActivePage();
+        if (wbPage == null)
+            return;
+        ITextSelection selection = new TextSelection(bounds[0], bounds[1]);
+        try
+        {
+            Class<?> cls = Class.forName("com._1c.g5.v8.dt.ui.util.OpenHelper");
+            Object helper = cls.getConstructor(IWorkbenchPage.class).newInstance(wbPage);
+            for (java.lang.reflect.Method m : cls.getMethods())
+            {
+                if (!"openEditor".equals(m.getName()) || m.getParameterCount() != 2)
+                    continue;
+                if (m.getParameterTypes()[0].equals(IFile.class)
+                    && m.getParameterTypes()[1].equals(ISelection.class))
+                {
+                    Object editorPart = m.invoke(helper, file, selection);
+                    if (editorPart instanceof IEditorPart ep)
+                        revealMatchInEditor(ep, bounds[0], bounds[1]);
+                    return;
+                }
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+    }
+
+    private static String resolveSourceEditorId(IFile file)
+    {
+        if (file == null)
+            return DEFAULT_TEXT_EDITOR_ID;
+        String ext = file.getFileExtension();
+        if (ext != null && XML_SOURCE_EXTENSIONS.contains(ext.toLowerCase(java.util.Locale.ROOT)))
+            return XML_EDITOR_ID;
+        return DEFAULT_TEXT_EDITOR_ID;
+    }
+
+    private static void openMatchInSourceEditor(IFile file, int[] bounds)
+    {
+        IWorkbenchPage wbPage = PlatformUI.getWorkbench()
+            .getActiveWorkbenchWindow().getActivePage();
+        if (wbPage == null)
+            return;
+        String editorId = resolveSourceEditorId(file);
+        IEditorInput input = new FileEditorInput(file);
+        IEditorPart editor;
+        try
+        {
+            editor = wbPage.openEditor(input, editorId, true, OPEN_WITH_MATCH);
+        }
+        catch (PartInitException e)
+        {
+            return;
+        }
+        revealMatchInEditor(editor, bounds[0], bounds[1]);
+    }
+
+    private static void revealMatchInEditor(IEditorPart editor, int offset, int length)
+    {
+        ITextEditor textEditor = findTextEditorInEditor(editor);
+        if (textEditor == null)
+            return;
+        Display.getDefault().asyncExec(() -> {
+            if (textEditor.getSite() != null
+                && textEditor.getSite().getShell() != null
+                && !textEditor.getSite().getShell().isDisposed())
+                textEditor.selectAndReveal(offset, length);
+        });
+    }
+
+    private static ITextEditor findTextEditorInEditor(IEditorPart editor)
+    {
+        if (editor == null)
+            return null;
+        if (editor instanceof ITextEditor te)
+            return te;
+        ITextEditor fromBsl = extractXtextEditorViaReflection(editor);
+        if (fromBsl != null)
+            return fromBsl;
+        Object countObj = Global.invoke(editor, "getPageCount");
+        if (!(countObj instanceof Integer count))
+            return null;
+        for (int i = 0; i < count; i++)
+        {
+            Object pageObj = Global.invoke(editor, "getEditor", Integer.valueOf(i));
+            if (pageObj instanceof IEditorPart pageEditor)
+            {
+                ITextEditor nested = findTextEditorInEditor(pageEditor);
+                if (nested != null)
+                    return nested;
+            }
+            else if (pageObj instanceof ITextEditor te)
+                return te;
+        }
+        return null;
+    }
+
+    private static ITextEditor extractXtextEditorViaReflection(IEditorPart editor)
+    {
+        try
+        {
+            Class<?> cls = Class.forName("com._1c.g5.v8.dt.bsl.ui.menu.BslHandlerUtil");
+            java.lang.reflect.Method method = cls.getMethod("extractXtextEditor", IEditorPart.class);
+            Object result = method.invoke(null, editor);
+            if (result instanceof ITextEditor te)
+                return te;
+        }
+        catch (Exception ignored)
+        {
+        }
+        return null;
+    }
+
+    private static void openFileInEditorFromTree(TreeViewer treeViewer, Object page)
+    {
+        IStructuredSelection selection = treeViewer.getStructuredSelection();
+        Object first = selection.getFirstElement();
+        if (first == null)
+            return;
+
+        ITreeContentProvider cp = (ITreeContentProvider) treeViewer.getContentProvider();
+
+        if (first instanceof IFile file)
+        {
+            LineElement le = findFirstLineElement(file, cp);
+            if (le != null)
+                openFileInEditorImpl(file, le, treeViewer, page, null);
+        }
+        else if (first instanceof LineElement le)
+        {
+            IFile file = findFileForLineElement(le, treeViewer);
+            if (file != null)
+                openFileInEditorImpl(file, le, treeViewer, page, null);
+        }
+    }
+
+    private static LineElement findFirstLineElement(IFile file, ITreeContentProvider cp)
+    {
+        Object[] children = cp.getChildren(file);
+        if (children == null)
+            return null;
+        for (Object child : children)
+        {
+            if (child instanceof LineElement le)
+                return le;
+        }
+        return null;
+    }
+
+    private static IFile findFileForLineElement(LineElement lineElement, TreeViewer treeViewer)
+    {
+        ITreeContentProvider cp = (ITreeContentProvider) treeViewer.getContentProvider();
+        Object input = treeViewer.getInput();
+        if (cp.hasChildren(input))
+            return findFileForLineElementRec(lineElement, cp, cp.getChildren(input));
+        return null;
+    }
+
+    private static IFile findFileForLineElementRec(LineElement lineElement,
+            ITreeContentProvider cp, Object[] nodes)
+    {
+        if (nodes == null)
+            return null;
+        for (Object node : nodes)
+        {
+            if (node instanceof IFile file)
+            {
+                Object[] fileChildren = cp.getChildren(file);
+                if (fileChildren != null)
+                {
+                    for (Object child : fileChildren)
+                    {
+                        if (lineElement.equals(child))
+                            return file;
+                    }
+                }
+            }
+            else if (cp.hasChildren(node))
+            {
+                IFile found = findFileForLineElementRec(lineElement, cp, cp.getChildren(node));
+                if (found != null)
+                    return found;
+            }
         }
         return null;
     }
@@ -860,6 +1216,14 @@ public final class FileSearchResultsHook implements IStartup
         tv.getTable().setData(COPY_HOOKED_KEY, null);
         registerCopyHandler(tv);
         registerGlobalCopyHandler(tv, page, view);
+
+        ISearchResultPage activePage = ((ISearchResultViewPart) view).getActivePage();
+        if (activePage != null && activePage.getClass().getName().contains(PAGE_CLASS_MARKER))
+        {
+            Object viewerObj = Global.getField(activePage, "fViewer");
+            if (viewerObj instanceof TreeViewer treeViewer)
+                registerTreeContextMenu(treeViewer, activePage);
+        }
     }
 
     private static void installFileTreeMatchCount(TreeViewer treeViewer)
