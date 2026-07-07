@@ -1,14 +1,17 @@
 package tormozit;
 
 import java.lang.reflect.Proxy;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
 
 import org.eclipse.core.runtime.Status;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.layout.GridData;
+import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
-import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IStartup;
@@ -144,29 +147,66 @@ public class ConfigurationSearchDialogHook implements IStartup
 
         IDialogSettings settings = getDialogSettings();
 
-        Button cbWholeWord = new Button(parent, SWT.CHECK);
-        cbWholeWord.setText("Слово целиком");
-        cbWholeWord.setToolTipText("Искать только целые слова, а не подстроки"
-            + Global.pluginSignForTooltip());
-        cbWholeWord.setSelection(settings.getBoolean(KEY_WHOLE_WORD));
-        cbWholeWord.addListener(SWT.Selection,
-            e -> settings.put(KEY_WHOLE_WORD, cbWholeWord.getSelection()));
-
         if (btnCase != null)
         {
-            GridData gd = new GridData(SWT.BEGINNING, SWT.CENTER, false, false);
-            cbWholeWord.setLayoutData(gd);
-            cbWholeWord.moveBelow(btnCase);
-            parent.layout(true, true);
-            gd.horizontalIndent = btnCase.getLocation().x;
-            parent.layout(true, true);
+            // Create vertical group to hold both checkboxes
+            Composite vGroup = new Composite(parent, SWT.NONE);
+            GridLayout vLayout = new GridLayout(1, false);
+            vLayout.marginWidth = 0;
+            vLayout.marginHeight = 0;
+            vLayout.verticalSpacing = 0;
+            vGroup.setLayout(vLayout);
+
+            // Copy case button's GridData to the vertical group
+            GridData caseGd = (GridData) btnCase.getLayoutData();
+            GridData vGd;
+            if (caseGd != null)
+            {
+                vGd = new GridData(caseGd.horizontalAlignment, caseGd.verticalAlignment,
+                    caseGd.grabExcessHorizontalSpace, caseGd.grabExcessVerticalSpace);
+                vGd.horizontalIndent = caseGd.horizontalIndent;
+                vGd.horizontalSpan = caseGd.horizontalSpan;
+                vGd.verticalSpan = caseGd.verticalSpan;
+                vGd.widthHint = caseGd.widthHint;
+                vGd.heightHint = caseGd.heightHint;
+                vGd.exclude = caseGd.exclude;
+            }
+            else
+            {
+                vGd = new GridData(SWT.BEGINNING, SWT.CENTER, false, false);
+            }
+            vGroup.setLayoutData(vGd);
+
+            // Position vGroup right after case button in the parent grid
+            vGroup.moveBelow(btnCase);
+
+            // Reparent case button into the vertical group
+            btnCase.setParent(vGroup);
+            btnCase.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
+
+            // Create whole word checkbox in the vertical group
+            Button cbWholeWord = new Button(vGroup, SWT.CHECK);
+            cbWholeWord.setText("Слово целиком");
+            cbWholeWord.setToolTipText("Искать только целые слова, а не подстроки"
+                + Global.pluginSignForTooltip());
+            cbWholeWord.setSelection(settings.getBoolean(KEY_WHOLE_WORD));
+            cbWholeWord.addListener(SWT.Selection,
+                e -> settings.put(KEY_WHOLE_WORD, cbWholeWord.getSelection()));
+            cbWholeWord.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
         }
         else
         {
+            Button cbWholeWord = new Button(parent, SWT.CHECK);
+            cbWholeWord.setText("Слово целиком");
+            cbWholeWord.setToolTipText("Искать только целые слова, а не подстроки"
+                + Global.pluginSignForTooltip());
+            cbWholeWord.setSelection(settings.getBoolean(KEY_WHOLE_WORD));
             cbWholeWord.setLayoutData(
                 new GridData(GridData.BEGINNING, GridData.CENTER, false, false));
-            parent.layout(true, true);
+            cbWholeWord.addListener(SWT.Selection,
+                e -> settings.put(KEY_WHOLE_WORD, cbWholeWord.getSelection()));
         }
+        parent.layout(true, true);
         shell.pack();
 
         patchExecutor(page);
@@ -230,181 +270,111 @@ public class ConfigurationSearchDialogHook implements IStartup
                     Object executor = method.invoke(origExecProvider, args);
                     if (executor == null)
                         return null;
-
-                    Object origTp = Global.getField(executor, "textSearchIndexProvider");
-                    if (origTp != null)
-                    {
-                        Object proxyTp = createProxyIndexProvider(origTp);
-                        Global.setFieldForce(executor, "textSearchIndexProvider", proxyTp);
-                    }
-                    return executor;
+                    return wrapExecutor(executor);
                 }
                 return method.invoke(origExecProvider, args);
             });
     }
 
-    private static Object createProxyIndexProvider(Object origTp) throws Exception
+    private static Object wrapExecutor(Object executor) throws Exception
     {
-        ClassLoader cl = ConfigurationSearchDialogHook.class.getClassLoader();
-        Class<?> provInterface = Class.forName(
-            "com._1c.g5.v8.dt.search.core.text.ITextSearchIndexProvider");
-        Class<?> idxInterface = Class.forName(
-            "com._1c.g5.v8.dt.search.core.text.ITextSearchIndex");
-
-        return Proxy.newProxyInstance(cl, new Class[] { provInterface },
+        ClassLoader cl = executor.getClass().getClassLoader();
+        final ClassLoader executorCL = cl != null ? cl
+            : ConfigurationSearchDialogHook.class.getClassLoader();
+        Class<?>[] interfaces = executor.getClass().getInterfaces();
+        if (interfaces == null || interfaces.length == 0)
+            return executor;
+        return Proxy.newProxyInstance(executorCL, interfaces,
             (proxy, method, args) ->
             {
-                if ("get".equals(method.getName()))
+                if ("run".equals(method.getName()) && args != null && args.length == 3
+                    && getDialogSettings().getBoolean(KEY_WHOLE_WORD))
                 {
-                    Object origIndex = method.invoke(origTp, args);
-                    if (origIndex == null)
-                        return null;
-
-                    return Proxy.newProxyInstance(cl, new Class[] { idxInterface },
-                        (idxProxy, idxMethod, idxArgs) ->
-                        {
-                            if ("search".equals(idxMethod.getName())
-                                && idxArgs.length == 3)
-                            {
-                                Object query = idxArgs[0];
-                                String sq = (String) Global.invoke(query, "getSearchString");
-                                if (getDialogSettings().getBoolean(KEY_WHOLE_WORD))
-                                {
-                                    Object luceneQuery = Global.invoke(query, "getQuery");
-                                    log("WW sq=" + sq + " origQuery="
-                                        + Global.invoke(luceneQuery, "toString"));
-                                    ClassLoader luceneCL = luceneQuery.getClass().getClassLoader();
-                                    Object modified = replaceWildcardWithTerm(luceneQuery, luceneCL);
-                                    if (modified != luceneQuery)
-                                    {
-                                        boolean caseSensitive =
-                                            (Boolean) Global.invoke(query, "isCaseSensitive");
-
-                                        Class<?> lqClass = luceneCL.loadClass(
-                                            "org.apache.lucene.search.Query");
-                                        Class<?> tqClass = query.getClass();
-                                        Object newQuery = tqClass
-                                            .getConstructor(String.class, boolean.class, lqClass)
-                                            .newInstance(sq, caseSensitive, modified);
-                                        log("WW modQuery="
-                                            + Global.invoke(modified, "toString"));
-                                        return idxMethod.invoke(origIndex,
-                                            new Object[] { newQuery, idxArgs[1], idxArgs[2] });
-                                    }
-                                    else
-                                    {
-                                        log("WW no WildcardQuery found, origQuery="
-                                            + Global.invoke(luceneQuery, "toString"));
-                                    }
-                                }
-                                else
-                                {
-                                    log("WW disabled, sq=" + sq);
-                                }
-                            }
-                            return idxMethod.invoke(origIndex, idxArgs);
-                        });
+                    Object input = args[0];
+                    String sq = (String) Global.invoke(input, "getSearchString");
+                    if (sq != null && !sq.contains("?") && !sq.contains("*"))
+                    {
+                        boolean caseSensitive = (Boolean) Global.invoke(input, "isCaseSensitive");
+                        Object filteredCollector = createFilteredCollector(
+                            args[1], sq, caseSensitive, executorCL);
+                        args[1] = filteredCollector;
+                    }
                 }
-                return method.invoke(origTp, args);
+                return method.invoke(executor, args);
             });
     }
 
-    private static Object replaceWildcardWithTerm(Object query, ClassLoader luceneCL) throws Exception
+    private static Object createFilteredCollector(Object origCollector, String searchString,
+        boolean caseSensitive, ClassLoader cl) throws Exception
     {
-        if (query == null)
-            return null;
-
-        Class<?> bqClass = luceneCL.loadClass("org.apache.lucene.search.BooleanQuery");
-        Class<?> bqBuilderClass = luceneCL.loadClass("org.apache.lucene.search.BooleanQuery$Builder");
-        Class<?> wqClass = luceneCL.loadClass("org.apache.lucene.search.WildcardQuery");
-        Class<?> tqClass = luceneCL.loadClass("org.apache.lucene.search.TermQuery");
-        Class<?> bcClass = luceneCL.loadClass("org.apache.lucene.search.BooleanClause");
-        Class<?> occurClass = luceneCL.loadClass("org.apache.lucene.search.BooleanClause$Occur");
-        Class<?> termClass = luceneCL.loadClass("org.apache.lucene.index.Term");
-
-        if (bqClass.isInstance(query))
-        {
-            Iterable<?> clauses = (Iterable<?>) bqClass.getMethod("clauses").invoke(query);
-
-            Object builder = bqBuilderClass.getConstructor().newInstance();
-            java.lang.reflect.Method addMethod = null;
-            java.lang.reflect.Method buildMethod = null;
-            for (java.lang.reflect.Method m : bqBuilderClass.getMethods())
+        Class<?> iface = Class.forName(
+            "com._1c.g5.v8.dt.search.core.ISearchResultCollector");
+        ClassLoader ifaceCL = iface.getClassLoader();
+        if (ifaceCL == null)
+            ifaceCL = cl;
+        return Proxy.newProxyInstance(ifaceCL, new Class[] { iface },
+            (proxy, method, args) ->
             {
-                if ("add".equals(m.getName()) && m.getParameterCount() == 1)
-                    addMethod = m;
-                if ("build".equals(m.getName()) && m.getParameterCount() == 0)
-                    buildMethod = m;
-            }
-            if (addMethod == null || buildMethod == null)
-                return query;
-
-            boolean changed = false;
-            java.lang.reflect.Method getQueryM = bcClass.getMethod("getQuery");
-            java.lang.reflect.Method getOccurM = bcClass.getMethod("getOccur");
-
-            for (Object clause : clauses)
-            {
-                Object inner = getQueryM.invoke(clause);
-                Object occur = getOccurM.invoke(clause);
-
-                if (wqClass.isInstance(inner))
+                if ("addMatch".equals(method.getName()) && args != null && args.length == 1)
                 {
-                    Object term = wqClass.getMethod("getTerm").invoke(inner);
-                    String field = (String) termClass.getMethod("field").invoke(term);
-                    String rawText = (String) termClass.getMethod("text").invoke(term);
-
-                    if ("text".equals(field) || "textLowerCase".equals(field))
-                    {
-                        log("WW replace WQ field=" + field + " rawText=" + rawText);
-                        String cleanText = rawText.replaceAll("^[*?]+", "").replaceAll("[*?]+$", "");
-                        log("WW cleanText=" + cleanText);
-                        Object cleanTerm = termClass
-                            .getConstructor(String.class, String.class)
-                            .newInstance(field, cleanText);
-                        inner = tqClass.getConstructor(termClass).newInstance(cleanTerm);
-                        changed = true;
-                    }
+                    if (isWholeWordMatch(args[0], searchString, caseSensitive))
+                        return method.invoke(origCollector, args);
+                    return null;
                 }
-                else if (bqClass.isInstance(inner))
+                if ("addMatches".equals(method.getName()) && args != null && args.length == 1)
                 {
-                    Object mod = replaceWildcardWithTerm(inner, luceneCL);
-                    if (mod != inner)
-                    {
-                        inner = mod;
-                        changed = true;
-                    }
+                    Collection<?> matches = (Collection<?>) args[0];
+                    List<Object> filtered = new ArrayList<>();
+                    for (Object m : matches)
+                        if (isWholeWordMatch(m, searchString, caseSensitive))
+                            filtered.add(m);
+                    if (filtered.size() == matches.size())
+                        return method.invoke(origCollector, args);
+                    return method.invoke(origCollector, new Object[] { filtered });
                 }
+                return method.invoke(origCollector, args);
+            });
+    }
 
-                Object newClause = bcClass
-                    .getConstructor(
-                        luceneCL.loadClass("org.apache.lucene.search.Query"), occurClass)
-                    .newInstance(inner, occur);
-                addMethod.invoke(builder, newClause);
-            }
+    private static boolean isWholeWordMatch(Object match, String searchWord,
+        boolean caseSensitive) throws Exception
+    {
+        if (match == null || searchWord == null)
+            return true;
+        String cn = match.getClass().getName();
+        if (!cn.startsWith("com._1c.g5.v8.dt.search.core.text.TextSearch"))
+            return true;
 
-            return changed ? buildMethod.invoke(builder) : query;
-        }
+        String fullText = (String) Global.invoke(match, "getText");
+        if (fullText == null)
+            return true;
 
-        if (wqClass.isInstance(query))
+        int offset = (Integer) Global.invoke(match, "getTextOffset");
+        int length = (Integer) Global.invoke(match, "getTextLength");
+
+        if (offset < 0 || length <= 0 || offset + length > fullText.length())
+            return true;
+
+        String matched = fullText.substring(offset, offset + length);
+        if (!caseSensitive)
         {
-            Object term = wqClass.getMethod("getTerm").invoke(query);
-            String field = (String) termClass.getMethod("field").invoke(term);
-            String rawText = (String) termClass.getMethod("text").invoke(term);
-
-            log("WW top-level WQ field=" + field + " rawText=" + rawText);
-            if ("text".equals(field) || "textLowerCase".equals(field))
-            {
-                String cleanText = rawText.replaceAll("^[*?]+", "").replaceAll("[*?]+$", "");
-                log("WW cleanText=" + cleanText);
-                Object cleanTerm = termClass
-                    .getConstructor(String.class, String.class)
-                    .newInstance(field, cleanText);
-                return tqClass.getConstructor(termClass).newInstance(cleanTerm);
-            }
+            matched = matched.toLowerCase(java.util.Locale.ROOT);
+            searchWord = searchWord.toLowerCase(java.util.Locale.ROOT);
         }
+        if (!matched.equals(searchWord))
+            return false;
 
-        return query;
+        if (offset > 0 && isWordChar(fullText.charAt(offset - 1)))
+            return false;
+        int end = offset + length;
+        if (end < fullText.length() && isWordChar(fullText.charAt(end)))
+            return false;
+        return true;
+    }
+
+    private static boolean isWordChar(char c)
+    {
+        return Character.isLetterOrDigit(c) || c == '_';
     }
 
     private static IDialogSettings getDialogSettings()
