@@ -102,17 +102,26 @@ jobs:
           VER="${{ steps.ver.outputs.version }}"
           test -d "deploy/$VER/features" || (echo "ERROR: deploy/$VER/features missing" && exit 1)
           test -d "deploy/$VER/plugins" || (echo "ERROR: deploy/$VER/plugins missing" && exit 1)
-          test -f deploy/compositeContent.jar || (echo "ERROR: deploy/compositeContent.jar missing at root" && exit 1)
-          test -f deploy/compositeContent.xml || (echo "ERROR: deploy/compositeContent.xml missing at root" && exit 1)
-          test -f deploy/compositeArtifacts.jar || (echo "ERROR: deploy/compositeArtifacts.jar missing at root" && exit 1)
-          test -f deploy/compositeArtifacts.xml || (echo "ERROR: deploy/compositeArtifacts.xml missing at root" && exit 1)
+          test -f deploy/content.jar || (echo "ERROR: deploy/content.jar missing at root" && exit 1)
+          test -f deploy/content.xml || (echo "ERROR: deploy/content.xml missing at root" && exit 1)
+          test -f deploy/artifacts.jar || (echo "ERROR: deploy/artifacts.jar missing at root" && exit 1)
+          test -f deploy/artifacts.xml || (echo "ERROR: deploy/artifacts.xml missing at root" && exit 1)
+          test -d deploy/features || (echo "ERROR: deploy/features missing at root" && exit 1)
+          test -d deploy/plugins || (echo "ERROR: deploy/plugins missing at root" && exit 1)
           test -f deploy/p2.index || (echo "ERROR: deploy/p2.index missing" && exit 1)
           test -f "deploy/$VER/p2.index" || (echo "ERROR: deploy/$VER/p2.index missing" && exit 1)
           test -f deploy/.nojekyll || (echo "ERROR: deploy/.nojekyll missing" && exit 1)
-          grep -q compositeContent deploy/p2.index || (echo "ERROR: root p2.index must reference compositeContent" && exit 1)
-          grep -q "<child location='$VER/'/>" deploy/compositeContent.xml || (echo "ERROR: $VER missing from compositeContent.xml" && exit 1)
-          test ! -f deploy/content.jar || (echo "ERROR: root content.jar must not exist (use composite repo)" && exit 1)
+          grep -q content.xml deploy/p2.index || (echo "ERROR: root p2.index must reference content.xml (simple repo)" && exit 1)
+          grep -q "tormozit.comfort.feature.feature.group" deploy/content.xml || (echo "ERROR: root content.xml missing feature.group IU" && exit 1)
+          test ! -f deploy/compositeContent.jar || (echo "ERROR: root compositeContent.jar must not exist" && exit 1)
+          test ! -f deploy/compositeContent.xml || (echo "ERROR: root compositeContent.xml must not exist" && exit 1)
           grep -q "unit id='tormozit.comfort'" "deploy/$VER/content.xml" || (echo "ERROR: bundle IU missing from deploy/$VER/content.xml" && exit 1)
+
+          ROOT_GROUP_COUNT=$(grep -o "id='tormozit.comfort.feature.feature.group'" deploy/content.xml | wc -l | tr -d ' ')
+          if [[ "$ROOT_GROUP_COUNT" -lt 1 ]]; then
+            echo "ERROR: root content.xml has no feature.group IU"
+            exit 1
+          fi
 
           shopt -s nullglob
           version_dirs=()
@@ -120,8 +129,15 @@ jobs:
             name=$(basename "$dir")
             [[ "$name" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
             version_dirs+=("$name")
-            grep -q "<child location='$name/'/>" deploy/compositeContent.xml || (echo "ERROR: $name missing from compositeContent.xml" && exit 1)
-            grep -q "<child location='$name/'/>" deploy/compositeArtifacts.xml || (echo "ERROR: $name missing from compositeArtifacts.xml" && exit 1)
+            VER_QUAL=$(grep -o "id='tormozit.comfort.feature.feature.group' version='[^']*'" "deploy/$name/content.xml" | head -1 | sed "s/.*version='//;s/'$//")
+            if [[ -z "$VER_QUAL" ]]; then
+              echo "ERROR: deploy/$name/content.xml missing feature.group"
+              exit 1
+            fi
+            grep -q "id='tormozit.comfort.feature.feature.group' version='$VER_QUAL'" deploy/content.xml || (
+              echo "ERROR: root content.xml missing feature.group $VER_QUAL from $name"
+              exit 1
+            )
             test -d "deploy/$name/features" || (echo "ERROR: deploy/$name/features missing" && exit 1)
             test -d "deploy/$name/plugins" || (echo "ERROR: deploy/$name/plugins missing" && exit 1)
             test -f "deploy/$name/content.xml" || (echo "ERROR: deploy/$name/content.xml missing (sanitize failed?)" && exit 1)
@@ -135,10 +151,8 @@ jobs:
             fi
           done
 
-          child_count=$(grep -o "<child location='" deploy/compositeContent.xml | wc -l | tr -d ' ')
-          dir_count=${#version_dirs[@]}
-          if [[ "$child_count" -ne "$dir_count" ]]; then
-            echo "ERROR: composite children ($child_count) != version folders ($dir_count)"
+          if [[ ! " ${version_dirs[*]} " =~ " ${VER} " ]]; then
+            echo "ERROR: latest version folder $VER missing from deploy/"
             exit 1
           fi
 
@@ -152,15 +166,12 @@ jobs:
             done < /tmp/old-pages-versions.txt
           fi
 
-          while IFS= read -r child_loc; do
-            [[ -z "$child_loc" ]] && continue
-            child_name="${child_loc%/}"
-            if [[ ! -d "deploy/$child_name" ]]; then
-              echo "ERROR: composite child $child_name has no folder deploy/$child_name/"
-              exit 1
-            fi
-          done < <(grep -o "location='[^']*'" deploy/compositeContent.xml | sed "s/location='//;s/'$//")
-
+          dir_count=${#version_dirs[@]}
+          if [[ "$ROOT_GROUP_COUNT" -ne "$dir_count" ]]; then
+            echo "ERROR: root feature.group count $ROOT_GROUP_COUNT != version folders $dir_count"
+            exit 1
+          fi
+          echo "Root feature.group count: $ROOT_GROUP_COUNT"
           echo "Version folders (${dir_count}): ${version_dirs[*]}"
           echo "deploy tree:"
           find deploy -maxdepth 3 -type f | head -30 || true

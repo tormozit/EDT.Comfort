@@ -10,16 +10,29 @@ deploy_dir = os.environ.get("DEPLOY_DIR", "deploy")
 latest = os.environ.get("LATEST_VERSION", "")
 CATEGORY_ID = "comfort"
 BUNDLE_ID = "tormozit.comfort"
+FEATURE_GROUP_IU = "tormozit.comfort.feature.feature.group"
 SITE_BASE_URL = "https://tormozit.github.io/EDT.Comfort/"
+
+ROOT_P2_ITEMS = (
+    "features",
+    "plugins",
+    "content.jar",
+    "content.xml",
+    "artifacts.jar",
+    "artifacts.xml",
+    "p2.index",
+)
+
+COMPOSITE_ITEMS = (
+    "compositeContent.jar",
+    "compositeContent.xml",
+    "compositeArtifacts.jar",
+    "compositeArtifacts.xml",
+)
 
 simple_p2_index = """version=1
 metadata.repository.factory.order=content.xml,content.jar,!
 artifact.repository.factory.order=artifacts.xml,artifacts.jar,!
-"""
-
-composite_p2_index = """version=1
-metadata.repository.factory.order=compositeContent.xml,compositeContent.jar,!
-artifact.repository.factory.order=compositeArtifacts.xml,compositeArtifacts.jar,!
 """
 
 
@@ -107,16 +120,17 @@ def publish_p2_files(target_dir: str) -> None:
         f.write(simple_p2_index)
 
 
+def remove_composite_repository() -> None:
+    """Удалить composite p2 из корня (ломает регистрацию feature.group в EDT)."""
+    for item in COMPOSITE_ITEMS:
+        path = os.path.join(deploy_dir, item)
+        if os.path.isfile(path):
+            os.remove(path)
+
+
 def remove_root_simple_repository() -> None:
-    """Удалить простой p2-репозиторий из корня (устаревший вариант деплоя)."""
-    for item in (
-        "features",
-        "plugins",
-        "content.jar",
-        "content.xml",
-        "artifacts.jar",
-        "artifacts.xml",
-    ):
+    """Очистить простой p2-репозиторий в корне перед повторной публикацией."""
+    for item in ROOT_P2_ITEMS:
         path = os.path.join(deploy_dir, item)
         if os.path.isdir(path):
             shutil.rmtree(path)
@@ -124,50 +138,181 @@ def remove_root_simple_repository() -> None:
             os.remove(path)
 
 
-def write_composite_repository(children: list[str]) -> None:
+def read_content_xml(path: str) -> str:
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            return f.read()
+    jar_path = path.replace(".xml", ".jar")
+    if os.path.isfile(jar_path):
+        with zipfile.ZipFile(jar_path, "r") as zin:
+            return zin.read("content.xml").decode("utf-8")
+    return ""
+
+
+def read_artifacts_xml(dir_path: str) -> str:
+    xml_path = os.path.join(dir_path, "artifacts.xml")
+    if os.path.isfile(xml_path):
+        with open(xml_path, encoding="utf-8") as f:
+            return f.read()
+    jar_path = os.path.join(dir_path, "artifacts.jar")
+    if os.path.isfile(jar_path):
+        with zipfile.ZipFile(jar_path, "r") as zin:
+            return zin.read("artifacts.xml").decode("utf-8")
+    raise SystemExit(f"ERROR: artifacts metadata missing in {dir_path}")
+
+
+UNIT_BLOCK_RE = re.compile(r"<unit\b[^>]*>.*?</unit>", re.DOTALL)
+ARTIFACT_BLOCK_RE = re.compile(r"<artifact\b[^>]*>.*?</artifact>", re.DOTALL)
+UNIT_KEY_RE = re.compile(r"<unit id='([^']+)'\s+version='([^']+)'")
+ARTIFACT_KEY_RE = re.compile(
+    r"<artifact classifier='([^']+)'\s+id='([^']+)'\s+version='([^']+)'"
+)
+
+
+def _block_key(block: str, key_re: re.Pattern[str]) -> tuple[str, ...]:
+    match = key_re.search(block)
+    if not match:
+        raise SystemExit(f"ERROR: cannot parse p2 metadata block: {block[:120]!r}")
+    return match.groups()
+
+
+def _merge_repository_xml(
+    xml_texts: list[str],
+    block_re: re.Pattern[str],
+    key_re: re.Pattern[str],
+    container_tag: str,
+) -> str:
+    if not xml_texts:
+        raise SystemExit("ERROR: no p2 metadata to merge for root repository")
+
+    blocks: dict[tuple[str, ...], str] = {}
+    for xml_text in xml_texts:
+        for block in block_re.findall(xml_text):
+            blocks[_block_key(block, key_re)] = block
+
+    template = xml_texts[0]
+    merged_inner = "\n    ".join(blocks.values())
+    merged = re.sub(
+        rf"<{container_tag} size='\d+'>.*?</{container_tag}>",
+        f"<{container_tag} size='{len(blocks)}'>\n    {merged_inner}\n  </{container_tag}>",
+        template,
+        count=1,
+        flags=re.DOTALL,
+    )
     timestamp = str(int(time.time() * 1000))
-    children_xml = "\n".join(f"    <child location='{child}/'/>" for child in children)
+    merged = re.sub(
+        r"<property name='p2.timestamp' value='[^']*'/>",
+        f"<property name='p2.timestamp' value='{timestamp}'/>",
+        merged,
+        count=1,
+    )
+    return merged
 
-    def composite_xml(repo_kind: str, repo_type: str) -> str:
-        return f"""<?xml version='1.0' encoding='UTF-8'?>
-<?composite{repo_kind}Repository version='1.0.0'?>
-<repository name='EDT Comfort' type='{repo_type}' version='1.0.0'>
-  <properties size='1'>
-    <property name='p2.timestamp' value='{timestamp}'/>
-  </properties>
-  <children size='{len(children)}'>
-{children_xml}
-  </children>
-</repository>
-"""
 
-    composites = (
-        (
-            "compositeContent",
-            "Metadata",
-            "org.eclipse.equinox.internal.p2.metadata.repository.CompositeMetadataRepository",
-        ),
-        (
-            "compositeArtifacts",
-            "Artifact",
-            "org.eclipse.equinox.internal.p2.artifact.repository.CompositeArtifactRepository",
-        ),
+def write_p2_xml_jar(xml_path: str, jar_path: str, inner_name: str) -> None:
+    with open(xml_path, encoding="utf-8") as f:
+        xml_text = f.read()
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zout:
+        zout.writestr(inner_name, xml_text.encode("utf-8"))
+    with open(jar_path, "wb") as f:
+        f.write(buf.getvalue())
+
+
+def copy_artifact_dirs(children: list[str]) -> None:
+    for subdir in ("plugins", "features"):
+        dst = os.path.join(deploy_dir, subdir)
+        os.makedirs(dst, exist_ok=True)
+        for child in children:
+            src_dir = os.path.join(deploy_dir, child, subdir)
+            if not os.path.isdir(src_dir):
+                raise SystemExit(f"ERROR: {child}/{subdir} missing")
+            for name in os.listdir(src_dir):
+                shutil.copy2(
+                    os.path.join(src_dir, name),
+                    os.path.join(dst, name),
+                )
+
+
+def publish_root_aggregated_repository(children: list[str]) -> None:
+    """Корень — простой p2-репозиторий со всеми версиями (видны в установщике EDT)."""
+    if not children:
+        raise SystemExit("ERROR: no version folders to aggregate at site root")
+
+    remove_composite_repository()
+    remove_root_simple_repository()
+
+    content_xmls: list[str] = []
+    artifacts_xmls: list[str] = []
+    for child in children:
+        child_dir = os.path.join(deploy_dir, child)
+        content_xmls.append(read_content_xml(os.path.join(child_dir, "content.xml")))
+        artifacts_xmls.append(read_artifacts_xml(child_dir))
+
+    merged_content = _merge_repository_xml(
+        content_xmls, UNIT_BLOCK_RE, UNIT_KEY_RE, "units"
+    )
+    merged_artifacts = _merge_repository_xml(
+        artifacts_xmls, ARTIFACT_BLOCK_RE, ARTIFACT_KEY_RE, "artifacts"
     )
 
-    for base_name, repo_kind, repo_type in composites:
-        xml = composite_xml(repo_kind, repo_type)
-        xml_path = os.path.join(deploy_dir, f"{base_name}.xml")
-        jar_path = os.path.join(deploy_dir, f"{base_name}.jar")
-        with open(xml_path, "w", encoding="utf-8", newline="\n") as f:
-            f.write(xml)
-        buf = io.BytesIO()
-        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zout:
-            zout.writestr(f"{base_name}.xml", xml.encode("utf-8"))
-        with open(jar_path, "wb") as f:
-            f.write(buf.getvalue())
+    copy_artifact_dirs(children)
 
+    root_content = os.path.join(deploy_dir, "content.xml")
+    root_artifacts = os.path.join(deploy_dir, "artifacts.xml")
+    with open(root_content, "w", encoding="utf-8", newline="\n") as f:
+        f.write(merged_content)
+    with open(root_artifacts, "w", encoding="utf-8", newline="\n") as f:
+        f.write(merged_artifacts)
+
+    write_p2_xml_jar(root_content, os.path.join(deploy_dir, "content.jar"), "content.xml")
+    write_p2_xml_jar(
+        root_artifacts, os.path.join(deploy_dir, "artifacts.jar"), "artifacts.xml"
+    )
     with open(os.path.join(deploy_dir, "p2.index"), "w", encoding="utf-8") as f:
-        f.write(composite_p2_index)
+        f.write(simple_p2_index)
+
+
+def feature_group_versions(xml_text: str) -> list[str]:
+    pattern = rf"id='{re.escape(FEATURE_GROUP_IU)}'\s+version='([^']+)'"
+    return re.findall(pattern, xml_text)
+
+
+def verify_root_aggregated_repository(children: list[str]) -> None:
+    root_content = read_content_xml(os.path.join(deploy_dir, "content.xml"))
+    if FEATURE_GROUP_IU not in root_content:
+        raise SystemExit(f"ERROR: root content.xml missing {FEATURE_GROUP_IU}")
+
+    root_groups = set(feature_group_versions(root_content))
+    expected_groups: set[str] = set()
+    for child in children:
+        child_content = read_content_xml(
+            os.path.join(deploy_dir, child, "content.xml")
+        )
+        child_groups = feature_group_versions(child_content)
+        if len(child_groups) != 1:
+            raise SystemExit(
+                f"ERROR: {child}/content.xml must contain exactly one feature.group, "
+                f"found {len(child_groups)}"
+            )
+        expected_groups.add(child_groups[0])
+
+    missing = expected_groups - root_groups
+    if missing:
+        raise SystemExit(
+            "ERROR: root repository missing feature.group versions: "
+            + ", ".join(sorted(missing))
+        )
+
+    p2_index_path = os.path.join(deploy_dir, "p2.index")
+    with open(p2_index_path, encoding="utf-8") as f:
+        p2_index = f.read()
+    if "compositeContent" in p2_index:
+        raise SystemExit("ERROR: root p2.index still references compositeContent")
+
+    for item in COMPOSITE_ITEMS:
+        if os.path.isfile(os.path.join(deploy_dir, item)):
+            raise SystemExit(f"ERROR: composite file still present at root: {item}")
 
 
 def list_version_children() -> list[str]:
@@ -296,9 +441,8 @@ def publish_p2_site(children: list[str]) -> None:
     for child in children:
         publish_p2_files(os.path.join(deploy_dir, child))
     write_version_index_pages(children)
-    remove_root_simple_repository()
-    if children:
-        write_composite_repository(children)
+    publish_root_aggregated_repository(children)
+    verify_root_aggregated_repository(children)
 
 
 def main() -> None:
@@ -317,7 +461,8 @@ def main() -> None:
     open(os.path.join(deploy_dir, ".nojekyll"), "w").close()
 
     print("Latest version:", latest)
-    print("Composite children:", children)
+    print("Version folders:", children)
+    print("Root p2: aggregated simple repository (all versions)")
     print("Docs only:", docs_only)
 
 

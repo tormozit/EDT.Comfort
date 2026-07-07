@@ -46,6 +46,8 @@
     <startup class="tormozit.GitChangedFileMenuHook"/>
     <startup class="tormozit.TextEditorFastSearchKeyBindingHook"/> 
     <startup class="tormozit.SearchViewAggregationHook"/>
+    <startup class="tormozit.FileSearchResultsHook"/>
+    <startup class="tormozit.ConfigurationSearchDialogHook"/>
   </extension>
 
   <extension point="org.eclipse.ui.contexts">

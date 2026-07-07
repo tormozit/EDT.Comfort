@@ -38,15 +38,16 @@ function Show-DeploySummary {
             Write-Host "  $v"
         }
     }
-    $composite = Join-Path $Dir 'compositeContent.xml'
-    if (Test-Path -LiteralPath $composite) {
-        $content = Get-Content -LiteralPath $composite -Raw -Encoding UTF8
-        $matches = [regex]::Matches($content, "location='([^']+)'")
-        Write-Host 'compositeContent.xml children:'
-        foreach ($m in $matches) {
-            $child = $m.Groups[1].Value.TrimEnd('/')
-            Write-Host "  $child"
+    $rootContent = Join-Path $Dir 'content.xml'
+    if (Test-Path -LiteralPath $rootContent) {
+        $content = Get-Content -LiteralPath $rootContent -Raw -Encoding UTF8
+        $m = [regex]::Match($content, "id='tormozit\.comfort' version='([^']+)'")
+        if ($m.Success) {
+            Write-Host "Root p2 (latest): $($m.Groups[1].Value)"
         }
+    }
+    elseif (Test-Path -LiteralPath (Join-Path $Dir 'compositeContent.xml')) {
+        Write-Host 'WARN: gh-pages still uses composite root (republish with resanitize)'
     }
 }
 

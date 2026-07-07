@@ -12,7 +12,8 @@ public final class ComfortSettings
     /**
      * Ключ булевой настройки «Улучшать списки» (имя ключа исторически осталось прежним).
      * Управляет заменой фильтров по подстроке в списках (навигатор, список баз и т.д.),
-     * а также доработками панели глобального поиска ({@link SearchViewAggregationHook}, issue #79).
+     * а также доработками панели глобального поиска ({@link SearchViewAggregationHook}, issue #79)
+     * и поиска по файлам ({@link FileSearchResultsHook}).
      */
     public static final String PREF_REPLACE_LIST_FILTERS = "comfort.replaceListFilters"; //$NON-NLS-1$
 
@@ -69,6 +70,12 @@ public final class ComfortSettings
 
     /** Автодоработки отладчика включены по умолчанию. */
     public static final boolean DEFAULT_IMPROVE_DEBUGGER_WINDOWS = true;
+
+    /** Prefix for file search table column widths. */
+    private static final String PREF_FILE_SEARCH_COLUMN_PREFIX = "comfort.fileSearch.columnWidth."; //$NON-NLS-1$
+
+    /** Prefix for file search sash weights. */
+    private static final String PREF_FILE_SEARCH_SASH_PREFIX = "comfort.fileSearch.sash."; //$NON-NLS-1$
 
     private static ComfortSettings instance;
 
@@ -206,6 +213,65 @@ public final class ComfortSettings
     public static void setDebugInspectorAutoClose(boolean enabled)
     {
         saveInspectorBoolean(PREF_DEBUG_INSPECTOR_AUTO_CLOSE, enabled, "inspectorAutoClose"); //$NON-NLS-1$
+    }
+
+    // ---- FileSearch column widths ----
+
+    public static int getFileSearchColumnWidth(String columnId, int defaultWidth)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return defaultWidth;
+        String key = PREF_FILE_SEARCH_COLUMN_PREFIX + columnId;
+        if (!settings.preferenceStore.contains(key))
+            return defaultWidth;
+        return settings.preferenceStore.getInt(key);
+    }
+
+    public static void setFileSearchColumnWidth(String columnId, int width)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        settings.preferenceStore.setValue(PREF_FILE_SEARCH_COLUMN_PREFIX + columnId, width);
+        try
+        {
+            settings.preferenceStore.save();
+        }
+        catch (Exception ex)
+        {
+            Global.log("ComfortSettings save error (columnWidth): " + ex); //$NON-NLS-1$
+        }
+    }
+
+    // ---- FileSearch sash weights ----
+
+    public static int getFileSearchSashWeight(String side, int defaultWeight)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return defaultWeight;
+        String key = PREF_FILE_SEARCH_SASH_PREFIX + side;
+        if (!settings.preferenceStore.contains(key))
+            return defaultWeight;
+        return settings.preferenceStore.getInt(key);
+    }
+
+    public static void setFileSearchSashWeights(int left, int right)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        settings.preferenceStore.setValue(PREF_FILE_SEARCH_SASH_PREFIX + "left", left);
+        settings.preferenceStore.setValue(PREF_FILE_SEARCH_SASH_PREFIX + "right", right);
+        try
+        {
+            settings.preferenceStore.save();
+        }
+        catch (Exception ex)
+        {
+            Global.log("ComfortSettings save error (sashWeights): " + ex); //$NON-NLS-1$
+        }
     }
 
     private static boolean getInspectorBoolean(String key, boolean defaultValue)

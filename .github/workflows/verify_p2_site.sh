@@ -94,7 +94,10 @@ fi
 
 if git fetch origin gh-pages 2>/dev/null && git rev-parse --verify origin/gh-pages >/dev/null 2>&1; then
   LATEST_ON_SITE=""
-  if git cat-file -e "origin/gh-pages:compositeContent.xml" 2>/dev/null; then
+  if git cat-file -e "origin/gh-pages:content.xml" 2>/dev/null; then
+    LATEST_BUNDLE="$(git show origin/gh-pages:content.xml | grep -o "id='tormozit.comfort' version='[^']*'" | head -1 | sed "s/.*version='//;s/'$//")"
+    LATEST_ON_SITE="$(base_version "${LATEST_BUNDLE:-}")"
+  elif git cat-file -e "origin/gh-pages:compositeContent.xml" 2>/dev/null; then
     LATEST_ON_SITE="$(git show origin/gh-pages:compositeContent.xml | grep -o "location='[^']*'" | head -1 | sed "s/location='//;s/\/'//")"
   fi
   echo "Latest on gh-pages: ${LATEST_ON_SITE:-unknown}"

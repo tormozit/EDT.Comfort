@@ -49,7 +49,9 @@ import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 
 /**
- * Issue #79 (п.4): при выборе в панели глобального поиска ({@code org.eclipse.search.ui.views.SearchView},
+ * Доработка панели глобального поиска по метаданным (см. также {@link FileSearchResultsHook} для поиска по файлам).
+ *
+ * <p>Issue #79 (п.4): при выборе в панели глобального поиска ({@code org.eclipse.search.ui.views.SearchView},
  * страница {@code com._1c.g5.v8.dt.internal.search.ui.page.ConfigurationSearchViewPage}) узла-группы
  * (объект с несколькими дочерними модулями/подобъектами) в правой таблице должны отображаться
  * вхождения ВСЕХ потомков, а не только собственные вхождения выбранного узла.

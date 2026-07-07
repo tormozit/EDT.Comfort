@@ -82,7 +82,9 @@ Require-Bundle: org.eclipse.ui;bundle-version="[3.201.0,4.0.0)",
  com.sun.jna.platform;bundle-version="[5.13.0,6.0.0)",
  org.eclipse.core.expressions,
  org.eclipse.search;bundle-version="[3.10.0,4.0.0)"
-Import-Package: org.osgi.framework;version="[1.8.0,2.0.0)"
+Import-Package: org.osgi.framework;version="[1.8.0,2.0.0)",
+ com.google.inject;resolution:=optional,
+ javax.inject;resolution:=optional
 Bundle-NativeCode: lib/jacob-1.21-x64.dll; osname=Win32; processor=x86-64
 Bundle-ClassPath: ., lib/jacob.jar
 
