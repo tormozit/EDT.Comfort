@@ -7,6 +7,7 @@ import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -102,6 +103,26 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     private int delegateSyncProbedContextKey = Integer.MIN_VALUE;
     /** Слова ИР для текущего контекста assist (после {@link #applyIrCompletion}). */
     private ICompletionProposal[] irProposals = EMPTY;
+    /**
+     * Тип ИР для overlap EDT+ИР по dedup-ключу — переживает пересборку popup
+     * (подпись каждой перегрузки собирается из сигнатуры EDT + тип из кэша).
+     */
+    private final java.util.Map<String, IrOverlapTypeMetadata> irOverlapTypeByKey =
+        new java.util.HashMap<>();
+
+    /** Метаданные типа ИР для overlap-строки EDT (общие для всех перегрузок имени). */
+    private static final class IrOverlapTypeMetadata
+    {
+        final String listTypeLabel;
+        final String parentContextType;
+        String calculatedType;
+
+        IrOverlapTypeMetadata(String listTypeLabel, String parentContextType)
+        {
+            this.listTypeLabel = listTypeLabel;
+            this.parentContextType = parentContextType;
+        }
+    }
     private int irSnapshotContextKey = Integer.MIN_VALUE;
     /** Штатный список delegate без слов ИР. */
     private ICompletionProposal[] delegateListCache = EMPTY;
@@ -236,6 +257,261 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         return name.isEmpty() ? "" : name; //$NON-NLS-1$
     }
 
+    /** Сигнатура {@code Имя(Параметры)} из display assist (без типа и {@code ~}). */
+    static String parseProposalSignature(String display)
+    {
+        if (display == null || display.isEmpty())
+            return ""; //$NON-NLS-1$
+        String head = display;
+        int ownerSep = head.indexOf(" ~ "); //$NON-NLS-1$
+        if (ownerSep >= 0)
+            head = head.substring(0, ownerSep).trim();
+        int closeParen = head.lastIndexOf(')');
+        int searchFrom = closeParen >= 0 ? closeParen + 1 : 0;
+        int colonIdx = head.indexOf(':', searchFrom);
+        String signature = colonIdx >= 0 ? head.substring(0, colonIdx).trim() : head.trim();
+        return signature.isEmpty() ? "" : signature; //$NON-NLS-1$
+    }
+
+    /** Имена параметров из сигнатуры EDT (только имена, без типов). */
+    static List<String> parseProposalParamNames(String display)
+    {
+        String signature = parseProposalSignature(display);
+        if (signature.isEmpty())
+            return java.util.Collections.emptyList();
+        int open = signature.indexOf('(');
+        if (open < 0)
+            return java.util.Collections.emptyList();
+        int close = signature.lastIndexOf(')');
+        if (close <= open)
+            return java.util.Collections.emptyList();
+        String inside = signature.substring(open + 1, close).trim();
+        if (inside.isEmpty())
+            return java.util.Collections.emptyList();
+        String[] parts = inside.split(","); //$NON-NLS-1$
+        List<String> names = new ArrayList<>(parts.length);
+        for (String part : parts)
+        {
+            String token = part.trim();
+            int colon = token.indexOf(':');
+            if (colon >= 0)
+                token = token.substring(0, colon).trim();
+            int eq = token.indexOf('=');
+            if (eq >= 0)
+                token = token.substring(0, eq).trim();
+            if (!token.isEmpty())
+                names.add(token);
+        }
+        return names;
+    }
+
+    /**
+     * Длинная перегрузка — расширение короткой необязательными параметрами
+     * ({@code Метод(A)} + {@code Метод(A, B)}). Пустая сигнатура {@code ()} не схлопывается.
+     */
+    static boolean isOptionalParamExtension(List<String> shorter, List<String> longer)
+    {
+        if (shorter == null || longer == null || shorter.isEmpty()
+            || shorter.size() >= longer.size())
+            return false;
+        for (int i = 0; i < shorter.size(); i++)
+        {
+            if (!shorter.get(i).equals(longer.get(i)))
+                return false;
+        }
+        return true;
+    }
+
+    /**
+     * Схлопывает min/max перегрузки с необязательными параметрами; разные сигнатуры
+     * (другие имена/типы параметров) остаются.
+     */
+    static List<ICompletionProposal> collapseOptionalParamOverlaps(
+        List<ICompletionProposal> batch)
+    {
+        if (batch == null || batch.size() <= 1)
+            return batch;
+        List<ICompletionProposal> emptyPair = tryCollapseEmptyParamPair(batch);
+        if (emptyPair != null)
+            return emptyPair;
+        List<ICompletionProposal> sorted = new ArrayList<>(batch);
+        sorted.sort((a, b) -> {
+            int ca = parseProposalParamNames(displayString(unwrapProposal(a))).size();
+            int cb = parseProposalParamNames(displayString(unwrapProposal(b))).size();
+            if (ca != cb)
+                return Integer.compare(ca, cb);
+            return Integer.compare(batch.indexOf(a), batch.indexOf(b));
+        });
+        List<ICompletionProposal> kept = new ArrayList<>(sorted.size());
+        List<List<String>> keptParams = new ArrayList<>(sorted.size());
+        for (ICompletionProposal proposal : sorted)
+        {
+            List<String> params = parseProposalParamNames(
+                displayString(unwrapProposal(proposal)));
+            boolean extension = false;
+            for (List<String> existing : keptParams)
+            {
+                if (isOptionalParamExtension(existing, params))
+                {
+                    extension = true;
+                    break;
+                }
+            }
+            if (!extension)
+            {
+                kept.add(proposal);
+                keptParams.add(params);
+            }
+        }
+        if (kept.size() == batch.size())
+            return batch;
+        Set<ICompletionProposal> keptSet =
+            java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+        keptSet.addAll(kept);
+        List<ICompletionProposal> ordered = new ArrayList<>(kept.size());
+        for (ICompletionProposal original : batch)
+        {
+            if (keptSet.contains(original))
+                ordered.add(original);
+        }
+        return ordered;
+    }
+
+    /**
+     * Ровно две перегрузки: {@code Метод()} и {@code Метод(…)} — оставить пустую.
+     */
+    private static List<ICompletionProposal> tryCollapseEmptyParamPair(
+        List<ICompletionProposal> batch)
+    {
+        if (batch == null || batch.size() != 2)
+            return null;
+        ICompletionProposal emptyForm = null;
+        ICompletionProposal paramForm = null;
+        for (ICompletionProposal p : batch)
+        {
+            int n = parseProposalParamNames(displayString(unwrapProposal(p))).size();
+            if (n == 0)
+            {
+                if (emptyForm != null)
+                    return null;
+                emptyForm = p;
+            }
+            else
+            {
+                if (paramForm != null)
+                    return null;
+                paramForm = p;
+            }
+        }
+        if (emptyForm == null || paramForm == null)
+            return null;
+        return java.util.Collections.singletonList(emptyForm);
+    }
+
+    /**
+     * Схлопывает optional-перегрузки EDT по dedup-ключу во всём merged-списке
+     * (не только в очереди overlap ИР).
+     */
+    static List<ICompletionProposal> collapseOptionalEdtOverlapsInMergedList(
+        List<ICompletionProposal> merged)
+    {
+        if (merged == null || merged.size() <= 1)
+            return merged;
+        Map<String, List<ICompletionProposal>> byKey = new LinkedHashMap<>();
+        for (ICompletionProposal p : merged)
+        {
+            if (unwrapProposal(p) instanceof IrCompletionProposal)
+                continue;
+            String key = dedupKey(p);
+            if (key.isEmpty())
+                continue;
+            byKey.computeIfAbsent(key.toLowerCase(java.util.Locale.ROOT), k -> new ArrayList<>())
+                .add(p);
+        }
+        Map<String, Set<ICompletionProposal>> keptByKey = new HashMap<>();
+        boolean anyCollapsed = false;
+        for (Map.Entry<String, List<ICompletionProposal>> entry : byKey.entrySet())
+        {
+            List<ICompletionProposal> kept = collapseOptionalParamOverlaps(entry.getValue());
+            Set<ICompletionProposal> keptSet =
+                java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+            keptSet.addAll(kept);
+            keptByKey.put(entry.getKey(), keptSet);
+            if (kept.size() < entry.getValue().size())
+                anyCollapsed = true;
+        }
+        if (!anyCollapsed)
+            return merged;
+        List<ICompletionProposal> result = new ArrayList<>(merged.size());
+        for (ICompletionProposal p : merged)
+        {
+            ICompletionProposal raw = unwrapProposal(p);
+            if (raw instanceof IrCompletionProposal)
+            {
+                result.add(p);
+                continue;
+            }
+            String key = dedupKey(p);
+            if (key.isEmpty())
+            {
+                result.add(p);
+                continue;
+            }
+            Set<ICompletionProposal> kept = keptByKey.get(key.toLowerCase(java.util.Locale.ROOT));
+            if (kept == null || kept.contains(p))
+                result.add(p);
+        }
+        return result;
+    }
+
+    static ICompletionProposal[] collapseOptionalEdtOverlapsArray(ICompletionProposal[] merged)
+    {
+        if (merged == null || merged.length <= 1)
+            return merged != null ? merged : EMPTY;
+        List<ICompletionProposal> collapsed =
+            collapseOptionalEdtOverlapsInMergedList(java.util.Arrays.asList(merged));
+        if (collapsed.size() == merged.length)
+            return merged;
+        return collapsed.toArray(new ICompletionProposal[collapsed.size()]);
+    }
+
+    private static void mergeDelegateOverlapQueue(Deque<ICompletionProposal> queue,
+        List<ICompletionProposal> merged, Set<ICompletionProposal> placedDelegates)
+    {
+        if (queue == null || queue.isEmpty())
+            return;
+        List<ICompletionProposal> batch = new ArrayList<>(queue.size());
+        while (!queue.isEmpty())
+            batch.add(queue.removeFirst());
+        for (ICompletionProposal d : collapseOptionalParamOverlaps(batch))
+        {
+            merged.add(d);
+            placedDelegates.add(unwrapProposal(d));
+        }
+    }
+
+    /**
+     * Подпись overlap: сигнатура EDT (имя и параметры), тип и родитель — из ИР.
+     */
+    static String injectIrTypeIntoEdtDisplay(String edtDisplay, String irTypeLabel,
+        String irCalculatedType, String irParentContext)
+    {
+        if (edtDisplay == null || edtDisplay.isEmpty())
+            return edtDisplay;
+        String signature = parseProposalSignature(edtDisplay);
+        if (signature.isEmpty())
+            return edtDisplay;
+        String typeSegment = irCalculatedType != null && !irCalculatedType.isEmpty()
+            ? IrBslCompletionSupport.wrapAngleType(irCalculatedType)
+            : (irTypeLabel != null ? irTypeLabel : ""); //$NON-NLS-1$
+        StringBuilder sb = new StringBuilder(signature);
+        if (!typeSegment.isEmpty())
+            sb.append(" : ").append(typeSegment); //$NON-NLS-1$
+        if (irParentContext != null && !irParentContext.isEmpty())
+            sb.append(" ~ ").append(irParentContext); //$NON-NLS-1$
+        return sb.toString();
+    }
+
     static String filterMatchName(ICompletionProposal proposal)
     {
         ICompletionProposal raw = unwrapProposal(proposal);
@@ -269,6 +545,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         irSnapshotContextKey = Integer.MIN_VALUE;
         delegateListCache = EMPTY;
         irWordsResolved = false;
+        irOverlapTypeByKey.clear();
         ContentAssistDebug.log("invalidateCache"); //$NON-NLS-1$
     }
 
@@ -371,14 +648,131 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     /** Есть ИР-слово с тем же dedup-ключом (overlap ИР+EDT в литерале). */
     boolean hasIrProposalForDedupKey(String key)
     {
+        return findIrProposalForDedupKey(key) != null;
+    }
+
+    /** ИР-слово с тем же dedup-ключом (overlap при merge / активации EDT-строки). */
+    IrCompletionProposal findIrProposalForDedupKey(String key)
+    {
         if (!hasIrProposalsForCurrentContext() || key == null || key.isEmpty())
-            return false;
+            return null;
         for (ICompletionProposal p : irProposals)
         {
-            if (key.equalsIgnoreCase(dedupKey(p)))
-                return true;
+            if (!key.equalsIgnoreCase(dedupKey(p)))
+                continue;
+            ICompletionProposal raw = unwrapProposal(p);
+            if (raw instanceof IrCompletionProposal ir)
+                return ir;
         }
-        return false;
+        return null;
+    }
+
+    /**
+     * Подпись overlap-строки EDT после {@code ОписаниеТекущегоСловаАвтодополнения}:
+     * тип из ИР, вставка — штатная EDT.
+     */
+    static boolean applyIrActivatedDisplayToEdtOverlap(ICompletionProposal edt,
+        IrCompletionProposal ir, String calculatedType)
+    {
+        if (edt == null || ir == null)
+            return false;
+        SmartContentAssistProcessor processor = ContentAssistSessionReloader.getActiveProcessor();
+        if (processor != null)
+            processor.putIrOverlapTypeFromIr(dedupKey(edt), ir, calculatedType);
+        String edtDisplay = displayString(unwrapProposal(edt));
+        String display = injectIrTypeIntoEdtDisplay(edtDisplay, ir.getListTypeLabel(),
+            calculatedType, ir.getParentContextType());
+        return applyIrDisplayToEdt(edt, display);
+    }
+
+    /** Подпись overlap EDT+ИР: сигнатура EDT + тип из кэша (устойчива к пересборке списка). */
+    String resolveIrOverlapDisplay(String edtDisplay, String dedupKey)
+    {
+        if (dedupKey == null || dedupKey.isEmpty() || edtDisplay == null || edtDisplay.isEmpty())
+            return null;
+        IrOverlapTypeMetadata meta = irOverlapTypeByKey.get(
+            dedupKey.toLowerCase(java.util.Locale.ROOT));
+        if (meta == null)
+            return null;
+        return injectIrTypeIntoEdtDisplay(edtDisplay, meta.listTypeLabel,
+            meta.calculatedType, meta.parentContextType);
+    }
+
+    void putIrOverlapTypeFromIr(String dedupKey, IrCompletionProposal ir, String calculatedType)
+    {
+        if (dedupKey == null || dedupKey.isEmpty() || ir == null)
+            return;
+        String key = dedupKey.toLowerCase(java.util.Locale.ROOT);
+        IrOverlapTypeMetadata meta = irOverlapTypeByKey.get(key);
+        if (meta == null)
+        {
+            meta = new IrOverlapTypeMetadata(ir.getListTypeLabel(), ir.getParentContextType());
+            irOverlapTypeByKey.put(key, meta);
+        }
+        if (calculatedType != null && !calculatedType.isEmpty())
+            meta.calculatedType = calculatedType;
+    }
+
+    private void rememberIrOverlapDisplay(ICompletionProposal edt, IrCompletionProposal ir)
+    {
+        if (edt == null || ir == null)
+            return;
+        putIrOverlapTypeFromIr(dedupKey(edt), ir, null);
+        String edtDisplay = displayString(unwrapProposal(edt));
+        if (edtDisplay == null || edtDisplay.isEmpty())
+            return;
+        String display = injectIrTypeIntoEdtDisplay(edtDisplay, ir.getListTypeLabel(),
+            null, ir.getParentContextType());
+        applyIrDisplayToEdt(edt, display);
+    }
+
+    /** Подпись overlap-строки EDT при merge: начальный тип из таблицы слов ИР. */
+    private void applyIrDisplayToEdtOverlap(ICompletionProposal edt, IrCompletionProposal ir)
+    {
+        rememberIrOverlapDisplay(edt, ir);
+    }
+
+    static boolean applyIrDisplayToEdt(ICompletionProposal proposal, String display)
+    {
+        if (display == null || display.isEmpty())
+            return false;
+        ICompletionProposal raw = unwrapProposal(proposal);
+        if (!(raw instanceof ConfigurableCompletionProposal configurable))
+            return false;
+        String old = configurable.getDisplayString();
+        if (display.equals(old))
+            return false;
+        configurable.setDisplayString(display);
+        return true;
+    }
+
+    private void adoptIrTypeForEdtOverlaps(ICompletionProposal[] merged,
+        ICompletionProposal[] irList)
+    {
+        if (merged == null || merged.length == 0 || irList == null || irList.length == 0)
+            return;
+        java.util.Map<String, IrCompletionProposal> irByKey = new java.util.HashMap<>();
+        for (ICompletionProposal p : irList)
+        {
+            ICompletionProposal raw = unwrapProposal(p);
+            if (!(raw instanceof IrCompletionProposal ir))
+                continue;
+            String key = dedupKey(p);
+            if (key.isEmpty())
+                continue;
+            irByKey.putIfAbsent(key.toLowerCase(java.util.Locale.ROOT), ir);
+        }
+        for (ICompletionProposal p : merged)
+        {
+            if (unwrapProposal(p) instanceof IrCompletionProposal)
+                continue;
+            String key = dedupKey(p);
+            if (key.isEmpty())
+                continue;
+            IrCompletionProposal ir = irByKey.get(key.toLowerCase(java.util.Locale.ROOT));
+            if (ir != null)
+                applyIrDisplayToEdtOverlap(p, ir);
+        }
     }
 
     private void applyIrSnapshotData(IrBslCompletionSupport.Snapshot snapshot)
@@ -497,6 +891,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             // #endregion
             return;
         }
+        adoptIrTypeForEdtOverlaps(merged, irProposals);
         fullListCache = merged;
         rebuildDelegateOrderMap();
         fullListReady = true;
@@ -654,9 +1049,11 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     ICompletionProposal[] mergeIrForDisplay(ICompletionProposal[] delegateBase)
     {
         if (!isIrWordsResolvedForContext() && irProposals.length == 0)
-            return delegateBase != null ? delegateBase : EMPTY;
+            return collapseOptionalEdtOverlapsArray(
+                delegateBase != null ? delegateBase : EMPTY);
         if (irSnapshotContextKey != fullListContextKey)
-            return delegateBase != null ? delegateBase : EMPTY;
+            return collapseOptionalEdtOverlapsArray(
+                delegateBase != null ? delegateBase : EMPTY);
         if (delegateBase == null || delegateBase.length == 0)
         {
             if (isIrWordsResolvedForContext() && irProposals.length > 0)
@@ -664,17 +1061,21 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             return EMPTY;
         }
         if (irProposals.length == 0)
-            return delegateBase;
+            return collapseOptionalEdtOverlapsArray(delegateBase);
         return mergeIrProposals(delegateBase);
     }
 
     private ICompletionProposal[] popupListWithIr(ICompletionProposal[] base)
     {
-        ICompletionProposal[] merged = mergeIrForDisplay(unwrapProposals(base != null ? base : EMPTY));
+        ICompletionProposal[] unwrapped = unwrapProposals(base != null ? base : EMPTY);
+        int baseIrN = countIrProposals(unwrapped);
+        ICompletionProposal[] delegateClean = stripIrProposals(unwrapped);
+        ICompletionProposal[] merged = mergeIrForDisplay(delegateClean);
         if (merged.length == 0)
             return EMPTY;
         ICompletionProposal[] result = buildDelegateOrderedList(merged);
         // #region agent log
+        debugMergeDedupAudit("popupListWithIr", unwrapped, irProposals, merged, baseIrN); //$NON-NLS-1$
         debugSessionOrderSample("H3", "popupListWithIr", "popup", result, 12); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         MemberEdtPriorityProfile popupProfile = isIrAssistOrderingEnabled()
             ? MemberEdtPriorityProfile.analyze(unwrapProposals(base != null ? base : EMPTY))
@@ -1971,7 +2372,8 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                     + ",\"delegateCount\":" + (delegateList != null ? delegateList.length : 0) //$NON-NLS-1$
                     + ",\"ms\":" + elapsedMs + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             // #endregion
-            return delegateList != null ? delegateList : EMPTY;
+            return collapseOptionalEdtOverlapsArray(
+                delegateList != null ? delegateList : EMPTY);
         }
         if (Arrays.equals(delegateList, lastMergeDelegateList) && irProposals == lastMergeIrProposalsRef
             && irSnapshotContextKey == lastMergeIrCtxKey && lastMergeResult != null)
@@ -2018,14 +2420,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             String key = dedupKey(irP);
             Deque<ICompletionProposal> queue = key.isEmpty() ? null : delegateByKey.get(key);
             if (queue != null && !queue.isEmpty())
-            {
-                while (!queue.isEmpty())
-                {
-                    ICompletionProposal d = queue.removeFirst();
-                    merged.add(d);
-                    placedDelegates.add(unwrapProposal(d));
-                }
-            }
+                mergeDelegateOverlapQueue(queue, merged, placedDelegates);
             else if (!key.isEmpty())
                 merged.add(irP);
         }
@@ -2034,6 +2429,8 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             if (!placedDelegates.contains(unwrapProposal(p)))
                 merged.add(p);
         }
+
+        merged = collapseOptionalEdtOverlapsInMergedList(merged);
 
         ICompletionProposal[] result = sortMergedList(
             merged.toArray(new ICompletionProposal[merged.size()]), irPriorityByKey,
@@ -2044,6 +2441,11 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             delegateProfile);
         // #endregion
         ICompletionProposal[] finalResult = stripEmptyPlaceholderProposals(result);
+        adoptIrTypeForEdtOverlaps(finalResult, irProposals);
+        // #region agent log
+        debugMergeDedupAudit("mergeIrProposals", delegateList, irProposals, finalResult, //$NON-NLS-1$
+            countIrProposals(delegateList));
+        // #endregion
         lastMergeDelegateList = delegateListKey;
         lastMergeIrProposalsRef = irProposalsKey;
         lastMergeIrCtxKey = irCtxKeyForCache;
@@ -2091,14 +2493,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             String key = dedupKey(irP);
             Deque<ICompletionProposal> queue = key.isEmpty() ? null : delegateByKey.get(key);
             if (queue != null && !queue.isEmpty())
-            {
-                while (!queue.isEmpty())
-                {
-                    ICompletionProposal d = queue.removeFirst();
-                    merged.add(d);
-                    placedDelegates.add(unwrapProposal(d));
-                }
-            }
+                mergeDelegateOverlapQueue(queue, merged, placedDelegates);
             else if (!key.isEmpty())
                 merged.add(irP);
         }
@@ -2108,6 +2503,8 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                 merged.add(p);
         }
 
+        merged = collapseOptionalEdtOverlapsInMergedList(merged);
+
         ICompletionProposal[] result = sortMergedList(
             merged.toArray(new ICompletionProposal[merged.size()]), irPriorityByKey,
             delegateProfile);
@@ -2115,6 +2512,8 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         debugSessionOrderSample("H2", "mergeIrProposals", "irOrderMerge", result, 12); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         debugIrMergeOrderSample("H3", "mergeIrProposals", "afterSort", result, irPriorityByKey, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             delegateProfile);
+        debugMergeDedupAudit("mergeIrProposalsCore", delegateList, irProposalsSnap, //$NON-NLS-1$
+            stripEmptyPlaceholderProposals(result), countIrProposals(delegateList));
         // #endregion
         return stripEmptyPlaceholderProposals(result);
     }
@@ -2397,6 +2796,158 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     static String dedupKeyForMerge(ICompletionProposal proposal)
     {
         return dedupKey(proposal);
+    }
+
+    private static int countIrProposals(ICompletionProposal[] proposals)
+    {
+        if (proposals == null || proposals.length == 0)
+            return 0;
+        int n = 0;
+        for (ICompletionProposal p : proposals)
+        {
+            if (unwrapProposal(p) instanceof IrCompletionProposal)
+                n++;
+        }
+        return n;
+    }
+
+    /**
+     * H90: аудит дублей merge ИР+EDT — только диагностика, без изменения списка.
+     * Пишет в журнал при «Общем логировании» и в NDJSON (debug-0ae881.log).
+     */
+    private static void debugMergeDedupAudit(String phase, ICompletionProposal[] delegateList,
+        ICompletionProposal[] irList, ICompletionProposal[] result, int delegateIrN)
+    {
+        if (result == null || result.length == 0)
+            return;
+        java.util.Map<String, Integer> keyCounts = new java.util.LinkedHashMap<>();
+        java.util.Map<String, StringBuilder> keyKinds = new java.util.LinkedHashMap<>();
+        for (ICompletionProposal p : result)
+        {
+            String key = dedupKey(p);
+            if (key.isEmpty())
+                continue;
+            String mapKey = key.toLowerCase(java.util.Locale.ROOT);
+            keyCounts.merge(mapKey, 1, Integer::sum);
+            String kind = proposalKindLabel(p);
+            String display = abbreviateForMergeLog(displayString(unwrapProposal(p)));
+            StringBuilder kinds = keyKinds.computeIfAbsent(mapKey, k -> new StringBuilder());
+            if (kinds.length() > 0)
+                kinds.append('|');
+            kinds.append(kind).append(':').append(display);
+        }
+        StringBuilder dupes = new StringBuilder();
+        int dupeKeyN = 0;
+        for (java.util.Map.Entry<String, Integer> e : keyCounts.entrySet())
+        {
+            if (e.getValue() <= 1)
+                continue;
+            dupeKeyN++;
+            if (dupes.length() > 0)
+                dupes.append(';');
+            dupes.append(e.getKey()).append('(').append(e.getValue()).append(")=") //$NON-NLS-1$
+                .append(keyKinds.get(e.getKey()));
+            if (dupeKeyN >= 8)
+                break;
+        }
+        int delegateN = delegateList != null ? delegateList.length : 0;
+        int irN = irList != null ? irList.length : 0;
+        String data = "{\"phase\":\"" + ContentAssistDebug.jsonEscapeForLog(phase) //$NON-NLS-1$
+            + "\",\"delegateN\":" + delegateN //$NON-NLS-1$
+            + ",\"delegateIrN\":" + delegateIrN //$NON-NLS-1$
+            + ",\"irN\":" + irN //$NON-NLS-1$
+            + ",\"resultN\":" + result.length //$NON-NLS-1$
+            + ",\"dupeKeyN\":" + dupeKeyN //$NON-NLS-1$
+            + ",\"dupes\":\"" + ContentAssistDebug.jsonEscapeForLog(dupes.toString()) + "\"}"; //$NON-NLS-1$ //$NON-NLS-2$
+        ContentAssistDebug.debugModeLog("H90", "mergeDedupAudit", "summary", data); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        if (dupeKeyN == 0)
+            return;
+        debugMergeDedupMismatch(phase, delegateList, irList, keyCounts);
+    }
+
+    /** H90: для дублирующихся ключей — почему ИР и EDT не схлопнулись. */
+    private static void debugMergeDedupMismatch(String phase, ICompletionProposal[] delegateList,
+        ICompletionProposal[] irList, java.util.Map<String, Integer> dupeKeyCounts)
+    {
+        java.util.Set<String> targets = new java.util.LinkedHashSet<>();
+        for (java.util.Map.Entry<String, Integer> e : dupeKeyCounts.entrySet())
+        {
+            if (e.getValue() > 1)
+                targets.add(e.getKey());
+            if (targets.size() >= 6)
+                break;
+        }
+        if (targets.isEmpty())
+            return;
+        StringBuilder detail = new StringBuilder();
+        int rows = 0;
+        for (String target : targets)
+        {
+            if (rows > 0)
+                detail.append(';');
+            detail.append(target).append('{');
+            appendMergeKeyEntries(detail, "ir", irList, target); //$NON-NLS-1$
+            detail.append(',');
+            appendMergeKeyEntries(detail, "edt", delegateList, target); //$NON-NLS-1$
+            detail.append('}');
+            rows++;
+        }
+        ContentAssistDebug.debugModeLog("H90", "mergeDedupAudit", "mismatch", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"phase\":\"" + ContentAssistDebug.jsonEscapeForLog(phase) //$NON-NLS-1$
+                + "\",\"detail\":\"" + ContentAssistDebug.jsonEscapeForLog(detail.toString()) //$NON-NLS-1$
+                + "\"}"); //$NON-NLS-1$
+    }
+
+    private static void appendMergeKeyEntries(StringBuilder sb, String label,
+        ICompletionProposal[] list, String targetKeyLower)
+    {
+        sb.append(label).append('[');
+        if (list == null)
+        {
+            sb.append(']');
+            return;
+        }
+        boolean first = true;
+        int n = 0;
+        for (ICompletionProposal p : list)
+        {
+            String key = dedupKey(p);
+            if (key.isEmpty() || !key.equalsIgnoreCase(targetKeyLower))
+                continue;
+            if (!first)
+                sb.append(',');
+            first = false;
+            ICompletionProposal raw = unwrapProposal(p);
+            sb.append(proposalKindLabel(p)).append(':').append(key);
+            if (raw instanceof IrCompletionProposal ir)
+                sb.append("/f=").append(abbreviateForMergeLog(ir.getFilterName())); //$NON-NLS-1$
+            else
+                sb.append("/d=").append(abbreviateForMergeLog(raw.getDisplayString())); //$NON-NLS-1$
+            if (++n >= 3)
+                break;
+        }
+        sb.append(']');
+    }
+
+    private static String proposalKindLabel(ICompletionProposal proposal)
+    {
+        ICompletionProposal raw = unwrapProposal(proposal);
+        if (raw instanceof IrCompletionProposal)
+            return "IR"; //$NON-NLS-1$
+        if (raw instanceof ConfigurableCompletionProposal)
+            return "EDT"; //$NON-NLS-1$
+        String cn = raw != null ? raw.getClass().getSimpleName() : "?"; //$NON-NLS-1$
+        return cn.length() > 8 ? cn.substring(0, 8) : cn;
+    }
+
+    private static String abbreviateForMergeLog(String text)
+    {
+        if (text == null)
+            return ""; //$NON-NLS-1$
+        String s = text.replace('\n', ' ').trim(); //$NON-NLS-1$
+        if (s.length() > 72)
+            s = s.substring(0, 69) + "..."; //$NON-NLS-1$
+        return s;
     }
 
     static String firstProposalDedupKey(ICompletionProposal[] proposals)

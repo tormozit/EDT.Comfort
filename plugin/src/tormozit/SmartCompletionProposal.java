@@ -79,8 +79,11 @@ public class SmartCompletionProposal implements
     @Override
     public StyledString getStyledDisplayString()
     {
+        String overlapDisplay = resolveIrOverlapDisplayOverride();
         StyledString result;
-        if (delegate instanceof IrCompletionProposal ir)
+        if (overlapDisplay != null)
+            result = buildIrStyledDisplayString(overlapDisplay);
+        else if (delegate instanceof IrCompletionProposal ir)
             result = buildIrStyledDisplayString(ir.getDisplayString());
         else if (delegate instanceof ICompletionProposalExtension6 ext6)
             result = ext6.getStyledDisplayString();
@@ -92,7 +95,7 @@ public class SmartCompletionProposal implements
         SmartCodeMatcher matcher = resolveHighlightMatcher();
         if (!matcher.isEmpty)
         {
-            String display = delegate.getDisplayString();
+            String display = overlapDisplay != null ? overlapDisplay : delegate.getDisplayString();
             String nameOnly = SmartContentAssistProcessor.parseProposalListName(
                 display != null ? display : ""); //$NON-NLS-1$
             if (!nameOnly.isEmpty())
@@ -117,7 +120,28 @@ public class SmartCompletionProposal implements
     @Override
     public String getDisplayString()
     {
+        String overlapDisplay = resolveIrOverlapDisplayOverride();
+        if (overlapDisplay != null)
+            return overlapDisplay;
         return delegate.getDisplayString();
+    }
+
+    /**
+     * Подпись overlap EDT+ИР из кэша процессора — не сбрасывается при пересборке popup.
+     */
+    private String resolveIrOverlapDisplayOverride()
+    {
+        if (delegate instanceof IrCompletionProposal)
+            return null;
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+            return null;
+        SmartContentAssistProcessor processor = ContentAssistSessionReloader.getActiveProcessor();
+        if (processor == null)
+            return null;
+        String key = SmartContentAssistProcessor.dedupKeyForMerge(delegate);
+        if (key.isEmpty())
+            return null;
+        return processor.resolveIrOverlapDisplay(delegate.getDisplayString(), key);
     }
 
     @Override
@@ -937,7 +961,7 @@ public class SmartCompletionProposal implements
             if (display == null || display.isDisposed())
                 return;
             display.asyncExec(() -> applyCachedEdtActivation(
-                reloader, cacheKey, delegate.getDisplayString(), cached, baseInput));
+                reloader, cacheKey, delegate.getDisplayString(), cached, baseInput, delegate));
             return;
         }
         if (!reloader.tryBeginIrActivation(cacheKey))
@@ -960,7 +984,7 @@ public class SmartCompletionProposal implements
             return;
         }
         display.asyncExec(() -> submitEdtActivationOnUi(
-            reloader, session, editor, gen, cacheKey, displayKey, name, isMethod, baseInput));
+            reloader, session, editor, gen, cacheKey, displayKey, name, isMethod, baseInput, delegate));
     }
 
     /** RDT {@code ПриАктивизацииСтрокиТ9}: динамический тип и описание ИР-слова. */
@@ -1163,12 +1187,14 @@ public class SmartCompletionProposal implements
 
     private static void applyCachedEdtActivation(
         ContentAssistSessionReloader reloader, String cacheKey, String displayKey,
-        IrBslCompletionSupport.ActivationDescription desc, Object baseInput)
+        IrBslCompletionSupport.ActivationDescription desc, Object baseInput,
+        ICompletionProposal edtDelegate)
     {
         org.eclipse.jface.text.contentassist.ContentAssistant assistant =
             ContentAssistSessionReloader.getActiveAssistant();
         if (assistant == null || !ContentAssistPopupSync.isPopupVisible(assistant))
             return;
+        applyEdtListTypeFromIrActivation(assistant, edtDelegate, desc);
         applyEdtActivationToSidePanel(
             reloader, assistant, cacheKey, displayKey, desc, baseInput);
     }
@@ -1176,7 +1202,7 @@ public class SmartCompletionProposal implements
     private static void submitEdtActivationOnUi(
         ContentAssistSessionReloader reloader, IRSession session, BslXtextEditor editor,
         int gen, String cacheKey, String displayKey, String wordValue, boolean isMethod,
-        Object baseInput)
+        Object baseInput, ICompletionProposal edtDelegate)
     {
         if (editor == null || session == null || reloader == null)
         {
@@ -1185,7 +1211,8 @@ public class SmartCompletionProposal implements
             return;
         }
         Runnable fetch = () -> runEdtActivationFetch(
-            reloader, session, gen, cacheKey, displayKey, wordValue, isMethod, baseInput);
+            reloader, session, gen, cacheKey, displayKey, wordValue, isMethod, baseInput,
+            edtDelegate);
         if (!reloader.isWordsTableReady())
         {
             reloader.runWhenWordsTableReady(() -> session.executor.submit(fetch));
@@ -1197,7 +1224,7 @@ public class SmartCompletionProposal implements
     private static void runEdtActivationFetch(
         ContentAssistSessionReloader reloader, IRSession session, int gen,
         String cacheKey, String displayKey, String wordValue, boolean isMethod,
-        Object baseInput)
+        Object baseInput, ICompletionProposal edtDelegate)
     {
         try
         {
@@ -1209,7 +1236,7 @@ public class SmartCompletionProposal implements
                 if (display == null || display.isDisposed())
                     return;
                 display.asyncExec(() -> applyEdtActivationResult(
-                    reloader, session, gen, cacheKey, displayKey, cached, baseInput));
+                    reloader, session, gen, cacheKey, displayKey, cached, baseInput, edtDelegate));
                 return;
             }
             IrBslCompletionSupport.ActivationDescription desc =
@@ -1223,7 +1250,7 @@ public class SmartCompletionProposal implements
             if (display == null || display.isDisposed())
                 return;
             display.asyncExec(() -> applyEdtActivationResult(
-                reloader, session, gen, cacheKey, displayKey, desc, baseInput));
+                reloader, session, gen, cacheKey, displayKey, desc, baseInput, edtDelegate));
         }
         finally
         {
@@ -1234,7 +1261,7 @@ public class SmartCompletionProposal implements
     private static void applyEdtActivationResult(
         ContentAssistSessionReloader reloader, IRSession session, int gen,
         String cacheKey, String displayKey, IrBslCompletionSupport.ActivationDescription desc,
-        Object baseInput)
+        Object baseInput, ICompletionProposal edtDelegate)
     {
         reloader.putIrActivation(cacheKey, desc);
         if (gen != reloader.getIrFetchGeneration())
@@ -1243,8 +1270,35 @@ public class SmartCompletionProposal implements
             ContentAssistSessionReloader.getActiveAssistant();
         if (assistant == null || !ContentAssistPopupSync.isPopupVisible(assistant))
             return;
+        applyEdtListTypeFromIrActivation(assistant, edtDelegate, desc);
         applyEdtActivationToSidePanel(
             reloader, assistant, cacheKey, displayKey, desc, baseInput);
+    }
+
+    /** Overlap EDT+ИР: тип в списке из ИР после активации строки. */
+    private static void applyEdtListTypeFromIrActivation(
+        org.eclipse.jface.text.contentassist.ContentAssistant assistant,
+        ICompletionProposal edtDelegate, IrBslCompletionSupport.ActivationDescription desc)
+    {
+        if (desc == null || desc.type == null || desc.type.isEmpty())
+            return;
+        SmartContentAssistProcessor processor = ContentAssistSessionReloader.getActiveProcessor();
+        if (processor == null)
+            return;
+        IrCompletionProposal ir = processor.findIrProposalForDedupKey(
+            SmartContentAssistProcessor.dedupKeyForMerge(edtDelegate));
+        if (ir == null)
+            return;
+        String key = SmartContentAssistProcessor.dedupKeyForMerge(edtDelegate);
+        String edtDisplay = edtDelegate.getDisplayString();
+        String old = processor.resolveIrOverlapDisplay(edtDisplay, key);
+        processor.putIrOverlapTypeFromIr(key, ir, desc.type);
+        String display = SmartContentAssistProcessor.injectIrTypeIntoEdtDisplay(
+            edtDisplay, ir.getListTypeLabel(), desc.type, ir.getParentContextType());
+        SmartContentAssistProcessor.applyIrDisplayToEdt(edtDelegate, display);
+        if (display.equals(old))
+            return;
+        ContentAssistPopupSync.refreshProposalTable(assistant);
     }
 
     private static void applyEdtActivationToSidePanel(
