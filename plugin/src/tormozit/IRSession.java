@@ -255,9 +255,9 @@ public final class IRSession
         }
 
         /** Assist: caret-точка на UI, {@code collectPending=true}. */
-        CodeEditorSyncPayload prepareCodeEditorSyncForAssist(BslXtextEditor editor, int offset)
+        CodeEditorSyncPayload prepareCodeEditorSyncForAssist(BslXtextEditor editor, int offset, int endOffset)
         {
-            return prepareCodeEditorSync(editor, offset, offset, true);
+            return prepareCodeEditorSync(editor, offset, endOffset, true);
         }
 
         /** Применить подготовленный sync на потоке {@link #executor}. */

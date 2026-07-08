@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
@@ -846,7 +847,10 @@ public final class SearchViewAggregationHook implements IStartup
         String ru = MdTypeMapping.anyToRu(segment);
         if (ru != null)
             return ru;
-        return MdTypeMapping.ruPluralToRu(segment);
+        ru = MdTypeMapping.ruPluralToRu(segment);
+        if (ru != null)
+            return ru;
+        return MdTypeMapping.treeGroupLabelToRu(segment);
     }
 
     /** Единый MD-путь для колонки «Путь» и сравнения ключей. */
@@ -896,12 +900,35 @@ public final class SearchViewAggregationHook implements IStartup
     /** Путь для колонки «Путь» — короткий MD-путь без дублирования колонки «Свойство». */
     private static String formatPathForTableItem(Object tableItem, Object ownerNode)
     {
-        String path = modulePathFromTableItem(tableItem);
-        if (path == null || path.isEmpty())
-            path = mdPathFromTableItemFile(tableItem);
-        if (path == null || path.isEmpty())
-            path = buildCanonicalMdPathFromNode(ownerNode);
-        return canonicalizeMdPath(path);
+        String source;
+        String path = bmTopObjectPathFromTableItem(tableItem);
+        if (path != null && !path.isEmpty())
+            source = "bmObject"; //$NON-NLS-1$
+        else
+        {
+            path = modulePathFromTableItem(tableItem);
+            if (path != null && !path.isEmpty())
+                source = "module"; //$NON-NLS-1$
+            else
+            {
+                path = mdPathFromTableItemFile(tableItem);
+                if (path != null && !path.isEmpty())
+                    source = "mdFile"; //$NON-NLS-1$
+                else
+                {
+                    path = buildCanonicalMdPathFromNode(ownerNode);
+                    source = "ownerNode"; //$NON-NLS-1$
+                    logObjectApiOnce("ownerNode", ownerNode); //$NON-NLS-1$
+                }
+            }
+        }
+        String result = canonicalizeMdPath(path);
+        if (result == null || result.isEmpty())
+        {
+            log("formatPathForTableItem: EMPTY source=" + source //$NON-NLS-1$
+                + " ownerLabel=" + extractLabel(ownerNode)); //$NON-NLS-1$
+        }
+        return result;
     }
 
     /** Убирает суффикс {@code :...} — он показывается в колонке «Свойство». */
@@ -933,6 +960,99 @@ public final class SearchViewAggregationHook implements IStartup
         return ref != null ? ref.modulePath : null;
     }
 
+    /**
+     * Путь через верхний BM-объект совпадения — тот же механизм, что и штатный двойной клик по строке
+     * поиска для открытия редактора объекта. Надёжнее и проще, чем парсинг подписей дерева:
+     * работает для любого типа {@code Match} (не только {@code TextSearchModelMatch}) и даёт
+     * точное полное имя верхнего MD-объекта без каких-либо таблиц соответствия.
+     *
+     * <p>{@code com._1c.g5.v8.dt.search.core.Match} (базовый класс всех совпадений поиска) хранит
+     * {@code long getMetadataTopObjectId()} (публичный) и {@code protected Optional<IBmObject> resolveObjectById(long)}.
+     * {@code IBmObject extends EObject} — полученный объект можно напрямую отдать в уже существующий
+     * {@link GetRef#eObjectToFullName(EObject)} (тот же код, что используется для навигатора/редакторов).
+     * Оба метода найдены декомпиляцией {@code com._1c.g5.v8.dt.search.core_*.jar} и {@code com._1c.g5.v8.bm.core_*.jar}
+     * из {@code C:\VC\EDT-plugin-WS\.metadata\.plugins\org.eclipse.pde.core\.bundle_pool\plugins}.
+     *
+     * <p>Может вернуть {@code null}, если BM-модель уже диспозирована/транзакция неактивна —
+     * тогда {@link #formatPathForTableItem} падает в файловые/{@code ownerNode}-стратегии.
+     */
+    private static String bmTopObjectPathFromTableItem(Object tableItem)
+    {
+        try
+        {
+            Object match = Global.invoke(tableItem, "getData"); //$NON-NLS-1$
+            if (match == null)
+                return null;
+            Object topIdObj = Global.invoke(match, "getMetadataTopObjectId"); //$NON-NLS-1$
+            if (!(topIdObj instanceof Long topId) || topId < 0) // IBmObject.BM_NULL_ID == -1
+                return null;
+            Object optObj = Global.invoke(match, "resolveObjectById", topId); //$NON-NLS-1$
+            if (!(optObj instanceof java.util.Optional<?> opt) || opt.isEmpty())
+                return null;
+            Object bmObject = opt.get();
+            if (!(bmObject instanceof EObject))
+                return null;
+            return GetRef.eObjectToFullName((EObject) bmObject);
+        }
+        catch (Exception ignored)
+        {
+            return null;
+        }
+    }
+
+    private static final Set<String> LOGGED_API_CLASSES = java.util.Collections.synchronizedSet(new java.util.HashSet<>());
+
+    /**
+     * Разовая диагностика (по разу на класс): вызывает все публичные нуль-арг методы объекта
+     * (getX()/isX()) и логирует имя + тип/значение результата. Оставлено на случай новых
+     * непокрытых типов совпадений в будущем; основной путь теперь —
+     * {@link #bmTopObjectPathFromTableItem}.
+     */
+    private static void logObjectApiOnce(String label, Object obj)
+    {
+        if (obj == null)
+            return;
+        Class<?> cls = obj.getClass();
+        String key = label + ":" + cls.getName(); //$NON-NLS-1$
+        if (!LOGGED_API_CLASSES.add(key))
+            return;
+        StringBuilder sb = new StringBuilder();
+        sb.append("API ").append(label).append(" class=").append(cls.getName()); //$NON-NLS-1$ //$NON-NLS-2$
+        for (Class<?> c = cls; c != null; c = c.getSuperclass())
+        {
+            for (java.lang.reflect.Method m : c.getDeclaredMethods())
+            {
+                if (m.getParameterCount() != 0)
+                    continue;
+                String name = m.getName();
+                if (!(name.startsWith("get") || name.startsWith("is"))) //$NON-NLS-1$ //$NON-NLS-2$
+                    continue;
+                if (name.equals("getClass")) //$NON-NLS-1$
+                    continue;
+                if (!java.lang.reflect.Modifier.isPublic(m.getModifiers()))
+                    continue;
+                sb.append("\n  ").append(name).append("(): ").append(m.getReturnType().getName()); //$NON-NLS-1$ //$NON-NLS-2$
+                try
+                {
+                    m.setAccessible(true);
+                    Object value = m.invoke(obj);
+                    if (value == null)
+                        sb.append(" = null"); //$NON-NLS-1$
+                    else if (value instanceof String || value instanceof Number || value instanceof Boolean)
+                        sb.append(" = ").append(value); //$NON-NLS-1$
+                    else
+                        sb.append(" -> ").append(value.getClass().getName()) //$NON-NLS-1$
+                          .append(" toString=").append(String.valueOf(value)); //$NON-NLS-1$
+                }
+                catch (Exception e)
+                {
+                    sb.append(" [ошибка вызова: ").append(e).append(']'); //$NON-NLS-1$
+                }
+            }
+        }
+        log(sb.toString());
+    }
+
     private static String projectRelativePathFromTableItem(Object tableItem)
     {
         try
@@ -942,7 +1062,8 @@ public final class SearchViewAggregationHook implements IStartup
                 return null;
             Object file = Global.invoke(match, "getFile"); //$NON-NLS-1$
             if (file == null)
-                return null;
+                return null; // матчи внутри бизнес-модели (реквизиты/команды формы и т.п.) без файла — ожидаемо,
+                            // путь для них строится через bmTopObjectPathFromTableItem/ownerNode (см. formatPathForTableItem)
             Object relPath = Global.invoke(file, "getProjectRelativePath"); //$NON-NLS-1$
             if (relPath == null)
                 return null;

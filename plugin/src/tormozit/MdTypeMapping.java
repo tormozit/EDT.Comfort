@@ -34,6 +34,16 @@ public final class MdTypeMapping
     /** RU мн.ч. → RU ед.ч. для offline-резолва прямых имён менеджеров. */
     private static final Map<String, String> RU_PLURAL_TO_RU = new LinkedHashMap<>();
 
+    /**
+     * Подписи узлов-групп в дереве панели глобального поиска ({@code ConfigurationSearchViewPage})
+     * → RU ед.ч. типа МД. В отличие от {@link #RU_PLURAL_TO_RU} (без пробелов, для имён менеджеров
+     * вида {@code РегистрыСведений.Имя}), здесь — человекочитаемые подписи с пробелами, ровно как
+     * их показывает EDT в дереве поиска (например «Общие формы», «Планы обмена»).
+     * Используется в {@link SearchViewAggregationHook#toSingularRuType} для построения колонки «Путь»
+     * по узлам дерева, когда совпадение не привязано к файлу (матчи внутри бизнес-модели формы и т.п.).
+     */
+    private static final Map<String, String> TREE_GROUP_LABEL_TO_RU = new LinkedHashMap<>();
+
     /** EN ед.ч. типа под-объекта → имя EMF-коллекции (attributes, forms…). */
     private static final Map<String, String> SUB_OBJECT_TO_EMF_FEATURE = new LinkedHashMap<>();
 
@@ -154,6 +164,54 @@ public final class MdTypeMapping
 
         for (Map.Entry<String, String> entry : RU_TO_RU_PLURAL.entrySet())
             RU_PLURAL_TO_RU.put(entry.getValue(), entry.getKey());
+
+        // ── Подписи узлов-групп в дереве поиска (с пробелами, как в UI EDT) ─────────────────
+        // Подтверждено логом: «Общие формы», «Регистры сведений», «Документы», «Планы обмена».
+        // Остальные — по аналогии (штатные русские названия веток EDT); если какая-то ветка
+        // в конкретной версии EDT называется иначе — смотри лог «buildCanonicalMdPathFromNode: labels=...»
+        // и добавь/поправь соответствующую строку ниже.
+        TREE_GROUP_LABEL_TO_RU.put("Общие модули",                       "ОбщийМодуль");
+        TREE_GROUP_LABEL_TO_RU.put("Общие формы",                        "ОбщаяФорма");
+        TREE_GROUP_LABEL_TO_RU.put("Общие макеты",                       "ОбщийМакет");
+        TREE_GROUP_LABEL_TO_RU.put("Общие картинки",                     "ОбщаяКартинка");
+        TREE_GROUP_LABEL_TO_RU.put("Общие команды",                      "ОбщаяКоманда");
+        TREE_GROUP_LABEL_TO_RU.put("Общие реквизиты",                    "ОбщийАтрибут");
+        TREE_GROUP_LABEL_TO_RU.put("Роли",                               "Роль");
+        TREE_GROUP_LABEL_TO_RU.put("Подсистемы",                         "Подсистема");
+        TREE_GROUP_LABEL_TO_RU.put("Функциональные опции",               "ФункциональнаяОпция");
+        TREE_GROUP_LABEL_TO_RU.put("Параметры функциональных опций",     "ПараметрФункциональнойОпции");
+        TREE_GROUP_LABEL_TO_RU.put("Определяемые типы",                  "ОпределяемыйТип");
+        TREE_GROUP_LABEL_TO_RU.put("Хранилища настроек",                 "ХранилищеНастроек");
+        TREE_GROUP_LABEL_TO_RU.put("Параметры сеанса",                   "ПараметрСеанса");
+        TREE_GROUP_LABEL_TO_RU.put("Языки",                              "ЯзыкКонфигурации");
+        TREE_GROUP_LABEL_TO_RU.put("Подписки на события",                "ПодпискаНаСобытие");
+        TREE_GROUP_LABEL_TO_RU.put("Регламентные задания",               "РегламентноеЗадание");
+        TREE_GROUP_LABEL_TO_RU.put("Группы команд",                      "ГруппаКоманд");
+        TREE_GROUP_LABEL_TO_RU.put("Боты",                               "Бот");
+        TREE_GROUP_LABEL_TO_RU.put("Справочники",                        "Справочник");
+        TREE_GROUP_LABEL_TO_RU.put("Документы",                          "Документ");
+        TREE_GROUP_LABEL_TO_RU.put("Перечисления",                       "Перечисление");
+        TREE_GROUP_LABEL_TO_RU.put("Планы обмена",                       "ПланОбмена");
+        TREE_GROUP_LABEL_TO_RU.put("Обработки",                          "Обработка");
+        TREE_GROUP_LABEL_TO_RU.put("Отчеты",                             "Отчет");
+        TREE_GROUP_LABEL_TO_RU.put("Бизнес-процессы",                    "БизнесПроцесс");
+        TREE_GROUP_LABEL_TO_RU.put("Задачи",                             "Задача");
+        TREE_GROUP_LABEL_TO_RU.put("Последовательности",                 "Последовательность");
+        TREE_GROUP_LABEL_TO_RU.put("Регистры сведений",                  "РегистрСведений");
+        TREE_GROUP_LABEL_TO_RU.put("Регистры накопления",                "РегистрНакопления");
+        TREE_GROUP_LABEL_TO_RU.put("Регистры бухгалтерии",               "РегистрБухгалтерии");
+        TREE_GROUP_LABEL_TO_RU.put("Регистры расчета",                   "РегистрРасчета");
+        TREE_GROUP_LABEL_TO_RU.put("Планы видов характеристик",          "ПланВидовХарактеристик");
+        TREE_GROUP_LABEL_TO_RU.put("Планы счетов",                       "ПланСчетов");
+        TREE_GROUP_LABEL_TO_RU.put("Планы видов расчета",                "ПланВидовРасчета");
+        TREE_GROUP_LABEL_TO_RU.put("Журналы документов",                 "ЖурналДокументов");
+        TREE_GROUP_LABEL_TO_RU.put("Критерии отбора",                    "КритерийОтбора");
+        TREE_GROUP_LABEL_TO_RU.put("XDTO-пакеты",                        "ПакетXDTO");
+        TREE_GROUP_LABEL_TO_RU.put("Web-сервисы",                        "WebСервис");
+        TREE_GROUP_LABEL_TO_RU.put("HTTP-сервисы",                       "HTTPСервис");
+        TREE_GROUP_LABEL_TO_RU.put("Стили",                              "СтильОформления");
+        TREE_GROUP_LABEL_TO_RU.put("Интерфейсы",                         "Интерфейс");
+        TREE_GROUP_LABEL_TO_RU.put("Внешние источники данных",           "ВнешнийИсточникДанных");
     }
 
     // =========================================================================
@@ -185,6 +243,15 @@ public final class MdTypeMapping
     public static String ruPluralToRu(String ruPlural)
     {
         return RU_PLURAL_TO_RU.get(ruPlural);
+    }
+
+    /**
+     * Подпись узла-группы в дереве панели поиска («Общие формы», «Планы обмена» — с пробелами,
+     * как показывает EDT) → RU ед.ч. типа МД. См. {@link #TREE_GROUP_LABEL_TO_RU}.
+     */
+    public static String treeGroupLabelToRu(String label)
+    {
+        return TREE_GROUP_LABEL_TO_RU.get(label);
     }
 
     /**

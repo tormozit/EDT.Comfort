@@ -684,4 +684,12 @@
     </viewContribution>
   </extension>
 
+  <extension point="org.eclipse.search.searchResultViewPages">
+    <viewPage
+        id="tormozit.compareSearchResultPage"
+        searchResultClass="tormozit.CompareSearchResult"
+        class="tormozit.CompareSearchResultPage">
+    </viewPage>
+  </extension>
+
 </plugin>

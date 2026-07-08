@@ -207,7 +207,8 @@ public class SmartCompletionProposal implements
         {
             if (viewer != null && tryApplyWordOnly(viewer.getDocument(), viewer, offset, stateMask))
                 return;
-            if (delegate instanceof IrCompletionProposal ir
+            if (true
+                && delegate instanceof IrCompletionProposal ir
                 && tryApplyWithIrAdapter(ir, viewer, offset))
                 return;
             if (delegate instanceof ICompletionProposalExtension2)

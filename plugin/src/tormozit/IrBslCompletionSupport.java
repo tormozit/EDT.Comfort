@@ -13,7 +13,9 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.Consumer;
 
+import org.eclipse.jface.text.ITextSelection;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
+import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.swt.widgets.Display;
 
 /**
@@ -272,7 +274,7 @@ public final class IrBslCompletionSupport
     }
 
     public static void prepareAssistContextAsync(
-        IRSession session, BslXtextEditor editor, int caretOffset, boolean autoInvoke,
+        IRSession session, BslXtextEditor editor, int _caretOffset, boolean autoInvoke,
         boolean closePreviousCommand, Consumer<Snapshot> onReady)
     {
         if (session == null || editor == null || session.executor == null
@@ -281,7 +283,7 @@ public final class IrBslCompletionSupport
         IRSession.CodeEditorSyncPayload payload;
         try
         {
-            payload = session.prepareCodeEditorSyncForAssist(editor, caretOffset);
+            payload = session.prepareCodeEditorSyncFromEditor(editor);
         }
         catch (Exception e)
         {

@@ -1,7 +1,9 @@
 package tormozit;
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -23,13 +25,22 @@ import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.events.FocusAdapter;
+import org.eclipse.swt.events.FocusEvent;
+import org.eclipse.swt.events.ModifyEvent;
+import org.eclipse.swt.events.ModifyListener;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Text;
+import org.eclipse.swt.widgets.Tree;
+import org.eclipse.swt.widgets.TreeColumn;
+import org.eclipse.jface.viewers.StyledString;
+import org.eclipse.search.ui.NewSearchUI;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IPartService;
 import org.eclipse.ui.IWorkbenchPart;
@@ -103,6 +114,7 @@ public class CompareConfigSearchDialogHook
             return;
 
         Composite parent = btnCase != null ? btnCase.getParent() : btnNext.getParent();
+        Composite buttonBar = btnNext.getParent();
 
         IDialogSettings settings = getDialogSettings();
 
@@ -136,13 +148,38 @@ public class CompareConfigSearchDialogHook
         if (btnCase != null)
             cbSearchAllColumns.moveBelow(btnCase);
 
-        CompareConfigSearchSession session = new CompareConfigSearchSession(shell, dialog, btnNext, btnPrev);
+        Button btnFindAll = new Button(buttonBar, SWT.PUSH);
+        btnFindAll.setText("\u041D\u0430\u0439\u0442\u0438 \u0432\u0441\u0435"); //$NON-NLS-1$
+        btnFindAll.setToolTipText("\u041F\u043E\u043A\u0430\u0437\u0430\u0442\u044C \u0432\u0441\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u043D\u044B\u0435 \u0443\u0437\u043B\u044B \u0432 \u043F\u0430\u043D\u0435\u043B\u0438 \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442\u043E\u0432 \u043F\u043E\u0438\u0441\u043A\u0430" + Global.pluginSignForTooltip()); //$NON-NLS-1$
+        btnFindAll.setLayoutData(new org.eclipse.swt.layout.RowData());
+
+        btnFindAll.moveAbove(btnPrev);
+
+        Text textFilter = (Text)getField(dialog, "textFilter"); //$NON-NLS-1$
+
+        CompareConfigSearchSession session = new CompareConfigSearchSession(shell, dialog, btnNext, btnPrev, btnFindAll, textFilter, getEditorFromDialog(dialog));
+
+        disableTreeDeactivationClearing(dialog);
+
+        btnFindAll.addListener(SWT.Selection, event ->
+        {
+            if (session.isRunning())
+            {
+                session.cancel();
+                return;
+            }
+            session.findAndShowAll(cbSearchAllColumns.getSelection());
+            session.focusComparisonTree();
+        });
         shell.setData(SESSION_KEY, session);
         shell.addListener(SWT.Close, event -> session.onShellClose());
 
-        interceptButton(btnNext, cbSearchAllRows, session, false, cbSearchAllColumns);
-        interceptButton(btnPrev, cbSearchAllRows, session, true, cbSearchAllColumns);
+        interceptButton(btnNext, dialog, cbSearchAllRows, session, false, cbSearchAllColumns);
+        interceptButton(btnPrev, dialog, cbSearchAllRows, session, true, cbSearchAllColumns);
 
+        installSearchDialogButtonKeepAlive(shell, dialog, session, textFilter, cbSearchAllRows, cbSearchAllColumns, btnCase);
+
+        buttonBar.layout(true, true);
         parent.layout(true, true);
         shell.pack();
     }
@@ -158,7 +195,7 @@ public class CompareConfigSearchDialogHook
         return section;
     }
 
-    private static void interceptButton(Button button, Button cbSearchAllRows, CompareConfigSearchSession session, boolean backward, Button cbSearchAllColumns)
+    private static void interceptButton(Button button, Object dialog, Button cbSearchAllRows, CompareConfigSearchSession session, boolean backward, Button cbSearchAllColumns)
     {
         Listener[] original = button.getListeners(SWT.Selection);
         for (Listener l : original)
@@ -173,6 +210,7 @@ public class CompareConfigSearchDialogHook
             }
             if (!cbSearchAllRows.getSelection())
             {
+                reattachSearchEngineMediator(dialog);
                 for (Listener l : original)
                     l.handleEvent(event);
             }
@@ -180,7 +218,130 @@ public class CompareConfigSearchDialogHook
             {
                 session.startSearch(backward, cbSearchAllColumns.getSelection());
             }
+            session.focusComparisonTree();
+            session.refreshSearchButtons();
         });
+    }
+
+    /**
+     * EDT снимает searchEngineMediator при деактивации дерева (фокус в поле ввода диалога).
+     * Отключаем DeactivationListener — PartListener по-прежнему обрабатывает смену редактора.
+     */
+    private static void disableTreeDeactivationClearing(Object dialog)
+    {
+        Object controller = getField(dialog, "controller"); //$NON-NLS-1$
+        if (controller == null)
+            return;
+
+        try
+        {
+            Field listenersField = controller.getClass().getDeclaredField("comparisonTreeSearchUpdateListeners"); //$NON-NLS-1$
+            listenersField.setAccessible(true);
+            @SuppressWarnings("unchecked")
+            List<Object> registered = (List<Object>)listenersField.get(controller);
+            if (registered == null || registered.isEmpty())
+                return;
+
+            List<Object> toRemove = new ArrayList<>();
+            List<Object> toKeep = new ArrayList<>();
+            for (Object listener : registered)
+            {
+                if (listener != null && "DeactivationListener".equals(listener.getClass().getSimpleName())) //$NON-NLS-1$
+                    toRemove.add(listener);
+                else
+                    toKeep.add(listener);
+            }
+            if (toRemove.isEmpty())
+                return;
+
+            listenersField.set(controller, toKeep);
+
+            Object mediator = getField(controller, "searchEngineMediator"); //$NON-NLS-1$
+            if (mediator != null)
+            {
+                Class<?> listenerType = Class.forName("com._1c.g5.v8.dt.md.compare.search.IComparisonTreeSearchUpdateListener"); //$NON-NLS-1$
+                Method remove = mediator.getClass().getMethod("removeComparisonTreeSearchUpdateListener", listenerType); //$NON-NLS-1$
+                for (Object listener : toRemove)
+                    remove.invoke(mediator, listener);
+            }
+        }
+        catch (Exception ignored) {}
+    }
+
+    private static void reattachSearchEngineMediator(Object dialog)
+    {
+        Object controller = getField(dialog, "controller"); //$NON-NLS-1$
+        if (controller == null)
+            return;
+
+        if (getField(controller, "searchEngineMediator") != null) //$NON-NLS-1$
+            return;
+
+        IEditorPart editor = getEditorFromDialog(dialog);
+        Object mediator = captureSearchEngineMediator(editor);
+        if (mediator == null)
+            return;
+
+        try
+        {
+            Class<?> mediatorType = Class.forName("com._1c.g5.v8.dt.internal.compare.ui.search.ComparisonTreeSearchEngineMediator"); //$NON-NLS-1$
+            Method setMediator = controller.getClass().getDeclaredMethod("setSearchEngineMediator", mediatorType, boolean.class); //$NON-NLS-1$
+            setMediator.setAccessible(true);
+            setMediator.invoke(controller, mediator, Boolean.FALSE);
+        }
+        catch (Exception ignored) {}
+    }
+
+    private static Object captureSearchEngineMediator(IEditorPart editor)
+    {
+        if (editor == null)
+            return null;
+        try
+        {
+            Class<?> mediatorType = Class.forName("com._1c.g5.v8.dt.internal.compare.ui.search.ComparisonTreeSearchEngineMediator"); //$NON-NLS-1$
+            return editor.getAdapter(mediatorType);
+        }
+        catch (Exception ignored)
+        {
+            return null;
+        }
+    }
+
+    private static void installSearchDialogButtonKeepAlive(Shell shell, Object dialog, CompareConfigSearchSession session,
+        Text textFilter, Button cbSearchAllRows, Button cbSearchAllColumns, Button btnCase)
+    {
+        Runnable keepAlive = () ->
+        {
+            if (shell.isDisposed())
+                return;
+            reattachSearchEngineMediator(dialog);
+            session.refreshSearchButtons();
+        };
+
+        shell.addListener(SWT.Activate, event -> shell.getDisplay().asyncExec(keepAlive));
+
+        FocusAdapter focusIn = new FocusAdapter()
+        {
+            @Override
+            public void focusGained(FocusEvent e)
+            {
+                keepAlive.run();
+            }
+        };
+
+        if (textFilter != null)
+        {
+            textFilter.addFocusListener(focusIn);
+            textFilter.addModifyListener((ModifyEvent e) -> session.refreshSearchButtons());
+        }
+        if (cbSearchAllRows != null)
+            cbSearchAllRows.addFocusListener(focusIn);
+        if (cbSearchAllColumns != null)
+            cbSearchAllColumns.addFocusListener(focusIn);
+        if (btnCase != null)
+            btnCase.addFocusListener(focusIn);
+
+        shell.getDisplay().asyncExec(keepAlive);
     }
 
     private static int computeTreeCacheKey(AbstractTreeViewer viewer, Object input)
@@ -215,12 +376,13 @@ public class CompareConfigSearchDialogHook
         {
             for (Object child : children)
             {
-                if (!progress.tick())
+                if (progress != null && !progress.tick())
                     return false;
                 if (isNodeMatchFilters(child, viewer))
                 {
                     result.add(child);
-                    progress.nodeAdded();
+                    if (progress != null)
+                        progress.nodeAdded();
                 }
                 if (!collectModelItems(child, provider, result, viewer, progress))
                     return false;
@@ -259,7 +421,8 @@ public class CompareConfigSearchDialogHook
 
         void nodeAdded()
         {
-            onNodeAdded.run();
+            if (onNodeAdded != null)
+                onNodeAdded.run();
         }
     }
 
@@ -295,6 +458,132 @@ public class CompareConfigSearchDialogHook
             }
         }
         return false;
+    }
+
+    private static String extractNodeLabel(Object node)
+    {
+        try
+        {
+            Object styled = Global.invoke(node, "getStyledText"); //$NON-NLS-1$
+            if (styled instanceof StyledString ss)
+            {
+                String text = ss.getString();
+                if (text != null && !text.isEmpty())
+                    return text;
+            }
+        }
+        catch (Exception ignored) {}
+        try
+        {
+            Object label = Global.invoke(node, "getLabel"); //$NON-NLS-1$
+            if (label instanceof String s && !s.isEmpty())
+                return s;
+        }
+        catch (Exception ignored) {}
+        return ""; //$NON-NLS-1$
+    }
+
+    private static String buildPathForNode(Object element)
+    {
+        java.util.List<String> parts = new java.util.ArrayList<>();
+        for (Object cur = element; cur != null; cur = Global.invoke(cur, "getParent")) //$NON-NLS-1$
+        {
+            String label = extractNodeLabel(cur);
+            if (label == null || label.isEmpty())
+                continue;
+            parts.add(0, label);
+        }
+        return String.join(".", parts); //$NON-NLS-1$
+    }
+
+    private static String getCachedObjectPath(Object parent, Map<Object, String> cache)
+    {
+        if (parent == null)
+            return ""; //$NON-NLS-1$
+        return cache.computeIfAbsent(parent, CompareConfigSearchDialogHook::buildPathForNode);
+    }
+
+    private static boolean textMatches(String text, String effectiveQuery, boolean caseSensitive)
+    {
+        return text != null && (caseSensitive ? text.contains(effectiveQuery) : text.toLowerCase().contains(effectiveQuery));
+    }
+
+    private static final class ComparisonStatusInfo
+    {
+        final String status;
+        final boolean checkable;
+
+        ComparisonStatusInfo(String status, boolean checkable)
+        {
+            this.status = status;
+            this.checkable = checkable;
+        }
+    }
+
+    private static ComparisonStatusInfo computeComparisonStatus(Object element)
+    {
+        String comparisonStatus = ""; //$NON-NLS-1$
+        boolean checkable = true;
+
+        if (element instanceof AbstractNodeWithLabels node)
+        {
+            if (node.hasOnlyOnOneSide(ComparisonSide.OTHER, ComparisonSide.MAIN))
+                comparisonStatus = "Добавлено"; //$NON-NLS-1$
+            else if (node.hasOnlyOnOneSide(ComparisonSide.MAIN, ComparisonSide.OTHER))
+                comparisonStatus = "Удалено"; //$NON-NLS-1$
+            else if (node.hasChanged(ComparisonSide.MAIN, ComparisonSide.OTHER))
+                comparisonStatus = "Изменено"; //$NON-NLS-1$
+            checkable = node.isCheckable();
+        }
+        else if (element instanceof AbstractDirectPartialModelNode node)
+        {
+            if (node.hasOnlyOnOneSide(ComparisonSide.OTHER, ComparisonSide.MAIN))
+                comparisonStatus = "Добавлено"; //$NON-NLS-1$
+            else if (node.hasOnlyOnOneSide(ComparisonSide.MAIN, ComparisonSide.OTHER))
+                comparisonStatus = "Удалено"; //$NON-NLS-1$
+            else if (node.hasDifferences(ComparisonSide.MAIN, ComparisonSide.OTHER))
+                comparisonStatus = "Изменено"; //$NON-NLS-1$
+        }
+
+        return new ComparisonStatusInfo(comparisonStatus, checkable);
+    }
+
+    private static final class ColumnHit
+    {
+        final String columnSide;
+        final String matchText;
+
+        ColumnHit(String columnSide, String matchText)
+        {
+            this.columnSide = columnSide;
+            this.matchText = matchText;
+        }
+    }
+
+    private static void collectColumnHits(Object element, String effectiveQuery, boolean caseSensitive,
+        boolean searchAllColumns, String headerMain, String headerOther, String headerAncestor,
+        String headerObject, List<ColumnHit> hits)
+    {
+        if (element instanceof AbstractNodeWithLabels node)
+        {
+            String text = node.getSideLabel(ComparisonSide.MAIN);
+            if (textMatches(text, effectiveQuery, caseSensitive))
+                hits.add(new ColumnHit(headerMain != null ? headerMain : "MAIN", text)); //$NON-NLS-1$
+
+            text = node.getSideLabel(ComparisonSide.OTHER);
+            if (textMatches(text, effectiveQuery, caseSensitive))
+                hits.add(new ColumnHit(headerOther != null ? headerOther : "OTHER", text)); //$NON-NLS-1$
+
+            text = node.getSideLabel(ComparisonSide.COMMON_ANCESTOR);
+            if (textMatches(text, effectiveQuery, caseSensitive))
+                hits.add(new ColumnHit(headerAncestor != null ? headerAncestor : "ОбщийПредок", text)); //$NON-NLS-1$
+        }
+        if (searchAllColumns && element instanceof AbstractDirectPartialModelNode node)
+        {
+            String text = node.getLabel();
+            if (textMatches(text, effectiveQuery, caseSensitive))
+                hits.add(new ColumnHit(headerObject, text));
+        }
     }
 
     private static void setStatus(Object dialog, String message)
@@ -350,6 +639,76 @@ public class CompareConfigSearchDialogHook
         return (viewer instanceof AbstractTreeViewer) ? (AbstractTreeViewer)viewer : null;
     }
 
+    private static void focusComparisonTree(IEditorPart editor)
+    {
+        AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
+        if (viewer == null)
+            return;
+        Control control = viewer.getControl();
+        if (control == null || control.isDisposed())
+            return;
+        Display display = control.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() ->
+        {
+            if (control.isDisposed())
+                return;
+            try
+            {
+                editor.setFocus();
+            }
+            catch (Exception ignored) {}
+            if (!control.isDisposed())
+                control.setFocus();
+        });
+    }
+
+    private static String getColumnHeader(IEditorPart editor, ComparisonSide side)
+    {
+        AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
+        if (viewer == null) return null;
+        Tree tree = (Tree) viewer.getControl();
+        if (tree == null || tree.isDisposed()) return null;
+        TreeColumn[] columns = tree.getColumns();
+        int idx;
+        switch (side)
+        {
+            case MAIN:
+                idx = columns.length >= 2 ? 1 : -1;
+                break;
+            case OTHER:
+                idx = columns.length >= 3 ? 2 : -1;
+                break;
+            case COMMON_ANCESTOR:
+                idx = columns.length >= 4 ? 3 : -1;
+                break;
+            default:
+                return null;
+        }
+        if (idx >= 0 && idx < columns.length)
+        {
+            String text = columns[idx].getText();
+            if (text != null && !text.isEmpty()) return text;
+        }
+        return null;
+    }
+
+    private static String getObjectColumnHeader(IEditorPart editor)
+    {
+        AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
+        if (viewer == null) return "\u041E\u0431\u044A\u0435\u043A\u0442";
+        Tree tree = (Tree) viewer.getControl();
+        if (tree == null || tree.isDisposed()) return "\u041E\u0431\u044A\u0435\u043A\u0442";
+        TreeColumn[] columns = tree.getColumns();
+        if (columns.length > 0)
+        {
+            String text = columns[0].getText();
+            if (text != null && !text.isEmpty()) return text;
+        }
+        return "\u041E\u0431\u044A\u0435\u043A\u0442";
+    }
+
     private static Object getField(Object obj, String name)
     {
         Class<?> cls = obj.getClass();
@@ -383,8 +742,11 @@ public class CompareConfigSearchDialogHook
         private final Object dialog;
         private final Button btnNext;
         private final Button btnPrev;
+        private final Button btnFindAll;
+        private final Text textFilter;
 
         private volatile Job activeJob;
+        private volatile Job findAllJob;
         private volatile int scanned;
         private volatile int total;
         private volatile int collected;
@@ -400,18 +762,45 @@ public class CompareConfigSearchDialogHook
         private final String btnNextOriginalText;
         private final String btnPrevOriginalText;
 
+        private String btnNextOriginal2;
+        private String btnPrevOriginal2;
+        private String btnFindAllOriginal2;
+
         private List<Object> cachedItems;
         private Object cachedInput;
         private int cachedFilterHash;
 
-        CompareConfigSearchSession(Shell shell, Object dialog, Button btnNext, Button btnPrev)
+        CompareConfigSearchSession(Shell shell, Object dialog, Button btnNext, Button btnPrev, Button btnFindAll, Text textFilter, IEditorPart editor)
         {
             this.shell = shell;
             this.dialog = dialog;
             this.btnNext = btnNext;
             this.btnPrev = btnPrev;
+            this.btnFindAll = btnFindAll;
+            this.textFilter = textFilter;
+            this.editorPart = editor;
             this.btnNextOriginalText = btnNext.getText();
             this.btnPrevOriginalText = btnPrev.getText();
+        }
+
+        void refreshSearchButtons()
+        {
+            if (running)
+                return;
+            boolean canSearch = editorPart != null && getTreeViewerFromEditor(editorPart) != null;
+            boolean hasQuery = textFilter != null && !textFilter.isDisposed() && !textFilter.getText().isEmpty();
+
+            if (btnNext != null && !btnNext.isDisposed())
+                btnNext.setEnabled(canSearch);
+            if (btnPrev != null && !btnPrev.isDisposed())
+                btnPrev.setEnabled(canSearch);
+            if (btnFindAll != null && !btnFindAll.isDisposed())
+                btnFindAll.setEnabled(canSearch && hasQuery);
+        }
+
+        void focusComparisonTree()
+        {
+            CompareConfigSearchDialogHook.focusComparisonTree(editorPart);
         }
 
         boolean isRunning()
@@ -431,6 +820,10 @@ public class CompareConfigSearchDialogHook
             activeJob = null;
             if (job != null)
                 job.cancel();
+            Job jfa = findAllJob;
+            findAllJob = null;
+            if (jfa != null)
+                jfa.cancel();
             if (running)
             {
                 running = false;
@@ -477,9 +870,7 @@ public class CompareConfigSearchDialogHook
             boolean caseSensitive = cbCase != null && cbCase.getSelection();
             String effectiveQuery = caseSensitive ? query : query.toLowerCase();
 
-            editorPart = getEditorFromDialog(dialog);
-
-            AbstractTreeViewer viewer = getTreeViewerFromDialog(dialog);
+            AbstractTreeViewer viewer = getTreeViewerFromEditor(editorPart);
             if (viewer == null)
                 return;
 
@@ -644,6 +1035,238 @@ public class CompareConfigSearchDialogHook
             job.schedule();
         }
 
+        void findAndShowAll(boolean searchAllColumns)
+        {
+            cancel();
+
+            Text textFilter = (Text)getField(dialog, "textFilter"); //$NON-NLS-1$
+            if (textFilter == null || textFilter.isDisposed())
+                return;
+            String query = textFilter.getText();
+            if (query.isEmpty())
+                return;
+
+            Button cbCase = (Button)getField(dialog, "buttonCaseSensitive"); //$NON-NLS-1$
+            boolean caseSensitive = cbCase != null && cbCase.getSelection();
+
+            if (editorPart == null)
+                return;
+
+            AbstractTreeViewer viewer = getTreeViewerFromEditor(editorPart);
+            if (viewer == null)
+                return;
+
+            IContentProvider cp = viewer.getContentProvider();
+            if (!(cp instanceof ITreeContentProvider))
+                return;
+            ITreeContentProvider provider = (ITreeContentProvider)cp;
+
+            Object input = viewer.getInput();
+            int filterHash = computeTreeCacheKey(viewer, input);
+
+            String headerMain = getColumnHeader(editorPart, ComparisonSide.MAIN);
+            String headerOther = getColumnHeader(editorPart, ComparisonSide.OTHER);
+            String headerAncestor = getColumnHeader(editorPart, ComparisonSide.COMMON_ANCESTOR);
+            String headerObject = getObjectColumnHeader(editorPart);
+
+            boolean cacheHit = isCacheValid(input, filterHash);
+
+            if (!cacheHit && editorPart != null)
+            {
+                SearchCache cached = searchCacheByEditor.get(editorPart);
+                if (cached != null && cached.input == input && cached.filterHash == filterHash)
+                {
+                    cachedInput = cached.input;
+                    cachedFilterHash = cached.filterHash;
+                    cachedItems = cached.items;
+                    cacheHit = true;
+                }
+            }
+
+            final boolean hasCachedItems = cacheHit;
+            final String effectiveQuery = caseSensitive ? query : query.toLowerCase();
+
+            activeGeneration++;
+            final int generation = activeGeneration;
+            running = true;
+            collecting = !hasCachedItems;
+            searchError = false;
+            scanned = 0;
+            total = hasCachedItems ? cachedItems.size() : 0;
+            collected = 0;
+            totalProcessed = 0;
+            setSearchButtonsToCancelMode();
+            startProgressTimer(generation);
+
+            Job job = new Job("Поиск по дереву сравнения...") //$NON-NLS-1$
+            {
+                @Override
+                protected IStatus run(IProgressMonitor monitor)
+                {
+                    try
+                    {
+                        if (generation != activeGeneration)
+                            return Status.CANCEL_STATUS;
+
+                        List<Object> items;
+                        if (hasCachedItems)
+                        {
+                            items = cachedItems;
+                        }
+                        else
+                        {
+                            items = new ArrayList<>();
+                            collecting = true;
+                            collected = 0;
+                            totalProcessed = 0;
+                            CollectProgress progress = new CollectProgress(generation,
+                                () -> activeGeneration, monitor,
+                                () -> collected++,
+                                () -> totalProcessed++);
+                            Object[] roots = provider.getElements(input);
+                            if (roots != null)
+                            {
+                                for (Object root : roots)
+                                {
+                                    if (!progress.tick())
+                                        return Status.CANCEL_STATUS;
+                                    items.add(root);
+                                    progress.nodeAdded();
+                                    if (!collectModelItems(root, provider, items, viewer, progress))
+                                        return Status.CANCEL_STATUS;
+                                }
+                            }
+                            saveCache(input, filterHash, items);
+                            collecting = false;
+                        }
+
+                        int n = items.size();
+                        total = n;
+                        scanned = 0;
+                        monitor.beginTask("Фильтрация...", n); //$NON-NLS-1$
+
+                        List<CompareSearchMatch> matches = buildFindAllMatches(items, effectiveQuery,
+                            caseSensitive, searchAllColumns, headerMain, headerOther,
+                            headerAncestor, headerObject, generation, monitor);
+
+                        if (generation != activeGeneration)
+                            return Status.CANCEL_STATUS;
+
+                        Display.getDefault().asyncExec(() ->
+                        {
+                            if (generation != activeGeneration)
+                                return;
+                            showFindAllResultsUI(matches, query);
+                        });
+
+                        monitor.done();
+                        return Status.OK_STATUS;
+                    }
+                    catch (Throwable t)
+                    {
+                        if (Global.isLogEnabled())
+                            Global.log("CompareSearch", "findAll error: " + t.getMessage());
+                        searchError = true;
+                        Display.getDefault().asyncExec(() ->
+                        {
+                            if (generation != activeGeneration)
+                                return;
+                            stopProgressTimer();
+                            findAllJob = null;
+                            running = false;
+                            restoreSearchButtons();
+                            setStatus(dialog, "Ошибка: " + t.getMessage()); //$NON-NLS-1$
+                        });
+                        return Status.CANCEL_STATUS;
+                    }
+                }
+            };
+            findAllJob = job;
+            job.setSystem(true);
+            job.schedule();
+        }
+
+        private List<CompareSearchMatch> buildFindAllMatches(List<Object> items, String effectiveQuery,
+            boolean caseSensitive, boolean searchAllColumns,
+            String headerMain, String headerOther, String headerAncestor, String headerObject,
+            int generation, IProgressMonitor monitor)
+        {
+            List<CompareSearchMatch> matches = new ArrayList<>();
+            Map<Object, String> pathCache = new IdentityHashMap<>();
+            List<ColumnHit> columnHits = new ArrayList<>(4);
+            int n = items.size();
+            for (int i = 0; i < n; i++)
+            {
+                if ((monitor != null && monitor.isCanceled()) || generation != activeGeneration)
+                    return matches;
+
+                scanned = i + 1;
+                Object element = items.get(i);
+
+                columnHits.clear();
+                collectColumnHits(element, effectiveQuery, caseSensitive, searchAllColumns,
+                    headerMain, headerOther, headerAncestor, headerObject, columnHits);
+
+                if (!columnHits.isEmpty())
+                {
+                    String propertyName = extractNodeLabel(element);
+                    Object parent = Global.invoke(element, "getParent"); //$NON-NLS-1$
+                    String objectPath = getCachedObjectPath(parent, pathCache);
+                    ComparisonStatusInfo statusInfo = computeComparisonStatus(element);
+
+                    for (ColumnHit hit : columnHits)
+                    {
+                        matches.add(new CompareSearchMatch(element, objectPath, propertyName,
+                            hit.columnSide, hit.matchText, statusInfo.status, statusInfo.checkable));
+                    }
+                }
+
+                if (monitor != null)
+                    monitor.worked(1);
+            }
+            return matches;
+        }
+
+        private void showFindAllResultsUI(List<CompareSearchMatch> matches, String query)
+        {
+            stopProgressTimer();
+            findAllJob = null;
+            running = false;
+            restoreSearchButtons();
+            if (!matches.isEmpty())
+            {
+                setStatus(dialog, "Найдено: " + matches.size()); //$NON-NLS-1$
+                doShowFindAllResults(matches, query);
+            }
+            else
+                setStatus(dialog, "Не найдено"); //$NON-NLS-1$
+        }
+
+        private void doShowFindAllResults(List<CompareSearchMatch> matches, String query)
+        {
+            CompareSearchResult result = new CompareSearchResult(matches, editorPart);
+            result.setQueryText(query);
+            CompareSearchQuery searchQuery = new CompareSearchQuery();
+            result.setQuery(searchQuery);
+            searchQuery.setSearchResult(result);
+            NewSearchUI.runQueryInBackground(searchQuery);
+        }
+
+        private List<Object> collectAllItems(ITreeContentProvider provider, Object input, AbstractTreeViewer viewer)
+        {
+            List<Object> items = new ArrayList<>();
+            Object[] roots = provider.getElements(input);
+            if (roots != null)
+            {
+                for (Object root : roots)
+                {
+                    items.add(root);
+                    collectModelItems(root, provider, items, viewer, null);
+                }
+            }
+            return items;
+        }
+
         private IStatus finishCancelled(int generation)
         {
             if (Global.isLogEnabled())
@@ -684,6 +1307,7 @@ public class CompareConfigSearchDialogHook
                     setStatus(dialog, "Не найдено"); //$NON-NLS-1$
                 restoreSearchButtons();
                 updateDialog(dialog);
+                refreshSearchButtons();
             });
         }
 
@@ -691,28 +1315,33 @@ public class CompareConfigSearchDialogHook
         {
             if (btnNext != null && !btnNext.isDisposed())
             {
-                btnNext.setText("Отмена");
+                btnNextOriginal2 = btnNext.getText();
+                btnNext.setText("\u041E\u0442\u043C\u0435\u043D\u0430");
                 btnNext.setEnabled(true);
             }
             if (btnPrev != null && !btnPrev.isDisposed())
             {
-                btnPrev.setText("Отмена");
+                btnPrevOriginal2 = btnPrev.getText();
+                btnPrev.setText("\u041E\u0442\u043C\u0435\u043D\u0430");
                 btnPrev.setEnabled(true);
+            }
+            if (btnFindAll != null && !btnFindAll.isDisposed())
+            {
+                btnFindAllOriginal2 = btnFindAll.getText();
+                btnFindAll.setText("\u041E\u0442\u043C\u0435\u043D\u0430");
+                btnFindAll.setEnabled(true);
             }
         }
 
         private void restoreSearchButtons()
         {
             if (btnNext != null && !btnNext.isDisposed())
-            {
-                btnNext.setText(btnNextOriginalText);
-                btnNext.setEnabled(true);
-            }
+                btnNext.setText(btnNextOriginal2 != null ? btnNextOriginal2 : btnNextOriginalText);
             if (btnPrev != null && !btnPrev.isDisposed())
-            {
-                btnPrev.setText(btnPrevOriginalText);
-                btnPrev.setEnabled(true);
-            }
+                btnPrev.setText(btnPrevOriginal2 != null ? btnPrevOriginal2 : btnPrevOriginalText);
+            if (btnFindAll != null && !btnFindAll.isDisposed())
+                btnFindAll.setText(btnFindAllOriginal2 != null ? btnFindAllOriginal2 : "Найти все"); //$NON-NLS-1$
+            refreshSearchButtons();
         }
 
         private void startProgressTimer(int generation)
@@ -726,7 +1355,9 @@ public class CompareConfigSearchDialogHook
                 if (collecting)
                     setStatus(dialog, "Сбор узлов… " + collected + " (обработано " + totalProcessed + ")"); //$NON-NLS-1$
                 else
-                    setStatus(dialog, "Поиск…"); //$NON-NLS-1$
+                    setStatus(dialog, total > 0
+                        ? "Поиск… " + scanned + "/" + total //$NON-NLS-1$
+                        : "Поиск…"); //$NON-NLS-1$
                 if (running && generation == activeGeneration && !shell.isDisposed())
                     display.timerExec(PROGRESS_INTERVAL_MS, progressTick);
             };

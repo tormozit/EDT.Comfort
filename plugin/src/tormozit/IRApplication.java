@@ -459,7 +459,7 @@ public final class IRApplication
                 Global.log("Попытка " + attempt + " неудача. Повтор..."); //$NON-NLS-1$ //$NON-NLS-2$
                 if (runtimeInstallation != null)
                 {
-                    registerComClass(className, runtimeInstallation.getLocation().getPath(), attempt, configBitness64);
+                    registerComClass(className, runtimeInstallation.getLocation().getPath() + "1cv8.exe", attempt, configBitness64);
                 }
             }
         }
