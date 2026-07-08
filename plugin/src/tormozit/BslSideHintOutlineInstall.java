@@ -69,8 +69,8 @@ public final class BslSideHintOutlineInstall
     private static final String LAST_BASE_HINT_KEY = "tormozit.bslSideHintLastBaseHint"; //$NON-NLS-1$
     private static final String METHOD_IMPL_CLASS = "com._1c.g5.v8.dt.internal.bsl.core.MethodImpl"; //$NON-NLS-1$
     private static final String I_EXTENSION_ELEMENT = "com._1c.g5.v8.dt.bsl.core.IExtensionElement"; //$NON-NLS-1$
-    /** EDT offset 0 → позиция каретки 1 в ИР при sync перед {@code ЗаполнитьТаблицуСлов}. */
-    private static final int WORDS_TABLE_SYNC_CARET_OFFSET = 0;
+    /** Sync по выделению BSL-редактора перед {@code ЗаполнитьТаблицуСлов} в outline. */
+    private static final int WORDS_TABLE_SYNC_CARET_OFFSET = IrBslCompletionSupport.SYNC_USE_EDITOR_SELECTION;
     private static final int DEBOUNCE_MS = OpenStrategy.getPostSelectionDelay();
     private BslSideHintOutlineInstall() {}
 

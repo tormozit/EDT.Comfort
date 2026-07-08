@@ -306,7 +306,17 @@ public final class ContentAssistSessionReloader
                 if (!preserveWordsTable)
                 {
                     wordsTableReady = false;
-                    wordsTableCaret = -1;
+                    // Важно: если запрос слов ещё в полёте, то сброс `wordsTableCaret` ломает guard
+                    // `isWordsTableFetchInFlightForCaret(caret)` и может приводить к дублю fetch.
+                    if (!wordsTableFetchInFlight)
+                        wordsTableCaret = -1;
+                    else
+                    {
+                        ContentAssistDebug.debugModeLog("H10", "assistSessionStarted", //$NON-NLS-1$ //$NON-NLS-2$
+                            "preserveCaretDuringInFlight", //$NON-NLS-1$
+                            "{\"preserveWordsTable\":false,\"wordsTableFetchInFlight\":true,\"caret\":"
+                                + caret + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
                 }
                 pendingPopupRefresh = false;
                 pendingPopupRefreshIsIr = false;
@@ -365,8 +375,18 @@ public final class ContentAssistSessionReloader
                     processor.onAssistSessionContextReady(viewer, caret);
                     ContentAssistPopupSync.installFilterTrackerPrepend(assistant, viewer);
                     installSessionCaretListener();
-                    if (!preserveWordsTable && !isWordsTableFetchInFlightForCaret(caret))
+                    boolean autoOpenIrPending = completionAutoOpenIrScheduled
+                        && caret == completionAutoOpenCaret;
+                    if (!preserveWordsTable && !isWordsTableFetchInFlightForCaret(caret)
+                        && !autoOpenIrPending)
                         scheduleWordsTablePreparation(caret);
+                    else if (autoOpenIrPending)
+                    {
+                        ContentAssistDebug.debugModeLog("H12", "assistSessionStarted", //$NON-NLS-1$ //$NON-NLS-2$
+                            "skipDuplicateIrFetch", //$NON-NLS-1$
+                            "{\"caret\":" + caret + ",\"autoOpenCaret\":" + completionAutoOpenCaret //$NON-NLS-1$ //$NON-NLS-2$
+                                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
                 }
 
                 if (comfortListFilter)
@@ -410,12 +430,23 @@ public final class ContentAssistSessionReloader
             public void assistSessionEnded(ContentAssistEvent event)
             {
                 boolean manualAwait = isManualIrAssistAwaitingWords();
-                boolean irOnly = processor != null && processor.isIrOnlyManualMode();
+                boolean preserveOnEnd = manualAwait || isCompletionAutoOpenAwaitingIr();
                 boolean popupVisible = ContentAssistPopupSync.isPopupVisible(assistant);
                 int endCaret = ContentAssistPopupSync.syncSessionOffsets(assistant, viewer);
+                // #region agent log
+                ContentAssistDebug.traceAssist("H6", "assistSessionEnded", "lifecycle", //$NON-NLS-1$ //$NON-NLS-2$
+                    "{\"preserveOnEnd\":" + preserveOnEnd //$NON-NLS-1$
+                        + ",\"manualAwait\":" + manualAwait //$NON-NLS-1$
+                        + ",\"autoOpenPending\":" + completionAutoOpenPending //$NON-NLS-1$
+                        + ",\"inFlight\":" + wordsTableFetchInFlight //$NON-NLS-1$
+                        + ",\"wordsCaret\":" + wordsTableCaret //$NON-NLS-1$
+                        + ",\"autoOpenCaret\":" + completionAutoOpenCaret //$NON-NLS-1$
+                        + ",\"popupVisible\":" + popupVisible //$NON-NLS-1$
+                        + ",\"endCaret\":" + endCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
                 boolean inLiteral = endCaret >= 0
                     && SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, endCaret);
-                if (!inLiteral && !manualAwait
+                if (!inLiteral && !preserveOnEnd
                     && ContentAssistPopupSync.hasAssistBrowserSidePanel(assistant))
                 {
                     IInformationControlCreator browserCreator = resolveFreshAssistBrowserCreator(endCaret);
@@ -426,31 +457,7 @@ public final class ContentAssistSessionReloader
                             bslEditor, browserCreator);
                     }
                 }
-                // #region agent log
-                ContentAssistDebug.debugModeLog("H6", "assistSessionEnded", "lifecycle", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"manualAwait\":" + manualAwait //$NON-NLS-1$
-                        + ",\"pending\":" + manualIrAssistPending //$NON-NLS-1$
-                        + ",\"inFlight\":" + wordsTableFetchInFlight //$NON-NLS-1$
-                        + ",\"manualCaret\":" + manualIrAssistCaret //$NON-NLS-1$
-                        + ",\"wordsCaret\":" + wordsTableCaret //$NON-NLS-1$
-                        + ",\"wordsReady\":" + wordsTableReady + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                ContentAssistDebug.debugModeLog("H16", "assistSessionEnded", "lifecycle", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"manualAwait\":" + manualAwait //$NON-NLS-1$
-                        + ",\"irOnly\":" + irOnly //$NON-NLS-1$
-                        + ",\"popupVisible\":" + popupVisible //$NON-NLS-1$
-                        + ",\"inLiteral\":" + inLiteral //$NON-NLS-1$
-                        + ",\"caret\":" + endCaret //$NON-NLS-1$
-                        + ",\"smartEnabled\":" + SmartAssistFilterState.isSmartFilterEnabled() //$NON-NLS-1$
-                        + ",\"commandFlag\":" + Boolean.TRUE.equals(LITERAL_REPEAT_FROM_COMMAND.get()) //$NON-NLS-1$
-                        + ",\"tableRows\":" + ContentAssistPopupSync.tableItemCountForAssistant(assistant) //$NON-NLS-1$
-                        + ",\"filteredN\":" + ContentAssistPopupSync.filteredProposalCountForAssistant(assistant) //$NON-NLS-1$
-                        + ",\"msSinceLastToggle\":" + (lastLiteralToggleMs > 0 //$NON-NLS-1$
-                            ? System.currentTimeMillis() - lastLiteralToggleMs : -1) //$NON-NLS-1$
-                        + ",\"manualDualPopupOpened\":" + manualDualPopupOpened //$NON-NLS-1$
-                        + ",\"pending\":" + manualIrAssistPending //$NON-NLS-1$
-                        + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                if (!manualAwait)
+                if (!preserveOnEnd)
                 {
                     finishIrAssistCommandProcessing();
                     cancelIrEvaluationIfConnected();
@@ -471,7 +478,7 @@ public final class ContentAssistSessionReloader
                             () -> suppressDocumentAutoOpenAfterSession = false);
                 }
 
-                if (!manualAwait)
+                if (!preserveOnEnd)
                 {
                     clearManualIrAssistState();
                     clearCompletionAutoOpenState("sessionEnd", completionAutoOpenActiveSeq); //$NON-NLS-1$
@@ -485,7 +492,7 @@ public final class ContentAssistSessionReloader
                 ACTIVE_RELOADER.remove();
                 if (openSessionReloader == ContentAssistSessionReloader.this)
                     openSessionReloader = null;
-                if (!manualAwait)
+                if (!preserveOnEnd)
                 {
                     wordsTableReady = false;
                     wordsTableCaret = -1;
@@ -509,7 +516,7 @@ public final class ContentAssistSessionReloader
                 ContentAssistPopupSync.clearSyncState();
                 ContentAssistDebug.log("assistSessionEnded processor=" //$NON-NLS-1$
                     + processorName(event.processor));
-                if (!manualAwait)
+                if (!preserveOnEnd)
                     processor.invalidateCache();
                 processor.exitIrOnlyManualMode();
                 SmartFilterTracker.setCurrentFilter("");
@@ -860,13 +867,6 @@ public final class ContentAssistSessionReloader
                     + ",\"popupWasOpen\":" + popupWasOpen //$NON-NLS-1$
                     + ",\"shouldFetch\":true,\"triggerBranch\":\"" + branch + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
-        else
-        {
-            ContentAssistDebug.logAutoOpen(seq, "H72", "onVerifyKeyForCompletionAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
-                "verifySkip", "{\"char\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(inserted)) //$NON-NLS-1$ //$NON-NLS-2$
-                    + "\",\"caretBefore\":" + startOffset //$NON-NLS-1$
-                    + ",\"doit\":" + event.doit + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        }
         // #endregion
     }
 
@@ -925,17 +925,37 @@ public final class ContentAssistSessionReloader
                 + "\",\"offset\":" + insertOffset + ",\"caretAfter\":" + caretAfter //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"shouldFetch\":true,\"triggerBranch\":\"" + branch + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         // #endregion
-        if ("space".equals(branch))
+        if ("space".equals(branch) || "symbol".equals(branch))
         {
-            // Пробел: не открываем EDT-попап, только ИР решает через ЗаполнитьТаблицуСлов
-            if (!isWordsTableFetchInFlightForCaret(caretAfter)
-                && scheduleWordsTablePreparation(caretAfter, true))
+            // Пробел и &~#: не открываем EDT-попап, ИР решает через ЗаполнитьТаблицуСлов
+            if (isWordsTableFetchInFlightForCaret(caretAfter))
+            {
+                // #region agent log
+                ContentAssistDebug.traceAssist("H4", "onDocumentChangedForCompletionAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
+                    "symbolSkipInFlight", "{\"branch\":\"" + branch + "\",\"caretAfter\":" //$NON-NLS-1$ //$NON-NLS-2$
+                        + caretAfter + ",\"seq\":" + seq + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
+            }
+            else if (!scheduleWordsTablePreparation(caretAfter, true))
+            {
+                // #region agent log
+                ContentAssistDebug.traceAssist("H4", "onDocumentChangedForCompletionAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
+                    "symbolScheduleFailed", "{\"branch\":\"" + branch + "\",\"caretAfter\":" //$NON-NLS-1$ //$NON-NLS-2$
+                        + caretAfter + ",\"seq\":" + seq + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
+            }
+            else
             {
                 completionAutoOpenPending = true;
                 completionAutoOpenCaret = caretAfter;
                 completionAutoOpenIrScheduled = true;
                 completionAutoOpenEdtOpened = false;
                 completionAutoOpenActiveSeq = seq;
+                // #region agent log
+                ContentAssistDebug.traceAssist("H4", "onDocumentChangedForCompletionAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
+                    "symbolIrScheduled", "{\"branch\":\"" + branch + "\",\"caretAfter\":" //$NON-NLS-1$ //$NON-NLS-2$
+                        + caretAfter + ",\"seq\":" + seq + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
             }
         }
         else
@@ -975,12 +995,6 @@ public final class ContentAssistSessionReloader
         StyledText text = viewer.getTextWidget() instanceof StyledText st ? st : null;
         int liveCaret = text != null && !text.isDisposed() ? text.getCaretOffset() : -1;
         boolean popupVisible = ContentAssistPopupSync.isPopupVisible(assistant);
-        // #region agent log
-        ContentAssistDebug.logAutoOpen(autoOpenSeq, "H72", "fireCompletionAutoOpenTimer", //$NON-NLS-1$ //$NON-NLS-2$
-            "timerFired", "{\"gen\":" + gen + ",\"genGlobal\":" + genGlobal //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"expectedCaret\":" + expectedCaretAfter + ",\"liveCaret\":" + liveCaret //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"popupVisible\":" + popupVisible + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
         if (gen != genGlobal)
         {
             logTimerAbort(autoOpenSeq, "genStale", gen, genGlobal, expectedCaretAfter, liveCaret); //$NON-NLS-1$
@@ -1117,21 +1131,6 @@ public final class ContentAssistSessionReloader
                 + ",\"autoOpenSeq\":" + autoOpenSeq //$NON-NLS-1$
                 + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         // #endregion
-        Control widget = (Control)viewer.getTextWidget();
-        if (widget != null && !widget.isDisposed())
-        {
-            Display display = widget.getDisplay();
-            if (display != null && !display.isDisposed())
-            {
-                display.timerExec(50, () -> {
-                    // #region agent log
-                    ContentAssistDebug.logAutoOpen(autoOpenSeq, "H75", "openCompletionAutoEdtPopup", //$NON-NLS-1$ //$NON-NLS-2$
-                        "showAfter", "{\"popupVisible\":" //$NON-NLS-1$ //$NON-NLS-2$
-                            + ContentAssistPopupSync.isPopupVisible(assistant) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                    // #endregion
-                });
-            }
-        }
     }
 
     private void openCompletionAutoIrPopup(IrBslCompletionSupport.Snapshot snapshot, int caret,
@@ -1161,6 +1160,11 @@ public final class ContentAssistSessionReloader
         if (popupVisible && assistant != null && viewer != null && processor != null)
             syncLiteralPopupAfterShow(assistant, viewer, snapshot);
         // #region agent log
+        ContentAssistDebug.traceAssist("H5", "openCompletionAutoIrPopup", "result", //$NON-NLS-1$ //$NON-NLS-2$
+            "{\"caret\":" + liveCaret + ",\"shown\":" + shown //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"popupVisible\":" + popupVisible //$NON-NLS-1$
+                + ",\"irN\":" + (snapshot != null && snapshot.proposals != null ? snapshot.proposals.length : 0) //$NON-NLS-1$
+                + ",\"autoOpenSeq\":" + autoOpenSeq + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         ContentAssistDebug.logAutoOpen(autoOpenSeq, "H77", "openCompletionAutoIrPopup", "irOpen", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "{\"caret\":" + liveCaret //$NON-NLS-1$
                 + ",\"irN\":" + (snapshot != null && snapshot.proposals != null ? snapshot.proposals.length : 0) //$NON-NLS-1$
@@ -1233,6 +1237,50 @@ public final class ContentAssistSessionReloader
     int peekCompletionAutoOpenActiveSeq()
     {
         return completionAutoOpenActiveSeq;
+    }
+
+    private boolean isCompletionAutoOpenAwaitingIr()
+    {
+        if (!completionAutoOpenPending && !completionAutoOpenIrScheduled)
+            return false;
+        if (wordsTableFetchInFlight && wordsTableCaret == completionAutoOpenCaret)
+            return true;
+        return completionAutoOpenPending && !wordsTableReady
+            && wordsTableCaret == completionAutoOpenCaret;
+    }
+
+    private boolean shouldIrAutoOpenPopup(IrBslCompletionSupport.Snapshot snapshot, int caret,
+                                          boolean popupVisible)
+    {
+        String reject = null;
+        if (snapshot == null || snapshot.proposals == null || snapshot.proposals.length == 0)
+            reject = "noProposals"; //$NON-NLS-1$
+        else if (!snapshot.autoOpenSuggested)
+            reject = "autoOpenSuggestedFalse"; //$NON-NLS-1$
+        else if (popupVisible)
+            reject = "popupAlreadyVisible"; //$NON-NLS-1$
+        else if (manualIrAssistPending)
+            reject = "manualIrAssistPending"; //$NON-NLS-1$
+        else
+        {
+            StyledText text = viewer.getTextWidget() instanceof StyledText st ? st : null;
+            int liveCaret = text != null && !text.isDisposed() ? text.getCaretOffset() : -1;
+            if (liveCaret != caret)
+                reject = "caretMismatch:" + liveCaret + "!=" + caret; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        if (reject != null)
+        {
+            // #region agent log
+            ContentAssistDebug.traceAssist("H3", "shouldIrAutoOpenPopup", "reject", //$NON-NLS-1$ //$NON-NLS-2$
+                "{\"caret\":" + caret + ",\"reason\":\"" + reject //$NON-NLS-1$ //$NON-NLS-2$
+                    + "\",\"irN\":" + (snapshot != null && snapshot.proposals != null //$NON-NLS-1$
+                        ? snapshot.proposals.length : 0) //$NON-NLS-1$
+                    + ",\"autoOpenSuggested\":" + (snapshot != null && snapshot.autoOpenSuggested) //$NON-NLS-1$
+                    + ",\"rawNull\":" + (snapshot == null) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return false;
+        }
+        return true;
     }
 
     private static boolean shouldOpenFromIr(IrBslCompletionSupport.Snapshot snapshot)
@@ -2332,15 +2380,29 @@ public final class ContentAssistSessionReloader
         ContentAssistDebug.logAutoOpen(completionAutoOpenActiveSeq, "H77", //$NON-NLS-1$
             "scheduleWordsTablePreparation", "irFetchScheduled", //$NON-NLS-1$ //$NON-NLS-2$
             "{\"caret\":" + caret + ",\"autoInvoke\":" + autoInvoke //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"syncCaret\":" + (autoInvoke ? caret : IrBslCompletionSupport.SYNC_USE_EDITOR_SELECTION) //$NON-NLS-1$
                 + ",\"fetchSeq\":" + fetchDiagSeq + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         // #endregion
-        IrBslCompletionSupport.prepareAssistContextAsync(session, bslEditor, caret, autoInvoke,
+        int syncCaretOffset = autoInvoke
+            ? caret : IrBslCompletionSupport.SYNC_USE_EDITOR_SELECTION;
+        IrBslCompletionSupport.prepareAssistContextAsync(session, bslEditor, syncCaretOffset, autoInvoke,
             closePrevious, raw -> onWordsTablePrepared(caret, raw, fetchDiagSeq));
         return true;
     }
 
     private void onWordsTablePrepared(int caret, IrBslCompletionSupport.Snapshot raw, int fetchDiagSeq)
     {
+        boolean staleFetch = fetchDiagSeq < wordsTableFetchDiagSeq;
+        if (staleFetch)
+        {
+            // #region agent log
+            ContentAssistDebug.traceAssist("H1", "onWordsTablePrepared", "staleDiscarded", //$NON-NLS-1$ //$NON-NLS-2$
+                "{\"caret\":" + caret + ",\"fetchSeq\":" + fetchDiagSeq //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"latestSeq\":" + wordsTableFetchDiagSeq + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            runPendingAfterWordsTable();
+            return;
+        }
         wordsTableFetchInFlight = false;
         wordsTableReady = true;
         wordsTableCaret = caret;
@@ -2351,7 +2413,6 @@ public final class ContentAssistSessionReloader
         int procIrN = processor.diagIrProposalCount();
         int procFullN = processor.diagFullListCacheCount();
         boolean popupNow = ContentAssistPopupSync.isPopupVisible(assistant);
-        boolean staleFetch = fetchDiagSeq < wordsTableFetchDiagSeq;
         boolean wouldDowngradeApplied = prevAppliedN >= 0 && irCount < prevAppliedN;
         boolean wouldDowngradeProc = procIrN > irCount && processor.isIrWordsResolvedForContext();
         // #region agent log
@@ -2400,6 +2461,22 @@ public final class ContentAssistSessionReloader
         }
         BslSideHintDebug.log("wordsTable ready caret=" + caret); //$NON-NLS-1$
         boolean popupVisible = ContentAssistPopupSync.isPopupVisible(assistant);
+        if (shouldIrAutoOpenPopup(snapshot, caret, popupVisible))
+        {
+            int autoOpenSeq = completionAutoOpenActiveSeq;
+            // #region agent log
+            ContentAssistDebug.traceAssist("H3", "onWordsTablePrepared", "irAutoOpenAttempt", //$NON-NLS-1$ //$NON-NLS-2$
+                "{\"caret\":" + caret + ",\"irN\":" + irCount //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"rawNull\":" + (raw == null) + ",\"seq\":" + autoOpenSeq + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            openCompletionAutoIrPopup(snapshot, caret, autoOpenSeq);
+            clearCompletionAutoOpenState("irAutoOpen", autoOpenSeq); //$NON-NLS-1$
+            ContentAssistDebug.logAutoOpenDecision("irAutoOpen", caret, irCount); //$NON-NLS-1$
+            irSnapshotAppliedCaret = caret;
+            irSnapshotAppliedIrCount = irCount;
+            runPendingAfterWordsTable();
+            return;
+        }
         // #region agent log
         ContentAssistDebug.debugModeLog("H2", "onWordsTablePrepared", "branch", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "{\"caret\":" + caret + ",\"irN\":" + snapshot.proposals.length //$NON-NLS-1$ //$NON-NLS-2$
@@ -2417,14 +2494,6 @@ public final class ContentAssistSessionReloader
             boolean irGate = shouldOpenFromIr(snapshot);
             boolean edtOpened = completionAutoOpenEdtOpened;
             String decision;
-            // #region agent log
-            ContentAssistDebug.logAutoOpen(autoOpenSeq, "H78", "onWordsTablePrepared", //$NON-NLS-1$ //$NON-NLS-2$
-                "autoOpenBranch", "{\"caret\":" + caret + ",\"irN\":" + irCount //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"irGate\":" + irGate //$NON-NLS-1$
-                    + ",\"edtOpened\":" + edtOpened //$NON-NLS-1$
-                    + ",\"popupVisible\":" + popupVisible //$NON-NLS-1$
-                    + ",\"autoOpenSuggested\":" + snapshot.autoOpenSuggested + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             if (!irGate && !edtOpened)
             {
                 decision = "clearBothFail"; //$NON-NLS-1$
@@ -2438,12 +2507,6 @@ public final class ContentAssistSessionReloader
                     ContentAssistPopupSync.recomputePopupList(assistant, viewer, processor);
                 clearCompletionAutoOpenState(decision, autoOpenSeq);
                 setLiteralOpenSetupComplete(true);
-            }
-            else if (irGate && !popupVisible)
-            {
-                decision = "irOpen"; //$NON-NLS-1$
-                openCompletionAutoIrPopup(snapshot, caret, autoOpenSeq);
-                clearCompletionAutoOpenState(decision, autoOpenSeq);
             }
             else if (irGate && popupVisible)
             {
@@ -2459,14 +2522,18 @@ public final class ContentAssistSessionReloader
                 decision = "noop"; //$NON-NLS-1$
                 clearCompletionAutoOpenState(decision, autoOpenSeq);
             }
-            // #region agent log
-            ContentAssistDebug.logAutoOpen(autoOpenSeq, "H78", "onWordsTablePrepared", //$NON-NLS-1$ //$NON-NLS-2$
-                "autoOpenDecision", "{\"decision\":\"" + decision + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            // #endregion
+            ContentAssistDebug.logAutoOpenDecision(decision, caret, irCount);
             irSnapshotAppliedCaret = caret;
             irSnapshotAppliedIrCount = irCount;
             runPendingAfterWordsTable();
             return;
+        }
+        if (shouldOpenFromIr(snapshot) && !popupVisible && !manualIrAssistPending)
+        {
+            ContentAssistDebug.agentLog("H78", "onWordsTablePrepared", "autoOpenSkipped", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"caret\":" + caret //$NON-NLS-1$
+                    + ",\"autoOpenSuggested\":" + snapshot.autoOpenSuggested //$NON-NLS-1$
+                    + ",\"irN\":" + irCount + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
         if (manualIrAssistPending && isManualCaretMatch(caret))
         {

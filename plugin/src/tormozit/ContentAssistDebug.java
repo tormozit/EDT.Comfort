@@ -22,10 +22,15 @@ public final class ContentAssistDebug
     private static final AtomicInteger agentValidateLogs = new AtomicInteger();
     private static final Path DEBUG_SESSION_LOG = Path.of("C:\\VC\\EDT.Comfort\\debug-0ae881.log"); //$NON-NLS-1$
     private static final String DEBUG_SESSION_ID = "0ae881"; //$NON-NLS-1$
-    private static final Path DEBUG_MODE_LOG = Path.of("C:\\VC\\EDT.Comfort\\debug-c201d2.log"); //$NON-NLS-1$
-    private static final String DEBUG_MODE_SESSION_ID = "c201d2"; //$NON-NLS-1$
-    /** Маркер сборки для literal assist — сверять в debug-c201d2.log (H00/H0). */
-    public static final String LITERAL_ASSIST_BUILD = "20260627-literal-freeze2"; //$NON-NLS-1$
+    private static final Path DEBUG_MODE_LOG = Path.of("C:\\VC\\EDT.Comfort\\debug-267a94.log"); //$NON-NLS-1$
+    private static final String DEBUG_MODE_SESSION_ID = "267a94"; //$NON-NLS-1$
+    /** Маркер сборки для literal assist. */
+    public static final String LITERAL_ASSIST_BUILD = "20260708-sync-selection"; //$NON-NLS-1$
+    /** NDJSON в debug-267a94.log — всегда при отладке автооткрытия. */
+    private static final boolean NDJSON_ENABLED = true;
+    /** Доп. шум только с {@code -Dtormozit.contentAssistVerbose=true}. */
+    private static final boolean VERBOSE =
+        Boolean.getBoolean("tormozit.contentAssistVerbose"); //$NON-NLS-1$
 
     /**
      * Асинхронная очередь для disk-write логов — никакого I/O на UI-потоке.
@@ -36,10 +41,16 @@ public final class ContentAssistDebug
 
     static
     {
-        try { Files.deleteIfExists(DEBUG_MODE_LOG); } catch (IOException e) { /* best-effort */ }
-        try { Files.deleteIfExists(DEBUG_SESSION_LOG); } catch (IOException e) { /* best-effort */ }
-        startAsyncWriter("ContentAssistDebugModeWriter", DEBUG_MODE_LOG, DEBUG_MODE_QUEUE); //$NON-NLS-1$
-        startAsyncWriter("ContentAssistSessionWriter", DEBUG_SESSION_LOG, SESSION_QUEUE); //$NON-NLS-1$
+        if (NDJSON_ENABLED)
+        {
+            try { Files.deleteIfExists(DEBUG_MODE_LOG); } catch (IOException e) { /* best-effort */ }
+            startAsyncWriter("ContentAssistDebugModeWriter", DEBUG_MODE_LOG, DEBUG_MODE_QUEUE); //$NON-NLS-1$
+        }
+        if (VERBOSE)
+        {
+            try { Files.deleteIfExists(DEBUG_SESSION_LOG); } catch (IOException e) { /* best-effort */ }
+            startAsyncWriter("ContentAssistSessionWriter", DEBUG_SESSION_LOG, SESSION_QUEUE); //$NON-NLS-1$
+        }
     }
 
     private static void startAsyncWriter(String threadName, Path logPath, BlockingQueue<String> queue)
@@ -83,7 +94,7 @@ public final class ContentAssistDebug
             "{\"build\":\"" + LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
-    /** NDJSON автооткрытия assist — dataJson дополняется build и autoOpenSeq. */
+    /** NDJSON автооткрытия — в файл; в журнал при «Общем логировании». */
     public static void logAutoOpen(int autoOpenSeq, String hypothesisId, String location,
         String message, String dataJson)
     {
@@ -92,22 +103,41 @@ public final class ContentAssistDebug
         String data = trimmed + ",\"autoOpenSeq\":" + autoOpenSeq //$NON-NLS-1$
             + ",\"build\":\"" + LITERAL_ASSIST_BUILD + "\"}"; //$NON-NLS-1$ //$NON-NLS-2$
         debugModeLog(hypothesisId, location, message, data);
+        agentLog(hypothesisId, location, message, data);
     }
 
-    /** NDJSON в debug-c201d2.log — отладка IR Ctrl+Space (без флажка логирования). */
+    /** Трассировка решений popup — NDJSON + журнал «Комфорт». */
+    public static void traceAssist(String hypothesisId, String location, String message,
+                                   String dataJson)
+    {
+        debugModeLog(hypothesisId, location, message, dataJson);
+        agentLog(hypothesisId, location, message, dataJson);
+    }
+
+    /** Decision-point автооткрытия в журнал «Комфорт». */
+    public static void logAutoOpenDecision(String decision, int caret, int irN)
+    {
+        agentLog("H78", "onWordsTablePrepared", "autoOpenDecision", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"decision\":\"" + jsonEscape(decision) + "\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"irN\":" + irN + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** NDJSON в debug-267a94.log. */
     public static void debugModeLog(String hypothesisId, String location, String message,
                                     String dataJson)
     {
+        if (!NDJSON_ENABLED)
+            return;
         try
         {
-//            String data = dataJson != null && !dataJson.isEmpty() ? dataJson : "{}"; //$NON-NLS-1$
-//            String line = "{\"sessionId\":\"" + DEBUG_MODE_SESSION_ID //$NON-NLS-1$
-//                + "\",\"hypothesisId\":\"" + hypothesisId //$NON-NLS-1$
-//                + "\",\"location\":\"" + location //$NON-NLS-1$
-//                + "\",\"message\":\"" + jsonEscape(message) //$NON-NLS-1$
-//                + "\",\"data\":" + data //$NON-NLS-1$
-//                + ",\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
-//            DEBUG_MODE_QUEUE.offer(line); // non-blocking; drops if queue full
+            String data = dataJson != null && !dataJson.isEmpty() ? dataJson : "{}"; //$NON-NLS-1$
+            String line = "{\"sessionId\":\"" + DEBUG_MODE_SESSION_ID //$NON-NLS-1$
+                + "\",\"hypothesisId\":\"" + hypothesisId //$NON-NLS-1$
+                + "\",\"location\":\"" + location //$NON-NLS-1$
+                + "\",\"message\":\"" + jsonEscape(message) //$NON-NLS-1$
+                + "\",\"data\":" + data //$NON-NLS-1$
+                + ",\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
+            DEBUG_MODE_QUEUE.offer(line); // non-blocking; drops if queue full
         }
         catch (Exception ignored)
         {

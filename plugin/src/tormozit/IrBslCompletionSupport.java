@@ -15,6 +15,7 @@ import java.util.function.Consumer;
 
 import org.eclipse.jface.text.ITextSelection;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
+import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.swt.widgets.Display;
 
@@ -25,6 +26,8 @@ public final class IrBslCompletionSupport
 {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final String CONTEXT_VARIANT_SEPARATOR = "$"; //$NON-NLS-1$
+    /** {@code prepareAssistContextAsync}: sync по выделению редактора (offset+length), не свёрнутая каретка. */
+    public static final int SYNC_USE_EDITOR_SELECTION = -1;
 
     /** Результат {@code ОписаниеТекущегоСловаАвтодополнения} (RDT {@code ПриАктивизацииСтрокиТ9}). */
     public static final class ActivationDescription
@@ -265,6 +268,9 @@ public final class IrBslCompletionSupport
 
     /**
      * Sync на UI; COM на {@code session.executor}; callback на UI после цепочки RDT.
+     *
+     * @param caretOffset каретка для sync ({@code offset==endOffset}) при auto-open;
+     *                    {@link #SYNC_USE_EDITOR_SELECTION} — выделение редактора (Ctrl+Space, assist-сессия)
      */
     public static void prepareAssistContextAsync(
         IRSession session, BslXtextEditor editor, int caretOffset, boolean autoInvoke,
@@ -283,7 +289,37 @@ public final class IrBslCompletionSupport
         IRSession.CodeEditorSyncPayload payload;
         try
         {
-            payload = session.prepareCodeEditorSyncFromEditor(editor);
+            // Auto-open: явная каретка (ITextSelection после VerifyKey ещё 0+0).
+            // Ctrl+Space / assist-сессия: выделение редактора (может быть диапазон).
+            if (_caretOffset >= 0)
+                payload = session.prepareCodeEditorSyncForAssist(editor, _caretOffset, _caretOffset);
+            else
+                payload = session.prepareCodeEditorSyncFromEditor(editor);
+            // #region agent log
+            if (payload != null)
+            {
+                int selOffset = -1;
+                int selLen = -1;
+                ISourceViewer viewer = editor.getInternalSourceViewer();
+                if (viewer != null)
+                {
+                    Object sel = viewer.getSelectionProvider().getSelection();
+                    if (sel instanceof ITextSelection textSelection)
+                    {
+                        selOffset = textSelection.getOffset();
+                        selLen = textSelection.getLength();
+                    }
+                }
+                ContentAssistDebug.traceAssist("H11", "prepareAssistContextAsync", "syncCaret", //$NON-NLS-1$ //$NON-NLS-2$
+                    "{\"requestedCaret\":" + _caretOffset //$NON-NLS-1$
+                        + ",\"useEditorSelection\":" + (_caretOffset < 0) //$NON-NLS-1$
+                        + ",\"payloadOffset\":" + payload.offset //$NON-NLS-1$
+                        + ",\"payloadEndOffset\":" + payload.endOffset //$NON-NLS-1$
+                        + ",\"editorSelOffset\":" + selOffset //$NON-NLS-1$
+                        + ",\"editorSelLen\":" + selLen //$NON-NLS-1$
+                        + ",\"autoInvoke\":" + autoInvoke + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            // #endregion
         }
         catch (Exception e)
         {
@@ -355,7 +391,14 @@ public final class IrBslCompletionSupport
                 + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         // #endregion
         if (!autoOpenSuggested)
+        {
+            IrCompletionDebug.log("ЗаполнитьТаблицуСлов autoOpen=false autoInvoke=" + autoInvoke); //$NON-NLS-1$
+            // #region agent log
+            ContentAssistDebug.traceAssist("H2", "fetchCompletionSnapshot", "irFillRejected", //$NON-NLS-1$ //$NON-NLS-2$
+                "{\"autoInvoke\":" + autoInvoke + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
             return null;
+        }
 
         String contextType = ComBridge.toString(
             session.invokeCodeEditorQuiet("ИмяТипаКонтекста")); //$NON-NLS-1$

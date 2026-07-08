@@ -326,8 +326,8 @@ public final class IRSession
         {
             final String text;
             final String moduleName;
-            final int offset;
-            final int endOffset;
+            final int offset; // start from 0
+            final int endOffset; // start from 0
             final String bslPath;
             final byte[] hash;
             final List<IRModuleChangeCollector.ModuleSyncEntry> pending;
