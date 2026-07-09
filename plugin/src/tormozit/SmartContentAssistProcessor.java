@@ -762,9 +762,6 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                 continue;
             irByKey.putIfAbsent(key.toLowerCase(java.util.Locale.ROOT), ir);
         }
-        int adopted = 0;
-        String sampleKey = null;
-        String sampleDisplay = null;
         for (ICompletionProposal p : merged)
         {
             if (unwrapProposal(p) instanceof IrCompletionProposal)
@@ -774,25 +771,8 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                 continue;
             IrCompletionProposal ir = irByKey.get(key.toLowerCase(java.util.Locale.ROOT));
             if (ir != null)
-            {
                 applyIrDisplayToEdtOverlap(p, ir);
-                adopted++;
-                if (sampleKey == null)
-                {
-                    sampleKey = key;
-                    sampleDisplay = resolveIrOverlapDisplay(displayString(unwrapProposal(p)), key);
-                }
-            }
         }
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H91", "adoptIrTypeForEdtOverlaps", "done", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"mergedN\":" + merged.length //$NON-NLS-1$
-                + ",\"irN\":" + irList.length //$NON-NLS-1$
-                + ",\"adopted\":" + adopted //$NON-NLS-1$
-                + ",\"sampleKey\":\"" + ContentAssistDebug.jsonEscapeForLog(sampleKey) //$NON-NLS-1$
-                + "\",\"sampleDisplay\":\"" + ContentAssistDebug.jsonEscapeForLog(sampleDisplay) //$NON-NLS-1$
-                + "\"}"); //$NON-NLS-1$
-        // #endregion
     }
 
     private void applyIrSnapshotData(IrBslCompletionSupport.Snapshot snapshot)
@@ -1050,6 +1030,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     void onAssistSessionContextReady(ITextViewer viewer, int caret)
     {
         IDocument doc = viewer != null ? viewer.getDocument() : null;
+        // В литерале не планируем member-stock / async delegate (см. ensureFullListForContext).
         ensureFullListForContext(viewer, doc, caret, false);
         tryRestoreIrSnapshotFromCache(doc, caret);
     }
@@ -3363,6 +3344,10 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             clearDelegateSyncProbe();
             ContentAssistDebug.log("fullList context change key=" + contextKey //$NON-NLS-1$
                 + " caret=" + caret); //$NON-NLS-1$
+            // В строковом литерале «.» — не member-access: иначе scheduleMemberStockCapture
+            // (readOnly + computeCompletionProposals) занимает UI ~2 с и блокирует IR callback.
+            if (isStringLiteralAssistContext(doc, caret))
+                return;
             int dot = ReceiverTypeLabel.findMemberAccessDot(doc, caret);
             if (dot >= 0)
             {
@@ -3772,6 +3757,10 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     {
         if (viewer == null || dotContextKey < 0)
             return;
+        // «.» в строковом литерале — не member-access; readOnly здесь держит UI ~2 с.
+        int caretProbe = resolveWidgetCaret(viewer);
+        if (caretProbe >= 0 && isStringLiteralAssistContext(viewer, caretProbe))
+            return;
         if (memberStockFullListDot == dotContextKey
             && memberStockFullList.length >= MIN_STABLE_MEMBER_CACHE)
             return;
@@ -3793,6 +3782,8 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                 return;
             IDocument doc = viewer.getDocument();
             int caret = resolveWidgetCaret(viewer);
+            if (isStringLiteralAssistContext(doc, caret))
+                return;
             if (ReceiverTypeLabel.findMemberAccessDot(doc, caret) != dotContextKey)
                 return;
             boolean allowShift = canShiftCaretForMemberCapture(viewer);

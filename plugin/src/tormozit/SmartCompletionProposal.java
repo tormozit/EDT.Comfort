@@ -944,39 +944,16 @@ public class SmartCompletionProposal implements
     private void scheduleEdtRowActivation()
     {
         if (!ComfortSettings.isReplaceListFiltersEnabled())
-        {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H91", "scheduleEdtRowActivation", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"reason\":\"filtersOff\"}"); //$NON-NLS-1$
-            // #endregion
             return;
-        }
         ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
         if (reloader == null)
-        {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H91", "scheduleEdtRowActivation", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"reason\":\"noReloader\"}"); //$NON-NLS-1$
-            // #endregion
             return;
-        }
         String cacheKey = BslCompletionSideHintResolver.resolveIrCacheKey(delegate);
         String name = BslCompletionSideHintResolver.resolveElementName(delegate);
         String kind = BslCompletionSideHintResolver.resolveElementKind(delegate);
         if (cacheKey == null || cacheKey.isEmpty() || name == null || name.isEmpty()
             || kind == null)
-        {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H91", "scheduleEdtRowActivation", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"reason\":\"badKey\"" //$NON-NLS-1$
-                    + ",\"name\":\"" + ContentAssistDebug.jsonEscapeForLog(name) //$NON-NLS-1$
-                    + "\",\"kind\":\"" + ContentAssistDebug.jsonEscapeForLog(kind) //$NON-NLS-1$
-                    + "\",\"cacheKeyLen\":" + (cacheKey != null ? cacheKey.length() : -1) //$NON-NLS-1$
-                    + ",\"display\":\"" + ContentAssistDebug.jsonEscapeForLog( //$NON-NLS-1$
-                        delegate.getDisplayString()) + "\"}"); //$NON-NLS-1$
-            // #endregion
             return;
-        }
         Object baseInfo = null;
         if (delegate instanceof ICompletionProposalExtension5 ext5)
             baseInfo = ext5.getAdditionalProposalInfo(new NullProgressMonitor());
@@ -994,13 +971,6 @@ public class SmartCompletionProposal implements
         final IrBslCompletionSupport.ActivationDescription cached = cachedRaw;
         if (cached != null)
         {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H91", "scheduleEdtRowActivation", "cached", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"name\":\"" + ContentAssistDebug.jsonEscapeForLog(name) //$NON-NLS-1$
-                    + "\",\"kind\":\"" + ContentAssistDebug.jsonEscapeForLog(kind) //$NON-NLS-1$
-                    + "\",\"type\":\"" + ContentAssistDebug.jsonEscapeForLog(cached.type) //$NON-NLS-1$
-                    + "\"}"); //$NON-NLS-1$
-            // #endregion
             Display display = Display.getDefault();
             if (display == null || display.isDisposed())
                 return;
@@ -1009,22 +979,10 @@ public class SmartCompletionProposal implements
             return;
         }
         if (!reloader.tryBeginIrActivation(cacheKey))
-        {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H91", "scheduleEdtRowActivation", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"reason\":\"pending\",\"name\":\"" //$NON-NLS-1$
-                    + ContentAssistDebug.jsonEscapeForLog(name) + "\"}"); //$NON-NLS-1$
-            // #endregion
             return;
-        }
         IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(reloader.getBslEditor());
         if (session == null)
         {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H91", "scheduleEdtRowActivation", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"reason\":\"noSession\",\"name\":\"" //$NON-NLS-1$
-                    + ContentAssistDebug.jsonEscapeForLog(name) + "\"}"); //$NON-NLS-1$
-            // #endregion
             reloader.endIrActivation(cacheKey);
             return;
         }
@@ -1039,14 +997,6 @@ public class SmartCompletionProposal implements
             reloader.endIrActivation(cacheKey);
             return;
         }
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H91", "scheduleEdtRowActivation", "fetch", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"name\":\"" + ContentAssistDebug.jsonEscapeForLog(name) //$NON-NLS-1$
-                + "\",\"kind\":\"" + ContentAssistDebug.jsonEscapeForLog(kind) //$NON-NLS-1$
-                + "\",\"isMethod\":" + isMethod //$NON-NLS-1$
-                + ",\"gen\":" + gen //$NON-NLS-1$
-                + ",\"display\":\"" + ContentAssistDebug.jsonEscapeForLog(displayKey) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
         display.asyncExec(() -> submitEdtActivationOnUi(
             reloader, session, editor, gen, cacheKey, displayKey, name, isMethod, baseInput, delegate));
     }
@@ -1309,24 +1259,7 @@ public class SmartCompletionProposal implements
                 IrBslCompletionSupport.fetchWordActivationDescription(
                     session, target.wordValue, target.isMethod, target.dictionaryKey);
             if (desc == null)
-            {
-                // #region agent log
-                ContentAssistDebug.debugModeLog("H91", "runEdtActivationFetch", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"reason\":\"nullDesc\",\"word\":\"" //$NON-NLS-1$
-                        + ContentAssistDebug.jsonEscapeForLog(wordValue)
-                        + "\",\"dict\":\"" + ContentAssistDebug.jsonEscapeForLog( //$NON-NLS-1$
-                            target.dictionaryKey) + "\"}"); //$NON-NLS-1$
-                // #endregion
                 return;
-            }
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H91", "runEdtActivationFetch", "ok", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"word\":\"" + ContentAssistDebug.jsonEscapeForLog(target.wordValue) //$NON-NLS-1$
-                    + "\",\"dict\":\"" + ContentAssistDebug.jsonEscapeForLog(target.dictionaryKey) //$NON-NLS-1$
-                    + "\",\"isMethod\":" + target.isMethod //$NON-NLS-1$
-                    + ",\"type\":\"" + ContentAssistDebug.jsonEscapeForLog(desc.type) //$NON-NLS-1$
-                    + "\",\"gen\":" + gen + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
             // Без КлючНабораСлов ИР часто отдаёт пустой Тип — не кэшируем, иначе overlap залипает.
             boolean hasType = desc.type != null && !desc.type.isEmpty();
             boolean hasDict = target.dictionaryKey != null && !target.dictionaryKey.isEmpty();
@@ -1368,52 +1301,21 @@ public class SmartCompletionProposal implements
         ICompletionProposal edtDelegate, IrBslCompletionSupport.ActivationDescription desc)
     {
         if (desc == null || desc.type == null || desc.type.isEmpty())
-        {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H91", "applyEdtListTypeFromIrActivation", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"reason\":\"noType\"}"); //$NON-NLS-1$
-            // #endregion
             return;
-        }
         SmartContentAssistProcessor processor = ContentAssistSessionReloader.getActiveProcessor();
         if (processor == null)
-        {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H91", "applyEdtListTypeFromIrActivation", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"reason\":\"noProcessor\"}"); //$NON-NLS-1$
-            // #endregion
             return;
-        }
         String key = SmartContentAssistProcessor.dedupKeyForMerge(edtDelegate);
         IrCompletionProposal ir = processor.findIrProposalForDedupKey(key);
         if (ir == null)
-        {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H91", "applyEdtListTypeFromIrActivation", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"reason\":\"noIr\"" //$NON-NLS-1$
-                    + ",\"key\":\"" + ContentAssistDebug.jsonEscapeForLog(key) //$NON-NLS-1$
-                    + "\",\"type\":\"" + ContentAssistDebug.jsonEscapeForLog(desc.type) //$NON-NLS-1$
-                    + "\",\"display\":\"" + ContentAssistDebug.jsonEscapeForLog( //$NON-NLS-1$
-                        edtDelegate.getDisplayString()) + "\"}"); //$NON-NLS-1$
-            // #endregion
             return;
-        }
         String edtDisplay = edtDelegate.getDisplayString();
         String old = processor.resolveIrOverlapDisplay(edtDisplay, key);
         processor.putIrOverlapTypeFromIr(key, ir, desc.type);
         String display = SmartContentAssistProcessor.injectIrTypeIntoEdtDisplay(
             edtDisplay, ir.getListTypeLabel(), desc.type, ir.getParentContextType());
         SmartContentAssistProcessor.applyIrDisplayToEdt(edtDelegate, display);
-        boolean same = display.equals(old);
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H91", "applyEdtListTypeFromIrActivation", "done", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"key\":\"" + ContentAssistDebug.jsonEscapeForLog(key) //$NON-NLS-1$
-                + "\",\"type\":\"" + ContentAssistDebug.jsonEscapeForLog(desc.type) //$NON-NLS-1$
-                + "\",\"same\":" + same //$NON-NLS-1$
-                + ",\"old\":\"" + ContentAssistDebug.jsonEscapeForLog(old) //$NON-NLS-1$
-                + "\",\"new\":\"" + ContentAssistDebug.jsonEscapeForLog(display) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        if (same)
+        if (display.equals(old))
             return;
         ContentAssistPopupSync.refreshProposalTable(assistant);
     }

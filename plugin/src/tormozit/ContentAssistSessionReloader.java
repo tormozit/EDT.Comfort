@@ -228,6 +228,8 @@ public final class ContentAssistSessionReloader
                 boolean inLiteral = caret >= 0
                     && SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret);
                 if (!event.isAutoActivated && inLiteral && !manualIrAssistPending
+                    && !completionAutoOpenPending && !completionAutoOpenIrScheduled
+                    && !processor.isIrOnlyManualMode()
                     && ComfortSettings.isReplaceListFiltersEnabled()
                     && IrBslExpressionHtmlSupport.resolveIrSessionForAssist(bslEditor, viewer) != null)
                 {
@@ -1063,7 +1065,6 @@ public final class ContentAssistSessionReloader
         completionAutoOpenIrScheduled = false;
         completionAutoOpenAwaitingLogged = false;
         ContentAssistPopupSync.ensureEmptyListAllowed(assistant, false);
-        warmupAssistBrowserCreator(caret);
         processor.onAssistSessionContextReady(viewer, caret);
         IRSession session = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(bslEditor, viewer);
         boolean irScheduled = false;
@@ -1073,6 +1074,8 @@ public final class ContentAssistSessionReloader
             if (irScheduled)
             {
                 completionAutoOpenIrScheduled = true;
+                // Ждём ИР: открытие только при autoOpenSuggested (ЗаполнитьТаблицуСлов).
+                // Browser warmup — в openCompletionAutoIrPopup (preShowLiteralBrowserPatch).
                 // #region agent log
                 ContentAssistDebug.logAutoOpen(autoOpenSeq, "H73", "beginCompletionAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
                     "irOnlyWait", "{\"caret\":" + caret + ",\"irScheduled\":true}"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -1080,6 +1083,7 @@ public final class ContentAssistSessionReloader
                 return;
             }
         }
+        warmupAssistBrowserCreator(caret);
         completionAutoOpenEdtOpened = true;
         // #region agent log
         ContentAssistDebug.logAutoOpen(autoOpenSeq, "H73", "beginCompletionAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
@@ -1169,6 +1173,23 @@ public final class ContentAssistSessionReloader
         }
         if (popupVisible && assistant != null && viewer != null && processor != null)
             syncLiteralPopupAfterShow(assistant, viewer, snapshot);
+        // Вне литерала finishDeferredLiteralPopupSetup не вызывается — иначе setupPhase
+        // блокирует requestIrPopupRefresh при смене контекста (напр. «.» после «_»).
+        boolean inLiteral = SmartContentAssistProcessor.isStringLiteralAssistContext(
+            viewer, liveCaret);
+        if (popupVisible && inLiteral)
+        {
+            widget.getDisplay().asyncExec(
+                () -> finishDeferredLiteralPopupSetup(assistant, viewer));
+        }
+        else
+        {
+            setLiteralOpenSetupComplete(true);
+            if (processor != null)
+                processor.exitIrOnlyManualMode();
+            if (pendingPopupRefresh)
+                flushPendingPopupRefreshIfAny();
+        }
         // #region agent log
         ContentAssistDebug.traceAssist("H5", "openCompletionAutoIrPopup", "result", //$NON-NLS-1$ //$NON-NLS-2$
             "{\"caret\":" + liveCaret + ",\"shown\":" + shown //$NON-NLS-1$ //$NON-NLS-2$
@@ -2414,6 +2435,8 @@ public final class ContentAssistSessionReloader
         boolean popupNow = ContentAssistPopupSync.isPopupVisible(assistant);
         boolean wouldDowngradeApplied = prevAppliedN >= 0 && irCount < prevAppliedN;
         boolean wouldDowngradeProc = procIrN > irCount && processor.isIrWordsResolvedForContext();
+        long sinceRequestMs = irWordsRequestStartedAtMs > 0
+            ? System.currentTimeMillis() - irWordsRequestStartedAtMs : -1;
         // #region agent log
         ContentAssistDebug.debugModeLog("H54", "onWordsTablePrepared", "snapshotArrival", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "{\"caret\":" + caret + ",\"fetchSeq\":" + fetchDiagSeq //$NON-NLS-1$ //$NON-NLS-2$
@@ -2425,6 +2448,7 @@ public final class ContentAssistSessionReloader
                 + ",\"popupVisible\":" + popupNow //$NON-NLS-1$
                 + ",\"wouldDowngradeApplied\":" + wouldDowngradeApplied //$NON-NLS-1$
                 + ",\"wouldDowngradeProc\":" + wouldDowngradeProc //$NON-NLS-1$
+                + ",\"sinceRequestMs\":" + sinceRequestMs //$NON-NLS-1$
                 + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         // #endregion
         boolean duplicateSnapshot = irSnapshotAppliedCaret == caret
