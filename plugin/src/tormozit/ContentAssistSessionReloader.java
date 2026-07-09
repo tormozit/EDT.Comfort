@@ -395,6 +395,9 @@ public final class ContentAssistSessionReloader
                         || (manualIrAssistPending && inLiteral && wordsTableReady);
                     if (!skipPopupSync)
                         ContentAssistPopupSync.scheduleSessionPopupSync(assistant, viewer, processor);
+                    else
+                        // irOnly (в т.ч. auto-open по «.»): полный sync пропущен — только «Фильтр»/«Родитель:»
+                        ContentAssistPopupSync.scheduleFilterBarSetup(assistant, viewer, processor);
                 }
             }
 
@@ -1510,6 +1513,13 @@ public final class ContentAssistSessionReloader
         if (stableCacheKey == null || stableCacheKey.isEmpty() || desc == null)
             return;
         irActivationByKey.put(stableCacheKey, desc);
+    }
+
+    public void removeIrActivation(String stableCacheKey)
+    {
+        if (stableCacheKey == null || stableCacheKey.isEmpty())
+            return;
+        irActivationByKey.remove(stableCacheKey);
     }
 
     /** Один COM {@code ОписаниеТекущегоСловаАвтодополнения} на ключ за одну активацию строки. */

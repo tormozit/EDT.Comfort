@@ -762,6 +762,9 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                 continue;
             irByKey.putIfAbsent(key.toLowerCase(java.util.Locale.ROOT), ir);
         }
+        int adopted = 0;
+        String sampleKey = null;
+        String sampleDisplay = null;
         for (ICompletionProposal p : merged)
         {
             if (unwrapProposal(p) instanceof IrCompletionProposal)
@@ -771,8 +774,25 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                 continue;
             IrCompletionProposal ir = irByKey.get(key.toLowerCase(java.util.Locale.ROOT));
             if (ir != null)
+            {
                 applyIrDisplayToEdtOverlap(p, ir);
+                adopted++;
+                if (sampleKey == null)
+                {
+                    sampleKey = key;
+                    sampleDisplay = resolveIrOverlapDisplay(displayString(unwrapProposal(p)), key);
+                }
+            }
         }
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H91", "adoptIrTypeForEdtOverlaps", "done", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"mergedN\":" + merged.length //$NON-NLS-1$
+                + ",\"irN\":" + irList.length //$NON-NLS-1$
+                + ",\"adopted\":" + adopted //$NON-NLS-1$
+                + ",\"sampleKey\":\"" + ContentAssistDebug.jsonEscapeForLog(sampleKey) //$NON-NLS-1$
+                + "\",\"sampleDisplay\":\"" + ContentAssistDebug.jsonEscapeForLog(sampleDisplay) //$NON-NLS-1$
+                + "\"}"); //$NON-NLS-1$
+        // #endregion
     }
 
     private void applyIrSnapshotData(IrBslCompletionSupport.Snapshot snapshot)

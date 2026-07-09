@@ -901,15 +901,21 @@ public class SmartCompletionProposal implements
         String merged = reloader.getIrMergedHtml(cacheKey);
         if (merged != null && !merged.isEmpty())
             return merged;
-        if (!IrBslHoverHtml.isBslBrowserInput(baseInfo))
-            return baseInfo;
         String irHtml = resolveActivationHtmlFromCache(reloader, cacheKey);
         if (irHtml != null && !irHtml.isEmpty())
         {
-            merged = IrBslHoverHtml.mergeHtml(IrBslHoverHtml.readHtml(baseInfo), irHtml);
-            reloader.putIrMergedHtml(cacheKey, merged);
-            return merged;
+            // Merge в боковую панель только если EDT дал BslBrowserInput; тип в списке
+            // уже обновлён через applyEdtListTypeFromIrActivation.
+            if (IrBslHoverHtml.isBslBrowserInput(baseInfo))
+            {
+                merged = IrBslHoverHtml.mergeHtml(IrBslHoverHtml.readHtml(baseInfo), irHtml);
+                reloader.putIrMergedHtml(cacheKey, merged);
+                return merged;
+            }
+            return baseInfo;
         }
+        // Активация (ОписаниеТекущегоСловаАвтодополнения) нужна и без BslBrowserInput —
+        // иначе overlap EDT+ИР не получает calculated type в подписи строки.
         maybeScheduleEdtRowActivation(reloader);
         return baseInfo;
     }
@@ -938,25 +944,63 @@ public class SmartCompletionProposal implements
     private void scheduleEdtRowActivation()
     {
         if (!ComfortSettings.isReplaceListFiltersEnabled())
+        {
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H91", "scheduleEdtRowActivation", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"reason\":\"filtersOff\"}"); //$NON-NLS-1$
+            // #endregion
             return;
+        }
         ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
         if (reloader == null)
+        {
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H91", "scheduleEdtRowActivation", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"reason\":\"noReloader\"}"); //$NON-NLS-1$
+            // #endregion
             return;
+        }
         String cacheKey = BslCompletionSideHintResolver.resolveIrCacheKey(delegate);
         String name = BslCompletionSideHintResolver.resolveElementName(delegate);
         String kind = BslCompletionSideHintResolver.resolveElementKind(delegate);
         if (cacheKey == null || cacheKey.isEmpty() || name == null || name.isEmpty()
             || kind == null)
+        {
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H91", "scheduleEdtRowActivation", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"reason\":\"badKey\"" //$NON-NLS-1$
+                    + ",\"name\":\"" + ContentAssistDebug.jsonEscapeForLog(name) //$NON-NLS-1$
+                    + "\",\"kind\":\"" + ContentAssistDebug.jsonEscapeForLog(kind) //$NON-NLS-1$
+                    + "\",\"cacheKeyLen\":" + (cacheKey != null ? cacheKey.length() : -1) //$NON-NLS-1$
+                    + ",\"display\":\"" + ContentAssistDebug.jsonEscapeForLog( //$NON-NLS-1$
+                        delegate.getDisplayString()) + "\"}"); //$NON-NLS-1$
+            // #endregion
             return;
+        }
         Object baseInfo = null;
         if (delegate instanceof ICompletionProposalExtension5 ext5)
             baseInfo = ext5.getAdditionalProposalInfo(new NullProgressMonitor());
         else
             baseInfo = delegate.getAdditionalProposalInfo();
         final Object baseInput = baseInfo;
-        IrBslCompletionSupport.ActivationDescription cached = reloader.getIrActivation(cacheKey);
+        IrBslCompletionSupport.ActivationDescription cachedRaw = reloader.getIrActivation(cacheKey);
+        // Пустой тип при overlap — обычно fetch без КлючНабораСлов до прихода ИР; не держим кэш.
+        if (cachedRaw != null && (cachedRaw.type == null || cachedRaw.type.isEmpty())
+            && resolveEdtOverlapDictionaryKey(delegate) != null)
+        {
+            reloader.removeIrActivation(cacheKey);
+            cachedRaw = null;
+        }
+        final IrBslCompletionSupport.ActivationDescription cached = cachedRaw;
         if (cached != null)
         {
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H91", "scheduleEdtRowActivation", "cached", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"name\":\"" + ContentAssistDebug.jsonEscapeForLog(name) //$NON-NLS-1$
+                    + "\",\"kind\":\"" + ContentAssistDebug.jsonEscapeForLog(kind) //$NON-NLS-1$
+                    + "\",\"type\":\"" + ContentAssistDebug.jsonEscapeForLog(cached.type) //$NON-NLS-1$
+                    + "\"}"); //$NON-NLS-1$
+            // #endregion
             Display display = Display.getDefault();
             if (display == null || display.isDisposed())
                 return;
@@ -965,10 +1009,22 @@ public class SmartCompletionProposal implements
             return;
         }
         if (!reloader.tryBeginIrActivation(cacheKey))
+        {
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H91", "scheduleEdtRowActivation", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"reason\":\"pending\",\"name\":\"" //$NON-NLS-1$
+                    + ContentAssistDebug.jsonEscapeForLog(name) + "\"}"); //$NON-NLS-1$
+            // #endregion
             return;
+        }
         IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(reloader.getBslEditor());
         if (session == null)
         {
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H91", "scheduleEdtRowActivation", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"reason\":\"noSession\",\"name\":\"" //$NON-NLS-1$
+                    + ContentAssistDebug.jsonEscapeForLog(name) + "\"}"); //$NON-NLS-1$
+            // #endregion
             reloader.endIrActivation(cacheKey);
             return;
         }
@@ -983,6 +1039,14 @@ public class SmartCompletionProposal implements
             reloader.endIrActivation(cacheKey);
             return;
         }
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H91", "scheduleEdtRowActivation", "fetch", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"name\":\"" + ContentAssistDebug.jsonEscapeForLog(name) //$NON-NLS-1$
+                + "\",\"kind\":\"" + ContentAssistDebug.jsonEscapeForLog(kind) //$NON-NLS-1$
+                + "\",\"isMethod\":" + isMethod //$NON-NLS-1$
+                + ",\"gen\":" + gen //$NON-NLS-1$
+                + ",\"display\":\"" + ContentAssistDebug.jsonEscapeForLog(displayKey) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
         display.asyncExec(() -> submitEdtActivationOnUi(
             reloader, session, editor, gen, cacheKey, displayKey, name, isMethod, baseInput, delegate));
     }
@@ -1239,12 +1303,35 @@ public class SmartCompletionProposal implements
                     reloader, session, gen, cacheKey, displayKey, cached, baseInput, edtDelegate));
                 return;
             }
+            IrOverlapActivationTarget target = resolveEdtOverlapActivationTarget(
+                edtDelegate, wordValue, isMethod);
             IrBslCompletionSupport.ActivationDescription desc =
                 IrBslCompletionSupport.fetchWordActivationDescription(
-                    session, wordValue, isMethod, ""); //$NON-NLS-1$
+                    session, target.wordValue, target.isMethod, target.dictionaryKey);
             if (desc == null)
+            {
+                // #region agent log
+                ContentAssistDebug.debugModeLog("H91", "runEdtActivationFetch", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"reason\":\"nullDesc\",\"word\":\"" //$NON-NLS-1$
+                        + ContentAssistDebug.jsonEscapeForLog(wordValue)
+                        + "\",\"dict\":\"" + ContentAssistDebug.jsonEscapeForLog( //$NON-NLS-1$
+                            target.dictionaryKey) + "\"}"); //$NON-NLS-1$
+                // #endregion
                 return;
-            reloader.putIrActivation(cacheKey, desc);
+            }
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H91", "runEdtActivationFetch", "ok", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"word\":\"" + ContentAssistDebug.jsonEscapeForLog(target.wordValue) //$NON-NLS-1$
+                    + "\",\"dict\":\"" + ContentAssistDebug.jsonEscapeForLog(target.dictionaryKey) //$NON-NLS-1$
+                    + "\",\"isMethod\":" + target.isMethod //$NON-NLS-1$
+                    + ",\"type\":\"" + ContentAssistDebug.jsonEscapeForLog(desc.type) //$NON-NLS-1$
+                    + "\",\"gen\":" + gen + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            // Без КлючНабораСлов ИР часто отдаёт пустой Тип — не кэшируем, иначе overlap залипает.
+            boolean hasType = desc.type != null && !desc.type.isEmpty();
+            boolean hasDict = target.dictionaryKey != null && !target.dictionaryKey.isEmpty();
+            if (hasType || hasDict)
+                reloader.putIrActivation(cacheKey, desc);
             session.pumpUserMessagesToUi();
             Display display = Display.getDefault();
             if (display == null || display.isDisposed())
@@ -1281,22 +1368,52 @@ public class SmartCompletionProposal implements
         ICompletionProposal edtDelegate, IrBslCompletionSupport.ActivationDescription desc)
     {
         if (desc == null || desc.type == null || desc.type.isEmpty())
+        {
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H91", "applyEdtListTypeFromIrActivation", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"reason\":\"noType\"}"); //$NON-NLS-1$
+            // #endregion
             return;
+        }
         SmartContentAssistProcessor processor = ContentAssistSessionReloader.getActiveProcessor();
         if (processor == null)
+        {
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H91", "applyEdtListTypeFromIrActivation", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"reason\":\"noProcessor\"}"); //$NON-NLS-1$
+            // #endregion
             return;
-        IrCompletionProposal ir = processor.findIrProposalForDedupKey(
-            SmartContentAssistProcessor.dedupKeyForMerge(edtDelegate));
-        if (ir == null)
-            return;
+        }
         String key = SmartContentAssistProcessor.dedupKeyForMerge(edtDelegate);
+        IrCompletionProposal ir = processor.findIrProposalForDedupKey(key);
+        if (ir == null)
+        {
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H91", "applyEdtListTypeFromIrActivation", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"reason\":\"noIr\"" //$NON-NLS-1$
+                    + ",\"key\":\"" + ContentAssistDebug.jsonEscapeForLog(key) //$NON-NLS-1$
+                    + "\",\"type\":\"" + ContentAssistDebug.jsonEscapeForLog(desc.type) //$NON-NLS-1$
+                    + "\",\"display\":\"" + ContentAssistDebug.jsonEscapeForLog( //$NON-NLS-1$
+                        edtDelegate.getDisplayString()) + "\"}"); //$NON-NLS-1$
+            // #endregion
+            return;
+        }
         String edtDisplay = edtDelegate.getDisplayString();
         String old = processor.resolveIrOverlapDisplay(edtDisplay, key);
         processor.putIrOverlapTypeFromIr(key, ir, desc.type);
         String display = SmartContentAssistProcessor.injectIrTypeIntoEdtDisplay(
             edtDisplay, ir.getListTypeLabel(), desc.type, ir.getParentContextType());
         SmartContentAssistProcessor.applyIrDisplayToEdt(edtDelegate, display);
-        if (display.equals(old))
+        boolean same = display.equals(old);
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H91", "applyEdtListTypeFromIrActivation", "done", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"key\":\"" + ContentAssistDebug.jsonEscapeForLog(key) //$NON-NLS-1$
+                + "\",\"type\":\"" + ContentAssistDebug.jsonEscapeForLog(desc.type) //$NON-NLS-1$
+                + "\",\"same\":" + same //$NON-NLS-1$
+                + ",\"old\":\"" + ContentAssistDebug.jsonEscapeForLog(old) //$NON-NLS-1$
+                + "\",\"new\":\"" + ContentAssistDebug.jsonEscapeForLog(display) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+        if (same)
             return;
         ContentAssistPopupSync.refreshProposalTable(assistant);
     }
@@ -1324,5 +1441,53 @@ public class SmartCompletionProposal implements
             ContentAssistPopupSync.pinMergedAdditionalInfo(assistant, displayKey, merged,
                 literalOverlap);
         }
+    }
+
+    /** Параметры COM {@code ОписаниеТекущегоСловаАвтодополнения} для overlap EDT+ИР. */
+    private static final class IrOverlapActivationTarget
+    {
+        final String wordValue;
+        final boolean isMethod;
+        final String dictionaryKey;
+
+        IrOverlapActivationTarget(String wordValue, boolean isMethod, String dictionaryKey)
+        {
+            this.wordValue = wordValue;
+            this.isMethod = isMethod;
+            this.dictionaryKey = dictionaryKey != null ? dictionaryKey : ""; //$NON-NLS-1$
+        }
+    }
+
+    private static IrOverlapActivationTarget resolveEdtOverlapActivationTarget(
+        ICompletionProposal edtDelegate, String wordValue, boolean isMethod)
+    {
+        IrCompletionProposal ir = findIrOverlapForEdt(edtDelegate);
+        if (ir == null)
+            return new IrOverlapActivationTarget(wordValue, isMethod, ""); //$NON-NLS-1$
+        return new IrOverlapActivationTarget(
+            ir.getWordValue() != null && !ir.getWordValue().isEmpty()
+                ? ir.getWordValue() : wordValue,
+            ir.isMethod(),
+            ir.getDictionaryKey());
+    }
+
+    private static String resolveEdtOverlapDictionaryKey(ICompletionProposal edtDelegate)
+    {
+        IrCompletionProposal ir = findIrOverlapForEdt(edtDelegate);
+        if (ir == null)
+            return null;
+        String dict = ir.getDictionaryKey();
+        return dict != null && !dict.isEmpty() ? dict : null;
+    }
+
+    private static IrCompletionProposal findIrOverlapForEdt(ICompletionProposal edtDelegate)
+    {
+        if (edtDelegate == null)
+            return null;
+        SmartContentAssistProcessor processor = ContentAssistSessionReloader.getActiveProcessor();
+        if (processor == null)
+            return null;
+        return processor.findIrProposalForDedupKey(
+            SmartContentAssistProcessor.dedupKeyForMerge(edtDelegate));
     }
 }
