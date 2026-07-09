@@ -425,31 +425,36 @@ public class SmartCompletionProposal implements
         IrCompletionProposal.InsertPlan plan = template != null
             ? IrCompletionProposal.planFromTemplate(template)
             : ir.buildInsertPlan();
+        int replaceFrom;
         int replaceLen;
         if (rangeAlreadyDeleted || template == null)
         {
+            replaceFrom = insertOffset;
             replaceLen = 0;
         }
         else
         {
-            int prefixStart = SmartContentAssistProcessor.computeIdentifierWordStart(
-                document, insertOffset);
-            replaceLen = Math.max(0, insertOffset - prefixStart);
+            if (ir.isReplaceParentOnInsert())
+                replaceFrom = IrCompletionProposal.computeMaskPrefixStart(document, insertOffset);
+            else
+                replaceFrom = SmartContentAssistProcessor.computeIdentifierWordStart(
+                    document, insertOffset);
+            replaceLen = Math.max(0, insertOffset - replaceFrom);
         }
         // Отступ вычисляем ДО вставки, по полной строке (не обрезая по каретке)
         try
         {
-            document.replace(insertOffset, replaceLen, plan.text);
+            document.replace(replaceFrom, replaceLen, plan.text);
             int insertedLength = plan.text.length();
             if (formatText && !lineIndent.isEmpty() && insertedLength > 0)
             {
-                formatInsertedRegion(insertOffset, insertedLength, lineIndent, indentFirstLine, editor);
+                formatInsertedRegion(replaceFrom, insertedLength, lineIndent, indentFirstLine, editor);
                 if (indentFirstLine)
                 {
                     plan.caretOffset += lineIndent.length();
                 }
             }
-            ir.setPendingCaretAfterApply(insertOffset + plan.caretOffset);
+            ir.setPendingCaretAfterApply(replaceFrom + plan.caretOffset);
         }
         catch (BadLocationException e)
         {

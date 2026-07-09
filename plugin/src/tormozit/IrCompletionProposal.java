@@ -35,6 +35,7 @@ public final class IrCompletionProposal implements
     private final String templateText;
     private final boolean method;
     private final boolean returnsValue;
+    private final boolean replaceParentOnInsert;
     private int irPriority;
     private final String stableCacheKey;
     private volatile String activationHtml;
@@ -51,7 +52,7 @@ public final class IrCompletionProposal implements
     public IrCompletionProposal(
         String displayString, String filterName, String templateText, boolean method, int irPriority,
         String wordValue, String dictionaryKey, String listTypeLabel, String parentContextType,
-        boolean returnsValue)
+        boolean returnsValue, boolean replaceParentOnInsert)
     {
         this.displayString = displayString != null ? displayString : ""; //$NON-NLS-1$
         this.filterName = filterName != null ? filterName : this.displayString;
@@ -62,6 +63,7 @@ public final class IrCompletionProposal implements
         this.templateText = templateText;
         this.method = method;
         this.returnsValue = returnsValue;
+        this.replaceParentOnInsert = replaceParentOnInsert;
         this.irPriority = irPriority;
         this.stableCacheKey = buildStableCacheKey(this.filterName, this.dictionaryKey);
     }
@@ -111,6 +113,11 @@ public final class IrCompletionProposal implements
     public boolean isReturnsValue()
     {
         return returnsValue;
+    }
+
+    public boolean isReplaceParentOnInsert()
+    {
+        return replaceParentOnInsert;
     }
 
     public String getListTypeLabel()
@@ -231,16 +238,23 @@ public final class IrCompletionProposal implements
     {
         if (document == null)
             return;
-        int replaceStart = getPrefixCompletionStart(document, offset);
-        int replaceLen = Math.max(0, offset - replaceStart);
+        int replaceStart;
+        int replaceLen;
+        if (replaceParentOnInsert)
+        {
+            replaceStart = computeMaskPrefixStart(document, offset);
+            replaceLen = Math.max(0, offset - replaceStart);
+        }
+        else
+        {
+            replaceStart = getPrefixCompletionStart(document, offset);
+            replaceLen = Math.max(0, offset - replaceStart);
+        }
         pendingCaretAfterApply = -1;
         try
         {
             InsertPlan plan = buildInsertPlan();
             document.replace(replaceStart, replaceLen, plan.text);
-            // Сохраняем позицию каретки — Eclipse применит её через getSelection().
-            // Не используем setCaretOffset(): к моменту apply() assistSessionEnded уже
-            // вызван и ACTIVE_VIEWER очищен, поэтому прямой вызов был бы no-op.
             pendingCaretAfterApply = replaceStart + plan.caretOffset;
         }
         catch (BadLocationException e)
@@ -359,6 +373,32 @@ public final class IrCompletionProposal implements
         {
             this.text = text;
             this.caretOffset = caretOffset;
+        }
+    }
+
+    /**
+     * Вычисляет позицию начала маски модуля (включая {@code .} перед маской)
+     * для предложений с {@code replaceParentOnInsert}.
+     * <p>Сканирует влево от {@code offset}: пропускает {@code .}, затем идентификаторные
+     * символы маски (как {@link SmartContentAssistProcessor#computeIdentifierWordStart},
+     * но захватывает {@code .} и текст до него).
+     */
+    static int computeMaskPrefixStart(IDocument document, int offset)
+    {
+        if (document == null || offset < 0)
+            return offset;
+        try
+        {
+            int pos = offset;
+            if (pos > 0 && document.getChar(pos - 1) == '.')
+                pos--;
+            while (pos > 0 && SmartContentAssistProcessor.isFilterChar(document.getChar(pos - 1)))
+                pos--;
+            return pos;
+        }
+        catch (BadLocationException e)
+        {
+            return SmartContentAssistProcessor.computeIdentifierWordStart(document, offset);
         }
     }
 

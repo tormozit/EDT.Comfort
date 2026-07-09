@@ -262,7 +262,7 @@ public final class IrBslCompletionSupport
             String display = IrBslCompletionSupport.buildInitialListDisplay(
                 word, method, type, parentContextType);
             return new IrCompletionProposal(display, filterName, templateText, method, priority,
-                word, dictionaryKey, type, parentContextType, returnsValue);
+                word, dictionaryKey, type, parentContextType, returnsValue, replaceParentOnInsert);
         }
     }
 
