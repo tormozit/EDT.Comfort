@@ -89,6 +89,8 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     private ICompletionProposal[] memberStockFullList = EMPTY;
     /** Позиция {@code '.'} для {@link #memberStockFullList}. */
     private int memberStockFullListDot = -1;
+    /** Отмена отложенного {@link #scheduleMemberStockCapture} (сохранение EDT DataEvent). */
+    private int memberStockCaptureGen;
     /** Пауза без ввода и с пустым фильтром перед тяжёлой {@link #loadFullList}. */
     private static final int IDLE_FULL_LIST_MS = 1500;
     private Runnable pendingIdleLoadTask;
@@ -331,9 +333,13 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     {
         if (batch == null || batch.size() <= 1)
             return batch;
+        logCollapseBatch("H-COLLAPSE", "collapseOptionalParamOverlaps", "batchIn", batch); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         List<ICompletionProposal> emptyPair = tryCollapseEmptyParamPair(batch);
         if (emptyPair != null)
+        {
+            logCollapseBatch("H-COLLAPSE", "collapseOptionalParamOverlaps", "emptyPairResult", emptyPair); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return emptyPair;
+        }
         List<ICompletionProposal> sorted = new ArrayList<>(batch);
         sorted.sort((a, b) -> {
             int ca = parseProposalParamNames(displayString(unwrapProposal(a))).size();
@@ -374,7 +380,143 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             if (keptSet.contains(original))
                 ordered.add(original);
         }
+        logCollapseBatch("H-COLLAPSE", "collapseOptionalParamOverlaps", "generalResult", ordered); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         return ordered;
+    }
+
+    /**
+     * H-COLLAPSE: identity + replacement-поля каждого proposal в батче схлопывания,
+     * чтобы сверить, меняется ли identityHashCode/replacementOffset у оставленного
+     * объекта между схлопыванием и реальным apply().
+     */
+    private static void logCollapseBatch(String hypothesisId, String location, String message,
+        List<ICompletionProposal> list)
+    {
+        if (list == null)
+            return;
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\"size\":").append(list.size()).append(",\"items\":["); //$NON-NLS-1$ //$NON-NLS-2$
+        for (int i = 0; i < list.size(); i++)
+        {
+            if (i > 0)
+                sb.append(',');
+            ICompletionProposal p = list.get(i);
+            ICompletionProposal raw = unwrapProposal(p);
+            String disp = displayString(raw);
+            sb.append("{\"wrapperIdentity\":").append(System.identityHashCode(p)) //$NON-NLS-1$
+                .append(",\"rawIdentity\":").append(System.identityHashCode(raw)) //$NON-NLS-1$
+                .append(",\"rawClass\":\"") //$NON-NLS-1$
+                .append(ContentAssistDebug.jsonEscapeForLog(raw != null ? raw.getClass().getName() : "null")) //$NON-NLS-1$
+                .append("\",\"display\":\"") //$NON-NLS-1$
+                .append(ContentAssistDebug.jsonEscapeForLog(disp != null ? disp : "")) //$NON-NLS-1$
+                .append('"');
+            if (raw instanceof ConfigurableCompletionProposal cp)
+            {
+                sb.append(",\"replacementOffset\":").append(cp.getReplacementOffset()) //$NON-NLS-1$
+                    .append(",\"replacementLength\":").append(cp.getReplacementLength()) //$NON-NLS-1$
+                    .append(",\"replacementString\":\"") //$NON-NLS-1$
+                    .append(ContentAssistDebug.jsonEscapeForLog(
+                        cp.getReplacementString() != null ? cp.getReplacementString() : "")) //$NON-NLS-1$
+                    .append('"');
+                appendCcpCaretFields(sb, cp);
+            }
+            sb.append('}');
+        }
+        sb.append("]}"); //$NON-NLS-1$
+        ContentAssistDebug.debugModeLog(hypothesisId, location, message, sb.toString());
+    }
+
+    /**
+     * H-COLLAPSE / H-POPUP-LIST: caret-метаданные raw CCP для сравнения auto vs Ctrl+Space.
+     */
+    static void appendCcpCaretFields(StringBuilder sb, ConfigurableCompletionProposal cp)
+    {
+        if (sb == null || cp == null)
+            return;
+        String repl = cp.getReplacementString();
+        int cursor = cp.getCursorPosition();
+        int selStart = cp.getSelectionStart();
+        int selLen = cp.getSelectionLength();
+        int openParen = repl != null ? repl.indexOf('(') : -1;
+        boolean caretInsideParens = openParen >= 0 && cursor == openParen + 1;
+        int expectedJfaceCaret = cp.getReplacementOffset() + cursor;
+        boolean noLink = cp.getClass().getName().indexOf("NoLinkModel") >= 0; //$NON-NLS-1$
+        sb.append(",\"cursorPosition\":").append(cursor) //$NON-NLS-1$
+            .append(",\"selectionStart\":").append(selStart) //$NON-NLS-1$
+            .append(",\"selectionLength\":").append(selLen) //$NON-NLS-1$
+            .append(",\"caretInsideParens\":").append(caretInsideParens) //$NON-NLS-1$
+            .append(",\"expectedJfaceCaret\":").append(expectedJfaceCaret) //$NON-NLS-1$
+            .append(",\"noLinkModel\":").append(noLink) //$NON-NLS-1$
+            .append(",\"linkedMode\":").append(readCcpLinkedMode(cp)); //$NON-NLS-1$
+    }
+
+    private static boolean readCcpLinkedMode(ConfigurableCompletionProposal cp)
+    {
+        try
+        {
+            java.lang.reflect.Field f = ConfigurableCompletionProposal.class
+                .getDeclaredField("linkedMode"); //$NON-NLS-1$
+            f.setAccessible(true);
+            return f.getBoolean(cp);
+        }
+        catch (Exception ignored)
+        {
+            return false;
+        }
+    }
+
+    /**
+     * H-POPUP-LIST: строки с {@code Вставить} / method {@code ()} — identity + caret на raw CCP.
+     */
+    static void logPopupListCaretProbe(String phase, List<ICompletionProposal> list)
+    {
+        if (list == null || list.isEmpty())
+            return;
+        StringBuilder sb = new StringBuilder();
+        sb.append("{\"phase\":\"").append(ContentAssistDebug.jsonEscapeForLog(phase)) //$NON-NLS-1$
+            .append("\",\"size\":").append(list.size()).append(",\"items\":["); //$NON-NLS-1$ //$NON-NLS-2$
+        int logged = 0;
+        for (int i = 0; i < list.size(); i++)
+        {
+            ICompletionProposal p = list.get(i);
+            ICompletionProposal raw = unwrapProposal(p);
+            String disp = displayString(raw);
+            String repl = raw instanceof ConfigurableCompletionProposal cp
+                ? cp.getReplacementString() : null;
+            boolean interesting = (disp != null && disp.indexOf("Вставить") >= 0) //$NON-NLS-1$
+                || (repl != null && repl.indexOf("Вставить") >= 0); //$NON-NLS-1$
+            if (!interesting)
+                continue;
+            if (logged > 0)
+                sb.append(',');
+            logged++;
+            sb.append("{\"index\":").append(i) //$NON-NLS-1$
+                .append(",\"isSmartWrapper\":").append(p instanceof SmartCompletionProposal) //$NON-NLS-1$
+                .append(",\"wrapperIdentity\":").append(System.identityHashCode(p)) //$NON-NLS-1$
+                .append(",\"rawIdentity\":").append(System.identityHashCode(raw)) //$NON-NLS-1$
+                .append(",\"rawClass\":\"") //$NON-NLS-1$
+                .append(ContentAssistDebug.jsonEscapeForLog(
+                    raw != null ? raw.getClass().getName() : "null")) //$NON-NLS-1$
+                .append("\",\"display\":\"") //$NON-NLS-1$
+                .append(ContentAssistDebug.jsonEscapeForLog(disp != null ? disp : "")) //$NON-NLS-1$
+                .append('"');
+            if (raw instanceof ConfigurableCompletionProposal cp)
+            {
+                sb.append(",\"replacementOffset\":").append(cp.getReplacementOffset()) //$NON-NLS-1$
+                    .append(",\"replacementLength\":").append(cp.getReplacementLength()) //$NON-NLS-1$
+                    .append(",\"replacementString\":\"") //$NON-NLS-1$
+                    .append(ContentAssistDebug.jsonEscapeForLog(repl != null ? repl : "")) //$NON-NLS-1$
+                    .append('"');
+                appendCcpCaretFields(sb, cp);
+            }
+            sb.append('}');
+            if (logged >= 4)
+                break;
+        }
+        if (logged == 0)
+            return;
+        sb.append("]}"); //$NON-NLS-1$
+        ContentAssistDebug.debugModeLog("H-POPUP-LIST", "popupListCaretProbe", phase, sb.toString()); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /**
@@ -535,8 +677,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         memberAccessReloadSeq++;
         memberAccessReloadScheduledSeq = -1;
         resetMemberStockFullList();
-        cancelIdleFullListLoad();
-        cancelEagerFullListLoad();
+        cancelDeferredDelegateComputes();
         lastTrackedFilter = ""; //$NON-NLS-1$
         terminalEmptyMemberAccess = false;
         cachedNonObjectDot = -1;
@@ -547,6 +688,18 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         irWordsResolved = false;
         irOverlapTypeByKey.clear();
         ContentAssistDebug.log("invalidateCache"); //$NON-NLS-1$
+    }
+
+    /**
+     * Отменяет отложенные {@code createProposals} (async/eager/idle/member-stock),
+     * чтобы не сбрасывать {@code BslDocumentListener.DataEvent} после in-place collapse.
+     */
+    void cancelDeferredDelegateComputes()
+    {
+        cancelIdleFullListLoad();
+        cancelEagerFullListLoad();
+        cancelAsyncDelegateLoad();
+        memberStockCaptureGen++;
     }
 
     void primeIrSnapshotForDualAssist(IrBslCompletionSupport.Snapshot snapshot)
@@ -3073,11 +3226,13 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         {
             if (hasIrProposalsForCurrentContext())
                 return popupListWithIr(raw);
-            return raw;
+            // Без ИР: схлопывание на уже созданном EDT-списке (без повторного createProposals).
+            return collapseOptionalEdtOverlapsArray(raw);
         }
         if (hasIrProposalsForCurrentContext())
             return popupListWithIr(raw);
-        return buildDelegateOrderedList(sortListForIrAssist(unwrapProposals(raw), null));
+        return buildDelegateOrderedList(sortListForIrAssist(
+            collapseOptionalEdtOverlapsArray(unwrapProposals(raw)), null));
     }
 
     /** Порядок delegate при smart-фильтре и пустом префиксе (штатный priority, не алфавит). */
@@ -3769,15 +3924,19 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             if (viewer.getTextWidget() == null || viewer.getTextWidget().isDisposed())
                 return;
             org.eclipse.swt.widgets.Display display = viewer.getTextWidget().getDisplay();
-            display.asyncExec(() -> runMemberStockCapture(viewer, dotContextKey, 0));
+            final int captureGen = memberStockCaptureGen;
+            display.asyncExec(() -> runMemberStockCapture(viewer, dotContextKey, 0, captureGen));
         }
         catch (Exception ignored) {}
     }
 
-    private void runMemberStockCapture(ITextViewer viewer, int dotContextKey, int attempt)
+    private void runMemberStockCapture(ITextViewer viewer, int dotContextKey, int attempt,
+                                       int captureGen)
     {
         try
         {
+            if (captureGen != memberStockCaptureGen)
+                return;
             if (fullListContextKey != dotContextKey)
                 return;
             IDocument doc = viewer.getDocument();
@@ -3792,11 +3951,15 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                 org.eclipse.swt.widgets.Display display = viewer.getTextWidget().getDisplay();
                 if (display != null && !display.isDisposed())
                     display.timerExec(25, () -> runMemberStockCapture(viewer, dotContextKey,
-                        attempt + 1));
+                        attempt + 1, captureGen));
                 return;
             }
+            if (captureGen != memberStockCaptureGen)
+                return;
             int prev = memberStockFullListDot == dotContextKey ? memberStockFullList.length : 0;
             captureMemberStockAtDot(viewer, dotContextKey, allowShift);
+            if (captureGen != memberStockCaptureGen)
+                return;
             if (memberStockFullList.length > prev)
             {
                 if (viewer instanceof SourceViewer)

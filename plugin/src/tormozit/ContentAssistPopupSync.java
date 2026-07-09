@@ -35,7 +35,9 @@ import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
  * <p>При вводе символов — prepend к {@code fFilterRunnable} планирует debounced
  * {@link #recomputePopupList} (smart-фильтр) вместо {@code validate} по полному списку.
  *
- * <p>{@link #recomputePopupList} — только для явных действий (toggle, Ctrl+Space, догрузка кэша).
+ * <p>{@link #recomputePopupList} — toggle, ввод с фильтром, догрузка кэша.
+ * Member-access с пустым фильтром (в т.ч. Ctrl+Space) — {@link #collapseOptionalOverlapsInVisiblePopup},
+ * без повторного {@code createProposals} (сохраняет EDT LinkedMode).
  */
 public final class ContentAssistPopupSync
 {
@@ -361,9 +363,16 @@ public final class ContentAssistPopupSync
                         boolean irExpected = inLiteral
                             && isLiteralIrExpected(viewer, processor, caret);
                         boolean forceSmartOpen = inLiteral && !irExpected;
-                        boolean shouldRecompute = shouldRecomputePopupList(filter, false, doc, caret);
+                        // Пустой фильтр на member-access: не гоняем stock+recompute —
+                        // повторный createProposals сбрасывает BslDocumentListener.DataEvent
+                        // (LinkedMode для каретки внутри ()). Схлопываем видимый список на месте.
+                        boolean memberEmptyOnly = isMemberAccessEmptyFilterRecompute(filter, doc,
+                            caret);
+                        boolean shouldRecompute = shouldRecomputePopupList(filter, false, doc, caret)
+                            && !memberEmptyOnly;
                         logSessionPopupSync("beforeRecompute", inLiteral, irExpected, //$NON-NLS-1$
-                            stableNAfterSeed, filter, shouldRecompute, forceSmartOpen, null);
+                            stableNAfterSeed, filter, shouldRecompute, forceSmartOpen,
+                            memberEmptyOnly ? "inplaceCollapse" : null); //$NON-NLS-1$
                         if (forceSmartOpen)
                         {
                             beginSmartLiteralSessionOpen();
@@ -374,6 +383,18 @@ public final class ContentAssistPopupSync
                                 refreshAdditionalInfo(assistant);
                                 return;
                             }
+                        }
+                        else if (memberEmptyOnly)
+                        {
+                            // Не дать async/member-stock createProposals сбросить DataEvent.
+                            processor.cancelDeferredDelegateComputes();
+                            boolean collapsed = collapseOptionalOverlapsInVisiblePopup(assistant);
+                            logSessionPopupSync(collapsed ? "afterRecompute" : "skipped", //$NON-NLS-1$ //$NON-NLS-2$
+                                inLiteral, irExpected, stableNAfterSeed, filter, false, false,
+                                collapsed ? "inplaceCollapse" : "inplaceCollapseMiss"); //$NON-NLS-1$ //$NON-NLS-2$
+                            if (collapsed)
+                                refreshAdditionalInfo(assistant);
+                            return;
                         }
                         else if (shouldRecompute)
                         {
@@ -894,6 +915,10 @@ public final class ContentAssistPopupSync
             fFilteredProposalsField.get(popup);
         if (fComputedProposalsField != null && applied != null)
             fComputedProposalsField.set(popup, applied);
+        // #region agent log
+        SmartContentAssistProcessor.logPopupListCaretProbe("afterSetProposals", //$NON-NLS-1$
+            applied != null ? applied : listToApply);
+        // #endregion
 
         installPopupScrollWatcher(popup, assistant, viewer, processor);
 
@@ -908,6 +933,17 @@ public final class ContentAssistPopupSync
         if (runStockFilterAfter)
         {
             runStockFilterRunnable(assistant);
+            // #region agent log
+            try
+            {
+                List<ICompletionProposal> afterStock =
+                    (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+                SmartContentAssistProcessor.logPopupListCaretProbe("afterStockFilter", afterStock); //$NON-NLS-1$
+            }
+            catch (Exception ignored)
+            {
+            }
+            // #endregion
             if (processor != null && processor.isIrWordsResolvedForContext()
                 && processor.resolvedIrProposalCount() > 0)
                 purgeEmptyPlaceholderFromPopup(popup, listToApply, saved, resetToFirst, restoreNow);
@@ -2769,17 +2805,83 @@ public final class ContentAssistPopupSync
     }
 
     /**
-     * Пересчёт при непустом фильтре, toggle smart-фильтра или member-access ({@code obj.}).
+     * Пересчёт при непустом фильтре или toggle smart-фильтра.
+     * Member-access с пустым фильтром — не здесь: см. {@link #collapseOptionalOverlapsInVisiblePopup}
+     * (повторный createProposals сбрасывает EDT LinkedMode / DataEvent).
      */
     private static boolean shouldRecomputePopupList(String filter, boolean afterFilterToggle,
                                                     IDocument doc, int caret)
     {
-        boolean memberAccess = doc != null && caret >= 0
-            && SmartContentAssistProcessor.ReceiverTypeLabel.findMemberAccessDot(doc, caret) >= 0;
-        boolean memberRecompute = memberAccess && (filter == null || filter.isEmpty());
         return afterFilterToggle
-            || (filter != null && !filter.isEmpty())
-            || memberRecompute;
+            || (filter != null && !filter.isEmpty());
+    }
+
+    /** Member-access ({@code obj.}) и пустой префикс — кандидат на in-place collapse. */
+    private static boolean isMemberAccessEmptyFilterRecompute(String filter, IDocument doc,
+                                                              int caret)
+    {
+        if (filter != null && !filter.isEmpty())
+            return false;
+        return doc != null && caret >= 0
+            && SmartContentAssistProcessor.ReceiverTypeLabel.findMemberAccessDot(doc, caret) >= 0;
+    }
+
+    /**
+     * Схлопывает optional-перегрузки в уже показанном popup без {@code createProposals}
+     * и без stock filter — сохраняет регистрацию {@code BslDocumentListener.DataEvent}.
+     *
+     * @return {@code true} если список прочитан (даже без изменений)
+     */
+    static boolean collapseOptionalOverlapsInVisiblePopup(ContentAssistant assistant)
+    {
+        if (assistant == null || !isPopupVisible(assistant))
+            return false;
+        try
+        {
+            Object popup = getPopup(assistant);
+            if (popup == null)
+                return false;
+            initPopupReflection(popup);
+            if (fFilteredProposalsField == null || setProposalsMethod == null)
+                return false;
+            List<ICompletionProposal> current =
+                (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+            if (current == null || current.isEmpty())
+                return false;
+            SavedSelection saved = saveSelection(popup);
+            List<ICompletionProposal> collapsed =
+                SmartContentAssistProcessor.collapseOptionalEdtOverlapsInMergedList(
+                    new ArrayList<>(current));
+            if (collapsed.size() == current.size())
+            {
+                // #region agent log
+                ContentAssistDebug.debugModeLog("H73", "inplaceCollapse", "unchanged", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"size\":" + current.size() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
+                finishSyncCycle(popup);
+                return true;
+            }
+            setProposalsAndRestoreSelection(popup, collapsed, false, saved, false, false);
+            List<ICompletionProposal> applied =
+                (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+            if (fComputedProposalsField != null && applied != null)
+                fComputedProposalsField.set(popup, applied);
+            // #region agent log
+            SmartContentAssistProcessor.logPopupListCaretProbe("inplaceCollapse", //$NON-NLS-1$
+                applied != null ? applied : collapsed);
+            ContentAssistDebug.debugModeLog("H73", "inplaceCollapse", "applied", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"before\":" + current.size() //$NON-NLS-1$
+                    + ",\"after\":" + (applied != null ? applied.size() : collapsed.size()) //$NON-NLS-1$
+                    + "}"); //$NON-NLS-1$
+            // #endregion
+            finishSyncCycle(popup);
+            return true;
+        }
+        catch (Exception e)
+        {
+            ContentAssistDebug.log("inplaceCollapse ERROR: " + e.getMessage()); //$NON-NLS-1$
+            return false;
+        }
     }
 
     /**
@@ -2824,6 +2926,15 @@ public final class ContentAssistPopupSync
                     + ",\"popupVisible\":" + isPopupVisible(assistant) //$NON-NLS-1$
                     + ",\"smartEnabled\":" + SmartAssistFilterState.isSmartFilterEnabled() //$NON-NLS-1$
                     + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            try
+            {
+                List<ICompletionProposal> stockList =
+                    (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+                SmartContentAssistProcessor.logPopupListCaretProbe("stockFilterRunnable", stockList); //$NON-NLS-1$
+            }
+            catch (Exception ignored)
+            {
+            }
             // #endregion
         }
         catch (Exception e)

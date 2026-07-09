@@ -479,8 +479,13 @@ public final class ContentAssistSessionReloader
                 {
                     Display suppressDisplay = suppressWidget.getDisplay();
                     if (suppressDisplay != null && !suppressDisplay.isDisposed())
+                    {
+                        // #region agent log
+                        scheduleInsertCaretProbe(suppressDisplay, "sessionEnd"); //$NON-NLS-1$
+                        // #endregion
                         suppressDisplay.asyncExec(
                             () -> suppressDocumentAutoOpenAfterSession = false);
+                    }
                 }
 
                 if (!preserveOnEnd)
@@ -875,8 +880,82 @@ public final class ContentAssistSessionReloader
         // #endregion
     }
 
+    /**
+     * H-INSERT: таймлайн каретки после confirm — EDT LinkedMode в documentChanged
+     * vs последующий JFace {@code getSelection}/{@code setSelectedRange}.
+     */
+    private void scheduleInsertCaretProbe(Display display, String reason)
+    {
+        if (display == null || display.isDisposed())
+            return;
+        final int[] delays = { 0, 1, 10, 50 };
+        for (int delay : delays)
+        {
+            final int d = delay;
+            Runnable task = () -> logInsertCaretProbe(reason + "+async" + d); //$NON-NLS-1$
+            if (d <= 0)
+                display.asyncExec(task);
+            else
+                display.timerExec(d, task);
+        }
+    }
+
+    private void logInsertCaretProbe(String phase)
+    {
+        try
+        {
+            org.eclipse.swt.custom.StyledText text =
+                viewer != null ? viewer.getTextWidget() : null;
+            int caret = text != null && !text.isDisposed() ? text.getCaretOffset() : -1;
+            String around = ""; //$NON-NLS-1$
+            IDocument doc = viewer != null ? viewer.getDocument() : null;
+            if (doc != null && caret >= 0)
+            {
+                int from = Math.max(0, caret - 16);
+                int to = Math.min(doc.getLength(), caret + 16);
+                around = doc.get(from, to - from);
+            }
+            ContentAssistDebug.debugModeLog("H-INSERT", "insertCaretProbe", phase, //$NON-NLS-1$ //$NON-NLS-2$
+                "{\"caret\":" + caret //$NON-NLS-1$
+                    + ",\"suppressAutoOpen\":" + suppressDocumentAutoOpenAfterSession //$NON-NLS-1$
+                    + ",\"around\":\"" + ContentAssistDebug.jsonEscapeForLog(around) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (Exception ignored)
+        {
+        }
+    }
+
+    private void logProposalDocumentInsert(DocumentEvent event)
+    {
+        if (event == null || event.getText() == null)
+            return;
+        String text = event.getText();
+        if (text.indexOf("Вставить") < 0 && !(text.indexOf('(') >= 0 && text.indexOf(')') > text.indexOf('('))) //$NON-NLS-1$
+            return;
+        if (text.length() > 80)
+            return;
+        org.eclipse.swt.custom.StyledText widget =
+            viewer != null ? viewer.getTextWidget() : null;
+        int caret = widget != null && !widget.isDisposed() ? widget.getCaretOffset() : -1;
+        ContentAssistDebug.debugModeLog("H-INSERT", "documentChanged", "proposalText", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"offset\":" + event.getOffset() //$NON-NLS-1$
+                + ",\"length\":" + event.getLength() //$NON-NLS-1$
+                + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(text) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"caretAfterEvent\":" + caret //$NON-NLS-1$
+                + ",\"pendingAutoOpen\":" + pendingAutoOpen //$NON-NLS-1$
+                + ",\"suppressAutoOpen\":" + suppressDocumentAutoOpenAfterSession //$NON-NLS-1$
+                + ",\"proposalApplyFlag\":" //$NON-NLS-1$
+                + Boolean.TRUE.equals(SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get())
+                + "}"); //$NON-NLS-1$
+        Display display = widget != null && !widget.isDisposed() ? widget.getDisplay() : null;
+        scheduleInsertCaretProbe(display, "docChanged"); //$NON-NLS-1$
+    }
+
     private void onDocumentChangedForCompletionAutoOpen(DocumentEvent event)
     {
+        // #region agent log
+        logProposalDocumentInsert(event);
+        // #endregion
         if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
             return;
         pendingAutoOpen = false;
@@ -1156,6 +1235,17 @@ public final class ContentAssistSessionReloader
         int liveCaret = widget instanceof StyledText st ? st.getCaretOffset() : caret;
         if (liveCaret < 0)
             liveCaret = caret;
+        boolean inLiteral = SmartContentAssistProcessor.isStringLiteralAssistContext(
+            viewer, liveCaret);
+        boolean memberAccess = isMemberAccessAtCaret(liveCaret);
+        // Member-access: как Ctrl+Space — сначала штатный EDT createProposals
+        // (BslDocumentListener.DataEvent / LinkedMode), затем merge ИР.
+        // irOnly (mergeIrForDisplay(EMPTY)) не регистрирует LinkedMode → каретка в конце ().
+        if (memberAccess && !inLiteral)
+        {
+            openCompletionAutoMemberIrPopup(snapshot, liveCaret, autoOpenSeq);
+            return;
+        }
         processor.enterIrOnlyManualMode(liveCaret);
         processor.onAssistSessionContextReady(viewer, liveCaret);
         processor.primeIrSnapshotForDualAssist(snapshot);
@@ -1175,8 +1265,6 @@ public final class ContentAssistSessionReloader
             syncLiteralPopupAfterShow(assistant, viewer, snapshot);
         // Вне литерала finishDeferredLiteralPopupSetup не вызывается — иначе setupPhase
         // блокирует requestIrPopupRefresh при смене контекста (напр. «.» после «_»).
-        boolean inLiteral = SmartContentAssistProcessor.isStringLiteralAssistContext(
-            viewer, liveCaret);
         if (popupVisible && inLiteral)
         {
             widget.getDisplay().asyncExec(
@@ -1190,16 +1278,56 @@ public final class ContentAssistSessionReloader
             if (pendingPopupRefresh)
                 flushPendingPopupRefreshIfAny();
         }
+        logOpenCompletionAutoIrPopup(liveCaret, shown, popupVisible, snapshot, autoOpenSeq,
+            "irOnly"); //$NON-NLS-1$
+    }
+
+    /**
+     * Автооткрытие на {@code obj.} с ИР: штатный EDT-список (LinkedMode) + merge слов ИР.
+     * Не использует {@code irOnlyManualMode}.
+     */
+    private void openCompletionAutoMemberIrPopup(IrBslCompletionSupport.Snapshot snapshot,
+                                                 int liveCaret, int autoOpenSeq)
+    {
+        processor.exitIrOnlyManualMode();
+        processor.onAssistSessionContextReady(viewer, liveCaret);
+        processor.primeIrSnapshotForDualAssist(snapshot);
+        SmartFilterTracker.setCurrentFilter(""); //$NON-NLS-1$
+        ContentAssistPopupSync.ensureEmptyListAllowed(assistant, true);
+        beginLiteralOpenTracking();
+        preShowLiteralBrowserPatch(liveCaret);
+        boolean shown = ContentAssistPopupSync.showPossibleCompletions(assistant);
+        boolean popupVisible = shown && ContentAssistPopupSync.isPopupVisible(assistant);
+        if (popupVisible && assistBrowserCreator == null)
+        {
+            IInformationControlCreator fresh = resolveFreshAssistBrowserCreator(liveCaret);
+            if (fresh != null)
+                rememberAssistBrowserCreator(fresh);
+        }
+        // Не syncLiteralPopupAfterShow / flush recompute: повторный createProposals
+        // сбросил бы DataEvent. sessionPopupSync (assistSessionStarted) — inplaceCollapse.
+        setLiteralOpenSetupComplete(true);
+        logOpenCompletionAutoIrPopup(liveCaret, shown, popupVisible, snapshot, autoOpenSeq,
+            "memberEdtFirst"); //$NON-NLS-1$
+    }
+
+    private void logOpenCompletionAutoIrPopup(int liveCaret, boolean shown, boolean popupVisible,
+                                              IrBslCompletionSupport.Snapshot snapshot,
+                                              int autoOpenSeq, String route)
+    {
+        int irN = snapshot != null && snapshot.proposals != null ? snapshot.proposals.length : 0;
         // #region agent log
         ContentAssistDebug.traceAssist("H5", "openCompletionAutoIrPopup", "result", //$NON-NLS-1$ //$NON-NLS-2$
             "{\"caret\":" + liveCaret + ",\"shown\":" + shown //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"popupVisible\":" + popupVisible //$NON-NLS-1$
-                + ",\"irN\":" + (snapshot != null && snapshot.proposals != null ? snapshot.proposals.length : 0) //$NON-NLS-1$
+                + ",\"irN\":" + irN //$NON-NLS-1$
+                + ",\"route\":\"" + route + "\"" //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"autoOpenSeq\":" + autoOpenSeq + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         ContentAssistDebug.logAutoOpen(autoOpenSeq, "H77", "openCompletionAutoIrPopup", "irOpen", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "{\"caret\":" + liveCaret //$NON-NLS-1$
-                + ",\"irN\":" + (snapshot != null && snapshot.proposals != null ? snapshot.proposals.length : 0) //$NON-NLS-1$
-                + ",\"popupVisible\":" + popupVisible + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"irN\":" + irN //$NON-NLS-1$
+                + ",\"popupVisible\":" + popupVisible //$NON-NLS-1$
+                + ",\"route\":\"" + route + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         // #endregion
     }
 
