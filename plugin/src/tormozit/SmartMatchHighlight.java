@@ -285,7 +285,7 @@ public final class SmartMatchHighlight
                 }
                 if (!backgroundOnly)
                 {
-                    gc.setFont(bold);
+                    gc.setFont(measureFont);
                     gc.setForeground(style.foreground);
                     gc.drawText(match, x, baseY, true);
                 }

@@ -48,6 +48,7 @@
     <startup class="tormozit.SearchViewAggregationHook"/>
     <startup class="tormozit.FileSearchResultsHook"/>
     <startup class="tormozit.ConfigurationSearchDialogHook"/>
+    <startup class="tormozit.PictureDialogHook"/>
   </extension>
 
   <extension point="org.eclipse.ui.contexts">

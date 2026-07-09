@@ -49,7 +49,10 @@ final class FilterInputBox
             "comfort.openMdObject.filter.history."), //$NON-NLS-1$
         SELECT_TYPE(
             "comfort.selectType.filter.history.count", //$NON-NLS-1$
-            "comfort.selectType.filter.history."); //$NON-NLS-1$
+            "comfort.selectType.filter.history."), //$NON-NLS-1$
+        PICTURE_DIALOG(
+            "comfort.pictureDialog.filter.history.count", //$NON-NLS-1$
+            "comfort.pictureDialog.filter.history."); //$NON-NLS-1$
 
         final String prefCountKey;
         final String prefItemPrefix;
@@ -150,6 +153,16 @@ final class FilterInputBox
         return create(parent, opts, onSearch);
     }
 
+    static FilterInputBox forPictureDialog(Composite parent, Runnable onSearch)
+    {
+        Options opts = new Options();
+        opts.scope = Scope.PICTURE_DIALOG;
+        opts.layoutData = compactLayoutData();
+        opts.message = "Поиск..."; //$NON-NLS-1$
+        opts.tooltip = "Smart-фильтр (пробел = AND)"; //$NON-NLS-1$
+        return create(parent, opts, onSearch);
+    }
+
     /**
      * Заменяет штатное {@link Text} поле паттерна в диалоге EDT на {@link SearchBox} с историей.
      */
@@ -206,6 +219,7 @@ final class FilterInputBox
             case OBJECT_SETS -> forObjectSets(parent, onSearch);
             case OPEN_MD_OBJECT -> forOpenMdObject(parent, onSearch);
             case SELECT_TYPE -> forSelectType(parent, onSearch);
+            case PICTURE_DIALOG -> forPictureDialog(parent, onSearch);
         };
     }
 

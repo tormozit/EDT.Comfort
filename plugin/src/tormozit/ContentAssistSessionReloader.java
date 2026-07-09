@@ -1062,20 +1062,27 @@ public final class ContentAssistSessionReloader
         ContentAssistPopupSync.ensureEmptyListAllowed(assistant, false);
         warmupAssistBrowserCreator(caret);
         processor.onAssistSessionContextReady(viewer, caret);
-        completionAutoOpenEdtOpened = true;
-        // #region agent log
-        ContentAssistDebug.logAutoOpen(autoOpenSeq, "H73", "beginCompletionAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
-            "edtOpenBeforeShow", "{\"edtOpenedFlag\":true}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        openCompletionAutoEdtPopup(caret, autoOpenSeq);
         IRSession session = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(bslEditor, viewer);
         boolean irScheduled = false;
         if (session != null && !isWordsTableFetchInFlightForCaret(caret))
         {
             irScheduled = scheduleWordsTablePreparation(caret, true);
             if (irScheduled)
+            {
                 completionAutoOpenIrScheduled = true;
+                // #region agent log
+                ContentAssistDebug.logAutoOpen(autoOpenSeq, "H73", "beginCompletionAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
+                    "irOnlyWait", "{\"caret\":" + caret + ",\"irScheduled\":true}"); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
+                return;
+            }
         }
+        completionAutoOpenEdtOpened = true;
+        // #region agent log
+        ContentAssistDebug.logAutoOpen(autoOpenSeq, "H73", "beginCompletionAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
+            "edtOpenBeforeShow", "{\"edtOpenedFlag\":true}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+        openCompletionAutoEdtPopup(caret, autoOpenSeq);
         if (!irScheduled)
             completionAutoOpenPending = false;
     }
@@ -1211,26 +1218,8 @@ public final class ContentAssistSessionReloader
         boolean inFlight = wordsTableFetchInFlight
             && wordsTableCaret == completionAutoOpenCaret;
         boolean result = inFlight;
-        if (result || !completionAutoOpenAwaitingLogged)
-        {
-            String reason = result ? "inFlight" : "idle"; //$NON-NLS-1$ //$NON-NLS-2$
-            // #region agent log
-            ContentAssistDebug.logAutoOpen(completionAutoOpenActiveSeq, "H74", //$NON-NLS-1$
-                "isCompletionAutoOpenAwaitingWords", "awaitingCheck", //$NON-NLS-1$ //$NON-NLS-2$
-                "{\"pending\":" + completionAutoOpenPending //$NON-NLS-1$
-                    + ",\"edtOpened\":" + completionAutoOpenEdtOpened //$NON-NLS-1$
-                    + ",\"inFlight\":" + inFlight //$NON-NLS-1$
-                    + ",\"wordsReady\":" + wordsTableReady //$NON-NLS-1$
-                    + ",\"wordsCaret\":" + wordsTableCaret //$NON-NLS-1$
-                    + ",\"autoCaret\":" + completionAutoOpenCaret //$NON-NLS-1$
-                    + ",\"result\":" + result //$NON-NLS-1$
-                    + ",\"reason\":\"" + reason + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            if (result)
-                completionAutoOpenAwaitingLogged = true;
-            else
-                completionAutoOpenAwaitingLogged = true;
-        }
+        if (result)
+            completionAutoOpenAwaitingLogged = true;
         return result;
     }
 

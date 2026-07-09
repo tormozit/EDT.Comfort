@@ -128,6 +128,8 @@ public final class ContentAssistDebug
     {
         if (!NDJSON_ENABLED)
             return;
+        if (!VERBOSE && isNoisyNdjsonLocation(location, message))
+            return;
         try
         {
             String data = dataJson != null && !dataJson.isEmpty() ? dataJson : "{}"; //$NON-NLS-1$
@@ -141,6 +143,51 @@ public final class ContentAssistDebug
         }
         catch (Exception ignored)
         {
+        }
+    }
+
+    /** Hot-path шум на каждое `.` / recompute — только с -Dtormozit.contentAssistVerbose=true. */
+    private static boolean isNoisyNdjsonLocation(String location, String message)
+    {
+        if (location == null)
+            return false;
+        switch (location)
+        {
+            case "applyStockAssistImagesFromDelegate": //$NON-NLS-1$
+            case "mergeIrProposals": //$NON-NLS-1$
+            case "browserContentLoad": //$NON-NLS-1$
+            case "sidePanelRefresh": //$NON-NLS-1$
+            case "literalOpenPhase": //$NON-NLS-1$
+            case "literalBrowserPhase": //$NON-NLS-1$
+            case "literalCreatorResolve": //$NON-NLS-1$
+            case "literalListState": //$NON-NLS-1$
+            case "literalMergeTimeline": //$NON-NLS-1$
+            case "literalOpenFlash": //$NON-NLS-1$
+            case "htmlApplyPoll": //$NON-NLS-1$
+            case "irActivationWarmup": //$NON-NLS-1$
+            case "isStringLiteralAssistContext": //$NON-NLS-1$
+            case "computeCompletionProposals": //$NON-NLS-1$
+            case "computeProposalsLight": //$NON-NLS-1$
+            case "filterCachedProposalsForPopup": //$NON-NLS-1$
+            case "applyPopupListSync": //$NON-NLS-1$
+            case "mergeDedupAudit": //$NON-NLS-1$
+            case "recomputePopupList": //$NON-NLS-1$
+            case "isCompletionAutoOpenAwaitingWords": //$NON-NLS-1$
+            case "coldCreatorBootstrap": //$NON-NLS-1$
+            case "ContentAssistSessionReloader.install": //$NON-NLS-1$
+            case "ContentAssistPatcher.applyPatch": //$NON-NLS-1$
+            case "installCtrlSpaceFilter": //$NON-NLS-1$
+            case "prepareAssistContextAsync": //$NON-NLS-1$
+            case "fetchCompletionSnapshot": //$NON-NLS-1$
+            case "applyIrCompletion": //$NON-NLS-1$
+                return true;
+            case "assistSessionStarted": //$NON-NLS-1$
+                return !"session".equals(message) && !"sessionStarted".equals(message); //$NON-NLS-1$ //$NON-NLS-2$
+            case "onWordsTablePrepared": //$NON-NLS-1$
+                return "branch".equals(message) || "merge".equals(message) //$NON-NLS-1$ //$NON-NLS-2$
+                    || "skipDuplicate".equals(message); //$NON-NLS-1$
+            default:
+                return false;
         }
     }
 
