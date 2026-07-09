@@ -89,7 +89,11 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     private ICompletionProposal[] memberStockFullList = EMPTY;
     /** Позиция {@code '.'} для {@link #memberStockFullList}. */
     private int memberStockFullListDot = -1;
-    /** Отмена отложенного {@link #scheduleMemberStockCapture} (сохранение EDT DataEvent). */
+    /**
+     * Поколение отмены {@link #scheduleMemberStockCapture}.
+     * Инкремент в {@link #cancelDeferredDelegateComputes} — иначе отложенный
+     * {@code createProposals} сбрасывает DataEvent после in-place collapse.
+     */
     private int memberStockCaptureGen;
     /** Пауза без ввода и с пустым фильтром перед тяжёлой {@link #loadFullList}. */
     private static final int IDLE_FULL_LIST_MS = 1500;
@@ -553,6 +557,11 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     /**
      * Схлопывает optional-перегрузки EDT по dedup-ключу во всём merged-списке
      * (не только в очереди overlap ИР).
+     *
+     * <p>Оставляет те же объекты proposal (identity), что пришли из EDT — не клонировать
+     * и не подменять через повторный {@code createProposals}: иначе теряется
+     * {@code BslDocumentListener.DataEvent} для LinkedMode (каретка внутри {@code ()}).
+     * In-place путь popup: {@link ContentAssistPopupSync#collapseOptionalOverlapsInVisiblePopup}.
      */
     static List<ICompletionProposal> collapseOptionalEdtOverlapsInMergedList(
         List<ICompletionProposal> merged)
@@ -691,8 +700,14 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     }
 
     /**
-     * Отменяет отложенные {@code createProposals} (async/eager/idle/member-stock),
-     * чтобы не сбрасывать {@code BslDocumentListener.DataEvent} после in-place collapse.
+     * Отменяет отложенные {@code createProposals} (async/eager/idle/member-stock).
+     *
+     * <p>Вызывать вместе с
+     * {@link ContentAssistPopupSync#collapseOptionalOverlapsInVisiblePopup}: иначе фоновый
+     * {@code delegate.computeCompletionProposals} после in-place collapse снова сделает
+     * {@code BslDocumentListener.reset} → {@code DataEvent} map clear → LinkedMode не войдёт,
+     * каретка останется в конце {@code Метод();}. Инкремент {@link #memberStockCaptureGen}
+     * гасит уже поставленные {@code asyncExec}/{@code timerExec} member-stock.
      */
     void cancelDeferredDelegateComputes()
     {
@@ -3226,11 +3241,13 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         {
             if (hasIrProposalsForCurrentContext())
                 return popupListWithIr(raw);
-            // Без ИР: схлопывание на уже созданном EDT-списке (без повторного createProposals).
+            // Без ИР: схлопывание на уже созданном EDT-списке. Не заменять на
+            // повторный delegate.compute — см. javadoc ContentAssistPopupSync (DataEvent).
             return collapseOptionalEdtOverlapsArray(raw);
         }
         if (hasIrProposalsForCurrentContext())
             return popupListWithIr(raw);
+        // Схлопывание до wrap: identity EDT proposal сохраняется для LinkedMode.
         return buildDelegateOrderedList(sortListForIrAssist(
             collapseOptionalEdtOverlapsArray(unwrapProposals(raw)), null));
     }

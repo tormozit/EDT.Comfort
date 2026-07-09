@@ -393,12 +393,14 @@ public final class ContentAssistSessionReloader
 
                 if (comfortListFilter)
                 {
+                    // irOnly (литерал / старый auto): полный sync пропущен — только панель.
+                    // Member-access auto с ИР идёт через memberEdtFirst (не irOnly) →
+                    // scheduleSessionPopupSync → inplaceCollapse (сохраняет DataEvent).
                     boolean skipPopupSync = processor.isIrOnlyManualMode()
                         || (manualIrAssistPending && inLiteral && wordsTableReady);
                     if (!skipPopupSync)
                         ContentAssistPopupSync.scheduleSessionPopupSync(assistant, viewer, processor);
                     else
-                        // irOnly (в т.ч. auto-open по «.»): полный sync пропущен — только «Фильтр»/«Родитель:»
                         ContentAssistPopupSync.scheduleFilterBarSetup(assistant, viewer, processor);
                 }
             }
@@ -1238,9 +1240,10 @@ public final class ContentAssistSessionReloader
         boolean inLiteral = SmartContentAssistProcessor.isStringLiteralAssistContext(
             viewer, liveCaret);
         boolean memberAccess = isMemberAccessAtCaret(liveCaret);
-        // Member-access: как Ctrl+Space — сначала штатный EDT createProposals
-        // (BslDocumentListener.DataEvent / LinkedMode), затем merge ИР.
-        // irOnly (mergeIrForDisplay(EMPTY)) не регистрирует LinkedMode → каретка в конце ().
+        // REGRESSION: на obj. с ИР нельзя открывать через irOnlyManualMode
+        // (computeIrOnlyProposals → mergeIrForDisplay(EMPTY)): нет штатного
+        // createProposals → нет DataEvent/LinkedMode → каретка в конце ();.
+        // Ctrl+Space уже шёл через EDT+merge — auto должен совпадать (memberEdtFirst).
         if (memberAccess && !inLiteral)
         {
             openCompletionAutoMemberIrPopup(snapshot, liveCaret, autoOpenSeq);
@@ -1283,8 +1286,13 @@ public final class ContentAssistSessionReloader
     }
 
     /**
-     * Автооткрытие на {@code obj.} с ИР: штатный EDT-список (LinkedMode) + merge слов ИР.
-     * Не использует {@code irOnlyManualMode}.
+     * Автооткрытие на {@code obj.} с ИР: штатный EDT-список (LinkedMode) + primed ИР.
+     *
+     * <p><b>Не</b> вызывать {@link SmartContentAssistProcessor#enterIrOnlyManualMode} и
+     * <b>не</b> {@link #syncLiteralPopupAfterShow} / flush-{@code recomputePopupList}:
+     * повторный {@code createProposals} сбрасывает {@code DataEvent}. Схлопывание —
+     * {@link ContentAssistPopupSync#scheduleSessionPopupSync} → in-place collapse.
+     * Маршрут в логе: {@code route=memberEdtFirst}.
      */
     private void openCompletionAutoMemberIrPopup(IrBslCompletionSupport.Snapshot snapshot,
                                                  int liveCaret, int autoOpenSeq)
@@ -1296,6 +1304,7 @@ public final class ContentAssistSessionReloader
         ContentAssistPopupSync.ensureEmptyListAllowed(assistant, true);
         beginLiteralOpenTracking();
         preShowLiteralBrowserPatch(liveCaret);
+        // Штатный show → EDT createProposals регистрирует DataEvent для LinkedMode.
         boolean shown = ContentAssistPopupSync.showPossibleCompletions(assistant);
         boolean popupVisible = shown && ContentAssistPopupSync.isPopupVisible(assistant);
         if (popupVisible && assistBrowserCreator == null)
@@ -1304,8 +1313,6 @@ public final class ContentAssistSessionReloader
             if (fresh != null)
                 rememberAssistBrowserCreator(fresh);
         }
-        // Не syncLiteralPopupAfterShow / flush recompute: повторный createProposals
-        // сбросил бы DataEvent. sessionPopupSync (assistSessionStarted) — inplaceCollapse.
         setLiteralOpenSetupComplete(true);
         logOpenCompletionAutoIrPopup(liveCaret, shown, popupVisible, snapshot, autoOpenSeq,
             "memberEdtFirst"); //$NON-NLS-1$

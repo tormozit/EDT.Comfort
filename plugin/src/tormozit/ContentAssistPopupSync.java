@@ -36,8 +36,21 @@ import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
  * {@link #recomputePopupList} (smart-фильтр) вместо {@code validate} по полному списку.
  *
  * <p>{@link #recomputePopupList} — toggle, ввод с фильтром, догрузка кэша.
- * Member-access с пустым фильтром (в т.ч. Ctrl+Space) — {@link #collapseOptionalOverlapsInVisiblePopup},
- * без повторного {@code createProposals} (сохраняет EDT LinkedMode).
+ *
+ * <h3>Регрессия: каретка после вставки {@code Метод();}</h3>
+ * EDT ставит каретку внутрь {@code ()} через {@code BslDocumentListener.DataEvent}
+ * (LinkedMode), зарегистрированный при штатном {@code createProposals}. Ключ map —
+ * {@code replacementString}. Повторный {@code createProposals} / stock filter с другим
+ * acceptor вызывает {@code reset} → {@code map.clear()} → LinkedMode не срабатывает,
+ * JFace оставляет каретку в конце текста ({@code cursorPosition = length}).
+ *
+ * <p><b>Запрещено</b> на member-access (Ctrl+Space / session open), в т.ч. с префиксом
+ * ({@code тз.Найти}): {@code runStockFilterRunnable} + {@link #recomputePopupList}.
+ * Нужно: {@link #syncMemberAccessPopupInPlace} (collapse / refresh из кэша без stock)
+ * + {@link SmartContentAssistProcessor#cancelDeferredDelegateComputes()}.
+ *
+ * <p>Проверка: без ИР и с ИР — auto и Ctrl+Space на {@code obj.} / {@code obj.Преф} →
+ * каретка внутри {@code ()} у схлопнутого {@code Вставить();} / {@code Найти()}.
  */
 public final class ContentAssistPopupSync
 {
@@ -363,16 +376,18 @@ public final class ContentAssistPopupSync
                         boolean irExpected = inLiteral
                             && isLiteralIrExpected(viewer, processor, caret);
                         boolean forceSmartOpen = inLiteral && !irExpected;
-                        // Пустой фильтр на member-access: не гоняем stock+recompute —
-                        // повторный createProposals сбрасывает BslDocumentListener.DataEvent
-                        // (LinkedMode для каретки внутри ()). Схлопываем видимый список на месте.
-                        boolean memberEmptyOnly = isMemberAccessEmptyFilterRecompute(filter, doc,
-                            caret);
+                        // REGRESSION (каретка в конце Метод(); / Найти()): на member-access
+                        // session sync не должен делать stock+recompute — даже при непустом
+                        // префиксе (тз.Найти + Ctrl+Space). createProposals → DataEvent.clear
+                        // → LinkedMode не входит. Список уже отфильтрован первичным compute;
+                        // здесь только in-place collapse (+ при префиксе refresh из кэша
+                        // без stock filter).
+                        boolean memberAccess = isMemberAccessAtCaret(doc, caret);
                         boolean shouldRecompute = shouldRecomputePopupList(filter, false, doc, caret)
-                            && !memberEmptyOnly;
+                            && !memberAccess;
                         logSessionPopupSync("beforeRecompute", inLiteral, irExpected, //$NON-NLS-1$
                             stableNAfterSeed, filter, shouldRecompute, forceSmartOpen,
-                            memberEmptyOnly ? "inplaceCollapse" : null); //$NON-NLS-1$
+                            memberAccess ? "inplaceCollapse" : null); //$NON-NLS-1$
                         if (forceSmartOpen)
                         {
                             beginSmartLiteralSessionOpen();
@@ -384,15 +399,15 @@ public final class ContentAssistPopupSync
                                 return;
                             }
                         }
-                        else if (memberEmptyOnly)
+                        else if (memberAccess)
                         {
-                            // Не дать async/member-stock createProposals сбросить DataEvent.
                             processor.cancelDeferredDelegateComputes();
-                            boolean collapsed = collapseOptionalOverlapsInVisiblePopup(assistant);
-                            logSessionPopupSync(collapsed ? "afterRecompute" : "skipped", //$NON-NLS-1$ //$NON-NLS-2$
+                            boolean synced = syncMemberAccessPopupInPlace(assistant, viewer,
+                                processor, caret, filter);
+                            logSessionPopupSync(synced ? "afterRecompute" : "skipped", //$NON-NLS-1$ //$NON-NLS-2$
                                 inLiteral, irExpected, stableNAfterSeed, filter, false, false,
-                                collapsed ? "inplaceCollapse" : "inplaceCollapseMiss"); //$NON-NLS-1$ //$NON-NLS-2$
-                            if (collapsed)
+                                synced ? "inplaceCollapse" : "inplaceCollapseMiss"); //$NON-NLS-1$ //$NON-NLS-2$
+                            if (synced)
                                 refreshAdditionalInfo(assistant);
                             return;
                         }
@@ -1053,8 +1068,14 @@ public final class ContentAssistPopupSync
                     hideProposalPopup(assistant);
                     return;
                 }
-                if (shouldRecomputePopupList(SmartFilterTracker.getCurrentFilter(), false,
-                    doc, caret))
+                String currentFilter = SmartFilterTracker.getCurrentFilter();
+                if (isMemberAccessAtCaret(doc, caret))
+                {
+                    processor.cancelDeferredDelegateComputes();
+                    syncMemberAccessPopupInPlace(assistant, viewer, processor, caret,
+                        currentFilter);
+                }
+                else if (shouldRecomputePopupList(currentFilter, false, doc, caret))
                 {
                     runStockFilterRunnable(assistant);
                     if (SmartAssistFilterState.isSmartFilterEnabled())
@@ -2758,9 +2779,16 @@ public final class ContentAssistPopupSync
                 // уже применил тот же фильтр: shouldRecomputePopupList вернёт false, и
                 // повторный validate() по 1000+ proposals на UI-потоке бессмысленен.
                 String currentFilter = SmartFilterTracker.getCurrentFilter();
-                boolean shouldRecompute = assistant != null && processor != null
-                    && shouldRecomputePopupList(currentFilter, false, doc, caret);
-                if (shouldRecompute)
+                boolean memberAccess = isMemberAccessAtCaret(doc, caret);
+                // Member-access: не stock+recompute (сброс DataEvent / LinkedMode).
+                if (memberAccess && assistant != null && processor != null)
+                {
+                    processor.cancelDeferredDelegateComputes();
+                    syncMemberAccessPopupInPlace(assistant, viewer, processor, caret,
+                        currentFilter);
+                }
+                else if (assistant != null && processor != null
+                    && shouldRecomputePopupList(currentFilter, false, doc, caret))
                 {
                     runStockFilterRunnable(assistant);
                     if (SmartAssistFilterState.isSmartFilterEnabled())
@@ -2805,9 +2833,13 @@ public final class ContentAssistPopupSync
     }
 
     /**
-     * Пересчёт при непустом фильтре или toggle smart-фильтра.
-     * Member-access с пустым фильтром — не здесь: см. {@link #collapseOptionalOverlapsInVisiblePopup}
-     * (повторный createProposals сбрасывает EDT LinkedMode / DataEvent).
+     * Нужен ли полный {@link #recomputePopupList} (не-member пути).
+     *
+     * <p>Member-access ({@code obj.} / {@code obj.Преф}) обрабатывается отдельно —
+     * {@link #syncMemberAccessPopupInPlace}; stock+recompute там сбрасывает DataEvent.
+     *
+     * @param doc   не используется (сигнатура для call-site)
+     * @param caret не используется (см. {@code doc})
      */
     private static boolean shouldRecomputePopupList(String filter, boolean afterFilterToggle,
                                                     IDocument doc, int caret)
@@ -2816,19 +2848,78 @@ public final class ContentAssistPopupSync
             || (filter != null && !filter.isEmpty());
     }
 
-    /** Member-access ({@code obj.}) и пустой префикс — кандидат на in-place collapse. */
-    private static boolean isMemberAccessEmptyFilterRecompute(String filter, IDocument doc,
-                                                              int caret)
+    /** Member-access ({@code obj.}) в позиции каретки. */
+    private static boolean isMemberAccessAtCaret(IDocument doc, int caret)
     {
-        if (filter != null && !filter.isEmpty())
-            return false;
         return doc != null && caret >= 0
             && SmartContentAssistProcessor.ReceiverTypeLabel.findMemberAccessDot(doc, caret) >= 0;
     }
 
     /**
-     * Схлопывает optional-перегрузки в уже показанном popup без {@code createProposals}
-     * и без stock filter — сохраняет регистрацию {@code BslDocumentListener.DataEvent}.
+     * Session/debounce sync на member-access без stock filter и без
+     * {@link #recomputePopupList} (они сбрасывают {@code BslDocumentListener.DataEvent}).
+     *
+     * <p>При непустом префиксе и тёплом кэше — подмена списка из
+     * {@link SmartContentAssistProcessor#filterCachedProposalsForPopup}; иначе
+     * {@link #collapseOptionalOverlapsInVisiblePopup} на уже показанных строках.
+     */
+    static boolean syncMemberAccessPopupInPlace(ContentAssistant assistant, SourceViewer viewer,
+                                                SmartContentAssistProcessor processor, int caret,
+                                                String filter)
+    {
+        if (assistant == null || !isPopupVisible(assistant))
+            return false;
+        try
+        {
+            if (processor != null && filter != null && !filter.isEmpty()
+                && SmartAssistFilterState.isSmartFilterEnabled())
+            {
+                ICompletionProposal[] cached =
+                    processor.filterCachedProposalsForPopup(viewer, caret, filter);
+                if (cached != null && cached.length > 0)
+                {
+                    Object popup = getPopup(assistant);
+                    if (popup == null)
+                        return false;
+                    initPopupReflection(popup);
+                    if (fFilteredProposalsField == null || setProposalsMethod == null)
+                        return false;
+                    SavedSelection saved = saveSelection(popup);
+                    List<ICompletionProposal> list = new ArrayList<>(Arrays.asList(cached));
+                    list = SmartContentAssistProcessor.collapseOptionalEdtOverlapsInMergedList(list);
+                    setProposalsAndRestoreSelection(popup, list, false, saved, false, false);
+                    List<ICompletionProposal> applied =
+                        (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+                    if (fComputedProposalsField != null && applied != null)
+                        fComputedProposalsField.set(popup, applied);
+                    // #region agent log
+                    SmartContentAssistProcessor.logPopupListCaretProbe("inplaceFilterCache", //$NON-NLS-1$
+                        applied != null ? applied : list);
+                    ContentAssistDebug.debugModeLog("H73", "inplaceCollapse", "filterCache", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        "{\"filter\":\"" + ContentAssistDebug.jsonEscapeForLog(filter) //$NON-NLS-1$
+                            + "\",\"n\":" + (applied != null ? applied.size() : list.size()) //$NON-NLS-1$
+                            + "}"); //$NON-NLS-1$
+                    // #endregion
+                    finishSyncCycle(popup);
+                    return true;
+                }
+            }
+            return collapseOptionalOverlapsInVisiblePopup(assistant);
+        }
+        catch (Exception e)
+        {
+            ContentAssistDebug.log("inplaceMemberSync ERROR: " + e.getMessage()); //$NON-NLS-1$
+            return collapseOptionalOverlapsInVisiblePopup(assistant);
+        }
+    }
+
+    /**
+     * Схлопывает optional-перегрузки в уже показанном popup.
+     *
+     * <p>Сохраняет identity штатных EDT proposal и регистрацию
+     * {@code BslDocumentListener.DataEvent} (LinkedMode → каретка внутри {@code ()}).
+     * Не вызывать {@code createProposals} / {@link #runStockFilterRunnable} /
+     * {@link #recomputePopupList} «рядом» на этом пути — см. javadoc класса.
      *
      * @return {@code true} если список прочитан (даже без изменений)
      */
