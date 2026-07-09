@@ -700,6 +700,8 @@ public final class GitChangedFileMenuHook implements IStartup
                     }
                 });
                 addedItems.add(objItem);
+
+                addIrHistoryItemIfNeeded(submenu, view, capturedFile, addedItems);
             }
 
             @Override
@@ -717,6 +719,39 @@ public final class GitChangedFileMenuHook implements IStartup
                 });
             }
         };
+    }
+
+    // ========================================================================
+    // HistoryView: «История ИР»
+    // ========================================================================
+
+    private static void addIrHistoryItemIfNeeded(Menu submenu, IViewPart view,
+        IFile capturedFile, List<MenuItem> addedItems)
+    {
+        if (!isHistoryView(view))
+            return;
+
+        MenuItem irItem = new MenuItem(submenu, SWT.PUSH);
+        irItem.setText("История ИР");
+        irItem.addSelectionListener(new SelectionAdapter()
+        {
+            @Override
+            public void widgetSelected(SelectionEvent ev)
+            {
+                String commitSha = extractCommitShaFrom(view);
+                HistoryViewHandler.executeIrHistoryWithFile(capturedFile, commitSha);
+            }
+        });
+        addedItems.add(irItem);
+    }
+
+    private static String extractCommitShaFrom(IViewPart view)
+    {
+        ISelection sel = selectionOf(view);
+        if (!(sel instanceof IStructuredSelection ss) || ss.size() != 1)
+            return "";
+        Object element = ss.getFirstElement();
+        return HistoryViewHandler.extractCommitSha(element);
     }
 
     // ========================================================================
@@ -950,6 +985,14 @@ public final class GitChangedFileMenuHook implements IStartup
     {
         IWorkbenchWindow window = activeWindow();
         return window != null ? window.getActivePage() : null;
+    }
+
+    private static boolean isHistoryView(IWorkbenchPart part)
+    {
+        if (part == null || part.getSite() == null)
+            return false;
+        String id = part.getSite().getId();
+        return EGIT_HISTORY_VIEW_ID.equals(id) || TEAM_HISTORY_VIEW_ID.equals(id);
     }
 
     public static boolean isGitView(IWorkbenchPart part)

@@ -352,6 +352,11 @@
         name="Быстрый поиск назад (Комфорт)"
         categoryId="tormozit.commands.global"
         description="То же, что штатный «Быстрый поиск назад» EDT, но всегда правильно переходит, учитывает настройки окна поиска и идентификатор под кареткой захватывается с учётом {@code _} (Комфорт)"/>
+    <command
+        id="tormozit.history.openInIr"
+        name="История ИР"
+        categoryId="tormozit.commands.global"
+        description="Открыть историю выделенного коммита в приложении ИР (Комфорт)"/>
   </extension>
 
   <extension point="org.eclipse.ui.handlers">
@@ -544,6 +549,18 @@
         class="tormozit.ExecutableExtensionFactory:tormozit.GitShowInNavigatorHandler"
         commandId="tormozit.git.showInNavigator">
     </handler>
+    <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.HistoryViewHandler"
+        commandId="tormozit.history.openInIr">
+      <activeWhen>
+        <with variable="activePartId">
+          <or>
+            <equals value="org.eclipse.egit.ui.HistoryView"/>
+            <equals value="org.eclipse.team.ui.GenericHistoryView"/>
+          </or>
+        </with>
+      </activeWhen>
+    </handler>
   </extension>
 
   <extension point="org.eclipse.ui.menus">
@@ -578,7 +595,7 @@
             style="toggle"
             tooltip="Показать только объекты активного набора; вытесняет фильтр подсистем (Комфорт)"/>
       </menuContribution>
-   </extension>
+    </extension>
 
   <extension point="org.eclipse.ui.views">
     <category
