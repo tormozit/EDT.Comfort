@@ -54,7 +54,7 @@ import com._1c.g5.v8.dt.mcore.TypeItem;
 /**
  * Подсказка параметров метода (CTRL+SHIFT+Space / LinkedMode):
  * заголовок {@code Владелец : Метод : Типы<br>(…)}; строка типа
- * {@code [Вх|Вых] Тип: … [=default] - описание}; выбор сигнатуры
+ * {@code Вх.|Вых. - типы [=default] - описание}; выбор сигнатуры
  * по числу фактических аргументов и пересечению типов.
  */
 public final class ParamHintHtmlModifier
@@ -576,10 +576,74 @@ public final class ParamHintHtmlModifier
 
         String before = html.substring(contentStart, firstParen);
         String rebuilt = rebuildHeadingPrefix(before, ctx);
+        String withParen;
         if (rebuilt == null)
-            return html.substring(0, firstParen) + "<br>(" + html.substring(firstParen + 1); //$NON-NLS-1$
-        return html.substring(0, contentStart) + rebuilt + "<br>(" //$NON-NLS-1$
-            + html.substring(firstParen + 1);
+            withParen = html.substring(0, firstParen) + "<br>(" + html.substring(firstParen + 1); //$NON-NLS-1$
+        else
+            withParen = html.substring(0, contentStart) + rebuilt + "<br>(" //$NON-NLS-1$
+                + html.substring(firstParen + 1);
+        String withOptional = rewriteHeadingOptionalParams(withParen, ctx);
+        return withOptional != null ? withOptional : withParen;
+    }
+
+    /**
+     * Необязательные параметры в сигнатуре: {@code (Колонки, Строки?)} вместо
+     * штатных {@code [Строки]}.
+     */
+    private static String rewriteHeadingOptionalParams(String html, HoverContext ctx)
+    {
+        if (html == null || ctx == null || ctx.pages == null || ctx.pages.isEmpty()
+            || ctx.pageIndex < 0 || ctx.pageIndex >= ctx.pages.size())
+            return null;
+        int open = html.indexOf("<br>("); //$NON-NLS-1$
+        if (open < 0)
+            return null;
+        open += "<br>".length(); //$NON-NLS-1$
+        // open указывает на '('
+        int close = html.indexOf(')', open + 1);
+        if (close < 0)
+            return null;
+        Object page = ctx.pages.get(ctx.pageIndex);
+        Object paramsObj = Global.getField(page, "params"); //$NON-NLS-1$
+        if (!(paramsObj instanceof List<?> params) || params.isEmpty())
+            return null;
+        StringBuilder list = new StringBuilder();
+        for (int i = 0; i < params.size(); i++)
+        {
+            Object paramContent = params.get(i);
+            if (paramContent == null)
+                continue;
+            String name = asString(Global.invoke(paramContent, "getName")); //$NON-NLS-1$
+            if (name == null || name.isBlank())
+                continue;
+            if (list.length() > 0)
+                list.append(", "); //$NON-NLS-1$
+            boolean current = i == ctx.paramIndex;
+            if (current)
+                list.append("<b>"); //$NON-NLS-1$
+            list.append(escapeHtml(name.trim()));
+            if (isParamOptional(paramContent))
+                list.append('?');
+            if (current)
+                list.append("</b>"); //$NON-NLS-1$
+        }
+        if (list.length() == 0)
+            return null;
+        return html.substring(0, open + 1) + list + html.substring(close);
+    }
+
+    private static boolean isParamOptional(Object paramContent)
+    {
+        if (paramContent == null)
+            return false;
+        Object required = Global.invoke(paramContent, "isRequired"); //$NON-NLS-1$
+        if (required instanceof Boolean req)
+            return !req.booleanValue();
+        Object optional = Global.invoke(paramContent, "getOptional"); //$NON-NLS-1$
+        if (optional instanceof Boolean opt && opt.booleanValue())
+            return true;
+        String def = asString(Global.invoke(paramContent, "getDefaultDescription")); //$NON-NLS-1$
+        return def != null && !def.isBlank();
     }
 
     /** {@code Владелец : Метод : Типы} (типы — HTML со ссылками, если есть). */
@@ -900,20 +964,21 @@ public final class ParamHintHtmlModifier
             return null;
 
         String oldTypeInner = html.substring(typeInnerStart, typeInnerEnd);
-        // База — исходный HTML EDT («Тип:» + ссылки <a>), без пересборки текста типов
-        String typeBase = stripComfortMeta(oldTypeInner);
+        // База — только типы (без «Тип:» / «Типы:»), со ссылками если есть
+        String typeBase = stripTypeLabel(stripComfortMeta(oldTypeInner));
 
         String description = null;
         String defaultDescription = null;
         Boolean isOut = null;
         String paramName = null;
+        Object paramContent = null;
 
         if (ctx != null && ctx.pages != null && !ctx.pages.isEmpty()
             && ctx.pageIndex >= 0 && ctx.pageIndex < ctx.pages.size()
             && ctx.paramIndex >= 0)
         {
             Object page = ctx.pages.get(ctx.pageIndex);
-            Object paramContent = Global.invoke(page, "getParameter", //$NON-NLS-1$
+            paramContent = Global.invoke(page, "getParameter", //$NON-NLS-1$
                 Integer.valueOf(ctx.paramIndex));
             if (paramContent != null)
             {
@@ -926,20 +991,12 @@ public final class ParamHintHtmlModifier
                 {
                     String linkedTypes = formatParamContentTypesHtml(paramContent);
                     if (linkedTypes != null && !linkedTypes.isEmpty())
-                    {
-                        int colon = typeBase.indexOf(':');
-                        String label = colon >= 0 ? typeBase.substring(0, colon + 1) : "Тип:"; //$NON-NLS-1$
-                        typeBase = label + " " + linkedTypes; //$NON-NLS-1$
-                    }
-                    else if (stripHtml(extractTypesHtml(typeBase)).isEmpty())
+                        typeBase = linkedTypes;
+                    else if (stripHtml(typeBase).isEmpty())
                     {
                         String fallbackTypes = formatParamContentTypes(paramContent);
                         if (fallbackTypes != null && !fallbackTypes.isEmpty())
-                        {
-                            int colon = typeBase.indexOf(':');
-                            String label = colon >= 0 ? typeBase.substring(0, colon + 1) : "Тип:"; //$NON-NLS-1$
-                            typeBase = label + " " + escapeHtml(fallbackTypes); //$NON-NLS-1$
-                        }
+                            typeBase = escapeHtml(fallbackTypes);
                     }
                 }
             }
@@ -954,7 +1011,7 @@ public final class ParamHintHtmlModifier
         String newTypeInner = directionPrefix + typeBase + suffix;
         if (newTypeInner == null || newTypeInner.isEmpty())
             return null;
-        boolean hasEnrichment = !extractTypesHtml(typeBase).isEmpty()
+        boolean hasEnrichment = !stripHtml(typeBase).isEmpty()
             || isOut != null
             || (defaultDescription != null && !defaultDescription.isBlank())
             || (description != null && !description.isBlank());
@@ -1124,7 +1181,7 @@ public final class ParamHintHtmlModifier
     {
         if (isOut == null)
             return ""; //$NON-NLS-1$
-        return isOut.booleanValue() ? "[Вых] " : "[Вх] "; //$NON-NLS-1$ //$NON-NLS-2$
+        return isOut.booleanValue() ? "Вых. - " : "Вх. - "; //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static String buildMetaSuffix(String defaultDescription, String description)
@@ -1133,7 +1190,7 @@ public final class ParamHintHtmlModifier
         if (defaultDescription != null && !defaultDescription.isBlank())
         {
             sb.append(" [="); //$NON-NLS-1$
-            sb.append(escapeHtml(stripHtml(defaultDescription)));
+            sb.append(escapeHtml(formatDefaultValue(defaultDescription)));
             sb.append(']');
         }
         if (description != null && !description.isBlank())
@@ -1144,13 +1201,55 @@ public final class ParamHintHtmlModifier
         return sb.toString();
     }
 
-    /** Срезает ранее дописанный Comfort-мета (префикс Вх/Вых и суффикс), сохраняя «Тип:» и ссылки. */
+    /** Штатное «Пустая строка.» → {@code ""}; хвостовая «.» у значения убирается. */
+    private static String formatDefaultValue(String defaultDescription)
+    {
+        String plain = stripHtml(defaultDescription).trim();
+        if (plain.equalsIgnoreCase("Пустая строка.") //$NON-NLS-1$
+            || plain.equalsIgnoreCase("Пустая строка") //$NON-NLS-1$
+            || plain.equalsIgnoreCase("Empty string.") //$NON-NLS-1$
+            || plain.equalsIgnoreCase("Empty string")) //$NON-NLS-1$
+            return "\"\""; //$NON-NLS-1$
+        while (plain.endsWith(".")) //$NON-NLS-1$
+            plain = plain.substring(0, plain.length() - 1).trim();
+        return plain;
+    }
+
+    /** Убирает подпись «Тип:» / «Типы:» / Type:, оставляя только перечень типов. */
+    private static String stripTypeLabel(String typeInnerHtml)
+    {
+        if (typeInnerHtml == null || typeInnerHtml.isEmpty())
+            return ""; //$NON-NLS-1$
+        String s = typeInnerHtml.trim();
+        String plain = stripHtml(s);
+        if (plain == null)
+            return s;
+        String[] labels = {
+            "Типы:", "Тип:", "Types:", "Type:" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        };
+        for (String label : labels)
+        {
+            if (plain.regionMatches(true, 0, label, 0, label.length()))
+            {
+                int colon = s.indexOf(':');
+                if (colon >= 0)
+                    return s.substring(colon + 1).trim();
+            }
+        }
+        return s;
+    }
+
+    /** Срезает ранее дописанный Comfort-мета (префикс Вх/Вых и суффикс), сохраняя типы и ссылки. */
     private static String stripComfortMeta(String typeInnerHtml)
     {
         if (typeInnerHtml == null || typeInnerHtml.isEmpty())
             return ""; //$NON-NLS-1$
         String s = typeInnerHtml;
-        if (s.startsWith("[Вых]")) //$NON-NLS-1$
+        if (s.startsWith("Вых. - ")) //$NON-NLS-1$
+            s = s.substring("Вых. - ".length()); //$NON-NLS-1$
+        else if (s.startsWith("Вх. - ")) //$NON-NLS-1$
+            s = s.substring("Вх. - ".length()); //$NON-NLS-1$
+        else if (s.startsWith("[Вых]")) //$NON-NLS-1$
         {
             s = s.substring("[Вых]".length()); //$NON-NLS-1$
             if (s.startsWith(" ")) //$NON-NLS-1$
@@ -1172,22 +1271,21 @@ public final class ParamHintHtmlModifier
         idx = s.indexOf(" [="); //$NON-NLS-1$
         if (idx >= 0 && idx < cut)
             cut = idx;
+        idx = s.indexOf("[="); //$NON-NLS-1$
+        if (idx >= 0 && idx < cut)
+            cut = idx;
         idx = s.indexOf(" - "); //$NON-NLS-1$
         if (idx >= 0 && idx < cut)
             cut = idx;
         return s.substring(0, cut);
     }
 
-    /** HTML фрагмент типов после «Тип:», со ссылками. */
+    /** HTML фрагмент типов (без подписи «Тип:»), со ссылками. */
     private static String extractTypesHtml(String typeInnerHtml)
     {
         if (typeInnerHtml == null || typeInnerHtml.isEmpty())
             return ""; //$NON-NLS-1$
-        String cleaned = stripComfortMeta(typeInnerHtml);
-        int colon = cleaned.indexOf(':');
-        if (colon < 0)
-            return cleaned.trim();
-        return cleaned.substring(colon + 1).trim();
+        return stripTypeLabel(stripComfortMeta(typeInnerHtml)).trim();
     }
 
     private static String extractExpandedDescription(String html)
