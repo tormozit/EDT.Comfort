@@ -108,12 +108,12 @@ public class ComfortPreferencePage
 
         addField(new BooleanFieldEditor(
             ContentAssistSettings.PREF_ENABLED,
-            "Автооткрытие автодополнения при вводе",
+            "Автооткрытие подсказок при вводе",
             codeEditorGroup));
 
         IntegerFieldEditor timeoutField = new IntegerFieldEditor(
             ContentAssistSettings.PREF_TIMEOUT,
-            "Автооткрытие автодополнения: Задержка (мс)",
+            "Автооткрытие: Задержка (мс)",
             codeEditorGroup);
         timeoutField.setValidRange(0, 10_000);
         addField(timeoutField);

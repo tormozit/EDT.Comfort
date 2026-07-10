@@ -233,11 +233,7 @@ public final class ParamHintHtmlModifier
     {
         ActiveEditor active = resolveActiveBslEditor();
         if (active == null || !(active.document instanceof IXtextDocument xdoc) || active.caret < 0)
-        {
-            ContentAssistDebug.debugModeLog("sigPick", "ensureFirstArg", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"reason\":\"noActiveEditor\"}"); //$NON-NLS-1$
             return;
-        }
         try
         {
             xdoc.readOnly((IUnitOfWork<Void, XtextResource>) resource -> {
@@ -245,53 +241,21 @@ public final class ParamHintHtmlModifier
                     return null;
                 EObject invocationLike = findInvocationLikeAt(resource, active.caret);
                 if (invocationLike == null)
-                {
-                    ContentAssistDebug.debugModeLog("sigPick", "ensureFirstArg", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        "{\"reason\":\"noInvocationLike\",\"caret\":" + active.caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
                     return null;
-                }
-                String kind = invocationLike.eClass() != null
-                    ? invocationLike.eClass().getName() : "?"; //$NON-NLS-1$
-                boolean multi = callSiteHasMultipleSignatures(resource, invocationLike);
-                if (!multi)
-                {
-                    ContentAssistDebug.debugModeLog("sigPick", "ensureFirstArg", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        "{\"reason\":\"singleSig\",\"kind\":\"" //$NON-NLS-1$
-                            + ContentAssistDebug.jsonEscapeForLog(kind) + "\"}"); //$NON-NLS-1$
+                if (!callSiteHasMultipleSignatures(resource, invocationLike))
                     return null;
-                }
                 EList<Expression> params = paramsOfInvocationLike(invocationLike);
                 if (params == null || params.isEmpty())
-                {
-                    ContentAssistDebug.debugModeLog("sigPick", "ensureFirstArg", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        "{\"reason\":\"noParams\",\"kind\":\"" //$NON-NLS-1$
-                            + ContentAssistDebug.jsonEscapeForLog(kind) + "\"}"); //$NON-NLS-1$
                     return null;
-                }
                 Expression firstArg = params.get(0);
                 if (firstArg == null)
                     return null;
-                int typesBefore = firstArg.getTypes() != null ? firstArg.getTypes().size() : 0;
                 forceComputeExpressionTypes(resource, firstArg, invocationLike);
-                int typesAfter = firstArg.getTypes() != null ? firstArg.getTypes().size() : 0;
-                Set<String> names = typeItemNames(firstArg.getTypes());
-                names.addAll(inferLiteralTypeNames(firstArg));
-                ContentAssistDebug.debugModeLog("sigPick", "ensureFirstArg", "computed", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"kind\":\"" + ContentAssistDebug.jsonEscapeForLog(kind) //$NON-NLS-1$
-                        + "\",\"argClass\":\"" //$NON-NLS-1$
-                        + ContentAssistDebug.jsonEscapeForLog(
-                            firstArg.eClass() != null ? firstArg.eClass().getName() : "?") //$NON-NLS-1$
-                        + "\",\"typesBefore\":" + typesBefore //$NON-NLS-1$
-                        + ",\"typesAfter\":" + typesAfter //$NON-NLS-1$
-                        + ",\"names\":\"" //$NON-NLS-1$
-                        + ContentAssistDebug.jsonEscapeForLog(names.toString()) + "\"}"); //$NON-NLS-1$
                 return null;
             });
         }
-        catch (Exception ex)
+        catch (Exception ignored)
         {
-            ContentAssistDebug.debugModeLog("sigPick", "ensureFirstArg", "error", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"ex\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -334,44 +298,9 @@ public final class ParamHintHtmlModifier
         {
             Type type = ctor.getType();
             if (type == null)
-            {
-                ContentAssistDebug.debugModeLog("sigPick", "multiSig", "ctor", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"result\":false,\"reason\":\"typeNull\"}"); //$NON-NLS-1$
                 return false;
-            }
             EList<Ctor> ctors = type.getCtors();
-            int n = ctors != null ? ctors.size() : 0;
-            String typeName = formatTypeItem(type);
-            StringBuilder ctorParams = new StringBuilder();
-            if (ctors != null)
-            {
-                for (int i = 0; i < ctors.size() && i < 6; i++)
-                {
-                    Ctor c = ctors.get(i);
-                    if (ctorParams.length() > 0)
-                        ctorParams.append('|');
-                    int pn = c != null && c.getParams() != null ? c.getParams().size() : -1;
-                    String p0 = ""; //$NON-NLS-1$
-                    if (c != null && c.getParams() != null && !c.getParams().isEmpty()
-                        && c.getParams().get(0) != null)
-                    {
-                        Object pType = Global.invoke(c.getParams().get(0), "getType"); //$NON-NLS-1$
-                        if (pType == null)
-                            pType = Global.invoke(c.getParams().get(0), "getTypes"); //$NON-NLS-1$
-                        p0 = String.valueOf(pType);
-                        if (p0.length() > 40)
-                            p0 = p0.substring(0, 40);
-                    }
-                    ctorParams.append(pn).append(':').append(p0);
-                }
-            }
-            boolean multi = n > 1;
-            ContentAssistDebug.debugModeLog("sigPick", "multiSig", "ctor", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"result\":" + multi + ",\"type\":\"" //$NON-NLS-1$ //$NON-NLS-2$
-                    + ContentAssistDebug.jsonEscapeForLog(typeName) + "\",\"ctors\":" + n //$NON-NLS-1$
-                    + ",\"detail\":\"" + ContentAssistDebug.jsonEscapeForLog(ctorParams.toString()) //$NON-NLS-1$
-                    + "\"}"); //$NON-NLS-1$
-            return multi;
+            return ctors != null && ctors.size() > 1;
         }
         if (!(invocationLike instanceof Invocation invocation))
             return false;
@@ -1268,16 +1197,6 @@ public final class ParamHintHtmlModifier
             boolean onOpen = sigPickOnOpenPending.get() || browserFirst;
             boolean strongChanged = pick.score >= SIG_PICK_STRONG_SCORE
                 && !fp.equals(sigPickLastFingerprint);
-            ContentAssistDebug.debugModeLog("sigPick", "tryModify", "pick", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"pages\":" + ctx.pages.size() //$NON-NLS-1$
-                    + ",\"pageIndex\":" + ctx.pageIndex //$NON-NLS-1$
-                    + ",\"paramIndex\":" + ctx.paramIndex //$NON-NLS-1$
-                    + ",\"actualArgs\":" + ctx.actualArgCount //$NON-NLS-1$
-                    + ",\"actualNames\":\"" //$NON-NLS-1$
-                    + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ctx.actualArgTypeNames))
-                    + "\",\"best\":" + pick.index + ",\"score\":" + pick.score //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"onOpen\":" + onOpen + ",\"strongChanged\":" + strongChanged //$NON-NLS-1$ //$NON-NLS-2$
-                    + "}"); //$NON-NLS-1$
             if (onOpen || strongChanged)
             {
                 sigPickOnOpenPending.set(false);
@@ -1287,19 +1206,9 @@ public final class ParamHintHtmlModifier
                 {
                     boolean shown = Global.invokeVoid(ctx.parametersHover, "showPage", //$NON-NLS-1$
                         ctx.pages, Integer.valueOf(pick.index), Integer.valueOf(ctx.paramIndex));
-                    ContentAssistDebug.debugModeLog("sigPick", "tryModify", "showPage", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        "{\"best\":" + pick.index + ",\"from\":" + ctx.pageIndex //$NON-NLS-1$ //$NON-NLS-2$
-                            + ",\"shown\":" + shown + ",\"reason\":\"" //$NON-NLS-1$ //$NON-NLS-2$
-                            + (onOpen ? "open" : "strong") + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     if (shown)
                         return;
                 }
-            }
-            else
-            {
-                ContentAssistDebug.debugModeLog("sigPick", "tryModify", "skipPick", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"pageIndex\":" + ctx.pageIndex + ",\"best\":" + pick.index //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"score\":" + pick.score + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
         else
@@ -2649,14 +2558,11 @@ public final class ParamHintHtmlModifier
         snap.actualArgCount = params != null ? params.size() : 0;
         Set<String> typeNames = new LinkedHashSet<>();
         boolean multiSig = callSiteHasMultipleSignatures(resource, invocationLike);
-        String argClass = ""; //$NON-NLS-1$
-        int typesSize = 0;
         if (multiSig && params != null && !params.isEmpty())
         {
             Expression firstArg = params.get(0);
             if (firstArg != null)
             {
-                argClass = firstArg.eClass() != null ? firstArg.eClass().getName() : "?"; //$NON-NLS-1$
                 // новый ФиксированнаяСтруктура() — тип создаваемого объекта, не getTypes() выражения.
                 if (firstArg instanceof OperatorStyleCreator created)
                 {
@@ -2672,7 +2578,6 @@ public final class ParamHintHtmlModifier
                 if (firstArg.getTypes() != null && !firstArg.getTypes().isEmpty())
                 {
                     snap.actualArgTypes = new ArrayList<>(firstArg.getTypes());
-                    typesSize = snap.actualArgTypes.size();
                     typeNames.addAll(typeItemNames(snap.actualArgTypes));
                 }
                 typeNames.addAll(inferLiteralTypeNames(firstArg));
@@ -2681,16 +2586,6 @@ public final class ParamHintHtmlModifier
         if (snap.actualArgTypes == null)
             snap.actualArgTypes = Collections.emptyList();
         snap.actualArgTypeNames = typeNames;
-        ContentAssistDebug.debugModeLog("sigPick", "snapshot", "done", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"multiSig\":" + multiSig //$NON-NLS-1$
-                + ",\"kind\":\"" //$NON-NLS-1$
-                + ContentAssistDebug.jsonEscapeForLog(
-                    invocationLike.eClass() != null ? invocationLike.eClass().getName() : "?") //$NON-NLS-1$
-                + "\",\"argCount\":" + snap.actualArgCount //$NON-NLS-1$
-                + ",\"argClass\":\"" + ContentAssistDebug.jsonEscapeForLog(argClass) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"typesSize\":" + typesSize //$NON-NLS-1$
-                + ",\"names\":\"" + ContentAssistDebug.jsonEscapeForLog(typeNames.toString()) //$NON-NLS-1$
-                + "\"}"); //$NON-NLS-1$
         return snap;
     }
 
@@ -2730,24 +2625,15 @@ public final class ParamHintHtmlModifier
 
         int required = Math.max(0, ctx.actualArgCount);
         List<Integer> candidates = new ArrayList<>();
-        StringBuilder candLog = new StringBuilder();
         for (int i = 0; i < ctx.pages.size(); i++)
         {
             int paramCount = countPageParams(ctx.pages.get(i));
-            Set<String> p0 = resolveParamTypeNames(ctx.pages.get(i), 0);
-            if (candLog.length() > 0)
-                candLog.append(';');
-            candLog.append(i).append(":n=").append(paramCount) //$NON-NLS-1$
-                .append(",t=").append(p0); //$NON-NLS-1$
             if (paramCount >= required)
                 candidates.add(Integer.valueOf(i));
         }
         if (candidates.isEmpty())
         {
             int fallback = ctx.pageIndex >= 0 ? ctx.pageIndex : 0;
-            ContentAssistDebug.debugModeLog("sigPick", "pickBest", "noCandidates", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"required\":" + required + ",\"pages\":\"" //$NON-NLS-1$ //$NON-NLS-2$
-                    + ContentAssistDebug.jsonEscapeForLog(candLog.toString()) + "\"}"); //$NON-NLS-1$
             return new SigPickResult(fallback, 0);
         }
 
@@ -2756,26 +2642,15 @@ public final class ParamHintHtmlModifier
         if (actualNames == null || actualNames.isEmpty())
             actualNames = typeItemNames(actualTypes);
         if (actualNames == null || actualNames.isEmpty())
-        {
-            int wildcardIdx = preferWildcardSignatureIndex(candidates, ctx.pages);
-            ContentAssistDebug.debugModeLog("sigPick", "pickBest", "noActualTypes", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"required\":" + required + ",\"fallback\":" + wildcardIdx //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"pages\":\"" + ContentAssistDebug.jsonEscapeForLog(candLog.toString()) //$NON-NLS-1$
-                    + "\"}"); //$NON-NLS-1$
-            return new SigPickResult(wildcardIdx, 1);
-        }
+            return new SigPickResult(preferWildcardSignatureIndex(candidates, ctx.pages), 1);
 
         int bestIdx = -1;
         int bestScore = -1;
-        StringBuilder scoreLog = new StringBuilder();
         for (Integer candidate : candidates)
         {
             int idx = candidate.intValue();
             Set<String> paramNames = resolveParamTypeNames(ctx.pages.get(idx), 0);
             int score = typeNamesMatchScore(actualNames, paramNames);
-            if (scoreLog.length() > 0)
-                scoreLog.append(';');
-            scoreLog.append(idx).append('=').append(score);
             if (score > bestScore)
             {
                 bestScore = score;
@@ -2784,12 +2659,6 @@ public final class ParamHintHtmlModifier
         }
         int resultIdx = bestScore > 0 ? bestIdx : preferWildcardSignatureIndex(candidates, ctx.pages);
         int resultScore = bestScore > 0 ? bestScore : 1;
-        ContentAssistDebug.debugModeLog("sigPick", "pickBest", "done", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"required\":" + required //$NON-NLS-1$
-                + ",\"actual\":\"" + ContentAssistDebug.jsonEscapeForLog(actualNames.toString()) //$NON-NLS-1$
-                + "\",\"scores\":\"" + ContentAssistDebug.jsonEscapeForLog(scoreLog.toString()) //$NON-NLS-1$
-                + "\",\"pages\":\"" + ContentAssistDebug.jsonEscapeForLog(candLog.toString()) //$NON-NLS-1$
-                + "\",\"bestScore\":" + bestScore + ",\"result\":" + resultIdx + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         return new SigPickResult(resultIdx, resultScore);
     }
 
