@@ -1751,7 +1751,10 @@ public final class ContentAssistSessionReloader
 
     /**
      * Оставляем object с RSP; {@code ParamSet} с цепочкой {@code Method}/{@code Type}
-     * (платформенная модель без eResource — штатный {@code getDocByParamSet}).
+     * (платформенная модель без eResource — штатный {@code getDocByParamSet});
+     * {@code FakeCtor} — сигнатура выбранного конструктора из proposal (без eResource,
+     * штатный hover по objects; иначе Comfort открывает InvocationParametersHover по AST
+     * и теряет выбранную перегрузку, см. «Новый Структура»).
      * Выкидываем сирот ({@code containers:none}) и прочие без RSP — иначе NPE в
      * {@code parseTemplateComment} валит {@code DataEvent.doIt} до {@code LinkedModeUI.enter}.
      */
@@ -1762,6 +1765,8 @@ public final class ContentAssistSessionReloader
         if (diag.hasRsp)
             return true;
         if ("ParamSet".equals(diag.eClass) && hasPlatformMethodChain(diag.containers)) //$NON-NLS-1$
+            return true;
+        if ("FakeCtor".equals(diag.eClass)) //$NON-NLS-1$
             return true;
         return false;
     }

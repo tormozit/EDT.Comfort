@@ -1490,6 +1490,19 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     }
 
     /**
+     * In-place фильтр уже показанного списка (member-access без stock recompute).
+     * Не трогает кэш; пустой {@code filter} — исходный массив.
+     */
+    ICompletionProposal[] filterProposalsInPlace(ICompletionProposal[] raw, String filter)
+    {
+        if (raw == null || raw.length == 0)
+            return EMPTY;
+        if (filter == null || filter.isEmpty() || !SmartAssistFilterState.isSmartFilterEnabled())
+            return raw;
+        return filterAndSort(raw, filter);
+    }
+
+    /**
      * Быстрый пересчёт popup по тёплому кэшу; {@code null} — нужен полный {@link #computeForPopupRefresh}.
      */
     ICompletionProposal[] filterCachedProposalsForPopup(ITextViewer viewer, int caret, String filter)

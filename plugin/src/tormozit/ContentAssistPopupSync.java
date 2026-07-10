@@ -1115,6 +1115,16 @@ public final class ContentAssistPopupSync
         FILTER_TASK_GEN.incrementAndGet();
     }
 
+    /**
+     * Сброс pending-флагов без отмены уже запланированного filter debounce
+     * (no-op collapse / in-place filter на member-access).
+     */
+    private static void finishSyncCycleLight(Object popup)
+    {
+        clearPendingDocumentEvents(popup);
+        clearFilterPending(popup);
+    }
+
     // ---- logging ------------------------------------------------------------
 
     private static void installPopupScrollWatcher(Object popup, ContentAssistant assistant,
@@ -2859,9 +2869,11 @@ public final class ContentAssistPopupSync
      * Session/debounce sync на member-access без stock filter и без
      * {@link #recomputePopupList} (они сбрасывают {@code BslDocumentListener.DataEvent}).
      *
-     * <p>При непустом префиксе и тёплом кэше — подмена списка из
-     * {@link SmartContentAssistProcessor#filterCachedProposalsForPopup}; иначе
-     * {@link #collapseOptionalOverlapsInVisiblePopup} на уже показанных строках.
+     * <p>При непустом префиксе — фильтр из
+     * {@link SmartContentAssistProcessor#filterCachedProposalsForPopup} или, при холодном
+     * кэше, из {@code fComputedProposals} / видимого списка
+     * ({@link SmartContentAssistProcessor#filterProposalsInPlace}). Пустой префикс —
+     * {@link #collapseOptionalOverlapsInVisiblePopup}.
      */
     static boolean syncMemberAccessPopupInPlace(ContentAssistant assistant, SourceViewer viewer,
                                                 SmartContentAssistProcessor processor, int caret,
@@ -2874,43 +2886,157 @@ public final class ContentAssistPopupSync
             if (processor != null && filter != null && !filter.isEmpty()
                 && SmartAssistFilterState.isSmartFilterEnabled())
             {
-                ICompletionProposal[] cached =
+                Object popup = getPopup(assistant);
+                if (popup == null)
+                    return false;
+                initPopupReflection(popup);
+                if (fFilteredProposalsField == null || setProposalsMethod == null)
+                    return false;
+
+                String path = "cache"; //$NON-NLS-1$
+                ICompletionProposal[] filtered =
                     processor.filterCachedProposalsForPopup(viewer, caret, filter);
-                if (cached != null && cached.length > 0)
+                List<ICompletionProposal> baseList = readMemberAccessBaseProposals(popup);
+                if (filtered != null)
                 {
-                    Object popup = getPopup(assistant);
-                    if (popup == null)
-                        return false;
-                    initPopupReflection(popup);
-                    if (fFilteredProposalsField == null || setProposalsMethod == null)
-                        return false;
-                    SavedSelection saved = saveSelection(popup);
-                    List<ICompletionProposal> list = new ArrayList<>(Arrays.asList(cached));
-                    list = SmartContentAssistProcessor.collapseOptionalEdtOverlapsInMergedList(list);
-                    setProposalsAndRestoreSelection(popup, list, false, saved, false, false);
-                    List<ICompletionProposal> applied =
-                        (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
-                    if (fComputedProposalsField != null && applied != null)
-                        fComputedProposalsField.set(popup, applied);
-                    // #region agent log
-                    SmartContentAssistProcessor.logPopupListCaretProbe("inplaceFilterCache", //$NON-NLS-1$
-                        applied != null ? applied : list);
-                    ContentAssistDebug.debugModeLog("H73", "inplaceCollapse", "filterCache", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        "{\"filter\":\"" + ContentAssistDebug.jsonEscapeForLog(filter) //$NON-NLS-1$
-                            + "\",\"n\":" + (applied != null ? applied.size() : list.size()) //$NON-NLS-1$
-                            + "}"); //$NON-NLS-1$
-                    // #endregion
-                    finishSyncCycle(popup);
-                    return true;
+                    // Если popup ещё не держал полную базу — взять её из тёплого кэша.
+                    ICompletionProposal[] fullCached =
+                        processor.filterCachedProposalsForPopup(viewer, caret, ""); //$NON-NLS-1$
+                    if (fullCached != null && fullCached.length > baseList.size())
+                        baseList = new ArrayList<>(Arrays.asList(fullCached));
                 }
+                else
+                {
+                    if (baseList.isEmpty())
+                        return collapseOptionalOverlapsInVisiblePopup(assistant);
+                    path = "visible"; //$NON-NLS-1$
+                    filtered = processor.filterProposalsInPlace(
+                        baseList.toArray(new ICompletionProposal[0]), filter);
+                }
+                if (filtered == null)
+                    return collapseOptionalOverlapsInVisiblePopup(assistant);
+
+                SavedSelection saved = saveSelection(popup);
+                List<ICompletionProposal> list = new ArrayList<>(Arrays.asList(filtered));
+                list = SmartContentAssistProcessor.collapseOptionalEdtOverlapsInMergedList(list);
+                // Базу (полный список) не затираем отфильтрованным — иначе Backspace
+                // не сможет вернуть отброшенные строки без stock recompute.
+                applyMemberAccessFilteredProposals(popup, baseList, list, saved);
+                List<ICompletionProposal> applied =
+                    (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+                // #region agent log
+                SmartContentAssistProcessor.logPopupListCaretProbe("inplaceFilterCache", //$NON-NLS-1$
+                    applied != null ? applied : list);
+                ContentAssistDebug.debugModeLog("H73", "inplaceCollapse", "filterCache", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"filter\":\"" + ContentAssistDebug.jsonEscapeForLog(filter) //$NON-NLS-1$
+                        + "\",\"path\":\"" + path + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"baseN\":" + baseList.size() //$NON-NLS-1$
+                        + ",\"n\":" + (applied != null ? applied.size() : list.size()) //$NON-NLS-1$
+                        + "}"); //$NON-NLS-1$
+                // #endregion
+                finishSyncCycleLight(popup);
+                return true;
             }
-            return collapseOptionalOverlapsInVisiblePopup(assistant);
+            return restoreMemberAccessFullListThenCollapse(assistant);
         }
         catch (Exception e)
         {
             ContentAssistDebug.log("inplaceMemberSync ERROR: " + e.getMessage()); //$NON-NLS-1$
             return collapseOptionalOverlapsInVisiblePopup(assistant);
         }
+    }
+
+    /**
+     * Пустой префикс на member-access: вернуть полную базу из {@code fComputedProposals},
+     * если видимый список уже был сужен in-place фильтром.
+     */
+    private static boolean restoreMemberAccessFullListThenCollapse(ContentAssistant assistant)
+    {
+        if (assistant == null || !isPopupVisible(assistant))
+            return false;
+        try
+        {
+            Object popup = getPopup(assistant);
+            if (popup == null)
+                return false;
+            initPopupReflection(popup);
+            if (fFilteredProposalsField == null || setProposalsMethod == null)
+                return false;
+            List<ICompletionProposal> base = readMemberAccessBaseProposals(popup);
+            List<ICompletionProposal> current =
+                (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+            int currentN = current != null ? current.size() : 0;
+            if (!base.isEmpty() && base.size() > currentN)
+            {
+                SavedSelection saved = saveSelection(popup);
+                List<ICompletionProposal> collapsed =
+                    SmartContentAssistProcessor.collapseOptionalEdtOverlapsInMergedList(
+                        new ArrayList<>(base));
+                setProposalsAndRestoreSelection(popup, collapsed, false, saved, false, false);
+                List<ICompletionProposal> applied =
+                    (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+                if (fComputedProposalsField != null && applied != null)
+                    fComputedProposalsField.set(popup, applied);
+                // #region agent log
+                ContentAssistDebug.debugModeLog("H73", "inplaceCollapse", "restoreBase", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"baseN\":" + base.size() //$NON-NLS-1$
+                        + ",\"wasN\":" + currentN //$NON-NLS-1$
+                        + ",\"after\":" + (applied != null ? applied.size() : collapsed.size()) //$NON-NLS-1$
+                        + "}"); //$NON-NLS-1$
+                // #endregion
+                finishSyncCycleLight(popup);
+                return true;
+            }
+            return collapseOptionalOverlapsInVisiblePopup(assistant);
+        }
+        catch (Exception e)
+        {
+            ContentAssistDebug.log("inplaceRestore ERROR: " + e.getMessage()); //$NON-NLS-1$
+            return collapseOptionalOverlapsInVisiblePopup(assistant);
+        }
+    }
+
+    /** Полный список member-access: предпочитаем {@code fComputedProposals}, иначе filtered. */
+    private static List<ICompletionProposal> readMemberAccessBaseProposals(Object popup)
+        throws Exception
+    {
+        List<ICompletionProposal> computed = null;
+        if (fComputedProposalsField != null)
+            computed = (List<ICompletionProposal>) fComputedProposalsField.get(popup);
+        List<ICompletionProposal> filtered = null;
+        if (fFilteredProposalsField != null)
+            filtered = (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+        if (computed != null && !computed.isEmpty())
+        {
+            if (filtered == null || filtered.isEmpty() || computed.size() >= filtered.size())
+                return new ArrayList<>(computed);
+        }
+        if (filtered != null && !filtered.isEmpty())
+            return new ArrayList<>(filtered);
+        if (computed != null)
+            return new ArrayList<>(computed);
+        return new ArrayList<>();
+    }
+
+    /**
+     * Показывает отфильтрованный список, сохраняя {@code fComputedProposals} как полную базу.
+     */
+    private static void applyMemberAccessFilteredProposals(Object popup,
+                                                           List<ICompletionProposal> base,
+                                                           List<ICompletionProposal> filtered,
+                                                           SavedSelection saved)
+            throws Exception
+    {
+        List<ICompletionProposal> keepBase = base != null && !base.isEmpty() ? base : filtered;
+        if (fComputedProposalsField != null && keepBase != null)
+            fComputedProposalsField.set(popup, keepBase);
+        setProposalsMethod.invoke(popup, filtered, Boolean.TRUE);
+        List<ICompletionProposal> applied =
+            (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
+        // Не перезаписываем computed отфильтрованным результатом setProposals.
+        if (fComputedProposalsField != null && keepBase != null)
+            fComputedProposalsField.set(popup, keepBase);
+        applySelection(popup, applied != null ? applied : filtered, saved, false, false);
     }
 
     /**
@@ -2946,10 +3072,15 @@ public final class ContentAssistPopupSync
             if (collapsed.size() == current.size())
             {
                 // #region agent log
+                String curFilter = SmartFilterTracker.getCurrentFilter();
                 ContentAssistDebug.debugModeLog("H73", "inplaceCollapse", "unchanged", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"size\":" + current.size() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                    "{\"size\":" + current.size() //$NON-NLS-1$
+                        + ",\"filter\":\"" + ContentAssistDebug.jsonEscapeForLog( //$NON-NLS-1$
+                            curFilter != null ? curFilter : "") + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
                 // #endregion
-                finishSyncCycle(popup);
+                // Не cancelDebouncedNativeFilter: иначе набор префикса после «.» теряет
+                // уже запланированный filter debounce.
+                finishSyncCycleLight(popup);
                 return true;
             }
             setProposalsAndRestoreSelection(popup, collapsed, false, saved, false, false);
