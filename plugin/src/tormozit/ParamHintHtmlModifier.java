@@ -6,6 +6,7 @@ import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
@@ -13,6 +14,7 @@ import org.eclipse.core.commands.IExecutionListener;
 import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.emf.common.util.EList;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.jface.text.link.LinkedModeModel;
@@ -21,17 +23,24 @@ import org.eclipse.swt.browser.Browser;
 import org.eclipse.swt.browser.ProgressEvent;
 import org.eclipse.swt.browser.ProgressListener;
 import org.eclipse.swt.custom.StyledText;
+import org.eclipse.swt.events.DisposeListener;
+import org.eclipse.swt.events.KeyAdapter;
+import org.eclipse.swt.events.KeyEvent;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Event;
+import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.commands.ICommandService;
+import org.eclipse.xtext.EcoreUtil2;
 import org.eclipse.xtext.nodemodel.ICompositeNode;
 import org.eclipse.xtext.nodemodel.INode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.resource.EObjectAtOffsetHelper;
+import org.eclipse.xtext.resource.IResourceServiceProvider;
 import org.eclipse.xtext.resource.XtextResource;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.util.concurrent.IUnitOfWork;
@@ -44,11 +53,14 @@ import com._1c.g5.v8.dt.bsl.model.FeatureEntry;
 import com._1c.g5.v8.dt.bsl.model.Invocation;
 import com._1c.g5.v8.dt.bsl.model.OperatorStyleCreator;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
+import com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.mcore.DuallyNamedElement;
+import com._1c.g5.v8.dt.mcore.Environmental;
 import com._1c.g5.v8.dt.mcore.Method;
 import com._1c.g5.v8.dt.mcore.ParamSet;
 import com._1c.g5.v8.dt.mcore.Parameter;
+import com._1c.g5.v8.dt.mcore.Type;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 
 /**
@@ -69,6 +81,12 @@ public final class ParamHintHtmlModifier
         "com._1c.g5.v8.dt.bsl.ui.contentassist.ParametersHoverInfoControl"; //$NON-NLS-1$
     private static final String BSL_SELECTION_LISTENER_CLASS =
         "com._1c.g5.v8.dt.bsl.ui.contentassist.BslSelectionChangedListener"; //$NON-NLS-1$
+    /** Только для Find-miss fallback (unwrap), общий resolve не меняем. */
+    private static final String PARAM_HOVER_HANDLER_CLASS =
+        "com._1c.g5.v8.dt.bsl.ui.contentassist.InvocationParametersHoverHandler"; //$NON-NLS-1$
+    /** Маркер ProgressListener только для Find-miss browser. */
+    private static final String FIND_MISS_COMFORT_PROGRESS =
+        "tormozit.findMissComfortProgress"; //$NON-NLS-1$
 
     private static volatile boolean installed;
     private static IExecutionListener paramHoverCommandListener;
@@ -100,9 +118,6 @@ public final class ParamHintHtmlModifier
             if (browser == null || browser.isDisposed())
                 return;
 
-            ContentAssistDebug.debugModeLog("ParamHintHtml", "browserFound", //$NON-NLS-1$ //$NON-NLS-2$
-                shell.getClass().getSimpleName(),
-                "{\"browser\":\"" + browser.getClass().getName() + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
 
             browser.addProgressListener(new ProgressListener()
             {
@@ -159,9 +174,6 @@ public final class ParamHintHtmlModifier
                 {
                     if (!INVOCATION_PARAMETERS_HOVER_COMMAND.equals(commandId))
                         return;
-                    ContentAssistDebug.debugModeLog("H-manual", "paramHoverCmd", "failure", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        "{\"ex\":\"" + ContentAssistDebug.jsonEscapeForLog( //$NON-NLS-1$
-                            String.valueOf(exception)) + "\"}"); //$NON-NLS-1$
                 }
 
                 @Override
@@ -170,8 +182,11 @@ public final class ParamHintHtmlModifier
                     if (!INVOCATION_PARAMETERS_HOVER_COMMAND.equals(commandId))
                         return;
                     boolean infoPresent = isParamHoverInfoControlPresent();
-                    ContentAssistDebug.debugModeLog("H-manual", "paramHoverCmd", "success", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        "{\"infoPresent\":" + infoPresent + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                    boolean alreadyVisible = isParamHintAlreadyVisible();
+                    // Синхронно и только при реальном промахе — без asyncExec (иначе
+                    // подмена comfort→EDT через ~50мс в основном режиме).
+                    if (!alreadyVisible)
+                        tryOpenParamHintAfterEdtMiss();
                 }
             };
             commands.addExecutionListener(paramHoverCommandListener);
@@ -237,20 +252,11 @@ public final class ParamHintHtmlModifier
                     // Как EDT inInvocationParameters: methodEnd <= caret < callEnd
                     edtInParams = caret >= site.methodAccessEnd && caret < site.callEnd;
                 }
-                ContentAssistDebug.debugModeLog("H-manual", "probeCaret", "preExecute", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"caret\":" + caret //$NON-NLS-1$
-                        + ",\"obj\":\"" + ContentAssistDebug.jsonEscapeForLog(objClass) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"methodEnd\":" + (site != null ? site.methodAccessEnd : -1) //$NON-NLS-1$
-                        + ",\"callEnd\":" + (site != null ? site.callEnd : -1) //$NON-NLS-1$
-                        + ",\"edtInParams\":" + edtInParams //$NON-NLS-1$
-                        + ",\"infoBefore\":" + isParamHoverInfoControlPresent() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
                 return null;
             });
         }
         catch (Exception ex)
         {
-            ContentAssistDebug.debugModeLog("H-manual", "probeCaret", "error", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"ex\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -270,17 +276,612 @@ public final class ParamHintHtmlModifier
         }
     }
 
+    /**
+     * Gate Find-miss: popup уже виден (реальный infoControl или Browser с heading).
+     * Не трогает resolve ctx основного пути.
+     */
+    private static boolean isParamHintAlreadyVisible()
+    {
+        try
+        {
+            // e4 lookUp только здесь/в Find-miss — общий resolve не трогаем.
+            Object handler = resolveParamHoverHandlerForMiss();
+            if (handler != null)
+            {
+                Object infoControl = Global.getField(handler, "infoControl"); //$NON-NLS-1$
+                if (infoControl != null)
+                    return true;
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+        try
+        {
+            Display display = Display.getCurrent();
+            if (display == null)
+                display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return false;
+            for (Shell shell : display.getShells())
+            {
+                if (shell == null || shell.isDisposed() || !shell.isVisible())
+                    continue;
+                Browser browser = IrBslHoverHtml.findControlBrowser(shell);
+                if (browser == null || browser.isDisposed())
+                    continue;
+                String text = browser.getText();
+                if (text != null && text.indexOf(HEADING_CLASS) >= 0)
+                    return true;
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+        return false;
+    }
+
+    /**
+     * Только промах EDT (нет popup): Error-страницы вместо CA, напр. Найти().
+     * Основной modifyHtml/Esc не меняем. HTML — через tryModifyBrowserHtml этого control.
+     */
+    private static void tryOpenParamHintAfterEdtMiss()
+    {
+        try
+        {
+            if (isParamHintAlreadyVisible())
+                return;
+            // Реальный handler с инъекцией (e4). Command.getHandler() — оболочка без полей.
+            Object handler = resolveParamHoverHandlerForMiss();
+            org.eclipse.core.commands.IHandler rawHandler =
+                resolveInvocationParametersHoverHandler();
+            if (handler == null)
+            {
+                return;
+            }
+            Object documentation = Global.getField(handler, "documentation"); //$NON-NLS-1$
+            Object languageProvider = Global.getField(handler, "languageProvider"); //$NON-NLS-1$
+
+            IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            if (window == null || window.getActivePage() == null)
+                return;
+            BslXtextEditor editor = GetRef.getActiveBslEditor(window.getActivePage().getActiveEditor());
+            if (editor == null)
+                return;
+            ITextViewer viewer = editor.getInternalSourceViewer();
+            if (viewer == null || viewer.getTextWidget() == null || viewer.getTextWidget().isDisposed())
+                return;
+            IDocument document = viewer.getDocument();
+            if (!(document instanceof IXtextDocument xdoc))
+                return;
+            int caret = viewer.getTextWidget().getCaretOffset();
+            org.eclipse.ui.IWorkbenchSite site = editor.getSite();
+
+            final Object handlerRef = handler;
+            final org.eclipse.core.commands.IHandler rawHandlerRef = rawHandler;
+            Boolean opened = xdoc.readOnly((IUnitOfWork<Boolean, XtextResource>) resource -> {
+                if (resource == null)
+                    return Boolean.FALSE;
+                CallSiteInfo siteInfo = findCallSiteAt(resource, caret);
+                if (siteInfo == null)
+                {
+                    return Boolean.FALSE;
+                }
+                EObjectAtOffsetHelper helper = new EObjectAtOffsetHelper();
+                EObject resolved = helper.resolveContainedElementAt(resource, caret);
+                Invocation invocation = findInvocationNear(resolved);
+                if (invocation == null || invocation.getMethodAccess() == null)
+                {
+                    return Boolean.FALSE;
+                }
+                FeatureAccess methodAccess = invocation.getMethodAccess();
+                IResourceServiceProvider rsp = resource.getURI() != null
+                    ? IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(
+                        resource.getURI())
+                    : null;
+                Object computer = rsp != null ? rsp.get(DynamicFeatureAccessComputer.class) : null;
+                Environmental envOwner = EcoreUtil2.getContainerOfType(methodAccess,
+                    Environmental.class);
+                Object environments = envOwner != null ? envOwner.environments() : null;
+                if (computer == null || environments == null)
+                {
+                    return Boolean.FALSE;
+                }
+
+                Object documentationLocal = documentation;
+                Object languageProviderLocal = languageProvider;
+                if (documentationLocal == null && rsp != null)
+                {
+                    try
+                    {
+                        Class<?> docClass = Class.forName(
+                            "com._1c.g5.v8.dt.internal.bsl.ui.documentation.BslDocumentationProvider"); //$NON-NLS-1$
+                        documentationLocal = rsp.get(docClass);
+                    }
+                    catch (Exception ignored)
+                    {
+                    }
+                }
+                if (languageProviderLocal == null && rsp != null)
+                {
+                    try
+                    {
+                        Class<?> langClass = Class.forName(
+                            "com._1c.g5.v8.dt.internal.bsl.ui.syntaxassist.SyntaxAssistLanguageProvider"); //$NON-NLS-1$
+                        languageProviderLocal = rsp.get(langClass);
+                    }
+                    catch (Exception ignored)
+                    {
+                    }
+                }
+                if (documentationLocal == null)
+                {
+                    return Boolean.FALSE;
+                }
+                String lang = asString(Global.invoke(languageProviderLocal, "getLanguage")); //$NON-NLS-1$
+                if (lang == null || lang.isBlank())
+                    lang = "ru"; //$NON-NLS-1$
+
+                Object plain = Global.invoke(computer, "resolveObject", //$NON-NLS-1$
+                    methodAccess, environments);
+                if (!(plain instanceof List<?> entries) || entries.isEmpty())
+                {
+                    return Boolean.FALSE;
+                }
+
+                List<Object> caPages = new ArrayList<>();
+                int paramSize = 0;
+                int maxParam = 0;
+                String methodLabel = ""; //$NON-NLS-1$
+                for (Object entry : entries)
+                {
+                    Object feature = entry instanceof FeatureEntry fe
+                        ? fe.getFeature()
+                        : Global.invoke(entry, "getFeature"); //$NON-NLS-1$
+                    if (!(feature instanceof Method method))
+                        continue;
+                    if (methodLabel.isEmpty())
+                    {
+                        String ru = method.getNameRu();
+                        String en = method.getName();
+                        methodLabel = ru != null && !ru.isEmpty() ? ru : (en != null ? en : ""); //$NON-NLS-1$
+                    }
+                    Object group = Global.invoke(documentationLocal, "getHoverDocumentationPages", //$NON-NLS-1$
+                        method, lang);
+                    int before = caPages.size();
+                    FindMissSupport.collectContentAssistPages(group, caPages);
+                    FindMissSupport.logHoverGroupDiag(group, before, caPages.size());
+                    // Реальные CA платформы: PlatformDocTreeNodeId.fromMethod → getHoverPages
+                    // (Error от getHoverDocumentationPages(Method) часто без link/platformId)
+                    if (caPages.size() == before)
+                        FindMissSupport.collectCaPagesFromMethodPlatformId(documentationLocal,
+                            method, lang, caPages);
+                    if (caPages.size() == before)
+                        FindMissSupport.recoverCaPagesFromErrorGroup(documentationLocal, group,
+                            lang, caPages);
+                    if (caPages.size() == before)
+                        FindMissSupport.collectCaFromViewDocumentation(documentationLocal, method,
+                            lang, caPages);
+                    if (caPages.size() == before)
+                    {
+                        EList<ParamSet> setsDirect = method.getParamSet();
+                        if (setsDirect != null)
+                        {
+                            for (ParamSet set : setsDirect)
+                            {
+                                if (set == null)
+                                    continue;
+                                Object setGroup = Global.invoke(documentationLocal,
+                                    "getHoverDocumentationPages", set, lang); //$NON-NLS-1$
+                                FindMissSupport.collectContentAssistPages(setGroup, caPages);
+                                if (caPages.size() == before)
+                                    FindMissSupport.recoverCaPagesFromErrorGroup(
+                                        documentationLocal, setGroup, lang, caPages);
+                            }
+                        }
+                    }
+                    if (caPages.size() == before)
+                        FindMissSupport.collectSyntheticCaPages(documentationLocal, method, lang,
+                            caPages);
+                    EList<ParamSet> sets = method.getParamSet();
+                    if (sets != null)
+                    {
+                        for (ParamSet set : sets)
+                        {
+                            if (set == null || set.getParams() == null)
+                                continue;
+                            int n = set.getParams().size();
+                            if (n > paramSize)
+                                paramSize = n;
+                            int max = set.getMaxParams();
+                            if (max > maxParam)
+                                maxParam = max;
+                            if (n > maxParam)
+                                maxParam = n;
+                        }
+                    }
+                }
+                if (caPages.isEmpty())
+                {
+                    return Boolean.FALSE;
+                }
+
+                Class<?> infoClass = Class.forName(
+                    "com._1c.g5.v8.dt.bsl.ui.contentassist.InvocationParametersHoverHandler$ParameterInfo"); //$NON-NLS-1$
+                java.lang.reflect.Constructor<?> ctor = infoClass.getDeclaredConstructor();
+                ctor.setAccessible(true);
+                Object info = ctor.newInstance();
+                int paramNumber = estimateParamNumberLikeEdt(siteInfo, caret);
+                if (paramNumber < 0)
+                    paramNumber = 0;
+                Global.setFieldForce(info, "pages", caPages); //$NON-NLS-1$
+                Global.setFieldForce(info, "paramNumber", Integer.valueOf(paramNumber)); //$NON-NLS-1$
+                Global.setFieldForce(info, "paramSize", Integer.valueOf(paramSize)); //$NON-NLS-1$
+                Global.setFieldForce(info, "maxParam", Integer.valueOf(maxParam)); //$NON-NLS-1$
+                Global.setFieldForce(info, "commaPosition", new ArrayList<Integer>()); //$NON-NLS-1$
+                Global.setFieldForce(info, "initialOffset", //$NON-NLS-1$
+                    Integer.valueOf(siteInfo.methodAccessEnd));
+                Global.setFieldForce(info, "firstAvailablePosition", //$NON-NLS-1$
+                    Integer.valueOf(siteInfo.methodAccessEnd));
+                Global.setFieldForce(info, "lastAvailablePosition", //$NON-NLS-1$
+                    Integer.valueOf(siteInfo.callEnd));
+
+                boolean shown = false;
+                if (PARAM_HOVER_HANDLER_CLASS.equals(handlerRef.getClass().getName()))
+                {
+                    shown = Global.invokeVoid(handlerRef, "showControlInfo", //$NON-NLS-1$
+                        viewer, info, Integer.valueOf(0), site);
+                    if (shown)
+                    {
+                        Object control = Global.getField(handlerRef, "infoControl"); //$NON-NLS-1$
+                        tryModifyFindMissBrowser(control);
+                    }
+                }
+                if (!shown)
+                {
+                    shown = showParamHintControlDirect(viewer, documentationLocal,
+                        languageProviderLocal, site, caPages, paramNumber);
+                }
+                return Boolean.valueOf(shown);
+            });
+            if (opened == null || !opened.booleanValue())
+            {
+                // already logged
+            }
+        }
+        catch (Exception ex)
+        {
+        }
+    }
+
+    /**
+     * Только Find-miss: e4 {@code lookUpHandler} → реальный handler с полями.
+     * Общий {@link #resolveInvocationParametersHoverHandler} не меняем.
+     */
+    private static Object resolveParamHoverHandlerForMiss()
+    {
+        try
+        {
+            Object context = null;
+            IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            if (window != null)
+            {
+                context = window.getService(Class.forName(
+                    "org.eclipse.e4.core.contexts.IEclipseContext")); //$NON-NLS-1$
+            }
+            if (context == null && window != null && window.getActivePage() != null)
+            {
+                org.eclipse.ui.IWorkbenchPart part = window.getActivePage().getActivePart();
+                if (part != null && part.getSite() != null)
+                {
+                    context = part.getSite().getService(Class.forName(
+                        "org.eclipse.e4.core.contexts.IEclipseContext")); //$NON-NLS-1$
+                }
+            }
+            if (context != null)
+            {
+                Class<?> impl = Class.forName(
+                    "org.eclipse.e4.core.commands.internal.HandlerServiceImpl"); //$NON-NLS-1$
+                java.lang.reflect.Method lookUp = impl.getMethod("lookUpHandler", //$NON-NLS-1$
+                    Class.forName("org.eclipse.e4.core.contexts.IEclipseContext"), //$NON-NLS-1$
+                    String.class);
+                Object h = lookUp.invoke(null, context, INVOCATION_PARAMETERS_HOVER_COMMAND);
+                if (h instanceof org.eclipse.core.commands.IHandler)
+                    return unwrapParamHoverHandler(h);
+                java.lang.reflect.Method get =
+                    context.getClass().getMethod("get", String.class); //$NON-NLS-1$
+                Object direct = get.invoke(context,
+                    "handler::" + INVOCATION_PARAMETERS_HOVER_COMMAND); //$NON-NLS-1$
+                if (direct instanceof org.eclipse.core.commands.IHandler)
+                    return unwrapParamHoverHandler(direct);
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+        return unwrapParamHoverHandler(resolveInvocationParametersHoverHandler());
+    }
+
+    /** e4/Command часто отдают обёртку — достаём реальный handler (только Find-miss). */
+    private static Object unwrapParamHoverHandler(Object handler)
+    {
+        if (handler == null)
+            return null;
+        Object cur = handler;
+        for (int depth = 0; depth < 8 && cur != null; depth++)
+        {
+            if (PARAM_HOVER_HANDLER_CLASS.equals(cur.getClass().getName()))
+                return cur;
+            Object next = Global.getField(cur, "handler"); //$NON-NLS-1$
+            if (next == null)
+                next = Global.getField(cur, "delegate"); //$NON-NLS-1$
+            if (next == null)
+                next = Global.getField(cur, "proxiedHandler"); //$NON-NLS-1$
+            if (next == null)
+                next = Global.getField(cur, "object"); //$NON-NLS-1$
+            if (next == null)
+                next = Global.getField(cur, "instance"); //$NON-NLS-1$
+            if (next == null || next == cur)
+                break;
+            cur = next;
+        }
+        for (Class<?> c = handler.getClass(); c != null && c != Object.class; c = c.getSuperclass())
+        {
+            java.lang.reflect.Field[] fields;
+            try
+            {
+                fields = c.getDeclaredFields();
+            }
+            catch (Exception ex)
+            {
+                break;
+            }
+            for (java.lang.reflect.Field f : fields)
+            {
+                try
+                {
+                    f.setAccessible(true);
+                    Object v = f.get(handler);
+                    if (v != null && PARAM_HOVER_HANDLER_CLASS.equals(v.getClass().getName()))
+                        return v;
+                }
+                catch (Exception ignored)
+                {
+                }
+            }
+        }
+        return handler;
+    }
+
+    /** Запасной показ без showControlInfo. Esc — Browser/Shell + KeyAdapter на редакторе. */
+    private static boolean showParamHintControlDirect(ITextViewer viewer, Object documentation,
+        Object languageProvider, org.eclipse.ui.IWorkbenchSite site, List<Object> pages,
+        int paramNumber)
+    {
+        try
+        {
+            if (viewer == null || documentation == null || pages == null || pages.isEmpty())
+                return false;
+            Class<?> controlClass = Class.forName(PARAMETERS_HOVER_CLASS);
+            Object control = null;
+            for (java.lang.reflect.Constructor<?> ctor : controlClass.getDeclaredConstructors())
+            {
+                if (ctor.getParameterCount() != 4)
+                    continue;
+                try
+                {
+                    ctor.setAccessible(true);
+                    control = ctor.newInstance(viewer, documentation, languageProvider, site);
+                    break;
+                }
+                catch (Exception ignored)
+                {
+                }
+            }
+            if (control == null)
+                return false;
+            Global.invoke(control, "showPage", pages, //$NON-NLS-1$
+                Integer.valueOf(paramNumber), Integer.valueOf(0));
+            Object handler = resolveParamHoverHandlerForMiss();
+            if (handler != null && PARAM_HOVER_HANDLER_CLASS.equals(handler.getClass().getName()))
+                Global.setFieldForce(handler, "infoControl", control); //$NON-NLS-1$
+            installDirectParamHintEscClose(viewer, control);
+            tryModifyFindMissBrowser(control);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            return false;
+        }
+    }
+
+    /**
+     * Find-miss only: один immediate tryModify + ProgressListener на этот browser
+     * (без Display.timerExec — иначе гонка с основным режимом).
+     */
+    private static void tryModifyFindMissBrowser(Object parametersHover)
+    {
+        Browser browser = findFindMissBrowser(parametersHover);
+        if (browser == null || browser.isDisposed())
+            return;
+        if (browser.getData(FIND_MISS_COMFORT_PROGRESS) == null)
+        {
+            browser.setData(FIND_MISS_COMFORT_PROGRESS, Boolean.TRUE);
+            browser.addProgressListener(new ProgressListener()
+            {
+                @Override
+                public void completed(ProgressEvent event)
+                {
+                    tryModifyBrowserHtml(browser);
+                }
+
+                @Override
+                public void changed(ProgressEvent event)
+                {
+                }
+            });
+        }
+        tryModifyBrowserHtml(browser);
+    }
+
+    private static Browser findFindMissBrowser(Object parametersHover)
+    {
+        if (parametersHover == null)
+            return null;
+        try
+        {
+            Object b = Global.invoke(parametersHover, "getBrowser"); //$NON-NLS-1$
+            if (b instanceof Browser br)
+                return br;
+            Object control = Global.invoke(parametersHover, "getControl"); //$NON-NLS-1$
+            Object fb = Global.getField(control, "fBrowser"); //$NON-NLS-1$
+            if (fb instanceof Browser br2)
+                return br2;
+            Object shell = Global.invoke(parametersHover, "getShell"); //$NON-NLS-1$
+            if (shell instanceof Shell s)
+                return IrBslHoverHtml.findControlBrowser(s);
+        }
+        catch (Exception ignored)
+        {
+        }
+        return null;
+    }
+
+    private static void installDirectParamHintEscClose(ITextViewer viewer, Object control)
+    {
+        if (viewer == null || control == null)
+            return;
+        StyledText textWidget = viewer.getTextWidget();
+        if (textWidget == null || textWidget.isDisposed())
+            return;
+        AtomicBoolean closed = new AtomicBoolean();
+        Runnable disposeHint = () ->
+        {
+            if (!closed.compareAndSet(false, true))
+                return;
+            try
+            {
+                Global.invoke(control, "dispose"); //$NON-NLS-1$
+            }
+            catch (Exception ignored)
+            {
+            }
+            try
+            {
+                Object handler = resolveParamHoverHandlerForMiss();
+                if (handler != null)
+                {
+                    Object current = Global.getField(handler, "infoControl"); //$NON-NLS-1$
+                    if (current == control)
+                        Global.setFieldForce(handler, "infoControl", null); //$NON-NLS-1$
+                }
+            }
+            catch (Exception ignored)
+            {
+            }
+        };
+        KeyAdapter editorEsc = new KeyAdapter()
+        {
+            @Override
+            public void keyPressed(KeyEvent e)
+            {
+                if (e.keyCode != SWT.ESC)
+                    return;
+                disposeHint.run();
+                e.doit = false;
+            }
+        };
+        // Фокус обычно в Browser popup — KeyAdapter на редакторе не получает Esc.
+        Listener popupEsc = (Event e) ->
+        {
+            if (e.type == SWT.KeyDown && e.keyCode == SWT.ESC)
+            {
+                disposeHint.run();
+                e.doit = false;
+            }
+            else if (e.type == SWT.Traverse && e.detail == SWT.TRAVERSE_ESCAPE)
+            {
+                disposeHint.run();
+                e.detail = SWT.TRAVERSE_NONE;
+                e.doit = false;
+            }
+        };
+        textWidget.addKeyListener(editorEsc);
+        Browser browser = findFindMissBrowser(control);
+        Shell shell = null;
+        if (browser != null && !browser.isDisposed())
+        {
+            browser.addListener(SWT.KeyDown, popupEsc);
+            browser.addListener(SWT.Traverse, popupEsc);
+            shell = browser.getShell();
+        }
+        if (shell == null)
+        {
+            Object sh = Global.invoke(control, "getShell"); //$NON-NLS-1$
+            if (sh instanceof Shell s)
+                shell = s;
+        }
+        if (shell != null && !shell.isDisposed())
+        {
+            shell.addListener(SWT.KeyDown, popupEsc);
+            shell.addListener(SWT.Traverse, popupEsc);
+        }
+        final Shell shellRef = shell;
+        final Browser browserRef = browser;
+        DisposeListener cleanup = e ->
+        {
+            closed.set(true);
+            if (!textWidget.isDisposed())
+                textWidget.removeKeyListener(editorEsc);
+            if (browserRef != null && !browserRef.isDisposed())
+            {
+                browserRef.removeListener(SWT.KeyDown, popupEsc);
+                browserRef.removeListener(SWT.Traverse, popupEsc);
+            }
+            if (shellRef != null && !shellRef.isDisposed())
+            {
+                shellRef.removeListener(SWT.KeyDown, popupEsc);
+                shellRef.removeListener(SWT.Traverse, popupEsc);
+            }
+        };
+        if (!Global.invokeVoid(control, "addDisposeListener", cleanup)) //$NON-NLS-1$
+        {
+            textWidget.removeKeyListener(editorEsc);
+            if (browserRef != null && !browserRef.isDisposed())
+            {
+                browserRef.removeListener(SWT.KeyDown, popupEsc);
+                browserRef.removeListener(SWT.Traverse, popupEsc);
+            }
+            if (shellRef != null && !shellRef.isDisposed())
+            {
+                shellRef.removeListener(SWT.KeyDown, popupEsc);
+                shellRef.removeListener(SWT.Traverse, popupEsc);
+            }
+        }
+    }
+
+    private static Invocation findInvocationNear(EObject resolved)
+    {
+        for (EObject cur = resolved; cur != null; cur = cur.eContainer())
+        {
+            if (cur instanceof Invocation invocation)
+                return invocation;
+        }
+        return null;
+    }
+
+    private static int estimateParamNumberLikeEdt(CallSiteInfo site, int caret)
+    {
+        if (site == null || caret < site.methodAccessEnd || caret >= site.callEnd)
+            return -1;
+        return 0;
+    }
+
     private static void logCallSiteFound(int caret, String via, CallSiteInfo site, EObject obj)
     {
         String objClass = "null"; //$NON-NLS-1$
         if (obj != null && obj.eClass() != null)
             objClass = obj.eClass().getName();
-        ContentAssistDebug.debugModeLog("H-manual", "findCallSiteAt", "hit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + caret //$NON-NLS-1$
-                + ",\"via\":\"" + ContentAssistDebug.jsonEscapeForLog(via) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"obj\":\"" + ContentAssistDebug.jsonEscapeForLog(objClass) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"methodEnd\":" + site.methodAccessEnd //$NON-NLS-1$
-                + ",\"callEnd\":" + site.callEnd + "}"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static CallSiteInfo findCallSiteAt(XtextResource resource, int caret)
@@ -330,11 +931,6 @@ public final class ParamHintHtmlModifier
             logCallSiteFound(caret, "nodeModel", fromNode, obj); //$NON-NLS-1$
             return fromNode;
         }
-        ContentAssistDebug.debugModeLog("H-manual", "findCallSiteAt", "miss", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + caret //$NON-NLS-1$
-                + ",\"obj\":\"" + ContentAssistDebug.jsonEscapeForLog( //$NON-NLS-1$
-                    obj != null && obj.eClass() != null ? obj.eClass().getName() : "null") //$NON-NLS-1$
-                + "\"}"); //$NON-NLS-1$
         return null;
     }
 
@@ -424,11 +1020,6 @@ public final class ParamHintHtmlModifier
             int best = pickBestSignatureIndex(ctx);
             if (best >= 0 && best != ctx.pageIndex)
             {
-                ContentAssistDebug.debugModeLog("ParamHintHtml", "signaturePick", //$NON-NLS-1$ //$NON-NLS-2$
-                    "switch", //$NON-NLS-1$
-                    "{\"from\":" + ctx.pageIndex + ",\"to\":" + best //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"paramIndex\":" + ctx.paramIndex //$NON-NLS-1$
-                        + ",\"actualArgs\":" + ctx.actualArgCount + "}"); //$NON-NLS-1$ //$NON-NLS-2$
                 if (Global.invokeVoid(ctx.parametersHover, "showPage", //$NON-NLS-1$
                     ctx.pages, Integer.valueOf(best), Integer.valueOf(ctx.paramIndex)))
                 {
@@ -440,28 +1031,12 @@ public final class ParamHintHtmlModifier
         String modified = modifyHtml(html, ctx);
         if (modified == null || modified.equals(html))
         {
-            ContentAssistDebug.debugModeLog("ParamHintHtml", "skip", //$NON-NLS-1$ //$NON-NLS-2$
-                ctx == null ? "noChangeCtxNull" : "noChange", //$NON-NLS-1$ //$NON-NLS-2$
-                "{" + contentAssistIndexJson(html) //$NON-NLS-1$
-                    + ",\"ctxNull\":" + (ctx == null) //$NON-NLS-1$
-                    + ",\"pages\":" + (ctx != null && ctx.pages != null ? ctx.pages.size() : -1) //$NON-NLS-1$
-                    + ",\"pageIndex\":" + (ctx != null ? ctx.pageIndex : -1) //$NON-NLS-1$
-                    + ",\"paramIndex\":" + (ctx != null ? ctx.paramIndex : -1) //$NON-NLS-1$
-                    + ",\"hasMeta\":" + html.contains(COMFORT_META_MARKER) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
 
         browser.setText(modified);
         scheduleScrollParamNameIntoView(browser);
 
-        ContentAssistDebug.debugModeLog("ParamHintHtml", "modified", //$NON-NLS-1$ //$NON-NLS-2$
-            "ok", //$NON-NLS-1$
-            "{\"lenBefore\":" + html.length() //$NON-NLS-1$
-                + ",\"lenAfter\":" + modified.length() //$NON-NLS-1$
-                + ",\"hasMeta\":" + modified.contains(COMFORT_META_MARKER) //$NON-NLS-1$
-                + ",\"ctxNull\":" + (ctx == null) //$NON-NLS-1$
-                + ",\"pages\":" + (ctx != null && ctx.pages != null ? ctx.pages.size() : -1) //$NON-NLS-1$
-                + "," + contentAssistIndexJson(html) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /** После setText — прокрутить к {@code <b>} имени текущего параметра. */
@@ -769,29 +1344,7 @@ public final class ParamHintHtmlModifier
                 picked = fallback;
             }
         }
-        logHeadingOwner(link, moduleOwner, fromTitle, typeName, containerName, fallback, source,
-            picked);
         return picked;
-    }
-
-    private static void logHeadingOwner(String link, String moduleOwner, String fromTitle,
-        String typeName, String containerName, String fallback, String source, String picked)
-    {
-        ContentAssistDebug.debugModeLog("H-owner", "resolveHeadingOwner", "pick", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"link\":\"" + ContentAssistDebug.jsonEscapeForLog(link != null ? link : "") //$NON-NLS-1$ //$NON-NLS-2$
-                + "\",\"moduleOwner\":\"" //$NON-NLS-1$
-                + ContentAssistDebug.jsonEscapeForLog(moduleOwner != null ? moduleOwner : "") //$NON-NLS-1$
-                + "\",\"externalTitle\":\"" //$NON-NLS-1$
-                + ContentAssistDebug.jsonEscapeForLog(fromTitle != null ? fromTitle : "") //$NON-NLS-1$
-                + "\",\"typeRef\":\"" //$NON-NLS-1$
-                + ContentAssistDebug.jsonEscapeForLog(typeName != null ? typeName : "") //$NON-NLS-1$
-                + "\",\"container\":\"" //$NON-NLS-1$
-                + ContentAssistDebug.jsonEscapeForLog(containerName != null ? containerName : "") //$NON-NLS-1$
-                + "\",\"fallback\":\"" //$NON-NLS-1$
-                + ContentAssistDebug.jsonEscapeForLog(fallback != null ? fallback : "") //$NON-NLS-1$
-                + "\",\"source\":\"" + ContentAssistDebug.jsonEscapeForLog(source) //$NON-NLS-1$
-                + "\",\"picked\":\"" //$NON-NLS-1$
-                + ContentAssistDebug.jsonEscapeForLog(picked != null ? picked : "") + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static String ownerFromExternalTitle(Object viewPage)
@@ -1017,15 +1570,6 @@ public final class ParamHintHtmlModifier
             || (description != null && !description.isBlank());
         if (!hasEnrichment)
             return null;
-        ContentAssistDebug.debugModeLog("ParamHintHtml", "typeLine", //$NON-NLS-1$ //$NON-NLS-2$
-            "meta", //$NON-NLS-1$
-            "{\"paramName\":\"" + ContentAssistDebug.jsonEscapeForLog(paramName) //$NON-NLS-1$
-                + "\",\"isOut\":" + isOut //$NON-NLS-1$
-                + ",\"hasSuffix\":" + !suffix.isEmpty() //$NON-NLS-1$
-                + ",\"hasHref\":" + typeBase.contains("href") //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"descLen\":" + (description == null ? -1 : description.length()) //$NON-NLS-1$
-                + ",\"suffix\":\"" + ContentAssistDebug.jsonEscapeForLog( //$NON-NLS-1$
-                    suffix.length() > 120 ? suffix.substring(0, 120) : suffix) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
 
         String typeOpen = html.substring(typeDivStart, typeInnerStart);
         if (!typeOpen.contains(COMFORT_META_MARKER))
@@ -1503,8 +2047,6 @@ public final class ParamHintHtmlModifier
         Object parametersHover = findParametersHover(browser, diag);
         if (parametersHover == null)
         {
-            ContentAssistDebug.debugModeLog("ParamHintHtml", "resolveCtx", "miss", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                diag.toJson());
             return null;
         }
         Object input = Global.invoke(parametersHover, "getInput"); //$NON-NLS-1$
@@ -1516,8 +2058,6 @@ public final class ParamHintHtmlModifier
         if (input == null)
         {
             diag.inputNull = true;
-            ContentAssistDebug.debugModeLog("ParamHintHtml", "resolveCtx", "inputNull", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                diag.toJson());
             return null;
         }
 
@@ -1525,8 +2065,6 @@ public final class ParamHintHtmlModifier
         if (!(pagesObj instanceof List<?> pages) || pages.isEmpty())
         {
             diag.pagesEmpty = true;
-            ContentAssistDebug.debugModeLog("ParamHintHtml", "resolveCtx", "pagesEmpty", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                diag.toJson());
             return null;
         }
 
@@ -1550,12 +2088,6 @@ public final class ParamHintHtmlModifier
         ctx.paramIndex = paramIndex;
 
         fillInvocationContext(ctx);
-        ContentAssistDebug.debugModeLog("ParamHintHtml", "resolveCtx", "ok", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"pages\":" + ctx.pages.size() //$NON-NLS-1$
-                + ",\"pageIndex\":" + ctx.pageIndex //$NON-NLS-1$
-                + ",\"paramIndex\":" + ctx.paramIndex //$NON-NLS-1$
-                + ",\"actualArgs\":" + ctx.actualArgCount //$NON-NLS-1$
-                + ",\"via\":\"" + ContentAssistDebug.jsonEscapeForLog(diag.via) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         return ctx;
     }
 
@@ -1791,27 +2323,6 @@ public final class ParamHintHtmlModifier
         String handlerError = ""; //$NON-NLS-1$
         String linkedError = ""; //$NON-NLS-1$
 
-        String toJson()
-        {
-            return "{\"handlerNull\":" + handlerNull //$NON-NLS-1$
-                + ",\"infoControlNull\":" + infoControlNull //$NON-NLS-1$
-                + ",\"infoControlWrongClass\":" + infoControlWrongClass //$NON-NLS-1$
-                + ",\"handlerBrowserMismatch\":" + handlerBrowserMismatch //$NON-NLS-1$
-                + ",\"browserListenerHit\":" + browserListenerHit //$NON-NLS-1$
-                + ",\"browserListenerEvents\":" + browserListenerEvents //$NON-NLS-1$
-                + ",\"inputNull\":" + inputNull //$NON-NLS-1$
-                + ",\"pagesEmpty\":" + pagesEmpty //$NON-NLS-1$
-                + ",\"activeEditorNull\":" + activeEditorNull //$NON-NLS-1$
-                + ",\"linkedModelNull\":" + linkedModelNull //$NON-NLS-1$
-                + ",\"linkedListenersNull\":" + linkedListenersNull //$NON-NLS-1$
-                + ",\"linkedListenerFound\":" + linkedListenerFound //$NON-NLS-1$
-                + ",\"linkedBrowserMismatch\":" + linkedBrowserMismatch //$NON-NLS-1$
-                + ",\"infoControlClass\":\"" + ContentAssistDebug.jsonEscapeForLog(infoControlClass) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"handlerError\":\"" + ContentAssistDebug.jsonEscapeForLog(handlerError) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"linkedError\":\"" + ContentAssistDebug.jsonEscapeForLog(linkedError) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"browserListenerError\":\"" + ContentAssistDebug.jsonEscapeForLog(browserListenerError) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"via\":\"" + ContentAssistDebug.jsonEscapeForLog(via) + "\"}"; //$NON-NLS-1$ //$NON-NLS-2$
-        }
     }
 
     private static void fillInvocationContext(HoverContext ctx)
@@ -1835,9 +2346,6 @@ public final class ParamHintHtmlModifier
         }
         catch (Exception ex)
         {
-            ContentAssistDebug.debugModeLog("ParamHintHtml", "invocationCtx", //$NON-NLS-1$ //$NON-NLS-2$
-                "error", //$NON-NLS-1$
-                "{\"ex\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -2126,6 +2634,833 @@ public final class ParamHintHtmlModifier
         int actualArgCount;
         List<TypeItem> actualArgTypes = Collections.emptyList();
         Method method;
+    }
+
+    private static final class FindMissSupport
+    {
+        private static final String CA_PAGE =
+            "com._1c.g5.v8.dt.internal.bsl.ui.documentation.page.IBslDocumentationContentAssistPage"; //$NON-NLS-1$
+
+        private FindMissSupport() {}
+
+        static void collectContentAssistPages(Object group, List<Object> out)
+        {
+            List<?> pages = pagesOf(group);
+            if (pages == null || pages.isEmpty())
+                return;
+            Class<?> caClass = caPageClass();
+            if (caClass == null)
+                return;
+            for (Object page : pages)
+            {
+                if (caClass.isInstance(page))
+                    out.add(page);
+            }
+        }
+
+        static void logHoverGroupDiag(Object group, int caBefore, int caAfter)
+        {
+            try
+            {
+                List<?> pages = pagesOf(group);
+                StringBuilder classes = new StringBuilder();
+                int n = pages == null ? 0 : pages.size();
+                for (int i = 0; pages != null && i < pages.size() && i < 4; i++)
+                {
+                    Object p = pages.get(i);
+                    if (classes.length() > 0)
+                        classes.append(',');
+                    if (p == null)
+                        classes.append("null"); //$NON-NLS-1$
+                    else
+                    {
+                        classes.append(p.getClass().getSimpleName());
+                        String link = asString(Global.invoke(p, "getLink")); //$NON-NLS-1$
+                        if (link == null || link.isBlank())
+                            link = extractLinkFromErrorEntries(p);
+                        Object pid = Global.invoke(p, "getPlatformId"); //$NON-NLS-1$
+                        if (pid == null)
+                            pid = Global.getField(p, "nodeId"); //$NON-NLS-1$
+                        classes.append("{link=").append(link != null && !link.isBlank()) //$NON-NLS-1$
+                            .append(",pid=").append(pid != null) //$NON-NLS-1$
+                            .append(",entryLink=").append( //$NON-NLS-1$
+                                extractLinkFromErrorEntries(p) != null).append('}');
+                    }
+                }
+            }
+            catch (Exception ignored)
+            {
+            }
+        }
+
+        /**
+         * Как EDT: {@code PlatformDocTreeNodeId.fromMethod(version, typeCode, methodCode)}
+         * → {@code getPlatformDocumentationPage} → {@code getHoverPages()} (реальные CA).
+         * Если у Method/Type {@code getCode()==-1} (часто у resolve из AST) —
+         * переразрешаем через {@code getTypeItemByName} / дерево platform.doc по имени.
+         */
+        static void collectCaPagesFromMethodPlatformId(Object provider, Method method,
+            String language, List<Object> out)
+        {
+            if (provider == null || method == null || out == null)
+                return;
+            String lang = language != null && !language.isBlank() ? language : "ru"; //$NON-NLS-1$
+            int before = out.size();
+            try
+            {
+                Type ownerType = ownerTypeOf(method);
+                if (ownerType == null)
+                {
+                    return;
+                }
+                ClassLoader cl = provider.getClass().getClassLoader();
+                Class<?> idClass = Class.forName(
+                    "com._1c.g5.v8.dt.platform.doc.PlatformDocTreeNodeId", true, cl); //$NON-NLS-1$
+                java.lang.reflect.Method fromMethod = null;
+                for (java.lang.reflect.Method m : idClass.getMethods())
+                {
+                    if ("fromMethod".equals(m.getName()) && m.getParameterCount() == 3) //$NON-NLS-1$
+                    {
+                        fromMethod = m;
+                        break;
+                    }
+                }
+                if (fromMethod == null)
+                {
+                    return;
+                }
+                Class<?> versionType = fromMethod.getParameterTypes()[0];
+                Object version = Global.invoke(provider, "getVersion", method); //$NON-NLS-1$
+                Object versionArg = coerceVersionArg(version, versionType);
+                if (versionArg == null)
+                {
+                    return;
+                }
+
+                int typeCode = ownerType.getCode();
+                int methodCode = method.getCode();
+                String codeSource = "direct"; //$NON-NLS-1$
+                if (typeCode <= 0 || methodCode <= 0)
+                {
+                    int[] resolved = resolvePlatformCodes(provider, method, ownerType);
+                    if (resolved != null)
+                    {
+                        typeCode = resolved[0];
+                        methodCode = resolved[1];
+                        codeSource = "byName"; //$NON-NLS-1$
+                    }
+                }
+
+                if (typeCode > 0 && methodCode > 0)
+                {
+                    Object nodeId;
+                    try
+                    {
+                        nodeId = fromMethod.invoke(null, versionArg, Integer.valueOf(typeCode),
+                            Integer.valueOf(methodCode));
+                    }
+                    catch (Exception ex)
+                    {
+                        Throwable cause = ex instanceof java.lang.reflect.InvocationTargetException ite
+                            && ite.getCause() != null ? ite.getCause() : ex;
+                        nodeId = null;
+                    }
+                    if (nodeId != null
+                        && tryCollectCaFromPlatformNode(provider, nodeId, versionArg, lang, out)
+                        && out.size() > before)
+                    {
+                        return;
+                    }
+                }
+
+                // Запасной путь: дерево platform.doc по именам владельца/метода
+                if (collectCaPagesFromDocTreeByName(provider, versionArg, ownerType, method, lang,
+                    out) && out.size() > before)
+                {
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                Throwable cause = ex instanceof java.lang.reflect.InvocationTargetException ite
+                    && ite.getCause() != null ? ite.getCause() : ex;
+            }
+        }
+
+        /** @return int[]{typeCode, methodCode} или null */
+        private static int[] resolvePlatformCodes(Object provider, Method method, Type ownerType)
+        {
+            try
+            {
+                Resource res = method.eResource();
+                if (res == null)
+                    res = ownerType.eResource();
+                String[] typeNames = {
+                    ownerType.getNameRu(), ownerType.getName()
+                };
+                String methodRu = method.getNameRu();
+                String methodEn = method.getName();
+                for (String typeName : typeNames)
+                {
+                    if (typeName == null || typeName.isBlank())
+                        continue;
+                    Object item = Global.invoke(provider, "getTypeItemByName", typeName, res); //$NON-NLS-1$
+                    if (!(item instanceof Type platformType) || platformType.getCode() <= 0)
+                        continue;
+                    Object ctx = platformType.getContextDef();
+                    if (ctx == null)
+                        continue;
+                    Object all = Global.invoke(ctx, "allMethods"); //$NON-NLS-1$
+                    if (!(all instanceof List<?> methods))
+                        all = Global.invoke(ctx, "getMethods"); //$NON-NLS-1$
+                    if (!(all instanceof List<?> methodList))
+                        continue;
+                    for (Object raw : methodList)
+                    {
+                        if (!(raw instanceof Method cand) || cand.getCode() <= 0)
+                            continue;
+                        if (methodNameMatches(cand, methodRu, methodEn))
+                            return new int[] { platformType.getCode(), cand.getCode() };
+                    }
+                }
+                // compositeId типа как запасной typeCode
+                Object composite = ownerType.getCompositeId();
+                if (composite != null)
+                {
+                    Object idObj = Global.invoke(composite, "getId"); //$NON-NLS-1$
+                    if (idObj instanceof Integer id && id.intValue() > 0 && method.getCode() > 0)
+                        return new int[] { id.intValue(), method.getCode() };
+                }
+            }
+            catch (Exception ignored)
+            {
+            }
+            return null;
+        }
+
+        private static boolean methodNameMatches(Method cand, String ru, String en)
+        {
+            if (cand == null)
+                return false;
+            String cRu = cand.getNameRu();
+            String cEn = cand.getName();
+            if (ru != null && !ru.isBlank() && ru.equalsIgnoreCase(cRu))
+                return true;
+            if (en != null && !en.isBlank() && en.equalsIgnoreCase(cEn))
+                return true;
+            if (ru != null && !ru.isBlank() && ru.equalsIgnoreCase(cEn))
+                return true;
+            if (en != null && !en.isBlank() && en.equalsIgnoreCase(cRu))
+                return true;
+            return false;
+        }
+
+        private static boolean tryCollectCaFromPlatformNode(Object provider, Object nodeId,
+            Object versionArg, String lang, List<Object> out)
+        {
+            try
+            {
+                Object viewPage = Global.invoke(provider, "getPlatformDocumentationPage", //$NON-NLS-1$
+                    nodeId, versionArg, lang);
+                if (viewPage == null)
+                    return false;
+                String viewCls = viewPage.getClass().getName();
+                if (viewCls != null && viewCls.indexOf("ErrorBslDocumentationPage") >= 0) //$NON-NLS-1$
+                {
+                    String link = asString(Global.invoke(viewPage, "getLink")); //$NON-NLS-1$
+                    if (link == null || link.isBlank())
+                        link = extractLinkFromErrorEntries(viewPage);
+                    if (link != null && !link.isBlank())
+                    {
+                        Object byLink = Global.invoke(provider, "getHoverDocumentationPages", //$NON-NLS-1$
+                            link, lang);
+                        int before = out.size();
+                        collectContentAssistPages(byLink, out);
+                        return out.size() > before;
+                    }
+                    return false;
+                }
+                int before = out.size();
+                collectCaFromViewOrHoverPage(viewPage, out);
+                return out.size() > before;
+            }
+            catch (Exception ex)
+            {
+                return false;
+            }
+        }
+
+        private static boolean collectCaPagesFromDocTreeByName(Object provider, Object versionArg,
+            Type ownerType, Method method, String lang, List<Object> out)
+        {
+            try
+            {
+                Object docProv = Global.getField(provider, "platformDocumentationProvider"); //$NON-NLS-1$
+                if (docProv == null)
+                    return false;
+                Object tree = Global.invoke(docProv, "getTree", versionArg); //$NON-NLS-1$
+                if (tree == null)
+                    return false;
+                Object root = Global.invoke(tree, "getRootNode"); //$NON-NLS-1$
+                if (root == null)
+                    return false;
+                String[] typeNames = { ownerType.getNameRu(), ownerType.getName() };
+                String[] methodNames = { method.getNameRu(), method.getName() };
+                Object typeNode = findDocTreeNodeByNames(root, typeNames, 0, 12);
+                if (typeNode == null)
+                    return false;
+                Object methodNode = findDocTreeMethodNode(typeNode, methodNames);
+                if (methodNode == null)
+                    return false;
+                Object nodeId = Global.invoke(methodNode, "getId"); //$NON-NLS-1$
+                if (nodeId != null
+                    && tryCollectCaFromPlatformNode(provider, nodeId, versionArg, lang, out))
+                    return true;
+                String path = asString(Global.invoke(methodNode, "getPath")); //$NON-NLS-1$
+                if (path != null && !path.isBlank())
+                {
+                    int before = out.size();
+                    Object byPath = Global.invoke(provider, "getHoverDocumentationPages", //$NON-NLS-1$
+                        path, lang);
+                    collectContentAssistPages(byPath, out);
+                    return out.size() > before;
+                }
+            }
+            catch (Exception ex)
+            {
+            }
+            return false;
+        }
+
+        private static Object findDocTreeMethodNode(Object typeNode, String[] methodNames)
+        {
+            if (typeNode == null)
+                return null;
+            Object direct = findDocTreeNodeByNames(typeNode, methodNames, 0, 4);
+            if (direct != null)
+                return direct;
+            Object children = Global.invoke(typeNode, "getChildren"); //$NON-NLS-1$
+            if (!(children instanceof Iterable<?> it))
+                return null;
+            for (Object child : it)
+            {
+                if (child == null)
+                    continue;
+                String nameRu = asString(Global.invoke(child, "getName", "ru")); //$NON-NLS-1$ //$NON-NLS-2$
+                String nameEn = asString(Global.invoke(child, "getName", "en")); //$NON-NLS-1$ //$NON-NLS-2$
+                String elem = asString(Global.invoke(child, "getElementName", Boolean.TRUE)); //$NON-NLS-1$
+                if (isMethodsFolderName(nameRu) || isMethodsFolderName(nameEn)
+                    || isMethodsFolderName(elem))
+                {
+                    Object under = findDocTreeNodeByNames(child, methodNames, 0, 3);
+                    if (under != null)
+                        return under;
+                }
+            }
+            return null;
+        }
+
+        private static boolean isMethodsFolderName(String name)
+        {
+            if (name == null || name.isBlank())
+                return false;
+            return "methods".equalsIgnoreCase(name) //$NON-NLS-1$
+                || "методы".equalsIgnoreCase(name) //$NON-NLS-1$
+                || name.toLowerCase().contains("method"); //$NON-NLS-1$
+        }
+
+        private static Object findDocTreeNodeByNames(Object node, String[] names, int depth,
+            int maxDepth)
+        {
+            if (node == null || names == null || depth > maxDepth)
+                return null;
+            String nameRu = asString(Global.invoke(node, "getName", "ru")); //$NON-NLS-1$ //$NON-NLS-2$
+            String nameEn = asString(Global.invoke(node, "getName", "en")); //$NON-NLS-1$ //$NON-NLS-2$
+            String elem = asString(Global.invoke(node, "getElementName", Boolean.TRUE)); //$NON-NLS-1$
+            for (String want : names)
+            {
+                if (want == null || want.isBlank())
+                    continue;
+                if (want.equalsIgnoreCase(nameRu) || want.equalsIgnoreCase(nameEn)
+                    || want.equalsIgnoreCase(elem))
+                    return node;
+            }
+            Object children = Global.invoke(node, "getChildren"); //$NON-NLS-1$
+            if (!(children instanceof Iterable<?> it))
+                return null;
+            for (Object child : it)
+            {
+                Object hit = findDocTreeNodeByNames(child, names, depth + 1, maxDepth);
+                if (hit != null)
+                    return hit;
+            }
+            return null;
+        }
+
+        /** Version из provider и тип параметра fromMethod могут быть с разных CL. */
+        private static Object coerceVersionArg(Object version, Class<?> versionType)
+        {
+            if (versionType == null)
+                return version;
+            if (version != null && versionType.isInstance(version))
+                return version;
+            try
+            {
+                if (version != null && versionType.isEnum())
+                {
+                    String name = version instanceof Enum<?> e ? e.name() : String.valueOf(version);
+                    @SuppressWarnings({ "unchecked", "rawtypes" })
+                    Object asEnum = Enum.valueOf((Class) versionType, name);
+                    return asEnum;
+                }
+                java.lang.reflect.Field latest = versionType.getField("LATEST"); //$NON-NLS-1$
+                return latest.get(null);
+            }
+            catch (Exception ignored)
+            {
+            }
+            return version;
+        }
+
+        private static String extractLinkFromErrorEntries(Object errorPage)
+        {
+            if (errorPage == null)
+                return null;
+            try
+            {
+                Object entries = Global.getField(errorPage, "entries"); //$NON-NLS-1$
+                if (!(entries instanceof List<?> list))
+                    return null;
+                for (Object entry : list)
+                {
+                    if (entry == null)
+                        continue;
+                    String key = asString(Global.invoke(entry, "getKey")); //$NON-NLS-1$
+                    String value = asString(Global.invoke(entry, "getValue")); //$NON-NLS-1$
+                    if (value != null && (value.contains(".html") || value.contains("v8help:") //$NON-NLS-1$ //$NON-NLS-2$
+                        || value.contains("SyntaxHelper"))) //$NON-NLS-1$
+                        return value.trim();
+                    if (key != null && (key.contains("link") || key.contains("path") //$NON-NLS-1$ //$NON-NLS-2$
+                        || key.contains("page")) && value != null && !value.isBlank()) //$NON-NLS-1$
+                        return value.trim();
+                }
+                String description = asString(Global.getField(errorPage, "description")); //$NON-NLS-1$
+                if (description != null && description.contains(".html")) //$NON-NLS-1$
+                    return description.trim();
+            }
+            catch (Exception ignored)
+            {
+            }
+            return null;
+        }
+
+        private static Type ownerTypeOf(Method method)
+        {
+            if (method == null)
+                return null;
+            for (EObject cur = method.eContainer(); cur != null; cur = cur.eContainer())
+            {
+                if (cur instanceof Type type)
+                    return type;
+            }
+            return null;
+        }
+
+        /**
+         * EDT для части платформенных Method отдаёт {@code ErrorBslDocumentationPage}
+         * вместо CA. Достаём реальные CA: link → platformId/view → hoverPages.
+         * Исключения глотаем — иначе NPE в resolveHover валит весь fallback.
+         */
+        static void recoverCaPagesFromErrorGroup(Object provider, Object group, String language,
+            List<Object> out)
+        {
+            if (provider == null || out == null)
+                return;
+            List<?> pages = pagesOf(group);
+            if (pages == null || pages.isEmpty())
+                return;
+            String lang = language != null && !language.isBlank() ? language : "ru"; //$NON-NLS-1$
+            int before = out.size();
+            for (Object page : pages)
+            {
+                if (page == null)
+                    continue;
+                String cls = page.getClass().getName();
+                if (cls == null || cls.indexOf("ErrorBslDocumentationPage") < 0) //$NON-NLS-1$
+                    continue;
+                try
+                {
+                    String link = asString(Global.invoke(page, "getLink")); //$NON-NLS-1$
+                if (link == null || link.isBlank())
+                    link = extractLinkFromErrorEntries(page);
+                if (link != null && !link.isBlank())
+                {
+                    try
+                    {
+                        Object byLink = Global.invoke(provider, "getHoverDocumentationPages", //$NON-NLS-1$
+                            link, lang);
+                        collectContentAssistPages(byLink, out);
+                        if (out.size() > before)
+                        {
+                            return;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                    }
+                    // resolveHover внутри EDT делает link.lastIndexOf — только при non-null link
+                    try
+                    {
+                        // временно подставим link в Error, если поле пустое
+                        if (asString(Global.invoke(page, "getLink")) == null //$NON-NLS-1$
+                            || asString(Global.invoke(page, "getLink")).isBlank()) //$NON-NLS-1$
+                            Global.setFieldForce(page, "link", link); //$NON-NLS-1$
+                        Object resolved = Global.invoke(provider,
+                            "resolveHoverDocumentationPages", page, lang); //$NON-NLS-1$
+                        collectContentAssistPages(resolved, out);
+                        if (out.size() > before)
+                        {
+                            return;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                    }
+                }
+                else
+                {
+                }
+
+                // 2) platformId → MethodLike view → getHoverPages() = реальные CA
+                Object platformId = Global.invoke(page, "getPlatformId"); //$NON-NLS-1$
+                if (platformId == null)
+                    platformId = Global.getField(page, "nodeId"); //$NON-NLS-1$
+                Object version = Global.invoke(page, "getVersion"); //$NON-NLS-1$
+                if (platformId != null)
+                {
+                    try
+                    {
+                        Object viewPage = Global.invoke(provider, "getPlatformDocumentationPage", //$NON-NLS-1$
+                            platformId, version, lang);
+                        collectCaFromViewOrHoverPage(viewPage, out);
+                        if (out.size() > before)
+                        {
+                            return;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                    }
+                }
+                }
+                catch (Exception ex)
+                {
+                }
+            }
+        }
+
+        /** View-страницы Method (не Error) → CA через {@code getHoverPages()}. */
+        static void collectCaFromViewDocumentation(Object provider, Method method, String language,
+            List<Object> out)
+        {
+            if (provider == null || method == null || out == null)
+                return;
+            String lang = language != null && !language.isBlank() ? language : "ru"; //$NON-NLS-1$
+            int before = out.size();
+            try
+            {
+                Object viewGroup = Global.invoke(provider, "getViewDocumentationPages", //$NON-NLS-1$
+                    method, lang);
+                List<?> pages = pagesOf(viewGroup);
+                if (pages == null || pages.isEmpty())
+                    return;
+                for (Object page : pages)
+                {
+                    if (page == null)
+                        continue;
+                    String cls = page.getClass().getName();
+                    if (cls != null && cls.indexOf("ErrorBslDocumentationPage") >= 0) //$NON-NLS-1$
+                        continue;
+                    collectCaFromViewOrHoverPage(page, out);
+                }
+                if (out.size() > before)
+                {
+                }
+            }
+            catch (Exception ex)
+            {
+            }
+        }
+
+        private static void collectCaFromViewOrHoverPage(Object page, List<Object> out)
+        {
+            if (page == null || out == null)
+                return;
+            Class<?> caClass = caPageClass();
+            if (caClass != null && caClass.isInstance(page))
+            {
+                out.add(page);
+                return;
+            }
+            Object hoverPages = Global.invoke(page, "getHoverPages"); //$NON-NLS-1$
+            if (!(hoverPages instanceof List<?> list) || list.isEmpty())
+                return;
+            if (caClass == null)
+                return;
+            for (Object hover : list)
+            {
+                if (caClass.isInstance(hover))
+                    out.add(hover);
+            }
+        }
+
+        static void collectSyntheticCaPages(Object provider, Method method, String language,
+            List<Object> out)
+        {
+            if (method == null || out == null)
+                return;
+            EList<ParamSet> sets = method.getParamSet();
+            if (sets == null || sets.isEmpty())
+                return;
+            try
+            {
+                Class<?> localeClass = Class.forName(
+                    "com._1c.g5.v8.dt.internal.bsl.ui.documentation.BslDocumentationLocale"); //$NON-NLS-1$
+                Class<?> viewPageClass = Class.forName(
+                    "com._1c.g5.v8.dt.internal.bsl.ui.documentation.page.MethodLikeBslDocumentationPage"); //$NON-NLS-1$
+                Class<?> setPageClass = Class.forName(
+                    "com._1c.g5.v8.dt.internal.bsl.ui.documentation.page.MethodLikeParamSetBslDocumentationPage"); //$NON-NLS-1$
+                Class<?> paramContentClass = Class.forName(
+                    "com._1c.g5.v8.dt.internal.bsl.ui.documentation.page.ParamContent"); //$NON-NLS-1$
+                Class<?> valueContentClass = Class.forName(
+                    "com._1c.g5.v8.dt.internal.bsl.ui.documentation.page.ValueContent"); //$NON-NLS-1$
+                Class<?> versionClass = Class.forName(
+                    "com._1c.g5.v8.dt.platform.version.Version"); //$NON-NLS-1$
+                Class<?> typeGroupClass = Class.forName(
+                    "com._1c.g5.v8.dt.internal.bsl.ui.documentation.page.TypeGroupContent"); //$NON-NLS-1$
+                Class<?> footnoteClass = Class.forName(
+                    "com._1c.g5.v8.dt.internal.bsl.ui.documentation.page.Footnote"); //$NON-NLS-1$
+                Class<?> pageRefClass = Class.forName(
+                    "com._1c.g5.v8.dt.internal.bsl.ui.documentation.page.IPageReference"); //$NON-NLS-1$
+
+                String lang = language != null && !language.isBlank() ? language : "ru"; //$NON-NLS-1$
+                boolean ru = "ru".equalsIgnoreCase(lang); //$NON-NLS-1$
+                Object locale = null;
+                if (provider != null)
+                {
+                    Object localeProvider = Global.getField(provider, "localeProvider"); //$NON-NLS-1$
+                    if (localeProvider != null)
+                        locale = Global.invoke(localeProvider, "getLocale", lang); //$NON-NLS-1$
+                }
+                if (locale == null)
+                {
+                    locale = localeClass.getConstructor(String.class, String.class, boolean.class)
+                        .newInstance(lang, ru ? "Русский" : "English", Boolean.valueOf(ru)); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                Object version = provider != null
+                    ? Global.invoke(provider, "getVersion", method) //$NON-NLS-1$
+                    : null;
+                if (version == null)
+                    version = versionClass.getField("LATEST").get(null); //$NON-NLS-1$
+
+                String nameRu = method.getNameRu();
+                String nameEn = method.getName();
+                String display = ru
+                    ? (nameRu != null && !nameRu.isEmpty() ? nameRu : nameEn)
+                    : (nameEn != null && !nameEn.isEmpty() ? nameEn : nameRu);
+                if (display == null)
+                    display = ""; //$NON-NLS-1$
+
+                // kind = ключ LocalizedConstants (function/procedure), не язык
+                String kind = method.isRetVal() ? "function" : "procedure"; //$NON-NLS-1$
+                Object viewPage = viewPageClass
+                    .getConstructor(localeClass, String.class, versionClass, String.class)
+                    .newInstance(locale, null, version, kind);
+                Global.invoke(viewPage, "setName", //$NON-NLS-1$
+                    nameRu != null ? nameRu : display,
+                    nameEn != null ? nameEn : display);
+
+                // Владелец для comfort-заголовка (resolveHeadingOwner → container)
+                String ownerName = ownerNameFromMethod(method, ru);
+                if (ownerName != null && !ownerName.isEmpty())
+                {
+                    Object ownerRef = newPlainPageReference(pageRefClass, ownerName);
+                    if (ownerRef != null)
+                        Global.invoke(viewPage, "setContainer", ownerRef); //$NON-NLS-1$
+                }
+
+                Resource methodResource = method.eResource();
+                Object returnedValue = buildSyntheticValueContent(provider, method.getRetValType(),
+                    methodResource, version, ru, valueContentClass, typeGroupClass, footnoteClass,
+                    pageRefClass);
+                if (returnedValue != null)
+                    Global.invoke(viewPage, "setReturnedValue", returnedValue); //$NON-NLS-1$
+
+                int added = 0;
+                for (ParamSet set : sets)
+                {
+                    if (set == null || set.getParams() == null || set.getParams().isEmpty())
+                        continue;
+                    Object setPage = setPageClass.getConstructor(viewPageClass).newInstance(viewPage);
+                    Global.invoke(setPage, "setName", display); //$NON-NLS-1$
+                    Global.invoke(setPage, "setCode", Integer.valueOf(set.getCode())); //$NON-NLS-1$
+
+                    List<Object> paramContents = new ArrayList<>();
+                    for (Object rawParam : set.getParams())
+                    {
+                        if (!(rawParam instanceof Parameter parameter))
+                            continue;
+                        String pRu = parameter.getNameRu();
+                        String pEn = parameter.getName();
+                        String pName = ru
+                            ? (pRu != null && !pRu.isEmpty() ? pRu : pEn)
+                            : (pEn != null && !pEn.isEmpty() ? pEn : pRu);
+                        if (pName == null)
+                            pName = ""; //$NON-NLS-1$
+
+                        Object value = buildSyntheticValueContent(provider, parameter.getType(),
+                            methodResource, version, ru, valueContentClass, typeGroupClass,
+                            footnoteClass, pageRefClass);
+                        if (value == null)
+                        {
+                            value = valueContentClass
+                                .getConstructor(String.class, List.class)
+                                .newInstance("", Collections.emptyList()); //$NON-NLS-1$
+                        }
+                        Object paramContent = paramContentClass
+                            .getConstructor(String.class, valueContentClass, String.class,
+                                Boolean.class, Boolean.class)
+                            .newInstance(pName, value, null, Boolean.FALSE, null);
+                        paramContents.add(paramContent);
+                    }
+                    Global.invoke(setPage, "setParams", paramContents); //$NON-NLS-1$
+                    out.add(setPage);
+                    added++;
+                }
+            }
+            catch (Exception ex)
+            {
+                Throwable cause = ex instanceof java.lang.reflect.InvocationTargetException ite
+                    && ite.getCause() != null ? ite.getCause() : ex;
+            }
+        }
+
+        private static String ownerNameFromMethod(Method method, boolean ru)
+        {
+            if (method == null)
+                return null;
+            for (EObject cur = method.eContainer(); cur != null; cur = cur.eContainer())
+            {
+                if (cur instanceof TypeItem typeItem)
+                {
+                    String name = typeItem.getNameRu();
+                    if (!ru || name == null || name.isEmpty())
+                        name = typeItem.getName();
+                    if (name != null && !name.isEmpty())
+                        return name;
+                }
+                if (cur instanceof DuallyNamedElement dually)
+                {
+                    String name = dually.getNameRu();
+                    if (!ru || name == null || name.isEmpty())
+                        name = dually.getName();
+                    if (name != null && !name.isEmpty())
+                        return name;
+                }
+            }
+            return null;
+        }
+
+        private static Object buildSyntheticValueContent(Object provider, EList<TypeItem> types,
+            Resource resource, Object version, boolean ru, Class<?> valueContentClass,
+            Class<?> typeGroupClass, Class<?> footnoteClass, Class<?> pageRefClass)
+            throws Exception
+        {
+            if (types == null || types.isEmpty())
+                return null;
+            List<Object> refs = new ArrayList<>();
+            for (TypeItem typeItem : types)
+            {
+                if (typeItem == null)
+                    continue;
+                String typeName = typeItem.getNameRu();
+                if (!ru || typeName == null || typeName.isEmpty())
+                    typeName = typeItem.getName();
+                if (typeName == null || typeName.isEmpty())
+                    continue;
+                Object ref = null;
+                if (provider != null)
+                {
+                    try
+                    {
+                        ref = Global.invoke(provider, "convertTypeItemToReference", //$NON-NLS-1$
+                            typeItem, resource, Boolean.TRUE, version, Boolean.valueOf(ru));
+                    }
+                    catch (Exception ignored)
+                    {
+                    }
+                }
+                if (ref == null)
+                    ref = newPlainPageReference(pageRefClass, typeName);
+                if (ref != null)
+                    refs.add(ref);
+            }
+            if (refs.isEmpty())
+                return null;
+            Object group = typeGroupClass
+                .getConstructor(String.class, List.class, footnoteClass)
+                .newInstance(null, refs, null);
+            return valueContentClass
+                .getConstructor(String.class, List.class)
+                .newInstance(null, Collections.singletonList(group));
+        }
+
+        private static Object newPlainPageReference(Class<?> pageRefClass, String name)
+        {
+            if (pageRefClass == null || name == null)
+                return null;
+            final String label = name;
+            return java.lang.reflect.Proxy.newProxyInstance(
+                pageRefClass.getClassLoader(),
+                new Class<?>[] { pageRefClass },
+                (proxy, method, args) ->
+                {
+                    String m = method.getName();
+                    if ("toShortString".equals(m) || "toFullString".equals(m) //$NON-NLS-1$ //$NON-NLS-2$
+                        || "toString".equals(m)) //$NON-NLS-1$
+                        return label;
+                    if ("getHref".equals(m)) //$NON-NLS-1$
+                        return null;
+                    if ("hashCode".equals(m)) //$NON-NLS-1$
+                        return Integer.valueOf(System.identityHashCode(proxy));
+                    if ("equals".equals(m)) //$NON-NLS-1$
+                        return Boolean.valueOf(proxy == args[0]);
+                    Class<?> rt = method.getReturnType();
+                    if (rt == boolean.class)
+                        return Boolean.FALSE;
+                    if (rt == int.class)
+                        return Integer.valueOf(0);
+                    return null;
+                });
+        }
+
+        private static List<?> pagesOf(Object group)
+        {
+            Object pages = Global.invoke(group, "getPages"); //$NON-NLS-1$
+            return pages instanceof List<?> list ? list : null;
+        }
+
+        private static Class<?> caPageClass()
+        {
+            try
+            {
+                return Class.forName(CA_PAGE);
+            }
+            catch (Exception ex)
+            {
+                return null;
+            }
+        }
     }
 
     private static final class ActiveEditor
