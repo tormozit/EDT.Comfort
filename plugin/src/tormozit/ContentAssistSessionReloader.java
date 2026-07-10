@@ -1,11 +1,17 @@
 package tormozit;
 
+import org.eclipse.core.runtime.ListenerList;
+import org.eclipse.jface.text.AbstractDocument;
 import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.IDocumentExtension;
 import org.eclipse.jface.text.IDocumentExtension4;
 import org.eclipse.jface.text.IDocumentListener;
 import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.IInformationControlCreator;
+import org.eclipse.jface.text.link.LinkedModeModel;
+import org.eclipse.jface.text.link.ProposalPosition;
 import org.eclipse.jface.text.contentassist.ContentAssistant;
+import org.eclipse.jface.text.contentassist.ICompletionProposal;
 import org.eclipse.jface.text.contentassist.ContentAssistEvent;
 import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
@@ -16,6 +22,9 @@ import org.eclipse.jface.text.contentassist.ICompletionListenerExtension;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
 import org.eclipse.jface.text.contentassist.IContentAssistProcessor;
 import org.eclipse.jface.text.source.SourceViewer;
+import org.eclipse.emf.common.util.URI;
+import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.CaretEvent;
 import org.eclipse.swt.custom.CaretListener;
@@ -29,13 +38,16 @@ import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Widget;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.commands.ICommandService;
+import org.eclipse.xtext.resource.IResourceServiceProvider;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 
+import java.lang.reflect.Field;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -138,6 +150,20 @@ public final class ContentAssistSessionReloader
      * asyncExec сбросит флаг после обработки текущего SWT-события.
      */
     private volatile boolean suppressDocumentAutoOpenAfterSession;
+    /**
+     * Штатный {@code BslDocumentListener} на время apply: если {@code DataEvent.doIt}
+     * упадёт до {@code addDocumentListener}, listener останется снятым — запомнили
+     * экземпляр в aboutToBeChanged, чтобы вернуть на документ.
+     */
+    private volatile IDocumentListener pendingBslDocumentListener;
+    /**
+     * После insert: objects отфильтрованы (нет штатного ParametersHover) —
+     * {@code executeCommand(InvocationParametersHover)}, если каретка внутри {@code ()}.
+     */
+    private volatile boolean pendingShowParamHintAfterInsert;
+    private volatile int pendingParamHintDesiredCaret = -1;
+    /** Поколение отложенного param hint — отмена повторного timerExec. */
+    private final AtomicInteger paramHintPostGen = new AtomicInteger();
     /** Автооткрытие assist (порт ИР ПриНажатииКлавишиАвтодополнение). */
     private volatile boolean completionAutoOpenPending;
     private volatile int completionAutoOpenCaret = -1;
@@ -810,16 +836,932 @@ public final class ContentAssistSessionReloader
             @Override
             public void documentAboutToBeChanged(DocumentEvent event)
             {
-                // автооткрытие — только после вставки (documentChanged)
+                prepareStockLinkedModeBeforeAssistInsert(event);
             }
 
             @Override
             public void documentChanged(DocumentEvent event)
             {
+                scheduleEnsureBslDocumentListenerAfterAssistInsert(event);
                 onDocumentChangedForCompletionAutoOpen(event);
             }
         };
         doc.addDocumentListener(completionAutoOpenDocumentListener);
+    }
+
+    /**
+     * До штатного {@code BslDocumentListener.documentChanged} → {@code DataEvent.doIt}:
+     * убрать из {@code objects} EObject без {@link IResourceServiceProvider} (NPE в
+     * {@code BslCommentUiUtils.parseTemplateComment}), чтобы {@code LinkedModeUI.enter()}
+     * отработал штатно. Запомнить listener на случай throw до re-add.
+     */
+    private void prepareStockLinkedModeBeforeAssistInsert(DocumentEvent event)
+    {
+        pendingBslDocumentListener = null;
+        pendingShowParamHintAfterInsert = false;
+        pendingParamHintDesiredCaret = -1;
+        if (event == null || event.getDocument() == null || event.getText() == null)
+            return;
+        if (!isAssistProposalInsertInProgress())
+            return;
+        String text = event.getText();
+        if (text.isEmpty() || text.indexOf('(') < 0)
+            return;
+        IDocument doc = event.getDocument();
+        IDocumentListener bslListener = findBslDocumentListener(doc);
+        if (bslListener == null)
+        {
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H-INSERT", "prepareStockLinkedMode", "noBslListener", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(
+                    text.length() > 80 ? text.substring(0, 80) : text) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return;
+        }
+        pendingBslDocumentListener = bslListener;
+        DataEventDiag before = readDataEventDiag(bslListener, text);
+        int clearedChoices = clearProposalPositionChoices(bslListener, text);
+        int filtered = sanitizeDataEventObjectsWithoutRsp(bslListener, text);
+        DataEventDiag after = readDataEventDiag(bslListener, text);
+        int open = text.indexOf('(');
+        int desiredCaret = open >= 0 ? event.getOffset() + open + 1 : -1;
+        // Штатный ParametersHover строится из objects; если все отфильтрованы
+        // (прикладной метод / bm:// без RSP) — подсказку параметров откроем сами.
+        if (after.objectsSize == 0 && before.hasKey && desiredCaret >= 0)
+        {
+            pendingShowParamHintAfterInsert = true;
+            pendingParamHintDesiredCaret = desiredCaret;
+        }
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H-INSERT", "prepareStockLinkedMode", "sanitize", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"filtered\":" + filtered //$NON-NLS-1$
+                + ",\"clearedChoices\":" + clearedChoices //$NON-NLS-1$
+                + ",\"pendingParamHint\":" + pendingShowParamHintAfterInsert //$NON-NLS-1$
+                + ",\"offset\":" + event.getOffset() //$NON-NLS-1$
+                + ",\"mapSize\":" + before.mapSize //$NON-NLS-1$
+                + ",\"hasKey\":" + before.hasKey //$NON-NLS-1$
+                + ",\"posStart\":" + before.posStart //$NON-NLS-1$
+                + ",\"length\":" + before.length //$NON-NLS-1$
+                + ",\"stopPos\":" + before.stopPos //$NON-NLS-1$
+                + ",\"allInfo\":" + before.allInfoSize //$NON-NLS-1$
+                + ",\"objectsBefore\":" + before.objectsSize //$NON-NLS-1$
+                + ",\"objectsAfter\":" + after.objectsSize //$NON-NLS-1$
+                + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(
+                    text.length() > 80 ? text.substring(0, 80) : text) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+        schedulePostDoItLinkedModeDiag(doc, event.getOffset(), text);
+    }
+
+    /**
+     * Подавить popup локальных переменных: {@code ProposalPosition.getChoices()} → пустой массив.
+     * Штатный {@code BslSelectionChangedListener} иначе открывает список choices рядом с
+     * {@code ParametersHoverInfoControl}.
+     *
+     * @return число очищенных ProposalPosition
+     */
+    private static int clearProposalPositionChoices(IDocumentListener bslListener,
+        String replacementText)
+    {
+        if (bslListener == null || replacementText == null)
+            return 0;
+        try
+        {
+            Field mapField = bslListener.getClass().getDeclaredField("map"); //$NON-NLS-1$
+            mapField.setAccessible(true);
+            Object mapObj = mapField.get(bslListener);
+            if (!(mapObj instanceof Map<?, ?> map))
+                return 0;
+            Object dataEvent = map.get(replacementText);
+            if (dataEvent == null)
+                return 0;
+            Field allInfoField = dataEvent.getClass().getDeclaredField("allInfo"); //$NON-NLS-1$
+            allInfoField.setAccessible(true);
+            Object allInfoObj = allInfoField.get(dataEvent);
+            if (!(allInfoObj instanceof List<?> allInfo) || allInfo.isEmpty())
+                return 0;
+            Field proposalsField = ProposalPosition.class.getDeclaredField("fProposals"); //$NON-NLS-1$
+            proposalsField.setAccessible(true);
+            int cleared = 0;
+            ICompletionProposal[] empty = new ICompletionProposal[0];
+            for (Object pos : allInfo)
+            {
+                if (!(pos instanceof ProposalPosition))
+                    continue;
+                Object current = proposalsField.get(pos);
+                if (current instanceof ICompletionProposal[] arr && arr.length == 0)
+                    continue;
+                proposalsField.set(pos, empty);
+                cleared++;
+            }
+            return cleared;
+        }
+        catch (Exception ex)
+        {
+            ContentAssistDebug.debugModeLog("H-INSERT", "clearProposalChoices", "error", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"ex\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            return 0;
+        }
+    }
+
+    /**
+     * Для прикладных методов (objects отфильтрованы) штатный ParametersHover из LinkedMode
+     * не поднимается. Вызываем штатную команду Ctrl+Shift+Space
+     * ({@code InvocationParametersHover}) через {@code executeCommand}.
+     */
+    private void maybeShowParamHintAfterInsert(int caret)
+    {
+        if (!pendingShowParamHintAfterInsert)
+            return;
+        int desired = pendingParamHintDesiredCaret;
+        pendingShowParamHintAfterInsert = false;
+        pendingParamHintDesiredCaret = -1;
+        if (desired < 0 || caret != desired)
+        {
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"caret\":" + caret + ",\"desired\":" + desired + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            // #endregion
+            return;
+        }
+        StyledText widget = viewer != null ? viewer.getTextWidget() : null;
+        Display display = widget != null && !widget.isDisposed() ? widget.getDisplay() : null;
+        if (display == null || display.isDisposed())
+            return;
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "scheduled", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"caret\":" + caret + ",\"desired\":" + desired + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // #endregion
+        final int desiredCaret = desired;
+        final int gen = paramHintPostGen.incrementAndGet();
+        // Вторая попытка только если первая не открыла попап (alreadyShown отменит gen).
+        display.timerExec(200, () -> runInvocationParametersHoverCommand(desiredCaret, gen, 1));
+        display.timerExec(450, () -> runInvocationParametersHoverCommand(desiredCaret, gen, 2));
+    }
+
+    private void runInvocationParametersHoverCommand(int desiredCaret, int gen, int attempt)
+    {
+        if (gen != paramHintPostGen.get())
+            return;
+        StyledText st = viewer != null ? viewer.getTextWidget() : null;
+        if (st == null || st.isDisposed())
+            return;
+        int caret = st.getCaretOffset();
+        if (caret != desiredCaret)
+        {
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "skipAttempt", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"gen\":" + gen + ",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"caret\":" + caret + ",\"desired\":" + desiredCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return;
+        }
+        if (isParamHoverInfoControlVisible())
+        {
+            paramHintPostGen.incrementAndGet();
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "alreadyShown", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"gen\":" + gen + ",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return;
+        }
+        ParamHoverProbe probe = new ParamHoverProbe();
+        try
+        {
+            if (bslEditor != null && bslEditor.getSite() != null
+                && bslEditor.getSite().getPage() != null)
+            {
+                bslEditor.getSite().getPage().activate(bslEditor);
+            }
+            if (!st.isFocusControl())
+                st.setFocus();
+            probe = executeInvocationParametersHoverCommand();
+            if (probe.popupShown)
+                paramHintPostGen.incrementAndGet();
+        }
+        catch (Exception ex)
+        {
+            probe.execOk = false;
+            probe.err = String.valueOf(ex);
+        }
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "probe", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"gen\":" + gen //$NON-NLS-1$
+                + ",\"attempt\":" + attempt //$NON-NLS-1$
+                + ",\"caret\":" + caret //$NON-NLS-1$
+                + ",\"desired\":" + desiredCaret //$NON-NLS-1$
+                + ",\"execOk\":" + probe.execOk //$NON-NLS-1$
+                + ",\"popupShown\":" + probe.popupShown //$NON-NLS-1$
+                + ",\"handlerClass\":\"" + ContentAssistDebug.jsonEscapeForLog(
+                    probe.handlerClass != null ? probe.handlerClass : "") + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"infoControl\":\"" + ContentAssistDebug.jsonEscapeForLog(
+                    probe.infoControlState != null ? probe.infoControlState : "") + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"err\":\"" + ContentAssistDebug.jsonEscapeForLog(
+                    probe.err != null ? probe.err : "") + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+    }
+
+    /** Штатная команда BSL: Ctrl+Shift+Space — подсказка параметров вызова. */
+    private static final String INVOCATION_PARAMETERS_HOVER_COMMAND =
+        "com._1c.g5.v8.dt.bsl.ui.hover.InvocationParametersHover"; //$NON-NLS-1$
+
+    private static final class ParamHoverProbe
+    {
+        boolean execOk;
+        boolean popupShown;
+        String handlerClass;
+        String infoControlState;
+        String err;
+    }
+
+    private ParamHoverProbe executeInvocationParametersHoverCommand()
+    {
+        ParamHoverProbe probe = new ParamHoverProbe();
+        try
+        {
+            org.eclipse.ui.IWorkbenchWindow window =
+                PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            if (window == null)
+            {
+                probe.err = "windowNull"; //$NON-NLS-1$
+                return probe;
+            }
+            org.eclipse.ui.IWorkbenchPartSite site = null;
+            if (bslEditor != null)
+                site = bslEditor.getSite();
+            org.eclipse.ui.handlers.IHandlerService handlers = null;
+            if (site != null)
+                handlers = site.getService(org.eclipse.ui.handlers.IHandlerService.class);
+            if (handlers == null)
+                handlers = window.getService(org.eclipse.ui.handlers.IHandlerService.class);
+            if (handlers == null)
+            {
+                probe.err = "handlersNull"; //$NON-NLS-1$
+                return probe;
+            }
+            handlers.executeCommand(INVOCATION_PARAMETERS_HOVER_COMMAND, null);
+            probe.execOk = true;
+            fillParamHoverInfoControlProbe(probe);
+            return probe;
+        }
+        catch (Exception ex)
+        {
+            probe.execOk = false;
+            probe.err = String.valueOf(ex);
+            return probe;
+        }
+    }
+
+    private static boolean isParamHoverInfoControlVisible()
+    {
+        ParamHoverProbe probe = new ParamHoverProbe();
+        fillParamHoverInfoControlProbe(probe);
+        return probe.popupShown;
+    }
+
+    /**
+     * {@code infoControl != null} только если EDT вызвал {@code showControlInfo}.
+     * Реальный handler — через e4 {@code lookUpHandler} / ключ {@code handler::id}.
+     */
+    private static void fillParamHoverInfoControlProbe(ParamHoverProbe probe)
+    {
+        try
+        {
+            org.eclipse.core.commands.IHandler handler = resolveInvocationParametersHoverHandler();
+            if (handler == null)
+            {
+                probe.infoControlState = "handlerNull"; //$NON-NLS-1$
+                return;
+            }
+            probe.handlerClass = handler.getClass().getName();
+            Field infoField = null;
+            Class<?> cls = handler.getClass();
+            while (cls != null && infoField == null)
+            {
+                try
+                {
+                    infoField = cls.getDeclaredField("infoControl"); //$NON-NLS-1$
+                }
+                catch (NoSuchFieldException ignored)
+                {
+                    cls = cls.getSuperclass();
+                }
+            }
+            if (infoField == null)
+            {
+                probe.infoControlState = "fieldMissing"; //$NON-NLS-1$
+                return;
+            }
+            infoField.setAccessible(true);
+            Object infoControl = infoField.get(handler);
+            if (infoControl == null)
+            {
+                probe.infoControlState = "null"; //$NON-NLS-1$
+                probe.popupShown = false;
+                return;
+            }
+            probe.infoControlState = infoControl.getClass().getSimpleName();
+            probe.popupShown = true;
+        }
+        catch (Exception ex)
+        {
+            probe.infoControlState = "probeError:" + ex.getClass().getSimpleName(); //$NON-NLS-1$
+            probe.err = String.valueOf(ex);
+        }
+    }
+
+    private static org.eclipse.core.commands.IHandler resolveInvocationParametersHoverHandler()
+    {
+        try
+        {
+            Object context = null;
+            org.eclipse.ui.IWorkbenchWindow window =
+                PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            if (window != null)
+            {
+                context = window.getService(Class.forName(
+                    "org.eclipse.e4.core.contexts.IEclipseContext")); //$NON-NLS-1$
+            }
+            if (context == null && window != null && window.getActivePage() != null)
+            {
+                org.eclipse.ui.IWorkbenchPart part = window.getActivePage().getActivePart();
+                if (part != null && part.getSite() != null)
+                {
+                    context = part.getSite().getService(Class.forName(
+                        "org.eclipse.e4.core.contexts.IEclipseContext")); //$NON-NLS-1$
+                }
+            }
+            if (context != null)
+            {
+                Class<?> impl = Class.forName(
+                    "org.eclipse.e4.core.commands.internal.HandlerServiceImpl"); //$NON-NLS-1$
+                java.lang.reflect.Method lookUp = impl.getMethod("lookUpHandler", //$NON-NLS-1$
+                    Class.forName("org.eclipse.e4.core.contexts.IEclipseContext"), //$NON-NLS-1$
+                    String.class);
+                Object h = lookUp.invoke(null, context, INVOCATION_PARAMETERS_HOVER_COMMAND);
+                if (h instanceof org.eclipse.core.commands.IHandler)
+                    return (org.eclipse.core.commands.IHandler) h;
+                java.lang.reflect.Method get =
+                    context.getClass().getMethod("get", String.class); //$NON-NLS-1$
+                Object direct = get.invoke(context,
+                    "handler::" + INVOCATION_PARAMETERS_HOVER_COMMAND); //$NON-NLS-1$
+                if (direct instanceof org.eclipse.core.commands.IHandler)
+                    return (org.eclipse.core.commands.IHandler) direct;
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+        try
+        {
+            ICommandService commands =
+                PlatformUI.getWorkbench().getService(ICommandService.class);
+            if (commands == null)
+                return null;
+            org.eclipse.core.commands.Command command =
+                commands.getCommand(INVOCATION_PARAMETERS_HOVER_COMMAND);
+            return command != null ? command.getHandler() : null;
+        }
+        catch (Exception ignored)
+        {
+            return null;
+        }
+    }
+
+    /**
+     * Снимок сразу после всех {@code documentChanged} (включая {@code DataEvent.doIt}),
+     * до JFace {@code getSelection}/{@code setSelectedRange} в insertProposal.
+     */
+    private void schedulePostDoItLinkedModeDiag(IDocument doc, int insertOffset, String text)
+    {
+        if (!(doc instanceof IDocumentExtension ext) || completionAutoOpenDocumentListener == null)
+            return;
+        final String inserted = text;
+        final int offset = insertOffset;
+        try
+        {
+            ext.registerPostNotificationReplace(completionAutoOpenDocumentListener,
+                (d, owner) -> logLinkedModeDiagPhase("postDoIt", d, offset, inserted)); //$NON-NLS-1$
+        }
+        catch (Exception ex)
+        {
+            ContentAssistDebug.debugModeLog("H-INSERT", "postDoItDiag", "registerError", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"ex\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    private void logLinkedModeDiagPhase(String phase, IDocument doc, int insertOffset, String text)
+    {
+        try
+        {
+            StyledText st = viewer != null ? viewer.getTextWidget() : null;
+            int caret = st != null && !st.isDisposed() ? st.getCaretOffset() : -1;
+            boolean hasModel = doc != null && LinkedModeModel.hasInstalledModel(doc);
+            boolean bslPresent = findBslDocumentListener(doc) != null;
+            IDocumentListener bsl = findBslDocumentListener(doc);
+            DataEventDiag mapDiag = bsl != null ? readDataEventDiag(bsl, text) : DataEventDiag.missing();
+            int open = text != null ? text.indexOf('(') : -1;
+            int desired = open >= 0 ? insertOffset + open + 1 : -1;
+            int insertEnd = text != null ? insertOffset + text.length() : -1;
+            ContentAssistDebug.debugModeLog("H-INSERT", "linkedModeDiag", phase, //$NON-NLS-1$ //$NON-NLS-2$
+                "{\"caret\":" + caret //$NON-NLS-1$
+                    + ",\"desired\":" + desired //$NON-NLS-1$
+                    + ",\"insertEnd\":" + insertEnd //$NON-NLS-1$
+                    + ",\"hasModel\":" + hasModel //$NON-NLS-1$
+                    + ",\"bslPresent\":" + bslPresent //$NON-NLS-1$
+                    + ",\"mapSize\":" + mapDiag.mapSize //$NON-NLS-1$
+                    + ",\"hasKey\":" + mapDiag.hasKey //$NON-NLS-1$
+                    + ",\"posStart\":" + mapDiag.posStart //$NON-NLS-1$
+                    + ",\"length\":" + mapDiag.length //$NON-NLS-1$
+                    + ",\"allInfo\":" + mapDiag.allInfoSize //$NON-NLS-1$
+                    + ",\"objects\":" + mapDiag.objectsSize //$NON-NLS-1$
+                    + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(
+                        text != null && text.length() > 80 ? text.substring(0, 80) : text) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (Exception ignored)
+        {
+        }
+    }
+
+    /**
+     * Наш listener часто раньше {@code BslDocumentListener} в списке — sync
+     * {@code documentChanged} ещё до {@code doIt}. Проверяем re-add после всех listeners.
+     */
+    private void scheduleEnsureBslDocumentListenerAfterAssistInsert(DocumentEvent event)
+    {
+        if (pendingBslDocumentListener == null)
+            return;
+        if (event == null || event.getDocument() == null)
+            return;
+        if (!isAssistProposalInsertInProgress())
+        {
+            pendingBslDocumentListener = null;
+            return;
+        }
+        final IDocument doc = event.getDocument();
+        final IDocumentListener remembered = pendingBslDocumentListener;
+        final String text = event.getText();
+        final int offset = event.getOffset();
+        StyledText widget = viewer != null ? viewer.getTextWidget() : null;
+        Display display = widget != null && !widget.isDisposed() ? widget.getDisplay() : null;
+        if (display == null || display.isDisposed())
+        {
+            ensureBslDocumentListenerReadded(doc, remembered, offset, text);
+            return;
+        }
+        display.asyncExec(() -> ensureBslDocumentListenerReadded(doc, remembered, offset, text));
+        display.timerExec(1, () -> logLinkedModeDiagPhase("async1", doc, offset, text)); //$NON-NLS-1$
+        display.timerExec(10, () -> logLinkedModeDiagPhase("async10", doc, offset, text)); //$NON-NLS-1$
+    }
+
+    /**
+     * Если {@code DataEvent.doIt} упал, штатный listener остаётся снятым с документа —
+     * следующие вставки без LinkedMode. Вернуть его.
+     */
+    private void ensureBslDocumentListenerReadded(IDocument doc, IDocumentListener remembered,
+        int insertOffset, String text)
+    {
+        if (remembered == null || doc == null)
+            return;
+        if (pendingBslDocumentListener == remembered)
+            pendingBslDocumentListener = null;
+        boolean present = findBslDocumentListener(doc) != null;
+        boolean readded = false;
+        if (!present)
+        {
+            try
+            {
+                doc.addDocumentListener(remembered);
+                readded = true;
+            }
+            catch (Exception ex)
+            {
+                ContentAssistDebug.debugModeLog("H-INSERT", "ensureBslListener", "error", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"ex\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+        boolean hasModel = LinkedModeModel.hasInstalledModel(doc);
+        StyledText st = viewer != null ? viewer.getTextWidget() : null;
+        int caret = st != null && !st.isDisposed() ? st.getCaretOffset() : -1;
+        IDocumentListener bslNow = findBslDocumentListener(doc);
+        DataEventDiag mapDiag = readDataEventDiag(bslNow != null ? bslNow : remembered, text);
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H-INSERT", "ensureBslListener", "done", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"wasPresent\":" + present + ",\"readded\":" + readded //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"hasModel\":" + hasModel //$NON-NLS-1$
+                + ",\"caret\":" + caret //$NON-NLS-1$
+                + ",\"mapSize\":" + mapDiag.mapSize //$NON-NLS-1$
+                + ",\"hasKey\":" + mapDiag.hasKey //$NON-NLS-1$
+                + ",\"insertOffset\":" + insertOffset + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+        logLinkedModeDiagPhase("async0", doc, insertOffset, text); //$NON-NLS-1$
+        maybeShowParamHintAfterInsert(caret);
+    }
+
+    private boolean isAssistProposalInsertInProgress()
+    {
+        return suppressDocumentAutoOpenAfterSession
+            || Boolean.TRUE.equals(SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get());
+    }
+
+    private static final String BSL_DOCUMENT_LISTENER_SIMPLE =
+        "BslProposalProvider$BslDocumentListener"; //$NON-NLS-1$
+
+    private static final class DataEventDiag
+    {
+        final boolean hasKey;
+        final int mapSize;
+        final int posStart;
+        final int length;
+        final int stopPos;
+        final int allInfoSize;
+        final int objectsSize;
+
+        DataEventDiag(boolean hasKey, int mapSize, int posStart, int length, int stopPos,
+            int allInfoSize, int objectsSize)
+        {
+            this.hasKey = hasKey;
+            this.mapSize = mapSize;
+            this.posStart = posStart;
+            this.length = length;
+            this.stopPos = stopPos;
+            this.allInfoSize = allInfoSize;
+            this.objectsSize = objectsSize;
+        }
+
+        static DataEventDiag missing()
+        {
+            return new DataEventDiag(false, -1, -1, -1, -1, -1, -1);
+        }
+    }
+
+    private static DataEventDiag readDataEventDiag(IDocumentListener bslListener,
+        String replacementText)
+    {
+        if (bslListener == null)
+            return DataEventDiag.missing();
+        try
+        {
+            Field mapField = bslListener.getClass().getDeclaredField("map"); //$NON-NLS-1$
+            mapField.setAccessible(true);
+            Object mapObj = mapField.get(bslListener);
+            if (!(mapObj instanceof Map<?, ?> map))
+                return DataEventDiag.missing();
+            int mapSize = map.size();
+            if (replacementText == null)
+                return new DataEventDiag(false, mapSize, -1, -1, -1, -1, -1);
+            Object dataEvent = map.get(replacementText);
+            if (dataEvent == null)
+                return new DataEventDiag(false, mapSize, -1, -1, -1, -1, -1);
+            int posStart = readIntField(dataEvent, "posStart"); //$NON-NLS-1$
+            int length = readIntField(dataEvent, "length"); //$NON-NLS-1$
+            int stopPos = readIntField(dataEvent, "stopPos"); //$NON-NLS-1$
+            int allInfo = readListSizeField(dataEvent, "allInfo"); //$NON-NLS-1$
+            int objects = readListSizeField(dataEvent, "objects"); //$NON-NLS-1$
+            return new DataEventDiag(true, mapSize, posStart, length, stopPos, allInfo, objects);
+        }
+        catch (Exception ex)
+        {
+            return DataEventDiag.missing();
+        }
+    }
+
+    private static int readIntField(Object target, String name)
+    {
+        try
+        {
+            Field f = target.getClass().getDeclaredField(name);
+            f.setAccessible(true);
+            Object v = f.get(target);
+            return v instanceof Integer i ? i.intValue() : -1;
+        }
+        catch (Exception e)
+        {
+            return -1;
+        }
+    }
+
+    private static int readListSizeField(Object target, String name)
+    {
+        try
+        {
+            Field f = target.getClass().getDeclaredField(name);
+            f.setAccessible(true);
+            Object v = f.get(target);
+            if (v == null)
+                return 0;
+            if (v instanceof List<?> list)
+                return list.size();
+            return -1;
+        }
+        catch (Exception e)
+        {
+            return -1;
+        }
+    }
+
+    private static IDocumentListener findBslDocumentListener(IDocument doc)
+    {
+        if (doc == null)
+            return null;
+        for (IDocumentListener listener : listDocumentListeners(doc))
+        {
+            if (listener == null)
+                continue;
+            String name = listener.getClass().getName();
+            if (name != null && name.endsWith(BSL_DOCUMENT_LISTENER_SIMPLE))
+                return listener;
+        }
+        return null;
+    }
+
+    private static List<IDocumentListener> listDocumentListeners(IDocument doc)
+    {
+        List<IDocumentListener> result = new ArrayList<>();
+        if (!(doc instanceof AbstractDocument))
+            return result;
+        try
+        {
+            Field field = AbstractDocument.class.getDeclaredField("fDocumentListeners"); //$NON-NLS-1$
+            field.setAccessible(true);
+            Object listObj = field.get(doc);
+            if (listObj instanceof ListenerList<?> listenerList)
+            {
+                for (Object o : listenerList)
+                {
+                    if (o instanceof IDocumentListener l)
+                        result.add(l);
+                }
+            }
+            else if (listObj instanceof Iterable<?> iterable)
+            {
+                for (Object o : iterable)
+                {
+                    if (o instanceof IDocumentListener l)
+                        result.add(l);
+                }
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+        return result;
+    }
+
+    /**
+     * @return число удалённых objects без RSP; {@code -1} — DataEvent не найден / ошибка.
+     */
+    private static int sanitizeDataEventObjectsWithoutRsp(IDocumentListener bslListener,
+        String replacementText)
+    {
+        if (bslListener == null || replacementText == null)
+            return -1;
+        try
+        {
+            Field mapField = bslListener.getClass().getDeclaredField("map"); //$NON-NLS-1$
+            mapField.setAccessible(true);
+            Object mapObj = mapField.get(bslListener);
+            if (!(mapObj instanceof Map<?, ?> map))
+                return -1;
+            Object dataEvent = map.get(replacementText);
+            if (dataEvent == null)
+                return -1;
+            Field objectsField = dataEvent.getClass().getDeclaredField("objects"); //$NON-NLS-1$
+            objectsField.setAccessible(true);
+            Object objectsObj = objectsField.get(dataEvent);
+            if (!(objectsObj instanceof List<?> objects) || objects.isEmpty())
+                return 0;
+            List<Object> kept = new ArrayList<>(objects.size());
+            int filtered = 0;
+            StringBuilder objectsDiag = new StringBuilder("["); //$NON-NLS-1$
+            int idx = 0;
+            for (Object o : objects)
+            {
+                if (idx > 0)
+                    objectsDiag.append(',');
+                if (!(o instanceof EObject eObject))
+                {
+                    objectsDiag.append("{\"i\":").append(idx) //$NON-NLS-1$
+                        .append(",\"type\":\"nonEObject\",\"class\":\"") //$NON-NLS-1$
+                        .append(ContentAssistDebug.jsonEscapeForLog(
+                            o != null ? o.getClass().getName() : "null")) //$NON-NLS-1$
+                        .append("\"}"); //$NON-NLS-1$
+                    kept.add(o);
+                    idx++;
+                    continue;
+                }
+                ObjectRspDiag rspDiag = diagnoseObjectRsp(eObject);
+                boolean keep = shouldKeepDataEventObject(rspDiag);
+                if (keep && !rspDiag.hasRsp
+                    && "resourceNull".equals(rspDiag.reason) //$NON-NLS-1$
+                    && hasPlatformMethodChain(rspDiag.containers))
+                {
+                    // ParamSet платформенного Method/Type: docs через getDocByParamSet без eResource.
+                    rspDiag = new ObjectRspDiag(true, rspDiag.isProxy, rspDiag.resourceNull,
+                        rspDiag.eClass, rspDiag.uri, "okPlatformChain", rspDiag.containers); //$NON-NLS-1$
+                }
+                objectsDiag.append(rspDiag.toJson(idx));
+                if (keep)
+                    kept.add(eObject);
+                else
+                    filtered++;
+                idx++;
+            }
+            objectsDiag.append(']');
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H-INSERT", "sanitizeDataEvent", "objects", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(
+                    replacementText.length() > 80 ? replacementText.substring(0, 80) : replacementText)
+                    + "\",\"filtered\":" + filtered //$NON-NLS-1$
+                    + ",\"objects\":" + objectsDiag + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            if (filtered == 0)
+                return 0;
+            objectsField.set(dataEvent, kept);
+            return filtered;
+        }
+        catch (Exception ex)
+        {
+            ContentAssistDebug.debugModeLog("H-INSERT", "sanitizeDataEvent", "error", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"ex\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            return -1;
+        }
+    }
+
+    /**
+     * Оставляем object с RSP; {@code ParamSet} с цепочкой {@code Method}/{@code Type}
+     * (платформенная модель без eResource — штатный {@code getDocByParamSet}).
+     * Выкидываем сирот ({@code containers:none}) и прочие без RSP — иначе NPE в
+     * {@code parseTemplateComment} валит {@code DataEvent.doIt} до {@code LinkedModeUI.enter}.
+     */
+    private static boolean shouldKeepDataEventObject(ObjectRspDiag diag)
+    {
+        if (diag == null)
+            return false;
+        if (diag.hasRsp)
+            return true;
+        if ("ParamSet".equals(diag.eClass) && hasPlatformMethodChain(diag.containers)) //$NON-NLS-1$
+            return true;
+        return false;
+    }
+
+    private static boolean hasPlatformMethodChain(String containers)
+    {
+        if (containers == null || containers.isEmpty() || "none".equals(containers)) //$NON-NLS-1$
+            return false;
+        // Сегменты: "Method:resourceNull|ContextDef:…|Type:…"
+        // Не путать с прикладным "BslContextDefMethod:rspNull@bm://…"
+        // (contains("Method:") ложно срабатывал на BslContextDefMethod).
+        String[] segments = containers.split("\\|"); //$NON-NLS-1$
+        for (String segment : segments)
+        {
+            if (segment == null || segment.isEmpty())
+                continue;
+            int colon = segment.indexOf(':');
+            String cls = colon >= 0 ? segment.substring(0, colon) : segment;
+            if ("Method".equals(cls) || "Type".equals(cls)) //$NON-NLS-1$ //$NON-NLS-2$
+                return true;
+        }
+        return false;
+    }
+
+    private static final class ObjectRspDiag
+    {
+        final boolean hasRsp;
+        final boolean isProxy;
+        final boolean resourceNull;
+        final String eClass;
+        final String uri;
+        final String reason;
+        final String containers;
+
+        ObjectRspDiag(boolean hasRsp, boolean isProxy, boolean resourceNull,
+            String eClass, String uri, String reason)
+        {
+            this(hasRsp, isProxy, resourceNull, eClass, uri, reason, ""); //$NON-NLS-1$
+        }
+
+        ObjectRspDiag(boolean hasRsp, boolean isProxy, boolean resourceNull,
+            String eClass, String uri, String reason, String containers)
+        {
+            this.hasRsp = hasRsp;
+            this.isProxy = isProxy;
+            this.resourceNull = resourceNull;
+            this.eClass = eClass != null ? eClass : ""; //$NON-NLS-1$
+            this.uri = uri != null ? uri : ""; //$NON-NLS-1$
+            this.reason = reason != null ? reason : ""; //$NON-NLS-1$
+            this.containers = containers != null ? containers : ""; //$NON-NLS-1$
+        }
+
+        String toJson(int index)
+        {
+            return "{\"i\":" + index //$NON-NLS-1$
+                + ",\"hasRsp\":" + hasRsp //$NON-NLS-1$
+                + ",\"proxy\":" + isProxy //$NON-NLS-1$
+                + ",\"resourceNull\":" + resourceNull //$NON-NLS-1$
+                + ",\"eClass\":\"" + ContentAssistDebug.jsonEscapeForLog(eClass) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"uri\":\"" + ContentAssistDebug.jsonEscapeForLog(uri) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"reason\":\"" + ContentAssistDebug.jsonEscapeForLog(reason) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"containers\":\"" + ContentAssistDebug.jsonEscapeForLog(containers) + "\"}"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    private static ObjectRspDiag diagnoseObjectRsp(EObject eObject)
+    {
+        if (eObject == null)
+            return new ObjectRspDiag(false, false, true, "", "", "nullObject"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        String eClass = eClassName(eObject);
+        boolean proxy = isProxy(eObject);
+        ObjectRspDiag self = diagnoseResourceRsp(eObject, eClass, proxy);
+        if (self.hasRsp)
+            return self;
+        // ParamSet платформенных методов часто без eResource; EDT берёт docs через
+        // eContainer → AbstractMethod (getDocByParamSet). Проверяем цепочку контейнеров.
+        StringBuilder chain = new StringBuilder();
+        try
+        {
+            int depth = 0;
+            for (EObject cur = eObject.eContainer(); cur != null && depth < 8;
+                cur = cur.eContainer(), depth++)
+            {
+                ObjectRspDiag via = diagnoseResourceRsp(cur, eClassName(cur), isProxy(cur));
+                if (chain.length() > 0)
+                    chain.append('|');
+                chain.append(via.eClass).append(':').append(via.reason);
+                if (!via.uri.isEmpty())
+                    chain.append('@').append(shortUri(via.uri));
+                if (via.hasRsp)
+                {
+                    return new ObjectRspDiag(true, proxy, self.resourceNull, eClass, via.uri,
+                        "okViaContainer:" + via.eClass, chain.toString()); //$NON-NLS-1$
+                }
+            }
+            if (chain.length() == 0)
+                chain.append("none"); //$NON-NLS-1$
+        }
+        catch (Exception ex)
+        {
+            chain.append("ex:").append(ex.getClass().getSimpleName()); //$NON-NLS-1$
+        }
+        return new ObjectRspDiag(self.hasRsp, self.isProxy, self.resourceNull, self.eClass,
+            self.uri, self.reason, chain.toString());
+    }
+
+    private static String shortUri(String uri)
+    {
+        if (uri == null || uri.isEmpty())
+            return ""; //$NON-NLS-1$
+        if (uri.length() <= 80)
+            return uri;
+        return uri.substring(0, 40) + "…" + uri.substring(uri.length() - 30); //$NON-NLS-1$
+    }
+
+    private static String eClassName(EObject eObject)
+    {
+        try
+        {
+            if (eObject != null && eObject.eClass() != null)
+                return eObject.eClass().getName();
+        }
+        catch (Exception ignored)
+        {
+        }
+        return ""; //$NON-NLS-1$
+    }
+
+    private static boolean isProxy(EObject eObject)
+    {
+        try
+        {
+            return eObject != null && eObject.eIsProxy();
+        }
+        catch (Exception ignored)
+        {
+            return false;
+        }
+    }
+
+    private static ObjectRspDiag diagnoseResourceRsp(EObject eObject, String eClass, boolean proxy)
+    {
+        Resource resource = null;
+        try
+        {
+            resource = eObject.eResource();
+        }
+        catch (Exception ignored)
+        {
+        }
+        if (resource == null)
+            return new ObjectRspDiag(false, proxy, true, eClass, "", "resourceNull"); //$NON-NLS-1$ //$NON-NLS-2$
+        URI uri = resource.getURI();
+        String uriStr = uri != null ? uri.toString() : ""; //$NON-NLS-1$
+        if (uri == null)
+            return new ObjectRspDiag(false, proxy, false, eClass, "", "uriNull"); //$NON-NLS-1$ //$NON-NLS-2$
+        IResourceServiceProvider rsp =
+            IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(uri);
+        if (rsp == null)
+            return new ObjectRspDiag(false, proxy, false, eClass, uriStr, "rspNull"); //$NON-NLS-1$
+        return new ObjectRspDiag(true, proxy, false, eClass, uriStr, "ok"); //$NON-NLS-1$
     }
 
     private void uninstallCompletionAutoOpenDocumentListener()
