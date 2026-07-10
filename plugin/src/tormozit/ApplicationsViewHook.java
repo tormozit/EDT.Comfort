@@ -100,7 +100,7 @@ public class ApplicationsViewHook implements IStartup
         DB      ("Инфобаза",         null,                                                   200, true,  SWT.NONE  ),
         PLATFORM("Версия платформы", "Версия платформы для взаимодействия EDT с базой",       80, true,  SWT.NONE  ),
         SSH     ("Конфигуратор SSH",  "Дата сеанса конфигуратора SSH. Клик — отключить.",    165, true,  SWT.NONE  ),
-        IR      ("Приложение ИР",    "Версия платформы и дата сеанса ИР. Клик — отключить.", 165, true,  SWT.NONE  ),
+        IR      ("Приложение ИР",    "Версия платформы и дата сеанса ИР. Клик — подключить или отключить.", 165, true,  SWT.NONE  ),
         AUTO    ("Авто ИР",             "Автоматически подключать приложение ИР",                 CHECKBOX_COLUMN_WIDTH, true, SWT.CENTER),
         DYN_AUTO("Динамическое обновление",
                  "Автоматически нажимать «Обновить динамически», если к базе подключено приложение ИР",
@@ -822,14 +822,36 @@ public class ApplicationsViewHook implements IStartup
                     @Override public void update(ViewerCell cell)
                     {
                         IRApplication ir = IRApplication.getInstance();
-                        renderSessionCell(cell, ir.getSessionStart(cell.getElement()),
-                            ir.getSessionPlatformVersion(cell.getElement()));
+                        LocalDateTime start = ir.getSessionStart(cell.getElement());
+                        if (start != null)
+                        {
+                            renderSessionCell(cell, start,
+                                ir.getSessionPlatformVersion(cell.getElement()));
+                            return;
+                        }
+                        Display d = cell.getControl().getDisplay();
+                        InfobaseReference ib = getInfobase(cell.getElement());
+                        if (ir.isConnecting(ib))
+                        {
+                            cell.setText("Подключение…"); //$NON-NLS-1$
+                            cell.setForeground(d.getSystemColor(SWT.COLOR_DARK_GRAY));
+                        }
+                        else
+                        {
+                            cell.setText("Подключить"); //$NON-NLS-1$
+                            cell.setForeground(d.getSystemColor(SWT.COLOR_DARK_BLUE));
+                        }
+                        cell.setBackground(null);
                     }
                     @Override public String getToolTipText(Object element)
                     {
-                        return IRApplication.getInstance().isConnected(getInfobase(element))
-                            ? "Нажмите для отключения приложения ИР" //$NON-NLS-1$
-                            : "Приложение ИР не подключено"; //$NON-NLS-1$
+                        IRApplication ir = IRApplication.getInstance();
+                        InfobaseReference ib = getInfobase(element);
+                        if (ir.isConnected(ib))
+                            return "Нажмите для отключения приложения ИР"; //$NON-NLS-1$
+                        if (ir.isConnecting(ib))
+                            return "Подключение приложения ИР…"; //$NON-NLS-1$
+                        return "Нажмите для подключения приложения ИР"; //$NON-NLS-1$
                     }
                 };
 
@@ -994,7 +1016,7 @@ public class ApplicationsViewHook implements IStartup
         switch (col)
         {
             case SSH: return DesignerSessionPoolAccessor.getInstance().isConnected(ib);
-            case IR:  return IRApplication.getInstance().isConnected(ib);
+            case IR:  return true;
             default:  return false;
         }
     }
@@ -1015,7 +1037,10 @@ public class ApplicationsViewHook implements IStartup
             {
                 IRApplication ir = IRApplication.getInstance();
                 InfobaseReference ib = getInfobase(element);
-                if (ir.isConnected(ib)) ir.disconnect(ib);
+                if (ir.isConnected(ib))
+                    ir.disconnect(ib);
+                else if (element instanceof IInfobaseApplication app)
+                    ir.connectInfobaseApplication(app);
                 break;
             }
             case AUTO:

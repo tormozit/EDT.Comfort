@@ -412,6 +412,7 @@ public final class SearchViewAggregationHook implements IStartup
             installAggregationListener(treeViewer, tableViewer);
             installPathColumn(tableViewer);
             installTableCopyHandler(treeViewer, tableViewer);
+            TreeSoleChildAutoExpand.installForComfortLists(treeViewer);
 
             treeViewer.getTree().setData(HOOKED_KEY, Boolean.TRUE);
             log("tryPatch: PATCH OK для " + activePage.getClass().getName()); //$NON-NLS-1$

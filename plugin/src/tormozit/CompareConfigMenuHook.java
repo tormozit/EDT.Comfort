@@ -227,11 +227,16 @@ public class CompareConfigMenuHook implements IStartup
                 Display.getDefault().asyncExec(() ->
                 {
                     AbstractTreeViewer v = getTreeViewerFromEditor(editor);
-                    if (v != null) listener.setTreeViewer(v);
+                    if (v != null)
+                    {
+                        listener.setTreeViewer(v);
+                        TreeSoleChildAutoExpand.installForComfortLists(v);
+                    }
                 });
                 return;
             }
             listener.setTreeViewer(viewer);
+            TreeSoleChildAutoExpand.installForComfortLists(viewer);
         });
     }
 
@@ -1086,12 +1091,15 @@ public class CompareConfigMenuHook implements IStartup
 
             Set<Object> toExpand = new HashSet<>();
 
-            viewer.collapseAll();
             for (Object root : cp.getElements(viewer.getInput()))
             {
                 collectElementsToExpand(cp, root, mode, toExpand, viewer);
             }
-            viewer.setExpandedElements(toExpand.toArray());
+            TreeSoleChildAutoExpand.runSuppressed(() ->
+            {
+                viewer.collapseAll();
+                viewer.setExpandedElements(toExpand.toArray());
+            });
 
             if (selection != null && !selection.isEmpty())
             {

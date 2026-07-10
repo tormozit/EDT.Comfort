@@ -102,6 +102,14 @@ public final class IRApplication
         return s != null && s.state == State.CONNECTED;
     }
 
+    public boolean isConnecting(InfobaseReference infobase)
+    {
+        if (infobase == null)
+            return false;
+        IRSession s = sessions.get(sessionKey(infobase));
+        return s != null && s.state == State.CONNECTING;
+    }
+
     /**
      * Возвращает момент успешного подключения, или {@code null} если нет сессии.
      */

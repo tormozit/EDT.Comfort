@@ -346,6 +346,7 @@ public final class FileSearchResultsHook implements IStartup
             updateTableFromSelection(treeViewer, tableViewer);
 
         installFileTreeMatchCount(treeViewer);
+        TreeSoleChildAutoExpand.installForComfortLists(treeViewer);
 
         log("installSplitLayout: done");
     }
