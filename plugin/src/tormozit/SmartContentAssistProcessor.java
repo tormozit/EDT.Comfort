@@ -1915,7 +1915,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                 if (wasSmart)
                     applyUnfilteredReloadIfNeeded(viewer);
                 int probeOffset = resolveDelegateProbeOffset(viewer, offset, caret);
-                boolean syncSmart = wasSmart || SmartAssistFilterState.isSmartFilterEnabled();
+                boolean syncSmart = SmartAssistFilterState.isSmartFilterEnabled();
                 ICompletionProposal[] kept = resolveProposalList(viewer, probeOffset, caret, filter,
                     syncSmart);
                 return kept;
