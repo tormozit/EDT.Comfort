@@ -72,6 +72,8 @@ import com._1c.g5.v8.dt.mcore.TypeItem;
 public final class ParamHintHtmlModifier
 {
     private static final String HEADING_CLASS = "contentassist-heading-content"; //$NON-NLS-1$
+    /** Макс. число типов возврата в заголовке (через запятую); дальше — "...". */
+    private static final int MAX_HEADING_RETURN_TYPE_ELEMENTS = 10;
     private static final String TYPE_CLASS = "contentassist-type"; //$NON-NLS-1$
     private static final String DESC_CLASS = "contentassist-description"; //$NON-NLS-1$
     private static final String COMFORT_META_MARKER = "comfort-param-meta"; //$NON-NLS-1$
@@ -143,7 +145,7 @@ public final class ParamHintHtmlModifier
     }
 
     /**
-     * Только диагностика ручного Ctrl+Shift+Space. Каретку не двигаем.
+     * Fallback Ctrl+Shift+Space при промахе EDT (нет popup).
      */
     private static void installParamHoverCommandProbe(Display display)
     {
@@ -159,9 +161,6 @@ public final class ParamHintHtmlModifier
                 @Override
                 public void preExecute(String commandId, ExecutionEvent event)
                 {
-                    if (!INVOCATION_PARAMETERS_HOVER_COMMAND.equals(commandId))
-                        return;
-                    probeInvocationParametersHoverCaret(null);
                 }
 
                 @Override
@@ -172,8 +171,6 @@ public final class ParamHintHtmlModifier
                 @Override
                 public void postExecuteFailure(String commandId, ExecutionException exception)
                 {
-                    if (!INVOCATION_PARAMETERS_HOVER_COMMAND.equals(commandId))
-                        return;
                 }
 
                 @Override
@@ -181,7 +178,6 @@ public final class ParamHintHtmlModifier
                 {
                     if (!INVOCATION_PARAMETERS_HOVER_COMMAND.equals(commandId))
                         return;
-                    boolean infoPresent = isParamHoverInfoControlPresent();
                     boolean alreadyVisible = isParamHintAlreadyVisible();
                     // Синхронно и только при реальном промахе — без asyncExec (иначе
                     // подмена comfort→EDT через ~50мс в основном режиме).
@@ -193,86 +189,6 @@ public final class ParamHintHtmlModifier
         }
         catch (Exception ignored)
         {
-        }
-    }
-
-    /**
-     * Диагностика без изменения selection: как EDT {@code inInvocationParameters}.
-     *
-     * @return всегда {@code false} — каретку не трогаем
-     */
-    public static boolean prepareCaretForInvocationParametersHover(ITextViewer viewer)
-    {
-        probeInvocationParametersHoverCaret(viewer);
-        return false;
-    }
-
-    private static void probeInvocationParametersHoverCaret(ITextViewer viewer)
-    {
-        if (viewer == null)
-        {
-            ActiveEditor active = resolveActiveBslEditor();
-            if (active == null)
-                return;
-            BslXtextEditor editor = null;
-            try
-            {
-                IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
-                if (window != null && window.getActivePage() != null)
-                    editor = GetRef.getActiveBslEditor(window.getActivePage().getActiveEditor());
-            }
-            catch (Exception ignored)
-            {
-            }
-            if (editor != null)
-                viewer = editor.getInternalSourceViewer();
-            if (viewer == null)
-                return;
-        }
-        IDocument document = viewer.getDocument();
-        if (!(document instanceof IXtextDocument xdoc))
-            return;
-        StyledText st = viewer.getTextWidget();
-        if (st == null || st.isDisposed())
-            return;
-        int caret = st.getCaretOffset();
-        try
-        {
-            xdoc.readOnly((IUnitOfWork<Void, XtextResource>) resource -> {
-                if (resource == null)
-                    return null;
-                EObjectAtOffsetHelper helper = new EObjectAtOffsetHelper();
-                EObject obj = helper.resolveContainedElementAt(resource, caret);
-                String objClass = obj != null && obj.eClass() != null
-                    ? obj.eClass().getName() : "null"; //$NON-NLS-1$
-                CallSiteInfo site = findCallSiteAt(resource, caret);
-                boolean edtInParams = false;
-                if (site != null)
-                {
-                    // Как EDT inInvocationParameters: methodEnd <= caret < callEnd
-                    edtInParams = caret >= site.methodAccessEnd && caret < site.callEnd;
-                }
-                return null;
-            });
-        }
-        catch (Exception ex)
-        {
-        }
-    }
-
-    private static boolean isParamHoverInfoControlPresent()
-    {
-        try
-        {
-            org.eclipse.core.commands.IHandler handler = resolveInvocationParametersHoverHandler();
-            if (handler == null)
-                return false;
-            Object infoControl = Global.getField(handler, "infoControl"); //$NON-NLS-1$
-            return infoControl != null;
-        }
-        catch (Exception ignored)
-        {
-            return false;
         }
     }
 
@@ -333,8 +249,6 @@ public final class ParamHintHtmlModifier
                 return;
             // Реальный handler с инъекцией (e4). Command.getHandler() — оболочка без полей.
             Object handler = resolveParamHoverHandlerForMiss();
-            org.eclipse.core.commands.IHandler rawHandler =
-                resolveInvocationParametersHoverHandler();
             if (handler == null)
             {
                 return;
@@ -358,7 +272,6 @@ public final class ParamHintHtmlModifier
             org.eclipse.ui.IWorkbenchSite site = editor.getSite();
 
             final Object handlerRef = handler;
-            final org.eclipse.core.commands.IHandler rawHandlerRef = rawHandler;
             Boolean opened = xdoc.readOnly((IUnitOfWork<Boolean, XtextResource>) resource -> {
                 if (resource == null)
                     return Boolean.FALSE;
@@ -432,7 +345,6 @@ public final class ParamHintHtmlModifier
                 List<Object> caPages = new ArrayList<>();
                 int paramSize = 0;
                 int maxParam = 0;
-                String methodLabel = ""; //$NON-NLS-1$
                 for (Object entry : entries)
                 {
                     Object feature = entry instanceof FeatureEntry fe
@@ -440,17 +352,10 @@ public final class ParamHintHtmlModifier
                         : Global.invoke(entry, "getFeature"); //$NON-NLS-1$
                     if (!(feature instanceof Method method))
                         continue;
-                    if (methodLabel.isEmpty())
-                    {
-                        String ru = method.getNameRu();
-                        String en = method.getName();
-                        methodLabel = ru != null && !ru.isEmpty() ? ru : (en != null ? en : ""); //$NON-NLS-1$
-                    }
                     Object group = Global.invoke(documentationLocal, "getHoverDocumentationPages", //$NON-NLS-1$
                         method, lang);
                     int before = caPages.size();
                     FindMissSupport.collectContentAssistPages(group, caPages);
-                    FindMissSupport.logHoverGroupDiag(group, before, caPages.size());
                     // Реальные CA платформы: PlatformDocTreeNodeId.fromMethod → getHoverPages
                     // (Error от getHoverDocumentationPages(Method) часто без link/platformId)
                     if (caPages.size() == before)
@@ -544,12 +449,8 @@ public final class ParamHintHtmlModifier
                 }
                 return Boolean.valueOf(shown);
             });
-            if (opened == null || !opened.booleanValue())
-            {
-                // already logged
-            }
         }
-        catch (Exception ex)
+        catch (Exception ignored)
         {
         }
     }
@@ -877,13 +778,6 @@ public final class ParamHintHtmlModifier
         return 0;
     }
 
-    private static void logCallSiteFound(int caret, String via, CallSiteInfo site, EObject obj)
-    {
-        String objClass = "null"; //$NON-NLS-1$
-        if (obj != null && obj.eClass() != null)
-            objClass = obj.eClass().getName();
-    }
-
     private static CallSiteInfo findCallSiteAt(XtextResource resource, int caret)
     {
         EObjectAtOffsetHelper helper = new EObjectAtOffsetHelper();
@@ -896,14 +790,12 @@ public final class ParamHintHtmlModifier
             {
                 CallSiteInfo site = callSiteForInvocation(invocation);
                 if (site != null)
-                    logCallSiteFound(caret, "astAncestor", site, obj); //$NON-NLS-1$
                 return site;
             }
             if (cur instanceof OperatorStyleCreator ctor)
             {
                 CallSiteInfo site = callSiteForOperatorCtor(ctor);
                 if (site != null)
-                    logCallSiteFound(caret, "astAncestorCtor", site, obj); //$NON-NLS-1$
                 return site;
             }
         }
@@ -911,7 +803,6 @@ public final class ParamHintHtmlModifier
         {
             CallSiteInfo site = callSiteForInvocation(invocation);
             if (site != null)
-                logCallSiteFound(caret, "astInvocation", site, obj); //$NON-NLS-1$
             return site;
         }
         if (obj instanceof FeatureAccess)
@@ -921,16 +812,12 @@ public final class ParamHintHtmlModifier
             {
                 CallSiteInfo site = callSiteForInvocation(invocation);
                 if (site != null)
-                    logCallSiteFound(caret, "astFeatureParent", site, obj); //$NON-NLS-1$
                 return site;
             }
         }
         CallSiteInfo fromNode = findCallSiteFromNodeModel(resource, caret);
         if (fromNode != null)
-        {
-            logCallSiteFound(caret, "nodeModel", fromNode, obj); //$NON-NLS-1$
             return fromNode;
-        }
         return null;
     }
 
@@ -1289,7 +1176,6 @@ public final class ParamHintHtmlModifier
         String typeName = null;
         String containerName = null;
         String fallback = null;
-        String source = "none"; //$NON-NLS-1$
         String picked = null;
 
         Object viewPage = resolveViewPage(ctx);
@@ -1301,7 +1187,6 @@ public final class ParamHintHtmlModifier
                 moduleOwner = GetRef.moduleOwnerFromDocumentationLink(link.trim());
                 if (moduleOwner != null && !moduleOwner.isBlank())
                 {
-                    source = "moduleLink"; //$NON-NLS-1$
                     picked = moduleOwner;
                 }
             }
@@ -1310,7 +1195,6 @@ public final class ParamHintHtmlModifier
                 fromTitle = ownerFromExternalTitle(viewPage);
                 if (isHumanOwnerName(fromTitle))
                 {
-                    source = "externalTitle"; //$NON-NLS-1$
                     picked = fromTitle;
                 }
             }
@@ -1320,7 +1204,6 @@ public final class ParamHintHtmlModifier
                 typeName = shortStringIfHuman(typeRef);
                 if (typeName != null)
                 {
-                    source = "typeReference"; //$NON-NLS-1$
                     picked = typeName;
                 }
             }
@@ -1330,7 +1213,6 @@ public final class ParamHintHtmlModifier
                 containerName = shortStringIfHuman(container);
                 if (containerName != null)
                 {
-                    source = "container"; //$NON-NLS-1$
                     picked = containerName;
                 }
             }
@@ -1340,7 +1222,6 @@ public final class ParamHintHtmlModifier
             fallback = resolveMethodOwnerName(ctx);
             if (fallback != null && !fallback.isBlank())
             {
-                source = "methodAst"; //$NON-NLS-1$
                 picked = fallback;
             }
         }
@@ -1388,7 +1269,8 @@ public final class ParamHintHtmlModifier
             Object returned = Global.invoke(viewPage, "getReturnedValue"); //$NON-NLS-1$
             if (returned != null)
             {
-                String html = formatValueContentTypesHtml(returned);
+                String html = formatValueContentTypesHtml(returned,
+                    MAX_HEADING_RETURN_TYPE_ELEMENTS);
                 if (html != null && !html.isBlank())
                     return html;
             }
@@ -1399,15 +1281,25 @@ public final class ParamHintHtmlModifier
             if (types != null && !types.isEmpty())
             {
                 StringBuilder sb = new StringBuilder();
+                int count = 0;
+                boolean truncated = false;
                 for (TypeItem type : types)
                 {
                     String name = formatTypeItem(type);
                     if (name == null || name.isEmpty())
                         continue;
+                    if (count >= MAX_HEADING_RETURN_TYPE_ELEMENTS)
+                    {
+                        truncated = true;
+                        break;
+                    }
                     if (sb.length() > 0)
                         sb.append(','); //$NON-NLS-1$
                     sb.append(escapeHtml(name));
+                    count++;
                 }
+                if (truncated)
+                    sb.append("..."); //$NON-NLS-1$
                 if (sb.length() > 0)
                     return sb.toString();
             }
@@ -1429,7 +1321,32 @@ public final class ParamHintHtmlModifier
         plain = plain.substring(0, methodPos).trim();
         if (plain.isEmpty())
             return null;
-        return escapeHtml(plain);
+        return escapeHtml(limitCommaSeparatedPlain(plain, MAX_HEADING_RETURN_TYPE_ELEMENTS));
+    }
+
+    /**
+     * Оставляет первые {@code maxElements} фрагментов через запятую; при обрезке — "...".
+     */
+    private static String limitCommaSeparatedPlain(String plain, int maxElements)
+    {
+        if (plain == null || plain.isBlank() || maxElements <= 0)
+            return plain;
+        int count = 0;
+        int cut = -1;
+        for (int i = 0; i < plain.length(); i++)
+        {
+            if (plain.charAt(i) != ',')
+                continue;
+            count++;
+            if (count == maxElements)
+            {
+                cut = i;
+                break;
+            }
+        }
+        if (cut < 0)
+            return plain;
+        return plain.substring(0, cut) + "..."; //$NON-NLS-1$
     }
 
     private static String resolveMethodDisplayName(HoverContext ctx, String beforeHtml)
@@ -1896,12 +1813,23 @@ public final class ParamHintHtmlModifier
 
     private static String formatValueContentTypesHtml(Object value)
     {
+        return formatValueContentTypesHtml(value, Integer.MAX_VALUE);
+    }
+
+    /**
+     * @param maxElements лимит элементов через запятую; при превышении хвост заменяется на "..."
+     */
+    private static String formatValueContentTypesHtml(Object value, int maxElements)
+    {
         if (value == null)
             return ""; //$NON-NLS-1$
         Object groups = Global.invoke(value, "getGroups"); //$NON-NLS-1$
         if (!(groups instanceof List<?> groupList))
             return ""; //$NON-NLS-1$
         StringBuilder sb = new StringBuilder();
+        int count = 0;
+        boolean truncated = false;
+        outer:
         for (Object group : groupList)
         {
             Object types = Global.invoke(group, "getTypeRefs"); //$NON-NLS-1$
@@ -1914,6 +1842,11 @@ public final class ParamHintHtmlModifier
                     name = asString(Global.invoke(typeRef, "toFullString")); //$NON-NLS-1$
                 if (name == null || name.isEmpty())
                     continue;
+                if (count >= maxElements)
+                {
+                    truncated = true;
+                    break outer;
+                }
                 if (sb.length() > 0)
                     sb.append(','); //$NON-NLS-1$
                 String href = asString(Global.invoke(typeRef, "getHref")); //$NON-NLS-1$
@@ -1927,8 +1860,11 @@ public final class ParamHintHtmlModifier
                 }
                 else
                     sb.append(escapeHtml(name));
+                count++;
             }
         }
+        if (truncated)
+            sb.append("..."); //$NON-NLS-1$
         return sb.toString();
     }
 
@@ -2043,8 +1979,7 @@ public final class ParamHintHtmlModifier
 
     private static HoverContext resolveHoverContext(Browser browser)
     {
-        ResolveDiag diag = new ResolveDiag();
-        Object parametersHover = findParametersHover(browser, diag);
+        Object parametersHover = findParametersHover(browser);
         if (parametersHover == null)
         {
             return null;
@@ -2057,14 +1992,12 @@ public final class ParamHintHtmlModifier
         }
         if (input == null)
         {
-            diag.inputNull = true;
             return null;
         }
 
         Object pagesObj = Global.getField(input, "pages"); //$NON-NLS-1$
         if (!(pagesObj instanceof List<?> pages) || pages.isEmpty())
         {
-            diag.pagesEmpty = true;
             return null;
         }
 
@@ -2091,35 +2024,27 @@ public final class ParamHintHtmlModifier
         return ctx;
     }
 
-    private static Object findParametersHover(Browser browser, ResolveDiag diag)
+    private static Object findParametersHover(Browser browser)
     {
         if (browser == null || browser.isDisposed())
             return null;
 
-        Object fromBrowser = findParametersHoverFromBrowserListeners(browser, diag);
+        Object fromBrowser = findParametersHoverFromBrowserListeners(browser);
         if (fromBrowser != null)
-        {
-            diag.via = "browserListener"; //$NON-NLS-1$
             return fromBrowser;
-        }
 
-        Object fromHandler = findParametersHoverFromHandler(diag);
+        Object fromHandler = findParametersHoverFromHandler();
         if (fromHandler != null)
         {
             if (browserMatches(fromHandler, browser))
             {
-                diag.via = "handler"; //$NON-NLS-1$
                 return fromHandler;
             }
-            diag.handlerBrowserMismatch = true;
         }
 
-        Object fromLinked = findParametersHoverFromLinkedMode(browser, diag);
+        Object fromLinked = findParametersHoverFromLinkedMode(browser);
         if (fromLinked != null)
-        {
-            diag.via = "linkedMode"; //$NON-NLS-1$
             return fromLinked;
-        }
 
         return null;
     }
@@ -2128,7 +2053,7 @@ public final class ParamHintHtmlModifier
      * Штатный {@code ParametersHoverInfoControl} вешает на Browser dispose/key listeners
      * (inner-классы с {@code this$0}). По ним достаём владельца без handler/LinkedMode.
      */
-    private static Object findParametersHoverFromBrowserListeners(Browser browser, ResolveDiag diag)
+    private static Object findParametersHoverFromBrowserListeners(Browser browser)
     {
         try
         {
@@ -2138,21 +2063,18 @@ public final class ParamHintHtmlModifier
                 org.eclipse.swt.widgets.Listener[] listeners = browser.getListeners(eventType);
                 if (listeners == null || listeners.length == 0)
                     continue;
-                diag.browserListenerEvents++;
                 for (org.eclipse.swt.widgets.Listener listener : listeners)
                 {
                     Object hover = extractParametersHoverFromListener(listener);
                     if (hover != null && browserMatches(hover, browser))
                     {
-                        diag.browserListenerHit = true;
                         return hover;
                     }
                 }
             }
         }
-        catch (Exception ex)
+        catch (Exception ignored)
         {
-            diag.browserListenerError = ex.getClass().getSimpleName();
         }
         return null;
     }
@@ -2177,33 +2099,28 @@ public final class ParamHintHtmlModifier
         return null;
     }
 
-    private static Object findParametersHoverFromHandler(ResolveDiag diag)
+    private static Object findParametersHoverFromHandler()
     {
         try
         {
             org.eclipse.core.commands.IHandler handler = resolveInvocationParametersHoverHandler();
             if (handler == null)
             {
-                diag.handlerNull = true;
                 return null;
             }
             Object infoControl = Global.getField(handler, "infoControl"); //$NON-NLS-1$
             if (infoControl == null)
             {
-                diag.infoControlNull = true;
                 return null;
             }
-            diag.infoControlClass = infoControl.getClass().getName();
             if (!PARAMETERS_HOVER_CLASS.equals(infoControl.getClass().getName()))
             {
-                diag.infoControlWrongClass = true;
                 return null;
             }
             return infoControl;
         }
-        catch (Exception ex)
+        catch (Exception ignored)
         {
-            diag.handlerError = ex.getClass().getSimpleName();
             return null;
         }
     }
@@ -2229,14 +2146,13 @@ public final class ParamHintHtmlModifier
         }
     }
 
-    private static Object findParametersHoverFromLinkedMode(Browser browser, ResolveDiag diag)
+    private static Object findParametersHoverFromLinkedMode(Browser browser)
     {
         try
         {
             ActiveEditor active = resolveActiveBslEditor();
             if (active == null || active.document == null)
             {
-                diag.activeEditorNull = true;
                 return null;
             }
             LinkedModeModel model = null;
@@ -2257,14 +2173,12 @@ public final class ParamHintHtmlModifier
             }
             if (model == null)
             {
-                diag.linkedModelNull = true;
                 return null;
             }
             Object listeners = Global.getField(model, "fListeners"); //$NON-NLS-1$
             Iterable<?> iterable = asIterable(listeners);
             if (iterable == null)
             {
-                diag.linkedListenersNull = true;
                 return null;
             }
             for (Object listener : iterable)
@@ -2274,18 +2188,15 @@ public final class ParamHintHtmlModifier
                 String cls = listener.getClass().getName();
                 if (!BSL_SELECTION_LISTENER_CLASS.equals(cls))
                     continue;
-                diag.linkedListenerFound = true;
                 Object infoControl = Global.getField(listener, "infoControl"); //$NON-NLS-1$
                 if (infoControl == null)
                     continue;
                 if (browserMatches(infoControl, browser))
                     return infoControl;
-                diag.linkedBrowserMismatch = true;
             }
         }
-        catch (Exception ex)
+        catch (Exception ignored)
         {
-            diag.linkedError = ex.getClass().getSimpleName();
         }
         return null;
     }
@@ -2300,29 +2211,6 @@ public final class ParamHintHtmlModifier
         Object control = Global.invoke(parametersHover, "getControl"); //$NON-NLS-1$
         Object fBrowser = Global.getField(control, "fBrowser"); //$NON-NLS-1$
         return fBrowser == browser;
-    }
-
-    private static final class ResolveDiag
-    {
-        boolean browserListenerHit;
-        int browserListenerEvents;
-        String browserListenerError = ""; //$NON-NLS-1$
-        String via = ""; //$NON-NLS-1$
-        boolean handlerNull;
-        boolean infoControlNull;
-        boolean infoControlWrongClass;
-        boolean handlerBrowserMismatch;
-        boolean inputNull;
-        boolean pagesEmpty;
-        boolean activeEditorNull;
-        boolean linkedModelNull;
-        boolean linkedListenersNull;
-        boolean linkedListenerFound;
-        boolean linkedBrowserMismatch;
-        String infoControlClass = ""; //$NON-NLS-1$
-        String handlerError = ""; //$NON-NLS-1$
-        String linkedError = ""; //$NON-NLS-1$
-
     }
 
     private static void fillInvocationContext(HoverContext ctx)
@@ -2344,7 +2232,7 @@ public final class ParamHintHtmlModifier
             ctx.actualArgTypes = snap.actualArgTypes;
             ctx.method = snap.method;
         }
-        catch (Exception ex)
+        catch (Exception ignored)
         {
         }
     }
@@ -2658,41 +2546,6 @@ public final class ParamHintHtmlModifier
             }
         }
 
-        static void logHoverGroupDiag(Object group, int caBefore, int caAfter)
-        {
-            try
-            {
-                List<?> pages = pagesOf(group);
-                StringBuilder classes = new StringBuilder();
-                int n = pages == null ? 0 : pages.size();
-                for (int i = 0; pages != null && i < pages.size() && i < 4; i++)
-                {
-                    Object p = pages.get(i);
-                    if (classes.length() > 0)
-                        classes.append(',');
-                    if (p == null)
-                        classes.append("null"); //$NON-NLS-1$
-                    else
-                    {
-                        classes.append(p.getClass().getSimpleName());
-                        String link = asString(Global.invoke(p, "getLink")); //$NON-NLS-1$
-                        if (link == null || link.isBlank())
-                            link = extractLinkFromErrorEntries(p);
-                        Object pid = Global.invoke(p, "getPlatformId"); //$NON-NLS-1$
-                        if (pid == null)
-                            pid = Global.getField(p, "nodeId"); //$NON-NLS-1$
-                        classes.append("{link=").append(link != null && !link.isBlank()) //$NON-NLS-1$
-                            .append(",pid=").append(pid != null) //$NON-NLS-1$
-                            .append(",entryLink=").append( //$NON-NLS-1$
-                                extractLinkFromErrorEntries(p) != null).append('}');
-                    }
-                }
-            }
-            catch (Exception ignored)
-            {
-            }
-        }
-
         /**
          * Как EDT: {@code PlatformDocTreeNodeId.fromMethod(version, typeCode, methodCode)}
          * → {@code getPlatformDocumentationPage} → {@code getHoverPages()} (реальные CA).
@@ -2739,7 +2592,6 @@ public final class ParamHintHtmlModifier
 
                 int typeCode = ownerType.getCode();
                 int methodCode = method.getCode();
-                String codeSource = "direct"; //$NON-NLS-1$
                 if (typeCode <= 0 || methodCode <= 0)
                 {
                     int[] resolved = resolvePlatformCodes(provider, method, ownerType);
@@ -2747,7 +2599,6 @@ public final class ParamHintHtmlModifier
                     {
                         typeCode = resolved[0];
                         methodCode = resolved[1];
-                        codeSource = "byName"; //$NON-NLS-1$
                     }
                 }
 
@@ -2761,8 +2612,6 @@ public final class ParamHintHtmlModifier
                     }
                     catch (Exception ex)
                     {
-                        Throwable cause = ex instanceof java.lang.reflect.InvocationTargetException ite
-                            && ite.getCause() != null ? ite.getCause() : ex;
                         nodeId = null;
                     }
                     if (nodeId != null
@@ -2780,10 +2629,8 @@ public final class ParamHintHtmlModifier
                     return;
                 }
             }
-            catch (Exception ex)
+            catch (Exception ignored)
             {
-                Throwable cause = ex instanceof java.lang.reflect.InvocationTargetException ite
-                    && ite.getCause() != null ? ite.getCause() : ex;
             }
         }
 

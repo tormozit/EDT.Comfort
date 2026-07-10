@@ -710,7 +710,6 @@ public final class BslDocCommentDescriptionFix
 
     private static void ndjson(String location, String message, String dataJson)
     {
-        ContentAssistDebug.debugModeLog("bslDocComment", location, message, dataJson); //$NON-NLS-1$
         if (Global.isLogEnabled())
             Global.log("bslDocComment", location + ": " + message + " " + dataJson); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
