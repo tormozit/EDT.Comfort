@@ -49,6 +49,7 @@ public final class IrBslEditorHoverHook implements IStartup
     public void earlyStartup()
     {
         ContentAssistDebug.logLiteralAssistBuildStamp();
+        BslDocCommentDescriptionFix.install();
         Display.getDefault().asyncExec(() ->
         {
             ParamHintHtmlModifier.install(Display.getDefault());

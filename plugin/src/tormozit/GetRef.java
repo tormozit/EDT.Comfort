@@ -630,9 +630,63 @@ public class GetRef extends AbstractHandler
         catch (Exception e) { Global.log("GetRef.getFqnViaQnp: " + e); return null; } //$NON-NLS-1$
     }
 
-    // =========================================================================
-    // Путь файла EDT → полное русское имя МД
-    // =========================================================================
+    /**
+     * Человекочитаемый владелец метода модуля из {@code getLink()} страницы
+     * документации EDT ({@code platform:/resource/…/Module.bsl…}).
+     */
+    static String moduleOwnerFromDocumentationLink(String link)
+    {
+        if (link == null || link.isBlank())
+            return null;
+        String trimmed = link.trim();
+        if (trimmed.startsWith("platform:/resource/")) //$NON-NLS-1$
+        {
+            String rel = projectRelativePathFromPlatformLink(trimmed);
+            if (rel != null)
+            {
+                ModuleRef ref = pathToModuleRef(rel);
+                if (ref != null && ref.modulePath != null && !ref.modulePath.isBlank())
+                    return ref.modulePath;
+            }
+        }
+        if (!isDocumentationUri(trimmed))
+        {
+            ModuleRef ref = pathToModuleRef(trimmed);
+            if (ref != null && ref.modulePath != null && !ref.modulePath.isBlank())
+                return ref.modulePath;
+        }
+        return null;
+    }
+
+    private static boolean isDocumentationUri(String link)
+    {
+        return link.startsWith("v8help:") //$NON-NLS-1$
+            || link.startsWith("platform:") //$NON-NLS-1$
+            || link.startsWith("http:") //$NON-NLS-1$
+            || link.startsWith("https:"); //$NON-NLS-1$
+    }
+
+    private static String projectRelativePathFromPlatformLink(String link)
+    {
+        if (link == null || !link.startsWith("platform:/resource/")) //$NON-NLS-1$
+            return null;
+        String rest = link.substring("platform:/resource/".length()); //$NON-NLS-1$
+        int src = rest.indexOf("/src/"); //$NON-NLS-1$
+        if (src < 0)
+            src = rest.indexOf("src/"); //$NON-NLS-1$
+        if (src < 0)
+            return null;
+        String rel = rest.substring(src);
+        if (rel.startsWith("/")) //$NON-NLS-1$
+            rel = rel.substring(1);
+        int caret = rel.indexOf('^');
+        if (caret >= 0)
+            rel = rel.substring(0, caret);
+        int hash = rel.indexOf('#');
+        if (hash >= 0)
+            rel = rel.substring(0, hash);
+        return rel.isEmpty() ? null : rel;
+    }
 
     static String pathToFullName(String projectRelativePath)
     {

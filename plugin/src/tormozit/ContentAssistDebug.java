@@ -27,7 +27,7 @@ public final class ContentAssistDebug
     /** Маркер сборки для literal assist. */
     public static final String LITERAL_ASSIST_BUILD = "20260708-sync-selection"; //$NON-NLS-1$
     /** NDJSON в debug-267a94.log — временная отладка; выкл. после фикса. */
-    private static final boolean NDJSON_ENABLED = false;
+    private static final boolean NDJSON_ENABLED = true;
     /** Доп. шум только с {@code -Dtormozit.contentAssistVerbose=true}. */
     private static final boolean VERBOSE =
         Boolean.getBoolean("tormozit.contentAssistVerbose"); //$NON-NLS-1$
