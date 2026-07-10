@@ -26,14 +26,12 @@ final class IRConnectDebug
 
     static void log(String msg)
     {
-        if (Global.isLogEnabled())
-            Global.log(TAG, msg);
+//        Global.log(TAG, msg);
     }
 
     static void problem(String msg)
     {
-        if (Global.isLogEnabled())
-            Global.log(TAG, "[!] " + msg); //$NON-NLS-1$
+//        Global.log(TAG, "[!] " + msg); //$NON-NLS-1$
     }
 
     // -----------------------------------------------------------------------

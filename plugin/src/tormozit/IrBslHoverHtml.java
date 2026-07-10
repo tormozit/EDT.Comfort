@@ -93,6 +93,14 @@ public final class IrBslHoverHtml
         return findDescendantBrowser(comp);
     }
 
+    /** Находит виджет {@link Browser} внутри произвольного составного SWT-виджета. */
+    public static Browser findControlBrowser(Composite composite)
+    {
+        if (composite == null || composite.isDisposed())
+            return null;
+        return findDescendantBrowser(composite);
+    }
+
     private static Browser findDescendantBrowser(Composite composite)
     {
         for (Control child : composite.getChildren())

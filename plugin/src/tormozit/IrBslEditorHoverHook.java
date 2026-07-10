@@ -51,6 +51,8 @@ public final class IrBslEditorHoverHook implements IStartup
         ContentAssistDebug.logLiteralAssistBuildStamp();
         Display.getDefault().asyncExec(() ->
         {
+            ParamHintHtmlModifier.install(Display.getDefault());
+
             PlatformUI.getWorkbench().addWindowListener(new IWindowListener()
             {
                 @Override public void windowOpened(IWorkbenchWindow w) { hookWindow(w); }

@@ -168,6 +168,12 @@ public final class ContentAssistSessionReloader
      */
     private volatile boolean pendingShowParamHintAfterInsert;
     private volatile int pendingParamHintDesiredCaret = -1;
+    /**
+     * Ввод {@code (} или {@code ,} — открыть подсказку параметров метода,
+     * если она не открыта (багфикс штатной логики).
+     */
+    private volatile boolean pendingParamHintOnChar;
+    private volatile int pendingParamHintOnCharCaret = -1;
     /** Поколение отложенного param hint — отмена повторного timerExec. */
     private final AtomicInteger paramHintPostGen = new AtomicInteger();
     /** Автооткрытие assist (порт ИР ПриНажатииКлавишиАвтодополнение). */
@@ -849,6 +855,7 @@ public final class ContentAssistSessionReloader
             public void documentChanged(DocumentEvent event)
             {
                 scheduleEnsureBslDocumentListenerAfterAssistInsert(event);
+                maybeShowParamHintOnChar();
                 onDocumentChangedForCompletionAutoOpen(event);
             }
         };
@@ -970,6 +977,35 @@ public final class ContentAssistSessionReloader
     }
 
     /**
+     * Ввод {@code (} или {@code ,}: открыть подсказку параметров метода,
+     * если она не открыта (аналогично {@link #maybeShowParamHintAfterInsert}).
+     */
+    private void maybeShowParamHintOnChar()
+    {
+        if (!pendingParamHintOnChar)
+            return;
+        pendingParamHintOnChar = false;
+        int caret = pendingParamHintOnCharCaret;
+        pendingParamHintOnCharCaret = -1;
+        phcharLog("maybeShowParamHintOnChar entered, caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
+        if (caret < 0)
+            return;
+        if (Boolean.TRUE.equals(SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get()))
+            return;
+        if (suppressDocumentAutoOpenAfterSession)
+            return;
+        if (isParamHoverShellVisible() || isParamHoverInfoControlVisible())
+        {
+            phcharLog("skip: paramHint already visible"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        phcharLog("scheduling paramHint for caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
+        pendingShowParamHintAfterInsert = true;
+        pendingParamHintDesiredCaret = caret;
+        maybeShowParamHintAfterInsert(caret);
+    }
+
+    /**
      * Для прикладных методов (objects отфильтрованы) штатный ParametersHover из LinkedMode
      * не поднимается. Ждём AST ({@code Invocation} у каретки), затем один
      * {@code executeCommand(InvocationParametersHover)}.
@@ -983,20 +1019,15 @@ public final class ContentAssistSessionReloader
         pendingParamHintDesiredCaret = -1;
         if (desired < 0 || caret != desired)
         {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"caret\":" + caret + ",\"desired\":" + desired + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            // #endregion
+            phcharLog("maybeShowParamHintAfterInsert skip caret=" + caret //$NON-NLS-1$
+                + " desired=" + desired); //$NON-NLS-1$
             return;
         }
         StyledText widget = viewer != null ? viewer.getTextWidget() : null;
         Display display = widget != null && !widget.isDisposed() ? widget.getDisplay() : null;
         if (display == null || display.isDisposed())
             return;
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "scheduled", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + caret + ",\"desired\":" + desired + ",\"mode\":\"waitAst\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        // #endregion
+        phcharLog("maybeShowParamHintAfterInsert scheduled caret=" + caret); //$NON-NLS-1$ //$NON-NLS-2$
         final int desiredCaret = desired;
         final int gen = paramHintPostGen.incrementAndGet();
         final long startedMs = System.currentTimeMillis();
@@ -1023,46 +1054,27 @@ public final class ContentAssistSessionReloader
         int caret = st.getCaretOffset();
         if (caret != desiredCaret)
         {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "skipAttempt", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"gen\":" + gen + ",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"caret\":" + caret + ",\"desired\":" + desiredCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
+            phcharLog("poll skip caretMoved caret=" + caret //$NON-NLS-1$
+                + " desired=" + desiredCaret + " attempt=" + attempt); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         if (isParamHoverShellVisible())
         {
             paramHintPostGen.incrementAndGet();
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "alreadyShown", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"gen\":" + gen + ",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"waitMs\":" + (System.currentTimeMillis() - startedMs) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
+            phcharLog("poll alreadyShown attempt=" + attempt); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         boolean astReady = isInvocationAstReadyAt(desiredCaret);
         long waitMs = System.currentTimeMillis() - startedMs;
+        phcharLog("poll attempt=" + attempt + " astReady=" + astReady //$NON-NLS-1$ //$NON-NLS-2$
+            + " waitMs=" + waitMs); //$NON-NLS-1$
         if (!astReady && waitMs < PARAM_HINT_AST_TIMEOUT_MS)
         {
-            // #region agent log
-            if (attempt == 0 || attempt % 5 == 0)
-            {
-                ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "astWait", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"gen\":" + gen + ",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"waitMs\":" + waitMs + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            // #endregion
             display.timerExec(PARAM_HINT_AST_POLL_MS,
                 () -> pollAstReadyThenShowParamHint(desiredCaret, gen, attempt + 1, startedMs));
             return;
         }
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "astReady", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"gen\":" + gen + ",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"astReady\":" + astReady //$NON-NLS-1$
-                + ",\"waitMs\":" + waitMs //$NON-NLS-1$
-                + ",\"timeout\":" + (!astReady) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
+        phcharLog("poll ready, runCommand attempt=" + attempt); //$NON-NLS-1$ //$NON-NLS-2$
         runInvocationParametersHoverCommand(desiredCaret, gen, attempt);
     }
 
@@ -1166,21 +1178,14 @@ public final class ContentAssistSessionReloader
         int caret = st.getCaretOffset();
         if (caret != desiredCaret)
         {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "skipAttempt", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"gen\":" + gen + ",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"caret\":" + caret + ",\"desired\":" + desiredCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
+            phcharLog("runCmd skip caretMoved caret=" + caret //$NON-NLS-1$
+                + " desired=" + desiredCaret); //$NON-NLS-1$
             return;
         }
         if (isParamHoverShellVisible() || isParamHoverInfoControlVisible())
         {
             paramHintPostGen.incrementAndGet();
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "alreadyShown", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"gen\":" + gen + ",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
+            phcharLog("runCmd alreadyShown"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         ParamHoverProbe probe = new ParamHoverProbe();
@@ -1204,22 +1209,11 @@ public final class ContentAssistSessionReloader
             probe.execOk = false;
             probe.err = String.valueOf(ex);
         }
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "probe", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"gen\":" + gen //$NON-NLS-1$
-                + ",\"attempt\":" + attempt //$NON-NLS-1$
-                + ",\"caret\":" + caret //$NON-NLS-1$
-                + ",\"desired\":" + desiredCaret //$NON-NLS-1$
-                + ",\"execOk\":" + probe.execOk //$NON-NLS-1$
-                + ",\"popupShown\":" + probe.popupShown //$NON-NLS-1$
-                + ",\"shellVisible\":" + isParamHoverShellVisible() //$NON-NLS-1$
-                + ",\"handlerClass\":\"" + ContentAssistDebug.jsonEscapeForLog(
-                    probe.handlerClass != null ? probe.handlerClass : "") + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"infoControl\":\"" + ContentAssistDebug.jsonEscapeForLog(
-                    probe.infoControlState != null ? probe.infoControlState : "") + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"err\":\"" + ContentAssistDebug.jsonEscapeForLog(
-                    probe.err != null ? probe.err : "") + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
+        phcharLog("runCmd execOk=" + probe.execOk //$NON-NLS-1$
+            + " popupShown=" + probe.popupShown //$NON-NLS-1$
+            + " handler=" + probe.handlerClass //$NON-NLS-1$
+            + " infoControl=" + probe.infoControlState //$NON-NLS-1$
+            + " err=" + probe.err); //$NON-NLS-1$
     }
 
     /** Штатная команда BSL: Ctrl+Shift+Space — подсказка параметров вызова. */
@@ -1960,6 +1954,8 @@ public final class ContentAssistSessionReloader
     private void onVerifyKeyForCompletionAutoOpen(VerifyEvent event)
     {
         pendingAutoOpen = false;
+        char ch = event.character == 0 ? 0 : (char)event.character;
+        phcharLog("entry ch=" + (int)ch + "('" + ch + "')"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (!ComfortSettings.isReplaceListFiltersEnabled())
             return;
         ContentAssistSettings settings = ContentAssistSettings.getInstance();
@@ -1988,26 +1984,49 @@ public final class ContentAssistSessionReloader
                     + ",\"shouldFetch\":true,\"triggerBranch\":\"" + branch + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
         // #endregion
+        if ((inserted == '(' || inserted == ',') && !popupWasOpen)
+        {
+            String linePrefix = BslAssistSourceHeuristics.linePrefixToCaret(
+                doc, caretAfter, inserted, startOffset);
+            boolean inComment = BslAssistSourceHeuristics.isInsideLineComment(linePrefix);
+            boolean inString = BslAssistSourceHeuristics.isInsideStringLiteral(linePrefix);
+            phcharLog("verifyKey char=" + (int)inserted + "('" + inserted + "')" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " startOff=" + startOffset + " caretAfter=" + caretAfter //$NON-NLS-1$ //$NON-NLS-2$
+                + " inComment=" + inComment + " inString=" + inString);
+            if (!inComment && !inString)
+            {
+                pendingParamHintOnChar = true;
+                pendingParamHintOnCharCaret = caretAfter;
+                phcharLog("verifyKey pendingParamHintOnChar=true caretAfter=" + caretAfter); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+    }
+
+    private static final java.nio.file.Path PHCHAR_LOG =
+        java.nio.file.Path.of("C:\\VC\\EDT.Comfort\\debug-phchar.log"); //$NON-NLS-1$
+
+    private static void phcharLog(String msg)
+    {
+        try
+        {
+            java.nio.file.Files.writeString(PHCHAR_LOG,
+                System.currentTimeMillis() + " " + msg + "\n",  //$NON-NLS-1$ //$NON-NLS-2$
+                java.nio.file.StandardOpenOption.CREATE,
+                java.nio.file.StandardOpenOption.APPEND);
+        }
+        catch (Exception ignored)
+        {
+        }
     }
 
     /**
      * H-INSERT: таймлайн каретки после confirm — EDT LinkedMode в documentChanged
      * vs последующий JFace {@code getSelection}/{@code setSelectedRange}.
+     * Отключено: шум и таймеры на каждый insert (вкл. вместе с NDJSON).
      */
     private void scheduleInsertCaretProbe(Display display, String reason)
     {
-        if (display == null || display.isDisposed())
-            return;
-        final int[] delays = { 0, 1, 10, 50 };
-        for (int delay : delays)
-        {
-            final int d = delay;
-            Runnable task = () -> logInsertCaretProbe(reason + "+async" + d); //$NON-NLS-1$
-            if (d <= 0)
-                display.asyncExec(task);
-            else
-                display.timerExec(d, task);
-        }
+        // no-op
     }
 
     private void logInsertCaretProbe(String phase)
