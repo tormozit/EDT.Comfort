@@ -1,6 +1,7 @@
 // ParamHintHtmlModifier.java
 package tormozit;
 
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashSet;
@@ -12,9 +13,16 @@ import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
 import org.eclipse.core.commands.IExecutionListener;
 import org.eclipse.core.commands.NotHandledException;
+import org.eclipse.core.runtime.FileLocator;
+import org.eclipse.core.runtime.Path;
+import org.eclipse.core.runtime.Platform;
 import org.eclipse.emf.common.util.EList;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.resource.Resource;
+import org.eclipse.jface.action.Action;
+import org.eclipse.jface.action.Separator;
+import org.eclipse.jface.action.ToolBarManager;
+import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.jface.text.link.LinkedModeModel;
@@ -30,11 +38,14 @@ import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.swt.widgets.ToolBar;
 import org.eclipse.ui.IEditorPart;
+import org.eclipse.ui.ISharedImages;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.commands.ICommandService;
+import org.osgi.framework.Bundle;
 import org.eclipse.xtext.EcoreUtil2;
 import org.eclipse.xtext.nodemodel.ICompositeNode;
 import org.eclipse.xtext.nodemodel.INode;
@@ -89,6 +100,8 @@ public final class ParamHintHtmlModifier
     /** Маркер ProgressListener только для Find-miss browser. */
     private static final String FIND_MISS_COMFORT_PROGRESS =
         "tormozit.findMissComfortProgress"; //$NON-NLS-1$
+    /** Маркер кнопки закрытия на нижней панели ParametersHoverInfoControl. */
+    private static final String CLOSE_TOOLBAR_MARK = "tormozit.paramHintClose"; //$NON-NLS-1$
 
     private static volatile boolean installed;
     private static IExecutionListener paramHoverCommandListener;
@@ -120,6 +133,7 @@ public final class ParamHintHtmlModifier
             if (browser == null || browser.isDisposed())
                 return;
 
+            ensureParamHintCloseButton(browser);
 
             browser.addProgressListener(new ProgressListener()
             {
@@ -587,6 +601,7 @@ public final class ParamHintHtmlModifier
             if (handler != null && PARAM_HOVER_HANDLER_CLASS.equals(handler.getClass().getName()))
                 Global.setFieldForce(handler, "infoControl", control); //$NON-NLS-1$
             installDirectParamHintEscClose(viewer, control);
+            ensureParamHintCloseButtonOnHover(control);
             tryModifyFindMissBrowser(control);
             return true;
         }
@@ -889,11 +904,114 @@ public final class ParamHintHtmlModifier
         }
     }
 
+    /**
+     * Кнопка закрытия на нижней ToolBarManager popup (иконка close_view Eclipse).
+     * Идемпотентно: маркер на {@link ToolBar}.
+     */
+    private static void ensureParamHintCloseButton(Browser browser)
+    {
+        if (browser == null || browser.isDisposed())
+            return;
+        Object hover = findParametersHover(browser);
+        if (hover != null)
+            ensureParamHintCloseButtonOnHover(hover);
+    }
+
+    private static void ensureParamHintCloseButtonOnHover(Object parametersHover)
+    {
+        if (parametersHover == null)
+            return;
+        if (!PARAMETERS_HOVER_CLASS.equals(parametersHover.getClass().getName()))
+            return;
+        try
+        {
+            Object infoControl = Global.invoke(parametersHover, "getControl"); //$NON-NLS-1$
+            if (infoControl == null)
+                return;
+            Object tbmObj = Global.getField(infoControl, "fToolBarManager"); //$NON-NLS-1$
+            if (!(tbmObj instanceof ToolBarManager tbm))
+                return;
+            ToolBar toolBar = tbm.getControl();
+            if (toolBar == null || toolBar.isDisposed())
+                return;
+            if (Boolean.TRUE.equals(toolBar.getData(CLOSE_TOOLBAR_MARK)))
+                return;
+            toolBar.setData(CLOSE_TOOLBAR_MARK, Boolean.TRUE);
+
+            Action close = new Action()
+            {
+                @Override
+                public void run()
+                {
+                    disposeParamHintControl(parametersHover);
+                }
+            };
+            close.setImageDescriptor(closeViewImageDescriptor());
+            close.setToolTipText("Закрыть" + Global.pluginSignForTooltip()); //$NON-NLS-1$
+            tbm.add(new Separator());
+            tbm.add(close);
+            tbm.update(true);
+        }
+        catch (Exception ignored)
+        {
+        }
+    }
+
+    private static ImageDescriptor closeViewImageDescriptor()
+    {
+        try
+        {
+            Bundle bundle = Platform.getBundle("org.eclipse.ui"); //$NON-NLS-1$
+            if (bundle != null)
+            {
+                URL url = FileLocator.find(bundle,
+                    new Path("icons/full/elcl16/close_view.png"), null); //$NON-NLS-1$
+                if (url != null)
+                    return ImageDescriptor.createFromURL(url);
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+        return PlatformUI.getWorkbench().getSharedImages()
+            .getImageDescriptor(ISharedImages.IMG_TOOL_DELETE);
+    }
+
+    private static void disposeParamHintControl(Object parametersHover)
+    {
+        if (parametersHover == null)
+            return;
+        try
+        {
+            Global.invoke(parametersHover, "dispose"); //$NON-NLS-1$
+        }
+        catch (Exception ignored)
+        {
+        }
+        try
+        {
+            Object handler = resolveParamHoverHandlerForMiss();
+            if (handler == null)
+                handler = resolveInvocationParametersHoverHandler();
+            if (handler != null)
+            {
+                Object current = Global.getField(handler, "infoControl"); //$NON-NLS-1$
+                if (current == parametersHover)
+                    Global.setFieldForce(handler, "infoControl", null); //$NON-NLS-1$
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+    }
+
     /** Модифицировать HTML в браузере (сигнатура + формат строки типа). */
     private static void tryModifyBrowserHtml(Browser browser)
     {
         if (browser == null || browser.isDisposed())
             return;
+
+        ensureParamHintCloseButton(browser);
 
         String html = browser.getText();
         if (html == null || html.isBlank())
