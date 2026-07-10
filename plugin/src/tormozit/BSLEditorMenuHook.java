@@ -69,6 +69,7 @@ public class BSLEditorMenuHook implements IStartup
     private static final String ITEM_TEXT_DebugIR = "Отладить объект ИР";
     private static final String ITEM_TEXT_MethodConstructor = "Конструктор метода ИР";
     private static final String ITEM_TEXT_FormatText = IrFormatTextHandler.MENU_LABEL;
+    private static final String ITEM_TEXT_FindReferences = IrFindReferencesHandler.MENU_LABEL;
 
     /**
      * Ключ SWT-данных для маркировки «меню уже прикреплено».
@@ -390,6 +391,21 @@ public class BSLEditorMenuHook implements IStartup
                         }
                     });
                     addedItems.add(formatItem);
+
+                    MenuItem findRefsItem = new MenuItem(comfortSub, SWT.PUSH);
+                    findRefsItem.setText(ITEM_TEXT_FindReferences);
+                    findRefsItem.setToolTipText(
+                        "Найти ссылки на слово или объект метаданных через приложение ИР"
+                            + Global.pluginSignForTooltip());
+                    findRefsItem.addSelectionListener(new SelectionAdapter()
+                    {
+                        @Override
+                        public void widgetSelected(SelectionEvent ev)
+                        {
+                            runFindReferencesCommand(editor);
+                        }
+                    });
+                    addedItems.add(findRefsItem);
                 }
 
                 if (EditEmbeddedTextHandler.isApplicable(editor))
@@ -499,5 +515,23 @@ public class BSLEditorMenuHook implements IStartup
             IrFormatTextDebug.log("menu executeCommand failed: " + e.getMessage() + " → fallback"); //$NON-NLS-1$ //$NON-NLS-2$
         }
         IrFormatTextHandler.formatBslModule(editor);
+    }
+
+    private static void runFindReferencesCommand(BslXtextEditor editor)
+    {
+        try
+        {
+            IHandlerService handlerService = editor.getSite().getService(IHandlerService.class);
+            if (handlerService != null)
+            {
+                handlerService.executeCommand(IrFindReferencesHandler.COMMAND_ID, null);
+                return;
+            }
+        }
+        catch (Exception ignored)
+        {
+            // fallback ниже
+        }
+        IrFindReferencesHandler.findInModules(editor);
     }
 }

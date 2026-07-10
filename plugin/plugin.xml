@@ -328,6 +328,11 @@
         categoryId="tormozit.commands.global"
         description="Форматировать выделенный текст модуля или текст запроса через приложение ИР. Активно только при подключённом ИР. Настраивайте только «Редактирование источника Xtext». Остальные контексты не редактируйте. (Комфорт)"/>
     <command
+        id="tormozit.IrFindReferences"
+        name="Найти ссылки ИР"
+        categoryId="tormozit.commands.global"
+        description="Найти ссылки на слово или объект метаданных через приложение ИР. Активно только при подключённом ИР. Настраивайте только «Редактирование источника Xtext». Остальные контексты не редактируйте. (Комфорт)"/>
+    <command
         id="tormozit.showCollection"
         name="Показать коллекцию"
         categoryId="tormozit.commands.global"
@@ -524,6 +529,17 @@
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.IrFormatTextCommandHandler"
         commandId="tormozit.IrFormatText">
+    </handler>
+    <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.IrFindReferencesCommandHandler"
+        commandId="tormozit.IrFindReferences">
+      <activeWhen>
+        <with variable="activeContexts">
+          <iterate operator="or">
+            <equals value="org.eclipse.xtext.ui.XtextEditorScope"/>
+          </iterate>
+        </with>
+      </activeWhen>
     </handler>
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.DebugCollectionSkeletonHandler"
