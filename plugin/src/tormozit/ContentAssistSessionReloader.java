@@ -31,14 +31,20 @@ import org.eclipse.swt.custom.CaretListener;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.custom.VerifyKeyListener;
 import org.eclipse.swt.events.VerifyEvent;
+import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
+import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Widget;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.commands.ICommandService;
+import org.eclipse.xtext.resource.EObjectAtOffsetHelper;
 import org.eclipse.xtext.resource.IResourceServiceProvider;
+import org.eclipse.xtext.resource.XtextResource;
+import org.eclipse.xtext.ui.editor.model.IXtextDocument;
+import org.eclipse.xtext.util.concurrent.IUnitOfWork;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
@@ -965,8 +971,8 @@ public final class ContentAssistSessionReloader
 
     /**
      * Для прикладных методов (objects отфильтрованы) штатный ParametersHover из LinkedMode
-     * не поднимается. Вызываем штатную команду Ctrl+Shift+Space
-     * ({@code InvocationParametersHover}) через {@code executeCommand}.
+     * не поднимается. Ждём AST ({@code Invocation} у каретки), затем один
+     * {@code executeCommand(InvocationParametersHover)}.
      */
     private void maybeShowParamHintAfterInsert(int caret)
     {
@@ -989,13 +995,165 @@ public final class ContentAssistSessionReloader
             return;
         // #region agent log
         ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "scheduled", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + caret + ",\"desired\":" + desired + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"caret\":" + caret + ",\"desired\":" + desired + ",\"mode\":\"waitAst\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         // #endregion
         final int desiredCaret = desired;
         final int gen = paramHintPostGen.incrementAndGet();
-        // Вторая попытка только если первая не открыла попап (alreadyShown отменит gen).
-        display.timerExec(200, () -> runInvocationParametersHoverCommand(desiredCaret, gen, 1));
-        display.timerExec(450, () -> runInvocationParametersHoverCommand(desiredCaret, gen, 2));
+        final long startedMs = System.currentTimeMillis();
+        display.timerExec(0, () -> pollAstReadyThenShowParamHint(desiredCaret, gen, 0, startedMs));
+    }
+
+    private static final int PARAM_HINT_AST_POLL_MS = 20;
+    private static final int PARAM_HINT_AST_TIMEOUT_MS = 500;
+
+    /**
+     * Пока Xtext не видит {@code Invocation}/{@code OperatorStyleCreator} у каретки —
+     * {@code InvocationParametersHover} молча ничего не показывает. Опрос AST, затем
+     * один {@code executeCommand}.
+     */
+    private void pollAstReadyThenShowParamHint(int desiredCaret, int gen, int attempt,
+        long startedMs)
+    {
+        if (gen != paramHintPostGen.get())
+            return;
+        StyledText st = viewer != null ? viewer.getTextWidget() : null;
+        Display display = st != null && !st.isDisposed() ? st.getDisplay() : null;
+        if (display == null || display.isDisposed())
+            return;
+        int caret = st.getCaretOffset();
+        if (caret != desiredCaret)
+        {
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "skipAttempt", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"gen\":" + gen + ",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"caret\":" + caret + ",\"desired\":" + desiredCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return;
+        }
+        if (isParamHoverShellVisible())
+        {
+            paramHintPostGen.incrementAndGet();
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "alreadyShown", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"gen\":" + gen + ",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"waitMs\":" + (System.currentTimeMillis() - startedMs) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return;
+        }
+        boolean astReady = isInvocationAstReadyAt(desiredCaret);
+        long waitMs = System.currentTimeMillis() - startedMs;
+        if (!astReady && waitMs < PARAM_HINT_AST_TIMEOUT_MS)
+        {
+            // #region agent log
+            if (attempt == 0 || attempt % 5 == 0)
+            {
+                ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "astWait", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"gen\":" + gen + ",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"waitMs\":" + waitMs + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            // #endregion
+            display.timerExec(PARAM_HINT_AST_POLL_MS,
+                () -> pollAstReadyThenShowParamHint(desiredCaret, gen, attempt + 1, startedMs));
+            return;
+        }
+        // #region agent log
+        ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "astReady", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"gen\":" + gen + ",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"astReady\":" + astReady //$NON-NLS-1$
+                + ",\"waitMs\":" + waitMs //$NON-NLS-1$
+                + ",\"timeout\":" + (!astReady) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        // #endregion
+        runInvocationParametersHoverCommand(desiredCaret, gen, attempt);
+    }
+
+    /**
+     * Как {@code InvocationParametersHoverHandler}: у offset есть Invocation /
+     * OperatorStyleCreator (модель уже пересчитана после insert).
+     */
+    private boolean isInvocationAstReadyAt(int caret)
+    {
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        if (!(doc instanceof IXtextDocument xdoc))
+            return false;
+        try
+        {
+            Boolean ready = xdoc.readOnly(
+                (IUnitOfWork<Boolean, XtextResource>) resource -> {
+                    if (resource == null)
+                        return Boolean.FALSE;
+                    EObjectAtOffsetHelper helper = new EObjectAtOffsetHelper();
+                    EObject obj = helper.resolveContainedElementAt(resource, caret);
+                    for (EObject cur = obj; cur != null; cur = cur.eContainer())
+                    {
+                        String name = cur.eClass() != null ? cur.eClass().getName() : ""; //$NON-NLS-1$
+                        if ("Invocation".equals(name) //$NON-NLS-1$
+                            || "OperatorStyleCreator".equals(name)) //$NON-NLS-1$
+                            return Boolean.TRUE;
+                    }
+                    return Boolean.FALSE;
+                });
+            return Boolean.TRUE.equals(ready);
+        }
+        catch (Exception ex)
+        {
+            // #region agent log
+            ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "astError", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"ex\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return false;
+        }
+    }
+
+    /** Видимый shell подсказки параметров рядом с кареткой (probe по handler врёт). */
+    private boolean isParamHoverShellVisible()
+    {
+        try
+        {
+            StyledText st = viewer != null ? viewer.getTextWidget() : null;
+            if (st == null || st.isDisposed())
+                return false;
+            Display display = st.getDisplay();
+            if (display == null || display.isDisposed())
+                return false;
+            Shell editorShell = st.getShell();
+            Point caretDisp = st.toDisplay(st.getLocationAtOffset(st.getCaretOffset()));
+            for (Shell shell : display.getShells())
+            {
+                if (shell == null || shell.isDisposed() || !shell.isVisible())
+                    continue;
+                if (shell == editorShell)
+                    continue;
+                Point size = shell.getSize();
+                if (size.x < 50 || size.y < 20)
+                    continue;
+                Point loc = shell.getLocation();
+                if (Math.abs(loc.x - caretDisp.x) > 600 || Math.abs(loc.y - caretDisp.y) > 600)
+                    continue;
+                if (hasBrowserDescendant(shell))
+                    return true;
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+        return false;
+    }
+
+    private static boolean hasBrowserDescendant(Control root)
+    {
+        if (root == null || root.isDisposed())
+            return false;
+        if (root.getClass().getName().contains("Browser")) //$NON-NLS-1$
+            return true;
+        if (root instanceof org.eclipse.swt.widgets.Composite composite)
+        {
+            for (Control child : composite.getChildren())
+            {
+                if (hasBrowserDescendant(child))
+                    return true;
+            }
+        }
+        return false;
     }
 
     private void runInvocationParametersHoverCommand(int desiredCaret, int gen, int attempt)
@@ -1015,7 +1173,7 @@ public final class ContentAssistSessionReloader
             // #endregion
             return;
         }
-        if (isParamHoverInfoControlVisible())
+        if (isParamHoverShellVisible() || isParamHoverInfoControlVisible())
         {
             paramHintPostGen.incrementAndGet();
             // #region agent log
@@ -1036,6 +1194,8 @@ public final class ContentAssistSessionReloader
             if (!st.isFocusControl())
                 st.setFocus();
             probe = executeInvocationParametersHoverCommand();
+            if (!probe.popupShown && isParamHoverShellVisible())
+                probe.popupShown = true;
             if (probe.popupShown)
                 paramHintPostGen.incrementAndGet();
         }
@@ -1052,6 +1212,7 @@ public final class ContentAssistSessionReloader
                 + ",\"desired\":" + desiredCaret //$NON-NLS-1$
                 + ",\"execOk\":" + probe.execOk //$NON-NLS-1$
                 + ",\"popupShown\":" + probe.popupShown //$NON-NLS-1$
+                + ",\"shellVisible\":" + isParamHoverShellVisible() //$NON-NLS-1$
                 + ",\"handlerClass\":\"" + ContentAssistDebug.jsonEscapeForLog(
                     probe.handlerClass != null ? probe.handlerClass : "") + "\"" //$NON-NLS-1$ //$NON-NLS-2$
                 + ",\"infoControl\":\"" + ContentAssistDebug.jsonEscapeForLog(
