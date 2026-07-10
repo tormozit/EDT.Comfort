@@ -1224,6 +1224,7 @@ public final class ContentAssistSessionReloader
             }
             if (!st.isFocusControl())
                 st.setFocus();
+            ParamHintHtmlModifier.ensureFirstActualArgTypesComputed();
             probe = executeInvocationParametersHoverCommand();
             if (!probe.popupShown && isParamHoverShellVisible())
                 probe.popupShown = true;

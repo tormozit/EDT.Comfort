@@ -56,16 +56,24 @@ import org.eclipse.xtext.resource.XtextResource;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.util.concurrent.IUnitOfWork;
 
+import com._1c.g5.v8.dt.bsl.model.BooleanLiteral;
 import com._1c.g5.v8.dt.bsl.model.BslPackage;
+import com._1c.g5.v8.dt.bsl.model.DateLiteral;
 import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.Expression;
 import com._1c.g5.v8.dt.bsl.model.FeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.FeatureEntry;
 import com._1c.g5.v8.dt.bsl.model.Invocation;
+import com._1c.g5.v8.dt.bsl.model.NullLiteral;
+import com._1c.g5.v8.dt.bsl.model.NumberLiteral;
 import com._1c.g5.v8.dt.bsl.model.OperatorStyleCreator;
 import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
+import com._1c.g5.v8.dt.bsl.model.StringLiteral;
+import com._1c.g5.v8.dt.bsl.model.UndefinedLiteral;
 import com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer;
+import com._1c.g5.v8.dt.bsl.resource.TypesComputer;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import com._1c.g5.v8.dt.mcore.Ctor;
 import com._1c.g5.v8.dt.mcore.DuallyNamedElement;
 import com._1c.g5.v8.dt.mcore.Environmental;
 import com._1c.g5.v8.dt.mcore.Method;
@@ -73,6 +81,7 @@ import com._1c.g5.v8.dt.mcore.ParamSet;
 import com._1c.g5.v8.dt.mcore.Parameter;
 import com._1c.g5.v8.dt.mcore.Type;
 import com._1c.g5.v8.dt.mcore.TypeItem;
+import com._1c.g5.v8.dt.mcore.util.Environments;
 
 /**
  * Подсказка параметров метода (CTRL+SHIFT+Space / LinkedMode):
@@ -102,6 +111,11 @@ public final class ParamHintHtmlModifier
         "tormozit.findMissComfortProgress"; //$NON-NLS-1$
     /** Маркер кнопки закрытия на нижней панели ParametersHoverInfoControl. */
     private static final String CLOSE_TOOLBAR_MARK = "tormozit.paramHintClose"; //$NON-NLS-1$
+    /** Автовыбор сигнатуры: только при открытии или при сильном совпадении типа после смены текста. */
+    private static final int SIG_PICK_STRONG_SCORE = 10;
+    private static final String SIG_PICK_DONE_MARK = "tormozit.sigPickDone"; //$NON-NLS-1$
+    private static final AtomicBoolean sigPickOnOpenPending = new AtomicBoolean(false);
+    private static volatile String sigPickLastFingerprint = ""; //$NON-NLS-1$
 
     private static volatile boolean installed;
     private static IExecutionListener paramHoverCommandListener;
@@ -175,6 +189,11 @@ public final class ParamHintHtmlModifier
                 @Override
                 public void preExecute(String commandId, ExecutionEvent event)
                 {
+                    if (!INVOCATION_PARAMETERS_HOVER_COMMAND.equals(commandId))
+                        return;
+                    sigPickOnOpenPending.set(true);
+                    // TypesComputer — только при нескольких сигнатурах (иначе сразу выход).
+                    ensureFirstActualArgTypesComputed();
                 }
 
                 @Override
@@ -200,6 +219,227 @@ public final class ParamHintHtmlModifier
                 }
             };
             commands.addExecutionListener(paramHoverCommandListener);
+        }
+        catch (Exception ignored)
+        {
+        }
+    }
+
+    /**
+     * Ждёт/считает тип 1-го аргумента ТОЛЬКО при нескольких сигнатурах.
+     * Одна сигнатура — сразу return, без {@link TypesComputer}.
+     */
+    public static void ensureFirstActualArgTypesComputed()
+    {
+        ActiveEditor active = resolveActiveBslEditor();
+        if (active == null || !(active.document instanceof IXtextDocument xdoc) || active.caret < 0)
+        {
+            ContentAssistDebug.debugModeLog("sigPick", "ensureFirstArg", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"reason\":\"noActiveEditor\"}"); //$NON-NLS-1$
+            return;
+        }
+        try
+        {
+            xdoc.readOnly((IUnitOfWork<Void, XtextResource>) resource -> {
+                if (resource == null)
+                    return null;
+                EObject invocationLike = findInvocationLikeAt(resource, active.caret);
+                if (invocationLike == null)
+                {
+                    ContentAssistDebug.debugModeLog("sigPick", "ensureFirstArg", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        "{\"reason\":\"noInvocationLike\",\"caret\":" + active.caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return null;
+                }
+                String kind = invocationLike.eClass() != null
+                    ? invocationLike.eClass().getName() : "?"; //$NON-NLS-1$
+                boolean multi = callSiteHasMultipleSignatures(resource, invocationLike);
+                if (!multi)
+                {
+                    ContentAssistDebug.debugModeLog("sigPick", "ensureFirstArg", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        "{\"reason\":\"singleSig\",\"kind\":\"" //$NON-NLS-1$
+                            + ContentAssistDebug.jsonEscapeForLog(kind) + "\"}"); //$NON-NLS-1$
+                    return null;
+                }
+                EList<Expression> params = paramsOfInvocationLike(invocationLike);
+                if (params == null || params.isEmpty())
+                {
+                    ContentAssistDebug.debugModeLog("sigPick", "ensureFirstArg", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        "{\"reason\":\"noParams\",\"kind\":\"" //$NON-NLS-1$
+                            + ContentAssistDebug.jsonEscapeForLog(kind) + "\"}"); //$NON-NLS-1$
+                    return null;
+                }
+                Expression firstArg = params.get(0);
+                if (firstArg == null)
+                    return null;
+                int typesBefore = firstArg.getTypes() != null ? firstArg.getTypes().size() : 0;
+                forceComputeExpressionTypes(resource, firstArg, invocationLike);
+                int typesAfter = firstArg.getTypes() != null ? firstArg.getTypes().size() : 0;
+                Set<String> names = typeItemNames(firstArg.getTypes());
+                names.addAll(inferLiteralTypeNames(firstArg));
+                ContentAssistDebug.debugModeLog("sigPick", "ensureFirstArg", "computed", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"kind\":\"" + ContentAssistDebug.jsonEscapeForLog(kind) //$NON-NLS-1$
+                        + "\",\"argClass\":\"" //$NON-NLS-1$
+                        + ContentAssistDebug.jsonEscapeForLog(
+                            firstArg.eClass() != null ? firstArg.eClass().getName() : "?") //$NON-NLS-1$
+                        + "\",\"typesBefore\":" + typesBefore //$NON-NLS-1$
+                        + ",\"typesAfter\":" + typesAfter //$NON-NLS-1$
+                        + ",\"names\":\"" //$NON-NLS-1$
+                        + ContentAssistDebug.jsonEscapeForLog(names.toString()) + "\"}"); //$NON-NLS-1$
+                return null;
+            });
+        }
+        catch (Exception ex)
+        {
+            ContentAssistDebug.debugModeLog("sigPick", "ensureFirstArg", "error", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"ex\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /**
+     * Вызов у каретки: при вложенности берём внешний с несколькими сигнатурами
+     * (иначе каретка на {@code ФиксированнаяСтруктура} внутри {@code Структура(...)} даёт внутренний ctor).
+     */
+    private static EObject findInvocationLikeAt(XtextResource resource, int caret)
+    {
+        EObjectAtOffsetHelper helper = new EObjectAtOffsetHelper();
+        EObject obj = helper.resolveContainedElementAt(resource, caret);
+        EObject innermost = null;
+        EObject outermostMulti = null;
+        for (EObject cur = obj; cur != null; cur = cur.eContainer())
+        {
+            if (!(cur instanceof Invocation || cur instanceof OperatorStyleCreator))
+                continue;
+            if (innermost == null)
+                innermost = cur;
+            if (callSiteHasMultipleSignatures(resource, cur))
+                outermostMulti = cur;
+        }
+        return outermostMulti != null ? outermostMulti : innermost;
+    }
+
+    private static EList<Expression> paramsOfInvocationLike(EObject invocationLike)
+    {
+        if (invocationLike instanceof Invocation invocation)
+            return invocation.getParams();
+        if (invocationLike instanceof OperatorStyleCreator ctor)
+            return ctor.getParams();
+        return null;
+    }
+
+    /** {@code true} только если у вызова реально больше одной сигнатуры/ParamSet/Ctor. */
+    private static boolean callSiteHasMultipleSignatures(XtextResource resource,
+        EObject invocationLike)
+    {
+        if (invocationLike instanceof OperatorStyleCreator ctor)
+        {
+            Type type = ctor.getType();
+            if (type == null)
+            {
+                ContentAssistDebug.debugModeLog("sigPick", "multiSig", "ctor", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"result\":false,\"reason\":\"typeNull\"}"); //$NON-NLS-1$
+                return false;
+            }
+            EList<Ctor> ctors = type.getCtors();
+            int n = ctors != null ? ctors.size() : 0;
+            String typeName = formatTypeItem(type);
+            StringBuilder ctorParams = new StringBuilder();
+            if (ctors != null)
+            {
+                for (int i = 0; i < ctors.size() && i < 6; i++)
+                {
+                    Ctor c = ctors.get(i);
+                    if (ctorParams.length() > 0)
+                        ctorParams.append('|');
+                    int pn = c != null && c.getParams() != null ? c.getParams().size() : -1;
+                    String p0 = ""; //$NON-NLS-1$
+                    if (c != null && c.getParams() != null && !c.getParams().isEmpty()
+                        && c.getParams().get(0) != null)
+                    {
+                        Object pType = Global.invoke(c.getParams().get(0), "getType"); //$NON-NLS-1$
+                        if (pType == null)
+                            pType = Global.invoke(c.getParams().get(0), "getTypes"); //$NON-NLS-1$
+                        p0 = String.valueOf(pType);
+                        if (p0.length() > 40)
+                            p0 = p0.substring(0, 40);
+                    }
+                    ctorParams.append(pn).append(':').append(p0);
+                }
+            }
+            boolean multi = n > 1;
+            ContentAssistDebug.debugModeLog("sigPick", "multiSig", "ctor", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"result\":" + multi + ",\"type\":\"" //$NON-NLS-1$ //$NON-NLS-2$
+                    + ContentAssistDebug.jsonEscapeForLog(typeName) + "\",\"ctors\":" + n //$NON-NLS-1$
+                    + ",\"detail\":\"" + ContentAssistDebug.jsonEscapeForLog(ctorParams.toString()) //$NON-NLS-1$
+                    + "\"}"); //$NON-NLS-1$
+            return multi;
+        }
+        if (!(invocationLike instanceof Invocation invocation))
+            return false;
+        FeatureAccess methodAccess = invocation.getMethodAccess();
+        if (methodAccess == null || resource.getURI() == null)
+            return false;
+        try
+        {
+            IResourceServiceProvider rsp =
+                IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(
+                    resource.getURI());
+            if (rsp == null)
+                return false;
+            DynamicFeatureAccessComputer computer = rsp.get(DynamicFeatureAccessComputer.class);
+            Environmental envOwner = EcoreUtil2.getContainerOfType(methodAccess,
+                Environmental.class);
+            Environments environments = envOwner != null ? envOwner.environments() : null;
+            if (computer == null || environments == null)
+                return false;
+            Object plain = Global.invoke(computer, "resolveObject", //$NON-NLS-1$
+                methodAccess, environments);
+            if (!(plain instanceof List<?> entries) || entries.isEmpty())
+                return false;
+            int signatureCount = 0;
+            for (Object entry : entries)
+            {
+                Object feature = entry instanceof FeatureEntry fe
+                    ? fe.getFeature()
+                    : Global.invoke(entry, "getFeature"); //$NON-NLS-1$
+                if (!(feature instanceof Method method))
+                    continue;
+                EList<ParamSet> sets = method.getParamSet();
+                if (sets == null || sets.isEmpty())
+                    signatureCount++;
+                else
+                    signatureCount += sets.size();
+                if (signatureCount > 1)
+                    return true;
+            }
+            return false;
+        }
+        catch (Exception ignored)
+        {
+            return false;
+        }
+    }
+
+    private static void forceComputeExpressionTypes(XtextResource resource, Expression arg,
+        EObject invocationLike)
+    {
+        if (resource == null || arg == null || resource.getURI() == null)
+            return;
+        try
+        {
+            IResourceServiceProvider rsp =
+                IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(
+                    resource.getURI());
+            if (rsp == null)
+                return;
+            TypesComputer typesComputer = rsp.get(TypesComputer.class);
+            if (typesComputer == null)
+                return;
+            EObject envFrom = invocationLike != null ? invocationLike : arg;
+            Environmental envOwner = EcoreUtil2.getContainerOfType(envFrom, Environmental.class);
+            Environments environments = envOwner != null ? envOwner.environments() : null;
+            if (environments == null)
+                return;
+            typesComputer.computeTypes(arg, environments);
         }
         catch (Exception ignored)
         {
@@ -1022,16 +1262,48 @@ public final class ParamHintHtmlModifier
         HoverContext ctx = resolveHoverContext(browser);
         if (ctx != null && ctx.pages != null && ctx.pages.size() > 1)
         {
-            int best = pickBestSignatureIndex(ctx);
-            if (best >= 0 && best != ctx.pageIndex)
+            SigPickResult pick = pickBestSignature(ctx);
+            String fp = signaturePickFingerprint(ctx);
+            boolean browserFirst = !Boolean.TRUE.equals(browser.getData(SIG_PICK_DONE_MARK));
+            boolean onOpen = sigPickOnOpenPending.get() || browserFirst;
+            boolean strongChanged = pick.score >= SIG_PICK_STRONG_SCORE
+                && !fp.equals(sigPickLastFingerprint);
+            ContentAssistDebug.debugModeLog("sigPick", "tryModify", "pick", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"pages\":" + ctx.pages.size() //$NON-NLS-1$
+                    + ",\"pageIndex\":" + ctx.pageIndex //$NON-NLS-1$
+                    + ",\"paramIndex\":" + ctx.paramIndex //$NON-NLS-1$
+                    + ",\"actualArgs\":" + ctx.actualArgCount //$NON-NLS-1$
+                    + ",\"actualNames\":\"" //$NON-NLS-1$
+                    + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ctx.actualArgTypeNames))
+                    + "\",\"best\":" + pick.index + ",\"score\":" + pick.score //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"onOpen\":" + onOpen + ",\"strongChanged\":" + strongChanged //$NON-NLS-1$ //$NON-NLS-2$
+                    + "}"); //$NON-NLS-1$
+            if (onOpen || strongChanged)
             {
-                if (Global.invokeVoid(ctx.parametersHover, "showPage", //$NON-NLS-1$
-                    ctx.pages, Integer.valueOf(best), Integer.valueOf(ctx.paramIndex)))
+                sigPickOnOpenPending.set(false);
+                browser.setData(SIG_PICK_DONE_MARK, Boolean.TRUE);
+                sigPickLastFingerprint = fp;
+                if (pick.index >= 0 && pick.index != ctx.pageIndex)
                 {
-                    return;
+                    boolean shown = Global.invokeVoid(ctx.parametersHover, "showPage", //$NON-NLS-1$
+                        ctx.pages, Integer.valueOf(pick.index), Integer.valueOf(ctx.paramIndex));
+                    ContentAssistDebug.debugModeLog("sigPick", "tryModify", "showPage", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        "{\"best\":" + pick.index + ",\"from\":" + ctx.pageIndex //$NON-NLS-1$ //$NON-NLS-2$
+                            + ",\"shown\":" + shown + ",\"reason\":\"" //$NON-NLS-1$ //$NON-NLS-2$
+                            + (onOpen ? "open" : "strong") + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    if (shown)
+                        return;
                 }
             }
+            else
+            {
+                ContentAssistDebug.debugModeLog("sigPick", "tryModify", "skipPick", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    "{\"pageIndex\":" + ctx.pageIndex + ",\"best\":" + pick.index //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"score\":" + pick.score + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
         }
+        else
+            sigPickOnOpenPending.set(false);
 
         String modified = modifyHtml(html, ctx);
         if (modified == null || modified.equals(html))
@@ -2348,6 +2620,7 @@ public final class ParamHintHtmlModifier
                 return;
             ctx.actualArgCount = snap.actualArgCount;
             ctx.actualArgTypes = snap.actualArgTypes;
+            ctx.actualArgTypeNames = snap.actualArgTypeNames;
             ctx.method = snap.method;
         }
         catch (Exception ignored)
@@ -2358,17 +2631,7 @@ public final class ParamHintHtmlModifier
     private static InvocationSnapshot resolveInvocationSnapshot(XtextResource resource,
         int caret, int paramIndex)
     {
-        EObjectAtOffsetHelper helper = new EObjectAtOffsetHelper();
-        EObject obj = helper.resolveContainedElementAt(resource, caret);
-        EObject invocationLike = null;
-        for (EObject cur = obj; cur != null; cur = cur.eContainer())
-        {
-            if (cur instanceof Invocation || cur instanceof OperatorStyleCreator)
-            {
-                invocationLike = cur;
-                break;
-            }
-        }
+        EObject invocationLike = findInvocationLikeAt(resource, caret);
         if (invocationLike == null)
             return null;
 
@@ -2384,14 +2647,50 @@ public final class ParamHintHtmlModifier
             params = ((OperatorStyleCreator) invocationLike).getParams();
         }
         snap.actualArgCount = params != null ? params.size() : 0;
-        if (params != null && paramIndex >= 0 && paramIndex < params.size())
+        Set<String> typeNames = new LinkedHashSet<>();
+        boolean multiSig = callSiteHasMultipleSignatures(resource, invocationLike);
+        String argClass = ""; //$NON-NLS-1$
+        int typesSize = 0;
+        if (multiSig && params != null && !params.isEmpty())
         {
-            Expression arg = params.get(paramIndex);
-            if (arg != null && arg.getTypes() != null && !arg.getTypes().isEmpty())
-                snap.actualArgTypes = new ArrayList<>(arg.getTypes());
+            Expression firstArg = params.get(0);
+            if (firstArg != null)
+            {
+                argClass = firstArg.eClass() != null ? firstArg.eClass().getName() : "?"; //$NON-NLS-1$
+                // новый ФиксированнаяСтруктура() — тип создаваемого объекта, не getTypes() выражения.
+                if (firstArg instanceof OperatorStyleCreator created)
+                {
+                    Type createdType = created.getType();
+                    if (createdType != null)
+                    {
+                        typeNames.addAll(typeItemNames(Collections.singletonList(createdType)));
+                        if (snap.actualArgTypes == null || snap.actualArgTypes.isEmpty())
+                            snap.actualArgTypes = Collections.singletonList(createdType);
+                    }
+                }
+                forceComputeExpressionTypes(resource, firstArg, invocationLike);
+                if (firstArg.getTypes() != null && !firstArg.getTypes().isEmpty())
+                {
+                    snap.actualArgTypes = new ArrayList<>(firstArg.getTypes());
+                    typesSize = snap.actualArgTypes.size();
+                    typeNames.addAll(typeItemNames(snap.actualArgTypes));
+                }
+                typeNames.addAll(inferLiteralTypeNames(firstArg));
+            }
         }
         if (snap.actualArgTypes == null)
             snap.actualArgTypes = Collections.emptyList();
+        snap.actualArgTypeNames = typeNames;
+        ContentAssistDebug.debugModeLog("sigPick", "snapshot", "done", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"multiSig\":" + multiSig //$NON-NLS-1$
+                + ",\"kind\":\"" //$NON-NLS-1$
+                + ContentAssistDebug.jsonEscapeForLog(
+                    invocationLike.eClass() != null ? invocationLike.eClass().getName() : "?") //$NON-NLS-1$
+                + "\",\"argCount\":" + snap.actualArgCount //$NON-NLS-1$
+                + ",\"argClass\":\"" + ContentAssistDebug.jsonEscapeForLog(argClass) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"typesSize\":" + typesSize //$NON-NLS-1$
+                + ",\"names\":\"" + ContentAssistDebug.jsonEscapeForLog(typeNames.toString()) //$NON-NLS-1$
+                + "\"}"); //$NON-NLS-1$
         return snap;
     }
 
@@ -2419,35 +2718,118 @@ public final class ParamHintHtmlModifier
 
     static int pickBestSignatureIndex(HoverContext ctx)
     {
+        return pickBestSignature(ctx).index;
+    }
+
+    private static SigPickResult pickBestSignature(HoverContext ctx)
+    {
         if (ctx == null || ctx.pages == null || ctx.pages.isEmpty())
-            return -1;
+            return new SigPickResult(-1, 0);
         if (ctx.pages.size() == 1)
-            return 0;
+            return new SigPickResult(0, SIG_PICK_STRONG_SCORE);
 
         int required = Math.max(0, ctx.actualArgCount);
         List<Integer> candidates = new ArrayList<>();
+        StringBuilder candLog = new StringBuilder();
         for (int i = 0; i < ctx.pages.size(); i++)
         {
             int paramCount = countPageParams(ctx.pages.get(i));
+            Set<String> p0 = resolveParamTypeNames(ctx.pages.get(i), 0);
+            if (candLog.length() > 0)
+                candLog.append(';');
+            candLog.append(i).append(":n=").append(paramCount) //$NON-NLS-1$
+                .append(",t=").append(p0); //$NON-NLS-1$
             if (paramCount >= required)
                 candidates.add(Integer.valueOf(i));
         }
         if (candidates.isEmpty())
-            return ctx.pageIndex >= 0 ? ctx.pageIndex : 0;
+        {
+            int fallback = ctx.pageIndex >= 0 ? ctx.pageIndex : 0;
+            ContentAssistDebug.debugModeLog("sigPick", "pickBest", "noCandidates", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"required\":" + required + ",\"pages\":\"" //$NON-NLS-1$ //$NON-NLS-2$
+                    + ContentAssistDebug.jsonEscapeForLog(candLog.toString()) + "\"}"); //$NON-NLS-1$
+            return new SigPickResult(fallback, 0);
+        }
 
         List<TypeItem> actualTypes = ctx.actualArgTypes;
-        if (actualTypes == null || actualTypes.isEmpty() || ctx.paramIndex < 0)
-            return candidates.get(0).intValue();
+        Set<String> actualNames = ctx.actualArgTypeNames;
+        if (actualNames == null || actualNames.isEmpty())
+            actualNames = typeItemNames(actualTypes);
+        if (actualNames == null || actualNames.isEmpty())
+        {
+            int wildcardIdx = preferWildcardSignatureIndex(candidates, ctx.pages);
+            ContentAssistDebug.debugModeLog("sigPick", "pickBest", "noActualTypes", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                "{\"required\":" + required + ",\"fallback\":" + wildcardIdx //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"pages\":\"" + ContentAssistDebug.jsonEscapeForLog(candLog.toString()) //$NON-NLS-1$
+                    + "\"}"); //$NON-NLS-1$
+            return new SigPickResult(wildcardIdx, 1);
+        }
 
-        Set<String> actualNames = typeItemNames(actualTypes);
-        if (actualNames.isEmpty())
-            return candidates.get(0).intValue();
-
+        int bestIdx = -1;
+        int bestScore = -1;
+        StringBuilder scoreLog = new StringBuilder();
         for (Integer candidate : candidates)
         {
             int idx = candidate.intValue();
-            Set<String> paramNames = resolveParamTypeNames(ctx.pages.get(idx), ctx.paramIndex);
-            if (namesIntersect(actualNames, paramNames))
+            Set<String> paramNames = resolveParamTypeNames(ctx.pages.get(idx), 0);
+            int score = typeNamesMatchScore(actualNames, paramNames);
+            if (scoreLog.length() > 0)
+                scoreLog.append(';');
+            scoreLog.append(idx).append('=').append(score);
+            if (score > bestScore)
+            {
+                bestScore = score;
+                bestIdx = idx;
+            }
+        }
+        int resultIdx = bestScore > 0 ? bestIdx : preferWildcardSignatureIndex(candidates, ctx.pages);
+        int resultScore = bestScore > 0 ? bestScore : 1;
+        ContentAssistDebug.debugModeLog("sigPick", "pickBest", "done", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            "{\"required\":" + required //$NON-NLS-1$
+                + ",\"actual\":\"" + ContentAssistDebug.jsonEscapeForLog(actualNames.toString()) //$NON-NLS-1$
+                + "\",\"scores\":\"" + ContentAssistDebug.jsonEscapeForLog(scoreLog.toString()) //$NON-NLS-1$
+                + "\",\"pages\":\"" + ContentAssistDebug.jsonEscapeForLog(candLog.toString()) //$NON-NLS-1$
+                + "\",\"bestScore\":" + bestScore + ",\"result\":" + resultIdx + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        return new SigPickResult(resultIdx, resultScore);
+    }
+
+    private static String signaturePickFingerprint(HoverContext ctx)
+    {
+        if (ctx == null)
+            return ""; //$NON-NLS-1$
+        return ctx.actualArgCount + "|" //$NON-NLS-1$
+            + String.valueOf(ctx.actualArgTypeNames);
+    }
+
+    private static final class SigPickResult
+    {
+        final int index;
+        final int score;
+
+        SigPickResult(int index, int score)
+        {
+            this.index = index;
+            this.score = score;
+        }
+    }
+
+    /**
+     * Без фактического типа: первая сигнатура, у которой 1-й параметр «Произвольный»
+     * (или тип в доке пуст); иначе — первый кандидат.
+     */
+    private static int preferWildcardSignatureIndex(List<Integer> candidates, List<Object> pages)
+    {
+        if (candidates == null || candidates.isEmpty())
+            return 0;
+        if (pages == null || pages.isEmpty())
+            return candidates.get(0).intValue();
+        for (Integer candidate : candidates)
+        {
+            int idx = candidate.intValue();
+            if (idx < 0 || idx >= pages.size())
+                continue;
+            Set<String> paramNames = resolveParamTypeNames(pages.get(idx), 0);
+            if (isWildcardParamTypeNames(paramNames))
                 return idx;
         }
         return candidates.get(0).intValue();
@@ -2481,17 +2863,28 @@ public final class ParamHintHtmlModifier
     {
         Object paramContent = Global.invoke(page, "getParameter", Integer.valueOf(paramIndex)); //$NON-NLS-1$
         if (paramContent == null)
-            return Collections.emptySet();
+            return wildcardParamTypeNames();
         String formatted = formatParamContentTypes(paramContent);
         if (formatted == null || formatted.isEmpty())
-            return Collections.emptySet();
+            return wildcardParamTypeNames();
         Set<String> names = new LinkedHashSet<>();
         for (String part : formatted.split(",")) //$NON-NLS-1$
         {
             String trimmed = part.trim();
             if (!trimmed.isEmpty())
-                names.add(trimmed.toLowerCase());
+                addTypeMatchName(names, trimmed);
         }
+        if (names.isEmpty())
+            return wildcardParamTypeNames();
+        return names;
+    }
+
+    /** Нет типа у параметра в доке = «Произвольный». */
+    private static Set<String> wildcardParamTypeNames()
+    {
+        Set<String> names = new LinkedHashSet<>();
+        addTypeMatchName(names, "Произвольный"); //$NON-NLS-1$
+        addTypeMatchName(names, "Arbitrary"); //$NON-NLS-1$
         return names;
     }
 
@@ -2502,21 +2895,141 @@ public final class ParamHintHtmlModifier
             return names;
         for (TypeItem type : types)
         {
-            String name = formatTypeItem(type);
-            if (!name.isEmpty())
-                names.add(name.toLowerCase());
+            if (type instanceof DuallyNamedElement dually)
+            {
+                addTypeMatchName(names, dually.getNameRu());
+                addTypeMatchName(names, dually.getName());
+            }
+            addTypeMatchName(names, formatTypeItem(type));
+            if (type != null)
+                addTypeMatchName(names, type.getName());
         }
         return names;
     }
 
-    private static boolean namesIntersect(Set<String> actual, Set<String> expected)
+    /** Имена типов литерала, если {@code Expression#getTypes()} ещё пуст. */
+    private static Set<String> inferLiteralTypeNames(Expression arg)
     {
-        if (actual == null || actual.isEmpty() || expected == null || expected.isEmpty())
-            return false;
+        Set<String> names = new LinkedHashSet<>();
+        if (arg instanceof StringLiteral)
+        {
+            addTypeMatchName(names, "Строка"); //$NON-NLS-1$
+            addTypeMatchName(names, "String"); //$NON-NLS-1$
+        }
+        else if (arg instanceof NumberLiteral)
+        {
+            addTypeMatchName(names, "Число"); //$NON-NLS-1$
+            addTypeMatchName(names, "Number"); //$NON-NLS-1$
+        }
+        else if (arg instanceof BooleanLiteral)
+        {
+            addTypeMatchName(names, "Булево"); //$NON-NLS-1$
+            addTypeMatchName(names, "Boolean"); //$NON-NLS-1$
+        }
+        else if (arg instanceof DateLiteral)
+        {
+            addTypeMatchName(names, "Дата"); //$NON-NLS-1$
+            addTypeMatchName(names, "Date"); //$NON-NLS-1$
+        }
+        else if (arg instanceof UndefinedLiteral)
+        {
+            addTypeMatchName(names, "Неопределено"); //$NON-NLS-1$
+            addTypeMatchName(names, "Undefined"); //$NON-NLS-1$
+        }
+        else if (arg instanceof NullLiteral)
+            addTypeMatchName(names, "Null"); //$NON-NLS-1$
+        return names;
+    }
+
+    private static void addTypeMatchName(Set<String> names, String name)
+    {
+        if (names == null || name == null || name.isBlank())
+            return;
+        String n = name.trim().toLowerCase();
+        names.add(n);
+        switch (n)
+        {
+            case "строка": //$NON-NLS-1$
+                names.add("string"); //$NON-NLS-1$
+                break;
+            case "string": //$NON-NLS-1$
+                names.add("строка"); //$NON-NLS-1$
+                break;
+            case "число": //$NON-NLS-1$
+                names.add("number"); //$NON-NLS-1$
+                break;
+            case "number": //$NON-NLS-1$
+                names.add("число"); //$NON-NLS-1$
+                break;
+            case "булево": //$NON-NLS-1$
+                names.add("boolean"); //$NON-NLS-1$
+                break;
+            case "boolean": //$NON-NLS-1$
+                names.add("булево"); //$NON-NLS-1$
+                break;
+            case "дата": //$NON-NLS-1$
+                names.add("date"); //$NON-NLS-1$
+                break;
+            case "date": //$NON-NLS-1$
+                names.add("дата"); //$NON-NLS-1$
+                break;
+            case "неопределено": //$NON-NLS-1$
+                names.add("undefined"); //$NON-NLS-1$
+                break;
+            case "undefined": //$NON-NLS-1$
+                names.add("неопределено"); //$NON-NLS-1$
+                break;
+            case "фиксированнаяструктура": //$NON-NLS-1$
+                names.add("fixedstructure"); //$NON-NLS-1$
+                break;
+            case "fixedstructure": //$NON-NLS-1$
+                names.add("фиксированнаяструктура"); //$NON-NLS-1$
+                break;
+            default:
+                break;
+        }
+    }
+
+    /**
+     * Сопоставление типов аргумента с типами параметра сигнатуры.
+     * Точное имя — 10; «Произвольный»/Any/пустой тип в доке — слабый матч 1.
+     */
+    private static int typeNamesMatchScore(Set<String> actual, Set<String> expected)
+    {
+        if (actual == null || actual.isEmpty())
+            return 0;
+        if (expected == null || expected.isEmpty())
+            return 1;
+        int score = 0;
         for (String name : actual)
         {
             if (expected.contains(name))
-                return true;
+                score += 10;
+        }
+        if (score == 0 && isWildcardParamTypeNames(expected))
+            score = 1;
+        return score;
+    }
+
+    private static boolean isWildcardParamTypeNames(Set<String> expected)
+    {
+        if (expected == null || expected.isEmpty())
+            return true;
+        for (String name : expected)
+        {
+            if (name == null)
+                continue;
+            switch (name)
+            {
+                case "произвольный": //$NON-NLS-1$
+                case "arbitrary": //$NON-NLS-1$
+                case "any": //$NON-NLS-1$
+                case "variant": //$NON-NLS-1$
+                case "unknown": //$NON-NLS-1$
+                    return true;
+                default:
+                    break;
+            }
         }
         return false;
     }
@@ -2632,6 +3145,7 @@ public final class ParamHintHtmlModifier
         int paramIndex;
         int actualArgCount;
         List<TypeItem> actualArgTypes = Collections.emptyList();
+        Set<String> actualArgTypeNames = Collections.emptySet();
         Method method;
     }
 
@@ -2639,6 +3153,7 @@ public final class ParamHintHtmlModifier
     {
         int actualArgCount;
         List<TypeItem> actualArgTypes = Collections.emptyList();
+        Set<String> actualArgTypeNames = Collections.emptySet();
         Method method;
     }
 
