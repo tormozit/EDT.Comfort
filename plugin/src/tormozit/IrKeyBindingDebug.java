@@ -10,7 +10,8 @@ final class IrKeyBindingDebug
     private static final String[] IR_MIRROR_COMMAND_IDS = {
         IrMethodConstructorHandler.COMMAND_ID,
         EditEmbeddedTextCommandHandler.COMMAND_ID,
-        IrFormatTextCommandHandler.COMMAND_ID
+        IrFormatTextCommandHandler.COMMAND_ID,
+        IrModuleCheckHandler.COMMAND_ID
     };
 
     private IrKeyBindingDebug()

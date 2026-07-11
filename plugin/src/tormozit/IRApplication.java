@@ -1377,6 +1377,17 @@ public final class IRApplication
         return null;
     }
 
+    /** Любая подключённая сессия ИР (fallback для transport-сообщений без ИД процесса). */
+    public static IRSession getAnyConnectedSession()
+    {
+        for (IRSession session : sessions.values())
+        {
+            if (session.state == State.CONNECTED && checkAlive(session))
+                return session;
+        }
+        return null;
+    }
+
     /**
      * Берем любую активную сессию IRApplication.IRSession от main проекта. Если ее нет то подключаем от основного приложения. Если его нет то подключаем от первого приложения.
     */

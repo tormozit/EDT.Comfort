@@ -191,11 +191,17 @@ public class GoToDefinition extends AbstractHandler
         {
             try
             {
-                command = Global.readTextFromFile(commandFile);
+                String rawCommand = Global.readTextFromFile(commandFile);
                 Files.delete(commandFile.toPath());
                 ObjectMapper mapper = new ObjectMapper();
-                JsonNode commandObject = mapper.readTree(command);
+                JsonNode commandObject = mapper.readTree(rawCommand);
                 command = commandObject.get("Команда").asText(); //$NON-NLS-1$
+                String messageMarker = "<ВывестиСообщение> "; //$NON-NLS-1$
+                if (command.startsWith(messageMarker))
+                {
+                    showIRMessage(shell, part, lastFragmentAfterMarker(command, messageMarker));
+                    return null;
+                }
                 long PID = commandObject.get("ИДПроцесса").asLong(); //$NON-NLS-1$
                 withFile = commandObject.get("ЕстьФайл").asBoolean(); //$NON-NLS-1$
                 session = IRApplication.getSession(PID);
@@ -325,6 +331,48 @@ public class GoToDefinition extends AbstractHandler
             }
         }
         return null;
+    }
+
+    private static String lastFragmentAfterMarker(String text, String marker)
+    {
+        if (text == null || marker == null || marker.isEmpty())
+            return text != null ? text.strip() : ""; //$NON-NLS-1$
+        int index = text.lastIndexOf(marker);
+        if (index < 0)
+            return text.strip();
+        return text.substring(index + marker.length()).strip();
+    }
+
+    private static void showIRMessage(Shell shell, IWorkbenchPart part, String message)
+    {
+        final IWorkbenchPart partRef = part;
+        ToastNotification.show(
+            IRApplication.toastTitle(), //$NON-NLS-1$
+            message,
+            5_000,
+            () -> showIrApplication(resolveIrSessionForTransport(partRef)),
+            "Показать приложение ИР", //$NON-NLS-1$
+            shell);
+    }
+
+    private static IRSession resolveIrSessionForTransport(IWorkbenchPart part)
+    {
+        IProject activeProject = Global.getActiveProject(part, false);
+        if (activeProject != null)
+        {
+            IDtProject dtProject = Global.getDtProjectFromWorkspaceProject(activeProject);
+            IRSession session = IRApplication.getConnectedSession(dtProject);
+            if (session != null)
+                return session;
+        }
+        return IRApplication.getAnyConnectedSession();
+    }
+
+    private static void showIrApplication(IRSession session)
+    {
+        if (session == null || session.executor == null)
+            return;
+        session.executor.submit(session::showWindow);
     }
 
     public static void notifyDenyReplaceObject(File newFile, String command)

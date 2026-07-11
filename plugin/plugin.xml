@@ -144,6 +144,12 @@
           sequence="M3+M2+F">
     </key>
     <key
+          commandId="tormozit.IrModuleCheck"
+          contextId="org.eclipse.xtext.ui.XtextEditorScope"
+          schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
+          sequence="M1+F7">
+    </key>
+    <key
           commandId="tormozit.CollectionSkeleton"
           contextId="org.eclipse.ui.contexts.window"
           schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
@@ -334,6 +340,11 @@
         name="Найти ссылки ИР"
         categoryId="tormozit.commands.global"
         description="Найти ссылки на слово или объект метаданных через приложение ИР. Активно только при подключённом ИР. Настраивайте только «Редактирование источника Xtext». Остальные контексты не редактируйте. (Комфорт)"/>
+    <command
+        id="tormozit.IrModuleCheck"
+        name="Проверить модуль ИР"
+        categoryId="tormozit.commands.global"
+        description="Открыть проверку модуля через приложение ИР. Активно только при подключённом ИР. Настраивайте только «Редактирование источника Xtext». Остальные контексты не редактируйте. (Комфорт)"/>
     <command
         id="tormozit.showCollection"
         name="Показать коллекцию"
@@ -535,6 +546,17 @@
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.IrFindReferencesCommandHandler"
         commandId="tormozit.IrFindReferences">
+      <activeWhen>
+        <with variable="activeContexts">
+          <iterate operator="or">
+            <equals value="org.eclipse.xtext.ui.XtextEditorScope"/>
+          </iterate>
+        </with>
+      </activeWhen>
+    </handler>
+    <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.IrModuleCheckCommandHandler"
+        commandId="tormozit.IrModuleCheck">
       <activeWhen>
         <with variable="activeContexts">
           <iterate operator="or">

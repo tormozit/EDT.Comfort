@@ -20,6 +20,7 @@ import com.sun.jna.platform.win32.WinDef.HRGN;
 import com.sun.jna.platform.win32.WinDef.HWND;
 import com.sun.jna.platform.win32.WinDef.POINT;
 import com.sun.jna.platform.win32.WinDef.RECT;
+import com.sun.jna.platform.win32.WinDef.WORD;
 import com.sun.jna.platform.win32.WinUser;
 import com.sun.jna.ptr.IntByReference;
 import com.sun.jna.win32.StdCallLibrary;
@@ -40,6 +41,10 @@ public final class WinWindowActivator
     private static final int WS_EX_TOPMOST = 0x00000008;
     /** Win32 {@code WS_EX_TOOLWINDOW} — в JNA 5.13 не объявлен в {@link WinUser}. */
     private static final int WS_EX_TOOLWINDOW = 0x00000080;
+    /** Win32 {@code VK_RETURN} — в JNA 5.13 не объявлен в {@link WinUser}. */
+    private static final int VK_RETURN = 0x0D;
+    /** Win32 {@code KEYEVENTF_KEYUP} — в JNA 5.13 не объявлен в {@link WinUser}. */
+    private static final int KEYEVENTF_KEYUP = 0x0002;
 
     /** Win32-API, отсутствующие в {@link User32} JNA 5.13. */
     private interface User32Extra extends StdCallLibrary
@@ -1008,6 +1013,64 @@ public final class WinWindowActivator
         if (!User32.INSTANCE.GetWindowPlacement(hwnd, placement).booleanValue())
             return false;
         return placement.showCmd == WinUser.SW_SHOWMINIMIZED;
+    }
+
+    /**
+     * Пауза и Ctrl+Enter в окно ИР — автозапуск формы после COM-вызова {@code codeEditor}.
+     * Вызывать из COM-потока {@link IRSession#executor}.
+     */
+    public static void sendCtrlEnterToIrAfterDelay(IRSession session, long delayMs)
+    {
+        if (!WINDOWS || session == null || session.pid <= 0)
+            return;
+
+        if (delayMs > 0)
+        {
+            try
+            {
+                Thread.sleep(delayMs);
+            }
+            catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+
+        int pid = (int) session.pid;
+        HWND hwnd = User32.INSTANCE.GetForegroundWindow();
+        if (!isProcessWindow(hwnd, pid))
+            hwnd = resolveIrMainWindow(session);
+        if (hwnd == null)
+            return;
+
+        activateWindow(hwnd);
+        sendCtrlEnter();
+    }
+
+    private static void sendCtrlEnter()
+    {
+        WinUser.INPUT[] inputs = (WinUser.INPUT[]) new WinUser.INPUT().toArray(4);
+
+        inputs[0].type = new DWORD(WinUser.INPUT.INPUT_KEYBOARD);
+        inputs[0].input.setType("ki"); //$NON-NLS-1$
+        inputs[0].input.ki.wVk = new WORD(WinUser.VK_CONTROL);
+
+        inputs[1].type = new DWORD(WinUser.INPUT.INPUT_KEYBOARD);
+        inputs[1].input.setType("ki"); //$NON-NLS-1$
+        inputs[1].input.ki.wVk = new WORD(VK_RETURN);
+
+        inputs[2].type = new DWORD(WinUser.INPUT.INPUT_KEYBOARD);
+        inputs[2].input.setType("ki"); //$NON-NLS-1$
+        inputs[2].input.ki.wVk = new WORD(VK_RETURN);
+        inputs[2].input.ki.dwFlags = new DWORD(KEYEVENTF_KEYUP);
+
+        inputs[3].type = new DWORD(WinUser.INPUT.INPUT_KEYBOARD);
+        inputs[3].input.setType("ki"); //$NON-NLS-1$
+        inputs[3].input.ki.wVk = new WORD(WinUser.VK_CONTROL);
+        inputs[3].input.ki.dwFlags = new DWORD(KEYEVENTF_KEYUP);
+
+        User32.INSTANCE.SendInput(new DWORD(4), inputs, inputs[0].size());
     }
 
     private static void showAndActivate(HWND hwnd)

@@ -70,6 +70,7 @@ public class BSLEditorMenuHook implements IStartup
     private static final String ITEM_TEXT_MethodConstructor = "Конструктор метода ИР";
     private static final String ITEM_TEXT_FormatText = IrFormatTextHandler.MENU_LABEL;
     private static final String ITEM_TEXT_FindReferences = IrFindReferencesHandler.MENU_LABEL;
+    private static final String ITEM_TEXT_ModuleCheck = IrModuleCheckHandler.MENU_LABEL;
 
     /**
      * Ключ SWT-данных для маркировки «меню уже прикреплено».
@@ -347,7 +348,7 @@ public class BSLEditorMenuHook implements IStartup
     {
         return new MenuAdapter()
         {
-            private final List<MenuItem> addedItems = new ArrayList<>(4);
+            private final List<MenuItem> addedItems = new ArrayList<>(5);
 
             @Override
             public void menuShown(MenuEvent e)
@@ -374,6 +375,38 @@ public class BSLEditorMenuHook implements IStartup
                     });
                     addedItems.add(constructorItem);
 
+                    MenuItem findRefsItem = new MenuItem(comfortSub, SWT.PUSH);
+                    findRefsItem.setText(ITEM_TEXT_FindReferences);
+                    findRefsItem.setToolTipText(
+                        "Найти ссылки на слово или объект метаданных через приложение ИР"
+                            + Global.pluginSignForTooltip());
+                    findRefsItem.addSelectionListener(new SelectionAdapter()
+                    {
+                        @Override
+                        public void widgetSelected(SelectionEvent ev)
+                        {
+                            runFindReferencesCommand(editor);
+                        }
+                    });
+                    addedItems.add(findRefsItem);
+
+                    MenuItem moduleCheckItem = new MenuItem(comfortSub, SWT.PUSH);
+                    moduleCheckItem.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
+                        ITEM_TEXT_ModuleCheck,
+                        IrModuleCheckHandler.COMMAND_ID,
+                        IrModuleCheckCommandHandler.BINDING_CONTEXT_ID));
+                    moduleCheckItem.setToolTipText(
+                        "Открыть проверку модуля через приложение ИР" + Global.pluginSignForTooltip());
+                    moduleCheckItem.addSelectionListener(new SelectionAdapter()
+                    {
+                        @Override
+                        public void widgetSelected(SelectionEvent ev)
+                        {
+                            runModuleCheckCommand(editor);
+                        }
+                    });
+                    addedItems.add(moduleCheckItem);
+
                     MenuItem formatItem = new MenuItem(comfortSub, SWT.PUSH);
                     formatItem.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
                         ITEM_TEXT_FormatText,
@@ -391,21 +424,6 @@ public class BSLEditorMenuHook implements IStartup
                         }
                     });
                     addedItems.add(formatItem);
-
-                    MenuItem findRefsItem = new MenuItem(comfortSub, SWT.PUSH);
-                    findRefsItem.setText(ITEM_TEXT_FindReferences);
-                    findRefsItem.setToolTipText(
-                        "Найти ссылки на слово или объект метаданных через приложение ИР"
-                            + Global.pluginSignForTooltip());
-                    findRefsItem.addSelectionListener(new SelectionAdapter()
-                    {
-                        @Override
-                        public void widgetSelected(SelectionEvent ev)
-                        {
-                            runFindReferencesCommand(editor);
-                        }
-                    });
-                    addedItems.add(findRefsItem);
                 }
 
                 if (EditEmbeddedTextHandler.isApplicable(editor))
@@ -533,5 +551,23 @@ public class BSLEditorMenuHook implements IStartup
             // fallback ниже
         }
         IrFindReferencesHandler.findInModules(editor);
+    }
+
+    private static void runModuleCheckCommand(BslXtextEditor editor)
+    {
+        try
+        {
+            IHandlerService handlerService = editor.getSite().getService(IHandlerService.class);
+            if (handlerService != null)
+            {
+                handlerService.executeCommand(IrModuleCheckHandler.COMMAND_ID, null);
+                return;
+            }
+        }
+        catch (Exception ignored)
+        {
+            // fallback ниже
+        }
+        IrModuleCheckHandler.checkModule(editor);
     }
 }

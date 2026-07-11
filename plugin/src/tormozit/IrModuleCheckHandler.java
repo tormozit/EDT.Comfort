@@ -3,17 +3,16 @@ package tormozit;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 
-/**
- * Порт {@code НайтиВМодулях()} из RDT: поиск ссылок на слово или объект метаданных через приложение ИР.
- */
-public final class IrFindReferencesHandler
+/** Проверка модуля через приложение ИР ({@code ОткрытьПроверкуМодуля}). */
+public final class IrModuleCheckHandler
 {
-    public static final String COMMAND_ID = "tormozit.IrFindReferences"; //$NON-NLS-1$
-    static final String MENU_LABEL = "Найти ссылки ИР"; //$NON-NLS-1$
+    public static final String COMMAND_ID = "tormozit.IrModuleCheck"; //$NON-NLS-1$
+    static final String MENU_LABEL = "Проверить модуль ИР"; //$NON-NLS-1$
     private static final long CTRL_ENTER_DELAY_MS = 200;
 
-    private IrFindReferencesHandler() {}
-    public static void findInModules(BslXtextEditor editor)
+    private IrModuleCheckHandler() {}
+
+    public static void checkModule(BslXtextEditor editor)
     {
         if (editor == null)
         {
@@ -28,28 +27,25 @@ public final class IrFindReferencesHandler
         IRSession irSession = IRApplication.getSession(dtProject);
         if (irSession == null || irSession.executor == null)
             return;
+
         irSession.syncCodeEditorToIR(editor);
-        irSession.executor.submit(() ->
-            findInModulesOnComThread(irSession));
+        irSession.executor.submit(() -> checkModuleOnComThread(irSession));
     }
 
     /** COM-поток {@link IRSession#executor}; sync уже выполнен через {@link IRSession#syncCodeEditorToIR}. */
-    private static void findInModulesOnComThread(
-        IRSession irSession)
+    private static void checkModuleOnComThread(IRSession irSession)
     {
         try
         {
             irSession.invokeCodeEditor("РазобратьТекущийКонтекст"); //$NON-NLS-1$
             irSession.showWindow();
-//            Функция ОткрытьПоискВМодулях(Знач ЧтоИскать = Неопределено, Знач Автозапуск = Истина) Экспорт
-            irSession.invokeCodeEditor("ОткрытьПоискВМодулях", null, false);
+            irSession.invokeCodeEditor("ОткрытьПроверкуМодуля"); //$NON-NLS-1$
             WinWindowActivator.sendCtrlEnterToIrAfterDelay(irSession, CTRL_ENTER_DELAY_MS);
         }
         catch (Exception e)
         {
-            Global.log("IrFindReferencesHandler: " + e.getMessage()); //$NON-NLS-1$
+            Global.log("IrModuleCheckHandler: " + e.getMessage()); //$NON-NLS-1$
             ToastNotification.show(MENU_LABEL, "Ошибка вызова ИР: " + e.getMessage(), 5_000); //$NON-NLS-1$
         }
     }
-
 }
