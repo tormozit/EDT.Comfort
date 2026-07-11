@@ -345,6 +345,19 @@ public final class ToastNotification
         }
     }
 
+    /** Закрыть все активные тосты (preShutdown). Вызывать с UI-потока. */
+    public static void closeAllActive()
+    {
+        for (ToastEntry entry : activeToasts)
+        {
+            if (entry == null || entry.shell == null)
+                continue;
+            if (!entry.shell.isDisposed())
+                entry.shell.dispose();
+        }
+        activeToasts.clear();
+    }
+
     private static void logNotification(String title, String message)
     {
         String text = formatNotificationText(title, message);

@@ -1901,7 +1901,8 @@ public final class ObjectSetsView extends ViewPart
                 IProject project = ResourcesPlugin.getWorkspace().getRoot().getProject(set.projectName);
                 if (project != null && project.exists())
                 {
-                    EObject eObject = GoToDefinition.resolveEObjectForFullName(mdRef, page, project);
+                    // LabelProvider на UI — без блокирующего COM/ИР (см. MdLinkNormalizer)
+                    EObject eObject = GoToDefinition.resolveEObjectForFullName(mdRef, page, project, false);
                     if (eObject != null)
                     {
                         Image img = MdUiSharedImages.getMdClassImage(eObject.eClass());

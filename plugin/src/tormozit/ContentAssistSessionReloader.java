@@ -226,6 +226,32 @@ public final class ContentAssistSessionReloader
             viewer.getTextWidget().setData(DATA_KEY, null);
     }
 
+    /** Отмена отложенных timerExec/param-hint перед закрытием EDT. */
+    public static void prepareShutdown()
+    {
+        for (ContentAssistSessionReloader reloader :
+                new java.util.ArrayList<>(INSTALLED.values()))
+        {
+            if (reloader != null)
+                reloader.prepareShutdownInstance();
+        }
+    }
+
+    private void prepareShutdownInstance()
+    {
+        paramHintPostGen.incrementAndGet();
+        literalFlushTimerGen.incrementAndGet();
+        literalFlushTimerActive = false;
+        cancelCompletionAutoOpenTimers(completionAutoOpenActiveSeq, "shutdown"); //$NON-NLS-1$
+        if (viewer == null)
+            return;
+        ContentAssistPopupSync.cancelSessionPopupSync(viewer);
+        ContentAssistPopupSync.cancelFilterBarSetup(viewer);
+        ContentAssistPopupSync.cancelCaretRecompute(viewer);
+        if (assistant != null)
+            ContentAssistPopupSync.hideProposalPopup(assistant);
+    }
+
     private ContentAssistSessionReloader(SourceViewer viewer, ContentAssistant assistant,
                                          SmartContentAssistProcessor processor,
                                          BslXtextEditor editor)

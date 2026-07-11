@@ -1174,6 +1174,57 @@ public final class ParamHintHtmlModifier
         }
     }
 
+    /** Закрыть видимые popup подсказки параметров (preShutdown). */
+    public static void dismissAllVisible()
+    {
+        try
+        {
+            Object handler = resolveParamHoverHandlerForMiss();
+            if (handler != null)
+            {
+                Object infoControl = Global.getField(handler, "infoControl"); //$NON-NLS-1$
+                if (infoControl != null)
+                    disposeParamHintControl(infoControl);
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+        try
+        {
+            Object handler = resolveInvocationParametersHoverHandler();
+            if (handler != null)
+            {
+                Object infoControl = Global.getField(handler, "infoControl"); //$NON-NLS-1$
+                if (infoControl != null)
+                    disposeParamHintControl(infoControl);
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+        try
+        {
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            for (Shell shell : display.getShells())
+            {
+                if (shell == null || shell.isDisposed() || !shell.isVisible())
+                    continue;
+                Browser browser = IrBslHoverHtml.findControlBrowser(shell);
+                if (browser == null || browser.isDisposed())
+                    continue;
+                String text = browser.getText();
+                if (text != null && text.indexOf(HEADING_CLASS) >= 0)
+                    shell.dispose();
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+    }
+
     /** Модифицировать HTML в браузере (сигнатура + формат строки типа). */
     private static void tryModifyBrowserHtml(Browser browser)
     {

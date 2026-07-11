@@ -341,8 +341,12 @@ public final class SearchViewAggregationHook implements IStartup
         if (!ComfortSettings.isReplaceListFiltersEnabled())
             return;
         Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
         int delay = attempt == 0 ? 0 : 150;
         display.timerExec(delay, () -> {
+            if (display.isDisposed())
+                return;
             if (!ComfortSettings.isReplaceListFiltersEnabled())
                 return; // настройку могли выключить, пока ждали появления страницы
             if (!tryPatch(view) && attempt < 40)

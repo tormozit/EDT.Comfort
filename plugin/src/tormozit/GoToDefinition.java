@@ -834,6 +834,16 @@ public class GoToDefinition extends AbstractHandler
      */
     public static EObject resolveEObjectForFullName(String fullName, IWorkbenchPage page, IProject project)
     {
+        return resolveEObjectForFullName(fullName, page, project, true);
+    }
+
+    /**
+     * @param useIrLinkNormalizer {@code false} для LabelProvider на UI-потоке (иконки):
+     *     без синхронного COM/ИР; {@code true} — навигация с нормализацией форм/макетов через ИР
+     */
+    public static EObject resolveEObjectForFullName(
+        String fullName, IWorkbenchPage page, IProject project, boolean useIrLinkNormalizer)
+    {
         if (project == null || fullName == null || fullName.isBlank())
             return null;
         IV8ProjectManager projectManager =
@@ -842,7 +852,7 @@ public class GoToDefinition extends AbstractHandler
         if (v8Project == null)
             return null;
 
-        IRSession irSession = resolveConnectedIrSession(project);
+        IRSession irSession = useIrLinkNormalizer ? resolveConnectedIrSession(project) : null;
         MdLinkNormalizer.Result norm = MdLinkNormalizer.normalize(fullName, irSession);
         String normalizedRef = norm.normalizedRef();
 

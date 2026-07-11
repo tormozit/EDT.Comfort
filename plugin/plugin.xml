@@ -3,6 +3,7 @@
 <plugin>
 
   <extension point="org.eclipse.ui.startup">
+    <startup class="tormozit.ComfortShutdownHook"/>
     <startup class="tormozit.ActiveProjectTracker"/>
     <startup class="tormozit.CompareConfigMenuHook"/>
     <startup class="tormozit.ApplicationsViewHook"/>
@@ -41,6 +42,7 @@
     <startup class="tormozit.DebugInspectorHook"/>
     <startup class="tormozit.DebugVariablePresentationHook"/>
     <startup class="tormozit.DebugExpressionsChangeValueHook"/>
+    <startup class="tormozit.BreakpointPropertiesHook"/>
     <startup class="tormozit.InfobaseSyncQuestionDialogHook"/>
     <startup class="tormozit.FilterBySubsystemsDialogHook"/>
     <startup class="tormozit.GitChangedFileMenuHook"/>

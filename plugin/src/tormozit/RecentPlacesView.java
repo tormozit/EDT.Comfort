@@ -1216,7 +1216,8 @@ public final class RecentPlacesView extends ViewPart
             IProject project = RecentPlacesHandler.resolveProject(entry, page);
             if (project != null)
             {
-                EObject eObject = GoToDefinition.resolveEObjectForFullName(mdRef, page, project);
+                // LabelProvider на UI — без блокирующего COM/ИР (см. MdLinkNormalizer)
+                EObject eObject = GoToDefinition.resolveEObjectForFullName(mdRef, page, project, false);
                 if (eObject != null)
                 {
                     Image img = MdUiSharedImages.getMdClassImage(eObject.eClass());

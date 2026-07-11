@@ -31,6 +31,7 @@ import java.util.WeakHashMap;
 public final class ListSelectionThemeHook implements IStartup
 {
     private static volatile boolean filtersInstalled;
+    private static Listener showFilterListener;
     private static final Set<IWorkbenchPage> HOOKED_PAGES =
         Collections.newSetFromMap(new WeakHashMap<>());
 
@@ -51,12 +52,12 @@ public final class ListSelectionThemeHook implements IStartup
         if (display == null || display.isDisposed() || filtersInstalled)
             return;
         filtersInstalled = true;
-        Listener showListener = event -> {
+        showFilterListener = event -> {
             if (!(event.widget instanceof Shell shell) || shell.isDisposed())
                 return;
             Enhancement.scanShell(shell);
         };
-        display.addFilter(SWT.Show, showListener);
+        display.addFilter(SWT.Show, showFilterListener);
         hookWorkbenchWindows();
         for (Shell shell : display.getShells())
         {
@@ -139,6 +140,19 @@ public final class ListSelectionThemeHook implements IStartup
             @Override public void partInputChanged(IWorkbenchPartReference partRef) {}
         });
         scanWorkbenchShells();
+    }
+
+    /** Снять глобальный SWT.Show filter (preShutdown). */
+    public static void uninstall()
+    {
+        if (!filtersInstalled)
+            return;
+        Display display = Display.getDefault();
+        if (display != null && !display.isDisposed() && showFilterListener != null)
+            display.removeFilter(SWT.Show, showFilterListener);
+        showFilterListener = null;
+        filtersInstalled = false;
+        HOOKED_PAGES.clear();
     }
 
     private static void scanWorkbenchShells()
