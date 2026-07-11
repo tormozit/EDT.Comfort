@@ -267,6 +267,26 @@ public final class IRSession
                 applyCodeEditorSync(payload);
         }
 
+        /** Подготовка sync для редактора запросов: язык запросов, без имени модуля. */
+        CodeEditorSyncPayload prepareQueryEditorSync(ISourceViewer viewer, int caretOffset)
+        {
+            if (viewer == null)
+                return null;
+            IDocument doc = viewer.getDocument();
+            if (doc == null)
+                return null;
+            String text = doc.get();
+            Object sel = viewer.getSelectionProvider().getSelection();
+            int offset = caretOffset >= 0
+                ? caretOffset
+                : (sel instanceof ITextSelection ts ? ts.getOffset() : 0);
+            int endOffset = sel instanceof ITextSelection ts
+                ? offset + ts.getLength()
+                : offset;
+            return new CodeEditorSyncPayload(
+                text, "", offset, endOffset, "", null, List.of(), true); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+
         private CodeEditorSyncPayload prepareCodeEditorSync(
             BslXtextEditor editor, int offset, int endOffset)
         {
@@ -309,6 +329,8 @@ public final class IRSession
         private void applyCodeEditorSync(CodeEditorSyncPayload payload)
         {
             ensureCodeEditor();
+            if (payload.isQueryMode)
+                ComBridge.setProperty(codeEditor, "ЯзыкПрограммы", 1); //$NON-NLS-1$
             discardPendingUserMessages();
             for (IRModuleChangeCollector.ModuleSyncEntry e : payload.pending)
             {
@@ -331,9 +353,19 @@ public final class IRSession
             final String bslPath;
             final byte[] hash;
             final List<IRModuleChangeCollector.ModuleSyncEntry> pending;
+            final boolean isQueryMode;
+
             CodeEditorSyncPayload(
                 String text, String moduleName, int offset, int endOffset,
                 String bslPath, byte[] hash, List<IRModuleChangeCollector.ModuleSyncEntry> pending)
+            {
+                this(text, moduleName, offset, endOffset, bslPath, hash, pending, false);
+            }
+
+            CodeEditorSyncPayload(
+                String text, String moduleName, int offset, int endOffset,
+                String bslPath, byte[] hash, List<IRModuleChangeCollector.ModuleSyncEntry> pending,
+                boolean isQueryMode)
             {
                 this.text = text;
                 this.moduleName = moduleName;
@@ -342,6 +374,7 @@ public final class IRSession
                 this.bslPath = bslPath;
                 this.hash = hash;
                 this.pending = pending;
+                this.isQueryMode = isQueryMode;
             }
         }
 

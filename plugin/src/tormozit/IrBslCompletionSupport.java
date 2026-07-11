@@ -349,6 +349,66 @@ public final class IrBslCompletionSupport
     }
 
     /**
+     * Assist для произвольного {@link TextEditorFacade}.
+     * BSL — делегирует в BSL-путь; query — использует {@code prepareQueryEditorSync}.
+     */
+    public static void prepareAssistContextAsync(
+        IRSession session, TextEditorFacade facade, int caretOffset, boolean autoInvoke,
+        Consumer<Snapshot> onReady)
+    {
+        prepareAssistContextAsync(session, facade, caretOffset, autoInvoke, false, onReady);
+    }
+
+    public static void prepareAssistContextAsync(
+        IRSession session, TextEditorFacade facade, int caretOffset, boolean autoInvoke,
+        boolean closePreviousCommand, Consumer<Snapshot> onReady)
+    {
+        if (facade == null)
+            return;
+        if (!facade.isQueryMode() && facade instanceof BslTextEditorFacade bf)
+        {
+            prepareAssistContextAsync(session, bf.getBslEditor(), caretOffset, autoInvoke,
+                closePreviousCommand, onReady);
+            return;
+        }
+        if (session == null || session.executor == null || session.executor.isShutdown())
+            return;
+        ISourceViewer viewer = facade.getSourceViewer();
+        if (viewer == null)
+            return;
+        IRSession.CodeEditorSyncPayload payload;
+        try
+        {
+            payload = session.prepareQueryEditorSync(viewer, caretOffset);
+        }
+        catch (Exception e)
+        {
+            IrCompletionDebug.problem("query sync: " + e.getMessage()); //$NON-NLS-1$
+            return;
+        }
+        if (payload == null)
+            return;
+        final IRSession.CodeEditorSyncPayload syncPayload = payload;
+        session.executor.submit(() -> {
+            Snapshot snapshot = null;
+            try
+            {
+                if (closePreviousCommand)
+                    finishAssistCommandProcessing(session);
+                snapshot = fetchCompletionSnapshot(session, syncPayload, autoInvoke);
+            }
+            catch (Exception e)
+            {
+                IrCompletionDebug.problem("query fetch: " + e.getMessage()); //$NON-NLS-1$
+            }
+            final Snapshot ready = snapshot;
+            Display display = Display.getDefault();
+            if (display != null && !display.isDisposed() && onReady != null)
+                display.asyncExec(() -> onReady.accept(ready));
+        });
+    }
+
+    /**
      * Закрывает контекст assist в ИР (RDT: КончитьОбработкуКоманды после сессии или перед новым sync).
      * Только COM-поток {@link IRSession#executor}.
      */

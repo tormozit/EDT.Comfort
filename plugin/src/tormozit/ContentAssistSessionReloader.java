@@ -38,6 +38,8 @@ import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Widget;
+import org.eclipse.ui.IWorkbenchPart;
+import org.eclipse.ui.IWorkbenchPartSite;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.xtext.resource.EObjectAtOffsetHelper;
@@ -90,6 +92,7 @@ public final class ContentAssistSessionReloader
     private final SourceViewer viewer;
     private final ContentAssistant assistant;
     private final SmartContentAssistProcessor processor;
+    private final TextEditorFacade facade;
     private final BslXtextEditor bslEditor;
     private final CtrlSpaceFilter ctrlSpaceFilter;
     private final String displayFilterKey;
@@ -198,7 +201,7 @@ public final class ContentAssistSessionReloader
     private volatile boolean literalFlushTimerActive;
 
     public static void install(SourceViewer viewer, ContentAssistant assistant,
-                               SmartContentAssistProcessor processor, BslXtextEditor editor)
+                               SmartContentAssistProcessor processor, TextEditorFacade facade)
     {
         if (!ComfortSettings.isReplaceListFiltersEnabled())
             return;
@@ -209,7 +212,7 @@ public final class ContentAssistSessionReloader
             return;
 
         ContentAssistSessionReloader reloader =
-            new ContentAssistSessionReloader(viewer, assistant, processor, editor);
+            new ContentAssistSessionReloader(viewer, assistant, processor, facade);
         INSTALLED.put(viewer, reloader);
         control.setData(DATA_KEY, Boolean.TRUE);
         reloader.logInstallDiagnostics(viewer);
@@ -254,29 +257,31 @@ public final class ContentAssistSessionReloader
 
     private ContentAssistSessionReloader(SourceViewer viewer, ContentAssistant assistant,
                                          SmartContentAssistProcessor processor,
-                                         BslXtextEditor editor)
+                                         TextEditorFacade facade)
     {
         this.viewer = viewer;
         this.assistant = assistant;
         this.processor = processor;
-        this.bslEditor = editor;
+        this.facade = facade;
+        this.bslEditor = facade instanceof BslTextEditorFacade bf ? bf.getBslEditor() : null;
         this.ctrlSpaceFilter = new CtrlSpaceFilter();
         this.displayFilterKey = "tormozit.ctrlSpaceFilter." + System.identityHashCode(viewer); //$NON-NLS-1$
         IInformationControlCreator installBrowserCreator =
             BslCompletionSideHintResolver.resolveAssistBrowserCreator(viewer);
-        if (installBrowserCreator == null)
+        if (installBrowserCreator == null && bslEditor != null)
             installBrowserCreator =
-                BslCompletionSideHintResolver.resolveAssistBrowserCreatorFromEditor(editor);
-        if (installBrowserCreator == null)
+                BslCompletionSideHintResolver.resolveAssistBrowserCreatorFromEditor(bslEditor);
+        if (installBrowserCreator == null && bslEditor != null)
             installBrowserCreator = BslCompletionSideHintResolver
-                .resolveAssistBrowserCreatorCold(editor, viewer, processor).creator;
-        if (installBrowserCreator == null)
+                .resolveAssistBrowserCreatorCold(bslEditor, viewer, processor).creator;
+        if (installBrowserCreator == null && bslEditor != null)
             installBrowserCreator = BslCompletionSideHintResolver.primeRspHoverCreator(
-                viewer, -1, editor);
+                viewer, -1, bslEditor);
         if (installBrowserCreator != null)
         {
             this.assistBrowserCreator = installBrowserCreator;
-            BslCompletionSideHintResolver.rememberEditorBrowserCreator(editor, installBrowserCreator);
+            if (bslEditor != null)
+                BslCompletionSideHintResolver.rememberEditorBrowserCreator(bslEditor, installBrowserCreator);
         }
         // #region agent log
         logInstallCreatorDiagnostics(viewer, installBrowserCreator != null);
@@ -295,12 +300,12 @@ public final class ContentAssistSessionReloader
                     && !completionAutoOpenPending && !completionAutoOpenIrScheduled
                     && !processor.isIrOnlyManualMode()
                     && ComfortSettings.isReplaceListFiltersEnabled()
-                    && IrBslExpressionHtmlSupport.resolveIrSessionForAssist(bslEditor, viewer) != null)
+                    && IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer) != null)
                 {
                     // #region agent log
                     ContentAssistDebug.debugModeLog("H1", "assistSessionStarted", "tryBeginLiteral", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                         "{\"caret\":" + caret + ",\"build\":\"" //$NON-NLS-1$ //$NON-NLS-2$
-                            + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+                            + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$
                     // #endregion
                     tryBeginManualDualAssist(caret);
                 }
@@ -312,7 +317,7 @@ public final class ContentAssistSessionReloader
                 }
                 if (!event.isAutoActivated && inMember
                     && ComfortSettings.isReplaceListFiltersEnabled()
-                    && IrBslExpressionHtmlSupport.resolveIrSessionForAssist(bslEditor, viewer) != null)
+                    && IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer) != null)
                 {
                     ContentAssistPopupSync.ensureEmptyListAllowed(assistant, true);
                     // #region agent log
@@ -477,7 +482,7 @@ public final class ContentAssistSessionReloader
                     && SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret);
                 boolean popupVisible = ContentAssistPopupSync.isPopupVisible(assistant);
                 boolean irConnected = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(
-                    bslEditor, viewer) != null;
+                    facade, viewer) != null;
                 // #region agent log
                 ContentAssistDebug.debugModeLog("H63", "assistSessionRestarted", "session", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     "{\"auto\":" + event.isAutoActivated + ",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
@@ -675,14 +680,14 @@ public final class ContentAssistSessionReloader
 
     private void cancelIrEvaluationIfConnected()
     {
-        IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(bslEditor);
+        IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(facade);
         if (session != null)
             IRSession.cancelActiveEvaluation(session);
     }
 
     private void finishIrAssistCommandProcessing()
     {
-        IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(bslEditor);
+        IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(facade);
         if (session == null || session.executor == null || session.executor.isShutdown())
             return;
         session.executor.submit(() -> IrBslCompletionSupport.finishAssistCommandProcessing(session));
@@ -1243,10 +1248,13 @@ public final class ContentAssistSessionReloader
         ParamHoverProbe probe = new ParamHoverProbe();
         try
         {
-            if (bslEditor != null && bslEditor.getSite() != null
-                && bslEditor.getSite().getPage() != null)
+            IWorkbenchPartSite site = facade != null ? facade.getSite() : null;
+            if (site != null && site.getPage() != null)
             {
-                bslEditor.getSite().getPage().activate(bslEditor);
+                if (bslEditor != null)
+                    site.getPage().activate(bslEditor);
+                else
+                    site.getPage().activate(site.getPart());
             }
             if (!st.isFocusControl())
                 st.setFocus();
@@ -1305,9 +1313,7 @@ public final class ContentAssistSessionReloader
                 probe.err = "windowNull"; //$NON-NLS-1$
                 return probe;
             }
-            org.eclipse.ui.IWorkbenchPartSite site = null;
-            if (bslEditor != null)
-                site = bslEditor.getSite();
+            org.eclipse.ui.IWorkbenchPartSite site = facade != null ? facade.getSite() : null;
             org.eclipse.ui.handlers.IHandlerService handlers = null;
             if (site != null)
                 handlers = site.getService(org.eclipse.ui.handlers.IHandlerService.class);
@@ -2314,7 +2320,7 @@ public final class ContentAssistSessionReloader
         completionAutoOpenAwaitingLogged = false;
         ContentAssistPopupSync.ensureEmptyListAllowed(assistant, false);
         processor.onAssistSessionContextReady(viewer, caret);
-        IRSession session = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(bslEditor, viewer);
+        IRSession session = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer);
         boolean irScheduled = false;
         if (session != null && !isWordsTableFetchInFlightForCaret(caret))
         {
@@ -2368,7 +2374,7 @@ public final class ContentAssistSessionReloader
         //
         //shown = ContentAssistPopupSync.showPossibleCompletions(assistant); // Для штатного механизма это безусловное открытие окна как если бы CTRL+Space нажал. Поэтому выше продублировал штатную логику автооткрытия окна  
         
-        IDtProject dtProject = Global.getDtProjectFromBslEditor(bslEditor);
+        IDtProject dtProject = facade.getDtProject();
         if (dtProject == null || !IRApplication.hasConnectedSessionForKeys(dtProject))
             return; // Иначе непустой список затирается пустым вероятно после фиктивного слияния с ИР 
         boolean popupVisible = shown && ContentAssistPopupSync.isPopupVisible(assistant);
@@ -2632,7 +2638,7 @@ public final class ContentAssistSessionReloader
             return;
         if (!ComfortSettings.isReplaceListFiltersEnabled())
             return;
-        if (IrBslExpressionHtmlSupport.resolveIrSessionForAssist(bslEditor, viewer) == null)
+        if (IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer) == null)
             return;
         if (caret < 0)
             return;
@@ -2700,6 +2706,11 @@ public final class ContentAssistSessionReloader
     public BslXtextEditor getBslEditor()
     {
         return bslEditor;
+    }
+
+    public TextEditorFacade getFacade()
+    {
+        return facade;
     }
 
     public SmartContentAssistProcessor getProcessor()
@@ -3169,7 +3180,7 @@ public final class ContentAssistSessionReloader
 
     private void auditLiteralList(ContentAssistant ca, SourceViewer sv, int irN, String phase)
     {
-        ContentAssistPopupSync.auditLiteralPopupList(ca, sv, processor, bslEditor, irN, phase);
+        ContentAssistPopupSync.auditLiteralPopupList(ca, sv, processor, facade, irN, phase);
     }
 
     private void scheduleEmptyListRecovery(ContentAssistant ca, SourceViewer sv,
@@ -3329,10 +3340,10 @@ public final class ContentAssistSessionReloader
             // #endregion
             return;
         }
-        IRSession session = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(bslEditor, viewer);
+        IRSession session = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer);
         if (session == null)
         {
-            IDtProject dtProject = bslEditor != null ? Global.getDtProjectFromBslEditor(bslEditor) : null;
+            IDtProject dtProject = facade != null ? facade.getDtProject() : null;
             // #region agent log
             ContentAssistDebug.debugModeLog("H5", "tryBeginManualDualAssist", "noSession", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 "{\"caret\":" + caret + ",\"editorNull\":" + (bslEditor == null) //$NON-NLS-1$ //$NON-NLS-2$
@@ -3661,12 +3672,12 @@ public final class ContentAssistSessionReloader
 
     private boolean scheduleWordsTablePreparation(int caret, boolean autoInvoke)
     {
-        if (bslEditor == null || caret < 0)
+        if (facade == null || caret < 0)
             return false;
-        IRSession session = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(bslEditor, viewer);
+        IRSession session = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer);
         if (session == null)
         {
-            IDtProject dtProject = Global.getDtProjectFromBslEditor(bslEditor);
+            IDtProject dtProject = facade.getDtProject();
             // #region agent log
             ContentAssistDebug.debugModeLog("H5", "scheduleWordsTablePreparation", "noSession", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 "{\"caret\":" + caret + ",\"dtProjectNull\":" + (dtProject == null) //$NON-NLS-1$ //$NON-NLS-2$
@@ -3707,7 +3718,7 @@ public final class ContentAssistSessionReloader
         // #endregion
         int syncCaretOffset = autoInvoke
             ? caret : IrBslCompletionSupport.SYNC_USE_EDITOR_SELECTION;
-        IrBslCompletionSupport.prepareAssistContextAsync(session, bslEditor, syncCaretOffset, autoInvoke,
+        IrBslCompletionSupport.prepareAssistContextAsync(session, facade, syncCaretOffset, autoInvoke,
             closePrevious, raw -> onWordsTablePrepared(caret, raw, fetchDiagSeq));
         return true;
     }
@@ -4203,7 +4214,7 @@ public final class ContentAssistSessionReloader
         boolean inLiteral = caret >= 0
             && SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret);
         boolean irConnected = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(
-            bslEditor, viewer) != null;
+            facade, viewer) != null;
         // #region agent log
         ContentAssistDebug.debugModeLog("H60", "contentAssistCommand", "preExecute", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             "{\"popupVisible\":" + popupVisible + ",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
@@ -4228,7 +4239,7 @@ public final class ContentAssistSessionReloader
             || !SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret))
             return false;
         boolean irConnected = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(
-            bslEditor, viewer) != null;
+            facade, viewer) != null;
         int tableRowsBefore = ContentAssistPopupSync.tableItemCountForAssistant(assistant);
         // #region agent log
         ContentAssistDebug.debugModeLog("H56", "literalRepeatToggle", source, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
@@ -4266,7 +4277,7 @@ public final class ContentAssistSessionReloader
         ContentAssistSessionReloader reloader = getActiveReloader();
         boolean irConnected = reloader != null && viewer != null
             && IrBslExpressionHtmlSupport.resolveIrSessionForAssist(
-                reloader.getBslEditor(), viewer) != null;
+                reloader.getFacade(), viewer) != null;
         String returnClass = returnValue != null ? returnValue.getClass().getSimpleName() : "null"; //$NON-NLS-1$
         String err = exception != null && exception.getMessage() != null
             ? ContentAssistDebug.jsonEscapeForLog(exception.getMessage()) : ""; //$NON-NLS-1$
@@ -4349,7 +4360,7 @@ public final class ContentAssistSessionReloader
             {
                 if (!ComfortSettings.isReplaceListFiltersEnabled())
                     return;
-                if (IrBslExpressionHtmlSupport.resolveIrSessionForAssist(bslEditor, viewer) == null)
+                if (IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer) == null)
                     return;
                 if (text == null || text.isDisposed())
                     return;
@@ -4384,7 +4395,7 @@ public final class ContentAssistSessionReloader
                 // #endregion
                 return;
             }
-            if (IrBslExpressionHtmlSupport.resolveIrSessionForAssist(bslEditor, viewer) == null)
+            if (IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer) == null)
             {
                 // #region agent log
                 ContentAssistDebug.debugModeLog("H11", "CtrlSpaceFilter", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$

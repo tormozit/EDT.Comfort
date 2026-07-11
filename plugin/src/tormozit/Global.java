@@ -434,6 +434,44 @@ public final class Global
         return null;
     }
 
+    /**
+     * {@link IDtProject} для диалога редактора запросов.
+     * Ищет поле {@code project} ({@link IDtProject}) в объекте dialog рефлексией.
+     */
+    public static IDtProject getDtProjectFromQueryDialog(Object queryDialog)
+    {
+        if (queryDialog == null)
+            return null;
+        IDtProject fromField = getProjectFromEditor(queryDialog);
+        if (fromField != null)
+            return fromField;
+        try
+        {
+            IWorkbenchWindow window =
+                PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            if (window == null)
+                return null;
+            IWorkbenchPage page = window.getActivePage();
+            if (page == null)
+                return null;
+            IEditorPart editor = page.getActiveEditor();
+            if (editor == null)
+                return null;
+            IEditorInput input = editor.getEditorInput();
+            if (input != null)
+            {
+                IFile file = input.getAdapter(IFile.class);
+                if (file != null)
+                    return getDtProjectFromWorkspaceProject(file.getProject());
+            }
+        }
+        catch (Exception e)
+        {
+            log("Global.getDtProjectFromQueryDialog: " + e); //$NON-NLS-1$
+        }
+        return null;
+    }
+
     /** {@link IDtProject} по {@link IProject} воркспейса. */
     public static IDtProject getDtProjectFromWorkspaceProject(IProject iProject)
     {

@@ -40,6 +40,22 @@ public final class IrBslExpressionHtmlSupport
         return session;
     }
 
+    /** Сессия ИР для произвольного {@link TextEditorFacade} (BSL или query). */
+    public static IRSession resolveConnectedSession(TextEditorFacade facade)
+    {
+        if (facade == null)
+            return null;
+        if (!facade.isQueryMode() && facade instanceof BslTextEditorFacade bf)
+            return resolveConnectedSession(bf.getBslEditor());
+        IDtProject dtProject = facade.getDtProject();
+        if (dtProject == null || !IRApplication.hasConnectedSessionForKeys(dtProject))
+            return null;
+        IRSession session = IRApplication.getSession(dtProject);
+        if (session == null || session.executor == null || session.executor.isShutdown())
+            return null;
+        return session;
+    }
+
     /** Сессия ИР для assist: штатный путь + {@link IRApplication#getConnectedSession}. */
     public static IRSession resolveIrSessionForAssist(BslXtextEditor editor, SourceViewer viewer)
     {
@@ -47,6 +63,24 @@ public final class IrBslExpressionHtmlSupport
         if (session != null)
             return session;
         IDtProject dtProject = editor != null ? Global.getDtProjectFromBslEditor(editor) : null;
+        if (dtProject != null)
+        {
+            session = IRApplication.getConnectedSession(dtProject);
+            if (session != null && session.executor != null && !session.executor.isShutdown())
+                return session;
+        }
+        return null;
+    }
+
+    /** Сессия ИР для assist через {@link TextEditorFacade}. */
+    public static IRSession resolveIrSessionForAssist(TextEditorFacade facade, SourceViewer viewer)
+    {
+        if (facade == null)
+            return null;
+        IRSession session = resolveConnectedSession(facade);
+        if (session != null)
+            return session;
+        IDtProject dtProject = facade.getDtProject();
         if (dtProject != null)
         {
             session = IRApplication.getConnectedSession(dtProject);

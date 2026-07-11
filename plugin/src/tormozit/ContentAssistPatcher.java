@@ -18,11 +18,18 @@ public final class ContentAssistPatcher
 
     public static boolean applyPatch(SourceViewer sourceViewer, int timeout, String charset)
     {
-        return applyPatch(sourceViewer, timeout, charset, null);
+        return applyPatch(sourceViewer, timeout, charset, (TextEditorFacade) null);
     }
 
     public static boolean applyPatch(SourceViewer sourceViewer, int timeout, String charset,
                                     BslXtextEditor editor)
+    {
+        return applyPatch(sourceViewer, timeout, charset,
+            editor != null ? new BslTextEditorFacade(editor) : null);
+    }
+
+    public static boolean applyPatch(SourceViewer sourceViewer, int timeout, String charset,
+                                    TextEditorFacade facade)
     {
         ContentAssistant contentAssist = getContentAssistant(sourceViewer);
         if (contentAssist == null)
@@ -69,7 +76,7 @@ public final class ContentAssistPatcher
         }
 
         contentAssist.setSorter(new SmartCodeProposalSorter());
-        ContentAssistSessionReloader.install(sourceViewer, contentAssist, wrapper, editor);
+        ContentAssistSessionReloader.install(sourceViewer, contentAssist, wrapper, facade);
 
         ContentAssistDebug.log("applyPatch OK delegate=" + xtext.getClass().getSimpleName()); //$NON-NLS-1$
         // #region agent log

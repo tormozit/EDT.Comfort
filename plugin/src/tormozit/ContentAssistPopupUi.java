@@ -1,6 +1,5 @@
 package tormozit;
 
-import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import org.eclipse.jface.text.contentassist.ContentAssistant;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.swt.SWT;
@@ -302,8 +301,8 @@ public final class ContentAssistPopupUi
         if (inLiteral)
         {
             ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
-            BslXtextEditor editor = reloader != null ? reloader.getBslEditor() : null;
-            irConnected = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(editor, viewer)
+            TextEditorFacade facade = reloader != null ? reloader.getFacade() : null;
+            irConnected = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer)
                 != null;
         }
         toggle.setEnabled(true);

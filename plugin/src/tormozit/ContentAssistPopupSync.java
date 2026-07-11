@@ -238,9 +238,9 @@ public final class ContentAssistPopupSync
                                                SmartContentAssistProcessor processor, int caret)
     {
         ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
-        BslXtextEditor editor = reloader != null ? reloader.getBslEditor() : null;
+        TextEditorFacade facade = reloader != null ? reloader.getFacade() : null;
         return reloader != null && (
-            IrBslExpressionHtmlSupport.resolveIrSessionForAssist(editor, viewer) != null
+            IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer) != null
             || reloader.isManualIrAssistPending()
             || reloader.isWordsTableReady()
             || reloader.isWordsTableFetchInFlightForContext(caret)
@@ -635,10 +635,10 @@ public final class ContentAssistPopupSync
 
             ContentAssistSessionReloader literalReloader =
                 ContentAssistSessionReloader.getActiveReloader();
-            BslXtextEditor literalEditor = literalReloader != null
-                ? literalReloader.getBslEditor() : null;
+            TextEditorFacade literalFacade = literalReloader != null
+                ? literalReloader.getFacade() : null;
             boolean literalIrExpected = literalReloader != null && (
-                IrBslExpressionHtmlSupport.resolveIrSessionForAssist(literalEditor, viewer) != null
+                IrBslExpressionHtmlSupport.resolveIrSessionForAssist(literalFacade, viewer) != null
                 || literalReloader.isManualIrAssistPending()
                 || literalReloader.isWordsTableReady()
                 || literalReloader.isWordsTableFetchInFlightForContext(caret)
@@ -658,7 +658,7 @@ public final class ContentAssistPopupSync
                 ContentAssistSessionReloader auditReloader =
                     ContentAssistSessionReloader.getActiveReloader();
                 ContentAssistPopupSync.auditLiteralPopupList(assistant, viewer, processor,
-                    auditReloader != null ? auditReloader.getBslEditor() : null,
+                    auditReloader != null ? auditReloader.getFacade() : null,
                     auditReloader != null ? auditReloader.getExpectedLiteralIrCount() : -1,
                     "literalStockOnly"); //$NON-NLS-1$
                 int tableRowsBefore = tableItemCount(popup);
@@ -871,7 +871,7 @@ public final class ContentAssistPopupSync
                     ContentAssistSessionReloader auditReloader =
                         ContentAssistSessionReloader.getActiveReloader();
                     ContentAssistPopupSync.auditLiteralPopupList(assistant, viewer, processor,
-                        auditReloader != null ? auditReloader.getBslEditor() : null,
+                        auditReloader != null ? auditReloader.getFacade() : null,
                         auditReloader != null ? auditReloader.getExpectedLiteralIrCount() : -1,
                         "recomputeApplied"); //$NON-NLS-1$
                 }
@@ -1689,12 +1689,20 @@ public final class ContentAssistPopupSync
         SourceViewer viewer, SmartContentAssistProcessor processor, BslXtextEditor editor,
         int expectedIrN, String phase)
     {
+        return auditLiteralPopupList(assistant, viewer, processor,
+            editor != null ? new BslTextEditorFacade(editor) : null, expectedIrN, phase);
+    }
+
+    public static LiteralPopupListAudit auditLiteralPopupList(ContentAssistant assistant,
+        SourceViewer viewer, SmartContentAssistProcessor processor, TextEditorFacade facade,
+        int expectedIrN, String phase)
+    {
         if (processor == null || viewer == null || phase == null)
             return null;
         int caret = SmartContentAssistProcessor.resolveWidgetCaret(viewer);
         if (caret < 0 || !SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret))
             return null;
-        if (IrBslExpressionHtmlSupport.resolveIrSessionForAssist(editor, viewer) == null)
+        if (IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer) == null)
             return null;
         if (expectedIrN < 0 && processor.isIrWordsResolvedForContext())
             expectedIrN = processor.resolvedIrProposalCount();

@@ -15,6 +15,7 @@ import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.jface.util.IPropertyChangeListener;
 import org.eclipse.jface.util.PropertyChangeEvent;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
@@ -34,7 +35,10 @@ import org.eclipse.swt.events.KeyEvent;
 import org.eclipse.swt.widgets.Display;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import com._1c.g5.v8.dt.dcs.ui.DataCompositionSchemaEditor;
+import com._1c.g5.v8.dt.dcs.ui.datasets.DataSets;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
+import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorEmbeddedEditorPage;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
 
 /**
@@ -171,8 +175,6 @@ public final class ContentAssistManager
         if (!settings.isEnabled())
             return;
 
-        // getActiveEditor() — protected в MultiPageEditorPart, недоступен снаружи.
-        // Используем getActivePageInstance() → DtGranularEditorXtextEditorPage.
         org.eclipse.ui.forms.editor.IFormPage activePage =
             editor.getActivePageInstance();
         if (activePage instanceof DtGranularEditorXtextEditorPage<?>)
@@ -182,8 +184,9 @@ public final class ContentAssistManager
             if (embedded instanceof BslXtextEditor)
                 applyPatchToBslEditor((BslXtextEditor) embedded);
         }
+        if (activePage instanceof DtGranularEditorEmbeddedEditorPage<?> embeddedPage)
+            applyPatchToDcsQueryInPage(embeddedPage);
 
-        // Подписываемся на смену страниц
         if (!pageListeners.containsKey(editor))
         {
             IPageChangedListener pl = new PageChangeListener();
@@ -205,6 +208,51 @@ public final class ContentAssistManager
             sourceViewer, settings.getTimeout(), settings.getCharset(), editor);
         ContentAssistDebug.log("BslEditor patch " + (ok ? "OK" : "FAIL") //$NON-NLS-1$
             + " editor=" + editor.getTitle()); //$NON-NLS-1$
+    }
+
+    void applyPatchToQueryEditorShell(Shell shell)
+    {
+        if (!settings.isEnabled()) return;
+        if (shell == null || shell.isDisposed()) return;
+
+        ISourceViewer viewer = QueryTextEditDialogHook.resolveViewerForShell(shell);
+        if (viewer == null || !(viewer instanceof SourceViewer sourceViewer))
+            return;
+
+        Object dialog = QueryTextEditDialogHook.resolveDialogForShell(shell);
+        Object qlEditor = dialog != null ? Global.getField(dialog, "qlEditor") : null; //$NON-NLS-1$
+        QueryTextEditorFacade facade = new QueryTextEditorFacade(qlEditor, sourceViewer, dialog);
+
+        boolean ok = ContentAssistPatcher.applyPatch(
+            sourceViewer, settings.getTimeout(), settings.getCharset(), facade);
+        ContentAssistDebug.log("QueryEditor patch " + (ok ? "OK" : "FAIL") //$NON-NLS-1$
+            + " shell=" + shell.getText()); //$NON-NLS-1$
+    }
+
+    private void applyPatchToDcsQueryInPage(DtGranularEditorEmbeddedEditorPage<?> page)
+    {
+        if (!settings.isEnabled()) return;
+        if (!"editors.commontemplate.pages.dcs".equals(page.getId())) //$NON-NLS-1$
+            return;
+        IEditorPart embedded = page.getEmbeddedEditor();
+        if (!(embedded instanceof DataCompositionSchemaEditor dcsEditor))
+            return;
+        if (dcsEditor.getPages().isEmpty())
+            return;
+        Object firstPage = dcsEditor.getPages().get(0);
+        if (!(firstPage instanceof DataSets dataSets))
+            return;
+        Object qlEditor = dataSets.getQueryEditor();
+        if (qlEditor == null)
+            return;
+        Object viewerObj = Global.invoke(qlEditor, "getViewer"); //$NON-NLS-1$
+        if (!(viewerObj instanceof SourceViewer sourceViewer))
+            return;
+        QueryTextEditorFacade facade =
+            new QueryTextEditorFacade(qlEditor, sourceViewer, null);
+        boolean ok = ContentAssistPatcher.applyPatch(
+            sourceViewer, settings.getTimeout(), settings.getCharset(), facade);
+        ContentAssistDebug.log("DcsQuery patch " + (ok ? "OK" : "FAIL")); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private void registerPartListener(IWorkbenchWindow window)
@@ -294,6 +342,8 @@ public final class ContentAssistManager
                 if (embedded instanceof BslXtextEditor)
                     applyPatchToBslEditor((BslXtextEditor) embedded);
             }
+            if (page instanceof DtGranularEditorEmbeddedEditorPage<?> embeddedPage)
+                applyPatchToDcsQueryInPage(embeddedPage);
         }
     }
 }

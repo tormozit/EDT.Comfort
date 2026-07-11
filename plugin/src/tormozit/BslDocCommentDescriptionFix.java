@@ -710,8 +710,7 @@ public final class BslDocCommentDescriptionFix
 
     private static void ndjson(String location, String message, String dataJson)
     {
-        if (Global.isLogEnabled())
-            Global.log("bslDocComment", location + ": " + message + " " + dataJson); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+//        Global.log("bslDocComment", location + ": " + message + " " + dataJson); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     private static final class ParseWeavingHook implements WeavingHook

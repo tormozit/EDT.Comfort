@@ -93,6 +93,7 @@ public final class QueryTextEditDialogHook implements IStartup
 
         scheduleHookStyledTextMenus(shell.getDisplay(), shell, 0);
         scheduleMenuDetectOnShell(shell.getDisplay(), shell, 0);
+        scheduleContentAssistPatch(shell);
     }
 
     private static void handleMenuWidgetShow(Menu menu)
@@ -609,6 +610,36 @@ public final class QueryTextEditDialogHook implements IStartup
         if (dialog == null)
             return "null"; //$NON-NLS-1$
         return dialog.getClass().getName();
+    }
+
+    private static void scheduleContentAssistPatch(Shell shell)
+    {
+        if (shell == null || shell.isDisposed())
+            return;
+        shell.getDisplay().asyncExec(() ->
+        {
+            if (shell.isDisposed())
+                return;
+            ContentAssistManager mgr = ContentAssistManager.getInstance();
+            if (mgr != null)
+                mgr.applyPatchToQueryEditorShell(shell);
+        });
+    }
+
+    static ISourceViewer resolveViewerForShell(Shell shell)
+    {
+        if (shell == null || shell.isDisposed())
+            return null;
+        Object dialog = resolveDialog(shell);
+        if (dialog == null)
+            return null;
+        Object qlEditor = Global.getField(dialog, "qlEditor"); //$NON-NLS-1$
+        return viewerFromQlEditor(qlEditor);
+    }
+
+    static Object resolveDialogForShell(Shell shell)
+    {
+        return resolveDialog(shell);
     }
 
     /**
