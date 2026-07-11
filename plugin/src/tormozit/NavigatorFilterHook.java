@@ -200,6 +200,7 @@ public final class NavigatorFilterHook implements IStartup
         if (tree.getData(PATCHED_KEY) != null)
         {
             NavigatorFilterDebug.log("try#" + attempt + " SKIP already patched"); //$NON-NLS-1$ //$NON-NLS-2$
+            NavigatorAttributePropertiesHook.ensureInstalled(navigator, viewer);
             return true;
         }
 
@@ -232,6 +233,7 @@ public final class NavigatorFilterHook implements IStartup
         if (rawLp instanceof NavigatorStyledCellLabelWrapper || rawLp instanceof SmartStyledCellLabelWrapper)
         {
             NavigatorFilterDebug.log("try#" + attempt + " SKIP already wrapped"); //$NON-NLS-1$ //$NON-NLS-2$
+            NavigatorAttributePropertiesHook.ensureInstalled(navigator, viewer);
             return true;
         }
 
@@ -332,6 +334,7 @@ public final class NavigatorFilterHook implements IStartup
         tree.setData(PATCHED_KEY, Boolean.TRUE);
         tree.setData(SEARCH_CACHE_KEY, searchCache);
         tree.setData(HIGHLIGHT_KEY, highlight);
+        NavigatorAttributePropertiesHook.ensureInstalled(navigator, viewer);
         return true;
     }
 

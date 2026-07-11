@@ -32,6 +32,7 @@
     <startup class="tormozit.ObjectSetsBootstrapHook"/>
     <startup class="tormozit.ObjectSetSubsystemsFilterBridge"/>
     <startup class="tormozit.NavigatorAddToObjectSetMenuHook"/>
+    <startup class="tormozit.NavigatorAttributePropertiesHook"/>
     <startup class="tormozit.PropertySheetHook"/>
     <startup class="tormozit.ChoiceParametersHook"/>
     <startup class="tormozit.PredefinedSelectionDialogHook"/>
