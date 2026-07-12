@@ -9,11 +9,17 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
 import java.nio.file.Files;
 import java.util.Locale;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.Adapters;
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.Status;
+import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.TreeSelection;
 import org.eclipse.ui.IEditorInput;
@@ -245,7 +251,23 @@ public final class Global
      */
     public static boolean installLightControlFocusOutListener(Object lightControl, Runnable onFocusLost)
     {
-        if (lightControl == null || onFocusLost == null)
+        return installLightControlListener(lightControl, onFocusLost, null);
+    }
+
+    /**
+     * Как {@link #installLightControlFocusOutListener}, но дополнительно вызывает {@code onEnter}
+     * при нажатии Enter ({@code event.type == SWT.KeyDown && event.character == SWT.CR}) — фокус
+     * при этом не теряется, обработчик просто запускается по факту подтверждения ввода.
+     * Используется точечно (сейчас — только в панели «Свойства»,
+     * см. {@link PropertyNameIdentifierHook}), не в мастерах «Новый ...».
+     *
+     * @param onFocusLost вызывается на {@code SWT.FocusOut}; если {@code null} — этот случай игнорируется
+     * @param onEnter     вызывается на Enter; если {@code null} — этот случай игнорируется
+     * @return {@code true}, если слушатель успешно добавлен через {@code addControlListener}
+     */
+    public static boolean installLightControlListener(Object lightControl, Runnable onFocusLost, Runnable onEnter)
+    {
+        if (lightControl == null || (onFocusLost == null && onEnter == null))
             return false;
         try
         {
@@ -258,8 +280,10 @@ public final class Global
                 if ("eventReceived".equals(name) && args != null && args.length == 2 //$NON-NLS-1$
                     && args[1] instanceof Event event)
                 {
-                    if (event.type == SWT.FocusOut)
+                    if (event.type == SWT.FocusOut && onFocusLost != null)
                         onFocusLost.run();
+                    else if (event.type == SWT.KeyDown && event.character == SWT.CR && onEnter != null)
+                        onEnter.run();
                     return null;
                 }
                 if ("hashCode".equals(name) && (args == null || args.length == 0)) //$NON-NLS-1$
@@ -286,7 +310,7 @@ public final class Global
         }
         catch (Exception e)
         {
-            logError("Global", "installLightControlFocusOutListener", e); //$NON-NLS-1$ //$NON-NLS-2$
+            logError("Global", "installLightControlListener", e); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
     }
@@ -584,6 +608,73 @@ public final class Global
                 return (IDtProject) dt;
         }
         return null;
+    }
+
+    // =========================================================================
+    // ИР — фоновые вызовы БСЛ-функций подключённого приложения
+    // =========================================================================
+
+    /**
+     * Если для {@code project} есть подключённое приложение ИР (дешёвая проверка без COM-пробы,
+     * см. {@link IRApplication#hasConnectedSessionForKeys}) — в фоновом {@link Job} вызывает
+     * {@code module.function(args)} через {@link ComBridge} на COM-потоке сессии
+     * ({@link IRSession#executeOnComThread}) и, если к моменту готовности результата
+     * {@code stillApplicable} возвращает {@code true}, передаёт результат в {@code onResult} —
+     * уже на UI-потоке ({@link Display#asyncExec}).
+     *
+     * <p>Ничего не делает (тихо), если ИР не подключён — не пытается подключиться и не
+     * показывает пользователю никаких сообщений об этом (в отличие от {@link IRApplication#getSession}).
+     *
+     * @param project        проект инфобазы; если {@code null} — вызов не выполняется
+     * @param moduleName     имя общего модуля ИР, например {@code "ирОбщий"}
+     * @param functionName   имя экспортной функции модуля
+     * @param args           аргументы вызова (как в {@link ComBridge#invoke})
+     * @param stillApplicable проверяется на UI-потоке непосредственно перед применением результата —
+     *                       обычно сравнение снимка состояния UI на момент вызова с текущим
+     * @param onResult       вызывается на UI-потоке с результатом ({@code ComBridge.toString(...)}),
+     *                       только если {@code stillApplicable.get() == true}
+     */
+    public static void callIrFunctionInBackground(IDtProject project, String moduleName, String functionName,
+        Object[] args, Supplier<Boolean> stillApplicable, Consumer<String> onResult)
+    {
+        if (project == null || !IRApplication.hasConnectedSessionForKeys(project))
+            return;
+
+        new Job("ИР: " + functionName) //$NON-NLS-1$
+        {
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                try
+                {
+                    IRSession session = IRApplication.getConnectedSession(project);
+                    if (session == null)
+                        return Status.OK_STATUS;
+
+                    String result = session.executeOnComThread(() ->
+                    {
+                        Object module = session.getModule(moduleName);
+                        Object raw = ComBridge.invoke(module, functionName, args);
+                        return ComBridge.toString(raw);
+                    });
+
+                    Display display = Display.getDefault();
+                    if (display != null && !display.isDisposed())
+                    {
+                        display.asyncExec(() ->
+                        {
+                            if (Boolean.TRUE.equals(stillApplicable.get()))
+                                onResult.accept(result);
+                        });
+                    }
+                }
+                catch (Exception e)
+                {
+                    logError("Global", "callIrFunctionInBackground(" + moduleName + "." + functionName + ")", e); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                }
+                return Status.OK_STATUS;
+            }
+        }.schedule();
     }
 
     // =========================================================================

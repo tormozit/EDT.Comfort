@@ -1,9 +1,11 @@
 package tormozit;
 
 import java.util.Collections;
+import java.util.List;
 import java.util.Set;
 import java.util.WeakHashMap;
 
+import org.eclipse.core.resources.IProject;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IStartup;
@@ -16,6 +18,8 @@ import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+
+import com._1c.g5.v8.dt.core.platform.IDtProject;
 
 /**
  * В панели «Свойства» (LWT/AEF-рендеринг — та же технология, что и в мастерах «Новый ...», см.
@@ -39,6 +43,12 @@ public class PropertyNameIdentifierHook implements IStartup
 {
     private static final String NAME_PROPERTY_LABEL = "Имя"; //$NON-NLS-1$
     private static final String LOG_TAG = "PropertyNameIdentifier"; //$NON-NLS-1$
+    private static final String IR_TYPE_MODULE = "ирОбщий"; //$NON-NLS-1$
+    private static final String IR_TYPE_FUNCTION = "ИмяТипаИзИмениПеременнойЛкс"; //$NON-NLS-1$
+    private static final String DEFAULT_TYPE_NAME_RU = "Строка"; //$NON-NLS-1$
+    private static final int DEFAULT_STRING_LENGTH = 10;
+    private static final String TYPE_DESCRIPTION_MODEL_INTERFACE =
+        "com._1c.g5.v8.dt.md.ui.aef.models.type.ITypeDescriptionModel"; //$NON-NLS-1$
 
     /** Нативные light-контролы, на которых уже висит наш слушатель — не переустанавливать. */
     private static final Set<Object> ATTACHED =
@@ -146,12 +156,77 @@ public class PropertyNameIdentifierHook implements IStartup
         if (ATTACHED.contains(nativeControl))
             return true;
 
-        if (!Global.installLightControlFocusOutListener(nativeControl, () -> onNameFocusLost(nativeControl)))
+        Object typeModel = findTypeDescriptionModel(scene);
+        String initialName = readLightTextValue(nativeControl);
+
+        // В отличие от мастеров «Новый ...» — здесь обработчик срабатывает и на Enter (не только
+        // на потерю фокуса), т.к. в панели «Свойства» пользователь обычно правит одно поле и
+        // не уходит из него сразу; фокус при Enter не теряется.
+        Runnable onCommit = () -> onNameFocusLost(nativeControl, typeModel, initialName);
+        if (!Global.installLightControlListener(nativeControl, onCommit, onCommit))
             return false;
 
         ATTACHED.add(nativeControl);
         Global.log(LOG_TAG, "строка «Имя» подключена в панели «Свойства»"); //$NON-NLS-1$
         return true;
+    }
+
+    /** Текущий текст поля «Имя» ({@code getContent()} для обёрток вроде {@code LightEditorBar}, иначе сам контрол). */
+    private static String readLightTextValue(Object nativeControl)
+    {
+        Object content = Global.invoke(nativeControl, "getContent"); //$NON-NLS-1$
+        Object textControl = content != null ? content : nativeControl;
+        Object textObj = Global.invoke(textControl, "getText"); //$NON-NLS-1$
+        return textObj instanceof String s ? s : null;
+    }
+
+    /**
+     * Обходит дерево AEF-компонентов {@code scene.getComponent()} (рекурсивно через
+     * {@code IComponent.getComponents()}) и ищет первый компонент, чья модель
+     * ({@code IComponent.getModel()}) реализует {@code ITypeDescriptionModel} — так находится
+     * структурное описание типа для строки «Тип», т.к. панель «Свойства» рендерится generic
+     * definition-driven компонентом без именованных полей вроде {@code typeComponent}
+     * (в отличие от мастеров, см. {@link NewAttributeNameIdentifierHook}).
+     */
+    private static Object findTypeDescriptionModel(Object scene)
+    {
+        Object root = Global.invoke(scene, "getComponent"); //$NON-NLS-1$
+        return findTypeDescriptionModelInTree(root, 0);
+    }
+
+    private static Object findTypeDescriptionModelInTree(Object component, int depth)
+    {
+        if (component == null || depth > 12)
+            return null;
+        Object model = Global.invoke(component, "getModel"); //$NON-NLS-1$
+        if (implementsInterface(model, TYPE_DESCRIPTION_MODEL_INTERFACE))
+            return model;
+        Object children = Global.invoke(component, "getComponents"); //$NON-NLS-1$
+        if (children instanceof Iterable<?> iterable)
+        {
+            for (Object child : iterable)
+            {
+                Object found = findTypeDescriptionModelInTree(child, depth + 1);
+                if (found != null)
+                    return found;
+            }
+        }
+        return null;
+    }
+
+    private static boolean implementsInterface(Object obj, String interfaceName)
+    {
+        if (obj == null)
+            return false;
+        for (Class<?> c = obj.getClass(); c != null; c = c.getSuperclass())
+        {
+            for (Class<?> i : c.getInterfaces())
+            {
+                if (interfaceName.equals(i.getName()))
+                    return true;
+            }
+        }
+        return false;
     }
 
     private static Object resolvePropertySheetPage(IViewPart view)
@@ -202,8 +277,10 @@ public class PropertyNameIdentifierHook implements IStartup
         return null;
     }
 
-    private static void onNameFocusLost(Object nativeControl)
+    private static void onNameFocusLost(Object nativeControl, Object typeModel, String initialName)
     {
+        String identifier;
+        boolean modified;
         try
         {
             // Как и в мастере (NewAttributeNameIdentifierHook): если нативный контрол — обёртка
@@ -216,16 +293,104 @@ public class PropertyNameIdentifierHook implements IStartup
             if (!(textObj instanceof String text) || text.isEmpty())
                 return;
 
-            String identifier = Global.identifierFromRepresentation(text, "_", "", ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            if (identifier.equals(text))
-                return;
+            modified = !text.equals(initialName);
 
-            Global.invokeVoid(textControl, "setText", identifier); //$NON-NLS-1$
-            Global.log(LOG_TAG, "«" + text + "» → «" + identifier + "»"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            identifier = Global.identifierFromRepresentation(text, "_", "", ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            if (!identifier.equals(text))
+            {
+                Global.invokeVoid(textControl, "setText", identifier); //$NON-NLS-1$
+                Global.log(LOG_TAG, "«" + text + "» → «" + identifier + "»"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            }
         }
         catch (Exception e)
         {
             Global.logError(LOG_TAG, "onNameFocusLost", e); //$NON-NLS-1$
+            return;
+        }
+
+        if (modified)
+            tryAutofillTypeFromIr(typeModel, identifier);
+    }
+
+    /**
+     * Если поле «Тип» ещё не тронуто пользователем (тип = Строка, длина = 10 — 1С-дефолт) и
+     * подключено приложение ИР — запускает в фоне {@code ирОбщий.ИмяТипаИзИмениПеременнойЛкс(Имя)}
+     * и, если по готовности результата тип всё ещё дефолтный, подставляет предложенный ИР тип.
+     * См. аналогичную (пока не объединённую в общий helper) логику в
+     * {@link NewAttributeNameIdentifierHook}.
+     */
+    private static void tryAutofillTypeFromIr(Object typeModel, String name)
+    {
+        if (typeModel == null || name == null || name.isEmpty())
+            return;
+        if (!isDefaultStringType(typeModel))
+            return;
+
+        IDtProject project = resolveDtProject();
+        if (project == null)
+            return;
+
+        Global.callIrFunctionInBackground(project, IR_TYPE_MODULE, IR_TYPE_FUNCTION, new Object[] { name },
+            () -> isDefaultStringType(typeModel),
+            result -> applyIrType(typeModel, result));
+    }
+
+    private static boolean isDefaultStringType(Object typeModel)
+    {
+        try
+        {
+            Object singleTypeItemValue = Global.invoke(typeModel, "getSingleTypeItem"); //$NON-NLS-1$
+            Object typeItem = Global.invoke(singleTypeItemValue, "get"); //$NON-NLS-1$
+            Object nameRu = Global.invoke(typeItem, "getNameRu"); //$NON-NLS-1$
+            Object stringLengthValue = Global.invoke(typeModel, "getStringLength"); //$NON-NLS-1$
+            Object length = Global.invoke(stringLengthValue, "get"); //$NON-NLS-1$
+            if (!DEFAULT_TYPE_NAME_RU.equals(nameRu))
+                return false;
+            return length instanceof Integer i && i == DEFAULT_STRING_LENGTH;
+        }
+        catch (Exception ignored)
+        {
+            return false;
+        }
+    }
+
+    private static IDtProject resolveDtProject()
+    {
+        IProject project = Global.getActiveProject((IWorkbenchPage) null, false);
+        return project != null ? Global.getDtProjectFromWorkspaceProject(project) : null;
+    }
+
+    private static void applyIrType(Object typeModel, String irResult)
+    {
+        if (irResult == null || irResult.isBlank())
+            return;
+        try
+        {
+            Object typesObj = Global.invoke(typeModel, "getTypes", Boolean.FALSE); //$NON-NLS-1$
+            if (!(typesObj instanceof List<?> types))
+                return;
+
+            Object matched = null;
+            for (Object item : types)
+            {
+                Object nameRu = Global.invoke(item, "getNameRu"); //$NON-NLS-1$
+                Object name = Global.invoke(item, "getName"); //$NON-NLS-1$
+                if (irResult.equalsIgnoreCase(String.valueOf(nameRu)) || irResult.equalsIgnoreCase(String.valueOf(name)))
+                {
+                    matched = item;
+                    break;
+                }
+            }
+            if (matched == null)
+                return;
+
+            Object singleTypeItemValue = Global.invoke(typeModel, "getSingleTypeItem"); //$NON-NLS-1$
+            Global.invokeVoid(singleTypeItemValue, "set", matched); //$NON-NLS-1$
+            Global.log(LOG_TAG, "Тип подобран через ИР: " + irResult); //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+            Global.logError(LOG_TAG, "applyIrType", e); //$NON-NLS-1$
         }
     }
 }
