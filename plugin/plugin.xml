@@ -53,6 +53,7 @@
     <startup class="tormozit.ConfigurationSearchDialogHook"/>
     <startup class="tormozit.PictureDialogHook"/>
     <startup class="tormozit.NewAttributeNameIdentifierHook"/>
+    <startup class="tormozit.PropertyNameIdentifierHook"/>
   </extension>
 
   <extension point="org.eclipse.ui.contexts">

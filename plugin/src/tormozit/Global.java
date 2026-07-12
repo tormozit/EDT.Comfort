@@ -5,7 +5,10 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.lang.reflect.Field;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Proxy;
 import java.nio.file.Files;
+import java.util.Locale;
 
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
@@ -26,7 +29,8 @@ import org.eclipse.ui.navigator.CommonNavigator;
 import org.eclipse.xtext.ide.server.ProjectManager;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleContext;
-import org.osgi.framework.FrameworkUtil;    
+import org.osgi.framework.FrameworkUtil;
+import org.eclipse.swt.SWT;
 import org.eclipse.swt.widgets.*;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
@@ -222,6 +226,69 @@ public final class Global
         if (obj == null || methodName == null) return null;
         try { return obj.getClass().getMethod(methodName).invoke(obj); }
         catch (Exception ignored) { return null; }
+    }
+
+    private static final String LIGHT_CONTROL_LISTENER_CLASS = "com._1c.g5.lwt.ILightControlListener"; //$NON-NLS-1$
+
+    /**
+     * Вешает на {@code lightControl} (произвольный {@code com._1c.g5.lwt} light-контрол — без
+     * compile-зависимости от этого бандла, тем же принципом, что и весь остальной плагин, см.
+     * {@link #getField}/{@link #invoke}) слушатель {@code ILightControlListener} через
+     * {@link Proxy} и вызывает {@code onFocusLost} при {@code event.type == SWT.FocusOut}.
+     *
+     * <p>Proxy пересылает handler'у и служебные {@code Object}-методы ({@code hashCode}/
+     * {@code equals}/{@code toString}), которые может вызвать инфраструктура EDT при добавлении/
+     * поиске слушателя в коллекции; для примитивных возвращаемых типов {@code null} недопустим
+     * (NPE на автоунбоксинге), поэтому они обрабатываются явно.
+     *
+     * @return {@code true}, если слушатель успешно добавлен через {@code addControlListener}
+     */
+    public static boolean installLightControlFocusOutListener(Object lightControl, Runnable onFocusLost)
+    {
+        if (lightControl == null || onFocusLost == null)
+            return false;
+        try
+        {
+            ClassLoader lwtLoader = lightControl.getClass().getClassLoader();
+            Class<?> listenerClass = Class.forName(LIGHT_CONTROL_LISTENER_CLASS, true, lwtLoader);
+
+            InvocationHandler handler = (proxy, method, args) ->
+            {
+                String name = method.getName();
+                if ("eventReceived".equals(name) && args != null && args.length == 2 //$NON-NLS-1$
+                    && args[1] instanceof Event event)
+                {
+                    if (event.type == SWT.FocusOut)
+                        onFocusLost.run();
+                    return null;
+                }
+                if ("hashCode".equals(name) && (args == null || args.length == 0)) //$NON-NLS-1$
+                    return System.identityHashCode(proxy);
+                if ("equals".equals(name) && args != null && args.length == 1) //$NON-NLS-1$
+                    return proxy == args[0];
+                if ("toString".equals(name) && (args == null || args.length == 0)) //$NON-NLS-1$
+                    return proxy.getClass().getName() + "@" + Integer.toHexString(System.identityHashCode(proxy)); //$NON-NLS-1$
+                Class<?> returnType = method.getReturnType();
+                if (returnType == boolean.class)
+                    return Boolean.FALSE;
+                if (returnType == int.class || returnType == long.class || returnType == short.class
+                    || returnType == byte.class)
+                    return 0;
+                if (returnType == char.class)
+                    return '\0';
+                if (returnType == float.class || returnType == double.class)
+                    return 0.0;
+                return null;
+            };
+
+            Object listenerProxy = Proxy.newProxyInstance(lwtLoader, new Class<?>[] { listenerClass }, handler);
+            return invokeVoid(lightControl, "addControlListener", listenerProxy); //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+            logError("Global", "installLightControlFocusOutListener", e); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        }
     }
 
     // =========================================================================
@@ -586,6 +653,193 @@ public final class Global
         while (root.getCause() != null && root.getCause() != root)
             root = root.getCause();
         return root;
+    }
+
+    // =========================================================================
+    // Идентификаторы / представления (порты 1С-функций ...Лкс)
+    // =========================================================================
+
+    private static final String RUSSIAN_LOWER = "абвгдеёжзийклмнопрстуфхцчшщъыьэюя"; //$NON-NLS-1$
+    private static final String LATIN_LOWER = "abcdefghijklmnopqrstuvwxyz"; //$NON-NLS-1$
+    private static final String DIGITS = "0123456789"; //$NON-NLS-1$
+
+    /**
+     * Порт 1С-функции {@code ИдентификаторИзПредставленияЛкс}: строит валидный идентификатор
+     * из произвольного текстового представления (например, наименования реквизита).
+     *
+     * <p>Пример (со {@code specialCharReplacement = ""}, см.
+     * {@link #identifierFromRepresentation(String, String, String, String)}):
+     * {@code "3-я Дебиторка По контрагентам с интервалами СНГ (для Руководства)"} →
+     * {@code "_3яДебиторкаПоКонтрагентамСИнтерваламиСНГдляРуководства"} — недопустимые символы
+     * отбрасываются, а следующий за ними допустимый символ переводится в верхний регистр
+     * (склейка camelCase). Со {@code specialCharReplacement = "_"} те же символы заменяются на
+     * {@code "_"} без изменения регистра соседних букв.
+     *
+     * <p>Как {@link #identifierFromRepresentation(String, String, String, String)} со значениями
+     * по умолчанию из BSL-оригинала.
+     */
+    public static String identifierFromRepresentation(String representation)
+    {
+        return identifierFromRepresentation(representation, "_", "", "_"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    /**
+     * @param representation         исходное представление (может быть {@code null})
+     * @param emptyStringReplacement чем заменить пустое/пробельное представление (BSL-умолчание — {@code "_"})
+     * @param extraAllowedChars      дополнительные разрешённые символы идентификатора
+     * @param specialCharReplacement чем заменять недопустимый символ; если {@code ""} — символ
+     *                               отбрасывается, а следующий допустимый символ переводится
+     *                               в верхний регистр (camelCase-склейка); BSL-умолчание — {@code "_"}
+     */
+    public static String identifierFromRepresentation(String representation, String emptyStringReplacement,
+        String extraAllowedChars, String specialCharReplacement)
+    {
+        String value = representation;
+        if (isBlank(value))
+            value = emptyStringReplacement;
+        if (value == null)
+            value = ""; //$NON-NLS-1$
+        if (specialCharReplacement == null)
+            specialCharReplacement = ""; //$NON-NLS-1$
+
+        // Быстрый путь: представление уже является валидным одиночным идентификатором —
+        // порт проверки «Новый Структура(Представление)» из оригинала.
+        if (value.equals(value.trim()) && value.indexOf(',') < 0 && isBareIdentifier(value))
+            return value;
+
+        String working = value;
+        if (!working.isEmpty() && isAsciiDigit(working.charAt(0)))
+            working = "_" + working; //$NON-NLS-1$
+
+        String allowedChars = identifierCharSet(extraAllowedChars);
+        StringBuilder result = new StringBuilder(working.length());
+        // "Предыдущий символ" изначально считается пробелом — как и в оригинале на BSL
+        // (ПустаяСтрока(" ") = Истина), из-за чего самый первый обработанный символ
+        // переводится в верхний регистр.
+        String previousChar = " "; //$NON-NLS-1$
+        for (int i = 0; i < working.length(); i++)
+        {
+            String currentChar = String.valueOf(working.charAt(i));
+            if (isBlank(previousChar))
+                currentChar = currentChar.toUpperCase(Locale.ROOT);
+
+            char lower = Character.toLowerCase(currentChar.charAt(0));
+            if (allowedChars.indexOf(lower) >= 0)
+            {
+                result.append(currentChar);
+            }
+            else
+            {
+                result.append(specialCharReplacement);
+                if (specialCharReplacement.isEmpty())
+                    currentChar = " "; //$NON-NLS-1$
+            }
+            previousChar = currentChar;
+        }
+        return result.toString();
+    }
+
+    private static String identifierCharSet(String extraAllowedChars)
+    {
+        String extra = extraAllowedChars != null ? extraAllowedChars.toLowerCase(Locale.ROOT) : ""; //$NON-NLS-1$
+        return "_" + DIGITS + RUSSIAN_LOWER + LATIN_LOWER + extra; //$NON-NLS-1$
+    }
+
+    private static boolean isBareIdentifier(String s)
+    {
+        if (s.isEmpty())
+            return false;
+        char first = s.charAt(0);
+        if (isAsciiDigit(first) || !isIdentifierChar(first))
+            return false;
+        for (int i = 1; i < s.length(); i++)
+        {
+            if (!isIdentifierChar(s.charAt(i)))
+                return false;
+        }
+        return true;
+    }
+
+    private static boolean isIdentifierChar(char c)
+    {
+        char lower = Character.toLowerCase(c);
+        return lower == '_' || isAsciiDigit(lower)
+            || LATIN_LOWER.indexOf(lower) >= 0 || RUSSIAN_LOWER.indexOf(lower) >= 0;
+    }
+
+    private static boolean isAsciiDigit(char c)
+    {
+        return c >= '0' && c <= '9';
+    }
+
+    private static boolean isBlank(String s)
+    {
+        return s == null || s.trim().isEmpty();
+    }
+
+    /**
+     * Порт 1С-функции {@code ПредставлениеИзИдентификатораЛкс}: восстанавливает читаемое
+     * представление из идентификатора, обратная операция к
+     * {@link #identifierFromRepresentation(String)}.
+     *
+     * <p>Примеры: {@code "ОкноПрибытияС"} → {@code "Окно прибытия с"};
+     * {@code "Дебиторка_По_контрагентамСИнтерваламиСНГДля__Руководства"} →
+     * {@code "Дебиторка По контрагентам с интервалами СНГ для  Руководства"}. После символа
+     * {@code "_"} регистр не меняется, а сам символ заменяется на {@code " "}.
+     *
+     * @param identifier исходный идентификатор
+     * @return представление, или {@code null}/{@code ""} если на входе то же самое
+     */
+    public static String representationFromIdentifier(String identifier)
+    {
+        if (identifier == null || identifier.isEmpty())
+            return identifier;
+
+        int length = identifier.length();
+        String currentChar = identifier.substring(0, 1);
+        StringBuilder result = new StringBuilder(currentChar);
+
+        for (int i = 2; i <= length; i++)
+        {
+            String previousChar = currentChar;
+            currentChar = identifier.substring(i - 1, i);
+
+            if (currentChar.equals("_")) //$NON-NLS-1$
+            {
+                result.append(' ');
+                continue;
+            }
+            else if (isUpperInvariant(currentChar))
+            {
+                String nextChar = charAt1(identifier, i + 1);
+                boolean spaceBeforeAbbrevOrDigits =
+                    !currentChar.equals(" ") && !isUpperInvariant(previousChar); //$NON-NLS-1$
+                boolean spaceBeforeNewCapitalizedWord =
+                    !previousChar.equals("_") && isUpperInvariant(previousChar) && !isUpperInvariant(nextChar); //$NON-NLS-1$
+                if (spaceBeforeAbbrevOrDigits || spaceBeforeNewCapitalizedWord)
+                {
+                    result.append(' ');
+                    String afterNextChar = charAt1(identifier, i + 2);
+                    if (nextChar.isEmpty() || !isUpperInvariant(nextChar) || !isUpperInvariant(afterNextChar))
+                        currentChar = currentChar.toLowerCase(Locale.ROOT);
+                }
+            }
+            result.append(currentChar);
+        }
+        return result.toString();
+    }
+
+    /** {@code ВРЕГ(s) = s} из оригинала — верно и для верхнего регистра/цифр/спецсимволов, и для {@code ""}. */
+    private static boolean isUpperInvariant(String s)
+    {
+        return s.isEmpty() || s.toUpperCase(Locale.ROOT).equals(s);
+    }
+
+    /** {@code Сред(s, pos, 1)}: символ по 1-based позиции, {@code ""} при выходе за границы строки. */
+    private static String charAt1(String s, int pos1Based)
+    {
+        int index = pos1Based - 1;
+        return index >= 0 && index < s.length() ? s.substring(index, index + 1) : ""; //$NON-NLS-1$
     }
 
     // =========================================================================

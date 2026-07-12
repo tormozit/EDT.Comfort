@@ -1,7 +1,5 @@
 package tormozit;
 
-import java.lang.reflect.InvocationHandler;
-import java.lang.reflect.Proxy;
 import java.util.Iterator;
 import java.util.Map;
 
@@ -10,7 +8,6 @@ import org.eclipse.jface.wizard.IWizardContainer;
 import org.eclipse.jface.wizard.IWizardPage;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.widgets.Display;
-import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IStartup;
@@ -20,7 +17,7 @@ import org.eclipse.ui.IStartup;
  * части», «Новое измерение», «Новый ресурс», «Новый справочник», «Новая табличная часть» и т.д. —
  * все мастера-наследники {@code DtAefMdNewWizard}, см. {@link #isAttributeWizard}) — при уходе
  * фокуса из поля «Имя» автоматически преобразует введённое представление в валидный
- * идентификатор — см. {@link IdentifierFromRepresentation}, порт 1С-функции
+ * идентификатор — см. {@link Global#identifierFromRepresentation}, порт 1С-функции
  * {@code ИдентификаторИзПредставленияЛкс}.
  *
  * <p>Поле «Имя» в этом диалоге рендерится через LWT ({@code DtAefNewWizardPage} с
@@ -40,9 +37,9 @@ import org.eclipse.ui.IStartup;
  * view.getNativeControl()   (reflection)     → LightText — искомый light-контрол.
  * </pre>
  * На {@code LightText} вешается {@code com._1c.g5.lwt.ILightControlListener} через
- * {@link Proxy} (без compile-зависимости от бандла {@code com._1c.g5.lwt} — по тому же
- * принципу, что и весь остальной плагин, работающий с internal-классами EDT только через
- * {@link Global#getField}/{@link Global#invoke}). В {@code eventReceived} при
+ * {@link Global#installLightControlFocusOutListener} (без compile-зависимости от бандла
+ * {@code com._1c.g5.lwt} — по тому же принципу, что и весь остальной плагин, работающий с
+ * internal-классами EDT только через {@link Global#getField}/{@link Global#invoke}). При
  * {@code event.type == SWT.FocusOut} (это событие {@code LightText} рассылает синхронно и
  * безусловно при потере фокуса — см. {@code LightText.OverlayFocusListener.focusLost},
  * ДО разрушения overlay-редактора) текущий текст поля читается через
@@ -66,8 +63,6 @@ public class NewAttributeNameIdentifierHook implements IStartup
      */
     private static final String WIZARD_ANCESTOR_CLASS =
         "com._1c.g5.v8.dt.md.ui.wizards.base.aef.DtAefMdNewWizard"; //$NON-NLS-1$
-    private static final String LIGHT_CONTROL_LISTENER_CLASS =
-        "com._1c.g5.lwt.ILightControlListener"; //$NON-NLS-1$
     private static final String LOG_TAG = "NewAttributeNameIdentifier"; //$NON-NLS-1$
 
     @Override
@@ -147,7 +142,7 @@ public class NewAttributeNameIdentifierHook implements IStartup
         if (lightText == null)
             return false;
 
-        if (!installFocusOutListener(lightText))
+        if (!Global.installLightControlFocusOutListener(lightText, () -> onNameFocusLost(lightText)))
             return false;
 
         shell.setData(PATCHED_KEY, Boolean.TRUE);
@@ -210,56 +205,6 @@ public class NewAttributeNameIdentifierHook implements IStartup
         return null;
     }
 
-    private static boolean installFocusOutListener(Object lightText)
-    {
-        try
-        {
-            ClassLoader lwtLoader = lightText.getClass().getClassLoader();
-            Class<?> listenerClass = Class.forName(LIGHT_CONTROL_LISTENER_CLASS, true, lwtLoader);
-
-            InvocationHandler handler = (proxy, method, args) ->
-            {
-                String name = method.getName();
-                if ("eventReceived".equals(name) && args != null && args.length == 2 //$NON-NLS-1$
-                    && args[1] instanceof Event event)
-                {
-                    if (event.type == SWT.FocusOut)
-                        onNameFocusLost(lightText);
-                    return null;
-                }
-                // Proxy пересылает handler'у и служебные Object-методы (hashCode/equals/toString),
-                // которые может вызвать инфраструктура EDT при добавлении/поиске слушателя в
-                // коллекции; для примитивных возвращаемых типов null недопустим (NPE на
-                // автоунбоксинге), поэтому отвечаем на них явно.
-                if ("hashCode".equals(name) && (args == null || args.length == 0)) //$NON-NLS-1$
-                    return System.identityHashCode(proxy);
-                if ("equals".equals(name) && args != null && args.length == 1) //$NON-NLS-1$
-                    return proxy == args[0];
-                if ("toString".equals(name) && (args == null || args.length == 0)) //$NON-NLS-1$
-                    return proxy.getClass().getName() + "@" + Integer.toHexString(System.identityHashCode(proxy)); //$NON-NLS-1$
-                Class<?> returnType = method.getReturnType();
-                if (returnType == boolean.class)
-                    return Boolean.FALSE;
-                if (returnType == int.class || returnType == long.class || returnType == short.class
-                    || returnType == byte.class)
-                    return 0;
-                if (returnType == char.class)
-                    return '\0';
-                if (returnType == float.class || returnType == double.class)
-                    return 0.0;
-                return null;
-            };
-
-            Object listenerProxy = Proxy.newProxyInstance(lwtLoader, new Class<?>[] { listenerClass }, handler);
-            return Global.invokeVoid(lightText, "addControlListener", listenerProxy); //$NON-NLS-1$
-        }
-        catch (Exception e)
-        {
-            Global.logError(LOG_TAG, "installFocusOutListener", e); //$NON-NLS-1$
-            return false;
-        }
-    }
-
     private static void onNameFocusLost(Object lightText)
     {
         try
@@ -280,7 +225,7 @@ public class NewAttributeNameIdentifierHook implements IStartup
             // допустимый символ переводится в верхний регистр (как штатное автоформирование
             // имени в 1С), а не заменяется на "_". Чтобы получить подчёркивания вместо
             // camelCase-склейки, передайте "_" последним аргументом.
-            String identifier = IdentifierFromRepresentation.convert(text, "_", "", ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            String identifier = Global.identifierFromRepresentation(text, "_", "", ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             if (identifier.equals(text))
                 return;
 
