@@ -5,11 +5,6 @@ import java.util.Map;
 
 import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.jface.dialogs.PageChangedEvent;
-import org.eclipse.jface.text.contentassist.ContentAssistEvent;
-import org.eclipse.jface.text.contentassist.ContentAssistant;
-import org.eclipse.jface.text.contentassist.ICompletionListener;
-import org.eclipse.jface.text.contentassist.ICompletionProposal;
-import org.eclipse.jface.text.contentassist.IContentAssistantExtension2;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.jface.util.IPropertyChangeListener;
@@ -20,19 +15,12 @@ import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IWindowListener;
+import org.eclipse.ui.texteditor.ITextEditor;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
-import org.eclipse.jface.text.contentassist.ContentAssistant;
-import org.eclipse.jface.text.contentassist.IContentAssistantExtension2;
-import org.eclipse.jface.text.contentassist.ICompletionListener;
-import org.eclipse.jface.text.contentassist.ContentAssistEvent;
-import org.eclipse.jface.text.source.SourceViewer;
-import org.eclipse.swt.events.KeyAdapter;
-import org.eclipse.swt.events.KeyEvent;
-import org.eclipse.swt.widgets.Display;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.dcs.ui.DataCompositionSchemaEditor;
@@ -41,22 +29,6 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorEmbeddedEditorPage;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
 
-/**
- * Управляет подпиской на открытие/закрытие BSL-редакторов и применяет
- * к ним патч автооткрытия подсказки.
- *
- * <p><b>Порядок инициализации:</b>
- * <ol>
- *   <li>{@code ContentAssistManager.init(settings)} — вызывается
- *       из {@code Activator.start()} (безопасно, без UI);</li>
- *   <li>{@code start()} — вызывается из {@code earlyStartup()} уже на
- *       UI-потоке, когда Workbench гарантированно инициализирован.</li>
- * </ol>
- *
- * <p>{@code start()} не использует {@code syncExec}/{@code asyncExec} —
- * он уже выполняется на UI-потоке (через {@code earlyStartup()}).
- * {@link #applyPatchToOpenedEditors()} безопасен из любого потока.
- */
 public final class ContentAssistManager
 {
     private static ContentAssistManager instance;
@@ -75,8 +47,6 @@ public final class ContentAssistManager
         this.settings = settings;
     }
 
-    // ---- Синглтон ----
-
     public static synchronized ContentAssistManager init(
             ContentAssistSettings settings)
     {
@@ -87,15 +57,6 @@ public final class ContentAssistManager
 
     public static ContentAssistManager getInstance() { return instance; }
 
-    // ---- Lifecycle ----
-
-    /**
-     * Запускает менеджер.
-     *
-     * <p><b>Вызывается с UI-потока</b> из {@code earlyStartup() → asyncExec},
-     * когда Workbench готов. Не использует {@code syncExec}/{@code asyncExec},
-     * чтобы не замедлять старт.
-     */
     public void start()
     {
         settings.loadSettings();
@@ -104,17 +65,14 @@ public final class ContentAssistManager
         if (!PlatformUI.isWorkbenchRunning())
             return;
 
-        // Применяем патч к уже открытым редакторам (восстановленная сессия)
         applyPatchToOpenedEditorsOnUIThread();
 
-        // Регистрируем слушатели окон и частей
         PlatformUI.getWorkbench().addWindowListener(windowListener);
         for (IWorkbenchWindow window :
                 PlatformUI.getWorkbench().getWorkbenchWindows())
             registerPartListener(window);
     }
 
-    /** Останавливает менеджер. */
     public void stop()
     {
         settings.removePropertyChangeListener(settingsListener);
@@ -122,29 +80,18 @@ public final class ContentAssistManager
             PlatformUI.getWorkbench().removeWindowListener(windowListener);
     }
 
-    // ---- Патч ----
-
-    /**
-     * Применяет патч ко всем открытым BSL-редакторам.
-     * Безопасен из любого потока: если вызван не с UI-потока,
-     * планирует {@code asyncExec}.
-     */
     public void applyPatchToOpenedEditors()
     {
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
 
-        if (Display.getCurrent() != null)           // уже на UI-потоке
+        if (Display.getCurrent() != null)
             applyPatchToOpenedEditorsOnUIThread();
         else
             display.asyncExec(this::applyPatchToOpenedEditorsOnUIThread);
     }
 
-    /**
-     * Применяет патч ко всем открытым редакторам.
-     * <b>Вызывать только с UI-потока.</b>
-     */
     private void applyPatchToOpenedEditorsOnUIThread()
     {
         if (!settings.isEnabled())
@@ -157,7 +104,6 @@ public final class ContentAssistManager
         {
             for (IWorkbenchPage page : window.getPages())
             {
-                // Перебираем ВСЕ открытые редакторы, а не только активный
                 for (IEditorReference ref : page.getEditorReferences())
                 {
                     IWorkbenchPart part = ref.getPart(false);
@@ -183,6 +129,8 @@ public final class ContentAssistManager
                 ((DtGranularEditorXtextEditorPage<?>) activePage).getEmbeddedEditor();
             if (embedded instanceof BslXtextEditor)
                 applyPatchToBslEditor((BslXtextEditor) embedded);
+            else if (embedded instanceof ITextEditor textEditor)
+                applyPatchToGenericXtextEditor(textEditor);
         }
         if (activePage instanceof DtGranularEditorEmbeddedEditorPage<?> embeddedPage)
             applyPatchToDcsQueryInPage(embeddedPage);
@@ -203,11 +151,21 @@ public final class ContentAssistManager
         if (!(viewer instanceof SourceViewer)) return;
         SourceViewer sourceViewer = (SourceViewer) viewer;
 
-        // --- автооткрытие и символы-триггеры ---
-        boolean ok = ContentAssistPatcher.applyPatch(
+        ContentAssistPatcher.applyPatch(
             sourceViewer, settings.getTimeout(), settings.getCharset(), editor);
-        ContentAssistDebug.log("BslEditor patch " + (ok ? "OK" : "FAIL") //$NON-NLS-1$
-            + " editor=" + editor.getTitle()); //$NON-NLS-1$
+    }
+
+    private void applyPatchToGenericXtextEditor(ITextEditor editor)
+    {
+        if (!settings.isEnabled()) return;
+
+        ISourceViewer viewer = TextEditor.getSourceViewer(editor);
+        if (!(viewer instanceof SourceViewer sourceViewer))
+            return;
+        QueryTextEditorFacade facade =
+            new QueryTextEditorFacade(editor, sourceViewer, null);
+        ContentAssistPatcher.applyPatch(
+            sourceViewer, settings.getTimeout(), settings.getCharset(), facade);
     }
 
     void applyPatchToQueryEditorShell(Shell shell)
@@ -223,10 +181,8 @@ public final class ContentAssistManager
         Object qlEditor = dialog != null ? Global.getField(dialog, "qlEditor") : null; //$NON-NLS-1$
         QueryTextEditorFacade facade = new QueryTextEditorFacade(qlEditor, sourceViewer, dialog);
 
-        boolean ok = ContentAssistPatcher.applyPatch(
+        ContentAssistPatcher.applyPatch(
             sourceViewer, settings.getTimeout(), settings.getCharset(), facade);
-        ContentAssistDebug.log("QueryEditor patch " + (ok ? "OK" : "FAIL") //$NON-NLS-1$
-            + " shell=" + shell.getText()); //$NON-NLS-1$
     }
 
     private void applyPatchToDcsQueryInPage(DtGranularEditorEmbeddedEditorPage<?> page)
@@ -250,9 +206,8 @@ public final class ContentAssistManager
             return;
         QueryTextEditorFacade facade =
             new QueryTextEditorFacade(qlEditor, sourceViewer, null);
-        boolean ok = ContentAssistPatcher.applyPatch(
+        ContentAssistPatcher.applyPatch(
             sourceViewer, settings.getTimeout(), settings.getCharset(), facade);
-        ContentAssistDebug.log("DcsQuery patch " + (ok ? "OK" : "FAIL")); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private void registerPartListener(IWorkbenchWindow window)
@@ -265,8 +220,6 @@ public final class ContentAssistManager
         }
     }
 
-    // ---- Внутренние слушатели ----
-
     private class SettingsChangeListener implements IPropertyChangeListener
     {
         @Override
@@ -278,7 +231,7 @@ public final class ContentAssistManager
                     || ComfortSettings.PREF_REPLACE_LIST_FILTERS.equals(prop))
             {
                 settings.loadSettings();
-                applyPatchToOpenedEditors(); // безопасен из любого потока
+                applyPatchToOpenedEditors();
             }
         }
     }
@@ -341,6 +294,8 @@ public final class ContentAssistManager
                     ((DtGranularEditorXtextEditorPage<?>) page).getEmbeddedEditor();
                 if (embedded instanceof BslXtextEditor)
                     applyPatchToBslEditor((BslXtextEditor) embedded);
+                else if (embedded instanceof ITextEditor textEditor)
+                    applyPatchToGenericXtextEditor(textEditor);
             }
             if (page instanceof DtGranularEditorEmbeddedEditorPage<?> embeddedPage)
                 applyPatchToDcsQueryInPage(embeddedPage);

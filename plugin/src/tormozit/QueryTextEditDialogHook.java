@@ -33,7 +33,9 @@ public final class QueryTextEditDialogHook implements IStartup
     private static final String COMFORT_SUBMENU_MARKER =
         "tormozit.queryEditorComfortSubmenu"; //$NON-NLS-1$
     private static final String DIALOG_CLASS_SUFFIX = "QueryTextEditDialog"; //$NON-NLS-1$
+    private static final String DYNAMIC_LIST_DIALOG_SUFFIX = "DynamicListQueryDialog"; //$NON-NLS-1$
     private static final String DIALOG_TITLE = "Редактор запроса"; //$NON-NLS-1$
+    private static final String DYNAMIC_LIST_TITLE = "Динамический список"; //$NON-NLS-1$
     private static final String SUBMENU_TEXT = ComfortSubmenuHelper.SUBMENU_TEXT;
 
     /** Открытые окна «Редактор запроса» (shell диалога). */
@@ -405,7 +407,12 @@ public final class QueryTextEditDialogHook implements IStartup
         if (resolveDialog(shell) != null)
             return true;
         String title = shell.getText();
-        return title != null && title.startsWith(DIALOG_TITLE);
+        if (title != null && title.startsWith(DIALOG_TITLE))
+            return true;
+        if (title != null && title.startsWith(DYNAMIC_LIST_TITLE))
+            return true;
+        Object data = shell.getData();
+        return data != null && isQueryTextEditDialog(data);
     }
 
     private static Object resolveDialog(Shell shell)
@@ -478,8 +485,11 @@ public final class QueryTextEditDialogHook implements IStartup
 
     private static boolean isQueryTextEditDialog(Object data)
     {
-        return data != null
-            && data.getClass().getName().contains(DIALOG_CLASS_SUFFIX);
+        if (data == null)
+            return false;
+        String name = data.getClass().getName();
+        return name.contains(DIALOG_CLASS_SUFFIX)
+            || name.contains(DYNAMIC_LIST_DIALOG_SUFFIX);
     }
 
     private static QlEditorContext resolveQlEditorContext(Shell shell, Control control)
@@ -530,6 +540,13 @@ public final class QueryTextEditDialogHook implements IStartup
         if (embedded != null)
         {
             Object viewer = Global.invoke(embedded, "getViewer"); //$NON-NLS-1$
+            if (viewer instanceof ISourceViewer sourceViewer)
+                return sourceViewer;
+        }
+        Object tplEditor = Global.getField(dialog, "embeddedTemplateEditor"); //$NON-NLS-1$
+        if (tplEditor != null)
+        {
+            Object viewer = Global.invoke(tplEditor, "getViewer"); //$NON-NLS-1$
             if (viewer instanceof ISourceViewer sourceViewer)
                 return sourceViewer;
         }
@@ -631,10 +648,17 @@ public final class QueryTextEditDialogHook implements IStartup
         if (shell == null || shell.isDisposed())
             return null;
         Object dialog = resolveDialog(shell);
-        if (dialog == null)
-            return null;
-        Object qlEditor = Global.getField(dialog, "qlEditor"); //$NON-NLS-1$
-        return viewerFromQlEditor(qlEditor);
+        if (dialog != null)
+        {
+            Object qlEditor = Global.getField(dialog, "qlEditor"); //$NON-NLS-1$
+            ISourceViewer fromQl = viewerFromQlEditor(qlEditor);
+            if (fromQl != null)
+                return fromQl;
+            ISourceViewer fromDialog = viewerFromDialog(dialog);
+            if (fromDialog != null)
+                return fromDialog;
+        }
+        return null;
     }
 
     static Object resolveDialogForShell(Shell shell)
