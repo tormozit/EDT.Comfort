@@ -12,6 +12,8 @@
 
 Корневой composite-URL `https://tormozit.github.io/EDT.Comfort/` содержит **все архивные линейки** — в «Детали установки» отдельные строки с номером версии (1.0.0.19, 1.0.0.16, 1.0.0.15, …). Фиксированная линейка — по URL вида `https://tormozit.github.io/EDT.Comfort/1.0.0.14/`. Полный перечень — на [главной странице сайта](https://tormozit.github.io/EDT.Comfort/).
 
+По умолчанию в диалоге установки включена галочка **«Show only the latest versions of available software»** — она скрывает архивные линейки, оставляя только последнюю. Снимите её, чтобы увидеть все версии сайта сразу.
+
 ## Без интернета (архив)
 
 1. Скачать ZIP-файл с [релизов GitHub](https://github.com/tormozit/EDT.Comfort/releases) или с URL фиксированной версии, например:
