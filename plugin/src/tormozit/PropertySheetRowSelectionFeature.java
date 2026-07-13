@@ -226,7 +226,7 @@ final class PropertySheetRowSelectionFeature implements PropertySheetUiFeature
         Canvas overlay = (Canvas) scroll.getData(SCAN_OVERLAY_KEY);
         if (overlay == null || overlay.isDisposed())
         {
-            overlay = new Canvas(scroll, SWT.NO_MERGE_PAINTS | SWT.DOUBLE_BUFFERED);
+            overlay = new Canvas(scroll, SWT.NO_MERGE_PAINTS | SWT.TRANSPARENT);
             overlay.setEnabled(false);
             scroll.setData(SCAN_OVERLAY_KEY, overlay);
             final Canvas overlayRef = overlay;

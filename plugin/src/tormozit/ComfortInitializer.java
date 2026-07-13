@@ -33,5 +33,14 @@ public class ComfortInitializer extends AbstractPreferenceInitializer
         store.setDefault(
             ComfortSettings.PREF_LOG_AUTOSCROLL,
             ComfortSettings.DEFAULT_LOG_AUTOSCROLL);
+        store.setDefault(
+            ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_ENABLED,
+            ComfortSettings.DEFAULT_SERVER_CALL_HIGHLIGHTING_ENABLED);
+        store.setDefault(
+            ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_COLOR,
+            ComfortSettings.DEFAULT_SERVER_CALL_HIGHLIGHTING_COLOR);
+        store.setDefault(
+            ComfortSettings.PREF_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR,
+            ComfortSettings.DEFAULT_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR);
     }
 }

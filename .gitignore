@@ -1,5 +1,6 @@
 .tmp*
 debug-*.log
+comfort-session.log
 # Случайная распаковка JAR в корень (jar xf) — не коммитить
 /com/
 /org/

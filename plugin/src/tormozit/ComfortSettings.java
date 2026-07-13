@@ -74,6 +74,27 @@ public final class ComfortSettings
     /** Prefix for file search table column widths. */
     private static final String PREF_FILE_SEARCH_COLUMN_PREFIX = "comfort.fileSearch.columnWidth."; //$NON-NLS-1$
 
+    // ---- Server call highlighting ----
+
+    /** Ключ: включена ли подсветка серверных вызовов в редакторе BSL. */
+    public static final String PREF_SERVER_CALL_HIGHLIGHTING_ENABLED = "comfort.serverCallHighlighting.enabled"; //$NON-NLS-1$
+
+    /** Ключ: цвет подсветки серверных вызовов (строковое представление RGB). */
+    public static final String PREF_SERVER_CALL_HIGHLIGHTING_COLOR = "comfort.serverCallHighlighting.color"; //$NON-NLS-1$
+
+    /** Ключ: цвет подсветки серверных вызовов "с контекстом" (&НаСервере), строка RGB. */
+    public static final String PREF_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR =
+        "comfort.serverCallHighlighting.contextColor"; //$NON-NLS-1$
+
+    /** Подсветка серверных вызовов включена по умолчанию. */
+    public static final boolean DEFAULT_SERVER_CALL_HIGHLIGHTING_ENABLED = true;
+
+    /** Цвет серверных вызовов по умолчанию — тёмно-красный RGB(150,0,0). */
+    public static final String DEFAULT_SERVER_CALL_HIGHLIGHTING_COLOR = "150,0,0"; //$NON-NLS-1$
+
+    /** Цвет серверных вызовов "с контекстом" по умолчанию — красный RGB(200,0,0). */
+    public static final String DEFAULT_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR = "200,0,0"; //$NON-NLS-1$
+
     /** Prefix for file search sash weights. */
     private static final String PREF_FILE_SEARCH_SASH_PREFIX = "comfort.fileSearch.sash."; //$NON-NLS-1$
 
@@ -323,6 +344,36 @@ public final class ComfortSettings
             return scoped.contains(key);
         return store.getString(key) != null;
     }
+
+    // ---- Server call highlighting accessors ----
+
+    /** Подсветка серверных вызовов включена. */
+    public static boolean isServerCallHighlightingEnabled()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_SERVER_CALL_HIGHLIGHTING_ENABLED;
+        return settings.preferenceStore.getBoolean(PREF_SERVER_CALL_HIGHLIGHTING_ENABLED);
+    }
+
+    /** Цвет подсветки серверных вызовов (строка "R,G,B"). */
+    public static String getServerCallHighlightingColor()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_SERVER_CALL_HIGHLIGHTING_COLOR;
+        return settings.preferenceStore.getString(PREF_SERVER_CALL_HIGHLIGHTING_COLOR);
+    }
+
+    /** Цвет подсветки серверных вызовов "с контекстом" (строка "R,G,B"). */
+    public static String getServerCallContextHighlightingColor()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR;
+        return settings.preferenceStore.getString(PREF_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR);
+    }
+
 
     private static boolean getPerInfobaseBoolean(String prefPrefix, String infobaseUuid, boolean defaultValue)
     {

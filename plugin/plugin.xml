@@ -54,6 +54,8 @@
     <startup class="tormozit.PictureDialogHook"/>
     <startup class="tormozit.NewAttributeNameIdentifierHook"/>
     <startup class="tormozit.PropertyNameIdentifierHook"/>
+    <startup class="tormozit.BslServerCallHighlightingHook"/>
+    <startup class="tormozit.GotoDefinitionFieldMenuHook"/>
   </extension>
 
   <extension point="org.eclipse.ui.contexts">
@@ -752,5 +754,20 @@
         class="tormozit.CompareSearchResultPage">
     </viewPage>
   </extension>
+
+  <!--
+  <extension point="com._1c.g5.v8.dt.bsl.ui.bslUiModuleExtension">
+    <bslUiModuleExtension module="tormozit.ComfortBslUiModule"/>
+  </extension>
+  Отключено 2026-07-13 (окончательно, после трёх независимых прогонов):
+  включение этой точки расширения на 100% воспроизводимо ведёт к java.lang.VerifyError
+  в нативном com._1c.g5.v8.dt.bsl.documentation.comment.BslDocumentationComment.parseOldFormat
+  при загрузке проекта БСП_3 ("Bsl resolve cross references job" / com.e1c.g5.v8.dt.check).
+  Проверено: (1) без расширения — 2 чистых прогона, 0 ошибок; (2) с расширением — 2 падения
+  подряд, включая после фикса isProbeOffsetInComment в BslCompletionSideHintResolver (тот фикс
+  не помог — краш идёт из нативных фоновых задач EDT напрямую, а не через наш content-assist
+  пробник). Точный механизм влияния этой точки расширения на нативный баг не выяснен, но
+  корреляция полностью надёжна на этой сборке EDT/БСП_3. НЕ включать без свежего теста.
+  -->
 
 </plugin>

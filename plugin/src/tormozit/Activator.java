@@ -55,6 +55,15 @@ public class Activator extends AbstractUIPlugin
         settings.getPreferenceStore().setDefault(
             ComfortSettings.PREF_IMPROVE_DEBUGGER_WINDOWS,
             ComfortSettings.DEFAULT_IMPROVE_DEBUGGER_WINDOWS);
+        settings.getPreferenceStore().setDefault(
+            ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_ENABLED,
+            ComfortSettings.DEFAULT_SERVER_CALL_HIGHLIGHTING_ENABLED);
+        settings.getPreferenceStore().setDefault(
+            ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_COLOR,
+            ComfortSettings.DEFAULT_SERVER_CALL_HIGHLIGHTING_COLOR);
+        settings.getPreferenceStore().setDefault(
+            ComfortSettings.PREF_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR,
+            ComfortSettings.DEFAULT_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR);
         ContentAssistManager.init(settings);
         ComfortSettings.init(PLUGIN_ID);
         getPreferenceStore().setDefault(

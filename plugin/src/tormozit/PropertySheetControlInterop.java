@@ -290,7 +290,7 @@ final class PropertySheetControlInterop
         return Global.getField(view, "nativeControl"); //$NON-NLS-1$
     }
 
-    private static Object lightControlFromView(Object view)
+    static Object lightControlFromView(Object view)
     {
         if (view == null)
             return null;
@@ -964,6 +964,35 @@ final class PropertySheetControlInterop
             String text = labelTextOfViewModel(entry.getKey());
             if (displayName.equals(text))
                 return entry.getValue();
+        }
+        return null;
+    }
+
+    /**
+     * View РЕДАКТОРА значения для подписи {@code displayName} — в отличие от
+     * {@link #findLwtViewByDisplayName}, которая возвращает view самой подписи (тоже
+     * {@code LabelViewModel}-запись, отсюда её {@code getText()} — это текст подписи, а не
+     * значения). В карте {@code renderer.viewModelToView} (insertion-order) редактор — запись,
+     * непосредственно следующая за подписью — см. {@code PropertyNameIdentifierHook.findValueViewAfterLabel}
+     * для того же приёма на поле «Имя».
+     */
+    static Object findEditorViewByDisplayName(Object scene, String displayName)
+    {
+        if (scene == null || displayName == null || displayName.isEmpty())
+            return null;
+        Object renderer = Global.invoke(scene, "getRenderer"); //$NON-NLS-1$
+        Object mapObj = Global.getField(renderer, "viewModelToView"); //$NON-NLS-1$
+        if (!(mapObj instanceof java.util.Map))
+            return null;
+        boolean foundLabel = false;
+        for (java.util.Map.Entry<?, ?> entry : ((java.util.Map<?, ?>) mapObj).entrySet())
+        {
+            if (foundLabel)
+                return entry.getValue();
+            Object key = entry.getKey();
+            if (key != null && key.getClass().getName().contains("LabelViewModel") //$NON-NLS-1$
+                    && displayName.equals(labelTextOfViewModel(key)))
+                foundLabel = true;
         }
         return null;
     }
@@ -2071,12 +2100,155 @@ final class PropertySheetControlInterop
         return out;
     }
 
+    /**
+     * Строит области свойств секции по РЕАЛЬНОЙ геометрии LWT-меток
+     * ({@code LabelViewModel} → {@link #liveLightDisplayBounds}: {@code getBounds()} /
+     * {@code getAbsoluteBounds()} нативного light-контрола), без анализа цвета пикселей.
+     * Верх строки — Y её подписи (переведённый в canvas-координаты {@code content});
+     * низ — Y следующей по порядку подписи в этой же секции (или низ секции для последней).
+     * Так строки с произвольной высотой (многострочный «Комментарий»/«Представление» и т.п.)
+     * получают точные границы без хрупкого сравнения RGB. Возвращает {@code null}, если
+     * геометрию меток получить не удалось — тогда вызывающий код обязан использовать
+     * пиксельный fallback.
+     */
+    private static List<PropertyArea> buildPropertyAreasForSectionGeometry(Composite content,
+            LwtPropertySection section, Object scene, Object page, int groupIndex)
+    {
+        String title = section != null && section.titleHint != null ? section.titleHint : ""; //$NON-NLS-1$
+        if (content == null || content.isDisposed() || scene == null || section == null)
+            return geometryBail(title, "noContentOrScene", -1, -1); //$NON-NLS-1$
+
+        // Геометрию отдельных меток можно резолвить не для всех строк (составные редакторы
+        // вроде «Тип», чекбоксы, комбо) — если строка «выпала», её область молча сливается
+        // с соседней. Поэтому доверяем геометрии только когда нашли РОВНО столько строк,
+        // сколько модель считает видимыми в этой группе; иначе — откат на пиксельный fallback.
+        // groupIndex приходит от вызывающего кода — там уже есть ПРАВИЛЬНЫЙ (совпадающий по
+        // ссылке) список секций для resolveGroupIndex; пересчитывать его здесь заново со
+        // свежим collectPropertySections(content) бессмысленно — новые LwtPropertySection
+        // не совпадут по {@code ==} с уже имеющимся {@code section}, и fallback всегда даст -1.
+        if (groupIndex < 0)
+            return geometryBail(title, "noGroupIndex", -1, -1); //$NON-NLS-1$
+        List<Object> visibleFields = visibleFieldDefinitionsInSection(page, groupIndex, section,
+                scene, content);
+        int expectedCount = visibleFields.size();
+        if (expectedCount <= 0)
+            return geometryBail(title, "noExpectedFields", -1, 0); //$NON-NLS-1$
+
+        // Раньше брали ВСЕ метки сцены (labelEntriesFromScene) и фильтровали по попаданию Y
+        // в диапазон секции — но у скрытых/непрорисованных строк других групп bounds могут
+        // быть устаревшими и случайно попадать в диапазон ЭТОЙ секции («протечка» между
+        // группами, см. H30 incomplete found>expected). Вместо этого ищем метку АДРЕСНО по
+        // имени для каждого известного видимого поля этой группы — тем же способом
+        // (findLwtViewByDisplayName), что уже проверен в fillRowContextMenu/GoToDefinition.
+        List<Integer> tops = new ArrayList<>(expectedCount);
+        int unresolved = 0;
+        for (Object field : visibleFields)
+        {
+            String displayName = labeledDefinitionText(field);
+            Object labelView = displayName != null && !displayName.isEmpty()
+                    ? findLwtViewByDisplayName(scene, displayName) : null;
+            Rectangle displayBounds = labelView != null ? liveLightDisplayBounds(labelView) : null;
+            if ((displayBounds == null || displayBounds.height <= 0) && labelView != null)
+                displayBounds = liveLightDisplayBoundsOnHost(labelView, content);
+            if (displayBounds == null)
+            {
+                unresolved++;
+                continue;
+            }
+            tops.add(content.toControl(displayBounds.x, displayBounds.y).y);
+        }
+        if (unresolved > 0 || tops.size() != expectedCount)
+        {
+            // #region agent log
+            agentHitLog("H30", "ControlInterop.buildPropertyAreasForSectionGeometry", "unresolvedFields", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    java.util.Map.of("title", title, "expected", expectedCount, //$NON-NLS-1$ //$NON-NLS-2$
+                            "found", tops.size(), "unresolved", unresolved)); //$NON-NLS-1$ //$NON-NLS-2$
+            // #endregion
+            return null;
+        }
+        java.util.Collections.sort(tops);
+
+        List<PropertyArea> areas = new ArrayList<>();
+        for (int i = 0; i < tops.size(); i++)
+        {
+            int top = tops.get(i);
+            int bottom = i + 1 < tops.size() ? tops.get(i + 1) : section.bodyBottomCanvas;
+            if (bottom > top)
+                areas.add(new PropertyArea(top, bottom));
+        }
+        if (areas.isEmpty())
+            return null;
+
+        // Две проверки на правдоподобность — на КАЖДУЮ область, не только последнюю:
+        // 1) слишком маленькая (<8px) — резолвинг двух соседних меток «слипся» на почти
+        //    одинаковый Y (напр. коллизия findLwtViewByDisplayName/liveLightDisplayBoundsOnHost),
+        //    из-за чего следующая область незаконно поглощает лишний визуальный ряд;
+        // 2) аномально большая (>80px и >3x медианы) — «видимых» полей (expectedCount) меньше
+        //    реального числа строк в длинных виртуализированных секциях (напр. «Представление» —
+        //    модель отдаёт только текущее окно рендера), и хвост растягивается на всю секцию.
+        // В обоих случаях результату геометрии нельзя доверять целиком — откат на пиксельный скан.
+        if (areas.size() >= 2)
+        {
+            List<Integer> sortedHeights = new ArrayList<>();
+            for (PropertyArea a : areas)
+                sortedHeights.add(a.height());
+            java.util.Collections.sort(sortedHeights);
+            int median = sortedHeights.get(sortedHeights.size() / 2);
+            for (int i = 0; i < areas.size(); i++)
+            {
+                int h = areas.get(i).height();
+                boolean tooSmall = h < 8;
+                boolean tooLarge = median > 0 && h > 80 && h > median * 3;
+                if (tooSmall || tooLarge)
+                {
+                    // #region agent log
+                    agentHitLog("H30", "ControlInterop.buildPropertyAreasForSectionGeometry", //$NON-NLS-1$ //$NON-NLS-2$
+                            "implausibleArea", java.util.Map.of("title", title, "index", i, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                                    "height", h, "median", median, "expected", expectedCount)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    // #endregion
+                    return null;
+                }
+            }
+        }
+        return areas;
+    }
+
+    private static List<PropertyArea> geometryBail(String title, String reason, int found, int expected)
+    {
+        // #region agent log
+        agentHitLog("H30", "ControlInterop.buildPropertyAreasForSectionGeometry", reason, //$NON-NLS-1$ //$NON-NLS-2$
+                java.util.Map.of("title", title, "found", found, "expected", expected)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // #endregion
+        return null;
+    }
+
     static List<PropertyArea> buildPropertyAreasForSectionCanvas(Composite content,
             LwtPropertySection section, Object scene, Object page)
+    {
+        return buildPropertyAreasForSectionCanvas(content, section, scene, page, -1);
+    }
+
+    static List<PropertyArea> buildPropertyAreasForSectionCanvas(Composite content,
+            LwtPropertySection section, Object scene, Object page, int knownGroupIndex)
     {
         if (content == null || section == null || !section.expanded
                 || section.bodyBottomCanvas <= section.bodyTopCanvas)
             return java.util.Collections.emptyList();
+
+        List<PropertyArea> geometryAreas = buildPropertyAreasForSectionGeometry(content, section, scene,
+                page, knownGroupIndex);
+        if (geometryAreas != null)
+        {
+            // #region agent log
+            agentHitLog("H10", "ControlInterop.buildPropertyAreasForSectionCanvas", "scanAreasGeometry", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    java.util.Map.of("title", section.titleHint != null ? section.titleHint : "", //$NON-NLS-1$ //$NON-NLS-2$
+                            "areas", geometryAreas.size(), "bodyTop", section.bodyTopCanvas, //$NON-NLS-1$ //$NON-NLS-2$
+                            "bodyBottom", section.bodyBottomCanvas)); //$NON-NLS-1$
+            // #endregion
+            return geometryAreas;
+        }
+
+        // Fallback: пиксельный скан фона — только если геометрию меток получить не удалось.
         if (section.body != null && !section.body.isDisposed())
         {
             Object captureToken = content.getData(PS_CANVAS_CAPTURE_KEY);
@@ -2158,7 +2330,8 @@ final class PropertySheetControlInterop
         PropertySheetUiContext ctx = PropertySheetUiCoordinator.lastContext(page);
         if (ctx != null)
             scene = ctx.scene;
-        for (PropertyArea area : buildPropertyAreasForSectionCanvas(content, section, scene, page))
+        int groupIndex = resolveGroupIndex(page, section, sections);
+        for (PropertyArea area : buildPropertyAreasForSectionCanvas(content, section, scene, page, groupIndex))
         {
             if (area.containsCanvasY(canvasY))
                 return area;
@@ -2461,7 +2634,7 @@ final class PropertySheetControlInterop
             return null;
         }
         java.util.List<PropertyArea> areas = buildPropertyAreasForSectionCanvas(content, section,
-                scene, page);
+                scene, page, groupIndex);
         PropertyArea area = null;
         int propertyIndex = -1;
         for (int i = 0; i < areas.size(); i++)
@@ -2512,16 +2685,51 @@ final class PropertySheetControlInterop
         }
         else
         {
-            // #region agent log
-            java.util.List<Object> modelSecs = modelSectionDefinitions(page);
-            int fieldsCount = groupIndex >= 0 && groupIndex < modelSecs.size()
-                    ? modelFieldDefinitions(modelSecs.get(groupIndex)).size() : -1;
-            agentHitLog("H6", "ControlInterop.resolvePropertyAtClick", "modelMiss", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    java.util.Map.of("groupIndex", groupIndex, "propertyIndex", propertyIndex, //$NON-NLS-1$ //$NON-NLS-2$
-                            "fieldsCount", fieldsCount, "areasCount", areas.size(), //$NON-NLS-1$ //$NON-NLS-2$
-                            "sectionTitle", section.titleHint != null ? section.titleHint : "")); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            displayName = "scan#" + propertyIndex; //$NON-NLS-1$
+            // Модель «видимых полей» статична и не знает про поля, появляющиеся динамически
+            // (напр. Длина/ДопустимаяДлина/НеограниченнаяДлина для «Основные», когда Тип=Строка).
+            // Строка при этом РЕАЛЬНАЯ (area найдена пиксельным сканом) — просто её нет в списке
+            // модели. Ищем подпись геометрически: чья live-позиция (тем же способом, что и
+            // в buildPropertyAreasForSectionGeometry) попадает в диапазон этой area.
+            String geomName = null;
+            Object geomView = null;
+            for (java.util.Map.Entry<?, ?> entry : labelEntriesFromScene(scene))
+            {
+                Object candidateView = entry.getValue();
+                Rectangle b = liveLightDisplayBounds(candidateView);
+                if (b == null || b.height <= 0)
+                    b = liveLightDisplayBoundsOnHost(candidateView, content);
+                if (b == null)
+                    continue;
+                int labelTopCanvas = content.toControl(b.x, b.y).y;
+                if (labelTopCanvas >= area.topCanvas && labelTopCanvas < area.bottomCanvas)
+                {
+                    String text = labelTextOfViewModel(entry.getKey());
+                    if (text != null && !text.isEmpty())
+                    {
+                        geomName = text;
+                        geomView = candidateView;
+                        break;
+                    }
+                }
+            }
+            if (geomName != null)
+            {
+                displayName = geomName;
+                lwtView = geomView;
+            }
+            else
+            {
+                // #region agent log
+                java.util.List<Object> modelSecs = modelSectionDefinitions(page);
+                int fieldsCount = groupIndex >= 0 && groupIndex < modelSecs.size()
+                        ? modelFieldDefinitions(modelSecs.get(groupIndex)).size() : -1;
+                agentHitLog("H6", "ControlInterop.resolvePropertyAtClick", "modelMiss", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        java.util.Map.of("groupIndex", groupIndex, "propertyIndex", propertyIndex, //$NON-NLS-1$ //$NON-NLS-2$
+                                "fieldsCount", fieldsCount, "areasCount", areas.size(), //$NON-NLS-1$ //$NON-NLS-2$
+                                "sectionTitle", section.titleHint != null ? section.titleHint : "")); //$NON-NLS-1$ //$NON-NLS-2$
+                // #endregion
+                displayName = "scan#" + propertyIndex; //$NON-NLS-1$
+            }
         }
         int[] band = area.toDisplayBand(content);
         // #region agent log
@@ -4765,8 +4973,33 @@ final class PropertySheetControlInterop
     {
         if (lightControl == null)
             return ""; //$NON-NLS-1$
-        Object text = Global.invoke(lightControl, "getText"); //$NON-NLS-1$
+        String direct = rawLightText(lightControl);
+        if (!direct.isEmpty())
+            return direct;
+
+        // Обёртки вроде LightEditorBar/LightCombo (см. LightTextEditorBar) не имеют своего
+        // getText() — реальный текст хранит их getContent() (LightText), как и в
+        // PropertyNameIdentifierHook.readLightTextValue для поля «Имя».
+        Object content = Global.invoke(lightControl, "getContent"); //$NON-NLS-1$
+        if (content != null && content != lightControl)
+        {
+            String contentText = rawLightText(content);
+            if (!contentText.isEmpty())
+                return contentText;
+        }
+        return ""; //$NON-NLS-1$
+    }
+
+    private static String rawLightText(Object obj)
+    {
+        Object text = Global.invoke(obj, "getText"); //$NON-NLS-1$
         return text instanceof String ? (String) text : ""; //$NON-NLS-1$
+    }
+
+    /** Текст значения поля по AEF-view: {@link #lightControlFromView} + {@link #lightControlText}. */
+    static String lwtViewText(Object view)
+    {
+        return lightControlText(lightControlFromView(view));
     }
 
 

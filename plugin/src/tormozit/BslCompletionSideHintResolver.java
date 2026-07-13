@@ -313,7 +313,8 @@ public final class BslCompletionSideHintResolver
             processor, viewer, literalCaret);
         int delegateCount = 0;
         int ext3Count = 0;
-        if (processor != null && viewer != null && probe.probeOffset >= 0)
+        if (processor != null && viewer != null && probe.probeOffset >= 0
+            && !isProbeOffsetInComment(viewer.getDocument(), probe.probeOffset))
         {
             try
             {
@@ -335,9 +336,10 @@ public final class BslCompletionSideHintResolver
                     }
                 }
             }
-            catch (Exception ignored)
+            catch (Throwable ignored)
             {
-                // counts ниже
+                // тихий probe: гасим и Error (напр. VerifyError в нативном BSL-коде
+                // при разборе документационных комментариев), не только Exception
             }
         }
         if (probe.creator != null)
@@ -572,7 +574,7 @@ public final class BslCompletionSideHintResolver
         IDocument doc = viewer.getDocument();
         int probeOffset = resolveProbeOffsetOutsideLiteral(doc, literalCaret);
         result.probeOffset = probeOffset;
-        if (probeOffset < 0)
+        if (probeOffset < 0 || isProbeOffsetInComment(doc, probeOffset))
             return null;
         try
         {
@@ -595,9 +597,10 @@ public final class BslCompletionSideHintResolver
                 }
             }
         }
-        catch (Exception ignored)
+        catch (Throwable ignored)
         {
-            // null ниже
+            // тихий probe: гасим и Error (напр. VerifyError в нативном BSL-коде
+            // при разборе документационных комментариев), не только Exception
         }
         return null;
     }
@@ -649,6 +652,32 @@ public final class BslCompletionSideHintResolver
             if (offset > doc.getLength())
                 return false;
             return !SmartContentAssistProcessor.isStringLiteralAssistContext(doc, offset);
+        }
+        catch (Exception ignored)
+        {
+            return false;
+        }
+    }
+
+    /**
+     * {@code true}, если на строке {@code offset} раньше уже встречается {@code //} —
+     * значит offset попадает в комментарий BSL. Тихий probe не должен звать
+     * {@code computeCompletionProposals} в этом контексте: нативная обработка
+     * BSL-комментариев (documentation-парсер) содержит известный баг верификации
+     * байткода ({@code BslDocumentationComment.parseOldFormat}), который иначе
+     * триггерится нашим же пробником раньше, чем штатными фоновыми задачами EDT.
+     */
+    private static boolean isProbeOffsetInComment(IDocument doc, int offset)
+    {
+        if (doc == null || offset < 0)
+            return false;
+        try
+        {
+            int line = doc.getLineOfOffset(offset);
+            int lineStart = doc.getLineOffset(line);
+            int probeEnd = Math.max(lineStart, Math.min(offset, doc.getLength()));
+            String prefix = doc.get(lineStart, probeEnd - lineStart);
+            return prefix.contains("//"); //$NON-NLS-1$
         }
         catch (Exception ignored)
         {

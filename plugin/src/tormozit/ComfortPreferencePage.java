@@ -2,6 +2,7 @@ package tormozit;
 
 import org.eclipse.jface.dialogs.IDialogConstants;
 import org.eclipse.jface.preference.BooleanFieldEditor;
+import org.eclipse.jface.preference.ColorFieldEditor;
 import org.eclipse.jface.preference.FieldEditor;
 import org.eclipse.jface.preference.FieldEditorPreferencePage;
 import org.eclipse.jface.preference.IPreferencePageContainer;
@@ -117,6 +118,25 @@ public class ComfortPreferencePage
             codeEditorGroup);
         timeoutField.setValidRange(0, 10_000);
         addField(timeoutField);
+
+        BooleanFieldEditor serverCallField = new BooleanFieldEditor(
+            ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_ENABLED,
+            "Подсвечивать серверные вызовы", //$NON-NLS-1$
+            codeEditorGroup);
+        addField(serverCallField);
+        setFieldTooltip(serverCallField,
+            "Подсвечивать серверные вызовы в клиентском коде другим цветом.\n"
+            + "При выключении серверные вызовы подсвечиваются стандартным стилем builtin-функций EDT."); //$NON-NLS-1$
+
+        addField(new ColorFieldEditor(
+            ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_COLOR,
+            "Цвет серверных вызовов:", //$NON-NLS-1$
+            codeEditorGroup));
+
+        addField(new ColorFieldEditor(
+            ComfortSettings.PREF_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR,
+            "Цвет серверных вызовов с контекстом:", //$NON-NLS-1$
+            codeEditorGroup));
 
         createLoggingGroup();
 
@@ -403,6 +423,15 @@ public class ComfortPreferencePage
         {
             // getLabelControl недоступен
         }
+    }
+
+    @Override
+    public boolean performOk()
+    {
+        boolean result = super.performOk();
+        if (result)
+            BslServerCallHighlightingHook.refreshAllEditors();
+        return result;
     }
 
     private void addFieldHint(String text)

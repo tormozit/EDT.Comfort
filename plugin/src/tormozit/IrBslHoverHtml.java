@@ -80,6 +80,35 @@ public final class IrBslHoverHtml
     }
 
     /**
+     * Вставляет блок директивы компиляции ({@code &НаСервере} и т.д.) в HTML
+     * перед первым {@code <div} или {@code <span}. Идемпотентно: повторный вызов
+     * с тем же HTML не добавит директиву повторно.
+     *
+     * @return HTML с директивой или исходный {@code html} если директива пуста
+     */
+    public static String injectDirectiveIntoHtml(String html, String directive)
+    {
+        if (html == null || html.isEmpty() || directive == null || directive.isBlank())
+            return html;
+        String marker = "comfort-directive"; //$NON-NLS-1$
+        if (html.contains(marker))
+            return html;
+        String directiveBlock = "<div class=\"" + marker + "\">" + directive.trim() + "</div> "; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        int firstDiv = html.indexOf("<div"); //$NON-NLS-1$
+        int firstSpan = html.indexOf("<span"); //$NON-NLS-1$
+        int insertAt = -1;
+        if (firstDiv >= 0 && firstSpan >= 0)
+            insertAt = Math.min(firstDiv, firstSpan);
+        else if (firstDiv >= 0)
+            insertAt = firstDiv;
+        else if (firstSpan >= 0)
+            insertAt = firstSpan;
+        if (insertAt < 0)
+            return html;
+        return html.substring(0, insertAt) + directiveBlock + html.substring(insertAt);
+    }
+
+    /**
      * Находит виджет {@link Browser} внутри information control, обходя дерево SWT-виджетов.
      * Аналог внутреннего {@code BslInfoBrowserUtils.getInfoBrowser()} из EDT.
      */

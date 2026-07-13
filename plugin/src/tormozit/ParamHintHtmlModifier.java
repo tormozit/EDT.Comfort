@@ -1467,6 +1467,12 @@ public final class ParamHintHtmlModifier
         String owner = resolveHeadingOwner(ctx);
         String returnTypes = resolveHeadingReturnTypes(ctx, beforeHtml, methodName);
         StringBuilder sb = new StringBuilder();
+        if (ctx != null && ctx.directive != null && !ctx.directive.isBlank())
+        {
+            sb.append("<span class=\"comfort-directive\">"); //$NON-NLS-1$
+            sb.append(escapeHtml(ctx.directive));
+            sb.append("</span> "); //$NON-NLS-1$
+        }
         if (owner != null && !owner.isEmpty())
         {
             sb.append(escapeHtml(owner));
@@ -2582,6 +2588,7 @@ public final class ParamHintHtmlModifier
             ctx.actualArgTypes = snap.actualArgTypes;
             ctx.actualArgTypeNames = snap.actualArgTypeNames;
             ctx.method = snap.method;
+            ctx.directive = snap.directive;
         }
         catch (Exception ignored)
         {
@@ -2601,6 +2608,7 @@ public final class ParamHintHtmlModifier
         {
             params = invocation.getParams();
             snap.method = resolveMethod(invocation.getMethodAccess());
+            snap.directive = extractMethodDirective(resource, invocation);
         }
         else
         {
@@ -2660,6 +2668,73 @@ public final class ParamHintHtmlModifier
                 return method;
         }
         return null;
+    }
+
+    /**
+     * Извлекает директиву компиляции метода ({@code &НаСервере}, {@code &НаКлиенте} и т.д.)
+     * из текстовых токенов AST-узла метода перед ключевым словом
+     * {@code Процедура}/{@code Функция}/{@code Procedure}/{@code Function}.
+     *
+     * @return директива (напр. {@code &НаСервере}) или {@code null}
+     */
+    static String extractMethodDirective(XtextResource resource, Invocation invocation)
+    {
+        if (resource == null || invocation == null)
+            return null;
+        FeatureAccess access = invocation.getMethodAccess();
+        if (access == null)
+            return null;
+        EList<FeatureEntry> entries = null;
+        if (access instanceof DynamicFeatureAccess dynamic)
+            entries = dynamic.getFeatureEntries();
+        else if (access instanceof StaticFeatureAccess staticAccess)
+            entries = staticAccess.getFeatureEntries();
+        if (entries == null)
+            return null;
+        for (FeatureEntry entry : entries)
+        {
+            if (entry == null)
+                continue;
+            EObject feature = entry.getFeature();
+            if (!(feature instanceof com._1c.g5.v8.dt.bsl.model.Method bslMethod))
+                continue;
+            return extractDirectiveFromBslMethodNode(bslMethod);
+        }
+        return null;
+    }
+
+    private static String extractDirectiveFromBslMethodNode(
+        com._1c.g5.v8.dt.bsl.model.Method bslMethod)
+    {
+        ICompositeNode methodNode = NodeModelUtils.findActualNodeFor(bslMethod);
+        if (methodNode == null)
+            return null;
+        String fullText = NodeModelUtils.getTokenText(methodNode);
+        if (fullText == null || fullText.isEmpty())
+            return null;
+        String[] keywords = { "Процедура", "Procedure", "Функция", "Function" }; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        int keywordIdx = -1;
+        for (String kw : keywords)
+        {
+            keywordIdx = fullText.indexOf(kw);
+            if (keywordIdx >= 0)
+                break;
+        }
+        if (keywordIdx <= 0)
+            return null;
+        String prefix = fullText.substring(0, keywordIdx);
+        StringBuilder directive = new StringBuilder();
+        for (String line : prefix.split("\\r?\\n")) //$NON-NLS-1$
+        {
+            String trimmed = line.trim();
+            if (trimmed.startsWith("&")) //$NON-NLS-1$
+            {
+                if (directive.length() > 0)
+                    directive.append('\n');
+                directive.append(trimmed);
+            }
+        }
+        return directive.length() > 0 ? directive.toString() : null;
     }
 
     static int pickBestSignatureIndex(HoverContext ctx)
@@ -3067,6 +3142,7 @@ public final class ParamHintHtmlModifier
         List<TypeItem> actualArgTypes = Collections.emptyList();
         Set<String> actualArgTypeNames = Collections.emptySet();
         Method method;
+        String directive;
     }
 
     private static final class InvocationSnapshot
@@ -3075,6 +3151,7 @@ public final class ParamHintHtmlModifier
         List<TypeItem> actualArgTypes = Collections.emptyList();
         Set<String> actualArgTypeNames = Collections.emptySet();
         Method method;
+        String directive;
     }
 
     private static final class FindMissSupport

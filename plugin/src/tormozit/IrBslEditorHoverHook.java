@@ -229,6 +229,7 @@ public final class IrBslEditorHoverHook implements IStartup
         private volatile int lastScheduledOffset = -1;
         private volatile String lastIrHtml;
         private volatile String lastBaseHtml;
+        private volatile String lastDirective;
         private volatile HtmlIntegrityWatcher activeWatcher;
 
         IrBslTextHoverWrapper(ITextHover delegate, BslXtextEditor editor)
@@ -272,23 +273,49 @@ public final class IrBslEditorHoverHook implements IStartup
                 return info;
             if (!IrBslHoverHtml.isBslBrowserInput(info))
                 return info;
+            final int offset = hoverRegion.getOffset();
+            String directive = resolveHoverDirective(offset);
+            lastDirective = (directive != null && !directive.isBlank()) ? directive : null;
             IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(editor);
             if (session == null)
             {
                 cancelIrEnrichment();
                 IrBslHoverDebug.step("skip", "no session"); //$NON-NLS-1$ //$NON-NLS-2$
+                if (lastDirective != null)
+                {
+                    String html = IrBslHoverHtml.readHtml(info);
+                    String modified = IrBslHoverHtml.injectDirectiveIntoHtml(html, lastDirective);
+                    if (!modified.equals(html))
+                        return modified;
+                }
                 return info;
             }
-            final int offset = hoverRegion.getOffset();
             IRSession.cancelActiveEvaluation(session);
             final int gen = cancelIrEnrichment();
             lastScheduledOffset = offset;
             final Object baseInput = info;
             IRSession.CodeEditorSyncPayload payload = session.prepareCodeEditorSyncForHover(editor, offset);
             if (payload == null)
+            {
+                scheduleNativeInputSync(baseInput, offset, gen);
+                if (lastDirective != null)
+                {
+                    String html = IrBslHoverHtml.readHtml(info);
+                    String modified = IrBslHoverHtml.injectDirectiveIntoHtml(html, lastDirective);
+                    if (!modified.equals(html))
+                        return modified;
+                }
                 return info;
+            }
             scheduleNativeInputSync(baseInput, offset, gen);
             session.executor.submit(() -> scheduleIrEnrichment(session, baseInput, payload, offset, gen));
+            if (lastDirective != null)
+            {
+                String html = IrBslHoverHtml.readHtml(info);
+                String modified = IrBslHoverHtml.injectDirectiveIntoHtml(html, lastDirective);
+                if (!modified.equals(html))
+                    return modified;
+            }
             return info;
         }
 
@@ -304,9 +331,62 @@ public final class IrBslEditorHoverHook implements IStartup
                 IXtextBrowserInformationControl control = IrBslHoverControlAccess.resolve(editor);
                 if (control == null)
                     return;
+                String dir = lastDirective;
+                if (dir != null && !dir.isBlank())
+                {
+                    String html = IrBslHoverHtml.readHtml(baseInput);
+                    String modified = IrBslHoverHtml.injectDirectiveIntoHtml(html, dir);
+                    if (!modified.equals(html))
+                    {
+                        IrBslHoverHtml.applyHtmlToControl(control, modified);
+                        if (control.hasDelayedInputChangeListener())
+                            control.notifyDelayedInputChange(modified);
+                        return;
+                    }
+                }
                 if (control.hasDelayedInputChangeListener())
                     control.notifyDelayedInputChange(baseInput);
             });
+        }
+
+        private String resolveHoverDirective(int offset)
+        {
+            if (editor == null)
+                return null;
+            org.eclipse.jface.text.IDocument document = editor.getDocument();
+            if (!(document instanceof org.eclipse.xtext.ui.editor.model.IXtextDocument xtextDoc))
+                return null;
+            try
+            {
+                return xtextDoc.readOnly(
+                    (org.eclipse.xtext.util.concurrent.IUnitOfWork<String, org.eclipse.xtext.resource.XtextResource>) resource -> {
+                        if (resource == null)
+                            return null;
+                        org.eclipse.emf.ecore.EObject obj = findInvocationLikeAt(resource, offset);
+                        if (obj instanceof com._1c.g5.v8.dt.bsl.model.Invocation invocation)
+                            return ParamHintHtmlModifier.extractMethodDirective(resource, invocation);
+                        return null;
+                    });
+            }
+            catch (Exception e)
+            {
+                return null;
+            }
+        }
+
+        private static org.eclipse.emf.ecore.EObject findInvocationLikeAt(
+            org.eclipse.xtext.resource.XtextResource resource, int caret)
+        {
+            org.eclipse.xtext.resource.EObjectAtOffsetHelper helper =
+                new org.eclipse.xtext.resource.EObjectAtOffsetHelper();
+            org.eclipse.emf.ecore.EObject obj = helper.resolveContainedElementAt(resource, caret);
+            for (org.eclipse.emf.ecore.EObject cur = obj; cur != null; cur = cur.eContainer())
+            {
+                if (cur instanceof com._1c.g5.v8.dt.bsl.model.Invocation
+                    || cur instanceof com._1c.g5.v8.dt.bsl.model.OperatorStyleCreator)
+                    return cur;
+            }
+            return null;
         }
 
         /** Отменяет watcher, async-обогащение и кэш последнего ИР-фрагмента. */
@@ -353,6 +433,9 @@ public final class IrBslEditorHoverHook implements IStartup
             String baseHtml = IrBslHoverHtml.readHtml(baseInput);
             lastBaseHtml = baseHtml;
             String merged = IrBslHoverHtml.mergeHtml(baseHtml, irHtml);
+            String dir = lastDirective;
+            if (dir != null && !dir.isBlank())
+                merged = IrBslHoverHtml.injectDirectiveIntoHtml(merged, dir);
 
             if (tryApplyToCurrentControl(merged))
             {
