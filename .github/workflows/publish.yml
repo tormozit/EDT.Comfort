@@ -141,17 +141,16 @@ jobs:
             test -d "deploy/$name/features" || (echo "ERROR: deploy/$name/features missing" && exit 1)
             test -d "deploy/$name/plugins" || (echo "ERROR: deploy/$name/plugins missing" && exit 1)
             test -f "deploy/$name/content.xml" || (echo "ERROR: deploy/$name/content.xml missing (sanitize failed?)" && exit 1)
-            if [[ "$name" == "$VER" ]]; then
-              # Только у свежепубликуемой версии есть "сырые" метаданные из site/ с <update>.
-              # Старые архивные версии просто переносятся как есть и его не содержат.
-              if ! grep -q "<update id='tormozit.comfort.feature.feature.group'" "deploy/$name/content.xml"; then
-                echo "ERROR: deploy/$name/content.xml missing <update> for feature.group (p2 won't recognize upgrades, breaks 'Installed Software' after update)"
-                exit 1
-              fi
-              if ! grep -q "<update id='tormozit.comfort'" "deploy/$name/content.xml"; then
-                echo "ERROR: deploy/$name/content.xml missing <update> for bundle tormozit.comfort"
-                exit 1
-              fi
+            # generate_composite.py теперь дописывает <update> и архивным версиям
+            # (ensure_update_elements), не только текущей — иначе апдейт между
+            # двумя старыми версиями тоже теряет root в "Установленном ПО".
+            if ! grep -q "<update id='tormozit.comfort.feature.feature.group'" "deploy/$name/content.xml"; then
+              echo "ERROR: deploy/$name/content.xml missing <update> for feature.group (p2 won't recognize upgrades, breaks 'Installed Software' after update)"
+              exit 1
+            fi
+            if ! grep -q "<update id='tormozit.comfort'" "deploy/$name/content.xml"; then
+              echo "ERROR: deploy/$name/content.xml missing <update> for bundle tormozit.comfort"
+              exit 1
             fi
             if grep -q "tormozit.github.io/EDT.Comfort/" "deploy/$name/content.xml"; then
               echo "ERROR: deploy/$name/content.xml still references composite parent URL"
