@@ -117,7 +117,7 @@ jobs:
           test ! -f deploy/compositeContent.xml || (echo "ERROR: root compositeContent.xml must not exist" && exit 1)
           grep -q "unit id='tormozit.comfort'" "deploy/$VER/content.xml" || (echo "ERROR: bundle IU missing from deploy/$VER/content.xml" && exit 1)
 
-          ROOT_GROUP_COUNT=$(grep -o "id='tormozit.comfort.feature.feature.group'" deploy/content.xml | wc -l | tr -d ' ')
+          ROOT_GROUP_COUNT=$(grep -o "<unit id='tormozit.comfort.feature.feature.group'" deploy/content.xml | wc -l | tr -d ' ')
           if [[ "$ROOT_GROUP_COUNT" -lt 1 ]]; then
             echo "ERROR: root content.xml has no feature.group IU"
             exit 1
