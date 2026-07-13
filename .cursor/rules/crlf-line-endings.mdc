@@ -1,5 +1,5 @@
 ---
-description: CRLF на Windows, защита от двойных разделителей и авто-ремонт после правок
+description: CRLF на Windows, защита от двойных разделителей и авто-ремонт после завершения задачи
 alwaysApply: true
 ---
 
@@ -11,7 +11,7 @@ alwaysApply: true
 
 **Git hook:** см. `.cursor/scripts/install-git-eol-hook.ps1`, проверка — `check-double-eol.ps1`.
 
-**После записи** в `plugin/src/**`, `plugin/plugin.xml`, `META-INF/**`:
+**После завершения задачи** в `plugin/src/**`, `plugin/plugin.xml`, `META-INF/**`:
 ```powershell
 powershell -NoProfile -File "C:\VC\EDT.Comfort\.cursor\scripts\repair-double-eol.ps1" -Path "C:\VC\EDT.Comfort\plugin\src\tormozit\Foo.java"
 ```

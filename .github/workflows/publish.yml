@@ -141,8 +141,12 @@ jobs:
             test -d "deploy/$name/features" || (echo "ERROR: deploy/$name/features missing" && exit 1)
             test -d "deploy/$name/plugins" || (echo "ERROR: deploy/$name/plugins missing" && exit 1)
             test -f "deploy/$name/content.xml" || (echo "ERROR: deploy/$name/content.xml missing (sanitize failed?)" && exit 1)
-            if grep -q "<update id=" "deploy/$name/content.xml"; then
-              echo "ERROR: deploy/$name/content.xml still contains p2 update metadata"
+            if ! grep -q "<update id='tormozit.comfort.feature.feature.group'" "deploy/$name/content.xml"; then
+              echo "ERROR: deploy/$name/content.xml missing <update> for feature.group (p2 won't recognize upgrades, breaks 'Installed Software' after update)"
+              exit 1
+            fi
+            if ! grep -q "<update id='tormozit.comfort'" "deploy/$name/content.xml"; then
+              echo "ERROR: deploy/$name/content.xml missing <update> for bundle tormozit.comfort"
               exit 1
             fi
             if grep -q "tormozit.github.io/EDT.Comfort/" "deploy/$name/content.xml"; then

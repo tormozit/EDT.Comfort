@@ -37,18 +37,19 @@ artifact.repository.factory.order=artifacts.xml,artifacts.jar,!
 
 
 def sanitize_child_content_xml(xml_text: str) -> str:
-    """Убрать update-цепочку и ссылки на parent composite из дочернего p2-репозитория."""
+    """Убрать ссылки на parent composite из дочернего p2-репозитория.
+
+    <update> внутри unit-ов (feature.group, bundle) не трогаем: это цепочка
+    "эта версия обновляет предыдущую", без неё p2 при установке с сайта не
+    распознаёт апдейт корневого IU и плагин пропадает из "Установленного ПО"
+    (issue: "плагин пропадает после обновления, только не из ZIP").
+    """
     xml_text = re.sub(
         r"\s*<references\b[^>]*>.*?</references>\s*",
         "\n",
         xml_text,
         count=1,
         flags=re.DOTALL,
-    )
-    xml_text = re.sub(
-        r"\s*<update\b[^/]*/>\s*",
-        "\n",
-        xml_text,
     )
     return xml_text
 
