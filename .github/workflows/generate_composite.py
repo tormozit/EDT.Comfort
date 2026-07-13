@@ -54,9 +54,35 @@ def sanitize_child_content_xml(xml_text: str) -> str:
     return xml_text
 
 
+UPDATE_CHAIN_UNITS = (BUNDLE_ID, FEATURE_GROUP_IU)
+
+
+def ensure_update_elements(xml_text: str) -> str:
+    """Добавить <update> тем unit-ам (bundle/feature.group), у которых его нет.
+
+    Архивные версии сайта публиковались до этого фикса и физически не содержат
+    <update> в своём content.xml (он не проставляется задним числом сам по себе).
+    Без него p2 не признаёт переход со старой архивной версии на другую архивную
+    апдейтом — плагин пропадает из "Установленного ПО" даже при обновлении между
+    двумя старыми версиями, не только на последнюю.
+    """
+    parts = re.split(r"(?=<unit )", xml_text)
+    out = []
+    for part in parts:
+        m = re.match(r"<unit id='([^']*)' version='([^']*)'", part)
+        if m and m.group(1) in UPDATE_CHAIN_UNITS and "<update " not in part:
+            unit_id, version = m.group(1), m.group(2)
+            insert_at = part.index(">") + 1
+            update_tag = f"\n      <update id='{unit_id}' range='[0.0.0,{version})' severity='0'/>"
+            part = part[:insert_at] + update_tag + part[insert_at:]
+        out.append(part)
+    return "".join(out)
+
+
 def fix_content_xml(xml_text: str) -> str:
     """Category-IU fix + санитизация метаданных дочернего репозитория."""
     xml_text = sanitize_child_content_xml(xml_text)
+    xml_text = ensure_update_elements(xml_text)
     if "p2.type.category" not in xml_text:
         return xml_text
 
