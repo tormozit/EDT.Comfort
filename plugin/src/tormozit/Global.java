@@ -315,6 +315,102 @@ public final class Global
         }
     }
 
+    /**
+     * Создаёт объект класса {@code targetClass} конструктором, подобранным по количеству
+     * аргументов (как {@link #invoke} — без сверки типов параметров), включая private.
+     *
+     * @return новый объект, или {@code null} при любой ошибке / если подходящий конструктор не найден
+     */
+    public static Object newInstance(Class<?> targetClass, Object... args)
+    {
+        if (targetClass == null) return null;
+        int argc = args == null ? 0 : args.length;
+        for (java.lang.reflect.Constructor<?> ctor : targetClass.getDeclaredConstructors())
+        {
+            if (ctor.getParameterCount() == argc)
+            {
+                try
+                {
+                    ctor.setAccessible(true);
+                    return ctor.newInstance(args);
+                }
+                catch (Exception ignored) { /* пробуем следующий конструктор с тем же argc */ }
+            }
+        }
+        return null;
+    }
+
+    /** Как {@link #newInstance(Class, Object...)}, но класс ищется по имени через {@code loader}. */
+    public static Object newInstance(String className, ClassLoader loader, Object... args)
+    {
+        try
+        {
+            return newInstance(Class.forName(className, true, loader), args);
+        }
+        catch (Exception e)
+        {
+            logError("Global", "newInstance:" + className, e); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+    }
+
+    /**
+     * Как {@link #installLightControlListener(Object, Runnable, Runnable)}, но пересылает
+     * {@code onEvent} все события {@code ILightControlListener.eventReceived} без фильтрации
+     * по типу (используется, когда заранее не известно, какой именно тип события нужен —
+     * например, для перехвата ввода в {@code LightCombo}, где фильтрация списка происходит
+     * прямо на {@code SWT.KeyDown}, а не на {@code SWT.Modify}).
+     *
+     * @return {@code true}, если слушатель успешно добавлен через {@code addControlListener}
+     */
+    public static boolean installLightControlListener(Object lightControl, Consumer<Event> onEvent)
+    {
+        if (lightControl == null || onEvent == null)
+            return false;
+        try
+        {
+            ClassLoader lwtLoader = lightControl.getClass().getClassLoader();
+            Class<?> listenerClass = Class.forName(LIGHT_CONTROL_LISTENER_CLASS, true, lwtLoader);
+
+            InvocationHandler handler = (proxy, method, args) ->
+            {
+                String name = method.getName();
+                if ("eventReceived".equals(name) && args != null && args.length == 2 //$NON-NLS-1$
+                    && args[1] instanceof Event event)
+                {
+                    onEvent.accept(event);
+                    return null;
+                }
+                if ("hashCode".equals(name) && (args == null || args.length == 0)) //$NON-NLS-1$
+                    return System.identityHashCode(proxy);
+                if ("equals".equals(name) && args != null && args.length == 1) //$NON-NLS-1$
+                    return proxy == args[0];
+                if ("toString".equals(name) && (args == null || args.length == 0)) //$NON-NLS-1$
+                    return proxy.getClass().getName() + "@" + Integer.toHexString(System.identityHashCode(proxy)); //$NON-NLS-1$
+                Class<?> returnType = method.getReturnType();
+                if (returnType == boolean.class)
+                    return Boolean.FALSE;
+                if (returnType == int.class || returnType == long.class || returnType == short.class
+                    || returnType == byte.class)
+                    return 0;
+                if (returnType == char.class)
+                    return '\0';
+                if (returnType == float.class || returnType == double.class)
+                    return 0.0;
+                return null;
+            };
+
+            Object listenerProxy = Proxy.newProxyInstance(lwtLoader, new Class<?>[] { listenerClass }, handler);
+            invokeVoid(lightControl, "addControlListener", listenerProxy); //$NON-NLS-1$
+            return true;
+        }
+        catch (Exception e)
+        {
+            logError("Global", "installLightControlListener", e); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        }
+    }
+
     // =========================================================================
     // OSGi / сервисы
     // =========================================================================

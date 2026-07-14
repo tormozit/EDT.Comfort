@@ -24,6 +24,9 @@ public final class ContentAssistDebug
     private static final String DEBUG_SESSION_ID = "0ae881"; //$NON-NLS-1$
     private static final Path DEBUG_MODE_LOG = Path.of("C:\\VC\\EDT.Comfort\\debug-267a94.log"); //$NON-NLS-1$
     private static final String DEBUG_MODE_SESSION_ID = "267a94"; //$NON-NLS-1$
+    /** Временный файл для диагностики лага ввода (perfLog) — не «Журнал Комфорт», см. comfort-logging.mdc п.2. */
+    private static final Path PERF_LOG = Path.of("C:\\VC\\EDT.Comfort\\debug-perf-query-lag.log"); //$NON-NLS-1$
+    private static final BlockingQueue<String> PERF_QUEUE = new LinkedBlockingQueue<>(20_000);
     /** Маркер сборки для literal assist. */
     public static final String LITERAL_ASSIST_BUILD = "20260708-sync-selection"; //$NON-NLS-1$
     /** NDJSON в debug-267a94.log — временная отладка; выкл. после фикса. */
@@ -51,6 +54,8 @@ public final class ContentAssistDebug
             try { Files.deleteIfExists(DEBUG_SESSION_LOG); } catch (IOException e) { /* best-effort */ }
             startAsyncWriter("ContentAssistSessionWriter", DEBUG_SESSION_LOG, SESSION_QUEUE); //$NON-NLS-1$
         }
+        try { Files.deleteIfExists(PERF_LOG); } catch (IOException e) { /* best-effort */ }
+        startAsyncWriter("ContentAssistPerfLagWriter", PERF_LOG, PERF_QUEUE); //$NON-NLS-1$
     }
 
     private static void startAsyncWriter(String threadName, Path logPath, BlockingQueue<String> queue)
@@ -244,6 +249,23 @@ public final class ContentAssistDebug
         String data = dataJson != null && !dataJson.isEmpty() ? dataJson : "{}"; //$NON-NLS-1$
         Global.log("contentAssist", //$NON-NLS-1$
             "[" + hypothesisId + "] " + location + " " + message + " " + data); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+    }
+
+    /**
+     * Временная диагностика лага ввода в «Редакторе запроса» (не «Журнал Комфорт» —
+     * см. comfort-logging.mdc п.2): пишет в {@code debug-perf-query-lag.log} БЕЗУСЛОВНО,
+     * на каждый вызов — без флажков, без порога. {@code thresholdMs} не используется для
+     * фильтрации, только помечает вызов как «медленный» в самой записи. Снять после фикса.
+     */
+    public static void perfLog(String location, long elapsedMs, int thresholdMs, String extraJson)
+    {
+        String extra = extraJson != null && !extraJson.isEmpty() ? extraJson : "{}"; //$NON-NLS-1$
+        String line = "{\"location\":\"" + jsonEscape(location) //$NON-NLS-1$
+            + "\",\"ms\":" + elapsedMs //$NON-NLS-1$
+            + ",\"slow\":" + (elapsedMs >= thresholdMs) //$NON-NLS-1$
+            + ",\"data\":" + extra //$NON-NLS-1$
+            + ",\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
+        PERF_QUEUE.offer(line); // non-blocking; drops if queue full
     }
 
     public static boolean shouldLogValidateLiteral()

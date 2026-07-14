@@ -12,10 +12,13 @@ import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
+import org.eclipse.swt.widgets.List;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.Text;
+import org.eclipse.swt.widgets.Tree;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.PlatformUI;
@@ -94,6 +97,21 @@ public final class GotoDefinitionFieldMenuHook implements IStartup
                 return;
             }
             tryShowStandalone(event, control, PropertySheetControlInterop.controlText(control));
+            return;
+        }
+
+        // Фолбэк предназначен только для LWT-канвасов панели «Свойства» (см. javadoc класса),
+        // где отдельного текстового control в состоянии покоя не существует. Структурные виджеты
+        // со своим штатным контекстным меню (дерево реквизитов объекта метаданных, таблицы и т.п.)
+        // исключаем — иначе наш пункт подменяет собой их меню вместо того чтобы его дополнять.
+        if (control instanceof Tree || control instanceof Table || control instanceof List)
+            return;
+
+        // Если у control уже есть собственное меню — дополняем его, а не заменяем отдельным
+        // всплывающим меню (иначе штатные пункты этого меню пропадают у пользователя из виду).
+        if (control.getMenu() != null)
+        {
+            hookControlMenu(control);
             return;
         }
 

@@ -896,6 +896,7 @@ public final class ContentAssistPopupSync
             ContentAssistDebug.debugModeLog("H83", "recomputePopupList", "exit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 "{\"ms\":" + elapsedMs + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             // #endregion
+            ContentAssistDebug.perfLog("recomputePopupList", elapsedMs, 15, null); //$NON-NLS-1$
             if (viewer != null && isPopupVisible(assistant))
                 ContentAssistPopupUi.updateContextTypeLabel(viewer);
             RECOMPUTE_GUARD.set(Boolean.FALSE);

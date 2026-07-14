@@ -6,7 +6,6 @@ import com._1c.g5.v8.dt.bsl.ui.hover.BslDispatchingEObjectTextHover;
 import com._1c.g5.v8.dt.mcore.Method;
 import com._1c.g5.v8.dt.mcore.Property;
 import org.eclipse.emf.ecore.EObject;
-import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.IInformationControlCreator;
 import org.eclipse.jface.text.IRegion;
@@ -25,9 +24,7 @@ import org.eclipse.xtext.resource.IResourceServiceProvider;
 
 import org.eclipse.emf.common.util.URI;
 
-import java.util.LinkedHashSet;
 import java.util.Map;
-import java.util.Set;
 import java.util.WeakHashMap;
 
 /**
@@ -308,51 +305,8 @@ public final class BslCompletionSideHintResolver
             return result;
         }
         logColdCreatorBootstrap("hoverMap", false, -1, 0, 0, null); //$NON-NLS-1$
-        int literalCaret = resolveLiteralCaretForProbe(viewer);
-        ProbeDelegateBrowserResult probe = probeDelegateBrowserCreatorDetailed(
-            processor, viewer, literalCaret);
-        int delegateCount = 0;
-        int ext3Count = 0;
-        if (processor != null && viewer != null && probe.probeOffset >= 0
-            && !isProbeOffsetInComment(viewer.getDocument(), probe.probeOffset))
-        {
-            try
-            {
-                ICompletionProposal[] proposals = processor.getDelegate()
-                    .computeCompletionProposals(viewer, probe.probeOffset);
-                if (proposals != null)
-                {
-                    delegateCount = proposals.length;
-                    for (ICompletionProposal proposal : proposals)
-                    {
-                        if (proposal == null)
-                            continue;
-                        ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(proposal);
-                        if (raw instanceof IrCompletionProposal)
-                            continue;
-                        if (raw instanceof ICompletionProposalExtension3 ext3
-                            && ext3.getInformationControlCreator() != null)
-                            ext3Count++;
-                    }
-                }
-            }
-            catch (Throwable ignored)
-            {
-                // тихий probe: гасим и Error (напр. VerifyError в нативном BSL-коде
-                // при разборе документационных комментариев), не только Exception
-            }
-        }
-        if (probe.creator != null)
-        {
-            result.creator = probe.creator;
-            result.winner = "probeDelegate"; //$NON-NLS-1$
-            rememberEditorBrowserCreator(editor, probe.creator);
-            logColdCreatorBootstrap("probeDelegate", true, probe.probeOffset, //$NON-NLS-1$
-                delegateCount, ext3Count, null);
-            return result;
-        }
-        logColdCreatorBootstrap("probeDelegate", false, probe.probeOffset, //$NON-NLS-1$
-            delegateCount, ext3Count, probe.source);
+        // probeDelegate убран: гонял computeCompletionProposals (полный расчёт списка
+        // автодополнения) на UI-потоке дважды подряд только ради IInformationControlCreator.
         creator = resolveAssistBrowserCreatorChain(null, viewer,
             ContentAssistSessionReloader.getActiveReloader());
         if (creator != null)
@@ -405,6 +359,9 @@ public final class BslCompletionSideHintResolver
         int offset, BslXtextEditor editor)
     {
         IInformationControlCreator existing = resolveHoverCreatorFromRsp(viewer);
+        // Временный безусловный маркер (debug-perf-query-lag.log). Снять после фикса.
+        ContentAssistDebug.perfLog("primeRspHoverCreator.cheapPath", 0, 0, //$NON-NLS-1$
+            "{\"existingNonNull\":" + (existing != null) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         if (existing != null)
             return existing;
         if (viewer == null || !(viewer.getDocument() instanceof IXtextDocument xtextDoc))
@@ -427,6 +384,7 @@ public final class BslCompletionSideHintResolver
         }
         if (probeOffset >= 0)
         {
+            long _perfT0 = System.nanoTime();
             try
             {
                 IRegion region = new Region(probeOffset, 1);
@@ -435,6 +393,13 @@ public final class BslCompletionSideHintResolver
             catch (Exception ignored)
             {
                 // повторный getHoverControlCreator ниже
+            }
+            finally
+            {
+                // Временный безусловный замер (debug-perf-query-lag.log). Снять после фикса.
+                long elapsedMs = (System.nanoTime() - _perfT0) / 1_000_000;
+                ContentAssistDebug.perfLog("primeRspHoverCreator.getHoverInfo2", elapsedMs, 15, //$NON-NLS-1$
+                    "{\"probeOffset\":" + probeOffset + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
         IInformationControlCreator creator = bslHover.getHoverControlCreator();
@@ -565,131 +530,19 @@ public final class BslCompletionSideHintResolver
         return -1;
     }
 
+    /**
+     * Убрано: раньше здесь гонялся {@code processor.getDelegate().computeCompletionProposals(...)} —
+     * полный расчёт списка автодополнения Xtext на UI-потоке — только ради
+     * {@link IInformationControlCreator} одного из proposals. Единственная точка входа для
+     * всех вызывающих ({@link #probeDelegateBrowserCreatorDetailed}, а через неё —
+     * {@link #resolveAssistBrowserCreatorChain} и {@code traceAssistBrowserCreatorResolution}) —
+     * дальше по цепочке есть более дешёвые резолверы (RSP hover, editor cache, chain).
+     */
     private static IInformationControlCreator probeDelegateCreatorFromOffset(
         SmartContentAssistProcessor processor, SourceViewer viewer, int literalCaret,
         ProbeDelegateBrowserResult result)
     {
-        if (processor == null || viewer == null)
-            return null;
-        IDocument doc = viewer.getDocument();
-        int probeOffset = resolveProbeOffsetOutsideLiteral(doc, literalCaret);
-        result.probeOffset = probeOffset;
-        if (probeOffset < 0 || isProbeOffsetInComment(doc, probeOffset))
-            return null;
-        try
-        {
-            ICompletionProposal[] proposals =
-                processor.getDelegate().computeCompletionProposals(viewer, probeOffset);
-            if (proposals == null)
-                return null;
-            for (ICompletionProposal proposal : proposals)
-            {
-                if (proposal == null)
-                    continue;
-                ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(proposal);
-                if (raw instanceof IrCompletionProposal)
-                    continue;
-                if (raw instanceof ICompletionProposalExtension3 ext3)
-                {
-                    IInformationControlCreator creator = ext3.getInformationControlCreator();
-                    if (creator != null)
-                        return creator;
-                }
-            }
-        }
-        catch (Throwable ignored)
-        {
-            // тихий probe: гасим и Error (напр. VerifyError в нативном BSL-коде
-            // при разборе документационных комментариев), не только Exception
-        }
         return null;
-    }
-
-    /** Probe-offset вне строкового литерала для delegate.computeCompletionProposals. */
-    static int resolveProbeOffsetOutsideLiteral(IDocument doc, int literalCaret)
-    {
-        if (doc == null || literalCaret < 0)
-            return -1;
-        Set<Integer> candidates = new LinkedHashSet<>();
-        int dot = SmartContentAssistProcessor.ReceiverTypeLabel.findMemberAccessDot(doc, literalCaret);
-        if (dot >= 0)
-        {
-            addProbeOffsetIfOutsideLiteral(candidates, doc, dot + 1);
-            addProbeOffsetIfOutsideLiteral(candidates, doc, dot);
-        }
-        try
-        {
-            int line = doc.getLineOfOffset(literalCaret);
-            int lineStart = doc.getLineOffset(line);
-            addProbeOffsetIfOutsideLiteral(candidates, doc, lineStart);
-        }
-        catch (BadLocationException ignored)
-        {
-            // candidates ниже
-        }
-        for (int off = literalCaret; off >= 0 && off > literalCaret - 500; off--)
-        {
-            if (isProbeOffsetOutsideLiteral(doc, off))
-            {
-                candidates.add(off);
-                break;
-            }
-        }
-        for (Integer off : candidates)
-        {
-            if (off != null && off >= 0 && isProbeOffsetOutsideLiteral(doc, off))
-                return off;
-        }
-        return -1;
-    }
-
-    private static boolean isProbeOffsetOutsideLiteral(IDocument doc, int offset)
-    {
-        if (doc == null || offset < 0)
-            return false;
-        try
-        {
-            if (offset > doc.getLength())
-                return false;
-            return !SmartContentAssistProcessor.isStringLiteralAssistContext(doc, offset);
-        }
-        catch (Exception ignored)
-        {
-            return false;
-        }
-    }
-
-    /**
-     * {@code true}, если на строке {@code offset} раньше уже встречается {@code //} —
-     * значит offset попадает в комментарий BSL. Тихий probe не должен звать
-     * {@code computeCompletionProposals} в этом контексте: нативная обработка
-     * BSL-комментариев (documentation-парсер) содержит известный баг верификации
-     * байткода ({@code BslDocumentationComment.parseOldFormat}), который иначе
-     * триггерится нашим же пробником раньше, чем штатными фоновыми задачами EDT.
-     */
-    private static boolean isProbeOffsetInComment(IDocument doc, int offset)
-    {
-        if (doc == null || offset < 0)
-            return false;
-        try
-        {
-            int line = doc.getLineOfOffset(offset);
-            int lineStart = doc.getLineOffset(line);
-            int probeEnd = Math.max(lineStart, Math.min(offset, doc.getLength()));
-            String prefix = doc.get(lineStart, probeEnd - lineStart);
-            return prefix.contains("//"); //$NON-NLS-1$
-        }
-        catch (Exception ignored)
-        {
-            return false;
-        }
-    }
-
-    private static void addProbeOffsetIfOutsideLiteral(Set<Integer> candidates, IDocument doc,
-        int offset)
-    {
-        if (isProbeOffsetOutsideLiteral(doc, offset))
-            candidates.add(offset);
     }
 
     /** Hover creator из fTextHovers редактора (unwrap htmlHover). */

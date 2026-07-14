@@ -36,9 +36,29 @@ public class Activator extends AbstractUIPlugin
 
     private static Activator instance;
 
+    /** Метка сборки для проверки, что реально загружен новый код (не берётся из кэша/старого JAR). */
+    private static final String BUILD_MARKER = "20260713-perf-diag-v6"; //$NON-NLS-1$
+
     @Override
     public void start(BundleContext context) throws Exception
     {
+        // Временный безусловный маркер: первая строка start() — доказательство, что этот
+        // бандл реально загружен и это не старый закэшированный код. Снять после диагностики лага.
+        try
+        {
+            java.nio.file.Files.writeString(
+                java.nio.file.Path.of("C:\\VC\\EDT.Comfort\\debug-activator-start.log"), //$NON-NLS-1$
+                "BUILD_MARKER=" + BUILD_MARKER //$NON-NLS-1$
+                    + " pid=" + ProcessHandle.current().pid() //$NON-NLS-1$
+                    + " time=" + System.currentTimeMillis() + "\n", //$NON-NLS-1$ //$NON-NLS-2$
+                java.nio.charset.StandardCharsets.UTF_8,
+                java.nio.file.StandardOpenOption.CREATE,
+                java.nio.file.StandardOpenOption.APPEND);
+        }
+        catch (Exception ignored)
+        {
+        }
+
         super.start(context);
         instance = this;
 

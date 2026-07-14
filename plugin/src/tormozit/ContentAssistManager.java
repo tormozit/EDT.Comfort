@@ -170,19 +170,40 @@ public final class ContentAssistManager
 
     void applyPatchToQueryEditorShell(Shell shell)
     {
-        if (!settings.isEnabled()) return;
+        // Временный безусловный маркер трассировки — найти, где обрывается установка
+        // диагностики лага в «Редакторе запроса» (debug-perf-query-lag.log). Снять после фикса.
+        ContentAssistDebug.perfLog("applyPatchToQueryEditorShell.enter", 0, 0, //$NON-NLS-1$
+            "{\"settingsEnabled\":" + settings.isEnabled() //$NON-NLS-1$
+                + ",\"shellNull\":" + (shell == null) //$NON-NLS-1$
+                + ",\"shellDisposed\":" + (shell != null && shell.isDisposed()) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        if (!settings.isEnabled())
+        {
+            ContentAssistDebug.perfLog("applyPatchToQueryEditorShell.exit", 0, 0, //$NON-NLS-1$
+                "{\"reason\":\"settingsDisabled\"}"); //$NON-NLS-1$
+            return;
+        }
         if (shell == null || shell.isDisposed()) return;
 
         ISourceViewer viewer = QueryTextEditDialogHook.resolveViewerForShell(shell);
+        ContentAssistDebug.perfLog("applyPatchToQueryEditorShell.viewer", 0, 0, //$NON-NLS-1$
+            "{\"viewerNull\":" + (viewer == null) //$NON-NLS-1$
+                + ",\"viewerClass\":\"" + (viewer == null ? "null" : viewer.getClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$
+                + "\"}"); //$NON-NLS-1$
         if (viewer == null || !(viewer instanceof SourceViewer sourceViewer))
+        {
+            ContentAssistDebug.perfLog("applyPatchToQueryEditorShell.exit", 0, 0, //$NON-NLS-1$
+                "{\"reason\":\"viewerNotSourceViewer\"}"); //$NON-NLS-1$
             return;
+        }
 
         Object dialog = QueryTextEditDialogHook.resolveDialogForShell(shell);
         Object qlEditor = dialog != null ? Global.getField(dialog, "qlEditor") : null; //$NON-NLS-1$
         QueryTextEditorFacade facade = new QueryTextEditorFacade(qlEditor, sourceViewer, dialog);
 
-        ContentAssistPatcher.applyPatch(
+        boolean patched = ContentAssistPatcher.applyPatch(
             sourceViewer, settings.getTimeout(), settings.getCharset(), facade);
+        ContentAssistDebug.perfLog("applyPatchToQueryEditorShell.exit", 0, 0, //$NON-NLS-1$
+            "{\"reason\":\"done\",\"patched\":" + patched + "}"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private void applyPatchToDcsQueryInPage(DtGranularEditorEmbeddedEditorPage<?> page)
