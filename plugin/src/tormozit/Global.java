@@ -316,6 +316,63 @@ public final class Global
     }
 
     /**
+     * Подписывается на произвольный однометодный слушатель из чужого classloader'а (AEF-модели
+     * и т.п.) через {@link Proxy} — как {@link #installLightControlListener(Object, Consumer)},
+     * но без привязки к конкретному интерфейсу {@code ILightControlListener}: любой вызов ЛЮБОГО
+     * метода интерфейса {@code interfaceClassName} (кроме {@code hashCode}/{@code equals}/
+     * {@code toString}) просто запускает {@code onEvent} — сигнатура события нам не важна, нужен
+     * только сам факт «что-то изменилось» (например, {@code IListListener.listChanged}).
+     *
+     * @param target             объект, у которого вызывается {@code addMethodName(слушатель)}
+     * @param addMethodName      имя метода подписки, например {@code "addListListener"}
+     * @param interfaceClassName полное имя интерфейса слушателя, например
+     *                           {@code "com._1c.g5.aef2.models.list.IListListener"}
+     * @return {@code true}, если слушатель успешно создан и передан в {@code addMethodName}
+     */
+    public static boolean addGenericListener(Object target, String addMethodName, String interfaceClassName,
+            Runnable onEvent)
+    {
+        if (target == null || onEvent == null)
+            return false;
+        try
+        {
+            ClassLoader loader = target.getClass().getClassLoader();
+            Class<?> listenerClass = Class.forName(interfaceClassName, true, loader);
+
+            InvocationHandler handler = (proxy, method, args) ->
+            {
+                String name = method.getName();
+                if ("hashCode".equals(name) && (args == null || args.length == 0)) //$NON-NLS-1$
+                    return System.identityHashCode(proxy);
+                if ("equals".equals(name) && args != null && args.length == 1) //$NON-NLS-1$
+                    return proxy == args[0];
+                if ("toString".equals(name) && (args == null || args.length == 0)) //$NON-NLS-1$
+                    return proxy.getClass().getName() + "@" + Integer.toHexString(System.identityHashCode(proxy)); //$NON-NLS-1$
+                onEvent.run();
+                Class<?> returnType = method.getReturnType();
+                if (returnType == boolean.class)
+                    return Boolean.FALSE;
+                if (returnType == int.class || returnType == long.class || returnType == short.class
+                    || returnType == byte.class)
+                    return 0;
+                if (returnType == char.class)
+                    return '\0';
+                if (returnType == float.class || returnType == double.class)
+                    return 0.0;
+                return null;
+            };
+
+            Object listenerProxy = Proxy.newProxyInstance(loader, new Class<?>[] { listenerClass }, handler);
+            return invokeVoid(target, addMethodName, listenerProxy);
+        }
+        catch (Exception e)
+        {
+            logError("Global", "addGenericListener:" + interfaceClassName, e); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        }
+    }
+
+    /**
      * Создаёт объект класса {@code targetClass} конструктором, подобранным по количеству
      * аргументов (как {@link #invoke} — без сверки типов параметров), включая private.
      *

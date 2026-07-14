@@ -70,7 +70,7 @@ public final class IrMethodConstructorHandler extends AbstractHandler
                     () -> irSession.invokeCodeEditor("ОткрытьКонструкторМетода"), //$NON-NLS-1$
                     r -> "Ошибка".equals(ComBridge.toString(r))); //$NON-NLS-1$
 
-                if (isCancelled(result))
+                if (IRApplication.isCancelled(result))
                     return;
 
                 String resultText = ComBridge.toString(result);
@@ -98,16 +98,6 @@ public final class IrMethodConstructorHandler extends AbstractHandler
         if (part instanceof IEditorPart editorPart)
             return GetRef.getActiveBslEditor(editorPart);
         return GetRef.getActiveBslEditor(part);
-    }
-
-    private static boolean isCancelled(Object result)
-    {
-        if (result == null)
-            return true;
-        if (result instanceof Boolean b)
-            return !b;
-        String text = ComBridge.toString(result);
-        return text == null || text.isEmpty() || "false".equalsIgnoreCase(text); //$NON-NLS-1$
     }
 
     private static void ensureCodeEditor(IRSession irSession)

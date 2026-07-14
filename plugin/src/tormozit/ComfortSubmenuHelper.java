@@ -233,17 +233,16 @@ final class ComfortSubmenuHelper
     }
 
     /**
-     * Находит существующее подменю «Комфорт» в {@code parentMenu} либо создаёт новое.
-     * Если {@code anchor} не {@code null} и подменю не найдено, новый пункт вставляется
-     * сразу после {@code anchor} (в противном случае — в конец).
+     * Находит существующее подменю «Комфорт» в {@code parentMenu}, ничего не создавая.
+     * Используется там, где новый пункт должен попадать в уже имеющееся подменю «Комфорт»
+     * (например, в контекстном меню {@code BSLEditor}), но не должен провоцировать его
+     * создание в меню, где подменю не предусмотрено (обычные текстовые поля и т.п.).
      */
-    static Menu findOrCreateComfortSubmenu(Menu parentMenu, Shell shell, MenuItem anchor)
+    static Menu findExistingComfortSubmenu(Menu parentMenu)
     {
         if (parentMenu == null || parentMenu.isDisposed())
             return null;
-
-        MenuItem[] items = parentMenu.getItems();
-        for (MenuItem item : items)
+        for (MenuItem item : parentMenu.getItems())
         {
             if (item.isDisposed())
                 continue;
@@ -260,6 +259,22 @@ final class ComfortSubmenuHelper
                     return sub;
             }
         }
+        return null;
+    }
+
+    /**
+     * Находит существующее подменю «Комфорт» в {@code parentMenu} либо создаёт новое.
+     * Если {@code anchor} не {@code null} и подменю не найдено, новый пункт вставляется
+     * сразу после {@code anchor} (в противном случае — в конец).
+     */
+    static Menu findOrCreateComfortSubmenu(Menu parentMenu, Shell shell, MenuItem anchor)
+    {
+        if (parentMenu == null || parentMenu.isDisposed())
+            return null;
+
+        Menu existing = findExistingComfortSubmenu(parentMenu);
+        if (existing != null)
+            return existing;
 
         int index = anchor != null && !anchor.isDisposed() && anchor.getParent() == parentMenu
             ? parentMenu.indexOf(anchor) + 1

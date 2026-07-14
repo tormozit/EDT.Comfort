@@ -241,6 +241,21 @@ public final class QueryTextEditDialogHook implements IStartup
                 IrFormatTextHandler.formatQuery(viewer, queryDialog);
             }
         });
+
+        MenuItem irEditorItem = new MenuItem(comfortSub, SWT.PUSH);
+        irEditorItem.setText(IrQueryTextEditorHandler.MENU_LABEL);
+        irEditorItem.setToolTipText(
+            "Открыть весь текст запроса в текстовом редакторе ИР"
+                + Global.pluginSignForTooltip());
+        irEditorItem.setEnabled(IrFormatTextHandler.isApplicableQuery(viewer));
+        irEditorItem.addSelectionListener(new SelectionAdapter()
+        {
+            @Override
+            public void widgetSelected(SelectionEvent ev)
+            {
+                IrQueryTextEditorHandler.openQueryTextInIrEditor(viewer, queryDialog, shell);
+            }
+        });
     }
 
     /** Только корневое контекстное меню {@link StyledText}, не каскады вроде нашего подменю. */

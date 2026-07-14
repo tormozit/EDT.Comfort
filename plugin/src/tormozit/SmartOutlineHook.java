@@ -14,6 +14,7 @@ import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.StyledCellLabelProvider;
 import org.eclipse.jface.viewers.TreeViewer;
+import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.swt.SWT;
@@ -81,6 +82,7 @@ public class SmartOutlineHook implements IStartup {
     private static final String LAST_PATTERN_KEY = "tormozit.outlineLastPattern"; //$NON-NLS-1$
     private static final String PENDING_CLEAR_SELECTION_KEY = "tormozit.outlinePendingClearSelection"; //$NON-NLS-1$
     private static final String OUTLINE_RECENT_ON_OPEN_KEY = "tormozit.outlineRecentOnOpen"; //$NON-NLS-1$
+    private static final String TYPE_MARKED_CHECKBOX_KEY = "tormozit.typeMarkedCheckbox"; //$NON-NLS-1$
     /** Заголовок {@code SelectTypeDialog_title} / {@code TypeDescriptionDialogComponent_DialogTitle}. */
     private static final String SELECT_TYPE_DIALOG_TITLE =
             "Редактирование типа данных"; //$NON-NLS-1$
@@ -469,7 +471,7 @@ public class SmartOutlineHook implements IStartup {
             timedApplyTreeExpansion(smartFilter, viewer, "applySmartSearch/initial"); //$NON-NLS-1$
 
         // ПРИОРИТЕТ 1: Рейтинг Имени (от большего к меньшему)
-        viewer.setComparator(new SmartOutlineComparator(smartFilter.getNamePremiumCache(), smartFilter.getParamPremiumCache(), baseLp, flatContentProvider));
+        viewer.setComparator(new SmartOutlineComparator(smartFilter.getNamePremiumCache(), smartFilter.getParamPremiumCache(), baseLp, flatContentProvider, smartFilter));
 
         // --- Замена поля фильтра для диалогов выбора типа ---
         final Control fc;
@@ -491,23 +493,31 @@ public class SmartOutlineHook implements IStartup {
                 // Удаляем штатный SearchBox
                 searchBoxComposite.dispose();
                 
+                // Горизонтальная строка: [FilterInputBox] [флажок]
+                Composite filterRow = new Composite(parent, SWT.NONE);
+                filterRow.setLayout(new GridLayout(2, false));
+                filterRow.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+
                 // Создаем наш FilterInputBox БЕЗ onSearch — фильтрация через ModifyListener
-                FilterInputBox newBox = FilterInputBox.forSelectType(parent, null);
+                FilterInputBox newBox = FilterInputBox.forSelectType(filterRow, null);
                 if (newBox != null) {
                     typeFilterBoxRef[0] = newBox;
                     SearchBox newSearchBox = newBox.widget();
-                    if (layoutData != null)
-                        newSearchBox.setLayoutData(layoutData);
+                    GridData searchGd = new GridData(SWT.FILL, SWT.CENTER, true, false);
+                    newSearchBox.setLayoutData(searchGd);
                     if (sibling != null && !sibling.isDisposed())
-                        newSearchBox.moveAbove(sibling);
+                        filterRow.moveAbove(sibling);
                     parent.layout(true, true);
                     
                     fc = newBox.inputControl();
-                    // Фокус в новое поле
                     newBox.scheduleFocusWhenReady();
                 } else {
                     fc = filterControl;
                 }
+
+                // --- Флажок «Только помеченные» в filterRow справа от SearchBox ---
+                installOnlyMarkedCheckbox(patchedShell, viewer, smartFilter,
+                        highlightControl, aefTree, filterRow);
             } else {
                 fc = filterControl;
             }
@@ -528,6 +538,17 @@ public class SmartOutlineHook implements IStartup {
 //                if (typeFilterBoxRef[0] != null && !pattern.isEmpty()) {
 //                    typeFilterBoxRef[0].remember(pattern);
 //                }
+
+                // При вводе текста — снимаем «Только помеченные»
+                if (!pattern.isEmpty()) {
+                    Object btnObj = patchedShell.getData(TYPE_MARKED_CHECKBOX_KEY);
+                    if (btnObj instanceof Button btn && btn.getSelection()) {
+                        btn.setSelection(false);
+                        smartFilter.setMarkedOnly(false);
+                        ComfortSettings.setSelectTypeOnlyMarked(false);
+                    }
+                }
+
                 Display display = fc.getDisplay();
 
                 // ОПТИМИЗАЦИЯ 2: Дебаунс. Отменяем прошлый таймер
@@ -1472,6 +1493,127 @@ public class SmartOutlineHook implements IStartup {
             return true;
         return dialogName.contains("SelectTypeDialog") || dialogName.contains("TypeDescriptionDialog") //$NON-NLS-1$ //$NON-NLS-2$
                 || dialogName.contains("LwtDialog"); //$NON-NLS-1$
+    }
+
+    /**
+     * Устанавливает флажок «Только помеченные» в указанном композите
+     * (горизонтальная строка рядом с полем фильтра).
+     * Фильтр работает через {@link SmartOutlineFilter#setMarkedOnly(boolean)}.
+     */
+    private static void installOnlyMarkedCheckbox(Shell patchedShell, TreeViewer viewer,
+            SmartOutlineFilter smartFilter, SmartLabelHighlight highlightControl,
+            boolean aefTree, Composite buttonParent)
+    {
+        Tree tree = viewer.getTree();
+        if (tree == null || tree.isDisposed())
+            return;
+        if (buttonParent == null || buttonParent.isDisposed())
+            return;
+
+        Button onlyMarkedBtn = new Button(buttonParent, SWT.CHECK);
+        onlyMarkedBtn.setText("Только помеченные"); //$NON-NLS-1$
+        onlyMarkedBtn.setToolTipText("Показать только элементы с установленным флажком"); //$NON-NLS-1$
+        onlyMarkedBtn.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
+
+        patchedShell.setData(TYPE_MARKED_CHECKBOX_KEY, onlyMarkedBtn);
+
+        Object multiItems = resolveMultiItems(patchedShell);
+        updateOnlyMarkedButtonText(onlyMarkedBtn, multiItems, buttonParent);
+        if (multiItems != null)
+        {
+            Global.addGenericListener(multiItems, "addListListener", //$NON-NLS-1$
+                "com._1c.g5.aef2.models.list.IListListener", //$NON-NLS-1$
+                () -> onlyMarkedBtn.getDisplay().asyncExec(
+                    () -> updateOnlyMarkedButtonText(onlyMarkedBtn, multiItems, buttonParent)));
+        }
+
+        boolean stored = ComfortSettings.isSelectTypeOnlyMarked();
+        if (!stored)
+            stored = isCompositeTypeEnabled(patchedShell);
+        onlyMarkedBtn.setSelection(stored);
+        smartFilter.setMarkedOnly(stored);
+
+        onlyMarkedBtn.addListener(SWT.Selection, e -> {
+            boolean enabled = onlyMarkedBtn.getSelection();
+            ComfortSettings.setSelectTypeOnlyMarked(enabled);
+            smartFilter.setMarkedOnly(enabled);
+
+            Global.tempLog("selectType-marked", "toggle: " + enabled); //$NON-NLS-1$ //$NON-NLS-2$
+
+            Control control = viewer.getControl();
+            if (control != null && !control.isDisposed()) {
+                tree.setRedraw(false);
+                try {
+                    viewer.refresh(true);
+                    timedApplyTreeExpansion(smartFilter, viewer, "onlyMarked toggle"); //$NON-NLS-1$
+                    if (highlightControl instanceof AefTreeItemHighlight)
+                        ((AefTreeItemHighlight) highlightControl).apply(viewer, patchedShell);
+                    keepOrSelectFirstVisibleItem(viewer, smartFilter);
+                } finally {
+                    if (!tree.isDisposed())
+                        tree.setRedraw(true);
+                }
+            }
+        });
+
+        buttonParent.layout(true, true);
+    }
+
+    /**
+     * Достаёт {@code ITypeDescriptionDialogModel} диалога «Редактирование типа данных». По
+     * декомпиляции {@code TypeDescriptionDialogComponent} (см. {@code .tmp/bsl-factory/.../type/
+     * TypeDescriptionDialogComponent.class}) сам компонент диалога лежит в
+     * {@code dialog.val$dialogViewModel.eventChannel} (то же поле уже видно в раннем логе
+     * {@code selectType-marked.log}: {@code val$dialogViewModel : IDialogViewModel =
+     * DialogViewModelImpl=...(eventChannel: TypeDescriptionDialogComponent@...)}).
+     */
+    private static Object resolveTypeDescriptionModel(Shell shell)
+    {
+        if (shell == null || shell.isDisposed())
+            return null;
+        Object dialog = findDialog(shell);
+        if (dialog == null)
+            return null;
+        Object dialogViewModel = Global.getField(dialog, "val$dialogViewModel"); //$NON-NLS-1$
+        Object eventChannel = dialogViewModel != null ? Global.getField(dialogViewModel, "eventChannel") : null; //$NON-NLS-1$
+        return eventChannel != null ? Global.invoke(eventChannel, "getModel") : null; //$NON-NLS-1$
+    }
+
+    /**
+     * Проверить, включён ли флажок «Составной тип данных» — обычный чекбокс, привязанный к
+     * {@code ITypeDescriptionDialogModel.getCompositeType()} ({@code IValue<Boolean>}).
+     */
+    private static boolean isCompositeTypeEnabled(Shell shell)
+    {
+        Object model = resolveTypeDescriptionModel(shell);
+        Object compositeType = model != null ? Global.invoke(model, "getCompositeType") : null; //$NON-NLS-1$
+        Object value = compositeType != null ? Global.invoke(compositeType, "get") : null; //$NON-NLS-1$
+        return Boolean.TRUE.equals(value);
+    }
+
+    /**
+     * Список помеченных типов ({@code ITypeDescriptionDialogModel.getMultiItems()}, реализует
+     * {@code java.util.List}) — источник числа в тексте флажка «Только помеченные (N)».
+     */
+    private static Object resolveMultiItems(Shell shell)
+    {
+        Object model = resolveTypeDescriptionModel(shell);
+        return model != null ? Global.invoke(model, "getMultiItems") : null; //$NON-NLS-1$
+    }
+
+    private static int multiItemsSize(Object multiItems)
+    {
+        Object size = multiItems != null ? Global.invoke(multiItems, "size") : null; //$NON-NLS-1$
+        return size instanceof Integer ? (Integer) size : 0;
+    }
+
+    private static void updateOnlyMarkedButtonText(Button button, Object multiItems, Composite buttonParent)
+    {
+        if (button == null || button.isDisposed())
+            return;
+        button.setText("Только помеченные (" + multiItemsSize(multiItems) + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+        if (buttonParent != null && !buttonParent.isDisposed())
+            buttonParent.layout(true, true);
     }
 
     /** Текст выбранного типа для {@link GetRef} и Ctrl+C в диалоге выбора типа. */

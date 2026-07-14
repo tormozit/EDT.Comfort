@@ -11,28 +11,43 @@ public class SmartOutlineComparator extends ViewerComparator {
     private Map<Object, Integer> paramPremiumCache;
     private SmartMatcher matcher;
     private final SmartOutlineFlatContentProvider flatContentProvider;
+    /** Пока фильтр пуст — премии всех элементов равны 0, и без этой проверки компаратор
+     * проваливался бы в алфавитный порядок (Приоритет 3) даже без активного поиска, меняя
+     * исходный порядок дерева на ровном месте. */
+    private final SmartOutlineFilter filterState;
 
     public SmartOutlineComparator(Map<Object, Integer> namePremiumCache, Map<Object, Integer> paramPremiumCache,
             ILabelProvider labelProvider) {
-        this(namePremiumCache, paramPremiumCache, labelProvider, null);
+        this(namePremiumCache, paramPremiumCache, labelProvider, null, null);
     }
 
     public SmartOutlineComparator(Map<Object, Integer> namePremiumCache, Map<Object, Integer> paramPremiumCache,
             ILabelProvider labelProvider, SmartOutlineFlatContentProvider flatContentProvider) {
+        this(namePremiumCache, paramPremiumCache, labelProvider, flatContentProvider, null);
+    }
+
+    public SmartOutlineComparator(Map<Object, Integer> namePremiumCache, Map<Object, Integer> paramPremiumCache,
+            ILabelProvider labelProvider, SmartOutlineFlatContentProvider flatContentProvider,
+            SmartOutlineFilter filterState) {
         this.namePremiumCache = namePremiumCache;
         this.paramPremiumCache = paramPremiumCache;
         this.labelProvider = labelProvider;
         this.flatContentProvider = flatContentProvider;
+        this.filterState = filterState;
     }
 
     public SmartOutlineComparator(SmartMatcher matcher, ILabelProvider labelProvider) {
         this.matcher = matcher;
         this.labelProvider = labelProvider;
         this.flatContentProvider = null;
+        this.filterState = null;
     }
 
     @Override
     public int compare(Viewer viewer, Object e1, Object e2) {
+        if (filterState != null && !filterState.isFiltering())
+            return 0;
+
         int np1 = 0, np2 = 0;
         int pp1 = 0, pp2 = 0;
 

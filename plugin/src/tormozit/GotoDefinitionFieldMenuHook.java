@@ -22,6 +22,7 @@ import org.eclipse.swt.widgets.Tree;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.handlers.IHandlerService;
 
 /**
  * Глобальный пункт контекстного меню «Перейти к определению» для ЛЮБОГО поля ввода
@@ -152,7 +153,7 @@ public final class GotoDefinitionFieldMenuHook implements IStartup
                 "Перейти к определению", "tormozit.GoToDefinition")); //$NON-NLS-1$ //$NON-NLS-2$
         item.setToolTipText("Перейти к определению " + typeRef + Global.pluginSignForTooltip()); //$NON-NLS-1$
         item.addListener(SWT.Selection, e -> control.getDisplay().asyncExec(
-                () -> runGotoDefinition(control, fullText)));
+                () -> runGotoDefinitionAction(control, fullText)));
         menu.setLocation(at);
         menu.setVisible(true);
         menu.addListener(SWT.Hide, e -> control.getDisplay().asyncExec(() -> {
@@ -196,23 +197,70 @@ public final class GotoDefinitionFieldMenuHook implements IStartup
             if (Boolean.TRUE.equals(item.getData(ITEM_MARKER)) && !item.isDisposed())
                 item.dispose();
         }
+        // Уже существующее подменю «Комфорт» (напр. в контекстном меню BSLEditor) — если оно
+        // есть, добавляем пункт туда, а не отдельной строкой в корень меню. Само подменю здесь
+        // никогда не создаём — там, где его нет, наш пункт остаётся на верхнем уровне меню.
+        Menu comfortSub = ComfortSubmenuHelper.findExistingComfortSubmenu(menu);
+        if (comfortSub != null)
+        {
+            for (MenuItem item : comfortSub.getItems())
+            {
+                if (Boolean.TRUE.equals(item.getData(ITEM_MARKER)) && !item.isDisposed())
+                    item.dispose();
+            }
+        }
 
         String text = PropertySheetControlInterop.controlText(control);
         String typeRef = findTypeRef(text);
         if (typeRef == null)
             return;
 
-        MenuItem separator = new MenuItem(menu, SWT.SEPARATOR);
-        separator.setData(ITEM_MARKER, Boolean.TRUE);
-        MenuItem item = new MenuItem(menu, SWT.PUSH);
+        Menu targetMenu = comfortSub != null ? comfortSub : menu;
+        if (comfortSub == null)
+        {
+            MenuItem separator = new MenuItem(menu, SWT.SEPARATOR);
+            separator.setData(ITEM_MARKER, Boolean.TRUE);
+        }
+        MenuItem item = new MenuItem(targetMenu, SWT.PUSH);
         item.setData(ITEM_MARKER, Boolean.TRUE);
         item.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
                 "Перейти к определению", "tormozit.GoToDefinition")); //$NON-NLS-1$ //$NON-NLS-2$
         item.setToolTipText("Перейти к определению " + typeRef + Global.pluginSignForTooltip()); //$NON-NLS-1$
-        // В команду передаём ВЕСЬ текст поля (см. tryShowStandalone) — GoToDefinition.jump сам
-        // разбирает составные описания типов через запятую.
+        // Что именно передаётся дальше — см. runGotoDefinitionAction: для StyledText текст
+        // поля не используется (штатная команда сама берёт выражение из каретки), для
+        // остальных полей — передаётся целиком, GoToDefinition.jump сам разбирает составные
+        // описания типов через запятую.
         item.addListener(SWT.Selection, e -> control.getDisplay().asyncExec(
-                () -> runGotoDefinition(control, text)));
+                () -> runGotoDefinitionAction(control, text)));
+    }
+
+    /**
+     * Для текстового документа ({@link StyledText}, напр. BSL-редактор) текст поля целиком
+     * почти всегда бесполезен как ссылка — передаём управление штатной команде
+     * {@code tormozit.GoToDefinition}, которая сама берёт выражение из позиции каретки/
+     * выделения в активном редакторе. Для прочих полей ввода (Text/Combo) по-прежнему
+     * передаём весь текст поля напрямую в {@link GoToDefinition#jump}.
+     */
+    private static void runGotoDefinitionAction(Control control, String fullText)
+    {
+        if (control instanceof StyledText)
+            runGotoDefinitionCommand();
+        else
+            runGotoDefinition(control, fullText);
+    }
+
+    private static void runGotoDefinitionCommand()
+    {
+        try
+        {
+            IHandlerService handlerService = PlatformUI.getWorkbench().getService(IHandlerService.class);
+            if (handlerService != null)
+                handlerService.executeCommand("tormozit.GoToDefinition", null); //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+            Global.logError("GotoDefinitionFieldMenuHook", "runGotoDefinitionCommand", e); //$NON-NLS-1$ //$NON-NLS-2$
+        }
     }
 
     private static void runGotoDefinition(Control control, String fullText)

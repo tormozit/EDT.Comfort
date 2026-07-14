@@ -98,6 +98,14 @@ public final class ComfortSettings
     /** Prefix for file search sash weights. */
     private static final String PREF_FILE_SEARCH_SASH_PREFIX = "comfort.fileSearch.sash."; //$NON-NLS-1$
 
+    // ---- Select type: only marked ----
+
+    /** Ключ: «Только помеченные» в диалоге «Редактирование типа данных». */
+    public static final String PREF_SELECT_TYPE_ONLY_MARKED = "comfort.selectType.onlyMarked"; //$NON-NLS-1$
+
+    /** По умолчанию фильтр «Только помеченные» выключен. */
+    public static final boolean DEFAULT_SELECT_TYPE_ONLY_MARKED = false;
+
     private static ComfortSettings instance;
 
     private final ScopedPreferenceStore preferenceStore;
@@ -176,6 +184,32 @@ public final class ComfortSettings
         catch (Exception ex)
         {
             Global.log("ComfortSettings save error (logAutoscroll): " + ex); //$NON-NLS-1$
+        }
+    }
+
+    /** Фильтр «Только помеченные» в диалоге выбора типа (читается при открытии диалога). */
+    public static boolean isSelectTypeOnlyMarked()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_SELECT_TYPE_ONLY_MARKED;
+        return settings.preferenceStore.getBoolean(PREF_SELECT_TYPE_ONLY_MARKED);
+    }
+
+    /** Сохранить состояние флажка «Только помеченные» в диалоге выбора типа. */
+    public static void setSelectTypeOnlyMarked(boolean enabled)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        settings.preferenceStore.setValue(PREF_SELECT_TYPE_ONLY_MARKED, enabled);
+        try
+        {
+            settings.preferenceStore.save();
+        }
+        catch (Exception ex)
+        {
+            Global.log("ComfortSettings save error (onlyMarked): " + ex); //$NON-NLS-1$
         }
     }
 

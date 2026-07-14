@@ -17,6 +17,7 @@ public class SmartOutlineFilter extends ViewerFilter {
     private final boolean pruneEmptyBranches;
     private final boolean codeMatcher;
     private boolean flattenWhenFiltered;
+    private boolean markedOnly;
     private Object treeInput;
     
     private final Map<Object, Integer> namePremiumCache = new HashMap<>();
@@ -89,6 +90,15 @@ public class SmartOutlineFilter extends ViewerFilter {
 
     public boolean isFlattenWhenFiltered() {
         return flattenWhenFiltered;
+    }
+
+    public void setMarkedOnly(boolean markedOnly) {
+        this.markedOnly = markedOnly;
+        subtreeMatchMemo.clear();
+    }
+
+    public boolean isMarkedOnly() {
+        return markedOnly;
     }
 
     public boolean isFiltering() {
@@ -193,17 +203,63 @@ public class SmartOutlineFilter extends ViewerFilter {
         return true;
     }
 
+    /**
+     * Проверить, помечен ли элемент через {@code isChecked()}.
+     * Совместимо с LWT/AEF-деревьями, где {@code TreeItem.getChecked()} не работает.
+     */
+    static boolean isElementChecked(Object element)
+    {
+        if (element == null)
+            return false;
+        Object state = Global.invoke(element, "getCheckState"); //$NON-NLS-1$
+        if (state == null)
+            return false;
+        if (!isCheckedLogged)
+        {
+            isCheckedLogged = true;
+            Global.tempLog("selectType-marked", //$NON-NLS-1$
+                "checkState=" + state.getClass().getName() + " value=" + state); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        String name = state instanceof Enum ? ((Enum<?>) state).name() : String.valueOf(state);
+        return "CHECKED".equals(name); //$NON-NLS-1$
+    }
+
+    private static boolean isCheckedLogged;
+
+    /** Есть ли хотя бы один помеченный потомок (рекурсивно, через content provider). */
+    private boolean hasCheckedDescendant(ITreeContentProvider cp, Object element)
+    {
+        for (Object child : cp.getChildren(element))
+        {
+            if (isElementChecked(child))
+                return true;
+            if (cp.hasChildren(child) && hasCheckedDescendant(cp, child))
+                return true;
+        }
+        return false;
+    }
+
     @Override
     public boolean select(Viewer viewer, Object parentElement, Object element) {
         boolean hasChildren = false;
         TreeViewer treeViewer = viewer instanceof TreeViewer ? (TreeViewer) viewer : null;
+        ITreeContentProvider treeCp = null;
         if (treeViewer != null) {
             Object cp = treeViewer.getContentProvider();
-            if (cp instanceof ITreeContentProvider)
-                hasChildren = ((ITreeContentProvider) cp).hasChildren(element);
+            if (cp instanceof ITreeContentProvider) {
+                treeCp = (ITreeContentProvider) cp;
+                hasChildren = treeCp.hasChildren(element);
+            }
             Object input = treeViewer.getInput();
             if (input != null)
                 this.treeInput = input;
+        }
+
+        if (markedOnly) {
+            if (!isElementChecked(element)) {
+                if (!hasChildren || treeCp == null || !hasCheckedDescendant(treeCp, element))
+                    return false;
+            }
         }
 
         if (flattenWhenFiltered && !matcher.isEmpty && flatContentProvider != null && !hasChildren) {

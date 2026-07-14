@@ -537,6 +537,23 @@ public class TextEditorMenuHook implements IStartup
                             }
                         });
                         addedItems.add(formatItem);
+
+                        MenuItem irEditorItem = new MenuItem(comfortSub, SWT.PUSH);
+                        irEditorItem.setText(IrQueryTextEditorHandler.MENU_LABEL);
+                        irEditorItem.setToolTipText(
+                            "Открыть весь текст запроса в текстовом редакторе ИР"
+                                + Global.pluginSignForTooltip());
+                        irEditorItem.setEnabled(true);
+                        irEditorItem.addSelectionListener(new SelectionAdapter()
+                        {
+                            @Override
+                            public void widgetSelected(SelectionEvent ev)
+                            {
+                                IrQueryTextEditorHandler.openQueryTextInIrEditor(
+                                    viewer, null, menu.getShell());
+                            }
+                        });
+                        addedItems.add(irEditorItem);
                     }
                 }
 

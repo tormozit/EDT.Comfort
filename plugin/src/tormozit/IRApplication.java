@@ -1278,6 +1278,16 @@ public final class IRApplication
         ToastNotification.show(toastTitle(), "Ошибка подключения: " + msg, 6_000); //$NON-NLS-1$
     }
 
+    static boolean isCancelled(Object result)
+    {
+        if (result == null)
+            return true;
+        if (result instanceof Boolean b)
+            return !b;
+        String text = ComBridge.toString(result);
+        return text == null || text.isEmpty() || "false".equalsIgnoreCase(text); //$NON-NLS-1$
+    }
+
     static private void notifyListeners()
     {
         Runnable notify = () -> changeListeners.forEach(r -> {
