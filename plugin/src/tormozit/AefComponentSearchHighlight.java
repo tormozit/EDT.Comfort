@@ -28,8 +28,10 @@ final class AefComponentSearchHighlight
         if (query.isEmpty())
         {
             removeDtTreeViewFilters(viewer);
-            if (viewer != null)
-                viewer.refresh();
+            // Без лишнего viewer.refresh(): вызывающий (executeSmartFilterUpdate) уже сделал
+            // viewer.refresh(true) непосредственно перед apply() — второй полный JFace-проход
+            // по дереву тут ничего не меняет (только native-фильтр DtTreeViewFilter трогали), но
+            // стоит заметное время на большом дереве типов.
             restoreSmartFilterOnly(viewer, smartFilter);
             return;
         }
@@ -43,6 +45,11 @@ final class AefComponentSearchHighlight
             return;
 
         patchDtTreeViewFilterPattern(viewer, highlightRegex(fragments));
+        // dtTreeView.refresh() — нативный repaint AEF-дерева; performSearch(dtPattern, ...) выше
+        // красит нативно только ПЕРВЫЙ фрагмент (так было и до наших правок — API работает с
+        // одним термином). Регэксп из ВСЕХ фрагментов (highlightRegex) отрисовывается только
+        // через это финальное viewer.refresh() — без него слова после первого не подсвечивались
+        // (обнаружено на "те от": красилось только "те").
         if (dtTreeView != null)
             Global.invokeVoid(dtTreeView, "refresh"); //$NON-NLS-1$
         viewer.refresh();

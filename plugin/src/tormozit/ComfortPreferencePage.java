@@ -115,9 +115,16 @@ public class ComfortPreferencePage
         IntegerFieldEditor timeoutField = new IntegerFieldEditor(
             ContentAssistSettings.PREF_TIMEOUT,
             "Автооткрытие: Задержка (мс)",
-            codeEditorGroup);
+            codeEditorGroup,
+            5);
         timeoutField.setValidRange(0, 10_000);
         addField(timeoutField);
+        Text timeoutText = timeoutField.getTextControl(codeEditorGroup);
+        GridData timeoutTextData = new GridData();
+        timeoutTextData.widthHint = 40;
+        timeoutTextData.grabExcessHorizontalSpace = false;
+        timeoutTextData.horizontalAlignment = SWT.LEFT;
+        timeoutText.setLayoutData(timeoutTextData);
 
         BooleanFieldEditor serverCallField = new BooleanFieldEditor(
             ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_ENABLED,

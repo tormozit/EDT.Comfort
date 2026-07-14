@@ -193,15 +193,7 @@ public final class ComfortNavigatorSearchEngine implements IModelObjectTreeSearc
         if (matcher.hasMultipleSections())
         {
             String pathRu = MdTypeNames.translateDottedToRu(path.toString(".")); //$NON-NLS-1$
-            boolean treeMatch = matcher.matchesTree(pathRu);
-            String lowerPath = pathRu.toLowerCase();
-            boolean nearMiss = !treeMatch
-                && matcher.getAllSectionFragments().stream().anyMatch(lowerPath::contains);
-            if (treeMatch || nearMiss)
-                Global.tempLog("navigator-search", //$NON-NLS-1$
-                    "tryAddMatch pattern=" + matcher.fullPattern //$NON-NLS-1$
-                    + " pathRu=" + pathRu + " treeMatch=" + treeMatch); //$NON-NLS-1$ //$NON-NLS-2$
-            if (!treeMatch)
+            if (!matcher.matchesTree(pathRu))
                 return false;
         }
         else

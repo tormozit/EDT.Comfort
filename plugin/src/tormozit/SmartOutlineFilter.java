@@ -19,6 +19,10 @@ public class SmartOutlineFilter extends ViewerFilter {
     private boolean flattenWhenFiltered;
     private boolean markedOnly;
     private Object treeInput;
+    /** {@code true} — прежнее поведение (верхний уровень всегда раскрыт, см. InfobasesViewHook,
+     * обычный Outline). {@code false} — как в штатном EDT: ничего не раскрываем по умолчанию,
+     * только путь к совпадениям при непустом фильтре (см. {@link #applyTreeExpansion}). */
+    private boolean expandTopLevelByDefault = true;
     
     private final Map<Object, Integer> namePremiumCache = new HashMap<>();
     private final Map<Object, Integer> paramPremiumCache = new HashMap<>();
@@ -113,16 +117,26 @@ public class SmartOutlineFilter extends ViewerFilter {
         return matcher.matches(text);
     }
 
+    public void setExpandTopLevelByDefault(boolean expandTopLevelByDefault) {
+        this.expandTopLevelByDefault = expandTopLevelByDefault;
+    }
+
+    public boolean isExpandTopLevelByDefault() {
+        return expandTopLevelByDefault;
+    }
+
     /**
      * При широком фильтре (мало фрагментов, много совпадений) полный рекурсивный обход дерева
-     * ради автораскрытия становится синхронно дорогим (по замерам — до ~1с на UI-потоке, см.
-     * временный лог "typetree-expand") и ощущается как подвисание ввода. Раскрывать больше этого
-     * числа веток всё равно бесполезно — пользователь не увидит их одновременно на экране.
+     * ради автораскрытия становится синхронно дорогим (по замерам — до ~1с на UI-потоке) и
+     * ощущается как подвисание ввода. Раскрывать больше этого числа веток всё равно бесполезно —
+     * пользователь не увидит их одновременно на экране.
      */
     private static final int MAX_AUTO_EXPAND = 200;
 
     /**
-     * Верхний уровень дерева всегда раскрыт.
+     * Верхний уровень дерева раскрыт по умолчанию только если {@link #expandTopLevelByDefault}
+     * (для дерева типов — выключено, там штатное поведение EDT — свёрнуто при открытии, см.
+     * {@code SmartOutlineHook}).
      * При непустом фильтре дополнительно раскрываются ветки на пути к совпадениям — но не более
      * {@link #MAX_AUTO_EXPAND}, дальше обход обрывается (см. класс-комментарий).
      */
@@ -137,21 +151,77 @@ public class SmartOutlineFilter extends ViewerFilter {
         Object input = viewer.getInput();
         if (input == null)
             return;
-        Set<Object> toExpand = new LinkedHashSet<>();
-        collectTopLevelExpansion(viewer, toExpand);
-        if (flattenWhenFiltered && !matcher.isEmpty)
+
+        if (!expandTopLevelByDefault && matcher.isEmpty)
+        {
+            // Пустой фильтр и мы не форсируем дефолтное раскрытие (дерево типов, см.
+            // expandTopLevelByDefault) — раньше здесь просто ничего не делалось, оставляя
+            // раскрытым всё, что нараскрывалось за время фильтрации: при очистке поля дерево не
+            // сворачивалось обратно. Сворачиваем явно, но только если действительно есть что.
+            collapseAllIfExpanded(viewer);
             return;
+        }
+
+        Set<Object> toExpand = new LinkedHashSet<>();
+        if (expandTopLevelByDefault)
+            collectTopLevelExpansion(viewer, toExpand);
+        if (flattenWhenFiltered && !matcher.isEmpty)
+        {
+            applyExpandedElementsIfChanged(viewer, toExpand);
+            return;
+        }
         if (!matcher.isEmpty)
         {
+            // Потолок считаем ОТДЕЛЬНО от toExpand.size() — тот уже содержит базовые верхние
+            // узлы (collectTopLevelExpansion), их может быть намного больше MAX_AUTO_EXPAND само
+            // по себе (в реальном дереве типов — ~1200), и тогда цикл обрывался бы на первой же
+            // итерации, ни разу не вызвав collectExpandPath — раскрытие пути к совпадению
+            // переставало бы работать вообще.
+            int[] matchedAdded = { 0 };
             for (Object root : tcp.getElements(input))
             {
-                if (toExpand.size() > MAX_AUTO_EXPAND)
+                if (matchedAdded[0] > MAX_AUTO_EXPAND)
                     break;
-                collectExpandPath(tcp, root, toExpand);
+                collectExpandPath(tcp, root, toExpand, matchedAdded);
             }
         }
-        if (!toExpand.isEmpty())
-            viewer.setExpandedElements(toExpand.toArray());
+        applyExpandedElementsIfChanged(viewer, toExpand);
+    }
+
+    /**
+     * {@code setExpandedElements} — недешёвый SWT-layout (по замерам — сотни мс на дереве типов).
+     * Не вызываем его повторно, если набор раскрытых веток не изменился с прошлого раза — именно
+     * повторный вызов с тем же результатом (например, один и тот же однобуквенный фильтр набран
+     * заново) оказался основной причиной ощущения подвисания ввода.
+     */
+    private void applyExpandedElementsIfChanged(AbstractTreeViewer viewer, Set<Object> toExpand)
+    {
+        if (toExpand.isEmpty())
+            return;
+        Object[] current = viewer.getExpandedElements();
+        if (current != null && sameElements(current, toExpand))
+            return;
+        viewer.setExpandedElements(toExpand.toArray());
+    }
+
+    private static boolean sameElements(Object[] current, Set<Object> toExpand)
+    {
+        if (current.length != toExpand.size())
+            return false;
+        for (Object o : current)
+        {
+            if (!toExpand.contains(o))
+                return false;
+        }
+        return true;
+    }
+
+    private static void collapseAllIfExpanded(AbstractTreeViewer viewer)
+    {
+        Object[] current = viewer.getExpandedElements();
+        if (current == null || current.length == 0)
+            return;
+        viewer.collapseAll();
     }
 
     /** Только корневые узлы (проекты). */
@@ -190,16 +260,19 @@ public class SmartOutlineFilter extends ViewerFilter {
         }
     }
 
-    private boolean collectExpandPath(ITreeContentProvider cp, Object element, Set<Object> toExpand)
+    private boolean collectExpandPath(ITreeContentProvider cp, Object element, Set<Object> toExpand, int[] matchedAdded)
     {
-        if (toExpand.size() > MAX_AUTO_EXPAND)
+        if (matchedAdded[0] > MAX_AUTO_EXPAND)
             return false;
         if (!hasMatchInSubtree(cp, element))
             return false;
         for (Object child : cp.getChildren(element))
-            collectExpandPath(cp, child, toExpand);
+            collectExpandPath(cp, child, toExpand, matchedAdded);
         if (cp.hasChildren(element))
-            toExpand.add(element);
+        {
+            if (toExpand.add(element))
+                matchedAdded[0]++;
+        }
         return true;
     }
 

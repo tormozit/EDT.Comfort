@@ -7,6 +7,7 @@ import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -41,6 +42,16 @@ import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.ui.IStartup;
+import org.eclipse.ui.IViewPart;
+import org.eclipse.ui.IViewReference;
+import org.eclipse.ui.IPartListener2;
+import org.eclipse.ui.IWindowListener;
+import org.eclipse.ui.IWorkbench;
+import org.eclipse.ui.IWorkbenchPage;
+import org.eclipse.ui.IWorkbenchPart;
+import org.eclipse.ui.IWorkbenchPartReference;
+import org.eclipse.ui.IWorkbenchWindow;
+import org.eclipse.ui.PlatformUI;
 
 /**
  * Заменяет поле «Тип» в мастерах создания объектов метаданных ({@code DtAefMdNewWizard} и
@@ -94,6 +105,7 @@ public class TypeComboOverlayHook implements IStartup
     public void earlyStartup()
     {
         Display.getDefault().asyncExec(() -> install(Display.getDefault()));
+        Display.getDefault().asyncExec(TypeComboOverlayHook::installPropertySheet);
     }
 
     static void install(Display display)
@@ -221,9 +233,189 @@ public class TypeComboOverlayHook implements IStartup
             if (nativeControl == null || ATTACHED.contains(nativeControl))
                 continue;
 
-            if (createOverlay(nativeControl, typeModel, viewModel, page, wizard, focusAfterCreate))
+            // rediscover — общий с панелью «Свойства» механизм пересоздания оверлея (см.
+            // rediscoverOverlay/createOverlay): для мастера это просто повторный вызов самого
+            // patchTypeCombo с теми же page/wizard.
+            Runnable rediscover = () -> patchTypeCombo(page, wizard, true);
+            if (createOverlay(nativeControl, typeModel, viewModel, rediscover, focusAfterCreate) != null)
                 ATTACHED.add(nativeControl);
         }
+    }
+
+    // === Панель «Свойства»: то же поле «Тип», другое обнаружение/жизненный цикл ===
+    //
+    // Панель «Свойства» рендерится generic definition-driven компонентом (нет отдельного класса
+    // вроде TypeDescriptionComponent$3, по которому его можно опознать, как в мастере) — вместо
+    // этого используется уже рабочий паттерн PropertyNameIdentifierHook (строка «Имя» там же):
+    // искать в renderer.viewModelToView подпись «Тип» (LabelViewModel) и брать view/viewModel
+    // СЛЕДУЮЩЕЙ по порядку вставки записи (см. PropertyNameIdentifierHook.findValueViewAfterLabel).
+    //
+    // Ключевое отличие от мастера: панель «Свойства» не закрывается — она меняет содержимое при
+    // каждом клике по дереву объектов (новый объект → новая строка «Тип» для другого объекта,
+    // старая пропадает). PROPERTY_OVERLAYS хранит текущий оверлей для каждой view панели, чтобы
+    // корректно его продиспозить при смене объекта, а не плодить дубликаты/утечки.
+    private static final String TYPE_PROPERTY_LABEL = "Тип"; //$NON-NLS-1$
+    private static final Map<IViewPart, OverlayState> PROPERTY_OVERLAYS = new HashMap<>();
+
+    private static void installPropertySheet()
+    {
+        IWorkbench wb = PlatformUI.getWorkbench();
+        if (wb == null)
+            return;
+        for (IWorkbenchWindow window : wb.getWorkbenchWindows())
+            hookPropertySheetWindow(window);
+        wb.addWindowListener(new IWindowListener()
+        {
+            @Override public void windowOpened(IWorkbenchWindow w) { hookPropertySheetWindow(w); }
+            @Override public void windowActivated(IWorkbenchWindow w) {}
+            @Override public void windowDeactivated(IWorkbenchWindow w) {}
+            @Override public void windowClosed(IWorkbenchWindow w) {}
+        });
+    }
+
+    private static void hookPropertySheetWindow(IWorkbenchWindow window)
+    {
+        if (window == null)
+            return;
+        for (IWorkbenchPage page : window.getPages())
+        {
+            if (page == null)
+                continue;
+            for (IViewReference ref : page.getViewReferences())
+            {
+                IViewPart view = ref.getView(false);
+                if (PropertyNameIdentifierHook.isPropertySheetView(view))
+                    schedulePropertyAttach(view, 0);
+            }
+        }
+        window.getPartService().addPartListener(new IPartListener2()
+        {
+            @Override public void partOpened(IWorkbenchPartReference ref)        { tryFromRef(ref); }
+            @Override public void partVisible(IWorkbenchPartReference ref)       { tryFromRef(ref); }
+            @Override public void partActivated(IWorkbenchPartReference ref)     { tryFromRef(ref); }
+            // Главный сигнал смены объекта в дереве — панель осталась той же view, но её
+            // содержимое (строка «Тип») теперь для другого объекта.
+            @Override public void partInputChanged(IWorkbenchPartReference ref)  { tryFromRef(ref); }
+            @Override public void partBroughtToTop(IWorkbenchPartReference ref)  {}
+            @Override public void partDeactivated(IWorkbenchPartReference ref)   {}
+            @Override public void partHidden(IWorkbenchPartReference ref)        {}
+
+            @Override
+            public void partClosed(IWorkbenchPartReference ref)
+            {
+                IWorkbenchPart part = ref != null ? ref.getPart(false) : null;
+                if (part instanceof IViewPart view)
+                    disposePropertyOverlay(view);
+            }
+
+            private void tryFromRef(IWorkbenchPartReference ref)
+            {
+                IWorkbenchPart part = ref != null ? ref.getPart(false) : null;
+                if (PropertyNameIdentifierHook.isPropertySheetView(part))
+                    schedulePropertyAttach((IViewPart) part, 0);
+            }
+        });
+    }
+
+    private static void schedulePropertyAttach(IViewPart view, int attempt)
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        int delay = attempt == 0 ? 0 : 100;
+        display.timerExec(delay, () ->
+        {
+            if (tryAttachPropertySheet(view))
+                return;
+            // Строки палитры свойств подгружаются лениво — окно ожидания ~10с, тот же приём,
+            // что и PropertyNameIdentifierHook.scheduleAttach.
+            if (attempt < 100)
+                schedulePropertyAttach(view, attempt + 1);
+        });
+    }
+
+    private static boolean tryAttachPropertySheet(IViewPart view)
+    {
+        Object page = PropertyNameIdentifierHook.resolvePropertySheetPage(view);
+        if (page == null)
+            return false;
+
+        Object scene = Global.invoke(page, "getScene"); //$NON-NLS-1$
+        if (scene == null)
+            return false;
+
+        Map.Entry<?, ?> typeEditorEntry = PropertyNameIdentifierHook.findValueViewAfterLabel(scene, TYPE_PROPERTY_LABEL);
+        if (typeEditorEntry == null)
+            return false;
+
+        Object viewModel = typeEditorEntry.getKey();
+        Object typeView = typeEditorEntry.getValue();
+        Object nativeControl = typeView != null ? Global.invoke(typeView, "getNativeControl") : null; //$NON-NLS-1$
+        if (nativeControl == null)
+            return false;
+
+        // Сразу после смены объекта в дереве (checkExternalChange ловит «Model is offline» и
+        // пересобирает оверлей — см. scheduleRediscoverOverlay) AEF на один-два кадра успевает
+        // отдать nativeControl для строки «Тип» ДО того, как сам виджет полностью пересобран:
+        // kнопка «Выбрать» (nativeControl.buttons) в этот момент ещё null, а
+        // getSingleTypeItem().get() возвращает null — в логе это видно как
+        // «nativeControl.buttons=null currentTypeItem=null initialText=null», и пользователю
+        // показывалось пустое поле без иконки. Раньше это молча коммитилось в overlay как есть;
+        // теперь трактуем «buttons ещё не готовы» как «виджет ещё не найден» и уходим в тот же
+        // ретрай-цикл (schedulePropertyAttach), что и при отсутствии nativeControl вовсе.
+        if (Global.getField(nativeControl, "buttons") == null) //$NON-NLS-1$
+        {
+            diag("tryAttachPropertySheet: nativeControl.buttons ещё null — AEF не достроил строку, повтор позже"); //$NON-NLS-1$
+            return false;
+        }
+
+        OverlayState existing = PROPERTY_OVERLAYS.get(view);
+        if (existing != null)
+        {
+            if (existing.nativeControl == nativeControl && !existing.container.isDisposed())
+                return true; // тот же объект/поле — оверлей уже стоит, ничего делать не нужно
+            // Другой объект выбран в дереве (или старый nativeControl уже осиротел) — сносим
+            // прежний оверлей перед установкой нового, иначе накопится утечка контейнеров/поллеров
+            // при активном переключении по дереву (в отличие от мастера — тут это происходит
+            // постоянно, а не один раз за диалог).
+            disposePropertyOverlay(view);
+        }
+
+        if (ATTACHED.contains(nativeControl))
+            return true;
+
+        Object typeModel = PropertyNameIdentifierHook.findTypeDescriptionModel(scene);
+        if (typeModel == null)
+            return false;
+
+        // rediscoverOverlay() снимает текущий container ДО вызова rediscover и не смотрит на
+        // возвращаемое значение (Runnable) — если tryAttachPropertySheet тут же провалится
+        // (например, поймает AEF на переходном состоянии, см. проверку nativeControl.buttons
+        // выше), поле осталось бы без оверлея вообще, до следующего случайного триггера.
+        // Поэтому на неудаче сами уходим в стандартный ретрай-цикл.
+        Runnable rediscover = () ->
+        {
+            if (!tryAttachPropertySheet(view))
+                schedulePropertyAttach(view, 1);
+        };
+        OverlayState state = createOverlay(nativeControl, typeModel, viewModel, rediscover, true);
+        if (state == null)
+            return false;
+
+        ATTACHED.add(nativeControl);
+        PROPERTY_OVERLAYS.put(view, state);
+        diag("tryAttachPropertySheet: оверлей установлен для view=" + view); //$NON-NLS-1$
+        return true;
+    }
+
+    private static void disposePropertyOverlay(IViewPart view)
+    {
+        OverlayState state = PROPERTY_OVERLAYS.remove(view);
+        if (state == null)
+            return;
+        ATTACHED.remove(state.nativeControl);
+        if (!state.container.isDisposed())
+            state.container.dispose();
     }
 
     // LightText.createOverlay(Composite) помечает созданный оверлей именно этим ключом
@@ -253,27 +445,48 @@ public class TypeComboOverlayHook implements IStartup
     {
         if (state.container.isDisposed())
             return;
-        Composite host = state.container.getParent();
+        // В мастере создания объекта все поля («Имя», «Синоним», «Тип», ...) — прямые дети
+        // одного и того же host-composite, поэтому раньше хватало state.container.getParent().
+        // В панели «Свойства» поля разложены по нескольким вложенным группам («Основные»,
+        // «Использование», ...), каждая — свой SWT Composite, так что прямые «дети» родителя
+        // нашего container уже не покрывают соседние поля из ДРУГИХ групп (см. скриншот:
+        // подсветка остаётся висеть в «История данных», хотя фокус давно ушёл) — поэтому
+        // рекурсивно обходим весь hostShell целиком (это ровно тот же Shell, что и раньше
+        // получали бы через getParent() в плоском случае мастера, только теперь ищем на всю
+        // глубину, а не в одном уровне).
+        Shell host = state.hostShell;
         if (host == null || host.isDisposed())
             return;
 
-        int cleared = 0;
-        for (Control child : host.getChildren())
-        {
-            if (child == state.container || child.isDisposed())
-                continue;
-            if (!(child instanceof StyledText overlayText))
-                continue;
-            if (overlayText.getData(LWT_OVERLAY_DATA_KEY) == null)
-                continue;
-            overlayText.setSelection(0);
-            cleared++;
-        }
+        int[] clearedHolder = { 0 };
+        clearSiblingTextSelectionsRecursive(host, state.container, clearedHolder);
+        int cleared = clearedHolder[0];
         diag("clearSiblingTextSelections: оверлеев StyledText обработано=" + cleared); //$NON-NLS-1$
     }
 
-    private static boolean createOverlay(Object nativeControl, Object typeModel, Object viewModel,
-        IWizardPage page, IWizard wizard, boolean focusAfterCreate)
+    private static void clearSiblingTextSelectionsRecursive(Composite parent, Composite ownContainer, int[] cleared)
+    {
+        for (Control child : parent.getChildren())
+        {
+            if (child == ownContainer || child.isDisposed())
+                continue;
+            if (child instanceof StyledText overlayText)
+            {
+                if (overlayText.getData(LWT_OVERLAY_DATA_KEY) != null)
+                {
+                    overlayText.setSelection(0);
+                    cleared[0]++;
+                }
+            }
+            else if (child instanceof Composite composite)
+            {
+                clearSiblingTextSelectionsRecursive(composite, ownContainer, cleared);
+            }
+        }
+    }
+
+    private static OverlayState createOverlay(Object nativeControl, Object typeModel, Object viewModel,
+        Runnable rediscover, boolean focusAfterCreate)
     {
         ClassLoader lwtLoader = nativeControl.getClass().getClassLoader();
         Class<?> swtLightCompositeClass;
@@ -286,15 +499,15 @@ public class TypeComboOverlayHook implements IStartup
         {
             diag("createOverlay: SwtLightComposite class error " + e); //$NON-NLS-1$
             Global.logError(LOG_TAG, "SwtLightComposite class", e); //$NON-NLS-1$
-            return false;
+            return null;
         }
 
         Object hostComposite = Global.invoke(swtLightCompositeClass, "getHostSwtLightComposite", nativeControl); //$NON-NLS-1$
         if (hostComposite == null)
-            return false;
+            return null;
         Object parentObj = Global.invoke(hostComposite, "getSwtComposite"); //$NON-NLS-1$
         if (!(parentObj instanceof Composite parent) || parent.isDisposed())
-            return false;
+            return null;
 
         // getBounds() отдаёт позицию/размер контрола в системе координат хоста (см.
         // диагностику: Rectangle {150, 122, 349, 24}); а translateRectangleFromControl(this, rect)
@@ -306,17 +519,17 @@ public class TypeComboOverlayHook implements IStartup
             boundsObj = Global.getField(nativeControl, "bounds"); //$NON-NLS-1$
         Rectangle ownBounds = rectangleOf(boundsObj);
         if (ownBounds == null)
-            return false;
+            return null;
         Rectangle localRect = new Rectangle(0, 0, ownBounds.width, ownBounds.height);
         Rectangle realBounds = rectangleOf(Global.invoke(hostComposite, "translateRectangleFromControl", //$NON-NLS-1$
             nativeControl, localRect));
         if (realBounds == null)
-            return false;
+            return null;
         if (realBounds.width < 40)
         {
             diag("createOverlay: контрол слишком узкий (" + realBounds //$NON-NLS-1$
                 + "), это не поле «Тип» — пропуск"); //$NON-NLS-1$
-            return false;
+            return null;
         }
         // Резервируем справа полосу под нативную кнопку «...» — не перекрываем её своим
         // container'ом (см. RIGHT_RESERVED_WIDTH).
@@ -327,7 +540,7 @@ public class TypeComboOverlayHook implements IStartup
         if (entries.isEmpty())
         {
             diag("createOverlay: entries.isEmpty() — getTypes(false) пуст"); //$NON-NLS-1$
-            return false;
+            return null;
         }
 
         // ОТКАЧЕНО: пробовали nativeControl.setVisible(false), чтобы не просвечивал под нашим
@@ -428,8 +641,7 @@ public class TypeComboOverlayHook implements IStartup
         state.nativeControl = nativeControl;
         state.hostComposite = hostComposite;
         state.hostShell = parent.getShell();
-        state.page = page;
-        state.wizard = wizard;
+        state.rediscover = rediscover;
         state.text = text;
         state.iconLabel = iconLabel;
         state.arrowButton = arrowButton;
@@ -539,7 +751,7 @@ public class TypeComboOverlayHook implements IStartup
 
         diag("createOverlay: оверлей установлен, типов=" + entries.size() //$NON-NLS-1$
             + " realBounds=" + realBounds); //$NON-NLS-1$
-        return true;
+        return state;
     }
 
     // Основной сценарий (растягивание окна) теперь ловится немедленно через ControlListener на
@@ -603,13 +815,54 @@ public class TypeComboOverlayHook implements IStartup
     {
         if (state.container.isDisposed() || state.programmaticChange)
             return;
-        Object currentTypeItem = Global.invoke(Global.invoke(state.typeModel, "getSingleTypeItem"), "get"); //$NON-NLS-1$ //$NON-NLS-2$
+        Object currentTypeItem;
+        try
+        {
+            currentTypeItem = Global.invoke(Global.invoke(state.typeModel, "getSingleTypeItem"), "get"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (IllegalStateException ex)
+        {
+            // В панели «Свойства» смена выбранного объекта в дереве не всегда доходит до нас
+            // через partInputChanged (см. installPropertySheet/tryAttachPropertySheet) — панель
+            // может обновлять содержимое внутренним ISelectionListener без пересоздания входа
+            // view. Тогда typeModel, на который завязан этот оверлей, «умирает» (AEF переводит
+            // его в offline), а наш поллер продолжал бы стучаться в него вечно, раз в секунду
+            // логируя одно и то же исключение и оставляя на экране битый оверлей (пустой текст,
+            // disposed-иконки из старого viewModel.items). Трактуем «Model is offline» как
+            // надёжный сигнал «строка «Тип» под нами исчезла» и пересобираем оверлей тем же
+            // путём, что и при обычном внешнем изменении значения — rediscoverOverlay сносит
+            // текущий контейнер и заново запускает state.rediscover (для панели «Свойства» это
+            // повторный tryAttachPropertySheet, который либо найдёт новую актуальную строку,
+            // либо корректно ничего не создаст).
+            diag("checkExternalChange: typeModel offline — пересобираю оверлей: " + ex); //$NON-NLS-1$
+            scheduleRediscoverOverlay(state);
+            return;
+        }
         String currentText = currentTypeItem != null ? displayLabel(currentTypeItem) : null;
         if (java.util.Objects.equals(currentText, state.lastCommittedText))
             return;
         diag("checkExternalChange: значение изменено извне (было=" + state.lastCommittedText //$NON-NLS-1$
             + ", стало=" + currentText + ") — пересобираю оверлей"); //$NON-NLS-1$ //$NON-NLS-2$
-        rediscoverOverlay(state);
+        scheduleRediscoverOverlay(state);
+    }
+
+    /**
+     * Лог подтвердил: синхронный вызов rediscoverOverlay() прямо из тика поллера (в отличие от
+     * commitSelection, который специально делает это через asyncExec — см. комментарий там же)
+     * иногда попадает на промежуточное состояние AEF ПОСЛЕ смены значения через диалог «...», но
+     * ДО того, как AEF успел перестроить строку «Тип» обратно в обычный однострочный комбобокс —
+     * в этот момент nativeControl временно оказывается совсем другим виджетом (в логе —
+     * {@code Rectangle {0, 154, 489, 150}} вместо обычных ~24px высоты), и наш оверлей на секунду
+     * растягивается на всю эту область, наезжая на «Представление»/«Подсказка» ниже. asyncExec
+     * даёт AEF закончить перестройку синхронно в рамках текущего события, прежде чем мы заново
+     * ищем виджет — тот же приём, что и в commitSelection.
+     */
+    private static void scheduleRediscoverOverlay(OverlayState state)
+    {
+        if (state.text.isDisposed())
+            return;
+        Display display = state.text.getDisplay();
+        display.asyncExec(() -> rediscoverOverlay(state));
     }
 
 
@@ -677,8 +930,10 @@ public class TypeComboOverlayHook implements IStartup
         Object nativeControl;
         Object hostComposite;
         Shell hostShell;
-        IWizardPage page;
-        IWizard wizard;
+        // Пересоздаёт оверлей заново (ищет nativeControl/viewModel/typeModel с нуля) — для
+        // мастера это patchTypeCombo(page, wizard, true), для панели «Свойства» —
+        // tryAttachPropertySheet(view). См. rediscoverOverlay().
+        Runnable rediscover;
         Text text;
         Label iconLabel;
         Button arrowButton;
@@ -1337,7 +1592,7 @@ public class TypeComboOverlayHook implements IStartup
         state.container.dispose();
         try
         {
-            patchTypeCombo(state.page, state.wizard, true);
+            state.rediscover.run();
         }
         catch (Exception e)
         {

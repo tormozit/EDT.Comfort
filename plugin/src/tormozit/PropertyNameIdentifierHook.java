@@ -111,7 +111,7 @@ public class PropertyNameIdentifierHook implements IStartup
         });
     }
 
-    private static boolean isPropertySheetView(Object part)
+    static boolean isPropertySheetView(Object part)
     {
         if (!(part instanceof IViewPart))
             return false;
@@ -145,9 +145,10 @@ public class PropertyNameIdentifierHook implements IStartup
         if (scene == null)
             return false;
 
-        Object nameEditorView = findValueViewAfterLabel(scene, NAME_PROPERTY_LABEL);
-        if (nameEditorView == null)
+        java.util.Map.Entry<?, ?> nameEditorEntry = findValueViewAfterLabel(scene, NAME_PROPERTY_LABEL);
+        if (nameEditorEntry == null)
             return false;
+        Object nameEditorView = nameEditorEntry.getValue();
 
         Object nativeControl = Global.invoke(nameEditorView, "getNativeControl"); //$NON-NLS-1$
         if (nativeControl == null)
@@ -188,13 +189,15 @@ public class PropertyNameIdentifierHook implements IStartup
      * definition-driven компонентом без именованных полей вроде {@code typeComponent}
      * (в отличие от мастеров, см. {@link NewAttributeNameIdentifierHook}).
      */
-    private static Object findTypeDescriptionModel(Object scene)
+    // Package-private (не private) — переиспользуется в TypeComboOverlayHook (оверлей поля
+    // «Тип» в панели «Свойства», тот же пакет tormozit).
+    static Object findTypeDescriptionModel(Object scene)
     {
         Object root = Global.invoke(scene, "getComponent"); //$NON-NLS-1$
         return findTypeDescriptionModelInTree(root, 0);
     }
 
-    private static Object findTypeDescriptionModelInTree(Object component, int depth)
+    static Object findTypeDescriptionModelInTree(Object component, int depth)
     {
         if (component == null || depth > 12)
             return null;
@@ -229,7 +232,7 @@ public class PropertyNameIdentifierHook implements IStartup
         return false;
     }
 
-    private static Object resolvePropertySheetPage(IViewPart view)
+    static Object resolvePropertySheetPage(IViewPart view)
     {
         Object page = Global.invoke(view, "getCurrentPage"); //$NON-NLS-1$
         if (isPropertySheetPage(page))
@@ -241,17 +244,20 @@ public class PropertyNameIdentifierHook implements IStartup
         return null;
     }
 
-    private static boolean isPropertySheetPage(Object page)
+    static boolean isPropertySheetPage(Object page)
     {
         return page != null && page.getClass().getName().contains("PropertySheetPage"); //$NON-NLS-1$
     }
 
     /**
      * Ищет в {@code renderer.viewModelToView} (порядок-сохраняющая {@link java.util.LinkedHashMap})
-     * {@code LabelViewModel} с текстом {@code displayName} и возвращает view **следующей** записи —
-     * это и есть view редактора значения (см. javadoc класса).
+     * {@code LabelViewModel} с текстом {@code displayName} и возвращает **следующую** запись
+     * целиком — {@code entry.getValue()} это view редактора значения (см. javadoc класса),
+     * {@code entry.getKey()} — его viewModel (нужен вызывающим, которым важны оба, например
+     * {@code TypeComboOverlayHook} — оттуда берутся иконки типа через {@code viewModel.items}).
+     * Package-private (не private) — переиспользуется в {@code TypeComboOverlayHook}.
      */
-    private static Object findValueViewAfterLabel(Object scene, String displayName)
+    static java.util.Map.Entry<?, ?> findValueViewAfterLabel(Object scene, String displayName)
     {
         Object renderer = Global.invoke(scene, "getRenderer"); //$NON-NLS-1$
         Object mapObj = renderer != null ? Global.getField(renderer, "viewModelToView") : null; //$NON-NLS-1$
@@ -262,7 +268,7 @@ public class PropertyNameIdentifierHook implements IStartup
         for (java.util.Map.Entry<?, ?> entry : map.entrySet())
         {
             if (foundLabel)
-                return entry.getValue();
+                return entry;
 
             Object key = entry.getKey();
             if (key != null && key.getClass().getName().contains("LabelViewModel")) //$NON-NLS-1$

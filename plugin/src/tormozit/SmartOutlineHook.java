@@ -408,6 +408,11 @@ public class SmartOutlineHook implements IStartup {
             flatFilterLp.bindFilter(smartFilter);
         if (!typeTree)
             smartFilter.setFlattenWhenFiltered(true);
+        else
+            // Штатное поведение EDT для этого диалога — дерево свёрнуто при открытии; принудительное
+            // раскрытие всего верхнего уровня (~1200 узлов) было основной причиной подвисания
+            // viewer.refresh(true) на каждое нажатие клавиши.
+            smartFilter.setExpandTopLevelByDefault(false);
         smartFilter.setPattern(getFilterPattern(filterControl));
 
         wrapContentProviderForFlatOutline(viewer, smartFilter, baseLp, typeTree);
@@ -467,9 +472,6 @@ public class SmartOutlineHook implements IStartup {
             aef.bindContext(smartFilter);
             aef.apply(viewer, patchedShell);
         }
-        if (typeTree)
-            timedApplyTreeExpansion(smartFilter, viewer, "applySmartSearch/initial"); //$NON-NLS-1$
-
         // ПРИОРИТЕТ 1: Рейтинг Имени (от большего к меньшему)
         viewer.setComparator(new SmartOutlineComparator(smartFilter.getNamePremiumCache(), smartFilter.getParamPremiumCache(), baseLp, flatContentProvider, smartFilter));
 
@@ -525,11 +527,37 @@ public class SmartOutlineHook implements IStartup {
             fc = filterControl;
         }
 
+        // Замер (selectType-marked-timing.log) показал: раскрытие всего дерева типов
+        // (applyTreeExpansion) занимает ~90-100мс САМО ПО СЕБЕ и раньше выполнялось ДО
+        // создания флажка «Только помеченные» — из-за этого флажок появлялся с задержкой,
+        // хотя его собственная установка занимает единицы мс. Поле фильтра и флажок теперь
+        // создаются выше синхронно (видны сразу), а дорогое раскрытие дерева откладываем на
+        // следующий тик через asyncExec — не блокирует появление уже созданных виджетов.
+        if (typeTree)
+        {
+            Control expansionControl = viewer.getControl();
+            if (expansionControl != null && !expansionControl.isDisposed())
+            {
+                expansionControl.getDisplay().asyncExec(() -> {
+                    if (viewer.getControl() == null || viewer.getControl().isDisposed())
+                        return;
+                    smartFilter.applyTreeExpansion(viewer);
+                });
+            }
+        }
+
         // Контейнер для хранения ссылки на текущую отложенную задачу (дебаунс)
         final Runnable[] pendingFilterTask = new Runnable[1];
         // Отдельный, более длинный дебаунс для дорогого раскрытия дерева типов — см.
         // scheduleTreeExpansion.
         final Runnable[] pendingExpandTask = new Runnable[1];
+        // То же для нативной AEF-подсветки (самый тяжёлый шаг) — см. scheduleAefHighlight.
+        final Runnable[] pendingAefTask = new Runnable[1];
+        // Последний замер стоимости каждого шага — под адаптивный дебаунс (adaptiveDebounceMs):
+        // на маленькой базе быстро, на большой сам растягивается пропорционально нагрузке.
+        final long[] lastExpandCostMs = { 0 };
+        final long[] lastAefCostMs = { 0 };
+        final long[] lastFilterCostMs = { 0 };
 
         addFilterModifyListener(fc, new ModifyListener() {
             @Override
@@ -561,11 +589,26 @@ public class SmartOutlineHook implements IStartup {
                     public void run() {
                         executeSmartFilterUpdate(viewer, smartFilter, highlightControl,
                                 flatContentProviderRef, bslQuickOutline, aefTree, typeTree,
-                                pattern, patchedShell, dialog, fc, pendingExpandTask);
+                                pattern, patchedShell, dialog, fc, pendingExpandTask, pendingAefTask,
+                                lastExpandCostMs, lastAefCostMs, lastFilterCostMs);
                     }
                 };
 
-                display.timerExec(150, pendingFilterTask[0]);
+                // Один символ фильтра почти ничего не сужает (совпадает почти со всем деревом
+                // типов), но именно на нём случаются самые дорогие пересчёты — а пользователь,
+                // как правило, тут же печатает следующий символ. Даём такому состоянию большую
+                // фору: если следующий символ придёт раньше TYPE_TREE_SINGLE_CHAR_DEBOUNCE_MS,
+                // эта задача будет отменена (см. timerExec(-1, ...) выше) и ни разу не выполнится.
+                int delay;
+                if (typeTree && pattern.trim().length() == 1)
+                    // length()==0 (очистка фильтра) сюда не попадает намеренно — очистка должна
+                    // отрабатывать быстро, а не с той же большой задержкой.
+                    delay = TYPE_TREE_SINGLE_CHAR_DEBOUNCE_MS;
+                else if (typeTree)
+                    delay = adaptiveFilterDebounceMs(lastFilterCostMs[0]);
+                else
+                    delay = 150;
+                display.timerExec(delay, pendingFilterTask[0]);
             }
         });
 
@@ -575,6 +618,9 @@ public class SmartOutlineHook implements IStartup {
             }
             if (pendingExpandTask[0] != null && !fc.getDisplay().isDisposed()) {
                 fc.getDisplay().timerExec(-1, pendingExpandTask[0]);
+            }
+            if (pendingAefTask[0] != null && !fc.getDisplay().isDisposed()) {
+                fc.getDisplay().timerExec(-1, pendingAefTask[0]);
             }
         });
 
@@ -623,29 +669,59 @@ public class SmartOutlineHook implements IStartup {
             BslSideHintOutlineInstall.installIfBsl(viewer, dialog, dialogName);
     }
     
-    /** Временный замер: пользователь сообщил, что раскрытие дерева в «Редактировании типа данных»
-     * иногда блокирует ввод — нужно понять, сколько реально занимает сам обход. */
-    private static void timedApplyTreeExpansion(SmartOutlineFilter smartFilter, TreeViewer viewer, String where)
-    {
-        long start = System.nanoTime();
-        smartFilter.applyTreeExpansion(viewer);
-        long elapsedMs = (System.nanoTime() - start) / 1_000_000L;
-        Global.tempLog("typetree-expand", //$NON-NLS-1$
-            where + " pattern=\"" + smartFilter.getPattern() + "\" elapsedMs=" + elapsedMs); //$NON-NLS-1$ //$NON-NLS-2$
-    }
-
     /**
-     * По логам обход дерева ({@link #timedApplyTreeExpansion}) при широком фильтре занимает
-     * сотни мс — на каждое отдельное нажатие клавиши это ощущается как подвисание ввода, даже
+     * По замерам обход дерева при широком фильтре занимает сотни мс — на каждое отдельное
+     * нажатие клавиши это ощущается как подвисание ввода, даже
      * с потолком {@code SmartOutlineFilter.MAX_AUTO_EXPAND}. Раскрытие — не то, что нужно видеть
      * на КАЖДОМ промежуточном состоянии набора текста, поэтому раскрываем только когда ввод
      * реально остановился (отдельный, более длинный дебаунс, независимый от дебаунса самой
      * фильтрации — та должна оставаться отзывчивой).
+     *
+     * Интервал — АДАПТИВНЫЙ (см. {@link #adaptiveDebounceMs}), а не фиксированная константа:
+     * подобранное на маленькой тестовой базе число здесь не годится — на конфигурации на порядок
+     * крупнее и раскрытие, и нативная AEF-подсветка (см. {@link #scheduleAefHighlight}) сами по
+     * себе кратно дороже, а дебаунс должен растягиваться вместе с реальной стоимостью, не раньше.
      */
-    private static final int TYPE_TREE_EXPAND_DEBOUNCE_MS = 400;
+    private static final int EXPAND_DEBOUNCE_MIN_MS = 400;
+    private static final int EXPAND_DEBOUNCE_MAX_MS = 3000;
+    private static final int EXPAND_DEBOUNCE_MULTIPLIER = 3;
+
+    /** Однобуквенный (или короче) фильтр на дереве типов почти не сужает список, но именно на
+     * нём случаются самые дорогие пересчёты — отдельная большая задержка, независимая от
+     * адаптивного дебаунса выше (тот подстраивается под уже измеренную стоимость, а тут стоимость
+     * ещё не измерена — первый символ вообще). */
+    private static final int TYPE_TREE_SINGLE_CHAR_DEBOUNCE_MS = 1000;
+
+    /** Базовый дебаунс самой фильтрации (список должен обновляться быстро) — растягивается
+     * заметно меньше и в более узких пределах, чем раскрытие/AEF-подсветка (см. выше). */
+    private static final int FILTER_DEBOUNCE_MIN_MS = 150;
+    private static final int FILTER_DEBOUNCE_MAX_MS = 800;
+    private static final int FILTER_DEBOUNCE_MULTIPLIER = 2;
+
+    private static int adaptiveDebounceMs(long lastElapsedMs)
+    {
+        return adaptiveDebounceMs(lastElapsedMs, EXPAND_DEBOUNCE_MIN_MS, EXPAND_DEBOUNCE_MAX_MS,
+                EXPAND_DEBOUNCE_MULTIPLIER);
+    }
+
+    private static int adaptiveFilterDebounceMs(long lastElapsedMs)
+    {
+        return adaptiveDebounceMs(lastElapsedMs, FILTER_DEBOUNCE_MIN_MS, FILTER_DEBOUNCE_MAX_MS,
+                FILTER_DEBOUNCE_MULTIPLIER);
+    }
+
+    private static int adaptiveDebounceMs(long lastElapsedMs, int minMs, int maxMs, int multiplier)
+    {
+        long target = lastElapsedMs * multiplier;
+        if (target < minMs)
+            return minMs;
+        if (target > maxMs)
+            return maxMs;
+        return (int) target;
+    }
 
     private static void scheduleTreeExpansion(SmartOutlineFilter smartFilter, TreeViewer viewer,
-            Runnable[] pendingExpandTask, String pattern)
+            Runnable[] pendingExpandTask, long[] lastExpandCostMs)
     {
         Control control = viewer.getControl();
         if (control == null || control.isDisposed())
@@ -656,16 +732,44 @@ public class SmartOutlineHook implements IStartup {
         pendingExpandTask[0] = () -> {
             if (control.isDisposed())
                 return;
-            timedApplyTreeExpansion(smartFilter, viewer, "debounced pattern=\"" + pattern + "\""); //$NON-NLS-1$ //$NON-NLS-2$
+            long start = System.nanoTime();
+            smartFilter.applyTreeExpansion(viewer);
+            lastExpandCostMs[0] = (System.nanoTime() - start) / 1_000_000L;
         };
-        display.timerExec(TYPE_TREE_EXPAND_DEBOUNCE_MS, pendingExpandTask[0]);
+        display.timerExec(adaptiveDebounceMs(lastExpandCostMs[0]), pendingExpandTask[0]);
+    }
+
+    /**
+     * {@code AefTreeItemHighlight.apply} (нативный {@code performSearch} + repaint) — самый
+     * тяжёлый шаг на каждое нажатие клавиши. Красная подсветка, как и раскрытие дерева, не
+     * обязана поспевать за КАЖДЫМ промежуточным символом — откладываем тем же приёмом, с тем же
+     * адаптивным интервалом.
+     */
+    private static void scheduleAefHighlight(AefTreeItemHighlight aef, TreeViewer viewer, Shell patchedShell,
+            Runnable[] pendingAefTask, long[] lastAefCostMs)
+    {
+        Control control = viewer.getControl();
+        if (control == null || control.isDisposed())
+            return;
+        Display display = control.getDisplay();
+        if (pendingAefTask[0] != null)
+            display.timerExec(-1, pendingAefTask[0]);
+        pendingAefTask[0] = () -> {
+            if (control.isDisposed())
+                return;
+            long start = System.nanoTime();
+            aef.apply(viewer, patchedShell);
+            lastAefCostMs[0] = (System.nanoTime() - start) / 1_000_000L;
+        };
+        display.timerExec(adaptiveDebounceMs(lastAefCostMs[0]), pendingAefTask[0]);
     }
 
     private static void executeSmartFilterUpdate(TreeViewer viewer, SmartOutlineFilter smartFilter,
             SmartLabelHighlight highlightControl, SmartOutlineFlatContentProvider flatContentProvider,
             boolean bslQuickOutline, boolean aefTree, boolean typeTree,
             String pattern, Shell patchedShell, Object dialog, Control filterControl,
-            Runnable[] pendingExpandTask) {
+            Runnable[] pendingExpandTask, Runnable[] pendingAefTask,
+            long[] lastExpandCostMs, long[] lastAefCostMs, long[] lastFilterCostMs) {
         
         Control control = viewer.getControl();
         if (control == null || control.isDisposed()) return;
@@ -688,19 +792,23 @@ public class SmartOutlineHook implements IStartup {
 
             // 1. Очищаем кэши и задаем новый текст поиска
             smartFilter.refreshPattern(pattern);
-            
+
             // 2. Паттерн подсветки (styled label — при refresh; AEF — после refresh)
             if (highlightControl != null)
                 highlightControl.setHighlightPattern(pattern);
 
             // 3. Обновляем только видимые элементы — плоский список уже пересобран в content provider
+            long refreshStart = System.nanoTime();
             viewer.refresh(true);
+            if (typeTree)
+                lastFilterCostMs[0] = (System.nanoTime() - refreshStart) / 1_000_000L;
 
             if (typeTree)
-                scheduleTreeExpansion(smartFilter, viewer, pendingExpandTask, pattern);
+                scheduleTreeExpansion(smartFilter, viewer, pendingExpandTask, lastExpandCostMs);
 
             if (highlightControl instanceof AefTreeItemHighlight)
-                ((AefTreeItemHighlight) highlightControl).apply(viewer, patchedShell);
+                scheduleAefHighlight((AefTreeItemHighlight) highlightControl, viewer, patchedShell,
+                        pendingAefTask, lastAefCostMs);
 
             // 4. Выделение: при очистке — прежняя строка, при фильтре — первая видимая
             if (clearingFilter)
@@ -1223,7 +1331,8 @@ public class SmartOutlineHook implements IStartup {
             return;
         Object element = selection.getFirstElement();
         Set<Object> toExpand = new LinkedHashSet<>();
-        smartFilter.collectTopLevelExpansion(viewer, toExpand);
+        if (smartFilter.isExpandTopLevelByDefault())
+            smartFilter.collectTopLevelExpansion(viewer, toExpand);
         addAncestorChain(viewer, element, toExpand);
         if (!toExpand.isEmpty())
             viewer.setExpandedElements(toExpand.toArray());
@@ -1545,7 +1654,7 @@ public class SmartOutlineHook implements IStartup {
                 tree.setRedraw(false);
                 try {
                     viewer.refresh(true);
-                    timedApplyTreeExpansion(smartFilter, viewer, "onlyMarked toggle"); //$NON-NLS-1$
+                    smartFilter.applyTreeExpansion(viewer);
                     if (highlightControl instanceof AefTreeItemHighlight)
                         ((AefTreeItemHighlight) highlightControl).apply(viewer, patchedShell);
                     keepOrSelectFirstVisibleItem(viewer, smartFilter);
