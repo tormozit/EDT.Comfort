@@ -741,13 +741,24 @@ public class OpenMdObjectHook implements IStartup {
                 styledString = new StyledString(getText(element));
             }
 
+            // Красим только чистое имя (до " - "): FilteredItemsSelectionDialog для ВЫДЕЛЕННОЙ
+            // строки сам прогоняет наш styledString через родной selectionDecorator.decorateText
+            // и StyledCellLabelProvider.styleDecoratedString(decorated, null, string) — если бы мы
+            // сами дописывали " / Родитель.Имя" в styledString, родной decorator получал бы уже
+            // изменённый нами текст, не находил бы совпадения и отбрасывал ВСЕ стили (включая
+            // подсветку имени), а сам он красит добавленный им суффикс без цвета (см. "null" —
+            // "no need to add colors when element is selected" в его исходнике). Поэтому полное
+            // имя с родительской секцией показывает и красит только родной decorateText (ниже),
+            // а мы подсвечиваем исключительно имя объекта — секционным фильтром по последней
+            // секции, обычным — по всем фрагментам.
             String plainText = styledString.getString();
-            // === ПОДСВЕТКА ТОЛЬКО В ЧИСТОМ ИМЕНИ ===
             String objectName = org.eclipse.ui.dialogs.OpenMdObjectItemsFilter.getObjectName(plainText);
             int nameOffset = plainText.indexOf(objectName);
             if (nameOffset < 0) nameOffset = 0;
-
-            for (SmartMatcher.HighlightRange range : matcher.getHighlightRanges(objectName)) {
+            java.util.List<SmartMatcher.HighlightRange> ranges = matcher.hasMultipleSections()
+                ? matcher.getLastSectionHighlightRanges(objectName)
+                : matcher.getHighlightRanges(objectName);
+            for (SmartMatcher.HighlightRange range : ranges) {
                 styledString.setStyle(nameOffset + range.offset, range.length, SmartMatchHighlight.styler());
             }
             return styledString;

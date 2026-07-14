@@ -17,6 +17,7 @@ public class SmartOutlineFilter extends ViewerFilter {
     private final boolean pruneEmptyBranches;
     private final boolean codeMatcher;
     private boolean flattenWhenFiltered;
+    private Object treeInput;
     
     private final Map<Object, Integer> namePremiumCache = new HashMap<>();
     private final Map<Object, Integer> paramPremiumCache = new HashMap<>();
@@ -103,8 +104,17 @@ public class SmartOutlineFilter extends ViewerFilter {
     }
 
     /**
+     * При широком фильтре (мало фрагментов, много совпадений) полный рекурсивный обход дерева
+     * ради автораскрытия становится синхронно дорогим (по замерам — до ~1с на UI-потоке, см.
+     * временный лог "typetree-expand") и ощущается как подвисание ввода. Раскрывать больше этого
+     * числа веток всё равно бесполезно — пользователь не увидит их одновременно на экране.
+     */
+    private static final int MAX_AUTO_EXPAND = 200;
+
+    /**
      * Верхний уровень дерева всегда раскрыт.
-     * При непустом фильтре дополнительно раскрываются ветки на пути к совпадениям.
+     * При непустом фильтре дополнительно раскрываются ветки на пути к совпадениям — но не более
+     * {@link #MAX_AUTO_EXPAND}, дальше обход обрывается (см. класс-комментарий).
      */
     public void applyTreeExpansion(AbstractTreeViewer viewer)
     {
@@ -124,7 +134,11 @@ public class SmartOutlineFilter extends ViewerFilter {
         if (!matcher.isEmpty)
         {
             for (Object root : tcp.getElements(input))
+            {
+                if (toExpand.size() > MAX_AUTO_EXPAND)
+                    break;
                 collectExpandPath(tcp, root, toExpand);
+            }
         }
         if (!toExpand.isEmpty())
             viewer.setExpandedElements(toExpand.toArray());
@@ -168,6 +182,8 @@ public class SmartOutlineFilter extends ViewerFilter {
 
     private boolean collectExpandPath(ITreeContentProvider cp, Object element, Set<Object> toExpand)
     {
+        if (toExpand.size() > MAX_AUTO_EXPAND)
+            return false;
         if (!hasMatchInSubtree(cp, element))
             return false;
         for (Object child : cp.getChildren(element))
@@ -185,6 +201,9 @@ public class SmartOutlineFilter extends ViewerFilter {
             Object cp = treeViewer.getContentProvider();
             if (cp instanceof ITreeContentProvider)
                 hasChildren = ((ITreeContentProvider) cp).hasChildren(element);
+            Object input = treeViewer.getInput();
+            if (input != null)
+                this.treeInput = input;
         }
 
         if (flattenWhenFiltered && !matcher.isEmpty && flatContentProvider != null && !hasChildren) {
@@ -198,8 +217,17 @@ public class SmartOutlineFilter extends ViewerFilter {
         String text = resolveFilterText(element);
 
         if (!hasChildren) {
-            if (!matcher.matches(text))
-                return false;
+            if (pruneEmptyBranches && !matcher.isEmpty) {
+                String parentText = (parentElement != null && parentElement != treeInput)
+                        ? resolveFilterText(parentElement) : "";
+                String elemText = resolveFilterText(element);
+                String fullName = parentText.isEmpty() ? elemText : parentText + "." + elemText;
+                if (!matcher.matchesTree(fullName))
+                    return false;
+            } else {
+                if (!matcher.matches(text))
+                    return false;
+            }
         }
         else if (pruneEmptyBranches && !matcher.isEmpty && treeViewer != null)
         {
@@ -224,8 +252,19 @@ public class SmartOutlineFilter extends ViewerFilter {
         if (memo != null)
             return memo.booleanValue();
 
-        String text = resolveFilterText(element);
-        boolean self = matcher.matches(text);
+        boolean self;
+        if (pruneEmptyBranches && !matcher.isEmpty) {
+            Object parent = cp.getParent(element);
+            String parentText = (parent != null && parent != treeInput)
+                    ? resolveFilterText(parent) : "";
+            String elemText = resolveFilterText(element);
+            String fullName = parentText.isEmpty() ? elemText : parentText + "." + elemText;
+            self = matcher.matchesTree(fullName);
+        } else {
+            String text = resolveFilterText(element);
+            self = matcher.matches(text);
+        }
+
         if (!cp.hasChildren(element))
         {
             subtreeMatchMemo.put(element, self);

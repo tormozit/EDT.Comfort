@@ -23,6 +23,17 @@ import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
  */
 final class FilterInputBox
 {
+    /**
+     * Единый текст подсказки для полей ввода, где фильтр умеет секции по точке и точную фразу
+     * в кавычках (см. {@link SmartMatcher#parseSections}) — «Открыть объект метаданных»,
+     * «Редактирование типа данных», поле «Тип» в «Новый реквизит», панель «Навигатор».
+     */
+    static final String HIERARCHICAL_FILTER_TOOLTIP =
+        "Иерархический фильтр:\n" //$NON-NLS-1$
+        + "• пробел между словами — И (все слова должны совпасть)\n" //$NON-NLS-1$
+        + "• точка — переход на уровень иерархии (родитель.элемент), сравнение с конца полного имени\n" //$NON-NLS-1$
+        + "• \"текст в кавычках\" — точная фраза целиком; точки и пробелы внутри неё не разделяют"; //$NON-NLS-1$
+
     private static final int MAX_ITEMS = 20;
     /** Максимальная ширина compact-поля (окно «Коллекция»). */
     static final int COMPACT_MAX_WIDTH = 267;
@@ -92,7 +103,7 @@ final class FilterInputBox
         FilterInputBoxListNavigation.ensureSearchBoxStockKeyStripped(box);
         box.setLayoutData(opts.layoutData != null ? opts.layoutData : compactLayoutData());
         if (opts.tooltip != null)
-            box.setToolTipText(opts.tooltip + " Ctrl+↓ — история запросов."); //$NON-NLS-1$
+            box.setToolTipText(opts.tooltip + "\nCtrl+↓ — история запросов."); //$NON-NLS-1$
         if (opts.message != null)
             box.setMessage(opts.message);
         box.setMinimumSearchTextLength(0);
@@ -139,7 +150,7 @@ final class FilterInputBox
         opts.scope = Scope.OPEN_MD_OBJECT;
         opts.layoutData = compactLayoutData();
         opts.message = "Поиск..."; //$NON-NLS-1$
-        opts.tooltip = "Smart-фильтр (пробел = AND)"; //$NON-NLS-1$
+        opts.tooltip = HIERARCHICAL_FILTER_TOOLTIP;
         return create(parent, opts, onSearch);
     }
 
@@ -149,7 +160,7 @@ final class FilterInputBox
         opts.scope = Scope.SELECT_TYPE;
         opts.layoutData = compactLayoutData();
         opts.message = "Поиск..."; //$NON-NLS-1$
-        opts.tooltip = "Smart-фильтр (пробел = AND)"; //$NON-NLS-1$
+        opts.tooltip = HIERARCHICAL_FILTER_TOOLTIP;
         return create(parent, opts, onSearch);
     }
 

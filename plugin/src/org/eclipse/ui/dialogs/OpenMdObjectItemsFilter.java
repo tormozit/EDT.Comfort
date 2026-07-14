@@ -4,7 +4,7 @@ import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.ui.dialogs.FilteredItemsSelectionDialog;
 import org.eclipse.ui.dialogs.FilteredItemsSelectionDialog.ItemsFilter;
 
-import tormozit.Global;
+import tormozit.MdTypeNames;
 import tormozit.SmartMatcher;
 
 public class OpenMdObjectItemsFilter extends FilteredItemsSelectionDialog.ItemsFilter {
@@ -31,11 +31,6 @@ public class OpenMdObjectItemsFilter extends FilteredItemsSelectionDialog.ItemsF
         patternMatcher.setPattern(matcher.isEmpty ? "" : matcher.fullPattern);
     }
 
-    /**
-     * Нужно ли пропустить перезапуск jobs (как {@code applyFilter} + {@code equalsFilter} в EDT).
-     * Вызывать <b>до</b> {@link #setPattern(String)} — иначе при {@code currentFilter == this}
-     * сравнение всегда true и фильтр замирает после первого символа.
-     */
     public boolean shouldSkipSchedule(String pattern, Object currentFilter) {
         if (currentFilter == this) {
             return patternUnchanged(pattern);
@@ -80,13 +75,31 @@ public class OpenMdObjectItemsFilter extends FilteredItemsSelectionDialog.ItemsF
         }
 
         String objectName = getObjectName(labelProvider.getText(item));
+
+        if (matcher.hasMultipleSections()) {
+            String fullName = resolveFullNameFast(item);
+            if (fullName != null)
+                return matcher.matchesTree(fullName);
+        }
+
         return matcher.matches(objectName);
     }
 
-    /**
-     * Извлекает чистое имя объекта из полного текста (до " - ").
-     * Единая точка правды для фильтрации и подсветки.
-     */
+    public static String resolveFullNameFast(Object item) {
+        if (item == null)
+            return null;
+        try {
+            Object description = tormozit.Global.getField(item, "description");
+            if (description == null)
+                return null;
+            String desc = description.toString();
+            String result = MdTypeNames.translateDottedToRu(desc);
+            return result != null && !result.isEmpty() ? result : null;
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
     public static String getObjectName(String fullText) {
         if (fullText == null) return "";
         int dashIdx = fullText.indexOf(" - ");
@@ -94,10 +107,10 @@ public class OpenMdObjectItemsFilter extends FilteredItemsSelectionDialog.ItemsF
     }
 
     private boolean isHistoryElement(Object item) {
-        Object history = Global.invoke(dialog, "getSelectionHistory");
+        Object history = tormozit.Global.invoke(dialog, "getSelectionHistory");
         if (history == null)
             return false;
-        return Boolean.TRUE.equals(Global.invoke(history, "contains", item));
+        return Boolean.TRUE.equals(tormozit.Global.invoke(history, "contains", item));
     }
 
     @Override

@@ -23,9 +23,6 @@ import org.eclipse.swt.events.FocusAdapter;
 import org.eclipse.swt.events.FocusEvent;
 import org.eclipse.swt.events.KeyAdapter;
 import org.eclipse.swt.events.KeyEvent;
-import org.eclipse.swt.graphics.Font;
-import org.eclipse.swt.graphics.FontData;
-import org.eclipse.swt.graphics.GC;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
@@ -48,8 +45,12 @@ import org.eclipse.ui.IStartup;
 /**
  * Заменяет поле «Тип» в мастерах создания объектов метаданных ({@code DtAefMdNewWizard} и
  * наследники — «Новый реквизит» и т.п.) на собственный оверлей: настоящий SWT {@code Text}
- * (плюс иконка слева) + свой выпадающий {@code Shell}-попап со списком, с фильтрацией по
- * {@link SectionMatcher}.
+ * (плюс иконка слева) + свой выпадающий {@code Shell}-попап со списком, с фильтрацией/сортировкой
+ * по {@link SmartMatcher} (тот же «умный фильтр», что и в Outline/остальном EDT — единообразие
+ * поведения и внешнего вида подсветки, см. {@link SmartMatchHighlight}). Раньше здесь была своя
+ * посекционная логика {@link SectionMatcher} (разбор по {@code .} с конца) — оставлена в проекте
+ * как референс для будущей доработки {@code SmartMatcher} той же секционной семантикой, но в
+ * этом поле больше не используется.
  *
  * <p>Предыдущая попытка (см. историю чата/снимки {@code .tmp/chat-snapshots}) пыталась патчить
  * приватное состояние штатного {@code com._1c.g5.lwt.controls.LightCombo}
@@ -351,6 +352,7 @@ public class TypeComboOverlayHook implements IStartup
 
         Text text = new Text(container, SWT.NONE);
         text.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+        text.setToolTipText(FilterInputBox.HIERARCHICAL_FILTER_TOOLTIP);
 
         Button arrowButton = new Button(container, SWT.ARROW | SWT.DOWN);
         GridData arrowData = new GridData(SWT.CENTER, SWT.FILL, false, true);
@@ -436,7 +438,6 @@ public class TypeComboOverlayHook implements IStartup
         state.typeModel = typeModel;
         state.entries = entries;
         state.lastCommittedText = initialText;
-        state.boldFont = boldFontOf(table);
 
         installBehaviour(state);
 
@@ -504,8 +505,6 @@ public class TypeComboOverlayHook implements IStartup
             hidePopup(state);
             if (!popup.isDisposed())
                 popup.dispose();
-            if (state.boldFont != null && !state.boldFont.isDisposed())
-                state.boldFont.dispose();
         });
 
         // Мастер может перекладываться и без изменения размера окна (например, после
@@ -688,9 +687,11 @@ public class TypeComboOverlayHook implements IStartup
         Object typeModel;
         List<TypeEntry> entries;
         List<TypeEntry> visibleEntries = new ArrayList<>();
-        List<List<int[]>> visibleHighlights = new ArrayList<>();
+        // Раскраску совпадений делает SmartMatchHighlight.paintTableCellMatchOverlay из
+        // PaintItem — ему нужен сам matcher (сам считает диапазоны через getHighlightRanges),
+        // отдельно готовые диапазоны хранить не нужно.
+        SmartMatcher currentMatcher;
         String lastCommittedText;
-        Font boldFont;
         Runnable pendingFilter;
         boolean repositionThrottled;
         boolean repositionPending;
@@ -878,6 +879,14 @@ public class TypeComboOverlayHook implements IStartup
                         moveSelection(state, -1);
                         e.doit = false;
                         break;
+                    case SWT.PAGE_DOWN:
+                        moveSelection(state, POPUP_VISIBLE_ROWS);
+                        e.doit = false;
+                        break;
+                    case SWT.PAGE_UP:
+                        moveSelection(state, -POPUP_VISIBLE_ROWS);
+                        e.doit = false;
+                        break;
                     case SWT.CR:
                     case SWT.KEYPAD_CR:
                         if (state.popup.isVisible())
@@ -926,11 +935,18 @@ public class TypeComboOverlayHook implements IStartup
         // SWT.Selection) — клик по списку переставал что-либо делать. Возврат фокуса перенесён
         // в конец commitSelection — после того как клик полностью обработан.
 
-        // Иконку и текст рисуем сами в PaintItem (см. ниже) — не полагаемся на TableItem.setImage
-        // вместе с подавлением SWT.FOREGROUND в EraseItem: на практике это гасило и штатную
-        // отрисовку иконки, не только текста (иконки в списке не показывались, хотя данные были).
-        table.addListener(SWT.EraseItem, e -> e.detail &= ~SWT.FOREGROUND);
-        table.addListener(SWT.PaintItem, e -> paintHighlightedItem(state, e));
+        // Иконка и текст — штатная отрисовка TableItem (setImage/setText в refresh()). Подсветку
+        // совпадений рисует общий SmartMatchHighlight.paintTableCellMatchOverlay — overlay поверх
+        // уже отрисованной платформой ячейки (сам берёт диапазоны из matcher.getHighlightRanges,
+        // сам определяет позицию текста через item.getTextBounds — корректно учитывает нашу
+        // иконку, т.к. она теперь настоящая TableItem-иконка, а не наша ручная отрисовка).
+        // Раньше здесь была своя ручная отрисовка иконки+текста в обход этого метода — оказалось
+        // избыточным и дублирующим раскраску, которая уже есть в общем коде.
+        table.addListener(SWT.PaintItem, e ->
+        {
+            if (state.currentMatcher != null && !state.currentMatcher.isEmpty)
+                SmartMatchHighlight.paintTableCellMatchOverlay(e, state.table, (TableItem) e.item, state.currentMatcher);
+        });
     }
 
     private static void scheduleFilter(OverlayState state)
@@ -989,24 +1005,52 @@ public class TypeComboOverlayHook implements IStartup
             return;
         String text = state.text.getText();
         boolean skipFilter = text.equals(state.lastCommittedText);
-        SectionMatcher matcher = new SectionMatcher(skipFilter ? null : text);
+        SmartMatcher matcher = new SmartMatcher(skipFilter ? null : text);
 
         state.visibleEntries.clear();
-        state.visibleHighlights.clear();
         for (TypeEntry entry : state.entries)
         {
-            if (entry.label == null || !matcher.matches(entry.label))
+            if (entry.label == null)
                 continue;
-            state.visibleEntries.add(entry);
-            state.visibleHighlights.add(matcher.getHighlightRanges(entry.label));
+            // matchesTree сам откатывается к сравнению с последним сегментом при однословном
+            // фильтре без точки — plain matches() по всей строке матчил бы и по нелистовой
+            // (категорийной) части, например "спр" по "СправочникСсылка.Валюты".
+            if (matcher.matchesTree(entry.label))
+                state.visibleEntries.add(entry);
         }
+        // Сортировка по рейтингу smart-фильтра — тот же приоритет, что и
+        // SmartOutlineComparator.compare (SmartOutlineComparator.java:53-70): рейтинг имени по
+        // убыванию → рейтинг параметров по убыванию → алфавит без учёта регистра. У наших меток
+        // нет скобок с параметрами — computeParamPremium всегда 0, только достраивает
+        // детерминированность сортировки при равном computeNamePremium. Пустой фильтр не сортируем
+        // вообще — при пустом matcher все премии всегда 0 (см. SmartMatcher.computePartPremium),
+        // сортировка выродилась бы в чисто алфавитную и поменяла бы порядок списка без фильтра.
+        if (!matcher.isEmpty)
+        {
+            state.visibleEntries.sort((a, b) ->
+            {
+                int np = Integer.compare(matcher.computeNamePremium(b.label), matcher.computeNamePremium(a.label));
+                if (np != 0)
+                    return np;
+                int pp = Integer.compare(matcher.computeParamPremium(b.label), matcher.computeParamPremium(a.label));
+                if (pp != 0)
+                    return pp;
+                return a.label.compareToIgnoreCase(b.label);
+            });
+        }
+
+        state.currentMatcher = matcher;
 
         state.table.setRedraw(false);
         try
         {
             state.table.removeAll();
             for (TypeEntry entry : state.visibleEntries)
-                new TableItem(state.table, SWT.NONE).setText(entry.label);
+            {
+                TableItem item = new TableItem(state.table, SWT.NONE);
+                item.setText(entry.label);
+                item.setImage(entry.icon);
+            }
             if (state.table.getItemCount() > 0)
                 state.table.select(0);
         }
@@ -1300,74 +1344,6 @@ public class TypeComboOverlayHook implements IStartup
             diag("rediscoverOverlay: исключение " + e); //$NON-NLS-1$
             Global.logError(LOG_TAG, "rediscoverOverlay", e); //$NON-NLS-1$
         }
-    }
-
-    private static final int TABLE_ICON_GAP = 4;
-
-    private static void paintHighlightedItem(OverlayState state, Event e)
-    {
-        TableItem item = (TableItem) e.item;
-        int index = state.table.indexOf(item);
-        String label = item.getText();
-        TypeEntry entry = index >= 0 && index < state.visibleEntries.size()
-            ? state.visibleEntries.get(index) : null;
-        List<int[]> ranges = index >= 0 && index < state.visibleHighlights.size()
-            ? state.visibleHighlights.get(index) : null;
-
-        GC gc = e.gc;
-        int x = e.x;
-        int y = e.y;
-        if (entry != null && entry.icon != null)
-        {
-            Rectangle iconBounds = entry.icon.getBounds();
-            int iconY = y + Math.max(0, (e.height - iconBounds.height) / 2);
-            gc.drawImage(entry.icon, x, iconY);
-            x += iconBounds.width + TABLE_ICON_GAP;
-        }
-        if (ranges == null || ranges.isEmpty())
-        {
-            gc.drawText(label, x, y, true);
-            return;
-        }
-
-        List<int[]> sorted = new ArrayList<>(ranges);
-        sorted.sort((a, b) -> Integer.compare(a[0], b[0]));
-        Font normal = gc.getFont();
-        int pos = 0;
-        for (int[] range : sorted)
-        {
-            int start = Math.max(range[0], pos);
-            int len = range[0] + range[1] - start;
-            if (len <= 0 || start >= label.length())
-                continue;
-            if (start > pos)
-            {
-                String plain = label.substring(pos, start);
-                gc.setFont(normal);
-                gc.drawText(plain, x, y, true);
-                x += gc.textExtent(plain).x;
-            }
-            int end = Math.min(label.length(), start + len);
-            String bold = label.substring(start, end);
-            gc.setFont(state.boldFont);
-            gc.drawText(bold, x, y, true);
-            x += gc.textExtent(bold).x;
-            pos = end;
-        }
-        if (pos < label.length())
-        {
-            gc.setFont(normal);
-            gc.drawText(label.substring(pos), x, y, true);
-        }
-        gc.setFont(normal);
-    }
-
-    private static Font boldFontOf(Control control)
-    {
-        FontData[] fds = control.getFont().getFontData();
-        for (FontData fd : fds)
-            fd.setStyle(fd.getStyle() | SWT.BOLD);
-        return new Font(control.getDisplay(), fds);
     }
 
     /**

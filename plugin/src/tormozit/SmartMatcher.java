@@ -5,19 +5,33 @@ import java.util.List;
 
 public class SmartMatcher {
     private final String[] fragments;
+    private final List<List<String>> sections;
     public final String fullPattern;
     public final boolean isEmpty;
 
     public SmartMatcher(String filterPattern) {
         if (filterPattern == null || filterPattern.trim().isEmpty()) {
             this.fragments = new String[0];
+            this.sections = new ArrayList<>();
             this.fullPattern = "";
             this.isEmpty = true;
         } else {
             this.fullPattern = filterPattern.toLowerCase().trim();
-            this.fragments = this.fullPattern.split("\\s+");
+            this.sections = parseSections(this.fullPattern);
+            // Фрагменты строим из уже распарсенных секций (учитывают кавычки: "их вал" — один
+            // фрагмент с пробелом внутри), а не наивным split по пробелу — иначе кавычки остаются
+            // приклеенными к словам (их / вал ) и matches() никогда не находит совпадение.
+            this.fragments = flattenSections(this.sections);
             this.isEmpty = false;
         }
+    }
+
+    private static String[] flattenSections(List<List<String>> sections) {
+        List<String> all = new ArrayList<>();
+        for (List<String> sec : sections) {
+            all.addAll(sec);
+        }
+        return all.toArray(new String[0]);
     }
 
     public String[] getFragments()
@@ -33,6 +47,116 @@ public class SmartMatcher {
         for (String frag : fragments) {
             if (!lowerText.contains(frag)) {
                 return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Парсинг текста фильтра в секции.
+     * Вне кавычек: точка — разделитель секций, пробел — разделитель фрагментов внутри секции.
+     * Внутри кавычек: пробелы и точки — часть фрагмента (кавычки удаляются).
+     *
+     * Примеры:
+     *   "док.реал тов"      → [[док], [реал, тов]]
+     *   "док.реал" тов       → [[док.реал], [тов]]
+     *   док."реал тов"       → [[док], [реал тов]]
+     */
+    public static List<List<String>> parseSections(String filterText) {
+        List<List<String>> result = new ArrayList<>();
+        if (filterText == null || filterText.isEmpty())
+            return result;
+
+        StringBuilder pending = new StringBuilder();
+        boolean inQuotes = false;
+
+        for (int i = 0; i < filterText.length(); i++) {
+            char c = filterText.charAt(i);
+            if (c == '"') {
+                if (inQuotes) {
+                    String frag = pending.toString();
+                    pending.setLength(0);
+                    inQuotes = false;
+                    if (!frag.isEmpty())
+                        result.add(java.util.Collections.singletonList(frag));
+                } else {
+                    flushUnquotedToSections(pending, result);
+                    pending.setLength(0);
+                    inQuotes = true;
+                }
+            } else if (inQuotes) {
+                pending.append(c);
+            } else {
+                pending.append(c);
+            }
+        }
+
+        if (inQuotes) {
+            String frag = pending.toString();
+            if (!frag.isEmpty())
+                result.add(java.util.Collections.singletonList(frag));
+        } else {
+            flushUnquotedToSections(pending, result);
+        }
+        return result;
+    }
+
+    private static void flushUnquotedToSections(StringBuilder buf, List<List<String>> result) {
+        String text = buf.toString();
+        if (text.isEmpty())
+            return;
+        String[] dotParts = text.split("\\.", -1);
+        for (String dotPart : dotParts) {
+            String trimmed = dotPart.trim();
+            if (trimmed.isEmpty())
+                continue;
+            String[] spaceParts = trimmed.split("\\s+", -1);
+            List<String> frags = new ArrayList<>();
+            for (String sp : spaceParts) {
+                String f = sp.trim();
+                if (!f.isEmpty())
+                    frags.add(f);
+            }
+            if (!frags.isEmpty())
+                result.add(frags);
+        }
+    }
+
+    public boolean hasMultipleSections() {
+        return sections.size() > 1;
+    }
+
+    /**
+     * Посекционное сопоставление: имя элемента делится по {@code .} на секции,
+     * секции фильтра выравниваются с конца, и в каждой проверяются все фрагменты.
+     * Если в фильтре одна секция — откат к {@link #matches(String)}.
+     */
+    public boolean matchesTree(String elementFullName) {
+        if (isEmpty)
+            return true;
+        if (elementFullName == null)
+            return false;
+        if (sections.size() <= 1) {
+            int lastDot = elementFullName.lastIndexOf('.');
+            String elemOnly = lastDot >= 0 ? elementFullName.substring(lastDot + 1) : elementFullName;
+            return matches(elemOnly);
+        }
+
+        String[] elemSections = elementFullName.toLowerCase().split("\\.");
+        int filterCount = sections.size();
+        int elemCount = elemSections.length;
+
+        if (filterCount > elemCount) {
+            return false;
+        }
+
+        int offset = elemCount - filterCount;
+        for (int i = 0; i < filterCount; i++) {
+            String elemSection = elemSections[offset + i];
+            for (String frag : sections.get(i)) {
+                if (!elemSection.contains(frag)) {
+                    return false;
+                }
             }
         }
         return true;
@@ -192,12 +316,37 @@ public class SmartMatcher {
         }
     }
 
+    /** Все фрагменты из всех секций одним плоским списком (для подсветки/поиска без учёта иерархии). */
+    public List<String> getAllSectionFragments() {
+        List<String> all = new ArrayList<>();
+        for (List<String> sec : sections) {
+            all.addAll(sec);
+        }
+        return all;
+    }
+
     public List<HighlightRange> getHighlightRanges(String text) {
         List<HighlightRange> ranges = new ArrayList<>();
         if (isEmpty || text == null) return ranges;
 
         String lowerText = text.toLowerCase();
-        for (String frag : fragments) {
+        for (String frag : getAllSectionFragments()) {
+            int idx = lowerText.indexOf(frag);
+            while (idx >= 0) {
+                ranges.add(new HighlightRange(idx, frag.length()));
+                idx = lowerText.indexOf(frag, idx + frag.length());
+            }
+        }
+        return ranges;
+    }
+
+    public List<HighlightRange> getLastSectionHighlightRanges(String text) {
+        List<HighlightRange> ranges = new ArrayList<>();
+        if (isEmpty || text == null || sections.isEmpty()) return ranges;
+
+        List<String> lastSection = sections.get(sections.size() - 1);
+        String lowerText = text.toLowerCase();
+        for (String frag : lastSection) {
             int idx = lowerText.indexOf(frag);
             while (idx >= 0) {
                 ranges.add(new HighlightRange(idx, frag.length()));

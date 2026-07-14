@@ -69,6 +69,17 @@ public final class NavigatorStyledCellLabelWrapper extends StyledCellLabelProvid
             return;
 
         SmartMatcher matcher = new SmartMatcher(highlightPattern);
+
+        if (matcher.hasMultipleSections())
+        {
+            // Секционный фильтр ("справ.вал"): у родителя и потомка в дереве — разные секции,
+            // ПОЛНОЕ совпадение всех слов на одной строке (как ниже) требовать нельзя.
+            java.util.List<SmartMatcher.HighlightRange> ranges = matcher.getHighlightRanges(text);
+            if (!ranges.isEmpty())
+                SmartMatchHighlight.appendMatchRanges(cell, ranges);
+            return;
+        }
+
         // ПОДСВЕТКА ТОЛЬКО ПРИ ПОЛНОМ СОВПАДЕНИИ ВСЕХ СЛОВ ФИЛЬТРА
         // ПО ПОЛНОМУ ПОИСКОВОМУ ТЕКСТУ ОБЪЕКТА (ИМЯ+СИНОНИМ+КОММЕНТАРИЙ+TOOLTIP).
         if (!matchesFullFilter(element, matcher, text))

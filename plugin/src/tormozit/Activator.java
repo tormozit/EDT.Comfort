@@ -42,22 +42,15 @@ public class Activator extends AbstractUIPlugin
     @Override
     public void start(BundleContext context) throws Exception
     {
-        // Временный безусловный маркер: первая строка start() — доказательство, что этот
-        // бандл реально загружен и это не старый закэшированный код. Снять после диагностики лага.
-        try
-        {
-            java.nio.file.Files.writeString(
-                java.nio.file.Path.of("C:\\VC\\EDT.Comfort\\debug-activator-start.log"), //$NON-NLS-1$
-                "BUILD_MARKER=" + BUILD_MARKER //$NON-NLS-1$
-                    + " pid=" + ProcessHandle.current().pid() //$NON-NLS-1$
-                    + " time=" + System.currentTimeMillis() + "\n", //$NON-NLS-1$ //$NON-NLS-2$
-                java.nio.charset.StandardCharsets.UTF_8,
-                java.nio.file.StandardOpenOption.CREATE,
-                java.nio.file.StandardOpenOption.APPEND);
-        }
-        catch (Exception ignored)
-        {
-        }
+        // Временные логи предыдущего запуска больше не актуальны — см. Global.tempLog
+        // и .cursor/rules/comfort-logging.mdc.
+        Global.clearTempLogs();
+
+        // Временный маркер: первая строка start() — доказательство, что этот бандл реально
+        // загружен и это не старый закэшированный код. Снять после диагностики лага.
+        Global.tempLog("activator-start", //$NON-NLS-1$
+            "BUILD_MARKER=" + BUILD_MARKER //$NON-NLS-1$
+                + " pid=" + ProcessHandle.current().pid()); //$NON-NLS-1$
 
         super.start(context);
         instance = this;

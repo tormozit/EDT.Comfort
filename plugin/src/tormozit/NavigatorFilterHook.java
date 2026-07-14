@@ -218,6 +218,14 @@ public final class NavigatorFilterHook implements IStartup
             lastGiveUpReason = "searchInput=null"; //$NON-NLS-1$
             return false;
         }
+        Control searchFocusControl = searchInput.focusControl();
+        if (searchFocusControl != null && !searchFocusControl.isDisposed())
+            // searchBox — тот же нативный com._1c.g5.v8.dt.common.ui.controls.search.SearchBox,
+            // что и в FilterInputBox (подтверждено); Ctrl+↓ — встроенная функция самого виджета,
+            // не зависит от того, что мы (в отличие от FilterInputBox.create()) не вызываем
+            // здесь setHistory() — историю Навигатор ведёт сам.
+            searchFocusControl.setToolTipText(
+                FilterInputBox.HIERARCHICAL_FILTER_TOOLTIP + "\nCtrl+↓ — история запросов."); //$NON-NLS-1$
         if (attempt == 0 || attempt % 3 == 0)
             NavigatorFilterDebug.log("try#" + attempt + " searchInput mode=" + searchInput.mode() //$NON-NLS-1$ //$NON-NLS-2$
                     + " " + SearchBoxFilterAccess.describe(searchBox)); //$NON-NLS-1$
@@ -622,6 +630,15 @@ public final class NavigatorFilterHook implements IStartup
 
             SmartMatcher matcher = new SmartMatcher(highlightPattern);
             String plainText = styled.getString();
+
+            if (matcher.hasMultipleSections())
+            {
+                // Секционный фильтр: у родителя и потомка в дереве — разные секции, требовать
+                // совпадение ВСЕХ фрагментов на одной строке (как ниже) нельзя.
+                applyHighlightIfNeeded(element, styled);
+                return styled;
+            }
+
             if (!matcher.matches(resolveMatchText(element, plainText)))
                 return styled;
 

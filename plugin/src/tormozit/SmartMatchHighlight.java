@@ -99,7 +99,12 @@ public final class SmartMatchHighlight
                 || item.isDisposed() || matcher == null || matcher.isEmpty)
             return;
         String text = item.getText(e.index);
-        if (text == null || text.isEmpty() || !matcher.matches(text))
+        if (text == null || text.isEmpty())
+            return;
+        // Текст ячейки сам вида "Категория.Имя" (например, TypeComboOverlayHook —
+        // "СправочникСсылка.Валюты") — matchesTree сам откатывается к последнему сегменту при
+        // однословном фильтре, plain matches() по всей строке матчил бы и нелистовую часть.
+        if (!matcher.matchesTree(text))
             return;
         Point origin = tableCellTextOrigin(e.gc, table, item, e.index, e, text);
         MatchStyle style = resolveMatchStyle(table);
@@ -369,7 +374,8 @@ public final class SmartMatchHighlight
         return list.toArray(new StyleRange[0]);
     }
 
-    private static Color lightForeground()
+    /** Package-private (не {@code private}) — переиспользуется вне resolveMatchStyle(), напр. TypeComboOverlayHook. */
+    static Color lightForeground()
     {
         if (cachedLightForeground == null || cachedLightForeground.isDisposed())
             cachedLightForeground = new Color(currentDisplay(), LIGHT_R, LIGHT_G, LIGHT_B);

@@ -774,6 +774,57 @@ public final class Global
     }
 
     // =========================================================================
+    // Временное логирование (отдельные файлы на отладочном РМ, см. .cursor/rules/comfort-logging.mdc)
+    // =========================================================================
+
+    /** Корень репозитория с исходниками плагина (личное РМ автора, не для дистрибуции). */
+    private static final String SOURCE_ROOT = "C:\\VC\\EDT.Comfort"; //$NON-NLS-1$
+
+    /** Папка временных логов — очищается целиком при каждом старте плагина, см. {@link #clearTempLogs()}. */
+    private static final String TEMP_LOG_DIR = SOURCE_ROOT + "\\.tmp\\temp-logs"; //$NON-NLS-1$
+
+    /**
+     * Временный лог отладочного РМ: одна строка с меткой времени в файл {@code .tmp/temp-logs/<topic>.log}.
+     * Каждый {@code topic} — свой файл; все такие файлы удаляются при следующем старте плагина
+     * ({@link #clearTempLogs()}, вызывается из {@code Activator.start}). Не связан с флажком
+     * «Общее логирование» и с журналом «Комфорт» — оба режима работают независимо (см.
+     * {@code .cursor/rules/comfort-logging.mdc}).
+     *
+     * @param topic имя темы/фичи — определяет имя файла; небезопасные для имени файла символы заменяются на {@code _}
+     * @param text  текст строки (без времени — оно добавляется автоматически)
+     */
+    public static synchronized void tempLog(String topic, String text)
+    {
+        try
+        {
+            String safeTopic = (topic == null || topic.isBlank()) ? "general" : topic.trim(); //$NON-NLS-1$
+            safeTopic = safeTopic.replaceAll("[\\\\/:*?\"<>|\\s]+", "_"); //$NON-NLS-1$ //$NON-NLS-2$
+            File dir = new File(TEMP_LOG_DIR);
+            dir.mkdirs();
+            File file = new File(dir, safeTopic + ".log"); //$NON-NLS-1$
+            String line = java.time.LocalDateTime.now() + " " + text + System.lineSeparator(); //$NON-NLS-1$
+            Files.writeString(file.toPath(), line, java.nio.charset.StandardCharsets.UTF_8,
+                java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+        }
+        catch (Exception ignored) {}
+    }
+
+    /** Удаляет все файлы временных логов из {@link #TEMP_LOG_DIR}. Вызывать при старте плагина. */
+    public static void clearTempLogs()
+    {
+        try
+        {
+            File dir = new File(TEMP_LOG_DIR);
+            File[] files = dir.listFiles();
+            if (files == null)
+                return;
+            for (File f : files)
+                f.delete();
+        }
+        catch (Exception ignored) {}
+    }
+
+    // =========================================================================
     // Логирование (журнал «Журнал Комфорт», {@link GlobalLogView})
     // =========================================================================
 

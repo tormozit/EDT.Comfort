@@ -1,5 +1,6 @@
 package tormozit;
 
+import java.util.List;
 import java.util.regex.Pattern;
 
 import org.eclipse.core.runtime.NullProgressMonitor;
@@ -37,10 +38,11 @@ final class AefComponentSearchHighlight
             return;
 
         Object dtTreeView = Global.getField(listener, "parentComposite"); //$NON-NLS-1$
-        if (!tryHighlightViaPerformSearch(viewer, shell, listener, dtFilterPattern(query)))
+        List<String> fragments = new SmartMatcher(query).getAllSectionFragments();
+        if (!tryHighlightViaPerformSearch(viewer, shell, listener, dtFilterPattern(fragments, query)))
             return;
 
-        patchDtTreeViewFilterPattern(viewer, highlightRegex(query));
+        patchDtTreeViewFilterPattern(viewer, highlightRegex(fragments));
         if (dtTreeView != null)
             Global.invokeVoid(dtTreeView, "refresh"); //$NON-NLS-1$
         viewer.refresh();
@@ -64,8 +66,10 @@ final class AefComponentSearchHighlight
         return null;
     }
 
-    private static String dtFilterPattern(String query)
+    private static String dtFilterPattern(List<String> fragments, String query)
     {
+        if (!fragments.isEmpty())
+            return fragments.get(0);
         String trimmed = query.trim();
         if (trimmed.isEmpty())
             return trimmed;
@@ -73,20 +77,16 @@ final class AefComponentSearchHighlight
         return parts[0].toLowerCase();
     }
 
-    private static String highlightRegex(String query)
+    private static String highlightRegex(List<String> fragments)
     {
-        String trimmed = query.trim().toLowerCase();
-        if (trimmed.isEmpty())
+        if (fragments.isEmpty())
             return ""; //$NON-NLS-1$
-        String[] parts = trimmed.split("\\s+"); //$NON-NLS-1$
-        if (parts.length == 1)
-            return Pattern.quote(parts[0]);
         StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < parts.length; i++)
+        for (int i = 0; i < fragments.size(); i++)
         {
             if (i > 0)
                 sb.append('|');
-            sb.append(Pattern.quote(parts[i]));
+            sb.append(Pattern.quote(fragments.get(i)));
         }
         return sb.toString();
     }

@@ -186,13 +186,30 @@ public final class ComfortNavigatorSearchEngine implements IModelObjectTreeSearc
         if (MdClassPackage.Literals.CONFIGURATION.equals(primary.getEClass()))
             return tryAddConfigurationMatch(matcher, primary, secondary, trie);
 
-        String searchText = collectPairSearchText(primary, secondary);
-        if (!matcher.matches(searchText))
-            return false;
-
         QualifiedName path = primary.getQualifiedName();
         if (path == null)
             return false;
+
+        if (matcher.hasMultipleSections())
+        {
+            String pathRu = MdTypeNames.translateDottedToRu(path.toString(".")); //$NON-NLS-1$
+            boolean treeMatch = matcher.matchesTree(pathRu);
+            String lowerPath = pathRu.toLowerCase();
+            boolean nearMiss = !treeMatch
+                && matcher.getAllSectionFragments().stream().anyMatch(lowerPath::contains);
+            if (treeMatch || nearMiss)
+                Global.tempLog("navigator-search", //$NON-NLS-1$
+                    "tryAddMatch pattern=" + matcher.fullPattern //$NON-NLS-1$
+                    + " pathRu=" + pathRu + " treeMatch=" + treeMatch); //$NON-NLS-1$ //$NON-NLS-2$
+            if (!treeMatch)
+                return false;
+        }
+        else
+        {
+            String searchText = collectPairSearchText(primary, secondary);
+            if (!matcher.matches(searchText))
+                return false;
+        }
 
         trie.addPath(path);
         EObject eObject = primary.getEObjectOrProxy();
@@ -204,16 +221,25 @@ public final class ComfortNavigatorSearchEngine implements IModelObjectTreeSearc
     private static boolean tryAddConfigurationMatch(SmartMatcher matcher, IEObjectDescription primary,
             IEObjectDescription secondary, EObjectTrie trie)
     {
-        String searchText = joinTokens(
-                segmentOrEmpty(primary.getName()),
-                segmentOrEmpty(secondary.getName()),
-                collectIndexUserText(primary),
-                collectIndexUserText(secondary));
-        if (!matcher.matches(searchText))
-            return false;
         QualifiedName path = primary.getQualifiedName();
         if (path == null)
             return false;
+
+        if (matcher.hasMultipleSections())
+        {
+            if (!matcher.matchesTree(MdTypeNames.translateDottedToRu(path.toString(".")))) //$NON-NLS-1$
+                return false;
+        }
+        else
+        {
+            String searchText = joinTokens(
+                    segmentOrEmpty(primary.getName()),
+                    segmentOrEmpty(secondary.getName()),
+                    collectIndexUserText(primary),
+                    collectIndexUserText(secondary));
+            if (!matcher.matches(searchText))
+                return false;
+        }
         trie.addPath(path);
         EObject eObject = primary.getEObjectOrProxy();
         if (eObject != null)
