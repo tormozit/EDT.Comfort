@@ -28,4 +28,4 @@
 ## Связанные разделы
 
 - [Инспектор переменных](inspektor-peremennyh.md)
-- [Приложения отладки](prilozheniya-otladki.md)
+- [Панель «Приложения»](prilozheniya.md)
