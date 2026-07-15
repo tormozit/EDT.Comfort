@@ -34,9 +34,7 @@
 
 ## Публикация
 
-### p2 + справка
-
-1. `site\republish.bat` — пересборка той же версии (Actions → mode **republish**)
-2. `site\release.bat` — новая линейка (Actions → mode **new**)
-3. Закоммитить `site/features/`, `site/plugins/`, `site/content.jar`, `site/artifacts.jar`
-4. Actions → **Publish p2 site**
+1. `site\version.txt` — при необходимости поднять
+2. `site\clean.bat`
+3. Eclipse - site\BuildAll
+4. GitHub Actions - Publish p2 site, Publush docs
