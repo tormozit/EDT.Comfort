@@ -101,7 +101,7 @@ public class ApplicationsViewHook implements IStartup
         PLATFORM("Версия платформы", "Версия платформы для взаимодействия EDT с базой",       80, true,  SWT.NONE  ),
         SSH     ("Конфигуратор SSH",  "Дата сеанса конфигуратора SSH. Клик — отключить.",    165, true,  SWT.NONE  ),
         IR      ("Приложение ИР",    "Версия платформы и дата сеанса ИР. Клик — подключить или отключить.", 165, true,  SWT.NONE  ),
-        AUTO    ("Авто ИР",             "Автоматически подключать приложение ИР",                 CHECKBOX_COLUMN_WIDTH, true, SWT.CENTER),
+        AUTO    ("Авто ИР",             "Автоматически подключать приложение ИР при обращениях к нему", CHECKBOX_COLUMN_WIDTH, true, SWT.CENTER),
         DYN_AUTO("Динамическое обновление",
                  "Автоматически нажимать «Обновить динамически», если к базе подключено приложение ИР",
                  CHECKBOX_COLUMN_WIDTH, true, SWT.CENTER);
@@ -736,12 +736,7 @@ public class ApplicationsViewHook implements IStartup
             TreeViewerColumn tvc = new TreeViewerColumn((TreeViewer) viewer, col.style);
             tvc.getColumn().setText(col.title);
             if (col.tooltip != null)
-            {
-                String tooltip = col == Column.DYN_AUTO
-                    ? col.tooltip + Global.pluginSignForTooltip()
-                    : col.tooltip;
-                tvc.getColumn().setToolTipText(tooltip);
-            }
+                tvc.getColumn().setToolTipText(col.tooltip + Global.pluginSignForTooltip());
             tvc.getColumn().setWidth(col.width);
             tvc.getColumn().setResizable(col.resizable);
             tvc.setLabelProvider(makeLabelProvider(col, origProvider));

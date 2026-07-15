@@ -57,7 +57,7 @@ public final class DebugIRHandler
             return;
 
         IProject wsProject = dtProject.getWorkspaceProject();
-        IRSession irSession = IRApplication.getSession(dtProject);
+        IRSession irSession = IRApplication.getSession(dtProject, true);
         if (irSession == null || irSession.executor == null)
             return;
 
@@ -128,7 +128,7 @@ public final class DebugIRHandler
         }
 
         IDtProject dtProject = Global.getDtProjectFromWorkspaceProject(project);
-        IRSession irSession = IRApplication.getSession(dtProject);
+        IRSession irSession = IRApplication.getSession(dtProject, true);
         if (irSession == null || irSession.executor == null)
             return;
 
@@ -161,7 +161,7 @@ public final class DebugIRHandler
             return;
 
         IDtProject dtProject = Global.getDtProjectFromWorkspaceProject(project);
-        IRSession irSession = IRApplication.getSession(dtProject);
+        IRSession irSession = IRApplication.getSession(dtProject, true);
         if (irSession == null || irSession.executor == null)
             return;
 

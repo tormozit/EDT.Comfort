@@ -265,7 +265,7 @@ public class TextEditorMenuHook implements IStartup
             IDtProject dtProject = IrFormatTextHandler.resolveDtProjectForQuery(null);
             if (dtProject == null)
                 return;
-            IRSession irSession = IRApplication.getSession(dtProject);
+            IRSession irSession = IRApplication.getSession(dtProject, true);
             if (irSession == null || irSession.executor == null)
                 return;
             event.doit = false;

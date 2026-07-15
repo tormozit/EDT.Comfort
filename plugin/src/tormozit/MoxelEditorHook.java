@@ -336,7 +336,7 @@ public class MoxelEditorHook implements IStartup
         {
             Object bmModel = Global.getField(granularEditor, "bmModel"); //$NON-NLS-1$
             IDtProject dtProject = (IDtProject) Global.getField(bmModel, "project"); //$NON-NLS-1$
-            IRSession irSession = IRApplication.getSession(dtProject);
+            IRSession irSession = IRApplication.getSession(dtProject, true);
             if (irSession == null || irSession.executor == null)
                 return;
             String currentRegionName = getCurrentRegionName(embeddedEditor);

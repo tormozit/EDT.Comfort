@@ -1296,6 +1296,7 @@ public final class SearchViewAggregationHook implements IStartup
         TableViewerColumn column = new TableViewerColumn(tableViewer, SWT.LEFT);
         TableColumn swtColumn = column.getColumn();
         swtColumn.setText("Путь"); //$NON-NLS-1$
+        swtColumn.setToolTipText("Путь" + Global.pluginSignForTooltip());
         swtColumn.setResizable(true);
         swtColumn.setMoveable(false);
         swtColumn.setWidth(0); // по умолчанию скрыта — показывается только при агрегации

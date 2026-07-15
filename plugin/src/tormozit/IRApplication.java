@@ -64,9 +64,14 @@ public final class IRApplication
     }
 
     private static final String WAIT_FOR_IR_CONNECTION_MSG = "Дождитесь подключения для вызова команд ИР"; //$NON-NLS-1$
+    private static volatile long lastWaitNotifyMs;
 
     public static void notifyWaitForIrConnection()
     {
+        long now = System.currentTimeMillis();
+        if (now - lastWaitNotifyMs < 1000)
+            return;
+        lastWaitNotifyMs = now;
         ToastNotification.show(toastTitle(), WAIT_FOR_IR_CONNECTION_MSG, 5_000);
     }
     
@@ -1370,21 +1375,12 @@ public final class IRApplication
     }
 
     /**
-     * Возвращает уже подключённую сессию ИР для проекта, не инициируя подключение.
+     * Возвращает подключённую сессию ИР для проекта, не инициируя подключение.
+     * Аналог {@code getSession(dtProject, false)}.
      */
     public static IRSession getConnectedSession(IDtProject dtProject)
     {
-        if (dtProject == null)
-            return null;
-        IProject wsProject = dtProject.getWorkspaceProject();
-        for (IRSession session : sessions.values())
-        {
-            if (session.project != wsProject)
-                continue;
-            if (session.state == State.CONNECTED && checkAlive(session))
-                return session;
-        }
-        return null;
+        return getSession(dtProject, false);
     }
 
     /** Любая подключённая сессия ИР (fallback для transport-сообщений без ИД процесса). */
@@ -1399,9 +1395,15 @@ public final class IRApplication
     }
 
     /**
-     * Берем любую активную сессию IRApplication.IRSession от main проекта. Если ее нет то подключаем от основного приложения. Если его нет то подключаем от первого приложения.
-    */
-    public static IRSession getSession(IDtProject dtProject)
+     * Возвращает подключённую сессию ИР для проекта.
+     *
+     * @param connectIfAbsent если {@code true} и сессия не найдена — запускает
+     *        асинхронное подключение. Если включён «Авто ИР» для приложения
+     *        проекта, параметр принудительно считается {@code true}.
+     * @return активная сессия, или {@code null} (нет сессии / идёт подключение /
+     *         приложение не найдено / connectIfAbsent == false)
+     */
+    public static IRSession getSession(IDtProject dtProject, boolean connectIfAbsent)
     {
         if (dtProject == null)
             return null;
@@ -1420,7 +1422,31 @@ public final class IRApplication
             if (session.state == State.CONNECTED && checkAlive(session))
                 return session;
         }
-        // Ищем любое приложение этого проекта, отдавая предпочтение основному приложению
+        if (!connectIfAbsent)
+        {
+            // Форсируем подключение при «Авто ИР»
+            IInfobaseApplication probe = findApplicationForDtProject(dtProject);
+            if (probe != null)
+                connectIfAbsent = getInstance().isAutoConnect(probe);
+            if (!connectIfAbsent)
+                return null;
+            return startConnect(probe);
+        }
+        IInfobaseApplication application = findApplicationForDtProject(dtProject);
+        if (application == null)
+            return null;
+        return startConnect(application);
+    }
+
+    private static IRSession startConnect(IInfobaseApplication application)
+    {
+        getInstance().connectInfobaseApplication(application);
+        notifyWaitForIrConnection();
+        return null;
+    }
+
+    private static IInfobaseApplication findApplicationForDtProject(IDtProject dtProject)
+    {
         BundleContext ctx = Global.ourContext();
         ServiceReference<Object>[] refs = null;
         try
@@ -1449,11 +1475,7 @@ public final class IRApplication
                     }
             } 
         }
-        if (application == null)
-            return null;            
-        getInstance().connectInfobaseApplication(application);
-        notifyWaitForIrConnection();
-        return null;
+        return application;
     }
     
     private static boolean checkAlive(IRSession session)

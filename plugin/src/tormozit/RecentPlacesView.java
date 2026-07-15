@@ -61,6 +61,7 @@ import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.PartInitException;
 
+import com._1c.g5.v8.dt.bsl.ui.BslSharedImages;
 import com._1c.g5.v8.dt.md.ui.shared.MdUiSharedImages;
 
 /**
@@ -1167,6 +1168,7 @@ public final class RecentPlacesView extends ViewPart
      */
     private static final class EntryIconResolver
     {
+        private static Image methodImage;
         private final Map<String, Image> cache = new HashMap<>();
 
         void clearCache()
@@ -1204,9 +1206,9 @@ public final class RecentPlacesView extends ViewPart
             int methodSep = key.indexOf(": "); //$NON-NLS-1$
             if (methodSep >= 0)
             {
-                Image moduleIcon = moduleTypeIcon(key.substring(0, methodSep).trim());
-                if (moduleIcon != null)
-                    return moduleIcon;
+                if (methodImage == null)
+                    methodImage = BslSharedImages.getImage(BslSharedImages.IMG_EXTERNAL_PROC);
+                return methodImage;
             }
 
             String mdRef = RecentPlacesKeys.mdObjectRef(entry);

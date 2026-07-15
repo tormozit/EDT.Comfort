@@ -70,7 +70,7 @@ public final class EditEmbeddedTextHandler
     public static void editEmbeddedText(BslXtextEditor editor)
     {
         IDtProject dtProject = Global.getDtProjectFromBslEditor(editor);
-        IRSession irSession = IRApplication.getSession(dtProject);
+        IRSession irSession = IRApplication.getSession(dtProject, true);
         if (irSession == null || irSession.executor == null)
         {
             return;

@@ -156,7 +156,7 @@ public class DataCompositionSchemaEditorHook implements IStartup
                 Object editor = Global.getField(page, "editor");
                 Object BmModel = Global.getField(editor, "bmModel");
                 IDtProject project = (IDtProject)Global.getField(BmModel, "project");
-                IRSession irSession = IRApplication.getSession(project);
+                IRSession irSession = IRApplication.getSession(project, true);
                 String fullObjectName = GetRef.getRefFromEditor(editor);
                 if (irSession == null || irSession.executor == null) {
                     return;

@@ -366,6 +366,7 @@ public final class FileSearchResultsHook implements IStartup
 
         TableViewerColumn pathCol = new TableViewerColumn(tableViewer, SWT.LEFT);
         pathCol.getColumn().setText("Путь");
+        pathCol.getColumn().setToolTipText("Путь" + Global.pluginSignForTooltip());
         pathCol.getColumn().setResizable(true);
         pathCol.getColumn().setWidth(ComfortSettings.getFileSearchColumnWidth("path", 180));
         pathCol.getColumn().addListener(SWT.Resize, e -> {
@@ -385,6 +386,7 @@ public final class FileSearchResultsHook implements IStartup
 
         TableViewerColumn fileCol = new TableViewerColumn(tableViewer, SWT.LEFT);
         fileCol.getColumn().setText("Файл");
+        fileCol.getColumn().setToolTipText("Файл" + Global.pluginSignForTooltip());
         fileCol.getColumn().setResizable(true);
         fileCol.getColumn().setWidth(ComfortSettings.getFileSearchColumnWidth("file", 250));
         fileCol.getColumn().addListener(SWT.Resize, e -> {
@@ -403,6 +405,7 @@ public final class FileSearchResultsHook implements IStartup
 
         TableViewerColumn lineCol = new TableViewerColumn(tableViewer, SWT.RIGHT);
         lineCol.getColumn().setText("Номер строки");
+        lineCol.getColumn().setToolTipText("Номер строки" + Global.pluginSignForTooltip());
         lineCol.getColumn().setResizable(true);
         lineCol.getColumn().setWidth(ComfortSettings.getFileSearchColumnWidth("line", 60));
         lineCol.getColumn().addListener(SWT.Resize, e -> {
@@ -421,6 +424,7 @@ public final class FileSearchResultsHook implements IStartup
 
         TableViewerColumn textCol = new TableViewerColumn(tableViewer, SWT.LEFT);
         textCol.getColumn().setText("Текст");
+        textCol.getColumn().setToolTipText("Текст" + Global.pluginSignForTooltip());
         textCol.getColumn().setResizable(true);
         textCol.getColumn().setWidth(ComfortSettings.getFileSearchColumnWidth("text", 300));
         textCol.getColumn().addListener(SWT.Resize, e -> {

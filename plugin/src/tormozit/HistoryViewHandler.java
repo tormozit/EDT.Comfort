@@ -60,7 +60,7 @@ public class HistoryViewHandler extends AbstractHandler
 
         String moduleName = resolveModuleProjectionName(file, project);
 
-        IRSession irSession = IRApplication.getSession(dtProject);
+        IRSession irSession = IRApplication.getSession(dtProject, true);
         if (irSession == null || irSession.executor == null)
             return;
 

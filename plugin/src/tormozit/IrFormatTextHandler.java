@@ -57,7 +57,7 @@ public final class IrFormatTextHandler
         if (dtProject == null)
             return;
 
-        IRSession irSession = IRApplication.getSession(dtProject);
+        IRSession irSession = IRApplication.getSession(dtProject, true);
         if (irSession == null || irSession.executor == null)
             return;
 
@@ -108,7 +108,7 @@ public final class IrFormatTextHandler
             return;
         }
 
-        IRSession irSession = IRApplication.getSession(dtProject);
+        IRSession irSession = IRApplication.getSession(dtProject, true);
         if (irSession == null || irSession.executor == null)
             return;
 

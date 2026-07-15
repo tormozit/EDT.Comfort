@@ -34,7 +34,7 @@ public final class IrBslExpressionHtmlSupport
         IDtProject dtProject = Global.getDtProjectFromBslEditor(editor);
         if (dtProject == null || !IRApplication.hasConnectedSessionForKeys(dtProject))
             return null;
-        IRSession session = IRApplication.getSession(dtProject);
+        IRSession session = IRApplication.getSession(dtProject, true);
         if (session == null || session.executor == null || session.executor.isShutdown())
             return null;
         return session;
@@ -50,7 +50,7 @@ public final class IrBslExpressionHtmlSupport
         IDtProject dtProject = facade.getDtProject();
         if (dtProject == null || !IRApplication.hasConnectedSessionForKeys(dtProject))
             return null;
-        IRSession session = IRApplication.getSession(dtProject);
+        IRSession session = IRApplication.getSession(dtProject, true);
         if (session == null || session.executor == null || session.executor.isShutdown())
             return null;
         return session;

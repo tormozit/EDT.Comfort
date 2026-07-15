@@ -1866,7 +1866,7 @@ public class GoToDefinition extends AbstractHandler
                 return RESULT_NOT_HANDLED;
             }
 
-            IRSession session = IRApplication.getSession(dtProject);
+            IRSession session = IRApplication.getSession(dtProject, true);
             if (session == null || session.executor == null)
             {
 

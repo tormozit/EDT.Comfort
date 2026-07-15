@@ -47,7 +47,7 @@ public final class IrMethodConstructorHandler extends AbstractHandler
         if (dtProject == null)
             return;
 
-        IRSession irSession = IRApplication.getSession(dtProject);
+        IRSession irSession = IRApplication.getSession(dtProject, true);
         if (irSession == null || irSession.executor == null)
             return;
 

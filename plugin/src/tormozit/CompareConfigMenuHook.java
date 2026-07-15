@@ -511,9 +511,7 @@ public class CompareConfigMenuHook implements IStartup
             Path pathAncestor = getPropertySideFile(editor, element, ComparisonSide.COMMON_ANCESTOR); // mxlx
             IComparisonSession compSession = CompareConfigSelectionListener.getSession(editor);
             IDtProject dtProject = compSession.getDataSource(ComparisonSide.MAIN).getDtProject();
-            IRSession irSession = connectIfAbsent
-                ? IRApplication.getSession(dtProject)
-                : IRApplication.getConnectedSession(dtProject);
+            IRSession irSession = IRApplication.getSession(dtProject, connectIfAbsent);
             if (irSession == null || irSession.executor == null) {
                 return;
             }

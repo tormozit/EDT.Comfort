@@ -334,7 +334,7 @@ public final class BslSideHintOutlineInstall
         IDtProject dtProject = Global.getDtProjectFromBslEditor(editor);
         if (dtProject == null || !IRApplication.hasConnectedSessionForKeys(dtProject))
             return;
-        IRSession session = IRApplication.getSession(dtProject);
+        IRSession session = IRApplication.getSession(dtProject, true);
         if (session == null || session.executor == null || session.executor.isShutdown())
             return;
         tree.setData(WORDS_TABLE_READY_KEY, Boolean.FALSE);
