@@ -293,7 +293,6 @@ public final class ContentAssistSessionReloader
             {
                 assistSessionStartedImpl(event);
             }
-            }
 
             private void assistSessionStartedImpl(ContentAssistEvent event)
             {

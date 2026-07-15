@@ -69,10 +69,10 @@ public final class IRApplication
     public static void notifyWaitForIrConnection()
     {
         long now = System.currentTimeMillis();
-        if (now - lastWaitNotifyMs < 1000)
+        if (now - lastWaitNotifyMs < 5000)
             return;
         lastWaitNotifyMs = now;
-        ToastNotification.show(toastTitle(), WAIT_FOR_IR_CONNECTION_MSG, 5_000);
+        ToastNotification.show(toastTitle(), WAIT_FOR_IR_CONNECTION_MSG, 3_000);
     }
     
     private static final IRApplication INSTANCE = new IRApplication();
@@ -327,6 +327,7 @@ public final class IRApplication
 
         IRSession connectingSession = newSession(executor);
         sessions.put(key, connectingSession);
+        connectingSession.project = resolvedProject;
         connectingSession.application = element;
         notifyListeners();
 
@@ -1416,25 +1417,21 @@ public final class IRApplication
                 continue;
             if (session.state == State.CONNECTING)
             {
-                notifyWaitForIrConnection();
                 return null;
             }
             if (session.state == State.CONNECTED && checkAlive(session))
                 return session;
         }
-        if (!connectIfAbsent)
-        {
-            // Форсируем подключение при «Авто ИР»
-            IInfobaseApplication probe = findApplicationForDtProject(dtProject);
-            if (probe != null)
-                connectIfAbsent = getInstance().isAutoConnect(probe);
-            if (!connectIfAbsent)
-                return null;
-            return startConnect(probe);
-        }
         IInfobaseApplication application = findApplicationForDtProject(dtProject);
         if (application == null)
             return null;
+        if (!connectIfAbsent)
+        {
+            // Форсируем подключение при «Авто ИР»
+            connectIfAbsent = getInstance().isAutoConnect(application);
+            if (!connectIfAbsent)
+                return null;
+        }
         return startConnect(application);
     }
 
