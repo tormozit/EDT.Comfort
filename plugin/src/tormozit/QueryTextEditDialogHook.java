@@ -646,10 +646,6 @@ public final class QueryTextEditDialogHook implements IStartup
 
     private static void scheduleContentAssistPatch(Shell shell)
     {
-        // Временный безусловный маркер трассировки (debug-perf-query-lag.log). Снять после фикса.
-        ContentAssistDebug.perfLog("QueryTextEditDialogHook.scheduleContentAssistPatch", 0, 0, //$NON-NLS-1$
-            "{\"shellNull\":" + (shell == null) //$NON-NLS-1$
-                + ",\"shellDisposed\":" + (shell != null && shell.isDisposed()) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         if (shell == null || shell.isDisposed())
             return;
         shell.getDisplay().asyncExec(() ->
@@ -657,8 +653,6 @@ public final class QueryTextEditDialogHook implements IStartup
             if (shell.isDisposed())
                 return;
             ContentAssistManager mgr = ContentAssistManager.getInstance();
-            ContentAssistDebug.perfLog("QueryTextEditDialogHook.scheduleContentAssistPatch.asyncExec", 0, 0, //$NON-NLS-1$
-                "{\"mgrNull\":" + (mgr == null) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             if (mgr != null)
                 mgr.applyPatchToQueryEditorShell(shell);
         });

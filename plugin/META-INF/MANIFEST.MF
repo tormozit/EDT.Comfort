@@ -3,7 +3,7 @@ Bundle-ManifestVersion: 2
 Bundle-SymbolicName: tormozit.comfort;singleton:=true
 Bundle-Name: EDT Comfort
 Bundle-Vendor: Tormozit
-Bundle-Version: 1.0.0.20-qualifier
+Bundle-Version: 1.0.0.21-qualifier
 Bundle-Activator: tormozit.Activator
 Bundle-ActivationPolicy: lazy
 Bundle-Localization: plugin

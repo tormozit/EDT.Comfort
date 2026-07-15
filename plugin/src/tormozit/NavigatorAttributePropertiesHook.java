@@ -1,13 +1,5 @@
 package tormozit;
 
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
-import java.time.LocalTime;
-import java.time.format.DateTimeFormatter;
-
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.viewers.DoubleClickEvent;
 import org.eclipse.jface.viewers.IDoubleClickListener;
@@ -32,8 +24,6 @@ import com._1c.g5.v8.dt.ui.commands.ShowPropertiesHandler;
 public final class NavigatorAttributePropertiesHook implements IStartup
 {
     private static final String VIEWER_MARKER = "tormozit.navigatorAttributePropertiesHook"; //$NON-NLS-1$
-    private static final Path TEMP_LOG =
-            Path.of("C:\\VC\\EDT.Comfort\\.tmp\\navigator-attribute-properties.log"); //$NON-NLS-1$
 
     private static volatile boolean displayFilterInstalled;
 
@@ -199,11 +189,10 @@ public final class NavigatorAttributePropertiesHook implements IStartup
         }
     }
 
-    /** Временное инструментирование отладочной среды — всегда пишет в журнал и {@link #TEMP_LOG}. */
+    /** Обёртка над {@link Global.log} — сохраняет интерфейс вызова в хуках. */
     private static final class NavigatorAttributePropertiesDebug
     {
         private static final String TAG = "NavigatorAttributeProperties"; //$NON-NLS-1$
-        private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("HH:mm:ss"); //$NON-NLS-1$
 
         private NavigatorAttributePropertiesDebug() {}
 
@@ -212,7 +201,6 @@ public final class NavigatorAttributePropertiesHook implements IStartup
             if (msg == null)
                 return;
             Global.log(TAG, msg);
-            appendTempLog(msg);
         }
 
         static String describe(Object element)
@@ -220,20 +208,6 @@ public final class NavigatorAttributePropertiesHook implements IStartup
             if (element == null)
                 return "<null>"; //$NON-NLS-1$
             return element.getClass().getName();
-        }
-
-        private static void appendTempLog(String msg)
-        {
-            String line = LocalTime.now().format(TIME) + "  " + msg; //$NON-NLS-1$
-            try
-            {
-                Files.writeString(TEMP_LOG, line + System.lineSeparator(), StandardCharsets.UTF_8,
-                        StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-            }
-            catch (IOException ignored)
-            {
-                // запасной канал — необязательный
-            }
         }
     }
 }

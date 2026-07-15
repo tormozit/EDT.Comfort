@@ -4451,8 +4451,6 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         }
         long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
         logFilterAndSortExitThrottled(result, elapsedMs);
-        ContentAssistDebug.perfLog("filterAndSort", elapsedMs, 15, //$NON-NLS-1$
-            "{\"rawN\":" + raw.length + ",\"resultN\":" + result.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         // #region agent log
         String trigger = ContentAssistPopupSync.peekRecomputeTrigger();
         if (!"sessionOpen".equals(trigger) && trigger != null && result.length > 0) //$NON-NLS-1$

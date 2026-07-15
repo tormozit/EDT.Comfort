@@ -203,11 +203,6 @@ public final class ContentAssistSessionReloader
     public static void install(SourceViewer viewer, ContentAssistant assistant,
                                SmartContentAssistProcessor processor, TextEditorFacade facade)
     {
-        // Временный безусловный маркер трассировки (debug-perf-query-lag.log). Снять после фикса.
-        ContentAssistDebug.perfLog("ContentAssistSessionReloader.install.enter", 0, 0, //$NON-NLS-1$
-            "{\"comfortListFilters\":" + ComfortSettings.isReplaceListFiltersEnabled() //$NON-NLS-1$
-                + ",\"alreadyInstalled\":" + INSTALLED.containsKey(viewer) //$NON-NLS-1$
-                + ",\"queryEditor\":" + (facade != null && facade.isQueryMode()) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         if (!ComfortSettings.isReplaceListFiltersEnabled())
             return;
         Widget w = viewer.getTextWidget();
@@ -222,8 +217,6 @@ public final class ContentAssistSessionReloader
         control.setData(DATA_KEY, Boolean.TRUE);
         reloader.logInstallDiagnostics(viewer);
         ContentAssistDebug.log("install completionListener"); //$NON-NLS-1$
-        ContentAssistDebug.perfLog("ContentAssistSessionReloader.install.done", 0, 0, //$NON-NLS-1$
-            "{\"queryEditor\":" + (facade != null && facade.isQueryMode()) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /** Снятие listener и флага (после {@link ContentAssistPatcher} → native assist). */
@@ -298,34 +291,17 @@ public final class ContentAssistSessionReloader
             @Override
             public void assistSessionStarted(ContentAssistEvent event)
             {
-                long _perfT0 = System.nanoTime();
-                try
-                {
                 assistSessionStartedImpl(event);
-                }
-                finally
-                {
-                    long elapsedMs = (System.nanoTime() - _perfT0) / 1_000_000;
-                    // Тело assistSessionStarted целиком синхронно на UI-потоке — по гипотезе
-                    // пользователя, открытие/закрытие popup на каждый символ делает что-то тяжёлое.
-                    ContentAssistDebug.perfLog("assistSessionStarted", elapsedMs, 15, //$NON-NLS-1$
-                        "{\"auto\":" + event.isAutoActivated //$NON-NLS-1$
-                            + ",\"queryEditor\":" + (facade != null && facade.isQueryMode()) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                }
+            }
             }
 
             private void assistSessionStartedImpl(ContentAssistEvent event)
             {
-                // Временные безусловные чекпойнты (debug-perf-query-lag.log) — найти, какой
-                // именно подвызов внутри assistSessionStarted стоит 100-180мс. Снять после фикса.
-                long _c0 = System.nanoTime();
                 ContentAssistDebug.resetValidateStats();
                 SmartAssistFilterState.reset();
                 int caret = ContentAssistPopupSync.syncSessionOffsets(assistant, viewer);
                 boolean inLiteral = caret >= 0
                     && SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret);
-                ContentAssistDebug.perfLog("assistSessionStarted.ckpt.syncOffsets", //$NON-NLS-1$
-                    (System.nanoTime() - _c0) / 1_000_000, 0, null);
                 if (!event.isAutoActivated && inLiteral && !manualIrAssistPending
                     && !completionAutoOpenPending && !completionAutoOpenIrScheduled
                     && !processor.isIrOnlyManualMode()
@@ -345,8 +321,6 @@ public final class ContentAssistSessionReloader
                     inMember = SmartContentAssistProcessor.ReceiverTypeLabel.findMemberAccessDot(
                         viewer.getDocument(), caret) >= 0;
                 }
-                ContentAssistDebug.perfLog("assistSessionStarted.ckpt.findMemberAccessDot", //$NON-NLS-1$
-                    (System.nanoTime() - _c0) / 1_000_000, 0, null);
                 if (!event.isAutoActivated && inMember
                     && ComfortSettings.isReplaceListFiltersEnabled()
                     && IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer) != null)
@@ -366,8 +340,6 @@ public final class ContentAssistSessionReloader
                 boolean preserveAutoOpen = completionAutoOpenPending || completionAutoOpenEdtOpened;
                 if (!manualDualSession && !preserveLiteralIr && !preserveAutoOpen)
                     processor.invalidateCache();
-                ContentAssistDebug.perfLog("assistSessionStarted.ckpt.invalidateCache", //$NON-NLS-1$
-                    (System.nanoTime() - _c0) / 1_000_000, 0, null);
                 ContentAssistPopupSync.clearSyncState();
                 ContentAssistDebug.log("assistSessionStarted auto=" + event.isAutoActivated //$NON-NLS-1$
                     + " processor=" + processorName(event.processor)); //$NON-NLS-1$
@@ -438,8 +410,6 @@ public final class ContentAssistSessionReloader
                 boolean cachedBeforeFresh = assistBrowserCreator != null;
                 if (fresh != null)
                     assistBrowserCreator = fresh;
-                ContentAssistDebug.perfLog("assistSessionStarted.ckpt.resolveFreshAssistBrowserCreator", //$NON-NLS-1$
-                    (System.nanoTime() - _c0) / 1_000_000, 0, null);
                 // #region agent log
                 String resourceSuffix = "null"; //$NON-NLS-1$
                 if (viewer.getDocument() instanceof org.eclipse.xtext.ui.editor.model.IXtextDocument xtextDoc)
@@ -479,11 +449,7 @@ public final class ContentAssistSessionReloader
                 else
                 {
                     SmartContentAssistProcessor.primeAssistContext(viewer, caret);
-                    ContentAssistDebug.perfLog("assistSessionStarted.ckpt.primeAssistContext", //$NON-NLS-1$
-                        (System.nanoTime() - _c0) / 1_000_000, 0, null);
                     processor.onAssistSessionContextReady(viewer, caret);
-                    ContentAssistDebug.perfLog("assistSessionStarted.ckpt.onAssistSessionContextReady", //$NON-NLS-1$
-                        (System.nanoTime() - _c0) / 1_000_000, 0, null);
                     ContentAssistPopupSync.installFilterTrackerPrepend(assistant, viewer);
                     installSessionCaretListener();
                     boolean autoOpenIrPending = completionAutoOpenIrScheduled
@@ -491,8 +457,6 @@ public final class ContentAssistSessionReloader
                     if (!preserveWordsTable && !isWordsTableFetchInFlightForCaret(caret)
                         && !autoOpenIrPending)
                         scheduleWordsTablePreparation(caret);
-                    ContentAssistDebug.perfLog("assistSessionStarted.ckpt.scheduleWordsTable", //$NON-NLS-1$
-                        (System.nanoTime() - _c0) / 1_000_000, 0, null);
                     if (autoOpenIrPending)
                     {
                         ContentAssistDebug.debugModeLog("H12", "assistSessionStarted", //$NON-NLS-1$ //$NON-NLS-2$
@@ -547,17 +511,7 @@ public final class ContentAssistSessionReloader
             @Override
             public void assistSessionEnded(ContentAssistEvent event)
             {
-                long _perfT0 = System.nanoTime();
-                try
-                {
                 assistSessionEndedImpl(event);
-                }
-                finally
-                {
-                    long elapsedMs = (System.nanoTime() - _perfT0) / 1_000_000;
-                    ContentAssistDebug.perfLog("assistSessionEnded", elapsedMs, 15, //$NON-NLS-1$
-                        "{\"queryEditor\":" + (facade != null && facade.isQueryMode()) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                }
             }
 
             private void assistSessionEndedImpl(ContentAssistEvent event)
@@ -776,17 +730,7 @@ public final class ContentAssistSessionReloader
 
     private void onSessionCaretMoved(CaretEvent event)
     {
-        long _perfT0 = System.nanoTime();
-        try
-        {
-            onSessionCaretMovedImpl(event);
-        }
-        finally
-        {
-            long elapsedMs = (System.nanoTime() - _perfT0) / 1_000_000;
-            ContentAssistDebug.perfLog("onSessionCaretMoved", elapsedMs, 15, //$NON-NLS-1$
-                "{\"queryEditor\":" + (facade != null && facade.isQueryMode()) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        }
+        onSessionCaretMovedImpl(event);
     }
 
     private void onSessionCaretMovedImpl(CaretEvent event)
@@ -2095,20 +2039,7 @@ public final class ContentAssistSessionReloader
 
     private void onVerifyKeyForCompletionAutoOpen(VerifyEvent event)
     {
-        long _perfT0 = System.nanoTime();
-        try
-        {
-            onVerifyKeyForCompletionAutoOpenImpl(event);
-        }
-        finally
-        {
-            long elapsedMs = (System.nanoTime() - _perfT0) / 1_000_000;
-            // VerifyKeyListener блокирует UI-поток ДО отрисовки символа — любая задержка
-            // здесь напрямую ощущается как лаг ввода в «Редакторе запроса».
-            ContentAssistDebug.perfLog("onVerifyKeyForCompletionAutoOpen", elapsedMs, 15, //$NON-NLS-1$
-                "{\"comfortListFilters\":" + ComfortSettings.isReplaceListFiltersEnabled() //$NON-NLS-1$
-                    + ",\"queryEditor\":" + (facade != null && facade.isQueryMode()) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        }
+        onVerifyKeyForCompletionAutoOpenImpl(event);
     }
 
     private void onVerifyKeyForCompletionAutoOpenImpl(VerifyEvent event)
@@ -2218,19 +2149,7 @@ public final class ContentAssistSessionReloader
 
     private void onDocumentChangedForCompletionAutoOpen(DocumentEvent event)
     {
-        long _perfT0 = System.nanoTime();
-        try
-        {
-            onDocumentChangedForCompletionAutoOpenImpl(event);
-        }
-        finally
-        {
-            long elapsedMs = (System.nanoTime() - _perfT0) / 1_000_000;
-            // documentChanged идёт синхронно в том же цикле ввода символа, до перерисовки.
-            ContentAssistDebug.perfLog("onDocumentChangedForCompletionAutoOpen", elapsedMs, 15, //$NON-NLS-1$
-                "{\"comfortListFilters\":" + ComfortSettings.isReplaceListFiltersEnabled() //$NON-NLS-1$
-                    + ",\"queryEditor\":" + (facade != null && facade.isQueryMode()) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        }
+        onDocumentChangedForCompletionAutoOpenImpl(event);
     }
 
     private void onDocumentChangedForCompletionAutoOpenImpl(DocumentEvent event)
@@ -3752,37 +3671,22 @@ public final class ContentAssistSessionReloader
 
     private IInformationControlCreator resolveFreshAssistBrowserCreator(int literalCaret)
     {
-        // Временные безусловные чекпойнты (debug-perf-query-lag.log) — найти, какой fallback
-        // в этой цепочке стоит 150+мс. Снять после фикса.
-        long _f0 = System.nanoTime();
         BslCompletionSideHintResolver.primeRspHoverCreator(viewer, literalCaret, bslEditor);
-        ContentAssistDebug.perfLog("resolveFreshAssistBrowserCreator.ckpt.primeRsp", //$NON-NLS-1$
-            (System.nanoTime() - _f0) / 1_000_000, 0, null);
         IInformationControlCreator fresh =
             assistBrowserCreator != null ? assistBrowserCreator : null;
         if (fresh == null)
             fresh = BslCompletionSideHintResolver.getEditorBrowserCreator(bslEditor);
-        ContentAssistDebug.perfLog("resolveFreshAssistBrowserCreator.ckpt.getEditorBrowserCreator", //$NON-NLS-1$
-            (System.nanoTime() - _f0) / 1_000_000, 0, "{\"foundYet\":" + (fresh != null) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         if (fresh == null)
             fresh = BslCompletionSideHintResolver.resolveAssistBrowserCreator(viewer);
-        ContentAssistDebug.perfLog("resolveFreshAssistBrowserCreator.ckpt.resolveAssistBrowserCreatorViewer", //$NON-NLS-1$
-            (System.nanoTime() - _f0) / 1_000_000, 0, "{\"foundYet\":" + (fresh != null) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         if (fresh == null)
             fresh = BslCompletionSideHintResolver.resolveAssistBrowserCreatorFromEditor(bslEditor);
-        ContentAssistDebug.perfLog("resolveFreshAssistBrowserCreator.ckpt.resolveAssistBrowserCreatorFromEditor", //$NON-NLS-1$
-            (System.nanoTime() - _f0) / 1_000_000, 0, "{\"foundYet\":" + (fresh != null) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         // probeDelegateBrowserCreator убран: он гонял computeCompletionProposals (полный
         // расчёт списка автодополнения) на UI-потоке только ради IInformationControlCreator.
         if (fresh == null)
             fresh = BslCompletionSideHintResolver
                 .resolveAssistBrowserCreatorCold(bslEditor, viewer, processor).creator;
-        ContentAssistDebug.perfLog("resolveFreshAssistBrowserCreator.ckpt.resolveAssistBrowserCreatorCold", //$NON-NLS-1$
-            (System.nanoTime() - _f0) / 1_000_000, 0, "{\"foundYet\":" + (fresh != null) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         if (fresh == null)
             fresh = BslCompletionSideHintResolver.resolveAssistBrowserCreator();
-        ContentAssistDebug.perfLog("resolveFreshAssistBrowserCreator.ckpt.resolveAssistBrowserCreatorNoArg", //$NON-NLS-1$
-            (System.nanoTime() - _f0) / 1_000_000, 0, "{\"foundYet\":" + (fresh != null) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         return fresh;
     }
 

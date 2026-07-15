@@ -36,9 +36,6 @@ public final class ContentAssistPatcher
         if (contentAssist == null)
         {
             ContentAssistDebug.log("applyPatch FAIL: ContentAssistant null"); //$NON-NLS-1$
-            // Временный безусловный маркер трассировки (debug-perf-query-lag.log). Снять после фикса.
-            ContentAssistDebug.perfLog("ContentAssistPatcher.applyPatch.fail", 0, 0, //$NON-NLS-1$
-                "{\"reason\":\"contentAssistNull\",\"queryEditor\":" + isQueryEditor + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
 
@@ -47,8 +44,6 @@ public final class ContentAssistPatcher
         if (current == null)
         {
             ContentAssistDebug.log("applyPatch FAIL: processor null"); //$NON-NLS-1$
-            ContentAssistDebug.perfLog("ContentAssistPatcher.applyPatch.fail", 0, 0, //$NON-NLS-1$
-                "{\"reason\":\"processorNull\",\"queryEditor\":" + isQueryEditor + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
 
@@ -56,9 +51,6 @@ public final class ContentAssistPatcher
         if (!(xtext instanceof XtextContentAssistProcessor))
         {
             ContentAssistDebug.log("applyPatch FAIL: not Xtext, got " + current.getClass().getName()); //$NON-NLS-1$
-            ContentAssistDebug.perfLog("ContentAssistPatcher.applyPatch.fail", 0, 0, //$NON-NLS-1$
-                "{\"reason\":\"notXtext\",\"actualClass\":\"" + current.getClass().getName() //$NON-NLS-1$
-                    + "\",\"queryEditor\":" + isQueryEditor + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
 
@@ -71,8 +63,6 @@ public final class ContentAssistPatcher
         {
             restoreNativeAssist(contentAssist, current, sourceViewer);
             ContentAssistDebug.log("applyPatch NATIVE delegate=" + xtext.getClass().getSimpleName()); //$NON-NLS-1$
-            ContentAssistDebug.perfLog("ContentAssistPatcher.applyPatch.native", 0, 0, //$NON-NLS-1$
-                "{\"queryEditor\":" + isQueryEditor + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return true;
         }
 
@@ -90,8 +80,6 @@ public final class ContentAssistPatcher
         ContentAssistSessionReloader.install(sourceViewer, contentAssist, wrapper, facade);
 
         ContentAssistDebug.log("applyPatch OK delegate=" + xtext.getClass().getSimpleName()); //$NON-NLS-1$
-        ContentAssistDebug.perfLog("ContentAssistPatcher.applyPatch.smartOk", 0, 0, //$NON-NLS-1$
-            "{\"queryEditor\":" + isQueryEditor + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         // #region agent log
         ContentAssistSettings settings = ContentAssistSettings.getInstance();
         boolean autoOpenEnabled = settings != null && settings.isEnabled();

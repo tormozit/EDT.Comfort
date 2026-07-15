@@ -304,17 +304,9 @@ public class SmartOutlineFilter extends ViewerFilter {
         Object state = Global.invoke(element, "getCheckState"); //$NON-NLS-1$
         if (state == null)
             return false;
-        if (!isCheckedLogged)
-        {
-            isCheckedLogged = true;
-            Global.tempLog("selectType-marked", //$NON-NLS-1$
-                "checkState=" + state.getClass().getName() + " value=" + state); //$NON-NLS-1$ //$NON-NLS-2$
-        }
         String name = state instanceof Enum ? ((Enum<?>) state).name() : String.valueOf(state);
         return "CHECKED".equals(name); //$NON-NLS-1$
     }
-
-    private static boolean isCheckedLogged;
 
     /** Есть ли хотя бы один помеченный потомок (рекурсивно, через content provider). */
     private boolean hasCheckedDescendant(ITreeContentProvider cp, Object element)

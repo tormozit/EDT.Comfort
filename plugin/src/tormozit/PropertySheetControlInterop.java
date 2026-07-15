@@ -51,51 +51,11 @@ final class PropertySheetControlInterop
 
     private PropertySheetControlInterop() {}
 
-    // #region agent log
-    private static final java.nio.file.Path AGENT_LOG_PATH =
-            java.nio.file.Path.of("C:\\VC\\EDT.Comfort\\debug-db8c17.log"); //$NON-NLS-1$
-
     static void agentHitLog(String hypothesisId, String location, String message,
             java.util.Map<String, Object> data)
     {
-        try
-        {
-            StringBuilder sb = new StringBuilder(256);
-            sb.append("{\"sessionId\":\"db8c17\",\"hypothesisId\":\"").append(hypothesisId) //$NON-NLS-1$
-                    .append("\",\"location\":\"").append(location) //$NON-NLS-1$
-                    .append("\",\"message\":\"").append(message) //$NON-NLS-1$
-                    .append("\",\"data\":{"); //$NON-NLS-1$
-            boolean first = true;
-            if (data != null)
-            {
-                for (java.util.Map.Entry<String, Object> e : data.entrySet())
-                {
-                    if (!first)
-                        sb.append(',');
-                    first = false;
-                    sb.append('"').append(e.getKey()).append("\":");
-                    Object v = e.getValue();
-                    if (v == null)
-                        sb.append("null"); //$NON-NLS-1$
-                    else if (v instanceof Number || v instanceof Boolean)
-                        sb.append(v);
-                    else
-                        sb.append('"').append(String.valueOf(v).replace("\\", "\\\\") //$NON-NLS-1$ //$NON-NLS-2$
-                                .replace("\"", "\\\"")).append('"'); //$NON-NLS-1$ //$NON-NLS-2$
-                }
-            }
-            sb.append("},\"timestamp\":").append(System.currentTimeMillis()).append("}\n"); //$NON-NLS-1$ //$NON-NLS-2$
-            java.nio.file.Files.writeString(AGENT_LOG_PATH, sb.toString(),
-                    java.nio.charset.StandardCharsets.UTF_8,
-                    java.nio.file.StandardOpenOption.CREATE,
-                    java.nio.file.StandardOpenOption.APPEND);
-        }
-        catch (Exception ignored)
-        {
-            // debug session only
-        }
+        // Отключено для релиза
     }
-    // #endregion
 
     static Control unwrapToSwtControl(Object value)
     {

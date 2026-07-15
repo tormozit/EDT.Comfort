@@ -359,9 +359,6 @@ public final class BslCompletionSideHintResolver
         int offset, BslXtextEditor editor)
     {
         IInformationControlCreator existing = resolveHoverCreatorFromRsp(viewer);
-        // Временный безусловный маркер (debug-perf-query-lag.log). Снять после фикса.
-        ContentAssistDebug.perfLog("primeRspHoverCreator.cheapPath", 0, 0, //$NON-NLS-1$
-            "{\"existingNonNull\":" + (existing != null) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         if (existing != null)
             return existing;
         if (viewer == null || !(viewer.getDocument() instanceof IXtextDocument xtextDoc))
@@ -384,7 +381,6 @@ public final class BslCompletionSideHintResolver
         }
         if (probeOffset >= 0)
         {
-            long _perfT0 = System.nanoTime();
             try
             {
                 IRegion region = new Region(probeOffset, 1);
@@ -393,13 +389,6 @@ public final class BslCompletionSideHintResolver
             catch (Exception ignored)
             {
                 // повторный getHoverControlCreator ниже
-            }
-            finally
-            {
-                // Временный безусловный замер (debug-perf-query-lag.log). Снять после фикса.
-                long elapsedMs = (System.nanoTime() - _perfT0) / 1_000_000;
-                ContentAssistDebug.perfLog("primeRspHoverCreator.getHoverInfo2", elapsedMs, 15, //$NON-NLS-1$
-                    "{\"probeOffset\":" + probeOffset + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
         IInformationControlCreator creator = bslHover.getHoverControlCreator();

@@ -1674,8 +1674,6 @@ public class SmartOutlineHook implements IStartup {
             ComfortSettings.setSelectTypeOnlyMarked(enabled);
             smartFilter.setMarkedOnly(enabled);
 
-            Global.tempLog("selectType-marked", "toggle: " + enabled); //$NON-NLS-1$ //$NON-NLS-2$
-
             Control control = viewer.getControl();
             if (control != null && !control.isDisposed()) {
                 tree.setRedraw(false);

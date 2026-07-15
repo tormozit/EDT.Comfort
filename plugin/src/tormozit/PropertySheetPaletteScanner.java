@@ -797,28 +797,7 @@ final class PropertySheetPaletteScanner
             boolean lwt, int expected)
     {
         int rowCount = rows.size();
-        // #region agent log
-        int lwtRowCount = 0;
-        for (PropertySheetPaletteRow row : rows)
-        {
-            if (row.lwtView != null)
-                lwtRowCount++;
-        }
-        try
-        {
-            String line = "{\"sessionId\":\"db8c17\",\"hypothesisId\":\"H11\",\"location\":\"PropertySheetPaletteScanner.scan\"," //$NON-NLS-1$
-                    + "\"message\":\"rows\",\"data\":{\"total\":" + rowCount + ",\"lwt\":" + lwtRowCount //$NON-NLS-1$
-                    + ",\"expected\":" + expected + "},\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
-            java.nio.file.Files.writeString(
-                    java.nio.file.Path.of("C:\\VC\\EDT.Comfort\\debug-db8c17.log"), //$NON-NLS-1$
-                    line, java.nio.charset.StandardCharsets.UTF_8,
-                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
-        }
-        catch (Exception ignored)
-        {
-            // debug session only
-        }
-        // #endregion
+
         if (rowCount > 0)
         {
             boolean incomplete = expected > 0 && rowCount < expected;

@@ -1,10 +1,10 @@
 package tormozit;
 
-import java.io.FileWriter;
-import java.io.IOException;
-import java.io.PrintWriter;
-import java.time.LocalTime;
-import java.time.format.DateTimeFormatter;
+// import java.io.FileWriter;   // отключено — diag() отключена для релиза
+// import java.io.IOException;  // отключено — diag() отключена для релиза
+// import java.io.PrintWriter;  // отключено — diag() отключена для релиза
+// import java.time.LocalTime;  // отключено — diag() отключена для релиза
+// import java.time.format.DateTimeFormatter;  // отключено — diag() отключена для релиза
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -1963,33 +1963,9 @@ public class TypeComboOverlayHook implements IStartup
         return sb.toString();
     }
 
-    /**
-     * ВРЕМЕННЫЙ безусловный файл-лог — {@code Global.log}/{@code Global.logError} скрыты
-     * флажком «Общее логирование», которого может не быть включено на тестовой машине (уже
-     * наступали на эти грабли с {@code TypeComboFilterHook}). Удалить вызовы {@code diag(...)}
-     * (или сам метод), когда оверлей будет подтверждён рабочим.
-     */
-    private static final String DIAG_LOG_FILE = "C:\\VC\\EDT.Comfort\\.tmp\\type-combo-overlay.log"; //$NON-NLS-1$
-    private static final DateTimeFormatter DIAG_TIME = DateTimeFormatter.ofPattern("HH:mm:ss"); //$NON-NLS-1$
-    private static PrintWriter diagWriter;
-    private static boolean diagWriterFailed;
-
-    // Package-private (не private) — переиспользуется в PropertyNameIdentifierHook
-    // (findValueViewAfterLabel, диагностика того, на какой записи карты она спотыкается).
+    // Отключено для релиза — diag() стала no-op, тело метода и поля DIAG_* удалены.
     static synchronized void diag(String message)
     {
-        if (diagWriterFailed)
-            return;
-        try
-        {
-            if (diagWriter == null)
-                diagWriter = new PrintWriter(new FileWriter(DIAG_LOG_FILE, false), true);
-            diagWriter.println(LocalTime.now().format(DIAG_TIME) + "  [" + LOG_TAG + "] " + message); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        catch (IOException e)
-        {
-            diagWriterFailed = true;
-            diagWriter = null;
-        }
+        // Отключено для релиза
     }
 }

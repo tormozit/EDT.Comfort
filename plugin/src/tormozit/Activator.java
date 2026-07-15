@@ -42,15 +42,7 @@ public class Activator extends AbstractUIPlugin
     @Override
     public void start(BundleContext context) throws Exception
     {
-        // Временные логи предыдущего запуска больше не актуальны — см. Global.tempLog
-        // и .cursor/rules/comfort-logging.mdc.
         Global.clearTempLogs();
-
-        // Временный маркер: первая строка start() — доказательство, что этот бандл реально
-        // загружен и это не старый закэшированный код. Снять после диагностики лага.
-        Global.tempLog("activator-start", //$NON-NLS-1$
-            "BUILD_MARKER=" + BUILD_MARKER //$NON-NLS-1$
-                + " pid=" + ProcessHandle.current().pid()); //$NON-NLS-1$
 
         super.start(context);
         instance = this;
