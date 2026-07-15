@@ -1531,7 +1531,11 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         if (!SmartAssistFilterState.isSmartFilterEnabled())
             return null;
         IDocument doc = viewer != null ? viewer.getDocument() : null;
-        if (isCacheValidForCaret(doc, caret))
+        // fullListReady может означать «неполный IR-only merge» (applyMergedFullListCache
+        // при готовых словах ИР раньше делегата явно сбрасывает delegateSyncProbed) — тогда
+        // не отдаём кэш без шаблонов EDT напрямую, а проваливаемся к веткам с реальным fetch.
+        if (isCacheValidForCaret(doc, caret)
+            && (!hasIrProposalsForCurrentContext() || isDelegateSyncProbedForContext()))
         {
             ICompletionProposal[] result = filter == null || filter.isEmpty()
                 ? finalizeListForIrAssistDisplay(fullListCache)
@@ -1555,7 +1559,9 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             String path;
             if (hasIrProposalsForCurrentContext())
             {
-                ICompletionProposal[] merged = mergeIrForDisplay(EMPTY);
+                // Мёржим с результатом первого sync-пробника, а не с EMPTY — иначе
+                // теряются нативные EDT-шаблоны («Процедура ...» и т.п.).
+                ICompletionProposal[] merged = mergeIrForDisplay(unwrapStableDelegateBase());
                 result = filter == null || filter.isEmpty()
                     ? finalizeListForIrAssistDisplay(merged)
                     : filterAndSort(merged, filter);
@@ -2288,7 +2294,8 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             return resolveDelegateOrderedList(viewer, offset, caret);
 
         scheduleEagerFullListLoad(viewer);
-        if (isCacheValidForCaret(doc, caret))
+        if (isCacheValidForCaret(doc, caret)
+            && (!hasIrProposalsForCurrentContext() || isDelegateSyncProbedForContext()))
         {
             ICompletionProposal[] result = filterAndSort(fullListCache, filter);
             debugResolveExit(doc, caret, filter, fullListCache.length, true, "cacheValid", result); //$NON-NLS-1$
@@ -2340,10 +2347,23 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             return EMPTY;
         }
         // Попап уже открыт — быстрый sync probe (1 delegate.compute, ~1-5ms);
-        // тяжёлый loadFullList остаётся в async Job.
+        // тяжёлый loadFullList остаётся в async Job. Мёржим с результатом первого
+        // sync-пробника (unwrapStableDelegateBase), а не с EMPTY — иначе теряются
+        // нативные EDT-шаблоны («Процедура ...» и т.п.), которых нет среди слов ИР.
         if (hasIrProposalsForCurrentContext())
         {
-            ICompletionProposal[] result = filterAndSort(mergeIrForDisplay(EMPTY), filter);
+            ICompletionProposal[] stableBase = unwrapStableDelegateBase();
+            // Попап мог открыть сам ИР программно (showPossibleCompletions), минуя
+            // ветку «!isPopupVisible()» выше — делегат EDT тогда ни разу не запрошен
+            // и stableBase пуст. Разовый sync-пробник — не молча мёржить с EMPTY.
+            if (stableBase.length == 0 && !isDelegateSyncProbedForContext())
+            {
+                stableBase = unwrapProposals(fetchDelegateList(viewer, offset, caret));
+                rememberInterimDelegateList(stableBase);
+                markDelegateSyncProbed();
+            }
+            ICompletionProposal[] result = filterAndSort(
+                mergeIrForDisplay(stableBase), filter);
             debugResolveExit(doc, caret, filter, 0, false, "h84IrOnly", result);
             return result;
         }
@@ -2373,7 +2393,10 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             return null;
         if (computeFullListContextKey(doc, caret) != fullListContextKey)
             return null;
-        if (fullListCache.length > 0)
+        // fullListCache может быть неполным IR-only merge (делегат EDT ещё не опрошен,
+        // applyMergedFullListCache сбросил delegateSyncProbed) — не отдавать его как interim.
+        if (fullListCache.length > 0
+            && (!hasIrProposalsForCurrentContext() || isDelegateSyncProbedForContext()))
             return fullListCache;
         if (lastStableDelegateList.length > 0)
             return lastStableDelegateList;
