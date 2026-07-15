@@ -268,7 +268,39 @@ public class PropertyNameIdentifierHook implements IStartup
         for (java.util.Map.Entry<?, ?> entry : map.entrySet())
         {
             if (foundLabel)
+            {
+                // Раньше здесь безусловно возвращалась САМАЯ ПЕРВАЯ запись сразу после подписи.
+                // Домен: у поля «Тип» может быть 1 или 2 виджета — кнопка «...» (ActionBar,
+                // открывает диалог выбора сложного типа) есть ВСЕГДА, а вот ComboSelectViewModel
+                // (наш комбобокс с выпадающим списком простых/ссылочных типов) есть, только если
+                // текущее значение ОДИНАРНОГО типа; при СОСТАВНОМ типе комбобокса в принципе нет,
+                // остаётся только кнопка «...» — оверлею в этом случае накладывать нечего, это не
+                // баг. Порядок ActionBar/Combo в карте не гарантирован (лог видел оба варианта),
+                // поэтому:
+                // 1) SectionViewModelImpl/LabelViewModel — граница текущей секции/следующая
+                //    подпись, редактора между label и этой границей не нашли (составной тип, либо
+                //    AEF временно убрал editor из карты при перестройке строки) — возвращаем null.
+                // 2) ActionBarViewModelImpl/LightEditorBar — это кнопка «...», не комбобокс;
+                //    пропускаем и продолжаем смотреть дальше — если следом всё же найдётся
+                //    ComboSelectViewModel (одинарный тип), вернём его; если вместо этого сразу
+                //    упрёмся в границу секции/подписи (составной тип) — вернём null по правилу 1.
+                Object entryKey = entry.getKey();
+                String entryKeyClass = entryKey == null ? "" : entryKey.getClass().getName(); //$NON-NLS-1$
+                if (entryKeyClass.contains("LabelViewModel") || entryKeyClass.contains("SectionViewModel")) //$NON-NLS-1$ //$NON-NLS-2$
+                {
+                    // ВРЕМЕННАЯ диагностика: лог показал случай, когда findValueViewAfterLabel
+                    // возвращает null НЕПРЕРЫВНО много секунд подряд после закрытия диалога
+                    // выбора типа (F4/«...») — значит, каждый раз упирается в границу секции сразу
+                    // после label, и надо увидеть, во что именно (какой именно класс), чтобы
+                    // понять, надо ли для него отдельное правило пропуска (как для ActionBar).
+                    TypeComboOverlayHook.diag("findValueViewAfterLabel: после подписи «" + displayName //$NON-NLS-1$
+                        + "» сразу граница — entryKeyClass=" + entryKeyClass); //$NON-NLS-1$
+                    return null; // дошли до границы секции/следующей подписи — редактора нет
+                }
+                if (entryKeyClass.contains("ActionBarViewModel")) //$NON-NLS-1$
+                    continue; // декорация — пропускаем, ищем дальше
                 return entry;
+            }
 
             Object key = entry.getKey();
             if (key != null && key.getClass().getName().contains("LabelViewModel")) //$NON-NLS-1$

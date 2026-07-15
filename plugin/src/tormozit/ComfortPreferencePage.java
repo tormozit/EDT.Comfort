@@ -43,13 +43,18 @@ public class ComfortPreferencePage
     private Link latestChangesLink;
     private Link updateLink;
 
+    private static final String REPLACE_LIST_FILTERS_DOC_URL =
+            "https://tormozit.github.io/EDT.Comfort/help#/uluchshenie-spiskov"; //$NON-NLS-1$
+
     private static final String REPLACE_LIST_FILTERS_TOOLTIP =
             "Текст фильтра будет дробиться на фрагменты пробелами и будет требоваться и подсвечиваться вхождение каждого фрагмента с мягким учетом порядка.\n"
-            + "Влияет на навигатор, список баз, быструю схему модуля, диалоги выбора типа и открытия объекта метаданных, список автодополнения.\n"
+            + "Влияет на навигатор, список баз, быструю схему модуля, диалоги выбора типа и открытия объекта метаданных, поле «Тип» в мастере и диалогах, список автодополнения.\n"
             + "Также включает доработки панели глобального поиска: фильтр с подсветкой над правой таблицей, счётчик вхождений в дереве, "
             + "объединённый показ вхождений всех потомков при выборе ветки-группы (с колонкой «Путь»), открытие первого вхождения по двойному клику на узле.\n"
             + "Для поиска по файлам справа от дерева добавляется таблица с колонками «Путь», «Файл», «Номер строки», «Текст», "
-            + "показывающая все совпадения выбранного узла (включая дочерние)."; //$NON-NLS-1$
+            + "показывающая все совпадения выбранного узла (включая дочерние).\n"
+            + "\n"
+            + "Изменение настройки применяется сразу для большинства механизмов; доработка поля «Тип» применяется только при следующем старте EDT."; //$NON-NLS-1$
 
     public ComfortPreferencePage()
     {
@@ -78,12 +83,7 @@ public class ComfortPreferencePage
         createVersionSection();
         createKeysLink();
 
-        BooleanFieldEditor replaceListFiltersField = new BooleanFieldEditor(
-            ComfortSettings.PREF_REPLACE_LIST_FILTERS,
-            "Улучшать списки",
-            getFieldEditorParent());
-        addField(replaceListFiltersField);
-        setFieldTooltip(replaceListFiltersField, REPLACE_LIST_FILTERS_TOOLTIP);
+        createReplaceListFiltersField();
 
         BooleanFieldEditor improveDebuggerField = new BooleanFieldEditor(
             ComfortSettings.PREF_IMPROVE_DEBUGGER_WINDOWS,
@@ -149,6 +149,40 @@ public class ComfortPreferencePage
 
         // Поле «Символы» намеренно не добавляется:
         // значение задано константой ContentAssistSettings.CHARSET_VALUE
+    }
+
+    /**
+     * Флажок «Улучшать списки» + ссылка «Подробнее» справа от него на одной строке.
+     *
+     * <p>{@link BooleanFieldEditor} в DEFAULT-стиле рисует подпись прямо на самом
+     * чекбоксе (отдельного {@link Label} нет) и растягивает его на все колонки того
+     * parent'а, куда его добавляют, поэтому чекбокс кладётся в отдельный
+     * однострочный {@code checkboxHost} (колонка 0 грида {@code parent}), а ссылка —
+     * его сосед по гриду в колонке 1. Без промежуточного {@link RowLayout}: у него
+     * ненулевые {@code marginLeft/marginRight} по умолчанию (3px), которые
+     * {@code marginWidth = 0} не обнуляет, — это и давало лишний сдвиг вправо.
+     */
+    private void createReplaceListFiltersField()
+    {
+        Composite parent = getFieldEditorParent();
+
+        Composite checkboxHost = new Composite(parent, SWT.NONE);
+        checkboxHost.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false));
+        BooleanFieldEditor replaceListFiltersField = new BooleanFieldEditor(
+            ComfortSettings.PREF_REPLACE_LIST_FILTERS,
+            "Улучшать списки",
+            checkboxHost);
+        addField(replaceListFiltersField);
+        setFieldTooltip(replaceListFiltersField, REPLACE_LIST_FILTERS_TOOLTIP, checkboxHost);
+
+        Link docLink = new Link(parent, SWT.NONE);
+        docLink.setText("<a>Подробнее</a>"); //$NON-NLS-1$
+        docLink.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false));
+        docLink.addListener(SWT.Selection, e -> {
+            if (!"Подробнее".equals(e.text)) //$NON-NLS-1$
+                return;
+            ComfortPreferences.openChangesUrl(REPLACE_LIST_FILTERS_DOC_URL);
+        });
     }
 
     private static final String IMPROVE_DEBUGGER_WINDOWS_TOOLTIP =
@@ -361,17 +395,43 @@ public class ComfortPreferencePage
         return latest != null ? latest.getChangesUrl() : ""; //$NON-NLS-1$
     }
 
+    private static final String HOME_PAGE_URL = "https://tormozit.github.io/EDT.Comfort"; //$NON-NLS-1$
+    private static final String NEW_ISSUE_URL =
+        "https://github.com/tormozit/EDT.Comfort/issues/new"; //$NON-NLS-1$
+
+    /**
+     * Ссылки «Клавиши», «Домашняя страница», «Создать заявку» на одной строке.
+     *
+     * <p>Родительский {@code parent} — грид на 2 колонки, а виджетов три, поэтому
+     * они кладутся в общий {@link Composite} с {@link RowLayout}, а не как прямые
+     * соседи по гриду. Все margin-поля {@link RowLayout} (включая отдельные
+     * {@code marginLeft/Top/Right/Bottom}, у которых значение по умолчанию — 3px и
+     * не сбрасывается через {@code marginWidth/marginHeight}) обнуляются явно —
+     * иначе строка сдвигается вправо относительно остальных полей страницы.
+     */
     private void createKeysLink()
     {
         Composite parent = getFieldEditorParent();
 
-        Link keysLink = new Link(parent, SWT.NONE);
+        Composite row = new Composite(parent, SWT.NONE);
+        GridData rowGd = new GridData(SWT.LEFT, SWT.CENTER, false, false);
+        rowGd.horizontalSpan = 2;
+        rowGd.verticalIndent = 8;
+        row.setLayoutData(rowGd);
+        RowLayout rowLayout = new RowLayout(SWT.HORIZONTAL);
+        rowLayout.spacing = 8;
+        rowLayout.marginWidth = 0;
+        rowLayout.marginHeight = 0;
+        rowLayout.marginLeft = 0;
+        rowLayout.marginTop = 0;
+        rowLayout.marginRight = 0;
+        rowLayout.marginBottom = 0;
+        rowLayout.center = true;
+        row.setLayout(rowLayout);
+
+        Link keysLink = new Link(row, SWT.NONE);
         keysLink.setText("<a>Клавиши</a>"); //$NON-NLS-1$
-        GridData gd = new GridData(SWT.LEFT, SWT.CENTER, false, false);
-        gd.horizontalSpan = 2;
-        gd.verticalIndent = 8;
-        keysLink.setLayoutData(gd);
-        keysLink.setToolTipText("Keys с фильтром «Комфорт»"); //$NON-NLS-1$
+        keysLink.setToolTipText("Настройки клавиш с фильтром «Комфорт»"); //$NON-NLS-1$
         keysLink.addListener(SWT.Selection, e -> {
             if (!"Клавиши".equals(e.text)) //$NON-NLS-1$
                 return;
@@ -382,6 +442,88 @@ public class ComfortPreferencePage
                 ComfortKeysPreferences.scheduleApplyEnhancements(container);
             }
         });
+
+        Link homePageLink = new Link(row, SWT.NONE);
+        homePageLink.setText("<a>Домашняя страница</a>"); //$NON-NLS-1$
+        homePageLink.addListener(SWT.Selection, e -> {
+            if (!"Домашняя страница".equals(e.text)) //$NON-NLS-1$
+                return;
+            ComfortPreferences.openChangesUrl(HOME_PAGE_URL);
+        });
+
+        Link newIssueLink = new Link(row, SWT.NONE);
+        newIssueLink.setText("<a>Создать заявку</a>"); //$NON-NLS-1$
+        newIssueLink.addListener(SWT.Selection, e -> {
+            if (!"Создать заявку".equals(e.text)) //$NON-NLS-1$
+                return;
+            ComfortPreferences.openChangesUrl(buildNewIssueUrl());
+        });
+    }
+
+    /**
+     * URL «Создать заявку» с предзаполненным телом — версия плагина, версия
+     * 1C:EDT и ОС, чтобы не просить об этом отдельно в каждой заявке.
+     */
+    private static String buildNewIssueUrl()
+    {
+        StringBuilder body = new StringBuilder();
+        body.append("**Версия плагина Комфорт:** ") //$NON-NLS-1$
+            .append(ComfortVersionInfo.installed().getDisplayVersion()).append("\n") //$NON-NLS-1$
+            .append("**Версия 1C:EDT:** ").append(getEdtVersion()).append("\n") //$NON-NLS-1$ //$NON-NLS-2$
+            .append("**ОС:** ").append(getOsInfo()).append("\n"); //$NON-NLS-1$ //$NON-NLS-2$
+
+        String irInfo = getIrTechnicalInfo();
+        if (irInfo != null && !irInfo.isBlank())
+            body.append("**ИР:**\n```\n").append(irInfo.strip()).append("\n```\n"); //$NON-NLS-1$ //$NON-NLS-2$
+        body.append("\n"); //$NON-NLS-1$
+
+        String encodedBody = java.net.URLEncoder.encode(body.toString(), java.nio.charset.StandardCharsets.UTF_8)
+            .replace("+", "%20"); //$NON-NLS-1$ //$NON-NLS-2$
+        return NEW_ISSUE_URL + "?body=" + encodedBody; //$NON-NLS-1$
+    }
+
+    /**
+     * {@code ирКлиент.ТехническаяИнформацияЛкс()}, если ИР подключён. {@code null},
+     * если подключения нет или вызов не удался — заявка всё равно должна открыться.
+     */
+    private static String getIrTechnicalInfo()
+    {
+        IRSession session = IRApplication.getAnyConnectedSession();
+        if (session == null)
+            return null;
+        try
+        {
+            return session.executeOnComThread(() -> {
+                Object irClient = session.getModule("ирКлиент"); //$NON-NLS-1$
+                return ComBridge.toString(ComBridge.invoke(irClient, "ТехническаяИнформацияЛкс")); //$NON-NLS-1$
+            });
+        }
+        catch (RuntimeException e)
+        {
+            return null;
+        }
+    }
+
+    private static String getEdtVersion()
+    {
+        try
+        {
+            org.eclipse.core.runtime.IProduct product = org.eclipse.core.runtime.Platform.getProduct();
+            if (product != null && product.getDefiningBundle() != null)
+                return product.getDefiningBundle().getVersion().toString();
+        }
+        catch (RuntimeException ignored)
+        {
+            // версия продукта недоступна
+        }
+        return "—"; //$NON-NLS-1$
+    }
+
+    private static String getOsInfo()
+    {
+        return System.getProperty("os.name", "?") + " " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + System.getProperty("os.version", "?") + " (" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + System.getProperty("os.arch", "?") + ")"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     /**

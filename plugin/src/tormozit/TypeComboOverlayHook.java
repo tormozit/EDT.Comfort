@@ -20,6 +20,7 @@ import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.events.ControlAdapter;
 import org.eclipse.swt.events.ControlEvent;
+import org.eclipse.swt.events.ControlListener;
 import org.eclipse.swt.events.FocusAdapter;
 import org.eclipse.swt.events.FocusEvent;
 import org.eclipse.swt.events.KeyAdapter;
@@ -104,6 +105,11 @@ public class TypeComboOverlayHook implements IStartup
     @Override
     public void earlyStartup()
     {
+        // Отдельного флажка для этой доработки больше нет (убран как избыточная сложность —
+        // см. историю чата) — теперь она подчиняется общему «Улучшать списки»
+        // (ComfortSettings.PREF_REPLACE_LIST_FILTERS), читается один раз тут, при старте EDT.
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+            return;
         Display.getDefault().asyncExec(() -> install(Display.getDefault()));
         Display.getDefault().asyncExec(TypeComboOverlayHook::installPropertySheet);
     }
@@ -327,48 +333,117 @@ public class TypeComboOverlayHook implements IStartup
         {
             if (tryAttachPropertySheet(view))
                 return;
-            // Строки палитры свойств подгружаются лениво — окно ожидания ~10с, тот же приём,
-            // что и PropertyNameIdentifierHook.scheduleAttach.
+            // Этот цикл — только на случай, когда строку «Тип» вообще ещё не нашли
+            // (findValueViewAfterLabel/typeModel вернули null — строки палитры свойств
+            // подгружаются лениво при первом открытии панели, тот же приём, что и
+            // PropertyNameIdentifierHook.scheduleAttach). ~10с хватает с большим запасом на этот
+            // одноразовый стартовый сценарий. Если же nativeControl УЖЕ найден, но createOverlay
+            // отклонил его подозрительные bounds — за повтор отвечает не этот таймер, а
+            // scheduleRetryOnResize (реальный ControlListener на самом контроле, без гадания
+            // интервалом).
             if (attempt < 100)
                 schedulePropertyAttach(view, attempt + 1);
         });
+    }
+
+    // Контролы, на которые уже повешен одноразовый resize-listener (см. scheduleRetryOnResize) —
+    // не даёт плодить по листенеру на каждую неудачную попытку (schedulePropertyAttach продолжает
+    // опрашивать параллельно как редкая подстраховка) на ОДНОМ И ТОМ ЖЕ ещё не перестроенном
+    // контроле. IdentityHashMap — сравниваем именно по ссылке, не по equals/hashCode.
+    private static final Set<Object> PENDING_RESIZE_RETRY =
+        Collections.newSetFromMap(new java.util.IdentityHashMap<>());
+
+    /**
+     * Вместо того чтобы гадать интервалом (было: подряд наращиваемые таймауты, каждый раз ловившие
+     * либо «слишком рано», либо «слишком поздно» — см. историю правок с buttons==null/height>40),
+     * подписываемся на РЕАЛЬНОЕ событие: как только AEF действительно закончит перестраивать
+     * строку «Тип» (что бы это ни было — переход simple↔reference, повторный выбор того же
+     * значения), nativeControl получит настоящий SWT-Resize при релэйауте — и мы переприсоединимся
+     * ровно в этот момент, без произвольной паузы.
+     */
+    private static void scheduleRetryOnResize(IViewPart view, Object nativeControl)
+    {
+        if (!PENDING_RESIZE_RETRY.add(nativeControl))
+            return; // уже ждём resize именно этого контрола — второй листенер не нужен
+        ControlListener[] holder = new ControlListener[1];
+        holder[0] = new ControlAdapter()
+        {
+            @Override
+            public void controlResized(ControlEvent e)
+            {
+                Global.invokeVoid(nativeControl, "removeControlListener", holder[0]); //$NON-NLS-1$
+                PENDING_RESIZE_RETRY.remove(nativeControl);
+                diag("scheduleRetryOnResize: controlResized — повторная попытка присоединения"); //$NON-NLS-1$
+                tryAttachPropertySheet(view);
+            }
+        };
+        if (!Global.invokeVoid(nativeControl, "addControlListener", holder[0])) //$NON-NLS-1$
+        {
+            // nativeControl не поддерживает addControlListener (не Control?) — резервируем
+            // только обычный поллинг (schedulePropertyAttach), листенер тут ни при чём.
+            PENDING_RESIZE_RETRY.remove(nativeControl);
+        }
     }
 
     private static boolean tryAttachPropertySheet(IViewPart view)
     {
         Object page = PropertyNameIdentifierHook.resolvePropertySheetPage(view);
         if (page == null)
+        {
+            diag("tryAttachPropertySheet: page==null для view=" + view); //$NON-NLS-1$
             return false;
+        }
 
         Object scene = Global.invoke(page, "getScene"); //$NON-NLS-1$
         if (scene == null)
+        {
+            diag("tryAttachPropertySheet: scene==null"); //$NON-NLS-1$
             return false;
+        }
 
         Map.Entry<?, ?> typeEditorEntry = PropertyNameIdentifierHook.findValueViewAfterLabel(scene, TYPE_PROPERTY_LABEL);
         if (typeEditorEntry == null)
+        {
+            diag("tryAttachPropertySheet: findValueViewAfterLabel вернул null (строка «Тип» не найдена " //$NON-NLS-1$
+                + "или следующая запись — не редактор)"); //$NON-NLS-1$
+            // Лог подтвердил: после выбора типа через диалог «...»/F4 редактор «Тип» пропадает из
+            // renderer.viewModelToView надолго, и ни ожидание, ни IScene.refresh() не помогают —
+            // карта сама себя не перестраивает. Вместо того чтобы гадать, ЧЕМ подтолкнуть AEF,
+            // ловим настоящее событие «диалог закрылся» (см. watchForDialogAndReclaimFocus) и
+            // пересобираем оверлей именно в этот момент — см. её правку.
             return false;
+        }
 
         Object viewModel = typeEditorEntry.getKey();
         Object typeView = typeEditorEntry.getValue();
         Object nativeControl = typeView != null ? Global.invoke(typeView, "getNativeControl") : null; //$NON-NLS-1$
         if (nativeControl == null)
-            return false;
-
-        // Сразу после смены объекта в дереве (checkExternalChange ловит «Model is offline» и
-        // пересобирает оверлей — см. scheduleRediscoverOverlay) AEF на один-два кадра успевает
-        // отдать nativeControl для строки «Тип» ДО того, как сам виджет полностью пересобран:
-        // kнопка «Выбрать» (nativeControl.buttons) в этот момент ещё null, а
-        // getSingleTypeItem().get() возвращает null — в логе это видно как
-        // «nativeControl.buttons=null currentTypeItem=null initialText=null», и пользователю
-        // показывалось пустое поле без иконки. Раньше это молча коммитилось в overlay как есть;
-        // теперь трактуем «buttons ещё не готовы» как «виджет ещё не найден» и уходим в тот же
-        // ретрай-цикл (schedulePropertyAttach), что и при отсутствии nativeControl вовсе.
-        if (Global.getField(nativeControl, "buttons") == null) //$NON-NLS-1$
         {
-            diag("tryAttachPropertySheet: nativeControl.buttons ещё null — AEF не достроил строку, повтор позже"); //$NON-NLS-1$
+            diag("tryAttachPropertySheet: nativeControl==null (typeView=" + describeClass(typeView) + ")"); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
 
+        // ВРЕМЕННАЯ диагностика: два разных heuristics (buttons==null, height>40) уже пытались
+        // угадать «это ещё не готовый виджет» и оба ловили ЛЕГИТИМНОЕ, постоянное состояние —
+        // сносили оверлей насовсем. Нужно фактически увидеть, ЧТО за объект возвращает
+        // findValueViewAfterLabel в момент, когда realBounds получается огромным (см.
+        // createOverlay: Rectangle {0, 154, 509, 150}) — сейчас логируем классы viewModel/
+        // typeView/nativeControl безусловно, чтобы по следующему логу понять, тот ли это вообще
+        // виджет (может, findValueViewAfterLabel в этот момент указывает совсем на другую запись
+        // карты viewModelToView, не на реальный комбобокс «Тип»).
+        diag("tryAttachPropertySheet: viewModel=" + describeClass(viewModel) //$NON-NLS-1$
+            + " typeView=" + describeClass(typeView) //$NON-NLS-1$
+            + " nativeControl=" + describeClass(nativeControl)); //$NON-NLS-1$
+
+        // Раньше здесь была проверка "nativeControl.buttons == null -> считать виджет ещё не
+        // готовым и уходить в ретрай". Задумывалась как признак промежуточного состояния AEF
+        // сразу после смены объекта в дереве (см. историю правок — так исправляли редкое пустое
+        // поле). На практике оказалась ложной: лог подтвердил случай, где buttons==null у
+        // НАЙДЕННОГО nativeControl остаётся так ПОСТОЯННО (не временно), ретрай молотил все 100
+        // попыток (~10с) и полностью сдавался — оверлей переставал появляться вообще, фокус
+        // уходил в штатный контрол без каретки. Убрано — лучше редкое кратковременное пустое
+        // поле (само лечится через checkExternalChange/EXTERNAL_CHANGE_GRACE_MS), чем полный отказ
+        // от подключения.
         OverlayState existing = PROPERTY_OVERLAYS.get(view);
         if (existing != null)
         {
@@ -384,15 +459,26 @@ public class TypeComboOverlayHook implements IStartup
         if (ATTACHED.contains(nativeControl))
             return true;
 
+        // Была попытка findTypeDescriptionModelForViewModel — искать модель именно того
+        // компонента, чей getViewModels() содержит уже найденный viewModel (вместо первой
+        // попавшейся ITypeDescriptionModel во всей сцене). Лог опроверг само предположение:
+        // getViewModels() компонента, судя по всему, вообще не содержит тот же объект, что лежит
+        // ключом в viewModelToView (иначе с чем сверяем — неизвестно) — скоуп-поиск возвращал
+        // null АБСОЛЮТНО ВСЕГДА, даже когда viewModel находился верно каждый раз. Это сломало
+        // 100% случаев — хуже узкого края-кейса с «Сумма», который эта правка пыталась исправить.
+        // Откат на обычный поиск; проблему с «Сумма» (несколько ITypeDescriptionModel в сцене)
+        // придётся решать другим способом, когда найдётся надёжный признак связи.
         Object typeModel = PropertyNameIdentifierHook.findTypeDescriptionModel(scene);
         if (typeModel == null)
             return false;
 
         // rediscoverOverlay() снимает текущий container ДО вызова rediscover и не смотрит на
         // возвращаемое значение (Runnable) — если tryAttachPropertySheet тут же провалится
-        // (например, поймает AEF на переходном состоянии, см. проверку nativeControl.buttons
-        // выше), поле осталось бы без оверлея вообще, до следующего случайного триггера.
-        // Поэтому на неудаче сами уходим в стандартный ретрай-цикл.
+        // (например, createOverlay отклонит контрол с подозрительными bounds — см. проверки
+        // width/height там же), поле осталось бы без оверлея вообще, до следующего случайного
+        // триггера. Поэтому на неудаче сами уходим в ретрай (полагаемся в первую очередь на
+        // scheduleRetryOnResize ниже — она сработает намного быстрее и по факту события, а не
+        // подбором таймаута; schedulePropertyAttach(view, 1) — лишь редкая подстраховка).
         Runnable rediscover = () ->
         {
             if (!tryAttachPropertySheet(view))
@@ -400,7 +486,14 @@ public class TypeComboOverlayHook implements IStartup
         };
         OverlayState state = createOverlay(nativeControl, typeModel, viewModel, rediscover, true);
         if (state == null)
+        {
+            // Не гадаем интервалом — вешаем одноразовый ControlListener прямо на найденный
+            // nativeControl (см. scheduleRetryOnResize) и переприсоединяемся ровно в момент,
+            // когда AEF реально закончит перекладывать эту строку (controlResized), а не через
+            // произвольную паузу.
+            scheduleRetryOnResize(view, nativeControl);
             return false;
+        }
 
         ATTACHED.add(nativeControl);
         PROPERTY_OVERLAYS.put(view, state);
@@ -485,8 +578,21 @@ public class TypeComboOverlayHook implements IStartup
         }
     }
 
-    private static OverlayState createOverlay(Object nativeControl, Object typeModel, Object viewModel,
-        Runnable rediscover, boolean focusAfterCreate)
+    /** Пара «LWT host-composite + его SWT-хозяин» — то, что нужно и createOverlay, и retry-логике
+     * (scheduleRetryOnResize), чтобы не искать это дважды разными путями. */
+    private static final class HostResolution
+    {
+        final Object hostComposite;
+        final Composite parent;
+
+        HostResolution(Object hostComposite, Composite parent)
+        {
+            this.hostComposite = hostComposite;
+            this.parent = parent;
+        }
+    }
+
+    private static HostResolution resolveHost(Object nativeControl)
     {
         ClassLoader lwtLoader = nativeControl.getClass().getClassLoader();
         Class<?> swtLightCompositeClass;
@@ -497,7 +603,7 @@ public class TypeComboOverlayHook implements IStartup
         }
         catch (Exception e)
         {
-            diag("createOverlay: SwtLightComposite class error " + e); //$NON-NLS-1$
+            diag("resolveHost: SwtLightComposite class error " + e); //$NON-NLS-1$
             Global.logError(LOG_TAG, "SwtLightComposite class", e); //$NON-NLS-1$
             return null;
         }
@@ -508,6 +614,17 @@ public class TypeComboOverlayHook implements IStartup
         Object parentObj = Global.invoke(hostComposite, "getSwtComposite"); //$NON-NLS-1$
         if (!(parentObj instanceof Composite parent) || parent.isDisposed())
             return null;
+        return new HostResolution(hostComposite, parent);
+    }
+
+    private static OverlayState createOverlay(Object nativeControl, Object typeModel, Object viewModel,
+        Runnable rediscover, boolean focusAfterCreate)
+    {
+        HostResolution host = resolveHost(nativeControl);
+        if (host == null)
+            return null;
+        Object hostComposite = host.hostComposite;
+        Composite parent = host.parent;
 
         // getBounds() отдаёт позицию/размер контрола в системе координат хоста (см.
         // диагностику: Rectangle {150, 122, 349, 24}); а translateRectangleFromControl(this, rect)
@@ -529,6 +646,17 @@ public class TypeComboOverlayHook implements IStartup
         {
             diag("createOverlay: контрол слишком узкий (" + realBounds //$NON-NLS-1$
                 + "), это не поле «Тип» — пропуск"); //$NON-NLS-1$
+            return null;
+        }
+        // Рисовать оверлей поверх такого widget'а НЕДОПУСТИМО (подтверждено пользователем) —
+        // растянутый на всю эту область container визуально ломает соседние поля («Представление»
+        // и т.п.). Отклоняем и уходим в ретрай (см. schedulePropertyAttach — потолок попыток
+        // подняли на порядок, чтобы не сдаваться навсегда за 10с, раз этот widget иногда держится
+        // куда дольше одного тика).
+        if (realBounds.height > 40)
+        {
+            diag("createOverlay: контрол слишком высокий (" + realBounds //$NON-NLS-1$
+                + "), похоже на переходное состояние AEF — пропуск"); //$NON-NLS-1$
             return null;
         }
         // Резервируем справа полосу под нативную кнопку «...» — не перекрываем её своим
@@ -618,7 +746,11 @@ public class TypeComboOverlayHook implements IStartup
 
         Shell popup = new Shell(parent.getShell(), SWT.NO_TRIM | SWT.ON_TOP);
         popup.setLayout(new FillLayout());
-        Table table = new Table(popup, SWT.SINGLE | SWT.FULL_SELECTION);
+        // SWT.NO_TRIM убирает рамку у самого Shell — без своего SWT.BORDER на Table попап
+        // визуально сливался с фоном под собой (штатные выпадающие списки такую еле заметную
+        // рамку по краю всегда рисуют). Table здесь заполняет popup целиком (FillLayout без
+        // отступов), так что бордер таблицы и есть бордер попапа.
+        Table table = new Table(popup, SWT.SINGLE | SWT.FULL_SELECTION | SWT.BORDER);
 
         // ВРЕМЕННАЯ диагностика (клик по скроллбару списка): лог показал, что НИ hidePopup(),
         // НИ наш Display-фильтр SWT.MouseDown ни разу не сработали, хотя пользователь
@@ -642,6 +774,7 @@ public class TypeComboOverlayHook implements IStartup
         state.hostComposite = hostComposite;
         state.hostShell = parent.getShell();
         state.rediscover = rediscover;
+        state.createdAtMs = System.currentTimeMillis();
         state.text = text;
         state.iconLabel = iconLabel;
         state.arrowButton = arrowButton;
@@ -681,36 +814,49 @@ public class TypeComboOverlayHook implements IStartup
             });
         });
 
-        // Изменение размера ОКНА мастера (в отличие от relayout внутри него после выбора
-        // значения — см. комментарий ниже про schedulePositionSync) штатно порождает
-        // SWT.Resize на самом Shell — на это нужно реагировать, а не только раз в
-        // POSITION_SYNC_INTERVAL_MS (жалоба пользователя: поле не растягивалось вместе с окном
-        // при его расширении). repositionOverlay теперь берёт ширину/высоту из ТЕКУЩИХ bounds
-        // nativeControl (не из зафиксированных при создании), так что реального растягивания
-        // это достаточно для отслеживания.
+        // Изменение размера ОКНА (растягивание) штатно порождает SWT.Resize на самом Shell —
+        // на это нужно реагировать, а не только раз в POSITION_SYNC_INTERVAL_MS (жалоба
+        // пользователя: поле не растягивалось вместе с окном при его расширении). Но одного
+        // Shell.addControlListener недостаточно: скриншот подтвердил случай, когда сам Shell
+        // (окно) не меняет размер вовсе, но строка «Тип» сдвигается ПО X — после выбора типа с
+        // другим набором соседних полей («Число» с «Длина»/«Точность»/«Неотрицательное» → просто
+        // «Справочник...» без них) ширина общей колонки подписей в секции меняется где-то ВНУТРИ
+        // окна, сам Shell снаружи остаётся того же размера. ПЕРВАЯ попытка (ControlListener прямо
+        // на nativeControl, аналогично scheduleRetryOnResize) тоже НЕ сработала (подтвердил
+        // пользователь) — судя по всему, собственные getBounds() у nativeControl не меняются,
+        // меняется его расположение относительно экрана из-за пересчёта layout где-то выше по
+        // дереву (ширина общей колонки подписей — это состояние родителя/секции, не самого combo).
+        // Вместо гадания, какой именно виджет (Shell/nativeControl/что-то ещё) получит
+        // SWT.Resize/SWT.Move, ловим оба события на уровне Display (тот же приём, что и
+        // outsideClickFilter/wheelFilter у попапа), отфильтровывая по принадлежности к нашему
+        // hostShell — так реагируем на любой relayout где угодно в этом окне.
         //
         // ВАЖНО: при живом перетаскивании края окна (drag-resize) Windows шлёт SWT.Resize
         // ДЕСЯТКАМИ РАЗ В СЕКУНДУ (подтверждено логом — на один жест перетаскивания пришлось
         // ~90 подряд идущих repositionOverlay за секунду). Дёргать на каждое такое событие
-        // setBounds+layout(true,true) — лишняя нагрузка (сам пользователь указал на это для
-        // поллера) и, похоже, источник побочных эффектов при быстрых последовательных
-        // relayout'ах (потеря фокуса поля/попапа). Поэтому реагируем с дебаунсом — тем же
-        // приёмом, что и scheduleFilter (собираем «пачку» событий за короткий интервал в один
-        // вызов), а не на каждый одиночный SWT.Resize.
-        ControlAdapter resizeListener = new ControlAdapter()
+        // setBounds+layout(true,true) — лишняя нагрузка и источник побочных эффектов при быстрых
+        // последовательных relayout'ах (потеря фокуса поля/попапа). Поэтому реагируем с
+        // дебаунсом — тем же приёмом, что и scheduleFilter (собираем «пачку» событий за короткий
+        // интервал в один вызов), а не на каждый одиночный SWT.Resize — см. scheduleReposition.
+        Listener layoutFilter = event ->
         {
-            @Override
-            public void controlResized(ControlEvent e)
-            {
-                scheduleReposition(state);
-            }
+            if (!(event.widget instanceof Control control) || control.isDisposed())
+                return;
+            if (control.getShell() != state.hostShell)
+                return;
+            scheduleReposition(state);
         };
-        state.hostShell.addControlListener(resizeListener);
+        Display hostDisplay = state.hostShell.getDisplay();
+        hostDisplay.addFilter(SWT.Resize, layoutFilter);
+        hostDisplay.addFilter(SWT.Move, layoutFilter);
 
         container.addDisposeListener(e ->
         {
-            if (!state.hostShell.isDisposed())
-                state.hostShell.removeControlListener(resizeListener);
+            if (!hostDisplay.isDisposed())
+            {
+                hostDisplay.removeFilter(SWT.Resize, layoutFilter);
+                hostDisplay.removeFilter(SWT.Move, layoutFilter);
+            }
             // hidePopup() снимает Display-фильтр (outsideClickFilter — см. showPopup), если он
             // был установлен; вызывать нужно ДО popup.dispose(), иначе removeFilter внутри
             // hidePopup наткнётся на уже disposed Display-объект popup и не сработает.
@@ -754,11 +900,15 @@ public class TypeComboOverlayHook implements IStartup
         return state;
     }
 
-    // Основной сценарий (растягивание окна) теперь ловится немедленно через ControlListener на
-    // Shell — этот поллер лишь редкий резервный проход (relayout без изменения размера окна,
-    // внешнее изменение значения через диалог «...»), поэтому интервал сделан большим, чтобы не
-    // создавать лишнюю нагрузку постоянными reflection-вызовами.
-    private static final int POSITION_SYNC_INTERVAL_MS = 1000;
+    // Было 1000 — расчёт на то, что растягивание окна ловится немедленно через layoutFilter
+    // (см. createOverlay), а этот поллер остаётся редким резервным проходом. Но подтверждено на
+    // практике: после смены типа с другим набором соседних полей («Число» → «Справочник...» —
+    // пропадают «Длина»/«Точность»/«Неотрицательное», меняется ширина колонки подписей) AEF
+    // завершает СВОЙ пересчёт позиции НЕ сразу — ни один SWT.Resize/SWT.Move, случившийся раньше,
+    // не даёт «правильных» bounds раньше времени, их физически ещё не существует. Единственный
+    // способ увидеть обновлённую позицию быстрее — опрашивать чаще; событийный подход тут не
+    // помогает по сути задачи (нет события «AEF действительно закончил»).
+    private static final int POSITION_SYNC_INTERVAL_MS = 200;
 
     private static void schedulePositionSync(OverlayState state)
     {
@@ -811,9 +961,32 @@ public class TypeComboOverlayHook implements IStartup
      * нужно пересобрать оверлей (тем же путём, что и после выбора из своего попапа — по факту
      * это может быть и переход simple→reference, для которого пересборка и так обязательна).
      */
+    // Лог подтвердил гонку: commitSelection асинхронно пересобирает оверлей, и если ровно на этот
+    // момент приходится тик поллера, typeModel только что пересобранного AEF ещё может на
+    // мгновение бросать «Model is offline» — мы тут же пересобирали оверлей ВТОРОЙ раз, снося
+    // попап, который пользователь как раз успел открыть клавишей Down сразу после выбора
+    // предыдущего значения. Даём свежесозданному оверлею короткую защитную паузу (больше
+    // интервала поллера — гарантированно пропускает первый тик).
+    //
+    // ВАЖНО: это значение раньше было 1500 — но выяснилось (другой баг, другой лог), что эта же
+    // пауза ЗАДЕРЖИВАЕТ и легитимные срабатывания checkExternalChange: после смены типа с другим
+    // набором соседних полей («Число» → «Справочник...») строка «Тип» физически сдвигается, но
+    // самая первая пересборка (сразу после commitSelection, см. asyncExec там же) ловит AEF ДО
+    // того, как он закончил перекладывать соседние поля, и получает контрол с неправильными
+    // bounds. Именно ВТОРАЯ пересборка — та, что checkExternalChange запускает по «Model is
+    // offline» — подхватывает уже правильную позицию. Пока действовала пауза 1500мс, эта
+    // законная пересборка искусственно откладывалась на те же 1.5+ секунды — то самое зависание
+    // позиции поля, на которое пожаловался пользователь. Сокращаем защитную паузу до минимума,
+    // который всё ещё гарантированно перекрывает POSITION_SYNC_INTERVAL_MS (=200) — она нужна
+    // только чтобы пропустить самый первый тик поллера после создания, а не блокировать
+    // проверку на полторы секунды.
+    private static final int EXTERNAL_CHANGE_GRACE_MS = POSITION_SYNC_INTERVAL_MS * 2;
+
     private static void checkExternalChange(OverlayState state)
     {
         if (state.container.isDisposed() || state.programmaticChange)
+            return;
+        if (System.currentTimeMillis() - state.createdAtMs < EXTERNAL_CHANGE_GRACE_MS)
             return;
         Object currentTypeItem;
         try
@@ -940,6 +1113,10 @@ public class TypeComboOverlayHook implements IStartup
         Shell popup;
         Table table;
         Object typeModel;
+        // Момент создания (см. checkExternalChange) — сразу после пересборки AEF ещё какое-то
+        // время «дособирает» typeModel, и опрос в этом окне может поймать ложное «Model is
+        // offline» на только что созданном оверлее.
+        long createdAtMs;
         List<TypeEntry> entries;
         List<TypeEntry> visibleEntries = new ArrayList<>();
         // Раскраску совпадений делает SmartMatchHighlight.paintTableCellMatchOverlay из
@@ -952,6 +1129,7 @@ public class TypeComboOverlayHook implements IStartup
         boolean repositionPending;
         boolean programmaticChange;
         Listener outsideClickFilter;
+        Listener wheelFilter;
         boolean suppressFocusRedirect;
         boolean pendingSelectAllOnClick;
         boolean recentMouseDown;
@@ -961,6 +1139,17 @@ public class TypeComboOverlayHook implements IStartup
     {
         Text text = state.text;
         Table table = state.table;
+
+        // Раньше popup SWT.Deactivate (см. createOverlay — ВРЕМЕННАЯ диагностика скроллбара)
+        // только логировался, но не закрывал попап. Из-за этого переключение на ДРУГОЕ
+        // приложение (напр. активация полноэкранного окна) деактивирует главное окно EDT вместе
+        // со всеми его дочерними Shell (в т.ч. наш popup — он SWT.ON_TOP дочерний Shell
+        // parent.getShell()), но попап оставался видимым поверх всего, зависая на экране.
+        // hidePopup(state, ...) безопасно вызывать многократно — это no-op, если попап уже скрыт
+        // (см. wasVisible в hidePopup), так что не конфликтует с explicit-закрытием при выборе
+        // строки/клике по стрелке.
+        state.popup.addListener(SWT.Deactivate, e ->
+            hidePopup(state, "popup Deactivate (потеря активации окна, напр. переключение на другое приложение)")); //$NON-NLS-1$
 
         state.arrowButton.addListener(SWT.Selection, e ->
         {
@@ -1300,14 +1489,25 @@ public class TypeComboOverlayHook implements IStartup
         try
         {
             state.table.removeAll();
+            int currentIndex = -1;
             for (TypeEntry entry : state.visibleEntries)
             {
                 TableItem item = new TableItem(state.table, SWT.NONE);
                 item.setText(entry.label);
                 item.setImage(entry.icon);
+                if (skipFilter && currentIndex < 0 && entry.label.equals(text))
+                    currentIndex = state.table.getItemCount() - 1;
             }
+            // При открытии списка кнопкой-стрелкой (без набора фильтра — skipFilter=true)
+            // подсвечиваем и прокручиваем к строке текущего типа, а не всегда к первой строке
+            // списка: список отсортирован по алфавиту, и текущий тип обычно вовсе не первый.
+            // Во время активной фильтрации (пользователь печатает) поведение прежнее — первая
+            // строка списка (лучшее совпадение по SmartMatcher).
             if (state.table.getItemCount() > 0)
-                state.table.select(0);
+            {
+                state.table.select(currentIndex >= 0 ? currentIndex : 0);
+                state.table.showSelection();
+            }
         }
         finally
         {
@@ -1349,6 +1549,18 @@ public class TypeComboOverlayHook implements IStartup
                 state.outsideClickFilter = e -> handlePotentialOutsideClick(state, e);
                 state.popup.getDisplay().addFilter(SWT.MouseDown, state.outsideClickFilter);
             }
+            // Тот же приём, что и с outsideClickFilter чуть выше (и по той же причине): попап
+            // никогда не активируется/не получает фокус (клавиатурный ввод должен оставаться в
+            // state.text), а ОС отправляет WM_MOUSEWHEEL в АКТИВНОЕ окно, а не в то, что под
+            // курсором — обычный SWT.MouseWheel-листенер прямо на table (что пробовали раньше) от
+            // ОС в принципе не получает это сообщение. Ловим прокрутку на уровне Display (там она
+            // приходит — доставляется активному в этот момент виджету, e.widget нам не важен) и
+            // применяем её к table вручную, только если курсор физически над попапом.
+            if (state.wheelFilter == null)
+            {
+                state.wheelFilter = e -> handlePopupWheel(state, e);
+                state.popup.getDisplay().addFilter(SWT.MouseWheel, state.wheelFilter);
+            }
             diag("showPopup: bounds=" + state.popup.getBounds() //$NON-NLS-1$
                 + " anchor.bounds=" + anchor.getBounds() + " itemCount=" + state.table.getItemCount()); //$NON-NLS-1$ //$NON-NLS-2$
         }
@@ -1374,8 +1586,42 @@ public class TypeComboOverlayHook implements IStartup
                 state.popup.getDisplay().removeFilter(SWT.MouseDown, state.outsideClickFilter);
             state.outsideClickFilter = null;
         }
+        if (state.wheelFilter != null)
+        {
+            if (!state.popup.isDisposed())
+                state.popup.getDisplay().removeFilter(SWT.MouseWheel, state.wheelFilter);
+            state.wheelFilter = null;
+        }
         if (wasVisible)
             state.popup.setVisible(false);
+    }
+
+    /**
+     * Display-фильтр SWT.MouseWheel, пока попап открыт (ставится/снимается строго парно с
+     * show/hidePopup — см. showPopup). Событие приходит от ОС АКТИВНОМУ виджету (обычно
+     * state.text), а не тому, что под курсором, поэтому e.widget не используем — сверяемся
+     * напрямую с текущей позицией курсора на экране.
+     */
+    private static void handlePopupWheel(OverlayState state, Event e)
+    {
+        if (state.popup.isDisposed() || !state.popup.isVisible())
+            return;
+        Point cursor = state.popup.getDisplay().getCursorLocation();
+        if (!state.popup.getBounds().contains(cursor))
+            return;
+        int itemCount = state.table.getItemCount();
+        if (itemCount > 0)
+        {
+            // e.count > 0 — колесо крутится «от себя» (к началу списка); знак — единственное, на
+            // что можно полагаться кроссплатформенно (величина сильно разнится по ОС/драйверам).
+            int step = e.count > 0 ? -3 : 3;
+            int newTop = Math.max(0, Math.min(itemCount - 1, state.table.getTopIndex() + step));
+            state.table.setTopIndex(newTop);
+        }
+        // Не даём прокрутке уйти дальше в тот виджет, которому ОС на самом деле адресовала
+        // событие (например, скроллящуюся панель «Свойства» под попапом) — иначе прокрутка списка
+        // визуально сопровождалась бы ещё и прокруткой фона позади него.
+        e.doit = false;
     }
 
     /**
@@ -1469,6 +1715,14 @@ public class TypeComboOverlayHook implements IStartup
         {
             try
             {
+                // Штатный баг EDT (воспроизведён и БЕЗ нашего оверлея, на голом штатном поле):
+                // F4 срабатывает только один раз подряд на одном и том же поле — повторное
+                // нажатие без ухода фокуса с поля и возврата на него F4 больше не ловит.
+                // Пробовал лечить это на своей стороне (Tab/Shift+Tab — не сработало; клик по
+                // nativeControl — открывал его нативный выпадающий список и мигал) — раз баг
+                // штатный и неисправимый снаружи, а попытки его обойти каждый раз давали новый
+                // визуальный побочный эффект хуже самого бага, оставляем как есть: F4 у нас
+                // ведёт себя так же, как и на голом штатном поле EDT.
                 Event down = new Event();
                 down.type = SWT.KeyDown;
                 down.keyCode = SWT.F4;
@@ -1515,9 +1769,17 @@ public class TypeComboOverlayHook implements IStartup
                 display.timerExec(-1, timeoutHolder[0]);
             shell.addDisposeListener(e ->
             {
-                diag("watchForDialogAndReclaimFocus: диалог закрыт — возвращаю фокус в наше поле"); //$NON-NLS-1$
-                if (!state.text.isDisposed())
-                    state.text.setFocus();
+                diag("watchForDialogAndReclaimFocus: диалог закрыт — пересобираю оверлей"); //$NON-NLS-1$
+                // Раньше здесь просто возвращался фокус (state.text.setFocus()) — но nativeControl,
+                // на который завязан ТЕКУЩИЙ state, мог за время диалога устареть (AEF перестраивает
+                // строку «Тип» под новое значение), и фокус садился в никуда/в штатное поле.
+                // Закрытие диалога — самый надёжный из доступных сигналов «пора перепроверить
+                // строку» (в отличие от угадывания задержек/принудительных scene.refresh(),
+                // которые не сработали — см. tryAttachPropertySheet), поэтому сразу пересобираем
+                // оверлей тем же путём, что и после выбора из своего попапа. asyncExec — даём
+                // обработке закрытия Shell полностью завершиться, прежде чем сносить/искать виджет
+                // заново (rediscoverOverlay и так делает то же самое для commitSelection).
+                display.asyncExec(() -> rediscoverOverlay(state));
             });
         };
         display.addFilter(SWT.Show, filterHolder[0]);
@@ -1581,13 +1843,24 @@ public class TypeComboOverlayHook implements IStartup
         // как будто окно мастера только что открылось. asyncExec — чтобы дать AEF время
         // перестроиться синхронно в рамках того же commit, прежде чем мы заново ищем виджет.
         Display display = state.text.getDisplay();
-        display.asyncExec(() -> rediscoverOverlay(state));
+        display.asyncExec(() ->
+        {
+            // ВРЕМЕННАЯ диагностика: лог показал случай, где после commitSelection не было вообще
+            // ни одной дальнейшей записи в лог — ни этой, ни из rediscoverOverlay/
+            // tryAttachPropertySheet. Нужно увидеть, доходит ли выполнение сюда вообще.
+            diag("commitSelection: asyncExec(rediscoverOverlay) исполняется, container.isDisposed()=" //$NON-NLS-1$
+                + (state.container == null ? "null" : state.container.isDisposed())); //$NON-NLS-1$
+            rediscoverOverlay(state);
+        });
     }
 
     private static void rediscoverOverlay(OverlayState state)
     {
         if (state.container == null || state.container.isDisposed())
+        {
+            diag("rediscoverOverlay: container null/disposed — пропуск пересборки"); //$NON-NLS-1$
             return;
+        }
         ATTACHED.remove(state.nativeControl);
         state.container.dispose();
         try
@@ -1652,6 +1925,11 @@ public class TypeComboOverlayHook implements IStartup
     }
 
     /** Компактное описание списка (кнопки и т.п.) для диагностики — класс + tooltip/bounds если есть. */
+    private static String describeClass(Object obj)
+    {
+        return obj == null ? "null" : obj.getClass().getName(); //$NON-NLS-1$
+    }
+
     private static String describeList(Object listObj)
     {
         if (!(listObj instanceof List<?> list))
@@ -1696,7 +1974,9 @@ public class TypeComboOverlayHook implements IStartup
     private static PrintWriter diagWriter;
     private static boolean diagWriterFailed;
 
-    private static synchronized void diag(String message)
+    // Package-private (не private) — переиспользуется в PropertyNameIdentifierHook
+    // (findValueViewAfterLabel, диагностика того, на какой записи карты она спотыкается).
+    static synchronized void diag(String message)
     {
         if (diagWriterFailed)
             return;

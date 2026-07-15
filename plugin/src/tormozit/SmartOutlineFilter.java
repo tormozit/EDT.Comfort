@@ -23,7 +23,12 @@ public class SmartOutlineFilter extends ViewerFilter {
      * обычный Outline). {@code false} — как в штатном EDT: ничего не раскрываем по умолчанию,
      * только путь к совпадениям при непустом фильтре (см. {@link #applyTreeExpansion}). */
     private boolean expandTopLevelByDefault = true;
-    
+    /** Раскрытость дерева на момент открытия окна (см. {@link #captureInitialExpandedElements}) —
+     * то, что штатно раскрыл нативный код (например, путь к уже выбранному элементу). При пустом
+     * фильтре и {@code !expandTopLevelByDefault} возвращаемся именно к этому состоянию, а не
+     * схлопываем всё подряд — иначе мы бы сами стирали то, что нативно раскрыл не наш код. */
+    private Set<Object> initialExpandedElements;
+
     private final Map<Object, Integer> namePremiumCache = new HashMap<>();
     private final Map<Object, Integer> paramPremiumCache = new HashMap<>();
     private final Map<Object, Boolean> subtreeMatchMemo = new HashMap<>();
@@ -126,6 +131,21 @@ public class SmartOutlineFilter extends ViewerFilter {
     }
 
     /**
+     * Снимок раскрытости дерева на момент открытия окна — вызывать один раз, ДО того как мы сами
+     * начали фильтровать/раскрывать что-либо (то есть сразу после установки нашего фильтра на уже
+     * готовый нативный viewer). См. использование в {@link #applyTreeExpansion}.
+     */
+    public void captureInitialExpandedElements(AbstractTreeViewer viewer) {
+        if (viewer == null) {
+            this.initialExpandedElements = new LinkedHashSet<>();
+            return;
+        }
+        Object[] current = viewer.getExpandedElements();
+        this.initialExpandedElements = current != null
+            ? new LinkedHashSet<>(java.util.Arrays.asList(current)) : new LinkedHashSet<>();
+    }
+
+    /**
      * При широком фильтре (мало фрагментов, много совпадений) полный рекурсивный обход дерева
      * ради автораскрытия становится синхронно дорогим (по замерам — до ~1с на UI-потоке) и
      * ощущается как подвисание ввода. Раскрывать больше этого числа веток всё равно бесполезно —
@@ -155,10 +175,11 @@ public class SmartOutlineFilter extends ViewerFilter {
         if (!expandTopLevelByDefault && matcher.isEmpty)
         {
             // Пустой фильтр и мы не форсируем дефолтное раскрытие (дерево типов, см.
-            // expandTopLevelByDefault) — раньше здесь просто ничего не делалось, оставляя
-            // раскрытым всё, что нараскрывалось за время фильтрации: при очистке поля дерево не
-            // сворачивалось обратно. Сворачиваем явно, но только если действительно есть что.
-            collapseAllIfExpanded(viewer);
+            // expandTopLevelByDefault) — возвращаемся к состоянию раскрытия на момент открытия
+            // окна (initialExpandedElements), а НЕ схлопываем всё подряд: там может быть уже
+            // раскрыт нативным кодом путь к текущему выбранному элементу — его схлопывать нельзя.
+            applyExpandedElementsIfChanged(viewer,
+                initialExpandedElements != null ? initialExpandedElements : new LinkedHashSet<>());
             return;
         }
 
@@ -196,8 +217,11 @@ public class SmartOutlineFilter extends ViewerFilter {
      */
     private void applyExpandedElementsIfChanged(AbstractTreeViewer viewer, Set<Object> toExpand)
     {
-        if (toExpand.isEmpty())
-            return;
+        // Пустой toExpand — валидная цель (полностью свернуть), а не «нечего делать»: раньше
+        // здесь был ранний выход на toExpand.isEmpty(), из-за которого возврат к пустому базовому
+        // состоянию (см. вызов из applyTreeExpansion) не срабатывал, если раскрытых веток сейчас
+        // не было — обычно безобидно, но именно тут был бы риск не свернуть остальное. Единственная
+        // причина реально ничего не делать — набор раскрытых веток совпадает с уже установленным.
         Object[] current = viewer.getExpandedElements();
         if (current != null && sameElements(current, toExpand))
             return;
@@ -216,13 +240,6 @@ public class SmartOutlineFilter extends ViewerFilter {
         return true;
     }
 
-    private static void collapseAllIfExpanded(AbstractTreeViewer viewer)
-    {
-        Object[] current = viewer.getExpandedElements();
-        if (current == null || current.length == 0)
-            return;
-        viewer.collapseAll();
-    }
 
     /** Только корневые узлы (проекты). */
     void collectRootExpansion(AbstractTreeViewer viewer, Set<Object> toExpand)

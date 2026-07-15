@@ -409,10 +409,15 @@ public class SmartOutlineHook implements IStartup {
         if (!typeTree)
             smartFilter.setFlattenWhenFiltered(true);
         else
+        {
             // Штатное поведение EDT для этого диалога — дерево свёрнуто при открытии; принудительное
             // раскрытие всего верхнего уровня (~1200 узлов) было основной причиной подвисания
             // viewer.refresh(true) на каждое нажатие клавиши.
             smartFilter.setExpandTopLevelByDefault(false);
+            // Снимок ДО того, как мы вообще начали трогать viewer (addFilter ещё не вызван ниже) —
+            // это то, что нативный код уже раскрыл сам (например, путь к текущему выбранному типу).
+            smartFilter.captureInitialExpandedElements(viewer);
+        }
         smartFilter.setPattern(getFilterPattern(filterControl));
 
         wrapContentProviderForFlatOutline(viewer, smartFilter, baseLp, typeTree);
@@ -527,24 +532,11 @@ public class SmartOutlineHook implements IStartup {
             fc = filterControl;
         }
 
-        // Замер (selectType-marked-timing.log) показал: раскрытие всего дерева типов
-        // (applyTreeExpansion) занимает ~90-100мс САМО ПО СЕБЕ и раньше выполнялось ДО
-        // создания флажка «Только помеченные» — из-за этого флажок появлялся с задержкой,
-        // хотя его собственная установка занимает единицы мс. Поле фильтра и флажок теперь
-        // создаются выше синхронно (видны сразу), а дорогое раскрытие дерева откладываем на
-        // следующий тик через asyncExec — не блокирует появление уже созданных виджетов.
-        if (typeTree)
-        {
-            Control expansionControl = viewer.getControl();
-            if (expansionControl != null && !expansionControl.isDisposed())
-            {
-                expansionControl.getDisplay().asyncExec(() -> {
-                    if (viewer.getControl() == null || viewer.getControl().isDisposed())
-                        return;
-                    smartFilter.applyTreeExpansion(viewer);
-                });
-            }
-        }
+        // Раскрытость дерева при открытии окна мы не трогаем вообще: нативный диалог сам
+        // открывается в нужном состоянии — свёрнут, кроме пути к уже выбранному типу (который
+        // штатно раскрыт и виден). applyTreeExpansion здесь вызывать не нужно и вредно: при
+        // expandTopLevelByDefault=false (см. ниже) на пустом фильтре он либо ничего не делает,
+        // либо схлопывает то, что нативный код уже правильно раскрыл для показа выбора.
 
         // Контейнер для хранения ссылки на текущую отложенную задачу (дебаунс)
         final Runnable[] pendingFilterTask = new Runnable[1];
@@ -1348,11 +1340,46 @@ public class SmartOutlineHook implements IStartup {
             return;
         ITreeContentProvider tcp = (ITreeContentProvider) cp;
         Object parent = tcp.getParent(element);
+        boolean found = false;
         while (parent != null)
         {
             toExpand.add(parent);
+            found = true;
             parent = tcp.getParent(parent);
         }
+        if (found)
+            return;
+        // getParent() у некоторых нативных ITreeContentProvider (например, дерево типов —
+        // StaticTreeContentProvider) не реализован и всегда возвращает null (обнаружено по
+        // временному логу: ancestorsAdded=0 для заведомо не корневого элемента). Резервный путь —
+        // ищем элемент сверху вниз через getChildren(), раз getParent() снизу вверх не работает.
+        Object input = viewer.getInput();
+        if (input == null)
+            return;
+        for (Object root : tcp.getElements(input))
+        {
+            if (findPathTo(tcp, root, element, toExpand))
+                break;
+        }
+    }
+
+    private static boolean findPathTo(ITreeContentProvider cp, Object node, Object target, Set<Object> toExpand)
+    {
+        if (node == null)
+            return false;
+        if (node.equals(target))
+            return true;
+        if (!cp.hasChildren(node))
+            return false;
+        for (Object child : cp.getChildren(node))
+        {
+            if (findPathTo(cp, child, target, toExpand))
+            {
+                toExpand.add(node);
+                return true;
+            }
+        }
+        return false;
     }
 
     private static void setFilterText(Control filterControl, String text)
