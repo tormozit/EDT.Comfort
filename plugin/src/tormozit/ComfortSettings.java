@@ -95,6 +95,20 @@ public final class ComfortSettings
     /** Цвет серверных вызовов "с контекстом" по умолчанию — красный RGB(200,0,0). */
     public static final String DEFAULT_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR = "200,0,0"; //$NON-NLS-1$
 
+    // ---- Bracket content hint ----
+
+    /** Ключ: включён ли показ содержимого открывающей конструкции у закрывающей. */
+    public static final String PREF_BRACKET_CONTENT_HINT_ENABLED = "comfort.bracketContentHint.enabled"; //$NON-NLS-1$
+
+    /** Ключ: минимальное число видимых строк между конструкциями для показа подсказки. */
+    public static final String PREF_BRACKET_CONTENT_HINT_MIN_LINES = "comfort.bracketContentHint.minLines"; //$NON-NLS-1$
+
+    /** Показ подсказки выключен по умолчанию. */
+    public static final boolean DEFAULT_BRACKET_CONTENT_HINT_ENABLED = false;
+
+    /** Минимальное число строк по умолчанию — 50. */
+    public static final int DEFAULT_BRACKET_CONTENT_HINT_MIN_LINES = 50;
+
     /** Prefix for file search sash weights. */
     private static final String PREF_FILE_SEARCH_SASH_PREFIX = "comfort.fileSearch.sash."; //$NON-NLS-1$
 
@@ -407,6 +421,27 @@ public final class ComfortSettings
             return DEFAULT_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR;
         return settings.preferenceStore.getString(PREF_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR);
     }
+
+    // ---- Bracket content hint accessors ----
+
+    /** Показ содержимого открывающей конструкции у закрывающей включён. */
+    public static boolean isBracketContentHintEnabled()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_BRACKET_CONTENT_HINT_ENABLED;
+        return settings.preferenceStore.getBoolean(PREF_BRACKET_CONTENT_HINT_ENABLED);
+    }
+
+    /** Минимальное число видимых строк между конструкциями для показа подсказки. */
+    public static int getBracketContentHintMinLines()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_BRACKET_CONTENT_HINT_MIN_LINES;
+        return settings.preferenceStore.getInt(PREF_BRACKET_CONTENT_HINT_MIN_LINES);
+    }
+
 
 
     private static boolean getPerInfobaseBoolean(String prefPrefix, String infobaseUuid, boolean defaultValue)

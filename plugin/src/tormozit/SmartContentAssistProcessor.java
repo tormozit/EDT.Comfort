@@ -2622,11 +2622,13 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         for (int i = 0; i < irProposals.length; i++)
         {
             ICompletionProposal irP = irProposals[i];
-            String key = dedupKey(irP);
+            String key = mergeMatchKey(irP);
             Deque<ICompletionProposal> queue = key.isEmpty() ? null : delegateByKey.get(key);
             if (queue != null && !queue.isEmpty())
+            {
                 mergeDelegateOverlapQueue(queue, merged, placedDelegates);
-            else if (!key.isEmpty())
+            }
+            else if (!key.isEmpty() && isBareUnmatchedIrProposalAllowed(irP, delegateByKey))
                 merged.add(irP);
         }
         for (ICompletionProposal p : delegateList)
@@ -2636,6 +2638,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         }
 
         merged = collapseOptionalEdtOverlapsInMergedList(merged);
+        merged = preferBareOverEmptyParens(merged);
 
         ICompletionProposal[] result = sortMergedList(
             merged.toArray(new ICompletionProposal[merged.size()]), irPriorityByKey,
@@ -2695,11 +2698,13 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         for (int i = 0; i < irProposalsSnap.length; i++)
         {
             ICompletionProposal irP = irProposalsSnap[i];
-            String key = dedupKey(irP);
+            String key = mergeMatchKey(irP);
             Deque<ICompletionProposal> queue = key.isEmpty() ? null : delegateByKey.get(key);
             if (queue != null && !queue.isEmpty())
+            {
                 mergeDelegateOverlapQueue(queue, merged, placedDelegates);
-            else if (!key.isEmpty())
+            }
+            else if (!key.isEmpty() && isBareUnmatchedIrProposalAllowed(irP, delegateByKey))
                 merged.add(irP);
         }
         for (ICompletionProposal p : delegateList)
@@ -2709,6 +2714,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         }
 
         merged = collapseOptionalEdtOverlapsInMergedList(merged);
+        merged = preferBareOverEmptyParens(merged);
 
         ICompletionProposal[] result = sortMergedList(
             merged.toArray(new ICompletionProposal[merged.size()]), irPriorityByKey,
@@ -2729,7 +2735,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         Map<String, Deque<ICompletionProposal>> map = new HashMap<>();
         for (ICompletionProposal p : delegateList)
         {
-            String key = dedupKey(p);
+            String key = mergeMatchKey(p);
             if (key.isEmpty())
                 continue;
             map.computeIfAbsent(key, k -> new ArrayDeque<>()).addLast(p);
@@ -2996,6 +3002,144 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             return IrBslCompletionSupport.normalizeFilterKey(ir.getFilterName());
         return IrBslCompletionSupport.normalizeFilterKey(
             parseProposalListName(raw.getDisplayString()));
+    }
+
+    private static final char MERGE_MATCH_PAREN_SEP = '';
+
+    /**
+     * Строгий ключ только для решения «заменить ИР-предложение EDT-очередью при мёрже»
+     * ({@link #indexDelegateByKey} + поиск {@code delegateByKey.get(key)} в циклах мёржа).
+     * В отличие от {@link #dedupKey} (сортировка/наследование приоритета/идентичность попапа —
+     * не трогать) учитывает «скобочность» вставки, чтобы бесскобочное ИР-слово (например
+     * «Структура» для {@code Новый Структура}) не подменялось EDT-очередью только скобочных
+     * перегрузок ({@code Структура()}, {@code Структура(параметры)}).
+     */
+    private static String mergeMatchKey(ICompletionProposal proposal)
+    {
+        ICompletionProposal raw = unwrapProposal(proposal);
+        String base;
+        boolean hasParens;
+        if (raw instanceof IrCompletionProposal ir)
+        {
+            base = IrBslCompletionSupport.normalizeFilterKey(ir.getFilterName());
+            hasParens = irProposalHasParens(ir);
+        }
+        else
+        {
+            base = IrBslCompletionSupport.normalizeFilterKey(
+                parseProposalListName(raw.getDisplayString()));
+            hasParens = edtProposalHasParens(raw);
+        }
+        if (base.isEmpty())
+            return ""; //$NON-NLS-1$
+        return base + MERGE_MATCH_PAREN_SEP + (hasParens ? '1' : '0');
+    }
+
+    private static boolean irProposalHasParens(IrCompletionProposal ir)
+    {
+        String template = ir.getTemplateText();
+        if (template != null && !template.isEmpty())
+            return template.indexOf('(') >= 0;
+        return ir.isMethod();
+    }
+
+    private static boolean edtProposalHasParens(ICompletionProposal raw)
+    {
+        String signature = parseProposalSignature(displayString(raw));
+        return signature.indexOf('(') >= 0;
+    }
+
+    /**
+     * Типы, для которых {@code Новый Тип} без скобок — валидный отдельный синтаксис 1С.
+     * Ни ИР (не считает параметры конструкторов при заполнении таблицы слов — дорого),
+     * ни EDT (не даёт этого дёшево) не позволяют определить это динамически — список
+     * поддерживается вручную.
+     */
+    private static final Set<String> BARE_CONSTRUCTOR_TYPE_NAMES_LC = Set.of(
+        "структура", "массив"); //$NON-NLS-1$ //$NON-NLS-2$
+
+    /**
+     * Разрешено ли добавить в merged ИР-предложение, не совпавшее по {@link #mergeMatchKey}
+     * ни с одной EDT-очередью. Для не-бесскобочных (метод/скобочный шаблон) — не наша забота,
+     * всегда {@code true}. Для бесскобочных — только если EDT либо вообще не знает такого
+     * имени (нет конфликта), либо имя есть в {@link #BARE_CONSTRUCTOR_TYPE_NAMES_LC} (иначе
+     * конструктор может требовать обязательные аргументы, и «Тип» без скобок рискует быть
+     * невалидным синтаксисом).
+     */
+    private static boolean isBareUnmatchedIrProposalAllowed(ICompletionProposal irP,
+        Map<String, Deque<ICompletionProposal>> delegateByKey)
+    {
+        ICompletionProposal raw = unwrapProposal(irP);
+        if (!(raw instanceof IrCompletionProposal ir) || irProposalHasParens(ir))
+            return true;
+        String base = dedupKey(irP);
+        if (base.isEmpty())
+            return true;
+        Deque<ICompletionProposal> parenQueue =
+            delegateByKey.get(base + MERGE_MATCH_PAREN_SEP + '1');
+        if (parenQueue == null || parenQueue.isEmpty())
+            return true;
+        for (ICompletionProposal p : parenQueue)
+        {
+            // EDT сам показывает «Имя()» без параметров — конструктор точно поддерживает
+            // пустой вызов, безопасно добавить и бесскобочную форму (дубль уберёт
+            // preferBareOverEmptyParens).
+            if (parseProposalParamNames(displayString(unwrapProposal(p))).isEmpty())
+                return true;
+        }
+        // У EDT для этого имени нет явной 0-параметровой перегрузки (как у «Структура»/
+        // «Массив» — обе перегрузки с 1+ параметрами) — используем ручной список исключений.
+        return BARE_CONSTRUCTOR_TYPE_NAMES_LC.contains(base.toLowerCase(java.util.Locale.ROOT));
+    }
+
+    /**
+     * «Имя» и «Имя()» (0 параметров) — семантически один и тот же вызов; если в списке есть
+     * бесскобочный вариант, скобочный «Имя()»-дубль (из EDT или ИР) убираем, оставляем только
+     * бесскобочный.
+     */
+    private static List<ICompletionProposal> preferBareOverEmptyParens(
+        List<ICompletionProposal> merged)
+    {
+        Set<String> bareKeys = null;
+        for (ICompletionProposal p : merged)
+        {
+            if (!isEffectivelyBare(p))
+                continue;
+            String key = dedupKey(p);
+            if (key.isEmpty())
+                continue;
+            if (bareKeys == null)
+                bareKeys = new HashSet<>();
+            bareKeys.add(key.toLowerCase(java.util.Locale.ROOT));
+        }
+        if (bareKeys == null || bareKeys.isEmpty())
+            return merged;
+        List<ICompletionProposal> result = new ArrayList<>(merged.size());
+        for (ICompletionProposal p : merged)
+        {
+            String key = dedupKey(p).toLowerCase(java.util.Locale.ROOT);
+            if (!key.isEmpty() && bareKeys.contains(key) && isEffectivelyZeroArgWithParens(p))
+                continue;
+            result.add(p);
+        }
+        return result;
+    }
+
+    private static boolean isEffectivelyBare(ICompletionProposal p)
+    {
+        ICompletionProposal raw = unwrapProposal(p);
+        if (raw instanceof IrCompletionProposal ir)
+            return !irProposalHasParens(ir);
+        return !edtProposalHasParens(raw);
+    }
+
+    private static boolean isEffectivelyZeroArgWithParens(ICompletionProposal p)
+    {
+        ICompletionProposal raw = unwrapProposal(p);
+        if (raw instanceof IrCompletionProposal ir)
+            return irProposalHasParens(ir);
+        return edtProposalHasParens(raw)
+            && parseProposalParamNames(displayString(raw)).isEmpty();
     }
 
     static String dedupKeyForMerge(ICompletionProposal proposal)

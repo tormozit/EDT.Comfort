@@ -42,5 +42,11 @@ public class ComfortInitializer extends AbstractPreferenceInitializer
         store.setDefault(
             ComfortSettings.PREF_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR,
             ComfortSettings.DEFAULT_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR);
+        store.setDefault(
+            ComfortSettings.PREF_BRACKET_CONTENT_HINT_ENABLED,
+            ComfortSettings.DEFAULT_BRACKET_CONTENT_HINT_ENABLED);
+        store.setDefault(
+            ComfortSettings.PREF_BRACKET_CONTENT_HINT_MIN_LINES,
+            ComfortSettings.DEFAULT_BRACKET_CONTENT_HINT_MIN_LINES);
     }
 }

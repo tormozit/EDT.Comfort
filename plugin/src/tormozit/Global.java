@@ -840,6 +840,16 @@ public final class Global
     /** Папка временных логов — очищается целиком при каждом старте плагина, см. {@link #clearTempLogs()}. */
     private static final String TEMP_LOG_DIR = SOURCE_ROOT + "\\.tmp\\temp-logs"; //$NON-NLS-1$
 
+    /** Раз в сколько миллисекунд буфер временных логов сбрасывается на диск, см. {@link #tempLog}. */
+    private static final long TEMP_LOG_FLUSH_INTERVAL_MS = 1000;
+
+    /** Буфер строк временного лога по темам — накопленное, но ещё не сброшенное на диск. */
+    private static final java.util.Map<String, StringBuilder> tempLogBuffers = new java.util.HashMap<>();
+
+    private static final Object tempLogLock = new Object();
+
+    private static volatile java.util.Timer tempLogTimer;
+
     /**
      * Временный лог отладочного РМ: одна строка с меткой времени в файл {@code .tmp/temp-logs/<topic>.log}.
      * Каждый {@code topic} — свой файл; все такие файлы удаляются при следующем старте плагина
@@ -847,28 +857,91 @@ public final class Global
      * «Общее логирование» и с журналом «Комфорт» — оба режима работают независимо (см.
      * {@code .cursor/rules/comfort-logging.mdc}).
      *
+     * <p>Сам вызов — только добавление строки в память (без файлового I/O), поэтому дёшев даже
+     * при частых вызовах (тысячи раз за один пересчёт на большом файле). Реальная запись на диск
+     * происходит асинхронно, раз в {@link #TEMP_LOG_FLUSH_INTERVAL_MS} мс, фоновым таймером
+     * (см. {@link #flushTempLogs()}), а также принудительно при остановке плагина
+     * ({@link #stopTempLogFlusher()}, вызывается из {@code Activator.stop}), чтобы не терять
+     * последние строки при закрытии EDT.
+     *
      * @param topic имя темы/фичи — определяет имя файла; небезопасные для имени файла символы заменяются на {@code _}
      * @param text  текст строки (без времени — оно добавляется автоматически)
      */
-    public static synchronized void tempLog(String topic, String text)
+    public static void tempLog(String topic, String text)
     {
+        String safeTopic = (topic == null || topic.isBlank()) ? "general" : topic.trim(); //$NON-NLS-1$
+        safeTopic = safeTopic.replaceAll("[\\\\/:*?\"<>|\\s]+", "_"); //$NON-NLS-1$ //$NON-NLS-2$
+        String line = java.time.LocalDateTime.now() + " " + text + System.lineSeparator(); //$NON-NLS-1$
+
+        synchronized (tempLogLock)
+        {
+            tempLogBuffers.computeIfAbsent(safeTopic, k -> new StringBuilder()).append(line);
+            if (tempLogTimer == null)
+            {
+                tempLogTimer = new java.util.Timer("ComfortTempLogFlusher", true); //$NON-NLS-1$
+                tempLogTimer.scheduleAtFixedRate(new java.util.TimerTask()
+                {
+                    @Override
+                    public void run()
+                    {
+                        flushTempLogs();
+                    }
+                }, TEMP_LOG_FLUSH_INTERVAL_MS, TEMP_LOG_FLUSH_INTERVAL_MS);
+            }
+        }
+    }
+
+    /** Сбрасывает накопленный буфер временных логов на диск (по одному append на тему). */
+    public static void flushTempLogs()
+    {
+        java.util.Map<String, StringBuilder> toFlush;
+        synchronized (tempLogLock)
+        {
+            if (tempLogBuffers.isEmpty())
+                return;
+            toFlush = new java.util.HashMap<>(tempLogBuffers);
+            tempLogBuffers.clear();
+        }
+
         try
         {
-            String safeTopic = (topic == null || topic.isBlank()) ? "general" : topic.trim(); //$NON-NLS-1$
-            safeTopic = safeTopic.replaceAll("[\\\\/:*?\"<>|\\s]+", "_"); //$NON-NLS-1$ //$NON-NLS-2$
             File dir = new File(TEMP_LOG_DIR);
             dir.mkdirs();
-            File file = new File(dir, safeTopic + ".log"); //$NON-NLS-1$
-            String line = java.time.LocalDateTime.now() + " " + text + System.lineSeparator(); //$NON-NLS-1$
-            Files.writeString(file.toPath(), line, java.nio.charset.StandardCharsets.UTF_8,
-                java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+            for (var entry : toFlush.entrySet())
+            {
+                File file = new File(dir, entry.getKey() + ".log"); //$NON-NLS-1$
+                Files.writeString(file.toPath(), entry.getValue().toString(),
+                    java.nio.charset.StandardCharsets.UTF_8,
+                    java.nio.file.StandardOpenOption.CREATE, java.nio.file.StandardOpenOption.APPEND);
+            }
         }
         catch (Exception ignored) {}
     }
 
-    /** Удаляет все файлы временных логов из {@link #TEMP_LOG_DIR}. Вызывать при старте плагина. */
+    /**
+     * Останавливает фоновый таймер сброса буфера и делает финальный {@link #flushTempLogs()},
+     * чтобы не потерять последние накопленные строки. Вызывать при остановке плагина.
+     */
+    public static void stopTempLogFlusher()
+    {
+        synchronized (tempLogLock)
+        {
+            if (tempLogTimer != null)
+            {
+                tempLogTimer.cancel();
+                tempLogTimer = null;
+            }
+        }
+        flushTempLogs();
+    }
+
+    /** Удаляет все файлы временных логов из {@link #TEMP_LOG_DIR} и очищает ещё не сброшенный буфер. Вызывать при старте плагина. */
     public static void clearTempLogs()
     {
+        synchronized (tempLogLock)
+        {
+            tempLogBuffers.clear();
+        }
         try
         {
             File dir = new File(TEMP_LOG_DIR);

@@ -145,6 +145,39 @@ public class ComfortPreferencePage
             "Цвет серверных вызовов с контекстом:", //$NON-NLS-1$
             codeEditorGroup));
 
+        BooleanFieldEditor bracketHintField = new BooleanFieldEditor(
+            ComfortSettings.PREF_BRACKET_CONTENT_HINT_ENABLED,
+            "Отображать начало конструкции в её конце", //$NON-NLS-1$
+            codeEditorGroup);
+        addField(bracketHintField);
+        setFieldTooltip(bracketHintField,
+            "Показывать начало блочной конструкции (Процедура, Если, Пока, Для, Попытка, #Область, #Если)\n"
+            + "полупрозрачным текстом рядом с её закрывающим словом (КонецПроцедуры, КонецЕсли и т.д.),\n"
+            + "если конструкция занимает много видимых строк. Цвет подсказки берётся из подсветки\n"
+            + "самого закрывающего слова. Подсказка не показывается, если справа от закрывающего\n"
+            + "слова есть ещё код/комментарий, или если на её строке стоит каретка."); //$NON-NLS-1$
+
+        IntegerFieldEditor bracketHintMinLinesField = new IntegerFieldEditor(
+            ComfortSettings.PREF_BRACKET_CONTENT_HINT_MIN_LINES,
+            "Минимальное расстояние в строках", //$NON-NLS-1$
+            codeEditorGroup,
+            5);
+        bracketHintMinLinesField.setValidRange(0, 10_000);
+        addField(bracketHintMinLinesField);
+        String bracketHintMinLinesTooltip =
+            "Минимальное количество ВИДИМЫХ строк (с учётом свёрнутых блоков) между началом\n"
+            + "и концом конструкции, при котором показывается подсказка. Если открывающая часть\n"
+            + "вообще не видна на экране (прокручена или свёрнута), подсказка показывается всегда,\n"
+            + "независимо от этого значения."; //$NON-NLS-1$
+        setFieldTooltip(bracketHintMinLinesField, bracketHintMinLinesTooltip);
+        Text bracketHintMinLinesText = bracketHintMinLinesField.getTextControl(codeEditorGroup);
+        bracketHintMinLinesText.setToolTipText(bracketHintMinLinesTooltip);
+        GridData bracketHintMinLinesTextData = new GridData();
+        bracketHintMinLinesTextData.widthHint = 40;
+        bracketHintMinLinesTextData.grabExcessHorizontalSpace = false;
+        bracketHintMinLinesTextData.horizontalAlignment = SWT.LEFT;
+        bracketHintMinLinesText.setLayoutData(bracketHintMinLinesTextData);
+
         createLoggingGroup();
 
         // Поле «Символы» намеренно не добавляется:
@@ -579,7 +612,10 @@ public class ComfortPreferencePage
     {
         boolean result = super.performOk();
         if (result)
+        {
             BslServerCallHighlightingHook.refreshAllEditors();
+            BracketContentHintHook.refreshAllEditors();
+        }
         return result;
     }
 

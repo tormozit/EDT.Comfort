@@ -69,6 +69,12 @@ public class Activator extends AbstractUIPlugin
         settings.getPreferenceStore().setDefault(
             ComfortSettings.PREF_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR,
             ComfortSettings.DEFAULT_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR);
+        settings.getPreferenceStore().setDefault(
+            ComfortSettings.PREF_BRACKET_CONTENT_HINT_ENABLED,
+            ComfortSettings.DEFAULT_BRACKET_CONTENT_HINT_ENABLED);
+        settings.getPreferenceStore().setDefault(
+            ComfortSettings.PREF_BRACKET_CONTENT_HINT_MIN_LINES,
+            ComfortSettings.DEFAULT_BRACKET_CONTENT_HINT_MIN_LINES);
         ContentAssistManager.init(settings);
         ComfortSettings.init(PLUGIN_ID);
         getPreferenceStore().setDefault(
@@ -95,6 +101,8 @@ public class Activator extends AbstractUIPlugin
         ContentAssistManager mgr = ContentAssistManager.getInstance();
         if (mgr != null)
             mgr.stop();
+
+        Global.stopTempLogFlusher();
 
         instance = null;
         super.stop(context);

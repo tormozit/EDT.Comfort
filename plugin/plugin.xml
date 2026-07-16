@@ -55,6 +55,7 @@
     <startup class="tormozit.NewAttributeNameIdentifierHook"/>
     <startup class="tormozit.PropertyNameIdentifierHook"/>
     <startup class="tormozit.BslServerCallHighlightingHook"/>
+    <startup class="tormozit.BracketContentHintHook"/>
     <startup class="tormozit.GotoDefinitionFieldMenuHook"/>
     <startup class="tormozit.TypeComboOverlayHook"/>
   </extension>
