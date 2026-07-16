@@ -775,6 +775,16 @@ public class SmartOutlineHook implements IStartup {
         try {
             String lastPattern = tree.getData(LAST_PATTERN_KEY) instanceof String
                 ? (String) tree.getData(LAST_PATTERN_KEY) : ""; //$NON-NLS-1$
+
+            // Паттерн реально не изменился — делать нечего. Без этой проверки паразитное
+            // modifyText с тем же (например, пустым) текстом — а такое бывает при создании/замене
+            // поля фильтра на FilterInputBox — заново прогоняло бы refresh/раскрытие/AEF-подсветку
+            // и МОГЛО СХЛОПНУТЬ то, что пользователь только что раскрыл вручную (раскрытие при
+            // пустом паттерне теперь осмысленно возвращает дерево к снимку на момент открытия —
+            // см. SmartOutlineFilter.applyTreeExpansion/initialExpandedElements).
+            if (pattern.equals(lastPattern))
+                return;
+
             boolean clearingFilter = pattern.isEmpty() && !lastPattern.isEmpty();
             IStructuredSelection pendingSelection = takePendingClearSelection(filterControl);
             if (pendingSelection == null && clearingFilter

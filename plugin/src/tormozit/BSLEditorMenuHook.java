@@ -72,6 +72,9 @@ public class BSLEditorMenuHook implements IStartup
     private static final String ITEM_TEXT_FindReferences = IrFindReferencesHandler.MENU_LABEL;
     private static final String ITEM_TEXT_ModuleCheck = IrModuleCheckHandler.MENU_LABEL;
 
+    private static final String SURROUND_HINT =
+        "\nЭто же можно сделать для выделенного блока через CTRL+Space при подключенном ИР.";
+
     /**
      * Ключ SWT-данных для маркировки «меню уже прикреплено».
      * Храним на виджете {@link StyledText}, чтобы не дублировать при повторном вызове.
@@ -334,6 +337,32 @@ public class BSLEditorMenuHook implements IStartup
     }
 
     // =========================================================================
+    // Поиск штатного подменю «Окружить»
+    // =========================================================================
+
+    private static Menu findExistingSurroundSubmenu(Menu menu)
+    {
+        if (menu == null || menu.isDisposed())
+            return null;
+        for (MenuItem item : menu.getItems())
+        {
+            if (item.isDisposed())
+                continue;
+            String text = item.getText();
+            boolean isCascade = (item.getStyle() & SWT.CASCADE) != 0;
+            if (!isCascade)
+                continue;
+            if (text != null && text.replace("&", "").trim().equals("Окружить"))
+            {
+                Menu sub = item.getMenu();
+                if (sub != null && !sub.isDisposed())
+                    return sub;
+            }
+        }
+        return null;
+    }
+
+    // =========================================================================
     // Построение MenuAdapter
     // =========================================================================
 
@@ -424,6 +453,44 @@ public class BSLEditorMenuHook implements IStartup
                         }
                     });
                     addedItems.add(formatItem);
+                }
+
+                Menu surroundSub = findExistingSurroundSubmenu(menu);
+                if (surroundSub != null && !Boolean.TRUE.equals(surroundSub.getData("tormozit.surroundHooked")))
+                {
+                    surroundSub.setData("tormozit.surroundHooked", Boolean.TRUE);
+                    surroundSub.addMenuListener(new MenuAdapter()
+                    {
+                        @Override
+                        public void menuShown(MenuEvent ev)
+                        {
+                            for (BslSurroundHandler.SurroundKind kind : BslSurroundHandler.SurroundKind.values())
+                            {
+                                MenuItem item = new MenuItem(surroundSub, SWT.PUSH);
+                                item.setText(kind.label);
+                                item.setToolTipText(kind.label + Global.pluginSignForTooltip() + SURROUND_HINT);
+                                item.addSelectionListener(new SelectionAdapter()
+                                {
+                                    @Override
+                                    public void widgetSelected(SelectionEvent e)
+                                    {
+                                        BslSurroundHandler.surroundWith(editor, kind);
+                                    }
+                                });
+                            }
+                        }
+
+                        @Override
+                        public void menuHidden(MenuEvent ev)
+                        {
+                            Display display = ((Menu) ev.widget).getDisplay();
+                            display.asyncExec(() ->
+                            {
+                                for (MenuItem mi : ((Menu) ev.widget).getItems())
+                                    if (!mi.isDisposed()) mi.dispose();
+                            });
+                        }
+                    });
                 }
 
                 if (EditEmbeddedTextHandler.isApplicable(editor))

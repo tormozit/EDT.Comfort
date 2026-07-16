@@ -12,13 +12,10 @@ import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
-import org.eclipse.swt.widgets.List;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Shell;
-import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.Text;
-import org.eclipse.swt.widgets.Tree;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.PlatformUI;
@@ -101,11 +98,14 @@ public final class GotoDefinitionFieldMenuHook implements IStartup
             return;
         }
 
-        // Фолбэк предназначен только для LWT-канвасов панели «Свойства» (см. javadoc класса),
-        // где отдельного текстового control в состоянии покоя не существует. Структурные виджеты
-        // со своим штатным контекстным меню (дерево реквизитов объекта метаданных, таблицы и т.п.)
-        // исключаем — иначе наш пункт подменяет собой их меню вместо того чтобы его дополнять.
-        if (control instanceof Tree || control instanceof Table || control instanceof List)
+        // Фолбэк — по белому списку, а не по чёрному: применяется только к LWT-хостящим
+        // canvas-виджетам (см. javadoc класса и PropertySheetControlInterop.isLightControl —
+        // тот же сигнал по имени пакета/класса), где отдельного текстового control в
+        // состоянии покоя не существует (напр. канвас панели «Свойства»,
+        // com._1c.g5.lwt.interop.SwtLightComposite). Для любых нативных SWT-виджетов со своим
+        // штатным меню (дерево реквизитов объекта метаданных, таблицы, вкладки workbench и
+        // т.п.) фолбэк не сработает в принципе — вести список исключений не нужно.
+        if (!isLwtHostedControl(control))
             return;
 
         // Если у control уже есть собственное меню — дополняем его, а не заменяем отдельным
@@ -165,6 +165,22 @@ public final class GotoDefinitionFieldMenuHook implements IStartup
     private static boolean isSupportedControl(Control control)
     {
         return control instanceof Text || control instanceof StyledText || control instanceof Combo;
+    }
+
+    /**
+     * LWT-виджет (напр. {@code com._1c.g5.lwt.interop.SwtLightComposite} — канвас панели
+     * «Свойства», см. {@code PropertySheetHook} про то, что именно этот класс получает
+     * MouseDown/MenuDetect вместо дочерних полей). Тот же сигнал, что и
+     * {@code PropertySheetControlInterop.isLightControl} — позитивно опознаёт «это поле ввода
+     * LWT-фреймворка», а не «всё, кроме известных структурных виджетов».
+     */
+    private static boolean isLwtHostedControl(Control control)
+    {
+        if (control == null)
+            return false;
+        String cn = control.getClass().getName();
+        return cn.contains(".lwt.") || cn.contains("LightLabel") //$NON-NLS-1$ //$NON-NLS-2$
+                || cn.contains("LightText") || cn.contains("ILightControl"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static void hookControlMenu(Control control)

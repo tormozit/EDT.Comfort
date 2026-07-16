@@ -1,11 +1,13 @@
 package tormozit;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.eclipse.jface.dialogs.IPageChangedListener;
@@ -40,6 +42,7 @@ public final class BslServerCallHighlightingHook implements IStartup
     private static final AtomicBoolean installed = new AtomicBoolean();
     private static final List<Object> patchedReconcilers = new ArrayList<>();
     private static final Map<DtGranularEditor<?>, IPageChangedListener> pageListeners = new HashMap<>();
+    private static final Map<Object, BslXtextEditor> reconcilerEditors = new WeakHashMap<>();
 
     @Override
     public void earlyStartup()
@@ -102,13 +105,30 @@ public final class BslServerCallHighlightingHook implements IStartup
     }
 
     /**
-     * Прямой вызов {@code HighlightingReconciler.modelChanged(resource)} (и
-     * {@code XtextDocument.notifyModelListeners(resource)}) не запускает реальный
-     * пересчёт подсветки — тихо ничего не делает без единой ошибки, по неясной
-     * причине. Единственный надёжный способ — настоящее изменение документа,
-     * поэтому делаем тривиальный самовосстанавливающийся edit: заменяем первый
-     * символ документа на него же самого, это порождает {@code DocumentEvent} и
-     * запускает штатный конвейер пересвязывания.
+     * {@link HighlightingReconciler#refresh()} (публичный, тот же путь, что
+     * {@code install()} при первом открытии редактора) НЕ годится: внутри он берёт
+     * {@code document.tryReadOnly(...)} — не блокирующий вариант, который тихо
+     * ничего не делает (без единой ошибки), если read-lock сразу не достался —
+     * подтверждено экспериментом: после перехода на {@code refresh()} раскраска
+     * серверных вызовов переставала появляться. Прямой вызов
+     * {@code HighlightingReconciler.modelChanged(resource)} — та же проблема.
+     * Единственный надёжный способ — настоящее изменение документа (идёт через
+     * блокирующий путь), поэтому делаем тривиальный самовосстанавливающийся edit:
+     * заменяем первый символ документа на него же самого, это порождает
+     * {@code DocumentEvent} и запускает штатный конвейер пересвязывания.
+     * <p>
+     * Побочный эффект: этот {@code DocumentEvent} — даже самовосстанавливающийся —
+     * взводит модифицированность редактора; {@code DirtyStateEditorSupport.markEditorClean()}
+     * тут не помогает (это внутреннее состояние Xtext, а не {@code ITextEditor.isDirty()}).
+     * Второй самозаменяющий edit с восстановленным modification stamp тоже не годится:
+     * он порождает ещё один {@code DocumentEvent}, и {@code HighlightingReconciler
+     * .updatePresentation()} (сверяет {@code resourceSet.getModificationStamp()} перед
+     * применением) отбрасывает результат ПЕРВОГО пересчёта как устаревший — раскраска
+     * пропадает (подтверждено экспериментом). Поэтому модифицированность снимаем без
+     * единой лишней записи в документ — напрямую через {@code fCanBeSaved} в
+     * {@code ElementInfo} документ-провайдера (см. {@link #resetDirtyFlagIfClean}),
+     * тем же приёмом, что использует сам {@code XtextDocumentProvider
+     * .UnchangedElementListener}.
      */
     private static void forceRefresh(Object reconciler)
     {
@@ -149,9 +169,15 @@ public final class BslServerCallHighlightingHook implements IStartup
                 return;
             }
 
+            BslXtextEditor editorForCleanup = reconcilerEditors.get(reconciler);
+            boolean wasDirty = editorForCleanup != null && editorForCleanup.isDirty();
+
             char firstChar = document.getChar(0);
             document.replace(0, 1, String.valueOf(firstChar));
             Global.log(TAG, "forceRefresh: self-replace edit triggered at offset 0"); //$NON-NLS-1$
+
+            if (editorForCleanup != null && !wasDirty)
+                resetDirtyFlagIfClean(editorForCleanup);
         }
         catch (Exception e)
         {
@@ -250,6 +276,7 @@ public final class BslServerCallHighlightingHook implements IStartup
             {
                 if (!patchedReconcilers.contains(reconciler))
                     patchedReconcilers.add(reconciler);
+                reconcilerEditors.put(reconciler, editor);
                 registerServerCallStyle(reconciler);
                 forceRefresh(reconciler);
                 Global.log(TAG, "patchEditor: OK, patched=" + patchedReconcilers.size()); //$NON-NLS-1$
@@ -473,6 +500,82 @@ public final class BslServerCallHighlightingHook implements IStartup
             }
         }
         return null;
+    }
+
+    private static Method findMethod(Class<?> clazz, String name, Class<?>... paramTypes)
+    {
+        Class<?> c = clazz;
+        while (c != null)
+        {
+            try
+            {
+                return c.getDeclaredMethod(name, paramTypes);
+            }
+            catch (NoSuchMethodException e)
+            {
+                c = c.getSuperclass();
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Снимает модифицированность редактора без единой записи в документ — напрямую
+     * через {@code fCanBeSaved} в {@code AbstractDocumentProvider.ElementInfo} (тот
+     * же публичный флаг, что читает/пишет {@code XtextDocumentProvider
+     * .UnchangedElementListener.documentChanged()}), и штатно оповещает об этом
+     * оповещателем {@code fireElementDirtyStateChanged}, чтобы у {@code ITextEditor}
+     * (и заголовка вкладки) сразу обновился признак "*". Оба метода/поля —
+     * {@code protected}/пакетные в {@code AbstractDocumentProvider}, отсюда рефлексия.
+     */
+    private static void resetDirtyFlagIfClean(BslXtextEditor editor)
+    {
+        try
+        {
+            Object provider = editor.getDocumentProvider();
+            Object input = editor.getEditorInput();
+            if (provider == null || input == null)
+                return;
+
+            Method getElementInfo = findMethod(provider.getClass(), "getElementInfo", Object.class); //$NON-NLS-1$
+            if (getElementInfo == null)
+            {
+                Global.log(TAG, "resetDirtyFlagIfClean: 'getElementInfo' not found"); //$NON-NLS-1$
+                return;
+            }
+            getElementInfo.setAccessible(true);
+            Object elementInfo = getElementInfo.invoke(provider, input);
+            if (elementInfo == null)
+            {
+                Global.log(TAG, "resetDirtyFlagIfClean: elementInfo null"); //$NON-NLS-1$
+                return;
+            }
+
+            Field canBeSavedField = findField(elementInfo.getClass(), "fCanBeSaved"); //$NON-NLS-1$
+            if (canBeSavedField == null)
+            {
+                Global.log(TAG, "resetDirtyFlagIfClean: 'fCanBeSaved' not found"); //$NON-NLS-1$
+                return;
+            }
+            canBeSavedField.setAccessible(true);
+            canBeSavedField.set(elementInfo, false);
+
+            Method fireDirty = findMethod(provider.getClass(), "fireElementDirtyStateChanged", //$NON-NLS-1$
+                Object.class, boolean.class);
+            if (fireDirty == null)
+            {
+                Global.log(TAG, "resetDirtyFlagIfClean: 'fireElementDirtyStateChanged' not found"); //$NON-NLS-1$
+                return;
+            }
+            fireDirty.setAccessible(true);
+            fireDirty.invoke(provider, input, false);
+
+            Global.log(TAG, "resetDirtyFlagIfClean: OK"); //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+            Global.log(TAG, "resetDirtyFlagIfClean failed: " + e.getClass().getSimpleName() + " " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
+        }
     }
 
     private static Class<?> loadClass(String name)
