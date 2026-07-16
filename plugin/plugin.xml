@@ -20,6 +20,7 @@
     <startup class="tormozit.IrBslEditorHoverHook"/>
     <startup class="tormozit.PriorityGlobalKeyBindingHook"/>
     <startup class="tormozit.ComfortKeysPageHook"/>
+    <startup class="tormozit.PreferenceSearchIndexHook"/>
     <startup class="tormozit.IrFormatTextKeyDiagHook"/>
     <startup class="tormozit.SmartOutlineHook"/>
     <startup class="tormozit.ListSelectionThemeHook"/>
@@ -308,6 +309,11 @@
         categoryId="tormozit.commands.global"
         description="Показать объект из git-представления в дереве навигатора (Комфорт)"/>
     <command
+        id="tormozit.git.addToObjectSet"
+        name="Добавить в набор объектов"
+        categoryId="tormozit.commands.global"
+        description="Добавить выделенные объекты из git-представления в активный набор (Комфорт)"/>
+    <command
         id="tormozit.OpenConfigurationObject"
         name="Открыть объект конфигурации"
         categoryId="tormozit.commands.global"
@@ -595,6 +601,10 @@
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.GitShowInNavigatorHandler"
         commandId="tormozit.git.showInNavigator">
+    </handler>
+    <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.GitAddToObjectSetHandler"
+        commandId="tormozit.git.addToObjectSet">
     </handler>
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.HistoryViewHandler"

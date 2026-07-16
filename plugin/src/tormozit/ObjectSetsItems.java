@@ -8,6 +8,7 @@ import java.util.Map;
 import java.util.Set;
 
 import org.eclipse.core.resources.IProject;
+import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.StructuredViewer;
@@ -74,6 +75,17 @@ final class ObjectSetsItems
         if (project != null && !project.isBlank() && !projectName.equals(project))
             return null;
         String fullName = GetRef.fullNameFromNavigatorElement(element);
+        if (fullName == null || fullName.isBlank())
+            return null;
+        String ownName = lastSegment(fullName);
+        return new ObjectSets.Item(fullName, fullName, fullName, ownName);
+    }
+
+    static ObjectSets.Item fromEObject(EObject eObject, String projectName)
+    {
+        if (eObject == null || projectName == null || projectName.isBlank())
+            return null;
+        String fullName = GetRef.fullNameFromNavigatorElement(eObject);
         if (fullName == null || fullName.isBlank())
             return null;
         String ownName = lastSegment(fullName);

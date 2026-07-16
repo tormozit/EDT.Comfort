@@ -48,6 +48,8 @@ import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
 
 import org.eclipse.e4.ui.model.application.ui.basic.MPart;
 
+import org.eclipse.ui.handlers.IHandlerService;
+
 /**
  * Добавляет «Открыть в Навигаторе» и «Открыть объект» в подменю «Комфорт»
  * контекстного меню изменённых файлов в EGit/EDT-представлениях
@@ -67,6 +69,14 @@ public final class GitChangedFileMenuHook implements IStartup
 
     private static final String NAV_ITEM_TEXT = "Открыть в Навигаторе"; //$NON-NLS-1$
     private static final String OBJ_ITEM_TEXT = "Открыть объект";       //$NON-NLS-1$
+    private static final String ADD_TO_SET_CMD = "tormozit.git.addToObjectSet"; //$NON-NLS-1$
+    private static final String ADD_TO_SET_MARKER = "tormozit.gitAddToObjectSetItem"; //$NON-NLS-1$
+
+    /**
+     * Snapshot мультивыделения, сохранённый при открытии меню.
+     * Handler читает его при клике по пункту «Добавить в набор».
+     */
+    static IStructuredSelection multiSelectionSnapshot;
 
     private static final String GIT_CONTEXT_ID = "tormozit.gitChangedFile.context"; //$NON-NLS-1$
 
@@ -564,21 +574,36 @@ public final class GitChangedFileMenuHook implements IStartup
             c = c.getParent();
         if (c == null || c.isDisposed())
             return null;
-        Object element = null;
         if (c instanceof Table table)
         {
             TableItem[] items = table.getSelection();
             if (items.length > 0)
-                element = items[0].getData();
+            {
+                List<Object> list = new ArrayList<>(items.length);
+                for (TableItem ti : items)
+                {
+                    Object d2 = ti.getData();
+                    if (d2 != null)
+                        list.add(d2);
+                }
+                return new StructuredSelection(list);
+            }
         }
         else if (c instanceof Tree tree)
         {
             TreeItem[] items = tree.getSelection();
             if (items.length > 0)
-                element = items[0].getData();
+            {
+                List<Object> list = new ArrayList<>(items.length);
+                for (TreeItem ti : items)
+                {
+                    Object d2 = ti.getData();
+                    if (d2 != null)
+                        list.add(d2);
+                }
+                return new StructuredSelection(list);
+            }
         }
-        if (element != null)
-            return new StructuredSelection(element);
         return null;
     }
 
@@ -620,7 +645,7 @@ public final class GitChangedFileMenuHook implements IStartup
     {
         return new MenuAdapter()
         {
-            private final List<MenuItem> addedItems = new ArrayList<>(2);
+            private final List<MenuItem> addedItems = new ArrayList<>(3);
 
             @Override
             public void menuShown(MenuEvent e)
@@ -629,7 +654,8 @@ public final class GitChangedFileMenuHook implements IStartup
 
                 // Try to get selection from the viewer that owns the clicked control
                 ISelection viewerSel = selectionOfClickedControl(e.widget);
-                if (viewerSel instanceof IStructuredSelection vs && vs.size() == 1)
+                if (viewerSel instanceof IStructuredSelection vs
+                    && (selection == null || vs.size() > ((IStructuredSelection) selection).size()))
                     selection = vs;
 
                 if (selection == null)
@@ -643,65 +669,126 @@ public final class GitChangedFileMenuHook implements IStartup
                         + selection.getClass().getName()); //$NON-NLS-1$
                     return;
                 }
-                if (structured.size() != 1)
-                {
-                    Global.log("GitChangedFileMenu: selection size=" + structured.size()); //$NON-NLS-1$
-                    return;
-                }
-
-                Object element = structured.getFirstElement();
-                Global.log("GitChangedFileMenu: resolve element class="
-                    + element.getClass().getName() + " toString=" + element); //$NON-NLS-1$ //$NON-NLS-2$
-
-                IFile file = resolveFile(view, element);
-                if (file == null || !file.exists())
-                {
-                    Global.log("GitChangedFileMenu: file not resolved"); //$NON-NLS-1$
-                    return;
-                }
-
-                EObject eObject = resolveEObject(file);
-                if (eObject == null)
-                {
-                    Global.log("GitChangedFileMenu: EObject not resolved"); //$NON-NLS-1$
-                    return;
-                }
-
-                Global.log("GitChangedFileMenu: resolved IFile=" + file.getFullPath() //$NON-NLS-1$
-                    + " EObject=" + eObject); //$NON-NLS-1$
+                // Snapshot для handler'а «Добавить в набор» (выполняется после клика по пункту)
+                multiSelectionSnapshot = structured;
 
                 Menu submenu = (Menu) e.widget;
                 Shell shell = submenu.getShell();
-                IFile capturedFile = file;
-                EObject captured = eObject;
 
-                MenuItem navItem = new MenuItem(submenu, SWT.PUSH);
-                navItem.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
-                    NAV_ITEM_TEXT, "tormozit.git.showInNavigator", GIT_CONTEXT_ID));
-                navItem.addSelectionListener(new SelectionAdapter()
+                // === Одиночное выделение: "Открыть в Навигаторе" и "Открыть объект" ===
+                if (structured.size() == 1)
+                {
+                    Object element = structured.getFirstElement();
+                    Global.log("GitChangedFileMenu: resolve single element class="
+                        + element.getClass().getName() + " toString=" + element); //$NON-NLS-1$
+
+                    IFile file = resolveFile(view, element);
+                    if (file != null && file.exists())
+                    {
+                        EObject eObject = resolveEObject(file);
+                        if (eObject != null)
+                        {
+                            Global.log("GitChangedFileMenu: resolved IFile=" + file.getFullPath() //$NON-NLS-1$
+                                + " EObject=" + eObject); //$NON-NLS-1$
+
+                            IFile capturedFile = file;
+                            EObject captured = eObject;
+
+                            MenuItem navItem = new MenuItem(submenu, SWT.PUSH);
+                            navItem.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
+                                NAV_ITEM_TEXT, "tormozit.git.showInNavigator", GIT_CONTEXT_ID));
+                            navItem.addSelectionListener(new SelectionAdapter()
+                            {
+                                @Override
+                                public void widgetSelected(SelectionEvent ev)
+                                {
+                                    NavigatorReveal.reveal(captured, true);
+                                }
+                            });
+                            addedItems.add(navItem);
+
+                            MenuItem objItem = new MenuItem(submenu, SWT.PUSH);
+                            objItem.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
+                                OBJ_ITEM_TEXT, "tormozit.git.openObject", GIT_CONTEXT_ID));
+                            objItem.addSelectionListener(new SelectionAdapter()
+                            {
+                                @Override
+                                public void widgetSelected(SelectionEvent ev)
+                                {
+                                    openInEditor(captured, capturedFile, shell);
+                                }
+                            });
+                            addedItems.add(objItem);
+
+                            addIrHistoryItemIfNeeded(submenu, view, capturedFile, addedItems);
+                        }
+                    }
+                }
+
+                // === Любое выделение: "Добавить в набор" ===
+                MenuItem addToSetItem = new MenuItem(submenu, SWT.PUSH);
+                // Определяем проект из первого подходящего элемента selection
+                String pName = null;
+                for (Object element : structured.toList())
+                {
+                    IFile f = resolveFile(view, element);
+                    if (f != null && f.exists())
+                    {
+                        IProject p = f.getProject();
+                        if (p != null)
+                        {
+                            pName = p.getName();
+                            break;
+                        }
+                    }
+                }
+                if (pName == null)
+                {
+                    IProject p = ActiveProjectTracker.resolveContextProject(view.getViewSite().getPage());
+                    if (p != null)
+                        pName = p.getName();
+                }
+
+                ObjectSets.SetDef addTarget = null;
+                if (pName != null)
+                {
+                    ObjectSetsAddTargetState.getInstance().ensureForProject(pName);
+                    addTarget = ObjectSetsAddTargetState.getInstance().getAddTargetSet(pName);
+                }
+                if (addTarget != null)
+                {
+                    addToSetItem.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
+                        "Добавить в набор <" + addTarget.name + ">", ADD_TO_SET_CMD, GIT_CONTEXT_ID));
+                    addToSetItem.setToolTipText("Добавить выбранные объекты метаданных в набор \u00ab" + addTarget.name + "\u00bb" + Global.pluginSignForTooltip());
+                    addToSetItem.setEnabled(true);
+                }
+                else
+                {
+                    addToSetItem.setText("Добавить в набор <\u2026>");
+                    addToSetItem.setToolTipText("Выберите активный набор в панели \u00abНаборы объектов\u00bb" + Global.pluginSignForTooltip());
+                    addToSetItem.setEnabled(false);
+                }
+                addToSetItem.setData(ADD_TO_SET_MARKER, Boolean.TRUE);
+                addToSetItem.addSelectionListener(new SelectionAdapter()
                 {
                     @Override
                     public void widgetSelected(SelectionEvent ev)
                     {
-                        NavigatorReveal.reveal(captured, true);
+                        IHandlerService handlerService =
+                            view.getViewSite().getService(IHandlerService.class);
+                        if (handlerService == null)
+                            return;
+                        try
+                        {
+                            handlerService.executeCommand(ADD_TO_SET_CMD, null);
+                        }
+                        catch (Exception ex)
+                        {
+                            Global.log("GitAddToObjectSet: " + ex);
+                        }
                     }
                 });
-                addedItems.add(navItem);
-
-                MenuItem objItem = new MenuItem(submenu, SWT.PUSH);
-                objItem.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
-                    OBJ_ITEM_TEXT, "tormozit.git.openObject", GIT_CONTEXT_ID));
-                objItem.addSelectionListener(new SelectionAdapter()
-                {
-                    @Override
-                    public void widgetSelected(SelectionEvent ev)
-                    {
-                        openInEditor(captured, capturedFile, shell);
-                    }
-                });
-                addedItems.add(objItem);
-
-                addIrHistoryItemIfNeeded(submenu, view, capturedFile, addedItems);
+                addedItems.add(addToSetItem);
             }
 
             @Override

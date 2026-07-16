@@ -46,6 +46,7 @@ import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableColumn;
 import org.eclipse.swt.widgets.TableItem;
+import org.eclipse.swt.widgets.Text;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.PlatformUI;
@@ -274,7 +275,41 @@ public final class ComfortKeysPreferences
         if (filterText != null && tree != null)
             setFilterText(tree, filterText);
         wireBindingsTreeCopy(page);
+        wireFilterHistory(tree);
         LocalConflictUi.install(page);
+    }
+
+    /** scopeId для {@link FilterHistoryStore} — отдельный от общего поиска по «Параметрам». */
+    private static final String KEYS_FILTER_HISTORY_SCOPE = "keysFilter"; //$NON-NLS-1$
+
+    private static final String KEYS_FILTER_HISTORY_WIRED_KEY =
+            "tormozit.ComfortKeysPreferences.historyWired"; //$NON-NLS-1$
+
+    /**
+     * История значений фильтра страницы «Клавиши» — тот же приём (хранилище
+     * + видимая кнопка + Ctrl+↓), что и в основном поиске по «Параметрам»
+     * (см. {@link PreferenceSearchFilterAugmenter}), через общие
+     * {@link FilterHistoryStore}/{@link FilterHistoryUi}. Идемпотентно —
+     * {@code applyEnhancements} вызывается многократно poll-циклом хука, пока
+     * страница окончательно не готова.
+     */
+    private static void wireFilterHistory(FilteredTree tree)
+    {
+        if (tree == null || tree.isDisposed())
+            return;
+        Text filterControl = tree.getFilterControl();
+        if (filterControl == null || filterControl.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(filterControl.getData(KEYS_FILTER_HISTORY_WIRED_KEY)))
+            return;
+        filterControl.setData(KEYS_FILTER_HISTORY_WIRED_KEY, Boolean.TRUE);
+
+        FilterHistoryUi.wireKeyboard(filterControl, KEYS_FILTER_HISTORY_SCOPE);
+
+        Composite buttonsRow = FilterHistoryUi.createButtonsRow(filterControl.getParent());
+        FilterHistoryUi.addHistoryButton(buttonsRow, filterControl, KEYS_FILTER_HISTORY_SCOPE);
+        if (buttonsRow != null)
+            filterControl.getParent().layout(true, true);
     }
 
     private static FilteredTree resolveFilteredTree(IPreferencePage page)
