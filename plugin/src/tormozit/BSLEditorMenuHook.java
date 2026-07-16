@@ -71,6 +71,7 @@ public class BSLEditorMenuHook implements IStartup
     private static final String ITEM_TEXT_FormatText = IrFormatTextHandler.MENU_LABEL;
     private static final String ITEM_TEXT_FindReferences = IrFindReferencesHandler.MENU_LABEL;
     private static final String ITEM_TEXT_ModuleCheck = IrModuleCheckHandler.MENU_LABEL;
+    private static final String ITEM_TEXT_DeclareExpressionType = IrDeclareExpressionTypeHandler.MENU_LABEL;
 
     private static final String SURROUND_HINT =
         "\nЭто же можно сделать для выделенного блока через CTRL+Space при подключенном ИР.";
@@ -387,11 +388,11 @@ public class BSLEditorMenuHook implements IStartup
                 Menu comfortSub = ComfortSubmenuHelper.findOrCreateComfortSubmenu(menu, menu.getShell());
                 if (comfortSub != null)
                 {
-                    MenuItem constructorItem = new MenuItem(comfortSub, SWT.PUSH);
-                    constructorItem.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
-                        ITEM_TEXT_MethodConstructor,
-                        IrMethodConstructorHandler.COMMAND_ID,
-                        EditEmbeddedTextCommandHandler.BINDING_CONTEXT_ID));
+                    MenuItem constructorItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
+                        ComfortSubmenuHelper.menuItemTextWithKeyBinding(
+                            ITEM_TEXT_MethodConstructor,
+                            IrMethodConstructorHandler.COMMAND_ID,
+                            EditEmbeddedTextCommandHandler.BINDING_CONTEXT_ID));
                     constructorItem.setToolTipText(
                         "Открыть конструктор метода приложения ИР" + Global.pluginSignForTooltip());
                     constructorItem.addSelectionListener(new SelectionAdapter()
@@ -404,8 +405,8 @@ public class BSLEditorMenuHook implements IStartup
                     });
                     addedItems.add(constructorItem);
 
-                    MenuItem findRefsItem = new MenuItem(comfortSub, SWT.PUSH);
-                    findRefsItem.setText(ITEM_TEXT_FindReferences);
+                    MenuItem findRefsItem =
+                        ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH, ITEM_TEXT_FindReferences);
                     findRefsItem.setToolTipText(
                         "Найти ссылки на слово или объект метаданных через приложение ИР"
                             + Global.pluginSignForTooltip());
@@ -419,11 +420,11 @@ public class BSLEditorMenuHook implements IStartup
                     });
                     addedItems.add(findRefsItem);
 
-                    MenuItem moduleCheckItem = new MenuItem(comfortSub, SWT.PUSH);
-                    moduleCheckItem.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
-                        ITEM_TEXT_ModuleCheck,
-                        IrModuleCheckHandler.COMMAND_ID,
-                        IrModuleCheckCommandHandler.BINDING_CONTEXT_ID));
+                    MenuItem moduleCheckItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
+                        ComfortSubmenuHelper.menuItemTextWithKeyBinding(
+                            ITEM_TEXT_ModuleCheck,
+                            IrModuleCheckHandler.COMMAND_ID,
+                            IrModuleCheckCommandHandler.BINDING_CONTEXT_ID));
                     moduleCheckItem.setToolTipText(
                         "Открыть проверку модуля через приложение ИР" + Global.pluginSignForTooltip());
                     moduleCheckItem.addSelectionListener(new SelectionAdapter()
@@ -436,11 +437,11 @@ public class BSLEditorMenuHook implements IStartup
                     });
                     addedItems.add(moduleCheckItem);
 
-                    MenuItem formatItem = new MenuItem(comfortSub, SWT.PUSH);
-                    formatItem.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
-                        ITEM_TEXT_FormatText,
-                        IrFormatTextCommandHandler.COMMAND_ID,
-                        IrFormatTextCommandHandler.BINDING_CONTEXT_ID));
+                    MenuItem formatItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
+                        ComfortSubmenuHelper.menuItemTextWithKeyBinding(
+                            ITEM_TEXT_FormatText,
+                            IrFormatTextCommandHandler.COMMAND_ID,
+                            IrFormatTextCommandHandler.BINDING_CONTEXT_ID));
                     formatItem.setToolTipText(
                         "Форматировать выделенный текст через приложение ИР" + Global.pluginSignForTooltip());
                     formatItem.setEnabled(IrFormatTextHandler.isApplicableBsl(editor));
@@ -453,6 +454,23 @@ public class BSLEditorMenuHook implements IStartup
                         }
                     });
                     addedItems.add(formatItem);
+
+                    MenuItem declareTypeItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
+                        ComfortSubmenuHelper.menuItemTextWithKeyBinding(
+                            ITEM_TEXT_DeclareExpressionType,
+                            IrDeclareExpressionTypeHandler.COMMAND_ID,
+                            IrDeclareExpressionTypeCommandHandler.BINDING_CONTEXT_ID));
+                    declareTypeItem.setToolTipText(
+                        "Явно объявить тип выражения под кареткой через приложение ИР" + Global.pluginSignForTooltip());
+                    declareTypeItem.addSelectionListener(new SelectionAdapter()
+                    {
+                        @Override
+                        public void widgetSelected(SelectionEvent ev)
+                        {
+                            runDeclareExpressionTypeCommand(editor);
+                        }
+                    });
+                    addedItems.add(declareTypeItem);
                 }
 
                 Menu surroundSub = findExistingSurroundSubmenu(menu);
@@ -636,5 +654,23 @@ public class BSLEditorMenuHook implements IStartup
             // fallback ниже
         }
         IrModuleCheckHandler.checkModule(editor);
+    }
+
+    private static void runDeclareExpressionTypeCommand(BslXtextEditor editor)
+    {
+        try
+        {
+            IHandlerService handlerService = editor.getSite().getService(IHandlerService.class);
+            if (handlerService != null)
+            {
+                handlerService.executeCommand(IrDeclareExpressionTypeHandler.COMMAND_ID, null);
+                return;
+            }
+        }
+        catch (Exception ignored)
+        {
+            // fallback ниже
+        }
+        IrDeclareExpressionTypeHandler.declareExpressionType(editor);
     }
 }

@@ -385,9 +385,21 @@ public class TextEditorMenuHook implements IStartup
                 TextEditor.Context ctx = TextEditor.buildContext(viewer, useExt, editable);
                 if (ctx == null)
                     return null;
-                return new MenuBinding(shell,
-                    () -> PasteWithCompareActions.isAvailable(shell, ctx),
-                    () -> PasteWithCompareActions.run(shell, ctx));
+                return List.of(
+                    new MenuBinding(shell,
+                        PasteWithCompareActions.MENU_LABEL,
+                        "Сравнить выделение с буфером обмена и вставить результат",
+                        PasteWithCompareHandler.COMMAND_ID,
+                        PasteWithCompareHandler.BINDING_CONTEXT_ID,
+                        () -> PasteWithCompareActions.isAvailable(shell, ctx),
+                        () -> PasteWithCompareActions.run(shell, ctx)),
+                    new MenuBinding(shell,
+                        SortTextLinesActions.MENU_LABEL,
+                        "Отсортировать выделенные строки текста по алфавиту",
+                        SortTextLinesHandler.COMMAND_ID,
+                        SortTextLinesHandler.BINDING_CONTEXT_ID,
+                        () -> SortTextLinesActions.isAvailable(shell, ctx),
+                        () -> SortTextLinesActions.run(shell, ctx)));
             });
         }
 
@@ -410,10 +422,21 @@ public class TextEditorMenuHook implements IStartup
             attachToMenu(menu, hookMarker, () ->
             {
                 Shell shell = textWidget.getShell();
-                return new MenuBinding(
-                    shell,
-                    () -> PasteWithCompareActions.isAvailable(shell, part, editorPart),
-                    () -> PasteWithCompareActions.run(shell, part, editorPart));
+                return List.of(
+                    new MenuBinding(shell,
+                        PasteWithCompareActions.MENU_LABEL,
+                        "Сравнить выделение с буфером обмена и вставить результат",
+                        PasteWithCompareHandler.COMMAND_ID,
+                        PasteWithCompareHandler.BINDING_CONTEXT_ID,
+                        () -> PasteWithCompareActions.isAvailable(shell, part, editorPart),
+                        () -> PasteWithCompareActions.run(shell, part, editorPart)),
+                    new MenuBinding(shell,
+                        SortTextLinesActions.MENU_LABEL,
+                        "Отсортировать выделенные строки текста по алфавиту",
+                        SortTextLinesHandler.COMMAND_ID,
+                        SortTextLinesHandler.BINDING_CONTEXT_ID,
+                        () -> SortTextLinesActions.isAvailable(shell, part, editorPart),
+                        () -> SortTextLinesActions.run(shell, part, editorPart)));
             });
         }
 
@@ -435,10 +458,21 @@ public class TextEditorMenuHook implements IStartup
             attachToMenu(menu, hookMarker, () ->
             {
                 Shell shell = textWidget.getShell();
-                return new MenuBinding(
-                    shell,
-                    () -> PasteWithCompareActions.isAvailable(shell, contextSupplier.get()),
-                    () -> PasteWithCompareActions.run(shell, contextSupplier.get()));
+                return List.of(
+                    new MenuBinding(shell,
+                        PasteWithCompareActions.MENU_LABEL,
+                        "Сравнить выделение с буфером обмена и вставить результат",
+                        PasteWithCompareHandler.COMMAND_ID,
+                        PasteWithCompareHandler.BINDING_CONTEXT_ID,
+                        () -> PasteWithCompareActions.isAvailable(shell, contextSupplier.get()),
+                        () -> PasteWithCompareActions.run(shell, contextSupplier.get())),
+                    new MenuBinding(shell,
+                        SortTextLinesActions.MENU_LABEL,
+                        "Отсортировать выделенные строки текста по алфавиту",
+                        SortTextLinesHandler.COMMAND_ID,
+                        SortTextLinesHandler.BINDING_CONTEXT_ID,
+                        () -> SortTextLinesActions.isAvailable(shell, contextSupplier.get()),
+                        () -> SortTextLinesActions.run(shell, contextSupplier.get())));
             });
         }
 
@@ -449,16 +483,16 @@ public class TextEditorMenuHook implements IStartup
         static void attachToMenu(
             Menu menu,
             String hookMarker,
-            Supplier<MenuBinding> bindingSupplier)
+            Supplier<List<MenuBinding>> bindingsSupplier)
         {
-            attachToMenu(menu, hookMarker, null, bindingSupplier);
+            attachToMenu(menu, hookMarker, null, bindingsSupplier);
         }
 
         static void attachToMenu(
             Menu menu,
             String hookMarker,
             ISourceViewer viewer,
-            Supplier<MenuBinding> bindingSupplier)
+            Supplier<List<MenuBinding>> bindingsSupplier)
         {
             if (menu == null || menu.isDisposed())
                 return;
@@ -467,7 +501,7 @@ public class TextEditorMenuHook implements IStartup
 
             menu.setData(hookMarker, Boolean.TRUE);
 
-            MenuAdapter listener = buildMenuListener(bindingSupplier, viewer);
+            MenuAdapter listener = buildMenuListener(bindingsSupplier, viewer);
             menu.addMenuListener(listener);
 
             menu.addDisposeListener(e ->
@@ -477,12 +511,12 @@ public class TextEditorMenuHook implements IStartup
             });
         }
 
-        private static MenuAdapter buildMenuListener(Supplier<MenuBinding> bindingSupplier)
+        private static MenuAdapter buildMenuListener(Supplier<List<MenuBinding>> bindingsSupplier)
         {
-            return buildMenuListener(bindingSupplier, null);
+            return buildMenuListener(bindingsSupplier, null);
         }
 
-        private static MenuAdapter buildMenuListener(Supplier<MenuBinding> bindingSupplier, ISourceViewer viewer)
+        private static MenuAdapter buildMenuListener(Supplier<List<MenuBinding>> bindingsSupplier, ISourceViewer viewer)
         {
             return new MenuAdapter()
             {
@@ -491,8 +525,8 @@ public class TextEditorMenuHook implements IStartup
                 @Override
                 public void menuShown(MenuEvent e)
                 {
-                    MenuBinding binding = bindingSupplier.get();
-                    if (binding == null)
+                    List<MenuBinding> bindings = bindingsSupplier.get();
+                    if (bindings == null || bindings.isEmpty())
                         return;
 
                     Menu menu = (Menu) e.widget;
@@ -501,24 +535,23 @@ public class TextEditorMenuHook implements IStartup
                     if (comfortSub == null)
                         return;
 
-                    MenuItem pasteItem = new MenuItem(comfortSub, SWT.PUSH);
-                    pasteItem.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
-                        PasteWithCompareActions.MENU_LABEL,
-                        PasteWithCompareHandler.COMMAND_ID,
-                        PasteWithCompareHandler.BINDING_CONTEXT_ID));
-                    pasteItem.setToolTipText(
-                        "Сравнить выделение с буфером обмена и вставить результат"
-                            + Global.pluginSignForTooltip());
-                    pasteItem.setEnabled(binding.isAvailable());
-                    pasteItem.addSelectionListener(new SelectionAdapter()
+                    for (MenuBinding binding : bindings)
                     {
-                        @Override
-                        public void widgetSelected(SelectionEvent ev)
+                        MenuItem item = new MenuItem(comfortSub, SWT.PUSH);
+                        item.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
+                            binding.label, binding.commandId, binding.bindingContextId));
+                        item.setToolTipText(binding.tooltip + Global.pluginSignForTooltip());
+                        item.setEnabled(binding.isAvailable());
+                        item.addSelectionListener(new SelectionAdapter()
                         {
-                            binding.run();
-                        }
-                    });
-                    addedItems.add(pasteItem);
+                            @Override
+                            public void widgetSelected(SelectionEvent ev)
+                            {
+                                binding.run();
+                            }
+                        });
+                        addedItems.add(item);
+                    }
 
                     if (viewer != null && IrFormatTextHandler.isApplicableQuery(viewer))
                     {
@@ -578,25 +611,34 @@ public class TextEditorMenuHook implements IStartup
         static final class MenuBinding
         {
             private final Shell shell;
-            private final java.util.function.BooleanSupplier isAvailable;
-            private final Runnable run;
+            final String label;
+            final String tooltip;
+            final String commandId;
+            final String bindingContextId;
+            private final java.util.function.BooleanSupplier isAvailableSupplier;
+            private final Runnable runAction;
 
-            MenuBinding(Shell shell, java.util.function.BooleanSupplier isAvailable, Runnable run)
+            MenuBinding(Shell shell, String label, String tooltip, String commandId, String bindingContextId,
+                java.util.function.BooleanSupplier isAvailableSupplier, Runnable runAction)
             {
                 this.shell = shell;
-                this.isAvailable = isAvailable;
-                this.run = run;
+                this.label = label;
+                this.tooltip = tooltip;
+                this.commandId = commandId;
+                this.bindingContextId = bindingContextId;
+                this.isAvailableSupplier = isAvailableSupplier;
+                this.runAction = runAction;
             }
 
             boolean isAvailable()
             {
-                return shell != null && !shell.isDisposed() && isAvailable.getAsBoolean();
+                return shell != null && !shell.isDisposed() && isAvailableSupplier.getAsBoolean();
             }
 
             void run()
             {
                 if (shell != null && !shell.isDisposed())
-                    run.run();
+                    runAction.run();
             }
         }
     }

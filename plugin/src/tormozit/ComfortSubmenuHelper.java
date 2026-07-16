@@ -1,6 +1,8 @@
 package tormozit;
 
+import java.text.Collator;
 import java.util.LinkedHashSet;
+import java.util.Locale;
 import java.util.Set;
 
 import org.eclipse.core.commands.ParameterizedCommand;
@@ -287,6 +289,68 @@ final class ComfortSubmenuHelper
         Menu comfortSub = new Menu(shell != null && !shell.isDisposed() ? shell : parentMenu.getShell(), SWT.DROP_DOWN);
         comfortRoot.setMenu(comfortSub);
         return comfortSub;
+    }
+
+    private static final Collator RU_COLLATOR = createRuCollator();
+
+    private static Collator createRuCollator()
+    {
+        Collator collator = Collator.getInstance(new Locale("ru")); //$NON-NLS-1$
+        collator.setStrength(Collator.PRIMARY);
+        return collator;
+    }
+
+    /**
+     * Создаёт пункт меню и сразу вставляет его в позицию, сохраняющую алфавитный порядок
+     * пунктов подменю «Комфорт» (по видимой части текста, без колонки сочетания клавиш
+     * после {@code \t}). Разделители ({@code SWT.SEPARATOR}) делят меню на независимо
+     * сортируемые группы — новый пункт вставляется внутрь группы, к которой относится
+     * последний элемент меню на момент вызова.
+     *
+     * <p><b>Используйте этот метод (а не {@code new MenuItem(comfortSub, ...)}) для всех
+     * пунктов подменю «Комфорт»</b> — так порядок команд остаётся отсортированным
+     * автоматически, в том числе для пунктов, добавляемых другими хуками в то же меню.
+     * Текст пункта должен быть известен на момент создания (если он зависит от условия,
+     * вычислите итоговую строку до вызова, а не через последующий {@code setText}).
+     */
+    static MenuItem createSortedMenuItem(Menu menu, int style, String text)
+    {
+        int index = findSortedInsertIndex(menu, text);
+        MenuItem item = index >= 0 ? new MenuItem(menu, style, index) : new MenuItem(menu, style);
+        item.setText(text);
+        return item;
+    }
+
+    private static int findSortedInsertIndex(Menu menu, String text)
+    {
+        if (menu == null || menu.isDisposed())
+            return -1;
+        String key = sortKey(text);
+        MenuItem[] items = menu.getItems();
+
+        int groupStart = 0;
+        for (int i = 0; i < items.length; i++)
+        {
+            if (!items[i].isDisposed() && (items[i].getStyle() & SWT.SEPARATOR) != 0)
+                groupStart = i + 1;
+        }
+
+        for (int i = groupStart; i < items.length; i++)
+        {
+            if (items[i].isDisposed() || (items[i].getStyle() & SWT.SEPARATOR) != 0)
+                continue;
+            if (RU_COLLATOR.compare(key, sortKey(items[i].getText())) < 0)
+                return i;
+        }
+        return items.length;
+    }
+
+    private static String sortKey(String text)
+    {
+        if (text == null)
+            return ""; //$NON-NLS-1$
+        int tab = text.indexOf('\t');
+        return (tab >= 0 ? text.substring(0, tab) : text).replace("&", "").trim(); //$NON-NLS-1$ //$NON-NLS-2$
     }
 }
 

@@ -329,6 +329,11 @@
         categoryId="tormozit.commands.global"
         description="Сравнить выделение с буфером и вставить отредактированный текст. Сочетание настраивается в Клавиши, контекст «В окнах»; срабатывает при фокусе в редактируемом текстовом поле (Комфорт)"/>
     <command
+        id="tormozit.SortTextLines"
+        name="Сортировать строки текста"
+        categoryId="tormozit.commands.global"
+        description="Отсортировать выделенные строки текста по алфавиту. Сочетание настраивается в Клавиши, контекст «В окнах»; срабатывает при фокусе в редактируемом текстовом поле (Комфорт)"/>
+    <command
         id="tormozit.ModuleOutline"
         name="Быстрая схема модуля"
         categoryId="tormozit.commands.global"
@@ -358,6 +363,11 @@
         name="Проверить модуль ИР"
         categoryId="tormozit.commands.global"
         description="Открыть проверку модуля через приложение ИР. Активно только при подключённом ИР. Настраивайте только «Редактирование источника Xtext». Остальные контексты не редактируйте. (Комфорт)"/>
+    <command
+        id="tormozit.IrDeclareExpressionType"
+        name="Объявить тип выражения ИР"
+        categoryId="tormozit.commands.global"
+        description="Явно объявить тип выражения под кареткой через приложение ИР. Активно только при подключённом ИР. Настраивайте только «Редактирование источника Xtext». Остальные контексты не редактируйте. (Комфорт)"/>
     <command
         id="tormozit.showCollection"
         name="Показать коллекцию"
@@ -520,6 +530,10 @@
         commandId="tormozit.PasteWithCompare">
     </handler>
     <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.SortTextLinesHandler"
+        commandId="tormozit.SortTextLines">
+    </handler>
+    <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.ModuleOutlineHandler"
         commandId="tormozit.ModuleOutline">
       <activeWhen>
@@ -570,6 +584,17 @@
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.IrModuleCheckCommandHandler"
         commandId="tormozit.IrModuleCheck">
+      <activeWhen>
+        <with variable="activeContexts">
+          <iterate operator="or">
+            <equals value="org.eclipse.xtext.ui.XtextEditorScope"/>
+          </iterate>
+        </with>
+      </activeWhen>
+    </handler>
+    <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.IrDeclareExpressionTypeCommandHandler"
+        commandId="tormozit.IrDeclareExpressionType">
       <activeWhen>
         <with variable="activeContexts">
           <iterate operator="or">
