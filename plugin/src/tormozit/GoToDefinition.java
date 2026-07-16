@@ -345,34 +345,16 @@ public class GoToDefinition extends AbstractHandler
 
     private static void showIRMessage(Shell shell, IWorkbenchPart part, String message)
     {
-        final IWorkbenchPart partRef = part;
         ToastNotification.show(
             IRApplication.toastTitle(), //$NON-NLS-1$
             message,
             5_000,
-            () -> showIrApplication(resolveIrSessionForTransport(partRef)),
+            () -> {
+                IRSession s = IRSession.resolveIrSessionForTransport(part);
+                if (s != null) s.showIrApplication();
+            },
             "Показать приложение ИР", //$NON-NLS-1$
             shell);
-    }
-
-    private static IRSession resolveIrSessionForTransport(IWorkbenchPart part)
-    {
-        IProject activeProject = Global.getActiveProject(part, false);
-        if (activeProject != null)
-        {
-            IDtProject dtProject = Global.getDtProjectFromWorkspaceProject(activeProject);
-            IRSession session = IRApplication.getConnectedSession(dtProject);
-            if (session != null)
-                return session;
-        }
-        return IRApplication.getAnyConnectedSession();
-    }
-
-    private static void showIrApplication(IRSession session)
-    {
-        if (session == null || session.executor == null)
-            return;
-        session.executor.submit(session::showWindow);
     }
 
     public static void notifyDenyReplaceObject(File newFile, String command)

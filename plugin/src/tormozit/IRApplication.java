@@ -140,6 +140,13 @@ public final class IRApplication
         return (s != null && s.state == State.CONNECTED) ? s.platformVersion : null;
     }
 
+    public IRSession getSessionByInfobase(InfobaseReference infobase)
+    {
+        if (infobase == null) return null;
+        IRSession s = sessions.get(sessionKey(infobase));
+        return (s != null && s.state == State.CONNECTED) ? s : null;
+    }
+
     public Object getAnyActiveDispatch()
     {
         for (IRSession s : sessions.values())

@@ -26,12 +26,14 @@ import org.eclipse.jface.text.TextSelection;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.viewers.ISelectionProvider;
 import org.eclipse.ui.IEditorInput;
+import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.text.undo.DocumentUndoManagerRegistry;
 import org.eclipse.text.undo.IDocumentUndoManager;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.util.TextRegion;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.platform.services.model.InfobaseReference;
 import com.e1c.g5.dt.applications.infobases.IInfobaseApplication;
 import com.sun.jna.platform.win32.WinDef.HWND;
@@ -844,30 +846,48 @@ public final class IRSession
         return new CompletionAdapterResult(newTemplate, formatText, isGenerator, deleteFromLf, deleteToLf);
     }
 
-    /**
-         * Проактивная отмена: удаление cancel-файла (ИР прерывает {@code ОписаниеХТМЛВыражения}).
-         * COM {@code УстановитьФайлОтменыВычислений(null)} вызывается в {@code finally} на executor.
-         */
-        public static void cancelActiveEvaluation(IRSession session)
+    static IRSession resolveIrSessionForTransport(IWorkbenchPart part)
+    {
+        IProject activeProject = Global.getActiveProject(part, false);
+        if (activeProject != null)
         {
-            if (session == null)
-                return;
-            AtomicReference<Path> ref = IrBslExpressionHtmlSupport.activeCancelFiles.get(session);
-            if (ref == null)
-                return;
-            Path path = ref.get();
-            if (path == null)
-                return;
-            try
-            {
-                if (Files.deleteIfExists(path))
-                    BslSideHintDebug.step("ir cancel", "deleted " + path.getFileName()); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            catch (Exception e)
-            {
-                BslSideHintDebug.problem("ir cancel: " + e.getMessage()); //$NON-NLS-1$
-            }
+            IDtProject dtProject = Global.getDtProjectFromWorkspaceProject(activeProject);
+            IRSession session = IRApplication.getConnectedSession(dtProject);
+            if (session != null)
+                return session;
         }
+        return IRApplication.getAnyConnectedSession();
+    }
+
+    public void showIrApplication()
+    {
+        executor.submit(this::showWindow);
+    }
+
+    /**
+     * Проактивная отмена: удаление cancel-файла (ИР прерывает {@code ОписаниеХТМЛВыражения}).
+     * COM {@code УстановитьФайлОтменыВычислений(null)} вызывается в {@code finally} на executor.
+     */
+    public static void cancelActiveEvaluation(IRSession session)
+    {
+        if (session == null)
+            return;
+        AtomicReference<Path> ref = IrBslExpressionHtmlSupport.activeCancelFiles.get(session);
+        if (ref == null)
+            return;
+        Path path = ref.get();
+        if (path == null)
+            return;
+        try
+        {
+            if (Files.deleteIfExists(path))
+                BslSideHintDebug.step("ir cancel", "deleted " + path.getFileName()); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (Exception e)
+        {
+            BslSideHintDebug.problem("ir cancel: " + e.getMessage()); //$NON-NLS-1$
+        }
+    }
 
     public static Path setEvaluationCancellationFile(IRSession session, Object codeEditor) throws IOException
         {

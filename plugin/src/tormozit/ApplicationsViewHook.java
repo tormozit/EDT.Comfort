@@ -1056,7 +1056,7 @@ public class ApplicationsViewHook implements IStartup
     }
 
     // =======================================================================
-    // 3. Тулбар: кнопки «Запустить конфигуратор» и «Подключение»
+    // 3. Тулбар: кнопки «Запустить конфигуратор» и «Комфорт»
     // =======================================================================
 
     private void addToolbarButtons(IViewPart view, ColumnViewer viewer)
@@ -1117,7 +1117,7 @@ public class ApplicationsViewHook implements IStartup
                 ToolItem item = index >= 0
                     ? new ToolItem(bar, SWT.DROP_DOWN, index)
                     : new ToolItem(bar, SWT.DROP_DOWN);
-                item.setText("Подключение"); //$NON-NLS-1$
+                item.setText("Комфорт"); //$NON-NLS-1$
                 item.setToolTipText("Управление подключениями инфобаз" + Global.pluginSignForTooltip()); //$NON-NLS-1$
                 item.setEnabled(false);
                 item.addSelectionListener(new SelectionAdapter()
@@ -1160,18 +1160,7 @@ public class ApplicationsViewHook implements IStartup
 
             Menu menu = new Menu(bar.getShell(), SWT.POP_UP);
 
-            addItem(menu, "Подключить приложение ИР", true, () -> { //$NON-NLS-1$
-                sel.toList().forEach(el -> irReg.connectInfobaseApplication((IInfobaseApplication)el));
-                safeRefresh(viewer);
-            });
-            addItem(menu, "Отключить приложение ИР", anyIr, () -> { //$NON-NLS-1$
-                sel.toList().forEach(el -> irReg.disconnect(getInfobase(el)));
-                safeRefresh(viewer);
-            });
-            new MenuItem(menu, SWT.SEPARATOR);
-            addItem(menu, "Отключить конфигуратор", anySsh, () -> { //$NON-NLS-1$
-                disconnectSsh(sel.toList(), viewer);
-            });
+            fillIrMenu(menu, sel, irReg, anyIr, anySsh, viewer);
 
             Rectangle b = item.getBounds();
             Point loc = bar.toDisplay(b.x, b.y + b.height);
@@ -1192,7 +1181,7 @@ public class ApplicationsViewHook implements IStartup
     }
 
     // =======================================================================
-    // 4. Контекстное меню: CASCADE «Подключение»
+    // 4. Контекстное меню: CASCADE «Комфорт»
     // =======================================================================
 
     private void addContextMenu(ColumnViewer viewer, Control control)
@@ -1221,7 +1210,7 @@ public class ApplicationsViewHook implements IStartup
                     added.add(new MenuItem(finalMenu, SWT.SEPARATOR));
 
                     MenuItem cascade = new MenuItem(finalMenu, SWT.CASCADE);
-                    cascade.setText("Подключение"); //$NON-NLS-1$
+                    cascade.setText("Комфорт"); //$NON-NLS-1$
                     added.add(cascade);
 
                     // new Menu(cascade) — единственный корректный способ создать
@@ -1229,18 +1218,7 @@ public class ApplicationsViewHook implements IStartup
                     Menu sub = new Menu(cascade);
                     cascade.setMenu(sub);
 
-                    addItem(sub, "Подключить приложение ИР", true, () -> { //$NON-NLS-1$
-                        sel.toList().forEach(el -> irReg.connectInfobaseApplication((IInfobaseApplication)el));
-                        safeRefresh(viewer);
-                    });
-                    addItem(sub, "Отключить приложение ИР", anyIr, () -> { //$NON-NLS-1$
-                        sel.toList().forEach(el -> irReg.disconnect(getInfobase(el)));
-                        safeRefresh(viewer);
-                    });
-                    new MenuItem(sub, SWT.SEPARATOR);
-                    addItem(sub, "Отключить конфигуратор", anySsh, () -> { //$NON-NLS-1$
-                        disconnectSsh(sel.toList(), viewer);
-                    });
+                    fillIrMenu(sub, sel, irReg, anyIr, anySsh, viewer);
                 }
                 catch (Exception ex)
                 {
@@ -1315,6 +1293,29 @@ public class ApplicationsViewHook implements IStartup
         item.addSelectionListener(new SelectionAdapter()
         {
             @Override public void widgetSelected(SelectionEvent e) { action.run(); }
+        });
+    }
+
+    private static void fillIrMenu(Menu menu, IStructuredSelection sel,
+        IRApplication irReg, boolean anyIr, boolean anySsh, ColumnViewer viewer)
+    {
+        addItem(menu, "Подключить приложение ИР", true, () -> { //$NON-NLS-1$
+            sel.toList().forEach(el -> irReg.connectInfobaseApplication((IInfobaseApplication)el));
+            safeRefresh(viewer);
+        });
+        addItem(menu, "Показать приложение ИР", anyIr, () -> { //$NON-NLS-1$
+            sel.toList().forEach(el -> {
+                IRSession session = irReg.getSessionByInfobase(getInfobase(el));
+                if (session != null) session.showIrApplication();
+            });
+        });
+        addItem(menu, "Отключить приложение ИР", anyIr, () -> { //$NON-NLS-1$
+            sel.toList().forEach(el -> irReg.disconnect(getInfobase(el)));
+            safeRefresh(viewer);
+        });
+        new MenuItem(menu, SWT.SEPARATOR);
+        addItem(menu, "Отключить конфигуратор", anySsh, () -> { //$NON-NLS-1$
+            disconnectSsh(sel.toList(), viewer);
         });
     }
 
