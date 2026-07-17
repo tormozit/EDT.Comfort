@@ -1686,28 +1686,27 @@ public class GoToDefinition extends AbstractHandler
         if (focused instanceof org.eclipse.swt.widgets.Text)
         {
             org.eclipse.swt.widgets.Text text = (org.eclipse.swt.widgets.Text) focused;
-            String sel = text.getSelectionText();
-            if (sel != null && !sel.isBlank()) 
-                return sel.strip();
             return text.getText().strip();
         }
         if (focused instanceof org.eclipse.swt.widgets.Combo)
         {
             org.eclipse.swt.widgets.Combo combo = (org.eclipse.swt.widgets.Combo) focused;
-            // Combo не предоставляет getSelectionText(), используем bounds
-            org.eclipse.swt.graphics.Point pt = combo.getSelection();
-            String all = combo.getText();
-            if (pt.x < pt.y && pt.y <= all.length())
-                return all.substring(pt.x, pt.y).strip();
-            return all.strip();
+            return combo.getText().strip();
         }
         if (focused instanceof org.eclipse.swt.custom.StyledText)
         {
             org.eclipse.swt.custom.StyledText st = (org.eclipse.swt.custom.StyledText) focused;
             String sel = st.getSelectionText();
-            if (sel != null && !sel.isBlank()) 
+            if (sel != null && !sel.isBlank())
                 return sel.strip();
-            return st.getText();
+            try
+            {
+                return extractQualifiedNameAt(new Document(st.getText()), st.getCaretOffset());
+            }
+            catch (BadLocationException e)
+            {
+                return null;
+            }
         }
         MoxelControl moxel = focused instanceof MoxelControl
                 ? (MoxelControl) focused
