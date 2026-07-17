@@ -47,6 +47,16 @@ public class PriorityGlobalKeyBindingHook implements IStartup
         "tormozit.CopyRef"         //$NON-NLS-1$
     };
 
+    private static final Set<String> GLOBAL_COMMAND_ID_SET =
+            new HashSet<>(Arrays.asList(GLOBAL_COMMAND_IDS));
+
+    /** Фиксированное сочетание каждой команды из {@link #GLOBAL_COMMAND_IDS} (как в {@code plugin.xml}). */
+    private static final java.util.Map<String, String> GLOBAL_COMMAND_DEFAULT_SEQUENCES =
+            java.util.Map.of(
+                "tormozit.GoToDefinition", "M1+F12", //$NON-NLS-1$ //$NON-NLS-2$
+                "tormozit.CopyRef", "M1+F11"); //$NON-NLS-1$ //$NON-NLS-2$
+
+
     /**
      * Команды ИР → USER в embedded/formEditor (XtextEditorScope — restore из IrKeyBindingHook);
      * SYSTEM FormatAction в Xtext-контекстах снимается (E4 не отдаёт приоритет USER над designer.scheme).
@@ -133,6 +143,7 @@ public class PriorityGlobalKeyBindingHook implements IStartup
         {
             if (!installServices())
                 return;
+            ensurePersistedGlobalOverrides(); // до installBindingListener() — без гонки с диалогом «Клавиши»
             installBindingListener();
         });
     }
@@ -204,6 +215,14 @@ public class PriorityGlobalKeyBindingHook implements IStartup
         {
             if (!irActive)
                 ensureFormatActionDefaults(Set.of());
+
+            Set<KeySequence> globalSequences = collectAllGlobalCommandSequences();
+            tempDumpGlobalCommandBindings(globalSequences);
+            // реактивно — переустановит persisted USER-оверрайд, если «Восстановить команду» её сняла;
+            // readRegistryAndPreferences() внутри пересобирает живую модель и сбрасывает наши
+            // непersist-нутые LOCAL_OVERRIDE_CONTEXT_IDS-привязки — форсируем их пересборку ниже.
+            if (ensurePersistedGlobalOverrides())
+                overridesNeedUpdate = true;
 
             if (overridesNeedUpdate)
             {
@@ -494,6 +513,184 @@ public class PriorityGlobalKeyBindingHook implements IStartup
         for (Binding binding : suppressedCompetingBindings)
             bindingServiceInternal.addBinding(binding);
         suppressedCompetingBindings.clear();
+    }
+
+    // =========================================================================
+    // Снятие чужих SYSTEM-привязок на сочетаниях GLOBAL_COMMAND_IDS в GLOBAL_CONTEXT_ID
+    // =========================================================================
+
+    /**
+     * ВРЕМЕННАЯ диагностика (снять после подтверждения фикса): безусловный дамп ВСЕХ
+     * привязок на сочетания {@link #GLOBAL_COMMAND_IDS} — без фильтров по схеме/контексту,
+     * чтобы увидеть реальный (не предполагаемый) contextId/schemeId/type конкурирующих
+     * команд, например {@code org.eclipse.debug.ui.commands.RunLast} на Ctrl+F11.
+     * Пишет в {@code .tmp/temp-logs/PriorityGlobalKeyBinding.log} через {@link Global#tempLog}.
+     */
+    private static void tempDumpGlobalCommandBindings(Set<KeySequence> sequences)
+    {
+        if (bindingServiceInternal == null)
+        {
+            Global.tempLog(TAG, "dump: bindingServiceInternal=null"); //$NON-NLS-1$
+            return;
+        }
+        Global.tempLog(TAG, "dump BEGIN activeScheme=" + activeSchemeId() //$NON-NLS-1$
+                + " ourSequences=" + sequences); //$NON-NLS-1$
+        for (Binding binding : bindingServiceInternal.getBindings())
+        {
+            if (binding == null)
+                continue;
+            TriggerSequence trigger = binding.getTriggerSequence();
+            if (!(trigger instanceof KeySequence keySequence) || !sequences.contains(keySequence))
+                continue;
+            ParameterizedCommand pc = binding.getParameterizedCommand();
+            Global.tempLog(TAG, "dump   cmd=" + (pc != null ? pc.getId() : "null") //$NON-NLS-1$ //$NON-NLS-2$
+                    + " ctx=" + binding.getContextId() //$NON-NLS-1$
+                    + " scheme=" + binding.getSchemeId() //$NON-NLS-1$
+                    + " type=" + (binding.getType() == Binding.USER ? "USER" : "SYSTEM") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " platform=" + binding.getPlatform() //$NON-NLS-1$
+                    + " locale=" + binding.getLocale() //$NON-NLS-1$
+                    + " seq=" + keySequence.format()); //$NON-NLS-1$
+        }
+        Global.tempLog(TAG, "dump END"); //$NON-NLS-1$
+    }
+
+    /** Все effective-сочетания {@link #GLOBAL_COMMAND_IDS} (объединённо, для поиска конфликтов). */
+    private static Set<KeySequence> collectAllGlobalCommandSequences()
+    {
+        Set<KeySequence> result = new LinkedHashSet<>();
+        for (String commandId : GLOBAL_COMMAND_IDS)
+            result.addAll(collectGlobalKeySequences(commandId));
+        return result;
+    }
+
+    /**
+     * Сохраняет USER-привязку {@link #GLOBAL_COMMAND_IDS} в {@link #GLOBAL_CONTEXT_ID} через
+     * {@link IBindingService#savePreferences} (+ tombstone на SYSTEM-схеме, см. ниже) и сразу
+     * пересобирает живую модель через {@link IBindingService#readRegistryAndPreferences}.
+     * Вызывается из {@link #earlyStartup()} (холодный старт) и реактивно из {@link #syncOverrides()}
+     * (например, когда пользователь жмёт «Восстановить команду» и наша привязка пропадает —
+     * тут же переустанавливается заново, а не только при следующем перезапуске EDT).
+     *
+     * <p>Идемпотентна (сверяет желаемое состояние с текущим и выходит без записи, если совпадает),
+     * поэтому многократные вызовы безопасны. Ранние попытки вызывать {@code savePreferences} реактивно
+     * БЕЗ пары {@code readRegistryAndPreferences} и БЕЗ tombstone ломали «Восстановить команду» для
+     * всех команд Комфорта — с обоими элементами вместе (плюс единый идемпотентный путь что при
+     * старте, что реактивно) 2026-07-17 подтверждено пользователем как рабочее, без регрессий.
+     *
+     * @return {@code true}, если реально записали и вызвали {@code readRegistryAndPreferences}
+     *         (это сбрасывает и наши непersist-нутые эфемерные оверрайды {@link #LOCAL_OVERRIDE_CONTEXT_IDS} —
+     *         вызывающий код обязан в этом случае форсировать их пересборку в этом же проходе).
+     */
+    private static boolean ensurePersistedGlobalOverrides()
+    {
+        if (bindingServiceInternal == null || commandService == null)
+            return false;
+
+        Scheme activeScheme = bindingServiceInternal.getActiveScheme();
+        if (activeScheme == null)
+            return false;
+        String schemeId = activeScheme.getId();
+
+        List<Binding> desiredUserBindings = new ArrayList<>();
+        for (String commandId : GLOBAL_COMMAND_IDS)
+        {
+            Command command = commandService.getCommand(commandId);
+            if (command == null || !command.isDefined())
+                continue;
+            ParameterizedCommand parameterized;
+            try
+            {
+                parameterized = ParameterizedCommand.generateCommand(command, null);
+            }
+            catch (Exception e)
+            {
+                Global.logError(TAG, "generateCommand (persist): " + commandId, e); //$NON-NLS-1$
+                continue;
+            }
+            String defaultSequenceFormal = GLOBAL_COMMAND_DEFAULT_SEQUENCES.get(commandId);
+            if (defaultSequenceFormal == null)
+                continue;
+            KeySequence sequence;
+            try
+            {
+                sequence = KeySequence.getInstance(defaultSequenceFormal);
+            }
+            catch (Exception e)
+            {
+                Global.logError(TAG, "parse default sequence: " + defaultSequenceFormal, e); //$NON-NLS-1$
+                continue;
+            }
+            desiredUserBindings.add(createOverride(sequence, parameterized, schemeId, GLOBAL_CONTEXT_ID));
+            // Tombstone (USER-привязка с пустой командой) на той же связке в родительской
+            // схеме — гасит там SYSTEM-декларации (нашу же из plugin.xml и чужие, например
+            // org.eclipse.debug.ui.commands.RunLast на Ctrl+F11), чтобы не было второй строки
+            // в Keys и самого конфликта. Тот же приём, что и у ручного назначения в диалоге.
+            desiredUserBindings.add(createOverride(sequence, null, DEFAULT_SCHEME_ID, GLOBAL_CONTEXT_ID));
+        }
+        if (desiredUserBindings.isEmpty())
+            return false;
+
+        Set<String> desiredTriggerKeys = new HashSet<>();
+        for (Binding desired : desiredUserBindings)
+            desiredTriggerKeys.add(triggerKey(desired));
+
+        List<Binding> originalUserBindings = new ArrayList<>();
+        List<Binding> combined = new ArrayList<>();
+        for (Binding binding : bindingServiceInternal.getBindings())
+        {
+            if (binding.getType() != Binding.USER)
+                continue;
+            if (isOwnEphemeralOverride(binding))
+                continue; // наша же рантайм-привязка для LOCAL_OVERRIDE_CONTEXT_IDS — не сохраняем
+            originalUserBindings.add(binding);
+            if (!desiredTriggerKeys.contains(triggerKey(binding)))
+                combined.add(binding); // не наш триггер — сохраняем как есть
+        }
+        combined.addAll(desiredUserBindings);
+
+        if (bindingSignatures(combined).equals(bindingSignatures(originalUserBindings)))
+            return false; // уже в желаемом состоянии
+
+        try
+        {
+            bindingServiceInternal.savePreferences(activeScheme, combined.toArray(new Binding[0]));
+            Global.tempLog(TAG, "persisted USER override via savePreferences: scheme=" + schemeId //$NON-NLS-1$
+                    + " total=" + combined.size() //$NON-NLS-1$
+                    + " added=" + desiredUserBindings.size()); //$NON-NLS-1$
+
+            // Пересобрать живую модель из реестра+preferences заново — иначе то, чем пользуется
+            // диалог «Клавиши»/«Восстановить команду», может остаться в устаревшем состоянии
+            // относительно того, что мы только что записали через savePreferences.
+            bindingServiceInternal.readRegistryAndPreferences(commandService);
+            Global.tempLog(TAG, "readRegistryAndPreferences done"); //$NON-NLS-1$
+            return true;
+        }
+        catch (java.io.IOException e)
+        {
+            Global.logError(TAG, "savePreferences", e); //$NON-NLS-1$
+            return false;
+        }
+    }
+
+    /**
+     * {@code true}, если это в точности тот вид рантайм-привязки, который сам плагин пересоздаёт
+     * при каждом старте через {@link #buildDesiredOverrides()} (GLOBAL_COMMAND_IDS × LOCAL_OVERRIDE_CONTEXT_IDS).
+     * Такие записи никогда нельзя сохранять в preferences — они не «настройка пользователя».
+     */
+    private static boolean isOwnEphemeralOverride(Binding binding)
+    {
+        ParameterizedCommand pc = binding.getParameterizedCommand();
+        String commandId = pc != null ? pc.getId() : null;
+        if (commandId == null || !GLOBAL_COMMAND_ID_SET.contains(commandId))
+            return false;
+        String contextId = binding.getContextId();
+        return FORM_EDITOR_CONTEXT_ID.equals(contextId) || ORDINARY_FORM_EDITOR_CONTEXT_ID.equals(contextId);
+    }
+
+    private static String triggerKey(Binding binding)
+    {
+        return binding.getSchemeId() + '|' + binding.getContextId()
+                + '|' + binding.getTriggerSequence().format();
     }
 
     /**
