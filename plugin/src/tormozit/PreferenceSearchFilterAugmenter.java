@@ -246,7 +246,7 @@ final class PreferenceSearchFilterAugmenter
             case FRESH ->
             {
                 glyph.setForeground(null);
-                glyph.setToolTipText("Обновить индекс фильтра. Индекс актуален."); //$NON-NLS-1$
+                glyph.setToolTipText("Обновить индекс фильтра. Индекс актуален. (Комфорт)"); //$NON-NLS-1$
                 if (!filterControl.isDisposed())
                 {
                     filterControl.setEnabled(true);
@@ -257,7 +257,7 @@ final class PreferenceSearchFilterAugmenter
             {
                 glyph.setForeground(accentColor(glyph));
                 glyph.setToolTipText(
-                        "Обновить индекс фильтра. Обнаружены изменения состава плагинов — индекс устарел."); //$NON-NLS-1$
+                        "Обновить индекс фильтра. Обнаружены изменения состава плагинов — индекс устарел. (Комфорт)"); //$NON-NLS-1$
                 if (!filterControl.isDisposed())
                 {
                     filterControl.setEnabled(true);
@@ -267,7 +267,7 @@ final class PreferenceSearchFilterAugmenter
             case NOT_BUILT ->
             {
                 glyph.setForeground(accentColor(glyph));
-                glyph.setToolTipText("Обновить индекс фильтра. Индекс ещё не построен."); //$NON-NLS-1$
+                glyph.setToolTipText("Обновить индекс фильтра. Индекс ещё не построен. (Комфорт)"); //$NON-NLS-1$
                 if (!filterControl.isDisposed())
                 {
                     filterControl.setEnabled(false);

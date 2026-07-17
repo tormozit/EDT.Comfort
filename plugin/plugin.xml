@@ -22,6 +22,8 @@
     <startup class="tormozit.ComfortKeysPageHook"/>
     <startup class="tormozit.PreferenceSearchIndexHook"/>
     <startup class="tormozit.IrFormatTextKeyDiagHook"/>
+    <startup class="tormozit.CtrlShiftFDiagHook"/>
+    <startup class="tormozit.KeyBindingToastHook"/>
     <startup class="tormozit.SmartOutlineHook"/>
     <startup class="tormozit.ListSelectionThemeHook"/>
     <startup class="tormozit.NavigatorFilterHook"/>

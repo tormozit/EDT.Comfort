@@ -36,7 +36,9 @@ import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
+import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Group;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Label;
@@ -57,12 +59,15 @@ import org.eclipse.ui.internal.keys.model.BindingElement;
 import org.eclipse.ui.internal.keys.model.BindingModel;
 import org.eclipse.ui.internal.keys.model.CommonModel;
 import org.eclipse.ui.internal.keys.model.ConflictModel;
+import org.eclipse.ui.internal.keys.model.ContextModel;
 import org.eclipse.ui.internal.keys.model.KeyController;
 import java.util.LinkedHashMap;
 import java.util.Map;
 import org.eclipse.core.commands.Command;
 import org.eclipse.core.commands.ParameterizedCommand;
 import org.eclipse.jface.bindings.Binding;
+import org.eclipse.jface.bindings.Scheme;
+import org.eclipse.jface.bindings.keys.KeyBinding;
 import org.eclipse.jface.bindings.keys.KeySequence;
 import org.eclipse.jface.bindings.TriggerSequence;
 import org.eclipse.ui.internal.keys.BindingService;
@@ -277,6 +282,541 @@ public final class ComfortKeysPreferences
         wireBindingsTreeCopy(page);
         wireFilterHistory(tree);
         LocalConflictUi.install(page);
+        installUserIndicatorCheckbox(page);
+        translateShowKeysControls(page);
+    }
+
+    // =========================================================================
+    // Перевод штатной группы «Show key binding when command is invoked» и её
+    // флажков — плюс подсказки со ссылкой на возможности Комфорт (тост с гиперссылкой
+    // «Настроить команду», см. KeyBindingToastHook).
+    // =========================================================================
+
+    private static final String SHOW_KEYS_TRANSLATED_KEY =
+            "tormozit.comfort.keys.showKeysTranslated"; //$NON-NLS-1$
+
+    private static final String SHOW_KEYS_GROUP_TEXT =
+            "Отображение сработавшений команды"; //$NON-NLS-1$
+
+    private static final String SHOW_KEYS_KEYBOARD_TEXT = "При нажатии клавиш"; //$NON-NLS-1$
+
+    private static final String SHOW_KEYS_KEYBOARD_TOOLTIP =
+            "Показывать имя команды при срабатывании по сочетанию клавиш.\n" //$NON-NLS-1$
+            + "От этого же флажка зависит уведомление Комфорт (имя команды, описание, сочетание, "
+            + "гиперссылка «Настроить команду»)."; //$NON-NLS-1$
+
+    private static final String SHOW_KEYS_MOUSE_TEXT = "При клике мышью"; //$NON-NLS-1$
+
+    private static final String SHOW_KEYS_MOUSE_TOOLTIP =
+            "Показывать имя команды при срабатывании через клик мышью"; //$NON-NLS-1$
+
+    private static void translateShowKeysControls(IPreferencePage page)
+    {
+        Button keyboardCheck = resolvePageButton(page, "fShowCommandKey"); //$NON-NLS-1$
+        if (keyboardCheck == null || keyboardCheck.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(keyboardCheck.getData(SHOW_KEYS_TRANSLATED_KEY)))
+            return;
+        keyboardCheck.setData(SHOW_KEYS_TRANSLATED_KEY, Boolean.TRUE);
+
+        keyboardCheck.setText(SHOW_KEYS_KEYBOARD_TEXT);
+        keyboardCheck.setToolTipText(SHOW_KEYS_KEYBOARD_TOOLTIP);
+
+        Button mouseCheck = resolvePageButton(page, "fShowCommandKeyForMouseEvents"); //$NON-NLS-1$
+        if (mouseCheck != null && !mouseCheck.isDisposed())
+        {
+            mouseCheck.setText(SHOW_KEYS_MOUSE_TEXT);
+            mouseCheck.setToolTipText(SHOW_KEYS_MOUSE_TOOLTIP);
+        }
+
+        if (keyboardCheck.getParent() instanceof Group group && !group.isDisposed())
+        {
+            group.setText(SHOW_KEYS_GROUP_TEXT);
+        }
+
+        keyboardCheck.getParent().getParent().layout(true, true);
+    }
+
+    private static Button resolvePageButton(IPreferencePage page, String fieldName)
+    {
+        Object value = resolvePageField(page, fieldName);
+        if (value instanceof Button button)
+            return button;
+        return null;
+    }
+
+    // =========================================================================
+    // Открытие «Клавиши» на конкретной команде (гиперссылка тоста после срабатывания
+    // сочетания клавиш, см. KeyBindingToastHook).
+    // =========================================================================
+
+    private static final int NAVIGATE_MAX_ATTEMPTS = 40;
+
+    private static final int NAVIGATE_POLL_MS = 100;
+
+    /**
+     * Открывает страницу «Клавиши» и выделяет в дереве первую привязку команды {@code commandId}.
+     * {@code PreferencesUtil.createPreferenceDialogOn} только создаёt диалог — {@code Shell}
+     * появляется лишь после {@link PreferenceDialog#open()}, поэтому навигация планируется
+     * через {@code asyncExec} ДО {@code open()}: тот блокирует поток вложенным циклом событий,
+     * но {@code asyncExec}-задача всё равно выполнится, пока этот цикл крутится.
+     */
+    public static void openKeysPageForCommand(String commandId)
+    {
+        if (commandId == null || commandId.isBlank())
+            return;
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        PreferenceDialog dialog = PreferencesUtil.createPreferenceDialogOn(
+            null, KEYS_PREFERENCE_PAGE_ID, null, null);
+        if (dialog == null)
+            return;
+        display.asyncExec(() -> scheduleNavigateToCommand(dialog, commandId, 0));
+        dialog.open();
+    }
+
+    private static void scheduleNavigateToCommand(PreferenceDialog dialog, String commandId, int attempt)
+    {
+        Shell shell = dialog.getShell();
+        if (shell == null || shell.isDisposed())
+            return;
+        Display display = shell.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+
+        Object selected = dialog.getSelectedPage();
+        if (selected instanceof IPreferencePage page && isKeysPreferencePage(page))
+        {
+            applyEnhancements(page, null);
+            KeyController controller = resolveKeyController(page);
+            FilteredTree tree = resolveFilteredTree(page);
+            if (controller != null && tree != null && !tree.isDisposed())
+            {
+                BindingElement target = findBindingElementByCommandId(controller, commandId);
+                if (target != null)
+                {
+                    String commandName = resolveCommandName(commandId);
+                    if (commandName != null)
+                    {
+                        setFilterText(tree, commandName);
+                        FilterHistoryStore.remember(KEYS_FILTER_HISTORY_SCOPE, commandName);
+                    }
+                    waitAndSelectBinding(tree, controller, target, 0);
+                    return;
+                }
+            }
+        }
+
+        if (attempt >= NAVIGATE_MAX_ATTEMPTS)
+            return;
+        display.timerExec(NAVIGATE_POLL_MS, () -> scheduleNavigateToCommand(dialog, commandId, attempt + 1));
+    }
+
+    private static BindingElement findBindingElementByCommandId(KeyController controller, String commandId)
+    {
+        for (Object element : controller.getBindingModel().getBindings())
+        {
+            if (element instanceof BindingElement bindingElement && commandId.equals(bindingElement.getId()))
+                return bindingElement;
+        }
+        return null;
+    }
+
+    private static String resolveCommandName(String commandId)
+    {
+        ICommandService commandService = PlatformUI.getWorkbench().getService(ICommandService.class);
+        if (commandService == null)
+            return null;
+        Command command = commandService.getCommand(commandId);
+        if (command == null)
+            return null;
+        try
+        {
+            return command.getName();
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+    }
+
+    private static void waitAndSelectBinding(
+            FilteredTree tree, KeyController controller, BindingElement target, int attempt)
+    {
+        if (tree.isDisposed())
+            return;
+        Display display = tree.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+
+        tree.getViewer().refresh();
+        if (isBindingVisibleInTreeStatic(tree, target) || attempt >= NAVIGATE_MAX_ATTEMPTS)
+        {
+            BindingModel bindingModel = controller.getBindingModel();
+            bindingModel.setSelectedElement(target);
+            TreeViewer viewer = tree.getViewer();
+            viewer.reveal(target);
+            viewer.setSelection(new StructuredSelection(target), true);
+            return;
+        }
+        display.timerExec(NAVIGATE_POLL_MS, () -> waitAndSelectBinding(tree, controller, target, attempt + 1));
+    }
+
+    private static boolean isBindingVisibleInTreeStatic(FilteredTree filteredTree, BindingElement binding)
+    {
+        for (TreeItem item : filteredTree.getViewer().getTree().getItems())
+        {
+            if (treeItemMatchesBindingStatic(item, binding))
+                return true;
+        }
+        return false;
+    }
+
+    private static boolean treeItemMatchesBindingStatic(TreeItem item, BindingElement binding)
+    {
+        Object data = item.getData();
+        if (binding.equals(data))
+            return true;
+        for (TreeItem child : item.getItems())
+        {
+            if (treeItemMatchesBindingStatic(child, binding))
+                return true;
+        }
+        return false;
+    }
+
+    // =========================================================================
+    // Флажок «Пользовательская» рядом с полем «Привязка»: реально поднимает/снимает
+    // приоритет выбранной привязки — через IBindingService.savePreferences + tombstone
+    // на родительской схеме (тот же приём, что PriorityGlobalKeyBindingHook.
+    // ensurePersistedGlobalOverrides — подтверждённый рабочим 2026-07-17), НЕ через
+    // BindingModel.copy()/restoreBinding(): copy() рассчитан на UI-поток «ввести НОВОЕ
+    // сочетание в поле Привязка и нажать Копировать» (создаёт пустую альтернативную
+    // привязку без сочетания и без U), а не на «продублировать текущую как USER».
+    // =========================================================================
+
+    private static final String USER_INDICATOR_KEY = "tormozit.comfort.keys.userIndicator"; //$NON-NLS-1$
+
+    private static final String USER_INDICATOR_TOOLTIP =
+            "Привязка назначена пользователем (USER) — при конфликте на том же сочетании "
+            + "в том же контексте она побеждает штатную (SYSTEM) привязку той же команды.\n" //$NON-NLS-1$
+            + "Отметить — поднять приоритет (то же сочетание становится пользовательским); "
+            + "снять — вернуть штатную привязку. (Комфорт)"; //$NON-NLS-1$
+
+    /** Не реагировать на programmatic setSelection() в {@link #syncUserIndicatorCheckbox}. */
+    private static final String USER_INDICATOR_SYNCING_KEY =
+            "tormozit.comfort.keys.userIndicatorSyncing"; //$NON-NLS-1$
+
+    /**
+     * Оборачивает {@code fBindingText} в новый {@code Composite} ровно на его прежнем месте
+     * в родителе (через {@code moveAbove} + reparent), чтобы флажок встал СПРАВА от поля,
+     * деля с ним ширину — без вставки нового ребёнка в существующий ряд родителя (это в
+     * прошлый раз сдвинуло «<» и «Когда», см. правку 009). Порядок остальных детей родителя
+     * не меняется: обёртка занимает точно ту же ячейку, которую раньше занимало само поле.
+     */
+    private static void installUserIndicatorCheckbox(IPreferencePage page)
+    {
+        Text bindingText = resolveBindingTextField(page);
+        if (bindingText == null || bindingText.isDisposed())
+            return;
+
+        Composite existingWrapper = bindingText.getParent();
+        if (existingWrapper != null && !existingWrapper.isDisposed()
+                && Boolean.TRUE.equals(existingWrapper.getData(USER_INDICATOR_KEY)))
+        {
+            syncUserIndicatorCheckbox(page);
+            return;
+        }
+
+        Composite originalParent = bindingText.getParent();
+        if (originalParent == null || originalParent.isDisposed())
+            return;
+
+        KeyController controller = resolveKeyController(page);
+        if (controller == null)
+            return;
+
+        Object originalLayoutData = bindingText.getLayoutData();
+
+        Composite wrapper = new Composite(originalParent, SWT.NONE);
+        GridLayout wrapperLayout = new GridLayout(2, false);
+        wrapperLayout.marginWidth = 0;
+        wrapperLayout.marginHeight = 0;
+        wrapperLayout.horizontalSpacing = 8;
+        wrapper.setLayout(wrapperLayout);
+        if (originalLayoutData instanceof GridData originalGd)
+            wrapper.setLayoutData(originalGd);
+        wrapper.moveAbove(bindingText);
+        wrapper.setData(USER_INDICATOR_KEY, Boolean.TRUE);
+
+        bindingText.setParent(wrapper);
+        bindingText.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+
+        Button userCheck = new Button(wrapper, SWT.CHECK);
+        userCheck.setText("Пользовательская"); //$NON-NLS-1$
+        userCheck.setToolTipText(USER_INDICATOR_TOOLTIP);
+        userCheck.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false));
+        userCheck.setData(USER_INDICATOR_KEY, Boolean.TRUE);
+
+        userCheck.addListener(SWT.Selection, e -> onUserIndicatorToggled(page, userCheck));
+
+        IPropertyChangeListener listener = event -> {
+            // Смена выделенной строки — событие на BindingModel. Прямое редактирование
+            // (набор нового сочетания в «Привязка») — событие PROP_TRIGGER/PROP_USER_DELTA
+            // на самом BindingElement (тот же приём, что LocalConflictUi.onKeyControllerChange),
+            // без первого флажок не видел бы, что U появился без смены выделения.
+            boolean selectionChanged = event.getSource() == controller.getBindingModel()
+                    && CommonModel.PROP_SELECTED_ELEMENT.equals(event.getProperty());
+            boolean elementEdited = event.getSource() instanceof BindingElement
+                    && (BindingElement.PROP_TRIGGER.equals(event.getProperty())
+                            || BindingElement.PROP_USER_DELTA.equals(event.getProperty()));
+            if (selectionChanged || elementEdited)
+                syncUserIndicatorCheckbox(page);
+        };
+        controller.addPropertyChangeListener(listener);
+        userCheck.addDisposeListener(e -> controller.removePropertyChangeListener(listener));
+
+        syncUserIndicatorCheckbox(page);
+        originalParent.layout(true, true);
+    }
+
+    private static void onUserIndicatorToggled(IPreferencePage page, Button userCheck)
+    {
+        if (Boolean.TRUE.equals(userCheck.getData(USER_INDICATOR_SYNCING_KEY)))
+            return;
+
+        KeyController controller = resolveKeyController(page);
+        if (controller == null)
+            return;
+        BindingElement selected = resolveSelectedBindingElement(controller);
+        if (!ComfortKeysLocalConflictAnalyzer.hasAssignedKey(selected))
+        {
+            syncUserIndicatorCheckbox(page);
+            return;
+        }
+
+        boolean makeUser = userCheck.getSelection();
+        if (makeUser)
+        {
+            // copy() не годится (создаёт пустую альтернативную привязку без сочетания и без U,
+            // см. правку выше) — своя логика через savePreferences+tombstone.
+            if (applyUserPriority(selected, true))
+            {
+                // KeyController.BindingModel — свой снимок, отдельный от IBindingService;
+                // savePreferences+readRegistryAndPreferences его не обновляет — правим сразу,
+                // чтобы флажок и колонка «Поль.» не показывали устаревшее состояние. Из-за этого
+                // же расхождения (свой BindingManager у диалога, см. performOk→saveBindings)
+                // изменение не переживает «OK»/переоткрытие — restoreBinding ниже устраняет это
+                // только для обратного направления; сюда пока не перенесено осознанно.
+                selected.setUserDelta(Integer.valueOf(Binding.USER));
+            }
+        }
+        else
+        {
+            // «Снять» = ровно то же самое действие, что кнопка «Восстановить команду»
+            // (BindingModel.restoreBinding) — штатный путь, корректно обновляющий приватный
+            // BindingManager диалога, поэтому не «сгорает» при последующем «OK». Именно этот
+            // метод раньше стоял здесь и был ошибочно заменён — сам по себе он не был причиной
+            // прежнего NPE (тот был от setUserDelta(null) уже после него).
+            controller.getBindingModel().restoreBinding(controller.getContextModel());
+        }
+
+        FilteredTree tree = resolveFilteredTree(page);
+        if (tree != null && !tree.isDisposed())
+            tree.getViewer().refresh();
+        syncUserIndicatorCheckbox(page);
+    }
+
+    /**
+     * Поднимает/снимает приоритет привязки {@code selected} до USER — тот же приём, что
+     * {@code PriorityGlobalKeyBindingHook.ensurePersistedGlobalOverrides}: USER-запись на
+     * активной схеме с тем же сочетанием + tombstone (USER-запись с {@code commandId=null})
+     * на родительской схеме, чтобы не плодить вторую конфликтующую строку в Keys. Пишет
+     * через {@code IBindingService.savePreferences} и сразу {@code readRegistryAndPreferences},
+     * иначе диалог останется показывать устаревшее состояние.
+     */
+    private static boolean applyUserPriority(BindingElement selected, boolean makeUser)
+    {
+        IBindingService bindingServiceRaw =
+                PlatformUI.getWorkbench().getService(IBindingService.class);
+        if (!(bindingServiceRaw instanceof BindingService bindingService))
+            return false;
+        ICommandService commandService =
+                PlatformUI.getWorkbench().getService(ICommandService.class);
+        if (commandService == null)
+            return false;
+
+        String commandId = selected.getId();
+        Command command = commandId != null ? commandService.getCommand(commandId) : null;
+        if (command == null || !command.isDefined())
+            return false;
+        ParameterizedCommand parameterized;
+        try
+        {
+            parameterized = ParameterizedCommand.generateCommand(command, null);
+        }
+        catch (Exception e)
+        {
+            Global.logError("ComfortKeys", "applyUserPriority generateCommand: " + commandId, e); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        }
+
+        TriggerSequence trigger = selected.getTrigger();
+        if (!(trigger instanceof KeySequence sequence) || sequence.isEmpty())
+            return false;
+
+        Scheme activeScheme = bindingService.getActiveScheme();
+        if (activeScheme == null)
+            return false;
+        String activeSchemeId = activeScheme.getId();
+        String contextId = resolveBindingElementContextIdForToggle(selected);
+        if (contextId == null)
+            return false;
+
+        String targetKey = activeSchemeId + '|' + contextId + '|' + sequence.format();
+        String tombstoneKey = DEFAULT_SCHEME_ID_FOR_TOGGLE + '|' + contextId + '|' + sequence.format();
+
+        Binding[] before = bindingService.getBindings();
+        int excludedCount = 0;
+        List<Binding> combined = new ArrayList<>();
+        for (Binding binding : before)
+        {
+            if (binding.getType() != Binding.USER)
+                continue;
+            TriggerSequence bindingTrigger = binding.getTriggerSequence();
+            String key = binding.getSchemeId() + '|' + binding.getContextId() + '|'
+                    + (bindingTrigger != null ? bindingTrigger.format() : ""); //$NON-NLS-1$
+            if (key.equals(targetKey) || key.equals(tombstoneKey))
+            {
+                excludedCount++;
+                continue; // заменим ниже актуальным состоянием
+            }
+            combined.add(binding);
+        }
+
+        if (makeUser)
+        {
+            combined.add(new KeyBinding(
+                    sequence, parameterized, activeSchemeId, contextId, null, null, null, Binding.USER));
+            if (!DEFAULT_SCHEME_ID_FOR_TOGGLE.equals(activeSchemeId))
+            {
+                combined.add(new KeyBinding(
+                        sequence, null, DEFAULT_SCHEME_ID_FOR_TOGGLE, contextId, null, null, null, Binding.USER));
+            }
+        }
+
+        Global.tempLog("userPriorityToggle", "cmd=" + commandId + " makeUser=" + makeUser //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " targetKey=" + targetKey + " tombstoneKey=" + tombstoneKey //$NON-NLS-1$ //$NON-NLS-2$
+                + " beforeTotal=" + before.length + " excluded=" + excludedCount //$NON-NLS-1$ //$NON-NLS-2$
+                + " combinedSize=" + combined.size()); //$NON-NLS-1$
+
+        try
+        {
+            bindingService.savePreferences(activeScheme, combined.toArray(new Binding[0]));
+            bindingService.readRegistryAndPreferences(commandService);
+
+            boolean stillPresentAfter = false;
+            for (Binding binding : bindingService.getBindings())
+            {
+                if (binding.getType() != Binding.USER)
+                    continue;
+                TriggerSequence bindingTrigger = binding.getTriggerSequence();
+                String key = binding.getSchemeId() + '|' + binding.getContextId() + '|'
+                        + (bindingTrigger != null ? bindingTrigger.format() : ""); //$NON-NLS-1$
+                if (key.equals(targetKey))
+                    stillPresentAfter = true;
+            }
+            Global.tempLog("userPriorityToggle", "cmd=" + commandId + " saved+reread ok" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " targetStillPresentAfterReread=" + stillPresentAfter); //$NON-NLS-1$
+            return true;
+        }
+        catch (java.io.IOException e)
+        {
+            Global.logError("ComfortKeys", "applyUserPriority savePreferences: " + commandId, e); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.tempLog("userPriorityToggle", "cmd=" + commandId + " savePreferences IOException " + e); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return false;
+        }
+    }
+
+    private static final String DEFAULT_SCHEME_ID_FOR_TOGGLE =
+            "org.eclipse.ui.defaultAcceleratorConfiguration"; //$NON-NLS-1$
+
+    private static String resolveBindingElementContextIdForToggle(BindingElement bindingElement)
+    {
+        if (bindingElement.getContext() != null)
+        {
+            String id = bindingElement.getContext().getId();
+            if (id != null && !id.isBlank())
+                return id;
+        }
+        try
+        {
+            Object id = Global.invoke(bindingElement, "getContextId"); //$NON-NLS-1$
+            if (id instanceof String contextId && !contextId.isBlank())
+                return contextId;
+        }
+        catch (Exception ignored)
+        {
+            // package-private getContextId
+        }
+        return null;
+    }
+
+    private static void syncUserIndicatorCheckbox(IPreferencePage page)
+    {
+        Text bindingText = resolveBindingTextField(page);
+        if (bindingText == null || bindingText.isDisposed())
+            return;
+        Composite wrapper = bindingText.getParent();
+        if (wrapper == null || wrapper.isDisposed())
+            return;
+        Button userCheck = findUserIndicatorButton(wrapper);
+        if (userCheck == null || userCheck.isDisposed())
+            return;
+
+        KeyController controller = resolveKeyController(page);
+        BindingElement selected = controller != null ? resolveSelectedBindingElement(controller) : null;
+        boolean hasBinding = ComfortKeysLocalConflictAnalyzer.hasAssignedKey(selected);
+        boolean isUser = hasBinding && selected.getUserDelta() != null
+                && selected.getUserDelta().intValue() == Binding.USER;
+
+        userCheck.setData(USER_INDICATOR_SYNCING_KEY, Boolean.TRUE);
+        try
+        {
+            userCheck.setEnabled(hasBinding);
+            userCheck.setSelection(isUser);
+        }
+        finally
+        {
+            userCheck.setData(USER_INDICATOR_SYNCING_KEY, null);
+        }
+    }
+
+    private static BindingElement resolveSelectedBindingElement(KeyController controller)
+    {
+        Object selected = controller.getBindingModel().getSelectedElement();
+        if (selected instanceof BindingElement bindingElement)
+            return bindingElement;
+        return null;
+    }
+
+    private static Button findUserIndicatorButton(Composite parent)
+    {
+        for (Control child : parent.getChildren())
+        {
+            if (child instanceof Button button && Boolean.TRUE.equals(button.getData(USER_INDICATOR_KEY)))
+                return button;
+        }
+        return null;
+    }
+
+    private static Text resolveBindingTextField(IPreferencePage page)
+    {
+        Object value = resolvePageField(page, "fBindingText"); //$NON-NLS-1$
+        if (value instanceof Text text)
+            return text;
+        return null;
     }
 
     /** scopeId для {@link FilterHistoryStore} — отдельный от общего поиска по «Параметрам». */
@@ -293,6 +833,8 @@ public final class ComfortKeysPreferences
      * {@code applyEnhancements} вызывается многократно poll-циклом хука, пока
      * страница окончательно не готова.
      */
+    private static final int FILTER_CONTROL_WIDTH = 300;
+
     private static void wireFilterHistory(FilteredTree tree)
     {
         if (tree == null || tree.isDisposed())
@@ -303,6 +845,12 @@ public final class ComfortKeysPreferences
         if (Boolean.TRUE.equals(filterControl.getData(KEYS_FILTER_HISTORY_WIRED_KEY)))
             return;
         filterControl.setData(KEYS_FILTER_HISTORY_WIRED_KEY, Boolean.TRUE);
+
+        if (filterControl.getLayoutData() instanceof GridData filterGd)
+        {
+            filterGd.widthHint = FILTER_CONTROL_WIDTH;
+            filterGd.grabExcessHorizontalSpace = false;
+        }
 
         FilterHistoryUi.wireKeyboard(filterControl, KEYS_FILTER_HISTORY_SCOPE);
 

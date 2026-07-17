@@ -78,7 +78,7 @@ final class FilterHistoryUi
     {
         if (row == null || row.isDisposed())
             return null;
-        Label label = createGlyphButton(row, "▾", "История фильтров (или Ctrl+↓ в поле)"); //$NON-NLS-1$ //$NON-NLS-2$
+        Label label = createGlyphButton(row, "▾", "История фильтров (или Ctrl+↓ в поле) (Комфорт)"); //$NON-NLS-1$ //$NON-NLS-2$
         label.addListener(SWT.MouseUp, e -> showPopup(label, filterControl, scopeId));
         Composite parent = row.getParent();
         if (parent != null && !parent.isDisposed())
