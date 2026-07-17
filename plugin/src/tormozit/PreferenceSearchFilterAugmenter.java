@@ -9,14 +9,17 @@ import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.jface.viewers.LabelProvider;
 import org.eclipse.jface.viewers.StyledString;
+import org.eclipse.jface.viewers.StyledString.Styler;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.CLabel;
 import org.eclipse.swt.graphics.Color;
+import org.eclipse.swt.graphics.Font;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.graphics.TextStyle;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Button;
@@ -443,11 +446,10 @@ final class PreferenceSearchFilterAugmenter
                 // соседних виджетов страницы. Текст и подсказка (tooltip)
                 // считаются одним атомом (см. PreferenceSearchIndex) — иначе
                 // подсветка тут разошлась бы с тем, что реально нашлось в
-                // индексе. При несовпадении — явный сброс фона (не оставляем
-                // подсветку от предыдущего текста фильтра).
+                // индексе.
                 String text = PreferenceSearchIndex.fuseTextAndTooltip(child, rawText);
                 boolean isMatch = text != null && !matcher.isEmpty && matcher.matches(text);
-                child.setBackground(isMatch ? controlHighlightColor(child) : null);
+                applyMatchStyle(child, isMatch);
             }
 
             if (child instanceof Composite childComposite)
@@ -455,22 +457,46 @@ final class PreferenceSearchFilterAugmenter
         }
     }
 
-    private static Color cachedLightHighlight;
+    private static final String ORIGINAL_FOREGROUND_KEY =
+            "tormozit.PreferenceSearchFilterAugmenter.originalForeground"; //$NON-NLS-1$
 
-    private static Color cachedDarkHighlight;
+    private static final String ORIGINAL_FONT_KEY =
+            "tormozit.PreferenceSearchFilterAugmenter.originalFont"; //$NON-NLS-1$
 
-    private static Color controlHighlightColor(Control control)
+    /**
+     * Красит только цвет/жирность шрифта контрола — фон НЕ трогаем вообще
+     * (единый стандарт подсветки в проекте, см. {@code OpenMdObjectHook}:
+     * только шрифт, без фона). И трогаем {@code setForeground}/{@code
+     * setFont} только у контролов, которые хоть раз реально подсвечивались —
+     * иначе прямой вызов этих сеттеров на КАЖДОМ контроле страницы при каждом
+     * пересчёте рвёт CSS-стилизацию тёмной темы Eclipse 4 (см. историю правок).
+     */
+    private static void applyMatchStyle(Control control, boolean isMatch)
     {
-        Display display = control.getDisplay();
-        if (SmartMatchHighlight.isDarkTheme())
+        if (isMatch)
         {
-            if (cachedDarkHighlight == null || cachedDarkHighlight.isDisposed())
-                cachedDarkHighlight = new Color(display, 90, 74, 30);
-            return cachedDarkHighlight;
+            if (control.getData(ORIGINAL_FOREGROUND_KEY) == null)
+            {
+                control.setData(ORIGINAL_FOREGROUND_KEY, control.getForeground());
+                control.setData(ORIGINAL_FONT_KEY, control.getFont());
+            }
+            TextStyle style = new TextStyle();
+            noBackgroundStyler(control).applyStyles(style);
+            if (style.foreground != null)
+                control.setForeground(style.foreground);
+            if (style.font != null)
+                control.setFont(style.font);
+            return;
         }
-        if (cachedLightHighlight == null || cachedLightHighlight.isDisposed())
-            cachedLightHighlight = new Color(display, 255, 246, 178);
-        return cachedLightHighlight;
+
+        Object originalFg = control.getData(ORIGINAL_FOREGROUND_KEY);
+        if (originalFg instanceof Color fg && !fg.isDisposed())
+            control.setForeground(fg);
+        Object originalFont = control.getData(ORIGINAL_FONT_KEY);
+        if (originalFont instanceof Font font && !font.isDisposed())
+            control.setFont(font);
+        // Если контрол никогда не подсвечивался (originalFg == null) — вообще
+        // не трогаем его, чтобы не срывать CSS-стилизацию темы.
     }
 
     private static void wireHighlighting(TreeViewer viewer, Text filterControl)
@@ -522,12 +548,14 @@ final class PreferenceSearchFilterAugmenter
             if (matcher.matches(label))
             {
                 List<SmartMatcher.HighlightRange> ranges = matcher.getHighlightRanges(label.toLowerCase());
-                SmartMatchHighlight.applyRanges(styled, ranges, filterControl);
+                Styler styler = noBackgroundStyler(filterControl);
+                for (SmartMatcher.HighlightRange range : ranges)
+                    styled.setStyle(range.offset, range.length, styler);
             }
             else if (element instanceof IPreferenceNode node
                     && PreferenceSearchIndex.getInstance().matches(node.getId(), pattern))
             {
-                styled.setStyle(0, styled.length(), SmartMatchHighlight.styler(filterControl));
+                styled.setStyle(0, styled.length(), noBackgroundStyler(filterControl));
             }
             return styled;
         }
@@ -537,6 +565,34 @@ final class PreferenceSearchFilterAugmenter
         {
             return element instanceof IPreferenceNode node ? node.getLabelImage() : null;
         }
+    }
+
+    /**
+     * {@code SmartMatchHighlight.styler(...)} в тёмной теме красит фон не
+     * случайно: тёмный foreground (DARK_MATCH_FG) там — часть СВЯЗАННОЙ пары
+     * со светлым фоном-плашкой (DARK_MATCH_BG), сам по себе на тёмном фоне
+     * страницы он почти нечитаем. Поэтому просто отбросить background из
+     * готового стиля недостаточно — вместо парного тёмного foreground берём
+     * {@link SmartMatchHighlight#lightForeground()}: тот самый самостоятельный
+     * «только текст» цвет, которым уже пользуется светлая ветка и который не
+     * привязан к фону. Жирность (font) берём из стокового стиля как есть —
+     * она одинакова в обеих ветках {@code resolveMatchStyle}.
+     */
+    private static Styler noBackgroundStyler(Control context)
+    {
+        Styler base = SmartMatchHighlight.styler(context);
+        return new Styler()
+        {
+            @Override
+            public void applyStyles(TextStyle textStyle)
+            {
+                TextStyle temp = new TextStyle();
+                base.applyStyles(temp);
+                textStyle.foreground = SmartMatchHighlight.lightForeground();
+                textStyle.font = temp.font;
+                // background намеренно не переносим
+            }
+        };
     }
 
     private static boolean isOriginalLeafMatch(PatternFilter original, Viewer v, Object element)

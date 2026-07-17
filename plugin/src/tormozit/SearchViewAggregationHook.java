@@ -11,10 +11,10 @@ import java.util.Map;
 import java.util.Set;
 
 import org.eclipse.emf.ecore.EObject;
-import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
+import org.eclipse.jface.viewers.ILabelProviderListener;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.LabelProvider;
 import org.eclipse.jface.viewers.StructuredSelection;
@@ -29,6 +29,7 @@ import org.eclipse.search.ui.ISearchResultPage;
 import org.eclipse.search.ui.ISearchResultViewPart;
 import org.eclipse.search.ui.NewSearchUI;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
@@ -490,7 +491,17 @@ public final class SearchViewAggregationHook implements IStartup
                 return;
             if (Boolean.TRUE.equals(tableViewer.getData(RESTORING_SELECTION_KEY)))
                 return;
-            saveTableSelection(treeViewer, tableViewer, treeViewer.getStructuredSelection().toList(), "table"); //$NON-NLS-1$
+            try
+            {
+                saveTableSelection(treeViewer, tableViewer, treeViewer.getStructuredSelection().toList(), "table"); //$NON-NLS-1$
+            }
+            catch (Exception e)
+            {
+                // Раньше здесь не было try/catch: необработанное исключение из SWT
+                // SelectionChanged-листенера могло "дозвучать" в цепочке событий двойного клика
+                // (issue: панель результатов поиска иногда опустошается после открытия объекта).
+                log("tableViewer.selectionChanged EXCEPTION: " + e); //$NON-NLS-1$
+            }
         });
 
         treeViewer.addPostSelectionChangedListener(event -> {
@@ -1301,16 +1312,37 @@ public final class SearchViewAggregationHook implements IStartup
         swtColumn.setMoveable(false);
         swtColumn.setWidth(0); // по умолчанию скрыта — показывается только при агрегации
 
-        column.setLabelProvider(new CellLabelProvider()
+        // ВАЖНО: обычный CellLabelProvider рисуется нативной отрисовкой Table (Windows custom draw);
+        // в тёмной теме для строки под курсором (выделенной) это иногда даёт невидимый текст
+        // (не тот цвет переднего плана, что у выделения). Соседние штатные колонки «Свойство»/«Текст»
+        // используют owner-draw через (Delegating)StyledCellLabelProvider — там такого не бывает,
+        // т.к. цвет текста берётся из GC в PaintItem, а не из нативной отрисовки строки.
+        // Поэтому колонку «Путь» тоже делаем owner-draw через StyledString.
+        column.setLabelProvider(new DelegatingStyledCellLabelProvider(new IStyledLabelProvider()
         {
             @Override
-            public void update(ViewerCell cell)
+            public StyledString getStyledText(Object element)
             {
                 Map<Object, String> pathByItem = PATH_MAPS_BY_TABLE_VIEWER.get(tableViewer);
-                String path = pathByItem != null ? pathByItem.get(cell.getElement()) : null;
-                cell.setText(path != null ? path : ""); //$NON-NLS-1$
+                String path = pathByItem != null ? pathByItem.get(element) : null;
+                return new StyledString(path != null ? path : ""); //$NON-NLS-1$
             }
-        });
+
+            @Override
+            public Image getImage(Object element) { return null; }
+
+            @Override
+            public void addListener(ILabelProviderListener listener) {}
+
+            @Override
+            public void dispose() {}
+
+            @Override
+            public boolean isLabelProperty(Object element, String property) { return false; }
+
+            @Override
+            public void removeListener(ILabelProviderListener listener) {}
+        }));
 
         table.addDisposeListener(e -> {
             PATH_MAPS_BY_TABLE_VIEWER.remove(tableViewer);
