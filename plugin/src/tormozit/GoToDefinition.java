@@ -1320,7 +1320,10 @@ public class GoToDefinition extends AbstractHandler
     {
         MdObjectPickDialog dlg = MdObjectPickDialog.forMetadataNames(shell, names);
         if (dlg.open() != Window.OK)
+        {
+            jumpCancelled = true;
             return false;
+        }
         String chosen = dlg.getSelectedFullName();
         if (chosen == null)
             return false;
