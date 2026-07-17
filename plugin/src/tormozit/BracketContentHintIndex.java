@@ -135,41 +135,65 @@ final class BracketContentHintIndex
      * список операторов после {@code #КонецОбласти}/{@code #КонецЕсли} —
      * включая следующие {@code #Область}/{@code #Если}. Поэтому
      * {@code node.getEndOffset()} для этих типов указывает не на конец самой
-     * конструкции, а на конец всей последующей цепочки — из-за этого
-     * подсказки разных регионов "склеивались" на одной строке. Нужно брать
-     * офсет конца именно терминала {@code END_REGION}/{@code END_IFPREPROCESSOR}.
+     * конструкции, а на конец всей последующей цепочки. Нужно брать офсет
+     * конца именно СВОЕГО закрывающего терминала — см. {@link #findOwnClosingTerminalEndOffset}.
      * Для остальных типов (Если/Пока/Для/Попытка/Процедура/Функция) узел
      * ограничен корректно — используется {@code node.getEndOffset()}.
      */
     private static int resolveEndOffset(EObject element, ICompositeNode node)
     {
-        if (element instanceof RegionPreprocessor)
-            return findTerminalEndOffset(node, "END_REGION"); //$NON-NLS-1$
-        if (element instanceof IfPreprocessor)
-            return findTerminalEndOffset(node, "END_IFPREPROCESSOR"); //$NON-NLS-1$
+        if (element instanceof RegionPreprocessor || element instanceof IfPreprocessor)
+            return findOwnClosingTerminalEndOffset(node);
         return node.getEndOffset();
     }
 
     /**
-     * Офсет конца первого (в документе) листа, соответствующего терминальному
-     * правилу {@code terminalRuleName}. Для ссылки на терминал по имени (как
-     * {@code END_REGION}/{@code END_IFPREPROCESSOR} в грамматике BSL)
-     * {@link ILeafNode#getGrammarElement()} возвращает {@link RuleCall}
-     * (ссылку на правило), а не сам {@code AbstractRule} — имя нужно брать
-     * через {@code ruleCall.getRule().getName()}.
+     * Офсет конца СОБСТВЕННОГО закрывающего терминала узла (не вложенного).
+     * Узел {@link RegionPreprocessor}/{@link IfPreprocessor} не только "раздут"
+     * через {@code itemAfter} (см. {@link #resolveEndOffset}), но и рекурсивно
+     * включает листья ЛЮБЫХ вложенных блоков того же семейства — вложенный
+     * {@code #Область}/{@code #Если}/{@code #Удаление}/{@code #Вставка} внутри.
+     * Наивный поиск "первого попавшегося" {@code END_*}-терминала находил
+     * закрывающий токен ВЛОЖЕННОГО блока вместо своего — из-за этого имена
+     * вложенных и внешних областей "накладывались" на одной строке.
+     *
+     * <p>Все терминалы блочных препроцессорных директив в грамматике BSL
+     * названы по единому соглашению — {@code BEGIN_REGION}/{@code END_REGION},
+     * {@code BEGIN_IFPREPROCESSOR}/{@code END_IFPREPROCESSOR},
+     * {@code BEGIN_DELETE}/{@code END_DELETE}, {@code BEGIN_INSERT}/{@code END_INSERT}.
+     * Считаем глубину вложенности по префиксу {@code BEGIN_}/{@code END_} —
+     * первый лист узла всегда наш собственный {@code BEGIN_*} (глубина 0→1),
+     * и когда встречный {@code END_*} возвращает глубину к 0 — это гарантированно
+     * наш собственный закрывающий терминал (грамматика не допускает
+     * пересечения разных типов пар).
+     *
+     * <p>Для ссылки на терминал по имени {@link ILeafNode#getGrammarElement()}
+     * возвращает {@link RuleCall} (ссылку на правило), а не сам {@code AbstractRule} —
+     * имя нужно брать через {@code ruleCall.getRule().getName()}.
      */
-    private static int findTerminalEndOffset(ICompositeNode node, String terminalRuleName)
+    private static int findOwnClosingTerminalEndOffset(ICompositeNode node)
     {
+        int depth = 0;
         for (ILeafNode leaf : node.getLeafNodes())
         {
             if (leaf.isHidden())
                 continue;
-            EObject grammarElement = leaf.getGrammarElement();
-            if (grammarElement instanceof RuleCall ruleCall
-                && terminalRuleName.equals(ruleCall.getRule().getName()))
-                return leaf.getEndOffset();
+            if (!(leaf.getGrammarElement() instanceof RuleCall ruleCall))
+                continue;
+
+            String ruleName = ruleCall.getRule().getName();
+            if (ruleName.startsWith("BEGIN_")) //$NON-NLS-1$
+            {
+                depth++;
+            }
+            else if (ruleName.startsWith("END_")) //$NON-NLS-1$
+            {
+                depth--;
+                if (depth == 0)
+                    return leaf.getEndOffset();
+            }
         }
-        return -1; // терминал не найден — конструкция не распознана как ожидалось
+        return -1; // собственный закрывающий терминал не найден — конструкция не распознана как ожидалось
     }
 
     /**
