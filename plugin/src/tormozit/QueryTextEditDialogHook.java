@@ -202,11 +202,11 @@ public final class QueryTextEditDialogHook implements IStartup
             return;
         comfortSub.setData(COMFORT_SUBMENU_MARKER, Boolean.TRUE);
 
-        MenuItem pasteItem = new MenuItem(comfortSub, SWT.PUSH);
-        pasteItem.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
-            PasteWithCompareActions.MENU_LABEL,
-            PasteWithCompareHandler.COMMAND_ID,
-            PasteWithCompareHandler.BINDING_CONTEXT_ID));
+        MenuItem pasteItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
+            ComfortSubmenuHelper.menuItemTextWithKeyBinding(
+                PasteWithCompareActions.MENU_LABEL,
+                PasteWithCompareHandler.COMMAND_ID,
+                PasteWithCompareHandler.BINDING_CONTEXT_ID));
         pasteItem.setToolTipText(
             "Сравнить выделение с буфером обмена и вставить результат"
                 + Global.pluginSignForTooltip());
@@ -228,8 +228,8 @@ public final class QueryTextEditDialogHook implements IStartup
             }
         });
 
-        MenuItem formatItem = new MenuItem(comfortSub, SWT.PUSH);
-        formatItem.setText(IrFormatTextHandler.MENU_LABEL);
+        MenuItem formatItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
+            IrFormatTextHandler.MENU_LABEL);
         formatItem.setToolTipText(
             "Форматировать текст запроса через приложение ИР" + Global.pluginSignForTooltip());
         formatItem.setEnabled(IrFormatTextHandler.isApplicableQuery(viewer));
@@ -242,8 +242,8 @@ public final class QueryTextEditDialogHook implements IStartup
             }
         });
 
-        MenuItem irEditorItem = new MenuItem(comfortSub, SWT.PUSH);
-        irEditorItem.setText(IrQueryTextEditorHandler.MENU_LABEL);
+        MenuItem irEditorItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
+            IrQueryTextEditorHandler.MENU_LABEL);
         irEditorItem.setToolTipText(
             "Открыть весь текст запроса в текстовом редакторе ИР"
                 + Global.pluginSignForTooltip());

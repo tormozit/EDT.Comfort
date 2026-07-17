@@ -10,9 +10,11 @@ import java.nio.charset.StandardCharsets;
 import org.eclipse.compare.CompareConfiguration;
 import org.eclipse.compare.CompareEditorInput;
 import org.eclipse.compare.CompareUI;
+import org.eclipse.compare.CompareViewerPane;
 import org.eclipse.compare.IEditableContent;
 import org.eclipse.compare.IEncodedStreamContentAccessor;
 import org.eclipse.compare.IModificationDate;
+import org.eclipse.compare.contentmergeviewer.TextMergeViewer;
 import org.eclipse.compare.internal.CompareUIPlugin;
 import org.eclipse.compare.internal.ViewerDescriptor;
 import org.eclipse.compare.IStreamContentAccessor;
@@ -22,10 +24,19 @@ import org.eclipse.compare.structuremergeviewer.DiffNode;
 import org.eclipse.compare.structuremergeviewer.ICompareInput;
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.jface.action.Action;
+import org.eclipse.jface.action.IContributionItem;
+import org.eclipse.jface.action.IToolBarManager;
+import org.eclipse.jface.action.Separator;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.viewers.Viewer;
+import org.eclipse.swt.SWT;
+import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Image;
+import org.eclipse.swt.layout.GridData;
+import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Control;
 
 /**
  * Общая логика команды «Вставить со сравнением» для handler и контекстного меню.
@@ -118,6 +129,14 @@ public final class PasteWithCompareActions
         /** Устанавливается только при нажатии OK в диалоге (не опрашивать {@link #okPressed()} вручную). */
         private boolean insertConfirmed;
 
+        /** Панель «Текущая строка» под панелями сравнения — {@code null} до {@link #createContents}. */
+        private CompareCurrentLinesPanel currentLinesPanel;
+        /** {@code StyledText} панелей сравнения текущего {@link TextMergeViewer} (для отслеживания каретки). */
+        private StyledText leftEditorText;
+        private StyledText rightEditorText;
+        /** Пункт «Сравнить ИР» в тулбаре добавляется один раз (см. {@link #addCompareInIrToolbarActionOnce}). */
+        private boolean toolbarActionAdded;
+
         StringFragmentCompareInput(String leftText, String rightText, String compareViewerType)
         {
             super(createConfiguration());
@@ -131,6 +150,51 @@ public final class PasteWithCompareActions
         }
 
         /**
+         * Под панелями сравнения — на всю ширину окна панель «Текущая строка»
+         * с содержимым строки под кареткой слева и справа.
+         */
+        @Override
+        public Control createContents(Composite parent)
+        {
+            /*
+             * parent — композит из org.eclipse.compare.internal.CompareDialog.createDialogArea
+             * (стандартный Dialog.createDialogArea со штатными отступами JFace в DLU) — в нём же
+             * рядом с нашим container лежит статусная строка диалога («Слева: X:Y, Справа: X:Y,
+             * входящее изменение #N» — CompareContainer.setStatusMessage). Уменьшаем отступы
+             * этого композита напрямую, без обращения к самому CompareDialog (internal-класс,
+             * создаётся не нами — через CompareUI.openCompareDialog).
+             */
+            if (parent.getLayout() instanceof GridLayout parentLayout)
+            {
+                parentLayout.marginHeight = 2;
+                parentLayout.verticalSpacing = 2;
+            }
+            Composite container = new Composite(parent, SWT.NONE);
+            GridLayout containerLayout = new GridLayout(1, false);
+            containerLayout.marginWidth = 0;
+            containerLayout.marginHeight = 0;
+            container.setLayout(containerLayout);
+
+            /*
+             * Подписи — из тех же CompareConfiguration.leftLabel/rightLabel, что показаны
+             * заголовками над панелями сравнения выше (единый источник, без дублирования строк).
+             */
+            currentLinesPanel = CompareCurrentLinesPanel.create(container,
+                getCompareConfiguration().getLeftLabel(null),
+                getCompareConfiguration().getRightLabel(null));
+            currentLinesPanel.setCompareInIrSupplier(this::supplyFullTextsForIr);
+            Composite currentLinesComposite = currentLinesPanel.getControl();
+
+            Control comparePane = super.createContents(container);
+            comparePane.moveAbove(currentLinesComposite);
+
+            comparePane.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+            currentLinesComposite.setLayoutData(new GridData(SWT.FILL, SWT.BEGINNING, true, false));
+
+            return container;
+        }
+
+        /**
          * Выбор просмотрщика — в момент создания viewer по реальному {@link ICompareInput}:
          * {@code CompareContentViewerSwitchingPane} принимает только дескриптор из списка,
          * найденного для этого input (иначе остаётся «Сравнение по умолчанию»).
@@ -139,7 +203,102 @@ public final class PasteWithCompareActions
         public Viewer findContentViewer(Viewer oldViewer, ICompareInput input, Composite parent)
         {
             applyPreferredBslViewerDescriptor(oldViewer, input);
-            return super.findContentViewer(oldViewer, input, parent);
+            Viewer viewer = super.findContentViewer(oldViewer, input, parent);
+            hookCurrentLineTracking(viewer);
+            return viewer;
+        }
+
+        /**
+         * Работает только для штатного {@link TextMergeViewer} (обычное/Xtext сравнение):
+         * доступ к его панелям — через приватные поля {@code fLeft}/{@code fRight}
+         * (недокументированный внутренний API Eclipse Compare, публичного способа нет).
+         * Для семантического просмотрщика BSL (GumTree) панель просто остаётся пустой.
+         */
+        private void hookCurrentLineTracking(Viewer viewer)
+        {
+            if (currentLinesPanel == null)
+                return;
+
+            if (!(viewer instanceof TextMergeViewer mergeViewer))
+            {
+                leftEditorText = null;
+                rightEditorText = null;
+                currentLinesPanel.renderPlain(0, ""); //$NON-NLS-1$
+                currentLinesPanel.renderPlain(1, ""); //$NON-NLS-1$
+                return;
+            }
+
+            leftEditorText = MergeViewerReflection.extractStyledText(mergeViewer, "fLeft"); //$NON-NLS-1$
+            rightEditorText = MergeViewerReflection.extractStyledText(mergeViewer, "fRight"); //$NON-NLS-1$
+
+            TwoSideCurrentLinesSync.hook(currentLinesPanel, leftEditorText, rightEditorText);
+            addCompareInIrToolbarActionOnce();
+        }
+
+        /**
+         * Добавляет «Сравнить ИР» в левый край верхней командной панели просмотрщика
+         * сравнения — тот же {@link IToolBarManager}, что уже содержит штатные кнопки
+         * навигации по различиям ({@code CompareViewerPane.getToolBarManager}), а не в
+         * свою панель снизу. {@code fContentInputPane} — приватное поле
+         * {@link CompareEditorInput}, доступно через reflection и в подклассе.
+         *
+         * <p>{@code IToolBarManager} не даёт прямого «добавить в начало» без ID
+         * существующего элемента — пересобираем список: наш пункт первым, затем то,
+         * что уже было.
+         *
+         * @return {@code true}, если пункт добавлен (панель тулбара уже готова)
+         */
+        private boolean addCompareInIrToolbarAction()
+        {
+            Object paneObj = Global.getField(this, "fContentInputPane"); //$NON-NLS-1$
+            if (!(paneObj instanceof CompareViewerPane pane) || pane.isDisposed())
+                return false;
+            IToolBarManager toolBarManager = CompareViewerPane.getToolBarManager(pane);
+            if (toolBarManager == null)
+                return false;
+
+            IContributionItem[] existingItems = toolBarManager.getItems();
+            toolBarManager.removeAll();
+            Action compareInIrAction = new Action(IrCompareValuesHandler.MENU_LABEL)
+            {
+                @Override
+                public void run()
+                {
+                    currentLinesPanel.triggerCompareInIr();
+                }
+            };
+            compareInIrAction.setToolTipText(IrCompareValuesHandler.TOOLTIP + Global.pluginSignForTooltip());
+            toolBarManager.add(compareInIrAction);
+            toolBarManager.add(currentLinesPanel.createVisibilityToggleAction());
+            toolBarManager.add(new Separator());
+            for (IContributionItem item : existingItems)
+                toolBarManager.add(item);
+
+            toolBarManager.update(true);
+            return true;
+        }
+
+        private void addCompareInIrToolbarActionOnce()
+        {
+            if (toolbarActionAdded)
+                return;
+            toolbarActionAdded = addCompareInIrToolbarAction();
+        }
+
+        /** Полные тексты обеих сторон (не текущей строки) — для кнопки «Сравнить ИР». */
+        private CompareCurrentLinesPanel.FullTextPair supplyFullTextsForIr()
+        {
+            if (leftEditorText == null || leftEditorText.isDisposed()
+                || rightEditorText == null || rightEditorText.isDisposed())
+                return null;
+            String leftLabel = getCompareConfiguration().getLeftLabel(null);
+            String rightLabel = getCompareConfiguration().getRightLabel(null);
+            String title = leftLabel + " / " + rightLabel; //$NON-NLS-1$
+            return new CompareCurrentLinesPanel.FullTextPair(
+                leftEditorText.getText(), rightEditorText.getText(), title, leftLabel, rightLabel,
+                IrCompareValuesHandler.syntaxVariantFor(compareViewerType),
+                CompareLineRangeMatcher.lineAtCaret(leftEditorText),
+                CompareLineRangeMatcher.lineAtCaret(rightEditorText));
         }
 
         /**

@@ -161,6 +161,8 @@ public class PriorityGlobalKeyBindingHook implements IStartup
 
     private static void onBindingManagerChanged(BindingManagerEvent event)
     {
+        if (commandService != null)
+            commandService.refreshElements(GetRef.COMMAND_ID, null);
         if (applyingOverrides || IrKeyBindingHook.isApplyingSuppress())
             return;
         scheduleSyncOverrides();
@@ -298,6 +300,20 @@ public class PriorityGlobalKeyBindingHook implements IStartup
     static boolean isApplyingOverrides()
     {
         return applyingOverrides;
+    }
+
+    /**
+     * Отформатированное сочетание клавиш команды из {@link #GLOBAL_COMMAND_IDS} (для тултипов).
+     * В отличие от {@code IBindingService.getBestActiveBindingFormattedFor}, не возвращает
+     * {@code null} при конфликте с чужой командой на том же сочетании (например, штатный
+     * Eclipse «Run Last Launched» на Ctrl+F11).
+     */
+    static String formatShortcutFor(String commandId)
+    {
+        if (bindingServiceInternal == null && !installServices())
+            return null;
+        Set<KeySequence> sequences = collectGlobalKeySequences(commandId);
+        return sequences.isEmpty() ? null : sequences.iterator().next().format();
     }
 
     private static boolean syncStateUpToDate(List<KeyBinding> desired, Set<KeySequence> irFormatSequences)

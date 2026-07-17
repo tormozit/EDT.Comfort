@@ -237,10 +237,10 @@ public final class GotoDefinitionFieldMenuHook implements IStartup
             MenuItem separator = new MenuItem(menu, SWT.SEPARATOR);
             separator.setData(ITEM_MARKER, Boolean.TRUE);
         }
-        MenuItem item = new MenuItem(targetMenu, SWT.PUSH);
-        item.setData(ITEM_MARKER, Boolean.TRUE);
-        item.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
+        MenuItem item = ComfortSubmenuHelper.createSortedMenuItem(targetMenu, SWT.PUSH,
+            ComfortSubmenuHelper.menuItemTextWithKeyBinding(
                 "Перейти к определению", "tormozit.GoToDefinition")); //$NON-NLS-1$ //$NON-NLS-2$
+        item.setData(ITEM_MARKER, Boolean.TRUE);
         item.setToolTipText("Перейти к определению " + typeRef + Global.pluginSignForTooltip()); //$NON-NLS-1$
         // Что именно передаётся дальше — см. runGotoDefinitionAction: для StyledText текст
         // поля не используется (штатная команда сама берёт выражение из каретки), для

@@ -131,6 +131,8 @@ public class CompareConfigMenuHook implements IStartup
 //          Activator.getDefault().getInjector().injectMembers(this); // Слишком рано?
             CompareConfigSearchDialogHook.install(Display.getDefault());
             CompareConfigOpenModuleMergeHandler.install(Display.getDefault());
+            ThreeSideMergeCurrentLinesHook.install(Display.getDefault());
+            GitCompareCurrentLinesHook.install();
 
             IWorkbench wb = PlatformUI.getWorkbench();
             for (IWorkbenchWindow w : wb.getWorkbenchWindows())

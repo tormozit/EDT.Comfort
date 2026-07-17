@@ -35,7 +35,10 @@ import org.eclipse.ui.IEditorInput;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchPart;
+import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.commands.IElementUpdater;
 import org.eclipse.ui.handlers.HandlerUtil;
+import org.eclipse.ui.menus.UIElement;
 import org.eclipse.ui.navigator.CommonNavigator;
 import org.eclipse.ui.forms.editor.IFormPage;
 import org.eclipse.xtext.resource.IResourceServiceProvider;
@@ -49,11 +52,17 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
 import com._1c.g5.v8.dt.ui.editor.IDtEditor;
 import com._1c.g5.v8.dt.ui.editor.input.IDtEditorInput;
 
-public class GetRef extends AbstractHandler
+public class GetRef extends AbstractHandler implements IElementUpdater
 {
     // =========================================================================
     // Маппинги
     // =========================================================================
+
+    static final String COMMAND_ID = "tormozit.CopyRef"; //$NON-NLS-1$
+
+    private static final String TOOLTIP_BASE = "Копировать ссылку"; //$NON-NLS-1$
+    private static final String TOOLTIP_SUFFIX =
+        "; это сочетание команды имеет приоритет над локальными привязками EDT (Комфорт)"; //$NON-NLS-1$
 
     private static final Map<String, String> SUBFOLDER_TO_RU = new LinkedHashMap<>();
     static
@@ -124,6 +133,33 @@ public class GetRef extends AbstractHandler
         setClipboardText(ref, shell);
         ToastNotification.show("Скопирована ссылка", ref, 6000);
         return null;
+    }
+
+    // =========================================================================
+    // Динамическая подсказка (актуальное сочетание клавиш команды)
+    // =========================================================================
+
+    /** Подставляет в тултип тулбара текущее сочетание клавиш, назначенное командой в Keys. */
+    @Override
+    public void updateElement(UIElement element, @SuppressWarnings("rawtypes") Map parameters)
+    {
+        element.setTooltip(TOOLTIP_BASE + shortcutSuffix() + TOOLTIP_SUFFIX);
+    }
+
+    private static String shortcutSuffix()
+    {
+        try
+        {
+            if (!PlatformUI.isWorkbenchRunning())
+                return ""; //$NON-NLS-1$
+            String formatted = PriorityGlobalKeyBindingHook.formatShortcutFor(COMMAND_ID);
+            return formatted != null && !formatted.isBlank() ? " (" + formatted + ")" : ""; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (Exception e)
+        {
+            Global.log("GetRef.shortcutSuffix: " + e); //$NON-NLS-1$
+            return ""; //$NON-NLS-1$
+        }
     }
 
     // =========================================================================

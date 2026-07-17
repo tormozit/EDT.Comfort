@@ -537,9 +537,9 @@ public class TextEditorMenuHook implements IStartup
 
                     for (MenuBinding binding : bindings)
                     {
-                        MenuItem item = new MenuItem(comfortSub, SWT.PUSH);
-                        item.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
-                            binding.label, binding.commandId, binding.bindingContextId));
+                        MenuItem item = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
+                            ComfortSubmenuHelper.menuItemTextWithKeyBinding(
+                                binding.label, binding.commandId, binding.bindingContextId));
                         item.setToolTipText(binding.tooltip + Global.pluginSignForTooltip());
                         item.setEnabled(binding.isAvailable());
                         item.addSelectionListener(new SelectionAdapter()
@@ -555,8 +555,8 @@ public class TextEditorMenuHook implements IStartup
 
                     if (viewer != null && IrFormatTextHandler.isApplicableQuery(viewer))
                     {
-                        MenuItem formatItem = new MenuItem(comfortSub, SWT.PUSH);
-                        formatItem.setText(IrFormatTextHandler.MENU_LABEL);
+                        MenuItem formatItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
+                            IrFormatTextHandler.MENU_LABEL);
                         formatItem.setToolTipText(
                             "Форматировать текст через приложение ИР"
                                 + Global.pluginSignForTooltip());
@@ -571,8 +571,8 @@ public class TextEditorMenuHook implements IStartup
                         });
                         addedItems.add(formatItem);
 
-                        MenuItem irEditorItem = new MenuItem(comfortSub, SWT.PUSH);
-                        irEditorItem.setText(IrQueryTextEditorHandler.MENU_LABEL);
+                        MenuItem irEditorItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
+                            IrQueryTextEditorHandler.MENU_LABEL);
                         irEditorItem.setToolTipText(
                             "Открыть весь текст запроса в текстовом редакторе ИР"
                                 + Global.pluginSignForTooltip());

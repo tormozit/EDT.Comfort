@@ -1,0 +1,560 @@
+package tormozit;
+
+import com._1c.g5.v8.dt.compare.ui.editor.DtComparisonView;
+import com._1c.g5.v8.dt.compare.ui.mergeviewer.IThreeSideTextMergeViewerProvider;
+import com._1c.g5.v8.dt.compare.ui.mergeviewer.ThreeSideTextMergeViewer;
+
+import org.eclipse.jface.action.Action;
+import org.eclipse.jface.action.IContributionItem;
+import org.eclipse.jface.action.IToolBarManager;
+import org.eclipse.jface.action.Separator;
+import org.eclipse.swt.SWT;
+import org.eclipse.swt.custom.SashForm;
+import org.eclipse.swt.custom.StyledText;
+import org.eclipse.swt.custom.ViewForm;
+import org.eclipse.swt.layout.GridData;
+import org.eclipse.swt.layout.GridLayout;
+import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Control;
+import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Event;
+import org.eclipse.swt.widgets.Group;
+import org.eclipse.swt.widgets.Shell;
+
+/**
+ * Панель «Текущая строка» (см. {@link CompareCurrentLinesPanel}) в любом окне
+ * 1C:EDT на основе трёхстороннего merge-вьюера — «Настройка объединения модулей»
+ * (со structure-разбором, {@code CompareBslModuleWithParsingModuleStructureDialog})
+ * и «Объединение» (без разбора структуры, {@code BslModuleThreeSideMergeDialog} /
+ * {@code ThreeSideTextMergeDialog}). Оба реализуют публичный
+ * {@code IThreeSideTextMergeViewerProvider.getMergeViewer()} — детектируем по
+ * этому интерфейсу, а не по имени конкретного класса диалога.
+ *
+ * <p>Это не наши диалоги — встраиваем панель в уже существующее дерево виджетов
+ * после открытия окна, а не через переопределение {@code createContents} (как в
+ * {@link PasteWithCompareActions}).
+ *
+ * <p>Три стороны сравнения (левая/правая/итоговая со слиянием) вместо двух —
+ * раскрашивается пара «сторона под кареткой ↔ итоговая» (или «левая ↔ итоговая»,
+ * если каретка в итоговой панели); третья, не участвующая сторона показывается
+ * обычным текстом сопоставленной строки (или пусто, если сопоставленной строки нет).
+ */
+public final class ThreeSideMergeCurrentLinesHook
+{
+    private static final String TAG = "ThreeSideMergeCurrentLines"; //$NON-NLS-1$
+
+    private static final String SHELL_HANDLED_KEY = "tormozit.threeSideMergeCurrentLinesShellHandled"; //$NON-NLS-1$
+    private static final String PANEL_ATTACHED_KEY = "tormozit.threeSideMergeCurrentLinesAttached"; //$NON-NLS-1$
+    private static final String FILTER_ROW_RELAID_KEY = "tormozit.threeSideMergeFilterRowRelaid"; //$NON-NLS-1$
+    private static final String HOOK_MARKER_KEY = "tormozit.threeSideMergeCurrentLinesHooked"; //$NON-NLS-1$
+
+    private static final int MAX_ATTEMPTS = 40;
+    private static final int RETRY_DELAY_MS = 50;
+
+    private static final int LEFT = 0;
+    private static final int RIGHT = 1;
+    private static final int RESULT = 2;
+
+    /** Используются, только если не удалось прочитать заголовок вьюера (см. {@link #refreshLabels}). */
+    private static final String DEFAULT_LEFT_LABEL = "Ваша версия:"; //$NON-NLS-1$
+    private static final String DEFAULT_RIGHT_LABEL = "Входящая версия:"; //$NON-NLS-1$
+    private static final String DEFAULT_RESULT_LABEL = "Итоговый текст:"; //$NON-NLS-1$
+
+    private ThreeSideMergeCurrentLinesHook()
+    {
+    }
+
+    public static void install(Display display)
+    {
+        if (display == null || display.isDisposed())
+            return;
+        display.addFilter(SWT.Show, ThreeSideMergeCurrentLinesHook::handleShow);
+    }
+
+    private static void handleShow(Event event)
+    {
+        if (!(event.widget instanceof Shell shell) || shell.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(shell.getData(SHELL_HANDLED_KEY)))
+            return;
+
+        if (!(shell.getData() instanceof IThreeSideTextMergeViewerProvider provider))
+            return;
+
+        shell.setData(SHELL_HANDLED_KEY, Boolean.TRUE);
+        scheduleAttach(shell, provider, 0);
+    }
+
+    private static void scheduleAttach(Shell shell, IThreeSideTextMergeViewerProvider provider, int attempt)
+    {
+        if (shell.isDisposed())
+            return;
+        if (attempt >= MAX_ATTEMPTS)
+        {
+            log("attach: не удалось найти merge-вьюер после " + MAX_ATTEMPTS + " попыток"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        shell.getDisplay().timerExec(attempt == 0 ? 100 : RETRY_DELAY_MS, () ->
+        {
+            if (!tryAttach(provider))
+                scheduleAttach(shell, provider, attempt + 1);
+        });
+    }
+
+    private static boolean tryAttach(IThreeSideTextMergeViewerProvider provider)
+    {
+        ThreeSideTextMergeViewer viewer = provider.getMergeViewer();
+        if (viewer == null)
+            return false;
+        Control viewerControl = viewer.getControl();
+        if (viewerControl == null || viewerControl.isDisposed())
+            return false;
+
+        Control viewFormControl = findViewFormAncestor(viewerControl);
+        if (viewFormControl == null)
+            return false;
+        Composite mergeViewerComposite = viewFormControl.getParent();
+        if (mergeViewerComposite == null)
+            return false;
+
+        attach(mergeViewerComposite, viewFormControl, provider, viewer);
+        return true;
+    }
+
+    /**
+     * И «Настройка объединения модулей», и «Объединение» кладут вьюер сравнения внутрь
+     * {@code ThreeSideTextMergeViewerPanel} ({@code extends ViewForm}) — поднимаемся
+     * от контрола вьюера до этого {@link ViewForm} и берём его родителя. Не зависит от
+     * того, что именно вокруг ({@link org.eclipse.swt.custom.SashForm} с деревом секций
+     * у структурированного диалога, либо обычный {@code Composite} у простого).
+     */
+    private static Control findViewFormAncestor(Control control)
+    {
+        for (Control c = control; c != null; c = c.getParent())
+        {
+            if (c instanceof ViewForm)
+                return c;
+        }
+        return null;
+    }
+
+    /**
+     * {@code mergeViewerComposite} — composite самого 1C (не наш), его {@code GridLayout}
+     * может резервировать отступ сверху/снизу (marginHeight) и между строками
+     * (verticalSpacing) — до вставки нашей панели там был один ребёнок ({@code ViewForm}),
+     * и этот отступ не был заметен. После вставки второй строки (нашей панели) тот же
+     * отступ появляется дважды — над и под панелью — и выглядит избыточным. Уменьшаем его
+     * явно, не полагаясь на то, что 1C сам использует нулевые значения. Не связано с зазором
+     * между кнопкой выбора вида объединения и её выпадающим меню (тот зазор — внутри чужого
+     * {@code ThreeSideTextMergeViewerPanel.createTopLeft()}, оставлен как есть).
+     */
+    private static void shrinkVerticalGaps(Composite mergeViewerComposite)
+    {
+        if (mergeViewerComposite.getLayout() instanceof GridLayout gridLayout)
+        {
+            gridLayout.marginHeight = 2;
+            gridLayout.verticalSpacing = 2;
+        }
+    }
+
+    /**
+     * Только у «Настройка объединения модулей» (structured-диалог с деревом секций) —
+     * {@code mergeViewerComposite} лежит внутри {@link SashForm} рядом с composite,
+     * содержащим {@link DtComparisonView} (дерево объектов + группа «Статусы по
+     * соответствиям объектов» + строка «Фильтр:», друг под другом в одну колонку).
+     * У «Объединение» (без разбора структуры) дерева нет — метод тихо ничего не делает.
+     *
+     * <p>Переносим строку фильтра в ту же строку, что и группа статусов (вместо отдельной
+     * строки под ней) — меняем {@code DtComparisonView.GridLayout} на 2 колонки: дерево
+     * растягивается на обе (как и раньше), фильтр занимает место группы статусов — колонка 1
+     * (слева), группа статусов сдвигается в колонку 2 (справа). {@code colorsLegend}/
+     * {@code filterControl} — приватные поля {@code DtComparisonView} без геттеров, только
+     * через рефлексию.
+     */
+    private static void relocateFilterRow(Composite mergeViewerComposite)
+    {
+        if (!(mergeViewerComposite.getParent() instanceof SashForm sashForm) || sashForm.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(sashForm.getData(FILTER_ROW_RELAID_KEY)))
+            return;
+
+        DtComparisonView comparisonView = null;
+        for (Control sashChild : sashForm.getChildren())
+        {
+            if (sashChild == mergeViewerComposite || !(sashChild instanceof Composite comparisonViewComposite))
+                continue;
+            for (Control c : comparisonViewComposite.getChildren())
+                if (c instanceof DtComparisonView view)
+                {
+                    comparisonView = view;
+                    break;
+                }
+        }
+        if (comparisonView == null)
+        {
+            log("relocateFilterRow: DtComparisonView не найден"); //$NON-NLS-1$
+            return;
+        }
+
+        Object legendObj = Global.getField(comparisonView, "colorsLegend"); //$NON-NLS-1$
+        Object filterObj = Global.getField(comparisonView, "filterControl"); //$NON-NLS-1$
+        if (!(legendObj instanceof Group legend) || !(filterObj instanceof Composite filter)
+            || !(comparisonView.getLayout() instanceof GridLayout viewLayout))
+        {
+            log("relocateFilterRow: не удалось извлечь colorsLegend/filterControl/GridLayout"); //$NON-NLS-1$
+            return;
+        }
+
+        sashForm.setData(FILTER_ROW_RELAID_KEY, Boolean.TRUE);
+        viewLayout.numColumns = 2;
+
+        GridData treeData = new GridData(SWT.FILL, SWT.FILL, true, true);
+        treeData.horizontalSpan = 2;
+        comparisonView.getTreeControl().setLayoutData(treeData);
+
+        /*
+         * GridLayout раскладывает детей в порядке их следования в composite (не по
+         * GridData) — colorsLegend создан раньше filterControl (см. конструктор
+         * DtComparisonView), поэтому без явной перестановки он и остался бы в колонке 1
+         * (слева). Меняем местами: filterControl — на место колонки 1 (там же, где раньше
+         * была группа статусов), colorsLegend — в колонку 2, справа.
+         */
+        filter.moveAbove(legend);
+
+        /*
+         * grab=true у любого из двух растягивает саму КОЛОНКУ на всё свободное место — и тогда
+         * компактный (не растянутый через align) сосед всё равно оказывается прижат к дальнему
+         * краю этой растянутой колонки, то есть к правому краю родителя. Никакого grab: обе
+         * колонки — natural size, legend просто стоит вплотную справа от filter, без зазора
+         * и без растяжения чего-либо.
+         */
+        filter.setLayoutData(new GridData(SWT.LEFT, SWT.BOTTOM, false, false));
+        legend.setLayoutData(new GridData(SWT.LEFT, SWT.BOTTOM, false, false));
+
+        comparisonView.layout(true, true);
+    }
+
+    private static void attach(Composite mergeViewerComposite, Control viewFormControl,
+        IThreeSideTextMergeViewerProvider provider, ThreeSideTextMergeViewer viewer)
+    {
+        if (mergeViewerComposite.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(mergeViewerComposite.getData(PANEL_ATTACHED_KEY)))
+            return;
+        mergeViewerComposite.setData(PANEL_ATTACHED_KEY, Boolean.TRUE);
+
+        /*
+         * Зазор между верхней панелью инструментов (topLeft — выбор вида объединения) и
+         * содержимым (панели сравнения) ViewForm — публичное поле самого SWT
+         * (org.eclipse.swt.custom.ViewForm.verticalSpacing, по умолчанию 1px), а не что-то
+         * приватное 1C — увеличиваем на пару пикселей штатным способом.
+         */
+        if (viewFormControl instanceof ViewForm viewForm)
+            viewForm.verticalSpacing += 2;
+
+        shrinkVerticalGaps(mergeViewerComposite);
+        relocateFilterRow(mergeViewerComposite);
+
+        CompareCurrentLinesPanel panel = CompareCurrentLinesPanel.create(mergeViewerComposite,
+            DEFAULT_LEFT_LABEL, DEFAULT_RIGHT_LABEL, DEFAULT_RESULT_LABEL);
+        refreshLabels(panel, provider, viewer);
+        Composite panelControl = panel.getControl();
+        panelControl.moveBelow(viewFormControl);
+
+        viewFormControl.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+        panelControl.setLayoutData(new GridData(SWT.FILL, SWT.BEGINNING, true, false));
+        mergeViewerComposite.layout(true, true);
+
+        StyledText leftText = MergeViewerReflection.extractStyledText(viewer, "leftViewer"); //$NON-NLS-1$
+        StyledText rightText = MergeViewerReflection.extractStyledText(viewer, "rightViewer"); //$NON-NLS-1$
+        StyledText resultText = MergeViewerReflection.extractStyledText(viewer, "resultViewer"); //$NON-NLS-1$
+
+        if (leftText == null || rightText == null || resultText == null)
+            log("attach: не удалось извлечь один из StyledText (left=" + (leftText != null) //$NON-NLS-1$
+                + " right=" + (rightText != null) + " result=" + (resultText != null) + ")"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+
+        ActivePair activePair = new ActivePair();
+        panel.setCompareInIrSupplier(() -> supplyFullTextsForIr(panel, activePair));
+        addCompareInIrToolbarAction(viewer, panel);
+
+        hookStyledText(leftText, panel, provider, viewer, leftText, rightText, resultText, activePair);
+        hookStyledText(rightText, panel, provider, viewer, leftText, rightText, resultText, activePair);
+        hookStyledText(resultText, panel, provider, viewer, leftText, rightText, resultText, activePair);
+
+        StyledText initialSource = leftText != null ? leftText : rightText != null ? rightText : resultText;
+        if (initialSource != null)
+            syncThreeWayCurrentLines(initialSource, panel, provider, viewer, leftText, rightText, resultText, activePair);
+    }
+
+    /**
+     * Добавляет «Сравнить ИР» в левый край панели инструментов правой стороны
+     * ({@code ThreeSideTextMergeViewer.rightToolBarManager} — приватное поле, тот же
+     * {@link IToolBarManager}, что уже содержит штатные кнопки — навигацию по различиям,
+     * копирование и т.п.). Не {@code ViewForm.setTopRight()}: это отдельная, куда более
+     * заметная область над всей панелью — не «вместе с обычными кнопками», как просили.
+     *
+     * <p>{@code IToolBarManager} не даёт прямого «добавить в начало» без ID существующего
+     * элемента — пересобираем список: наш пункт первым, затем то, что уже было.
+     */
+    private static void addCompareInIrToolbarAction(ThreeSideTextMergeViewer viewer, CompareCurrentLinesPanel panel)
+    {
+        Object managerObj = Global.getField(viewer, "rightToolBarManager"); //$NON-NLS-1$
+        if (!(managerObj instanceof IToolBarManager toolBarManager))
+            return;
+
+        IContributionItem[] existingItems = toolBarManager.getItems();
+        toolBarManager.removeAll();
+        Action compareInIrAction = new Action(IrCompareValuesHandler.MENU_LABEL)
+        {
+            @Override
+            public void run()
+            {
+                panel.triggerCompareInIr();
+            }
+        };
+        compareInIrAction.setToolTipText(IrCompareValuesHandler.TOOLTIP + Global.pluginSignForTooltip());
+        toolBarManager.add(compareInIrAction);
+        toolBarManager.add(panel.createVisibilityToggleAction());
+        toolBarManager.add(new Separator());
+        for (IContributionItem item : existingItems)
+            toolBarManager.add(item);
+
+        toolBarManager.update(true);
+    }
+
+    /** Пара сторон, чья раскраска сейчас активна — источник для кнопки «Сравнить ИР» (полные тексты). */
+    private static final class ActivePair
+    {
+        volatile StyledText widgetA;
+        volatile StyledText widgetB;
+        volatile int indexA = -1;
+        volatile int indexB = -1;
+    }
+
+    /** Полные тексты текущей раскрашенной пары (не текущей строки) — для кнопки «Сравнить ИР». */
+    private static CompareCurrentLinesPanel.FullTextPair supplyFullTextsForIr(
+        CompareCurrentLinesPanel panel, ActivePair activePair)
+    {
+        StyledText a = activePair.widgetA;
+        StyledText b = activePair.widgetB;
+        if (a == null || a.isDisposed() || b == null || b.isDisposed())
+            return null;
+        String labelA = panel.getLabelText(activePair.indexA);
+        String labelB = panel.getLabelText(activePair.indexB);
+        String title = labelA + " / " + labelB; //$NON-NLS-1$
+        // Оба диалога — исключительно сравнение/слияние модулей BSL.
+        return new CompareCurrentLinesPanel.FullTextPair(a.getText(), b.getText(), title, labelA, labelB,
+            IrCompareValuesHandler.syntaxVariantFor("bsl"), //$NON-NLS-1$
+            CompareLineRangeMatcher.lineAtCaret(a), CompareLineRangeMatcher.lineAtCaret(b));
+    }
+
+    /**
+     * Заголовки сторон, обновляются при каждой синхронизации (могут меняться при
+     * переключении узла дерева секций):
+     * <ul>
+     *   <li>Левая/правая — из полей {@code mainComparisonSideName}/{@code otherComparisonSideName}
+     *   диалога (protected-поля {@code AbstractCompareBslModuleWithParsingModuleStructureDialog}) —
+     *   это заголовки колонок дерева объектов («Конфигурация»/«Конфигурация1»), а не имя
+     *   выбранной строки дерева. Если таких полей нет (диалог «Объединение» без разбора
+     *   структуры — в нём дерева объектов нет) — берём текст в скобках из
+     *   {@code ThreeSideTextMergeViewer.leftLabel}/{@code rightLabel} (например,
+     *   «Модуль.Модуль1 (Конфигурация)» → «Конфигурация»).</li>
+     *   <li>Итоговая — всегда текст в скобках из {@code ThreeSideTextMergeViewer.resultLabel}
+     *   (скобок там обычно нет — тогда используется текст целиком).</li>
+     * </ul>
+     */
+    private static void refreshLabels(CompareCurrentLinesPanel panel, Object dialog, ThreeSideTextMergeViewer viewer)
+    {
+        String leftFromDialog = asNonBlankString(Global.getField(dialog, "mainComparisonSideName")); //$NON-NLS-1$
+        String rightFromDialog = asNonBlankString(Global.getField(dialog, "otherComparisonSideName")); //$NON-NLS-1$
+
+        String leftLabel = leftFromDialog != null ? leftFromDialog
+            : extractInsideParentheses(MergeViewerReflection.extractLabelText(viewer, "leftLabel")); //$NON-NLS-1$
+        String rightLabel = rightFromDialog != null ? rightFromDialog
+            : extractInsideParentheses(MergeViewerReflection.extractLabelText(viewer, "rightLabel")); //$NON-NLS-1$
+        String resultLabel = extractInsideParentheses(MergeViewerReflection.extractLabelText(viewer, "resultLabel")); //$NON-NLS-1$
+
+        panel.setLabelText(LEFT, labelOrDefault(withColon(leftLabel), DEFAULT_LEFT_LABEL));
+        panel.setLabelText(RIGHT, labelOrDefault(withColon(rightLabel), DEFAULT_RIGHT_LABEL));
+        panel.setLabelText(RESULT, labelOrDefault(withColon(resultLabel), DEFAULT_RESULT_LABEL));
+    }
+
+    private static String asNonBlankString(Object value)
+    {
+        return value instanceof String s && !s.isBlank() ? s : null;
+    }
+
+    /** {@code "Модуль.Модуль1 (Конфигурация)"} → {@code "Конфигурация"}; без скобок — текст как есть. */
+    private static String extractInsideParentheses(String text)
+    {
+        if (text == null)
+            return null;
+        int open = text.indexOf('(');
+        int close = open >= 0 ? text.indexOf(')', open + 1) : -1;
+        return close > open ? text.substring(open + 1, close).trim() : text;
+    }
+
+    private static String withColon(String text)
+    {
+        if (text == null)
+            return null;
+        String trimmed = text.trim();
+        if (trimmed.isEmpty())
+            return null;
+        return trimmed.endsWith(":") ? trimmed : trimmed + ":"; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static String labelOrDefault(String text, String fallback)
+    {
+        return text != null && !text.isBlank() ? text : fallback;
+    }
+
+    private static void hookStyledText(StyledText styledText, CompareCurrentLinesPanel panel, Object dialog,
+        ThreeSideTextMergeViewer viewer, StyledText leftText, StyledText rightText, StyledText resultText,
+        ActivePair activePair)
+    {
+        if (styledText == null || styledText.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(styledText.getData(HOOK_MARKER_KEY)))
+            return;
+        styledText.setData(HOOK_MARKER_KEY, Boolean.TRUE);
+
+        styledText.addCaretListener(e ->
+            syncThreeWayCurrentLines(styledText, panel, dialog, viewer, leftText, rightText, resultText, activePair));
+        styledText.addListener(SWT.Modify, e ->
+            syncThreeWayCurrentLines(styledText, panel, dialog, viewer, leftText, rightText, resultText, activePair));
+    }
+
+    /**
+     * Раскрашивает пару «сторона под кареткой ↔ итоговая» (или «левая ↔ итоговая»,
+     * если каретка в итоговой панели); третья сторона — обычным текстом сопоставленной
+     * строки, либо пусто, если строк не сопоставлена. Заодно запоминает эту пару в
+     * {@code activePair} — источник для кнопки «Сравнить ИР» (полные тексты).
+     */
+    private static void syncThreeWayCurrentLines(StyledText source, CompareCurrentLinesPanel panel, Object dialog,
+        ThreeSideTextMergeViewer viewer, StyledText leftText, StyledText rightText, StyledText resultText,
+        ActivePair activePair)
+    {
+        if (leftText == null || leftText.isDisposed()
+            || rightText == null || rightText.isDisposed()
+            || resultText == null || resultText.isDisposed())
+            return;
+
+        refreshLabels(panel, dialog, viewer);
+
+        int primaryIdx;
+        int colorPartnerIdx;
+        int plainIdx;
+        StyledText primaryWidget;
+        StyledText colorPartnerWidget;
+        StyledText plainWidget;
+
+        if (source == leftText)
+        {
+            primaryIdx = LEFT;
+            primaryWidget = leftText;
+            colorPartnerIdx = RESULT;
+            colorPartnerWidget = resultText;
+            plainIdx = RIGHT;
+            plainWidget = rightText;
+        }
+        else if (source == rightText)
+        {
+            primaryIdx = RIGHT;
+            primaryWidget = rightText;
+            colorPartnerIdx = RESULT;
+            colorPartnerWidget = resultText;
+            plainIdx = LEFT;
+            plainWidget = leftText;
+        }
+        else if (source == resultText)
+        {
+            primaryIdx = RESULT;
+            primaryWidget = resultText;
+            colorPartnerIdx = LEFT;
+            colorPartnerWidget = leftText;
+            plainIdx = RIGHT;
+            plainWidget = rightText;
+        }
+        else
+            return;
+
+        /*
+         * Для кнопки «Сравнить ИР» пара всегда «левая/правая ↔ итоговая» (не «итоговая ↔
+         * левая/правая») — даже если каретка сейчас в итоговой панели (тогда primary=RESULT,
+         * colorPartner=LEFT) и раскраска строится в обратном порядке ради цвета (см. ниже).
+         */
+        if (primaryIdx == RESULT)
+        {
+            activePair.widgetA = colorPartnerWidget;
+            activePair.widgetB = primaryWidget;
+            activePair.indexA = colorPartnerIdx;
+            activePair.indexB = primaryIdx;
+        }
+        else
+        {
+            activePair.widgetA = primaryWidget;
+            activePair.widgetB = colorPartnerWidget;
+            activePair.indexA = primaryIdx;
+            activePair.indexB = colorPartnerIdx;
+        }
+
+        int primaryLine = CompareLineRangeMatcher.lineAtCaret(primaryWidget);
+        String primaryLineText = CompareLineRangeMatcher.lineOrEmpty(primaryWidget, primaryLine);
+
+        int colorPartnerLine = CompareLineRangeMatcher.findMatchedLine(primaryWidget, primaryLine, colorPartnerWidget);
+        String colorPartnerLineText = colorPartnerLine >= 0
+            ? CompareLineRangeMatcher.lineOrEmpty(colorPartnerWidget, colorPartnerLine)
+            : null;
+
+        int plainLine = CompareLineRangeMatcher.findMatchedLine(primaryWidget, primaryLine, plainWidget);
+        String plainLineText = plainLine >= 0 ? CompareLineRangeMatcher.lineOrEmpty(plainWidget, plainLine) : ""; //$NON-NLS-1$
+
+        if (colorPartnerLineText == null)
+        {
+            panel.renderPlain(primaryIdx, primaryLineText);
+            panel.renderPlain(colorPartnerIdx, null);
+            panel.renderPlain(plainIdx, plainLineText);
+            panel.resetScroll();
+            return;
+        }
+
+        /*
+         * Итоговая сторона (результат слияния) — всегда «новая» относительно левой/правой,
+         * независимо от того, какая панель сейчас под кареткой: иначе при активной итоговой
+         * панели фрагмент, добавленный в неё, красился бы как «удаление» (красным) вместо
+         * «вставка» (зелёным) — align(text1, text2) считает различия относительно порядка
+         * аргументов, а не по смыслу «что было добавлено».
+         */
+        int oldIdx;
+        int newIdx;
+        String oldText;
+        String newText;
+        if (primaryIdx == RESULT)
+        {
+            oldIdx = colorPartnerIdx;
+            oldText = colorPartnerLineText;
+            newIdx = primaryIdx;
+            newText = primaryLineText;
+        }
+        else
+        {
+            oldIdx = primaryIdx;
+            oldText = primaryLineText;
+            newIdx = colorPartnerIdx;
+            newText = colorPartnerLineText;
+        }
+
+        CompareCurrentLineDiff.AlignedResult aligned = panel.renderPair(oldIdx, newIdx, oldText, newText);
+        panel.renderPlain(plainIdx, plainLineText);
+
+        // newIdx — это всегда RESULT (либо colorPartnerIdx=RESULT, либо primaryIdx=RESULT).
+        panel.scrollToFirstDifference(panel.getRow(RESULT), aligned.rightTypes);
+    }
+
+    private static void log(String msg)
+    {
+        if (Global.isLogEnabled())
+            Global.log(TAG, msg);
+    }
+}

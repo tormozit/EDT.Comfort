@@ -120,6 +120,14 @@ public final class ComfortSettings
     /** По умолчанию фильтр «Только помеченные» выключен. */
     public static final boolean DEFAULT_SELECT_TYPE_ONLY_MARKED = false;
 
+    // ---- Compare current lines panel ----
+
+    /** Ключ: показ панели «Текущая строка» под окнами сравнения текста ({@link CompareCurrentLinesPanel}). */
+    public static final String PREF_COMPARE_CURRENT_LINES_VISIBLE = "comfort.compare.currentLinesVisible"; //$NON-NLS-1$
+
+    /** Панель «Текущая строка» показывается по умолчанию. */
+    public static final boolean DEFAULT_COMPARE_CURRENT_LINES_VISIBLE = true;
+
     private static ComfortSettings instance;
 
     private final ScopedPreferenceStore preferenceStore;
@@ -224,6 +232,32 @@ public final class ComfortSettings
         catch (Exception ex)
         {
             Global.log("ComfortSettings save error (onlyMarked): " + ex); //$NON-NLS-1$
+        }
+    }
+
+    /** Показывать ли панель «Текущая строка» — общая настройка на все окна сравнения. */
+    public static boolean isCompareCurrentLinesVisible()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_COMPARE_CURRENT_LINES_VISIBLE;
+        return settings.preferenceStore.getBoolean(PREF_COMPARE_CURRENT_LINES_VISIBLE);
+    }
+
+    /** Сохранить состояние переключателя «Текущая строка» — запоминается между запусками EDT. */
+    public static void setCompareCurrentLinesVisible(boolean visible)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        settings.preferenceStore.setValue(PREF_COMPARE_CURRENT_LINES_VISIBLE, visible);
+        try
+        {
+            settings.preferenceStore.save();
+        }
+        catch (Exception ex)
+        {
+            Global.log("ComfortSettings save error (compareCurrentLinesVisible): " + ex); //$NON-NLS-1$
         }
     }
 

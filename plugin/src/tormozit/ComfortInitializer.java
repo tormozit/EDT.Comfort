@@ -48,5 +48,8 @@ public class ComfortInitializer extends AbstractPreferenceInitializer
         store.setDefault(
             ComfortSettings.PREF_BRACKET_CONTENT_HINT_MIN_LINES,
             ComfortSettings.DEFAULT_BRACKET_CONTENT_HINT_MIN_LINES);
+        store.setDefault(
+            ComfortSettings.PREF_COMPARE_CURRENT_LINES_VISIBLE,
+            ComfortSettings.DEFAULT_COMPARE_CURRENT_LINES_VISIBLE);
     }
 }
