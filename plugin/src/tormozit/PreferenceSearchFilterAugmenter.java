@@ -294,6 +294,8 @@ final class PreferenceSearchFilterAugmenter
      * страница) на время построения индекса — блокирует ввод, но НЕ
      * перекрывает панель кнопок (OK/Отмена/Применить), так что закрыть
      * диалог можно в любой момент, не дожидаясь завершения индексации.
+     * Без {@code SWT.ON_TOP}: owned-Shell остаётся над родителем внутри EDT,
+     * но не перекрывает окна других приложений при переключении фокуса.
      */
     private static Shell createBlockingOverlay(PreferenceDialog dialog)
     {
@@ -301,7 +303,7 @@ final class PreferenceSearchFilterAugmenter
         if (dialogShell == null || dialogShell.isDisposed())
             return null;
 
-        Shell overlay = new Shell(dialogShell, SWT.NO_TRIM | SWT.ON_TOP);
+        Shell overlay = new Shell(dialogShell, SWT.NO_TRIM);
         overlay.setLayout(new GridLayout(1, false));
         overlay.setBackground(dialogShell.getDisplay().getSystemColor(SWT.COLOR_WIDGET_BACKGROUND));
 
@@ -323,10 +325,10 @@ final class PreferenceSearchFilterAugmenter
         overlay.layout(true, true);
         overlay.open();
 
-        // overlay — отдельный top-level Shell, он НЕ следует автоматически
-        // за перемещением/ресайзом родительского диалога (родитель у Shell
-        // влияет только на стек окон и время жизни, не на позицию) — без
-        // этого слежения оверлей "отклеивается" от диалога при перетаскивании.
+        // overlay — отдельный Shell (owned у диалога), он НЕ следует
+        // автоматически за перемещением/ресайзом родителя (родитель влияет
+        // на стек окон и время жизни, не на позицию) — без этого слежения
+        // оверлей "отклеивается" от диалога при перетаскивании.
         Listener trackListener = e -> positionOverlay(overlay, dialog, dialogShell);
         dialogShell.addListener(SWT.Move, trackListener);
         dialogShell.addListener(SWT.Resize, trackListener);

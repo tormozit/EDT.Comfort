@@ -20,12 +20,10 @@
 		</exec>
 
 		<eclipse.refreshLocal resource="/plugin" depth="infinite"/>
-		<eclipse.refreshLocal resource="/tormozit.comfort.jdt.ui.dictionaries" depth="infinite"/>
 		<eclipse.refreshLocal resource="/feature" depth="infinite"/>
 		<eclipse.refreshLocal resource="/site" depth="infinite"/>
 
 		<eclipse.incrementalBuild project="plugin" kind="full"/>
-		<eclipse.incrementalBuild project="tormozit.comfort.jdt.ui.dictionaries" kind="full"/>
 		<eclipse.incrementalBuild project="feature" kind="full"/>
 	</target>
 

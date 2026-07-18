@@ -7,16 +7,20 @@ import java.util.Comparator;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Collection;
 import java.util.Map;
 import java.util.Set;
+import java.util.WeakHashMap;
 
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.ILabelProviderListener;
+import org.eclipse.jface.viewers.IOpenListener;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.LabelProvider;
+import org.eclipse.jface.viewers.OpenEvent;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.jface.viewers.TableViewer;
@@ -25,9 +29,12 @@ import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.ViewerCell;
 import org.eclipse.search.ui.IQueryListener;
 import org.eclipse.search.ui.ISearchQuery;
+import org.eclipse.search.ui.ISearchResult;
+import org.eclipse.search.ui.ISearchResultListener;
 import org.eclipse.search.ui.ISearchResultPage;
 import org.eclipse.search.ui.ISearchResultViewPart;
 import org.eclipse.search.ui.NewSearchUI;
+import org.eclipse.search.ui.SearchResultEvent;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.dnd.Clipboard;
@@ -77,6 +84,9 @@ import org.eclipse.ui.PlatformUI;
  * {@link Global#getField}/{@link Global#invoke} (см. журнал: Параметры → Комфорт → «Общее логирование»).
  *
  * <p>Включение: Параметры → Комфорт → «Улучшать списки» ({@link ComfortSettings#PREF_REPLACE_LIST_FILTERS}).
+ *
+ * <p>#165 (только диагностика в журнале «Комфорт»): Open / panelHealth / searchResultChanged /
+ * queryRemoved — без изменения поведения агрегации и Open.
  */
 public final class SearchViewAggregationHook implements IStartup
 {
@@ -85,8 +95,13 @@ public final class SearchViewAggregationHook implements IStartup
 
     private static final String HOOKED_KEY = "tormozit.searchAggregationHooked"; //$NON-NLS-1$
     private static final String TREE_COUNT_LABEL_HOOKED_KEY = "tormozit.searchTreeCountLabelHooked"; //$NON-NLS-1$
+    private static final String OPEN_DIAG_HOOKED_KEY = "tormozit.searchAggregationOpenDiag"; //$NON-NLS-1$
     /** Как {@code Messages.IMatchItem_Total_matches_count_pattern__0} в search.ui. */
     private static final String MATCH_COUNT_SUFFIX_PATTERN = " ({0} \u0441\u043E\u043E\u0442\u0432\u0435\u0442\u0441\u0442\u0432\u0438\u0439)"; //$NON-NLS-1$
+
+    /** Уже повешен диагностический {@link ISearchResultListener} (weak). */
+    private static final Set<ISearchResult> RESULT_LISTENERS_INSTALLED =
+            Collections.newSetFromMap(new WeakHashMap<>());
 
     // -----------------------------------------------------------------------
     // IStartup
@@ -115,7 +130,10 @@ public final class SearchViewAggregationHook implements IStartup
             NewSearchUI.addQueryListener(new IQueryListener()
             {
                 @Override public void queryAdded(ISearchQuery query)     { onQueryEvent("queryAdded"); } //$NON-NLS-1$
-                @Override public void queryRemoved(ISearchQuery query)    {}
+                @Override public void queryRemoved(ISearchQuery query)
+                {
+                    log("onQueryEvent: queryRemoved " + (query != null ? query.getClass().getSimpleName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
+                }
                 @Override public void queryStarting(ISearchQuery query)   { onSearchStarting(); }
                 @Override public void queryFinished(ISearchQuery query)   { onSearchFinished(); onQueryEvent("queryFinished"); } //$NON-NLS-1$
             });
@@ -402,6 +420,8 @@ public final class SearchViewAggregationHook implements IStartup
                 return false;
 
             installTreeMatchCountLabelProvider(treeViewer);
+            // Диагностика #165: подписка на новый SearchResult даже если дерево уже hook'нуто.
+            installSearchResultDiagListener(activePage);
 
             if (treeViewer.getTree().getData(HOOKED_KEY) != null)
                 return true; // уже установлен для этого дерева
@@ -417,6 +437,7 @@ public final class SearchViewAggregationHook implements IStartup
             installAggregationListener(treeViewer, tableViewer);
             installPathColumn(tableViewer);
             installTableCopyHandler(treeViewer, tableViewer);
+            installOpenDiagMonitor(activePage, treeViewer, tableViewer);
             TreeSoleChildAutoExpand.installForComfortLists(treeViewer);
 
             treeViewer.getTree().setData(HOOKED_KEY, Boolean.TRUE);
@@ -1821,6 +1842,127 @@ public final class SearchViewAggregationHook implements IStartup
         int swtSelCount = table == null || table.isDisposed() ? -1 : table.getSelectionCount();
         int viewerSelCount = tableViewer.getStructuredSelection().size();
         return "{tableItems=" + itemCount + " viewerSel=" + viewerSelCount + " swtSel=" + swtSelCount + "}"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+    }
+
+    // -----------------------------------------------------------------------
+    // Диагностика #165 (только журнал «Комфорт», без изменения поведения)
+    // -----------------------------------------------------------------------
+
+    private static String describePanelState(TreeViewer treeViewer, TableViewer tableViewer,
+            ISearchResultPage page)
+    {
+        Tree tree = treeViewer != null ? treeViewer.getTree() : null;
+        int treeItems = tree == null || tree.isDisposed() ? -1 : tree.getItemCount();
+        String inputState = "input=?"; //$NON-NLS-1$
+        try
+        {
+            Object input = page != null ? Global.invoke(page, "getInput") : null; //$NON-NLS-1$
+            if (input == null)
+                inputState = "input=null"; //$NON-NLS-1$
+            else
+            {
+                Object elements = Global.invoke(input, "getElements"); //$NON-NLS-1$
+                int elemCount = elements instanceof Collection<?> ? ((Collection<?>) elements).size() : -1;
+                inputState = "input=" + input.getClass().getSimpleName() + " elements=" + elemCount; //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+        catch (Exception e)
+        {
+            inputState = "input=ERR:" + e.getClass().getSimpleName(); //$NON-NLS-1$
+        }
+        return "{treeItems=" + treeItems + " " + describeTableSelectionState(tableViewer) //$NON-NLS-1$ //$NON-NLS-2$
+            + " " + inputState + "}"; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static void installOpenDiagMonitor(ISearchResultPage page, TreeViewer treeViewer,
+            TableViewer tableViewer)
+    {
+        Table table = tableViewer.getTable();
+        if (table == null || table.isDisposed() || table.getData(OPEN_DIAG_HOOKED_KEY) != null)
+            return;
+        table.setData(OPEN_DIAG_HOOKED_KEY, Boolean.TRUE);
+
+        IOpenListener openListener = new IOpenListener()
+        {
+            @Override
+            public void open(OpenEvent event)
+            {
+                if (!ComfortSettings.isReplaceListFiltersEnabled())
+                    return;
+                log("open: " + describePanelState(treeViewer, tableViewer, page)); //$NON-NLS-1$
+                schedulePanelHealthDiag(page, treeViewer, tableViewer, 0);
+                schedulePanelHealthDiag(page, treeViewer, tableViewer, 100);
+                schedulePanelHealthDiag(page, treeViewer, tableViewer, 500);
+                schedulePanelHealthDiag(page, treeViewer, tableViewer, 1500);
+            }
+        };
+        tableViewer.addOpenListener(openListener);
+        treeViewer.addOpenListener(openListener);
+    }
+
+    private static void schedulePanelHealthDiag(ISearchResultPage page, TreeViewer treeViewer,
+            TableViewer tableViewer, int delayMs)
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.timerExec(delayMs, () -> {
+            if (treeViewer.getTree() == null || treeViewer.getTree().isDisposed())
+                return;
+            if (tableViewer.getTable() == null || tableViewer.getTable().isDisposed())
+                return;
+            String state = describePanelState(treeViewer, tableViewer, page);
+            log("panelHealth +" + delayMs + "ms: " + state); //$NON-NLS-1$ //$NON-NLS-2$
+            int treeItems = treeViewer.getTree().getItemCount();
+            if (treeItems == 0)
+                log("TREE_EMPTIED +" + delayMs + "ms: " + state); //$NON-NLS-1$ //$NON-NLS-2$
+        });
+    }
+
+    private static void installSearchResultDiagListener(ISearchResultPage page)
+    {
+        try
+        {
+            Object input = Global.invoke(page, "getInput"); //$NON-NLS-1$
+            if (!(input instanceof ISearchResult result))
+                return;
+            synchronized (RESULT_LISTENERS_INSTALLED)
+            {
+                if (!RESULT_LISTENERS_INSTALLED.add(result))
+                    return;
+            }
+            result.addListener(new ISearchResultListener()
+            {
+                @Override
+                public void searchResultChanged(SearchResultEvent event)
+                {
+                    if (event == null)
+                        return;
+                    String kind = event.getClass().getSimpleName();
+                    log("searchResultChanged: " + kind); //$NON-NLS-1$
+                    if (!kind.contains("Reset") && !kind.contains("Remove")) //$NON-NLS-1$ //$NON-NLS-2$
+                        return;
+                    Display display = Display.getDefault();
+                    if (display == null || display.isDisposed())
+                        return;
+                    display.asyncExec(() -> {
+                        SearchViewViewers viewers = resolveViewers(findSearchViewPart());
+                        if (viewers == null)
+                            return;
+                        IViewPart view = findSearchViewPart();
+                        ISearchResultPage active = view instanceof ISearchResultViewPart
+                            ? ((ISearchResultViewPart) view).getActivePage() : null;
+                        log("searchResultChanged after " + kind + ": " //$NON-NLS-1$ //$NON-NLS-2$
+                            + describePanelState(viewers.tree, viewers.table, active));
+                    });
+                }
+            });
+            log("installSearchResultDiagListener: OK"); //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+            log("installSearchResultDiagListener EXCEPTION: " + e); //$NON-NLS-1$
+        }
     }
 
     // -----------------------------------------------------------------------

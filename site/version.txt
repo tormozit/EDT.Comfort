@@ -7,7 +7,7 @@
 #   Закоммитьте site/features/, site/plugins/, site/content.jar, site/artifacts.jar
 #      (+ MANIFEST/feature/pom/launch/backup/osgi при новом релизе).
 #   Перед первым Run Eclipse Application после release:
-#      powershell -File launch\assert-comfort-osgi.ps1
+#      powershell -File site\scripts\assert-comfort-osgi.ps1
 #   Actions → Publish p2 site:
 #      resanitize — все архивные линейки в списке EDT (sanitize метаданных gh-pages);
 #      republish — та же линейка, новый qualifier; new — новая линейка.
@@ -15,7 +15,7 @@
 #
 # Если после release в логе «image could not be loaded» / «Невозможно преобразовать модуль
 # tormozit.comfort» — это рассинхрон MANIFEST vs bundles.info vs dev.properties в PDE,
-# не пропажа файла в JAR. См. launch\README.txt и launch\assert-comfort-osgi.ps1.
+# не пропажа файла в JAR. См. launch\README.txt и site\scripts\assert-comfort-osgi.ps1.
 # URL в EDT «Установить новое ПО»:
 #   https://tormozit.github.io/EDT.Comfort/          — composite (все архивные линейки)
 #   https://tormozit.github.io/EDT.Comfort/1.0.0.10/ — фиксированная версия

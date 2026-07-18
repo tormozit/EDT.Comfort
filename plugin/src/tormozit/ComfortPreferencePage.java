@@ -203,6 +203,24 @@ public class ComfortPreferencePage
         bracketHintMinLinesTextData.horizontalAlignment = SWT.LEFT;
         bracketHintMinLinesText.setLayoutData(bracketHintMinLinesTextData);
 
+        // BooleanFieldEditor.createControl() подменяет layout родителя на GridLayout —
+        // отдельный host, иначе ломается сетка группы «Редактор кода».
+        Composite spellingIdentsHost = new Composite(codeEditorGroup, SWT.NONE);
+        GridData spellingIdentsHostData = new GridData(SWT.FILL, SWT.CENTER, true, false);
+        spellingIdentsHostData.horizontalSpan = 2;
+        spellingIdentsHost.setLayoutData(spellingIdentsHostData);
+        BooleanFieldEditor spellingIdentsField = new BooleanFieldEditor(
+            ComfortSettings.PREF_SPELLING_CHECK_IDENTIFIERS_VISIBLE,
+            "Проверять орфографию в идентификаторах в видимой области", //$NON-NLS-1$
+            spellingIdentsHost);
+        addField(spellingIdentsField);
+        setFieldTooltip(spellingIdentsField,
+            "При включённой орфографии Comfort (словарь «Русский/Английский (Комфорт-HUNSPELL)»)\n"
+            + "проверять в видимой области модуля имена (идентификаторы) и строковые литералы.\n"
+            + "Если выключено — проверяются только обычные слова в комментариях;\n"
+            + "слова с заглавной буквой не на первой позиции (как в CamelCase) пропускаются.", //$NON-NLS-1$
+            spellingIdentsHost);
+
         createLoggingGroup();
 
         // Поле «Символы» намеренно не добавляется:

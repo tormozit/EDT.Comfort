@@ -49,9 +49,42 @@ public class NavigatorShowInExplorerHandler extends AbstractHandler
                     "Не удалось определить файл или папку для выбранного элемента."); //$NON-NLS-1$
             return;
         }
+        File location = resource.getLocation() != null ? resource.getLocation().toFile() : null;
+        if (location == null)
+        {
+            MessageDialog.openInformation(shell, "Комфорт", //$NON-NLS-1$
+                    "Не удалось определить файл или папку для выбранного элемента."); //$NON-NLS-1$
+            return;
+        }
+        showInExplorer(location, resource.getType() == IResource.FILE, shell);
+    }
+
+    /** Открыть проводник ОС на файле (с выделением) или папке. */
+    public static void showInExplorer(File file, Shell shell)
+    {
+        if (file == null)
+        {
+            MessageDialog.openInformation(shell, "Комфорт", //$NON-NLS-1$
+                    "Не удалось определить файл или папку."); //$NON-NLS-1$
+            return;
+        }
+        showInExplorer(file, file.isFile() || !file.isDirectory(), shell);
+    }
+
+    private static void showInExplorer(File file, boolean selectAsFile, Shell shell)
+    {
         try
         {
-            launchSystemExplorer(resource);
+            File target = file;
+            if (selectAsFile && !target.exists())
+            {
+                File parent = target.getParentFile();
+                if (parent != null && !parent.isDirectory())
+                    parent.mkdirs();
+                if (!target.exists())
+                    target.createNewFile();
+            }
+            launchSystemExplorer(target, selectAsFile && target.isFile());
         }
         catch (IOException e)
         {
@@ -61,15 +94,14 @@ public class NavigatorShowInExplorerHandler extends AbstractHandler
         }
     }
 
-    private static void launchSystemExplorer(IResource resource) throws IOException
+    private static void launchSystemExplorer(File file, boolean selectFile) throws IOException
     {
-        File file = resource.getLocation().toFile();
         String path = file.getCanonicalPath();
         String os = Platform.getOS();
 
         if (Platform.OS_WIN32.equals(os))
         {
-            if (resource.getType() == IResource.FILE)
+            if (selectFile)
                 new ProcessBuilder("explorer.exe", "/select," + quoteWindowsPath(path)).start(); //$NON-NLS-1$ //$NON-NLS-2$
             else
                 new ProcessBuilder("explorer.exe", path).start(); //$NON-NLS-1$
@@ -80,7 +112,7 @@ public class NavigatorShowInExplorerHandler extends AbstractHandler
             new ProcessBuilder("open", "-R", path).start(); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
-        String openPath = resource.getType() == IResource.FILE ? file.getParent() : path;
+        String openPath = selectFile ? file.getParent() : path;
         if (openPath != null)
             new ProcessBuilder("xdg-open", openPath).start(); //$NON-NLS-1$
     }

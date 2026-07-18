@@ -11,6 +11,6 @@ alwaysApply: true
 
 **Запрещено:** менять основной `Eclipse Application.launch` без просьбы; второй launch с тем же `configLocation`; `clearConfig`/`generateProfile` для экспериментов; активные `.launch` в репо; `+R` на `.metadata` (только эталон в `launch/backup/`); restore только `bundles.info`.
 
-**Безопасно:** `launch/backup/`, `launch/restore-main.ps1`; перед restore — закрыть `eclipse.exe`; после — `bundles.info` = 262296. Основной launch: `clearConfig=false`, `generateProfile=false`, `askclear=false`, `pde.generated.config=true`. Отдельный launch — другой `configLocation`.
+**Безопасно:** `launch/backup/`, `site/scripts/restore-main.ps1`; перед restore — закрыть `eclipse.exe`; после — `bundles.info` = 262296. Основной launch: `clearConfig=false`, `generateProfile=false`, `askclear=false`, `pde.generated.config=true`. Отдельный launch — другой `configLocation`.
 
-Поломка: `powershell -File "C:\VC\EDT.Comfort\launch\restore-main.ps1"`.
+Поломка: `powershell -File "C:\VC\EDT.Comfort\site\scripts\restore-main.ps1"`.

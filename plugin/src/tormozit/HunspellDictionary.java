@@ -8,7 +8,9 @@ import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -21,10 +23,14 @@ import java.util.regex.PatternSyntaxException;
  * Поддерживает основные директивы {@code SET},
  * {@code FLAG}, {@code PFX}/{@code SFX}, {@code FORBIDDENWORD}; правила суффиксов/приставок
  * применяются без учёта более редких директив (COMPOUND*, MAP, REP и т.п.) — это не полная
- * реализация спецификации Hunspell, а практичное приближение для подсветки орфографии.
+ * реализация спецификации Hunspell, а практичное приближение для подсветки и подсказок.
  */
 final class HunspellDictionary
 {
+    /** Буквы для генерации правок на расстоянии 1–2 (RU + EN). */
+    private static final String SUGGEST_LETTERS =
+        "абвгдеёжзийклмнопрстуфхцчшщъыьэюяabcdefghijklmnopqrstuvwxyz"; //$NON-NLS-1$
+
     private enum FlagMode
     {
         CHAR, NUM, LONG
@@ -257,6 +263,96 @@ final class HunspellDictionary
         if (word.isEmpty())
             return true;
         return resultCache.computeIfAbsent(word, this::checkForm);
+    }
+
+    /**
+     * Варианты исправления: кандидаты на edit distance 1, при нехватке — 2
+     * (для слов не длиннее 12). Регистр подстраивается под исходное слово.
+     */
+    List<String> suggest(String word, int max)
+    {
+        if (word == null || word.isEmpty() || max <= 0)
+            return List.of();
+        if (isCorrect(word))
+            return List.of();
+        LinkedHashSet<String> found = new LinkedHashSet<>();
+        List<String> distance1 = edits1(word);
+        collectCorrectEdits(word, distance1, found, max, null);
+        // distance 2 только если на d1 пусто — полный перебор d1×d1 слишком тяжёл для UI
+        if (found.isEmpty() && word.length() <= 10)
+        {
+            int[] checks = { 0 };
+            for (String e1 : distance1)
+            {
+                if (found.size() >= max || checks[0] > 25000)
+                    break;
+                collectCorrectEdits(word, edits1(e1), found, max, checks);
+            }
+        }
+        return new ArrayList<>(found);
+    }
+
+    private void collectCorrectEdits(String original, List<String> candidates,
+        LinkedHashSet<String> found, int max, int[] checks)
+    {
+        for (String cand : candidates)
+        {
+            if (found.size() >= max)
+                return;
+            if (checks != null)
+            {
+                checks[0]++;
+                if (checks[0] > 25000)
+                    return;
+            }
+            if (cand.isEmpty() || cand.equalsIgnoreCase(original))
+                continue;
+            if (!isCorrect(cand))
+                continue;
+            found.add(matchCase(original, cand));
+        }
+    }
+
+    private static List<String> edits1(String word)
+    {
+        String w = word.toLowerCase(Locale.ROOT);
+        int n = w.length();
+        LinkedHashSet<String> edits = new LinkedHashSet<>();
+        for (int i = 0; i < n; i++)
+            edits.add(w.substring(0, i) + w.substring(i + 1));
+        for (int i = 0; i < n - 1; i++)
+            edits.add(w.substring(0, i) + w.charAt(i + 1) + w.charAt(i) + w.substring(i + 2));
+        for (int i = 0; i < n; i++)
+        {
+            for (int j = 0; j < SUGGEST_LETTERS.length(); j++)
+            {
+                char c = SUGGEST_LETTERS.charAt(j);
+                if (w.charAt(i) == c)
+                    continue;
+                edits.add(w.substring(0, i) + c + w.substring(i + 1));
+            }
+        }
+        for (int i = 0; i <= n; i++)
+        {
+            for (int j = 0; j < SUGGEST_LETTERS.length(); j++)
+                edits.add(w.substring(0, i) + SUGGEST_LETTERS.charAt(j) + w.substring(i));
+        }
+        return new ArrayList<>(edits);
+    }
+
+    private static String matchCase(String original, String suggestion)
+    {
+        if (original.isEmpty() || suggestion.isEmpty())
+            return suggestion;
+        if (original.equals(original.toUpperCase(Locale.ROOT)))
+            return suggestion.toUpperCase(Locale.ROOT);
+        if (Character.isUpperCase(original.charAt(0)))
+        {
+            if (suggestion.length() == 1)
+                return suggestion.toUpperCase(Locale.ROOT);
+            return Character.toUpperCase(suggestion.charAt(0)) + suggestion.substring(1);
+        }
+        return suggestion;
     }
 
     private boolean checkForm(String word)

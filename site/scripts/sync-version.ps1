@@ -25,7 +25,7 @@ $qualifier = "$release-qualifier"
 $releaseSnapshot = "$release-SNAPSHOT"
 Write-Host "Sync version: $qualifier (Maven: $releaseSnapshot)"
 
-. (Join-Path $Root 'launch\comfort-osgi-version.ps1')
+. (Join-Path $PSScriptRoot 'comfort-osgi-version.ps1')
 
 function Set-Utf8NoBomContent {
     param(
@@ -36,20 +36,24 @@ function Set-Utf8NoBomContent {
     [System.IO.File]::WriteAllLines($Path, $Lines, $utf8NoBom)
 }
 
-$manifestPath = Join-Path $Root 'plugin\META-INF\MANIFEST.MF'
-$manifestLines = Get-Content -LiteralPath $manifestPath -Encoding UTF8
-$manifestUpdated = $false
-for ($i = 0; $i -lt $manifestLines.Count; $i++) {
-    if ($manifestLines[$i] -match '^Bundle-Version:\s') {
-        $manifestLines[$i] = "Bundle-Version: $qualifier"
-        $manifestUpdated = $true
-        break
+function Set-BundleVersion {
+    param([string]$ManifestPath)
+    $manifestLines = Get-Content -LiteralPath $ManifestPath -Encoding UTF8
+    $manifestUpdated = $false
+    for ($i = 0; $i -lt $manifestLines.Count; $i++) {
+        if ($manifestLines[$i] -match '^Bundle-Version:\s') {
+            $manifestLines[$i] = "Bundle-Version: $qualifier"
+            $manifestUpdated = $true
+            break
+        }
     }
+    if (-not $manifestUpdated) {
+        Write-Error "Bundle-Version not found in $ManifestPath"
+    }
+    Set-Utf8NoBomContent -Path $ManifestPath -Lines $manifestLines
 }
-if (-not $manifestUpdated) {
-    Write-Error "Bundle-Version not found in MANIFEST.MF"
-}
-Set-Utf8NoBomContent -Path $manifestPath -Lines $manifestLines
+
+Set-BundleVersion -ManifestPath (Join-Path $Root 'plugin\META-INF\MANIFEST.MF')
 
 $featurePath = Join-Path $Root 'feature\feature.xml'
 $featureText = [System.IO.File]::ReadAllText($featurePath, [System.Text.Encoding]::UTF8)
@@ -80,14 +84,16 @@ $siteTextNew = [regex]::Replace(
 [System.IO.File]::WriteAllText($sitePath, $siteTextNew, (New-Object System.Text.UTF8Encoding($false)))
 
 $parentVersionPattern = '(<artifactId>comfort\.parent</artifactId>\s*<version>)[^<]+(</version>)'
-Get-ChildItem -Path $Root -Recurse -Filter 'pom.xml' | ForEach-Object {
-    $pomText = [System.IO.File]::ReadAllText($_.FullName, [System.Text.Encoding]::UTF8)
-    if ([regex]::IsMatch($pomText, $parentVersionPattern)) {
-        $pomNew = [regex]::Replace($pomText, $parentVersionPattern, "`${1}$releaseSnapshot`${2}")
-        [System.IO.File]::WriteAllText($_.FullName, $pomNew, (New-Object System.Text.UTF8Encoding($false)))
-        Write-Host "Updated: $($_.FullName) parent version -> $releaseSnapshot"
+Get-ChildItem -Path $Root -Recurse -Filter 'pom.xml' |
+    Where-Object { $_.FullName -notmatch '\\\.tmp\\|\\build\\' } |
+    ForEach-Object {
+        $pomText = [System.IO.File]::ReadAllText($_.FullName, [System.Text.Encoding]::UTF8)
+        if ([regex]::IsMatch($pomText, $parentVersionPattern)) {
+            $pomNew = [regex]::Replace($pomText, $parentVersionPattern, "`${1}$releaseSnapshot`${2}")
+            [System.IO.File]::WriteAllText($_.FullName, $pomNew, (New-Object System.Text.UTF8Encoding($false)))
+            Write-Host "Updated: $($_.FullName) parent version -> $releaseSnapshot"
+        }
     }
-}
 
 $sitePomPath = Join-Path $SiteDir 'pom.xml'
 $sitePomText = [System.IO.File]::ReadAllText($sitePomPath, [System.Text.Encoding]::UTF8)

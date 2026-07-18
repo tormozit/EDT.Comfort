@@ -263,6 +263,11 @@ public final class PropertySheetHook implements IStartup
             Control widget = (Control) event.widget;
             if (widget.isDisposed() || PropertySheetUiContext.isFilterAreaControl(widget))
                 return;
+            // Редактирование LWT LightText: StyledText-оверлей с setData(lwtOverlay).
+            // Не подменять меню строки («Копировать имя») — иначе ломается copy выделения.
+            if (widget instanceof org.eclipse.swt.custom.StyledText
+                && widget.getData("com._1c.g5.lwt.lwtOverlay") != null) //$NON-NLS-1$
+                return;
 
             Object page = PropertySheetUiCoordinator.pageForControl(widget);
             if (page == null)

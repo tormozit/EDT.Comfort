@@ -78,6 +78,9 @@ public class Activator extends AbstractUIPlugin
         settings.getPreferenceStore().setDefault(
             ComfortSettings.PREF_BRACKET_CONTENT_HINT_MIN_LINES,
             ComfortSettings.DEFAULT_BRACKET_CONTENT_HINT_MIN_LINES);
+        settings.getPreferenceStore().setDefault(
+            ComfortSettings.PREF_SPELLING_CHECK_IDENTIFIERS_VISIBLE,
+            ComfortSettings.DEFAULT_SPELLING_CHECK_IDENTIFIERS_VISIBLE);
         ContentAssistManager.init(settings);
         ComfortSettings.init(PLUGIN_ID);
         settings.getPreferenceStore().addPropertyChangeListener(event -> {

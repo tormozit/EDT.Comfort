@@ -62,7 +62,7 @@ final class PreferenceSearchIndex
 
     private enum IndexState
     {
-        IN_PROGRESS, DONE, FAILED, SKIPPED_LIVE
+        IN_PROGRESS, DONE, FAILED
     }
 
     private static final PreferenceSearchIndex INSTANCE = new PreferenceSearchIndex();
@@ -283,12 +283,13 @@ final class PreferenceSearchIndex
     {
         String id = node.getId();
 
-        // Страница уже создана (например, сейчас показана в диалоге или
-        // была открыта пользователем ранее) — её нельзя трогать офскрин-циклом
-        // создания/dispose, чтобы не испортить рабочий инстанс.
-        if (node.getPage() != null)
+        // Страница уже создана (показана в диалоге или открывалась в этой
+        // сессии диалога) — нельзя create/dispose офскрином, иначе убьём
+        // рабочий инстанс. Читаем тексты прямо с живого control.
+        IPreferencePage livePage = node.getPage();
+        if (livePage != null)
         {
-            stateByNodeId.put(id, IndexState.SKIPPED_LIVE);
+            indexExistingPage(node, livePage, true);
             return;
         }
 
@@ -311,15 +312,7 @@ final class PreferenceSearchIndex
             }
             page = (IPreferencePage)created;
             page.createControl(offscreen);
-
-            Set<String> texts = new LinkedHashSet<>();
-            addText(texts, node.getLabelText());
-            if (page.getControl() instanceof Composite composite)
-                collectTexts(composite, texts);
-
-            textsByNodeId.put(id, texts);
-            stateByNodeId.put(id, IndexState.DONE);
-            fireNodeIndexed(id);
+            indexExistingPage(node, page, false);
         }
         catch (Throwable t)
         {
@@ -350,6 +343,36 @@ final class PreferenceSearchIndex
             {
                 disposeOffscreen(disposePage, disposeShell);
             }
+        }
+    }
+
+    /**
+     * Собирает тексты уже созданной страницы (живая в диалоге или только что
+     * созданная офскрин). Для живой страницы dispose/setPage не вызываются.
+     */
+    private void indexExistingPage(IPreferenceNode node, IPreferencePage page, boolean live)
+    {
+        String id = node.getId();
+        try
+        {
+            Set<String> texts = new LinkedHashSet<>();
+            addText(texts, node.getLabelText());
+            Control control = page.getControl();
+            if (control instanceof Composite composite && !composite.isDisposed())
+                collectTexts(composite, texts);
+
+            textsByNodeId.put(id, texts);
+            stateByNodeId.put(id, IndexState.DONE);
+            Global.tempLog("preferenceSearchIndex", //$NON-NLS-1$
+                    (live ? "indexLive " : "indexOffscreen ") + id //$NON-NLS-1$ //$NON-NLS-2$
+                    + " texts=" + texts.size()); //$NON-NLS-1$
+            fireNodeIndexed(id);
+        }
+        catch (Throwable t)
+        {
+            stateByNodeId.put(id, IndexState.FAILED);
+            Global.tempLog("preferenceSearchIndex", //$NON-NLS-1$
+                    "indexExistingPage " + id + ": " + describe(t)); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 

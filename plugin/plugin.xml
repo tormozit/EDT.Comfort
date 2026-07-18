@@ -62,6 +62,8 @@
     <startup class="tormozit.GotoDefinitionFieldMenuHook"/>
     <startup class="tormozit.TypeComboOverlayHook"/>
     <startup class="tormozit.SpellCheckHook"/>
+    <startup class="tormozit.PropertySheetSpellCheckHook"/>
+    <startup class="tormozit.BslModuleSpellCheckHook"/>
   </extension>
 
   <extension point="org.eclipse.ui.contexts">

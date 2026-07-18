@@ -178,6 +178,16 @@ public final class ComfortSettings
     /** По умолчанию bootstrap ещё не выполнялся. */
     public static final boolean DEFAULT_SPELLING_BOOTSTRAPPED = false;
 
+    /**
+     * Ключ: проверять орфографию идентификаторов (и строковых литералов) в видимой
+     * области модуля BSL. Выкл. — только «обычные» слова в комментариях.
+     */
+    public static final String PREF_SPELLING_CHECK_IDENTIFIERS_VISIBLE =
+        "comfort.spelling.checkIdentifiersVisible"; //$NON-NLS-1$
+
+    /** По умолчанию проверка идентификаторов выключена (меньше шума). */
+    public static final boolean DEFAULT_SPELLING_CHECK_IDENTIFIERS_VISIBLE = false;
+
     private static ComfortSettings instance;
 
     private final ScopedPreferenceStore preferenceStore;
@@ -609,6 +619,19 @@ public final class ComfortSettings
         {
             Global.log("ComfortSettings save error (spellingBootstrapped): " + ex); //$NON-NLS-1$
         }
+    }
+
+    /**
+     * Проверять орфографию в идентификаторах / строковых литералах видимой области модуля.
+     * Если {@code false} — не проверяем IDENT/STRING и слова в комментариях с заглавной
+     * не на первой позиции (простая эвристика «похоже на идентификатор»).
+     */
+    public static boolean isSpellingCheckIdentifiersVisible()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_SPELLING_CHECK_IDENTIFIERS_VISIBLE;
+        return settings.preferenceStore.getBoolean(PREF_SPELLING_CHECK_IDENTIFIERS_VISIBLE);
     }
 
     /** Минимальное число видимых строк между конструкциями для показа подсказки. */

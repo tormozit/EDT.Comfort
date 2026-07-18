@@ -5,23 +5,23 @@ alwaysApply: true
 
 # EDT workspace (EDT.Comfort)
 
-## Бандлы EDT
+## Р‘Р°РЅРґР»С‹ EDT
 
-Не искать в `Program Files\1C\…` без явной просьбы. Target platform:
+РќРµ РёСЃРєР°С‚СЊ РІ `Program Files\1C\вЂ¦` Р±РµР· СЏРІРЅРѕР№ РїСЂРѕСЃСЊР±С‹. Target platform:
 
 - Workspace: `C:\VC\EDT-plugin-WS`
 - JAR: `C:\VC\EDT-plugin-WS\.metadata\.plugins\org.eclipse.pde.core\.bundle_pool\plugins\`
 
-## Распаковка и разбор
+## Р Р°СЃРїР°РєРѕРІРєР° Рё СЂР°Р·Р±РѕСЂ
 
-Временные файлы — только `.tmp/` (напр. `.tmp\mdprops\`). **Не** распаковывать в корень/`plugin/`. `jar xf`/`unzip` — `working_directory` в `.tmp\<имя>`; иначе `com/`, `org/` в корне — удалить.
+Р’СЂРµРјРµРЅРЅС‹Рµ С„Р°Р№Р»С‹ вЂ” С‚РѕР»СЊРєРѕ `.tmp/` (РЅР°РїСЂ. `.tmp\mdprops\`). **РќРµ** СЂР°СЃРїР°РєРѕРІС‹РІР°С‚СЊ РІ РєРѕСЂРµРЅСЊ/`plugin/`. `jar xf`/`unzip` вЂ” `working_directory` РІ `.tmp\<РёРјСЏ>`; РёРЅР°С‡Рµ `com/`, `org/` РІ РєРѕСЂРЅРµ вЂ” СѓРґР°Р»РёС‚СЊ.
 
-`javap` только: `C:\Program Files\1C\1CE\components\axiom-jdk-full-17.0.16+12-x86_64\bin\javap.exe`
+`javap` С‚РѕР»СЊРєРѕ: `C:\Program Files\1C\1CE\components\axiom-jdk-full-17.0.16+12-x86_64\bin\javap.exe`
 
-Разбор класса: найти JAR в `.bundle_pool` → `jar xf` в `.tmp\…` → `javap` / `jar tf` / grep.
+Р Р°Р·Р±РѕСЂ РєР»Р°СЃСЃР°: РЅР°Р№С‚Рё JAR РІ `.bundle_pool` в†’ `jar xf` РІ `.tmp\вЂ¦` в†’ `javap` / `jar tf` / grep.
 
-## Репозиторий и сборка
+## Р РµРїРѕР·РёС‚РѕСЂРёР№ Рё СЃР±РѕСЂРєР°
 
-Исходники: `C:\VC\EDT.Comfort\plugin\`. Запуск — PDE workspace `EDT-plugin-WS`. **Maven запрещён** — сборка в PDE; после правок сообщить о пересборке, не запускать `mvn`.
+РСЃС…РѕРґРЅРёРєРё: `C:\VC\EDT.Comfort\plugin\`. Р—Р°РїСѓСЃРє вЂ” PDE workspace `EDT-plugin-WS`. **Maven Р·Р°РїСЂРµС‰С‘РЅ** вЂ” СЃР±РѕСЂРєР° РІ PDE; РїРѕСЃР»Рµ РїСЂР°РІРѕРє СЃРѕРѕР±С‰РёС‚СЊ Рѕ РїРµСЂРµСЃР±РѕСЂРєРµ, РЅРµ Р·Р°РїСѓСЃРєР°С‚СЊ `mvn`.
 
-Launch/OSGi — см. `pde-launch-osgi.mdc`; восстановление — `launch/restore-main.ps1`.
+Launch/OSGi вЂ” СЃРј. `pde-launch-osgi.mdc`; РІРѕСЃСЃС‚Р°РЅРѕРІР»РµРЅРёРµ вЂ” `site/scripts/restore-main.ps1`.

@@ -23,9 +23,4 @@
          version="0.0.0"
          unpack="false"/>
 
-   <plugin
-         id="tormozit.comfort.jdt.ui.dictionaries"
-         version="0.0.0"
-         unpack="false"/>
-
 </feature>

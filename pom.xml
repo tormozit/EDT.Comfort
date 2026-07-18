@@ -25,7 +25,6 @@
   <modules>
     <module>target</module>
     <module>plugin</module>
-    <module>fragment.jdt.ui.dictionaries</module>
     <module>feature</module>
     <module>site</module>
   </modules>

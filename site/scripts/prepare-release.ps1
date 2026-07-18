@@ -280,16 +280,16 @@ if ($Mode -eq 'Release') {
 Stop-EclipseProcesses
 Invoke-PdeBuild -RepoRoot $Root -SiteDirectory $SiteDir
 
-$restoreScript = Join-Path $Root 'launch\restore-main.ps1'
+$restoreScript = Join-Path $PSScriptRoot 'restore-main.ps1'
 if (-not (Test-Path -LiteralPath $restoreScript)) {
     Write-Error "restore-main.ps1 not found: $restoreScript"
 }
 Write-Host ''
-Write-Host 'Sync PDE OSGi profile (launch\restore-main.ps1)...'
+Write-Host 'Sync PDE OSGi profile (site\scripts\restore-main.ps1)...'
 & powershell -NoProfile -ExecutionPolicy Bypass -File $restoreScript
 Test-ExternalExitCode -Context 'restore-main.ps1'
 
-. (Join-Path $Root 'launch\comfort-osgi-version.ps1')
+. (Join-Path $PSScriptRoot 'comfort-osgi-version.ps1')
 $expectedQualifier = Get-ComfortExpectedQualifier
 $wsOsgi = $ComfortWsOsgi
 $wsBundles = Join-Path $wsOsgi $ComfortBundlesInfoRel
