@@ -1,5 +1,6 @@
 package tormozit;
 
+import java.lang.reflect.Method;
 import java.util.List;
 
 import org.eclipse.swt.SWT;
@@ -9,10 +10,12 @@ import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
+import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Text;
+import org.eclipse.ui.dialogs.FilteredTree;
 
 /**
  * Общий UI истории фильтра: сохранение по потере фокуса, попап по Ctrl+↓ и/
@@ -150,23 +153,91 @@ final class FilterHistoryUi
     private static void showMenu(Control anchor, Text filterControl, List<String> items)
     {
         Menu menu = new Menu(anchor);
+        Global.tempLog("filterHistoryUi", "showMenu: items=" + items); //$NON-NLS-1$ //$NON-NLS-2$
         for (String item : items)
         {
             MenuItem menuItem = new MenuItem(menu, SWT.PUSH);
             menuItem.setText(item);
             menuItem.addListener(SWT.Selection, e ->
             {
-                filterControl.setText(item);
-                filterControl.setSelection(item.length());
-                filterControl.setFocus();
+                Global.tempLog("filterHistoryUi", //$NON-NLS-1$
+                        "selection item=[" + item + "] before=[" //$NON-NLS-1$ //$NON-NLS-2$
+                        + (filterControl.isDisposed() ? "<disposed>" : filterControl.getText()) + "]"); //$NON-NLS-1$ //$NON-NLS-2$
+                // Не ставим текст здесь: Selection приходит внутри nested loop
+                // Menu.setVisible (на Windows Hide часто раньше Selection), и
+                // Modify/textChanged/refreshJob FilteredTree плавают до Activate
+                // окна. Применяем на следующем такте UI-потока.
+                if (!filterControl.isDisposed())
+                    filterControl.getDisplay().asyncExec(() -> applyHistoryValue(filterControl, item));
             });
         }
-        menu.addListener(SWT.Hide, e -> menu.getDisplay().asyncExec(() ->
+        menu.addListener(SWT.Hide, e ->
         {
-            if (!menu.isDisposed())
-                menu.dispose();
-        }));
+            Global.tempLog("filterHistoryUi", "menu Hide"); //$NON-NLS-1$ //$NON-NLS-2$
+            menu.getDisplay().asyncExec(() ->
+            {
+                if (!menu.isDisposed())
+                    menu.dispose();
+            });
+        });
         menu.setLocation(anchor.toDisplay(0, anchor.getSize().y));
+        Global.tempLog("filterHistoryUi", "menu.setVisible(true)"); //$NON-NLS-1$ //$NON-NLS-2$
         menu.setVisible(true);
+        Global.tempLog("filterHistoryUi", "menu.setVisible returned"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * Ставит значение из истории в поле и форсирует перефильтровку
+     * {@link FilteredTree} (тот же приём, что {@code ComfortKeysPreferences.setFilterText}).
+     */
+    private static void applyHistoryValue(Text filterControl, String item)
+    {
+        if (filterControl == null || filterControl.isDisposed())
+        {
+            Global.tempLog("filterHistoryUi", "applyAsync: filterControl disposed"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        Global.tempLog("filterHistoryUi", "applyAsync: item=[" + item + "] before=[" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + filterControl.getText() + "]"); //$NON-NLS-1$
+        filterControl.setText(item);
+        filterControl.setSelection(item.length());
+        filterControl.setFocus();
+        FilteredTree tree = findFilteredTree(filterControl);
+        if (tree != null)
+            forceTextChanged(tree);
+        else
+        {
+            Global.tempLog("filterHistoryUi", "applyAsync: no FilteredTree, notify Modify"); //$NON-NLS-1$ //$NON-NLS-2$
+            filterControl.notifyListeners(SWT.Modify, new Event());
+        }
+        Global.tempLog("filterHistoryUi", "applyAsync: after=[" + filterControl.getText() + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    private static FilteredTree findFilteredTree(Control start)
+    {
+        for (Control c = start; c != null; c = c.getParent())
+        {
+            if (c instanceof FilteredTree filteredTree)
+                return filteredTree;
+        }
+        return null;
+    }
+
+    private static void forceTextChanged(FilteredTree tree)
+    {
+        try
+        {
+            Method textChanged = FilteredTree.class.getDeclaredMethod("textChanged"); //$NON-NLS-1$
+            textChanged.setAccessible(true);
+            textChanged.invoke(tree);
+            Global.tempLog("filterHistoryUi", "textChanged ok"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (Exception ex)
+        {
+            Global.tempLog("filterHistoryUi", "textChanged fail: " + ex); //$NON-NLS-1$ //$NON-NLS-2$
+            Text filterControl = tree.getFilterControl();
+            if (filterControl != null && !filterControl.isDisposed())
+                filterControl.notifyListeners(SWT.Modify, new Event());
+        }
     }
 }

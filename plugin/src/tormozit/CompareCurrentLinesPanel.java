@@ -13,6 +13,7 @@ import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyleRange;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Color;
+import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
@@ -368,11 +369,11 @@ public final class CompareCurrentLinesPanel
     private void createDiffColors(Display display)
     {
         deleteBackground = new Color(display, 255, 224, 224);
-        deleteForeground = new Color(display, 198, 40, 40);
+        deleteForeground = new Color(display, SmartMatchHighlight.toEffectiveRgb(new RGB(198, 40, 40)));
         insertBackground = new Color(display, 216, 255, 216);
-        insertForeground = new Color(display, 46, 125, 50);
+        insertForeground = new Color(display, SmartMatchHighlight.toEffectiveRgb(new RGB(46, 125, 50)));
         spaceBackground = new Color(display, 224, 224, 255);
-        spaceForeground = new Color(display, 21, 101, 192);
+        spaceForeground = new Color(display, SmartMatchHighlight.toEffectiveRgb(new RGB(21, 101, 192)));
     }
 
     private void disposeDiffColors()

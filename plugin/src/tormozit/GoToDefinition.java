@@ -1160,7 +1160,8 @@ public class GoToDefinition extends AbstractHandler
         return openFileAtLine(file, line, page, shell);
     }
 
-    private static boolean openFileAtLine(IFile file, int line, IWorkbenchPage page, Shell shell)
+    /** Не {@code private} — переиспользуется {@link ShowInModuleHandler}. */
+    static boolean openFileAtLine(IFile file, int line, IWorkbenchPage page, Shell shell)
     {
         try
         {
@@ -1178,7 +1179,8 @@ public class GoToDefinition extends AbstractHandler
         } //$NON-NLS-1$
     }
 
-    private static void revealLine(IEditorPart editor, int lineNumber)
+    /** Не {@code private} — переиспользуется {@link ShowInModuleHandler}. */
+    static void revealLine(IEditorPart editor, int lineNumber)
     {
         if (lineNumber <= 0 || !(editor instanceof ITextEditor)) 
             return;

@@ -101,7 +101,8 @@ public final class FileSearchResultsHook implements IStartup
         @Override
         public void applyStyles(TextStyle textStyle)
         {
-            textStyle.foreground = Display.getCurrent().getSystemColor(SWT.COLOR_DARK_BLUE);
+            textStyle.foreground = SmartMatchHighlight.effectiveSystemColor(
+                Display.getCurrent(), SWT.COLOR_DARK_BLUE);
         }
     };
 

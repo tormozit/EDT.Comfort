@@ -152,10 +152,31 @@ public final class ComfortSettings
      */
     public static final String PREF_SPELLING_DICT_BASE_PATHS = "comfort.spelling.dictBasePaths"; //$NON-NLS-1$
 
-    /** Пути к словарям по умолчанию. */
+    /**
+     * Пути к словарям по умолчанию (относительные пути внутри бандла плагина,
+     * без расширения: пара {@code .aff}/{@code .dic}).
+     */
     public static final String DEFAULT_SPELLING_DICT_BASE_PATHS =
-        "C:\\Portable\\TurboConf\\SpellCheck\\russian-aot-ieyo;" //$NON-NLS-1$
-            + "C:\\Portable\\TurboConf\\SpellCheck\\en_US"; //$NON-NLS-1$
+        "dictionaries/hunspell/russian-aot-ieyo;" //$NON-NLS-1$
+            + "dictionaries/hunspell/en_US"; //$NON-NLS-1$
+
+    /**
+     * Код locale виртуального словаря Comfort в Platform dictionary.
+     * Подпись в UI — {@link #SPELLING_PLATFORM_DICT_LABEL}; проверка — Hunspell RU+EN.
+     */
+    public static final String SPELLING_PLATFORM_LOCALE = "ru_RU"; //$NON-NLS-1$
+
+    /** Подпись пункта Platform dictionary (вместо штатного {@code Locale.getDisplayName}). */
+    public static final String SPELLING_PLATFORM_DICT_LABEL = "Русский/Английский (Комфорт-HUNSPELL)"; //$NON-NLS-1$
+
+    /**
+     * Ключ: однократный bootstrap Platform dictionary (Default engine + locale ru_RU).
+     * После {@code true} плагин не перезаписывает выбор пользователя.
+     */
+    public static final String PREF_SPELLING_BOOTSTRAPPED = "comfort.spelling.platformDictBootstrapped"; //$NON-NLS-1$
+
+    /** По умолчанию bootstrap ещё не выполнялся. */
+    public static final boolean DEFAULT_SPELLING_BOOTSTRAPPED = false;
 
     private static ComfortSettings instance;
 
@@ -562,6 +583,32 @@ public final class ComfortSettings
             ? DEFAULT_SPELLING_DICT_BASE_PATHS
             : settings.preferenceStore.getString(PREF_SPELLING_DICT_BASE_PATHS);
         return value.split(";"); //$NON-NLS-1$
+    }
+
+    /** Bootstrap орфографии уже выполнен (выбор движка дальше только у пользователя). */
+    public static boolean isSpellingBootstrapped()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_SPELLING_BOOTSTRAPPED;
+        return settings.preferenceStore.getBoolean(PREF_SPELLING_BOOTSTRAPPED);
+    }
+
+    /** Отметить, что однократный bootstrap орфографии выполнен. */
+    public static void setSpellingBootstrapped(boolean bootstrapped)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        settings.preferenceStore.setValue(PREF_SPELLING_BOOTSTRAPPED, bootstrapped);
+        try
+        {
+            settings.preferenceStore.save();
+        }
+        catch (Exception ex)
+        {
+            Global.log("ComfortSettings save error (spellingBootstrapped): " + ex); //$NON-NLS-1$
+        }
     }
 
     /** Минимальное число видимых строк между конструкциями для показа подсказки. */

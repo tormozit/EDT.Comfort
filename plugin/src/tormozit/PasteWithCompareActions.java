@@ -22,12 +22,14 @@ import org.eclipse.compare.ITypedElement;
 import org.eclipse.compare.structuremergeviewer.Differencer;
 import org.eclipse.compare.structuremergeviewer.DiffNode;
 import org.eclipse.compare.structuremergeviewer.ICompareInput;
+import org.eclipse.core.resources.IFile;
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.IContributionItem;
 import org.eclipse.jface.action.IToolBarManager;
 import org.eclipse.jface.action.Separator;
+import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.swt.SWT;
@@ -37,6 +39,7 @@ import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
+import org.eclipse.ui.IWorkbenchPage;
 
 /**
  * Общая логика команды «Вставить со сравнением» для handler и контекстного меню.
@@ -83,7 +86,8 @@ public final class PasteWithCompareActions
             StringFragmentCompareInput input = new StringFragmentCompareInput(
                 ctx.selectedText,
                 clipboardText,
-                ctx.compareViewerType);
+                ctx.compareViewerType,
+                ctx);
 
             String newText = input.openDialog();
             if (newText == null)
@@ -126,6 +130,8 @@ public final class PasteWithCompareActions
         private final String compareViewerType;
         private final EditableStringCompareElement leftElement;
         private final EditableStringCompareElement rightElement;
+        /** Контекст вызывающего редактора — левая панель сравнения всегда его фрагмент (см. {@link #showInModule}). */
+        private final TextEditor.Context ctx;
         /** Устанавливается только при нажатии OK в диалоге (не опрашивать {@link #okPressed()} вручную). */
         private boolean insertConfirmed;
 
@@ -137,12 +143,14 @@ public final class PasteWithCompareActions
         /** Пункт «Сравнить ИР» в тулбаре добавляется один раз (см. {@link #addCompareInIrToolbarActionOnce}). */
         private boolean toolbarActionAdded;
 
-        StringFragmentCompareInput(String leftText, String rightText, String compareViewerType)
+        StringFragmentCompareInput(String leftText, String rightText, String compareViewerType,
+            TextEditor.Context ctx)
         {
             super(createConfiguration());
             this.compareViewerType = compareViewerType != null && !compareViewerType.isBlank()
                 ? compareViewerType
                 : "txt"; //$NON-NLS-1$
+            this.ctx = ctx;
             leftElement = new EditableStringCompareElement(
                 "selection." + this.compareViewerType, leftText, this.compareViewerType, false); //$NON-NLS-1$
             rightElement = new EditableStringCompareElement(
@@ -269,6 +277,16 @@ public final class PasteWithCompareActions
             };
             compareInIrAction.setToolTipText(IrCompareValuesHandler.TOOLTIP + Global.pluginSignForTooltip());
             toolBarManager.add(compareInIrAction);
+            Action showInModuleAction = new Action(ShowInModuleHandler.MENU_LABEL)
+            {
+                @Override
+                public void run()
+                {
+                    showInModule();
+                }
+            };
+            showInModuleAction.setToolTipText(ShowInModuleHandler.TOOLTIP + Global.pluginSignForTooltip());
+            toolBarManager.add(showInModuleAction);
             toolBarManager.add(currentLinesPanel.createVisibilityToggleAction());
             toolBarManager.add(new Separator());
             for (IContributionItem item : existingItems)
@@ -283,6 +301,52 @@ public final class PasteWithCompareActions
             if (toolbarActionAdded)
                 return;
             toolbarActionAdded = addCompareInIrToolbarAction();
+        }
+
+        /**
+         * «Показать в модуле» — всегда ведёт в левую панель (реальный открытый редактор,
+         * {@code ctx.selectedText}), независимо от того, где сейчас каретка: правая панель —
+         * это буфер обмена, без файла. «Сохранить» тут не нужно (вставка — не цель перехода) —
+         * диалог закрывается без применения (как {@link #cancelPressed()}), затем открывается
+         * реальный модуль на строке, соответствующей каретке в левой панели.
+         */
+        private void showInModule()
+        {
+            if (ctx == null || ctx.editor == null || leftEditorText == null || leftEditorText.isDisposed())
+                return;
+            IFile file = ctx.editor.getEditorInput().getAdapter(IFile.class);
+            if (file == null)
+            {
+                Global.log("PasteWithCompareActions.showInModule: нет реального файла у левого редактора"); //$NON-NLS-1$
+                return;
+            }
+
+            int line1Based;
+            try
+            {
+                int baseLine = ctx.viewer.getDocument().getLineOfOffset(ctx.offset);
+                int relativeLine = CompareLineRangeMatcher.lineAtCaret(leftEditorText);
+                line1Based = baseLine + relativeLine + 1;
+            }
+            catch (BadLocationException e)
+            {
+                Global.log("PasteWithCompareActions.showInModule: " + e); //$NON-NLS-1$
+                return;
+            }
+
+            IWorkbenchPage page = ctx.editor.getEditorSite().getPage();
+            Shell workbenchShell = page.getWorkbenchWindow().getShell();
+
+            Shell dialogShell = leftEditorText.getShell();
+            ModalSaveCloseHelper.Choice choice = ModalSaveCloseHelper.confirmClose(dialogShell,
+                "Закрыть окно сравнения и перейти в модуль?"); //$NON-NLS-1$
+            if (choice != ModalSaveCloseHelper.Choice.PROCEED)
+                return;
+
+            cancelPressed();
+            dialogShell.close();
+
+            ShowInModuleHandler.open(file, line1Based, page, workbenchShell);
         }
 
         /** Полные тексты обеих сторон (не текущей строки) — для кнопки «Сравнить ИР». */

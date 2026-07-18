@@ -716,7 +716,8 @@ public class ComfortPreferencePage
         int indent = convertHorizontalDLUsToPixels(IDialogConstants.INDENT + 12);
         gd.horizontalIndent = indent;
         hint.setLayoutData(gd);
-        hint.setForeground(parent.getDisplay().getSystemColor(SWT.COLOR_DARK_GRAY));
+        hint.setForeground(SmartMatchHighlight.effectiveSystemColor(
+            parent.getDisplay(), SWT.COLOR_DARK_GRAY));
 
         parent.addControlListener(new ControlAdapter()
         {

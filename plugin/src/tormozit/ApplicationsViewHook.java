@@ -829,12 +829,12 @@ public class ApplicationsViewHook implements IStartup
                         if (ir.isConnecting(ib))
                         {
                             cell.setText("Подключение…"); //$NON-NLS-1$
-                            cell.setForeground(d.getSystemColor(SWT.COLOR_DARK_GRAY));
+                            cell.setForeground(SmartMatchHighlight.effectiveSystemColor(d, SWT.COLOR_DARK_GRAY));
                         }
                         else
                         {
                             cell.setText("Подключить"); //$NON-NLS-1$
-                            cell.setForeground(d.getSystemColor(SWT.COLOR_DARK_BLUE));
+                            cell.setForeground(SmartMatchHighlight.effectiveSystemColor(d, SWT.COLOR_DARK_BLUE));
                         }
                         cell.setBackground(null);
                     }
@@ -963,12 +963,12 @@ public class ApplicationsViewHook implements IStartup
         {
             String prefix = (version != null && !version.isEmpty()) ? version + ", " : ""; //$NON-NLS-1$ //$NON-NLS-2$
             cell.setText(prefix + DATE_FMT.format(start));
-            cell.setForeground(d.getSystemColor(SWT.COLOR_DARK_GREEN));
+            cell.setForeground(SmartMatchHighlight.effectiveSystemColor(d, SWT.COLOR_DARK_GREEN));
         }
         else
         {
             cell.setText("\u2014"); //$NON-NLS-1$
-            cell.setForeground(d.getSystemColor(SWT.COLOR_DARK_GRAY));
+            cell.setForeground(SmartMatchHighlight.effectiveSystemColor(d, SWT.COLOR_DARK_GRAY));
         }
         cell.setBackground(null);
     }

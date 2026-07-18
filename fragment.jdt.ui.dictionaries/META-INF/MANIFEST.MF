@@ -1,0 +1,9 @@
+Manifest-Version: 1.0
+Bundle-ManifestVersion: 2
+Bundle-Name: EDT Comfort JDT UI Dictionaries
+Bundle-SymbolicName: tormozit.comfort.jdt.ui.dictionaries
+Bundle-Version: 1.0.0.22-qualifier
+Bundle-Vendor: Tormozit
+Fragment-Host: org.eclipse.jdt.ui;bundle-version="[3.18.0,4.0.0)"
+Bundle-RequiredExecutionEnvironment: JavaSE-17
+Automatic-Module-Name: tormozit.comfort.jdt.ui.dictionaries

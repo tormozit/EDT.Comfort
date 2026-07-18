@@ -1,80 +1,32 @@
 package tormozit;
 
 import java.io.File;
+import java.net.URI;
+import java.net.URL;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
-import org.eclipse.core.runtime.IProgressMonitor;
-import org.eclipse.jface.text.BadLocationException;
-import org.eclipse.jface.text.IDocument;
-import org.eclipse.jface.text.IRegion;
-import org.eclipse.jface.text.contentassist.ICompletionProposal;
-import org.eclipse.ui.texteditor.spelling.ISpellingEngine;
-import org.eclipse.ui.texteditor.spelling.ISpellingProblemCollector;
-import org.eclipse.ui.texteditor.spelling.SpellingContext;
-import org.eclipse.ui.texteditor.spelling.SpellingProblem;
+import org.eclipse.core.runtime.FileLocator;
+import org.eclipse.core.runtime.Path;
+import org.osgi.framework.Bundle;
+import org.osgi.framework.FrameworkUtil;
 
 /**
- * Движок проверки орфографии для EDT на базе словарей Hunspell/MySpell
- * ({@link HunspellDictionary}), т.к. EDT не поставляет ни одной реализации
- * {@code org.eclipse.ui.workbench.texteditor.spellingEngine} (issue 1c-edt-issues#1215).
- * Пути к словарям задаются настройкой {@link ComfortSettings#getSpellingDictionaryBasePaths()}.
+ * Загрузчик словарей Hunspell/MySpell для виртуального Platform dictionary
+ * ({@link SpellCheckHook}). Пути — {@link ComfortSettings#getSpellingDictionaryBasePaths()}
+ * (по умолчанию из бандла плагина).
  */
-public final class ComfortSpellingEngine implements ISpellingEngine
+public final class ComfortSpellingEngine
 {
     private static volatile List<HunspellDictionary> dictionaries;
 
-    @Override
-    public void check(IDocument document, IRegion[] regions, SpellingContext context,
-        ISpellingProblemCollector collector, IProgressMonitor monitor)
+    private ComfortSpellingEngine()
     {
-        List<HunspellDictionary> dicts = getDictionaries();
-        collector.beginCollecting();
-        try
-        {
-            for (IRegion region : regions)
-            {
-                if (monitor != null && monitor.isCanceled())
-                    break;
-                String word;
-                try
-                {
-                    word = document.get(region.getOffset(), region.getLength());
-                }
-                catch (BadLocationException e)
-                {
-                    continue;
-                }
-                if (!hasLetter(word) || isCorrect(dicts, word))
-                    continue;
-                collector.accept(new Problem(region.getOffset(), region.getLength(), word));
-            }
-        }
-        finally
-        {
-            collector.endCollecting();
-        }
     }
 
-    private static boolean hasLetter(String word)
-    {
-        for (int i = 0; i < word.length(); i++)
-            if (Character.isLetter(word.charAt(i)))
-                return true;
-        return false;
-    }
-
-    private static boolean isCorrect(List<HunspellDictionary> dicts, String word)
-    {
-        for (HunspellDictionary dict : dicts)
-        {
-            if (dict.isCorrect(word))
-                return true;
-        }
-        return false;
-    }
-
-    private static List<HunspellDictionary> getDictionaries()
+    /** Общий кэш словарей для Platform dictionary. */
+    static List<HunspellDictionary> sharedDictionaries()
     {
         List<HunspellDictionary> result = dictionaries;
         if (result == null)
@@ -97,63 +49,56 @@ public final class ComfortSpellingEngine implements ISpellingEngine
         List<HunspellDictionary> result = new ArrayList<>();
         for (String basePath : ComfortSettings.getSpellingDictionaryBasePaths())
         {
-            if (basePath.isBlank())
+            if (basePath == null || basePath.isBlank())
                 continue;
+            String trimmed = basePath.trim();
             try
             {
-                File aff = new File(basePath + ".aff"); //$NON-NLS-1$
-                File dic = new File(basePath + ".dic"); //$NON-NLS-1$
-                if (!aff.isFile() || !dic.isFile())
+                File aff = resolveDictionaryFile(trimmed, ".aff"); //$NON-NLS-1$
+                File dic = resolveDictionaryFile(trimmed, ".dic"); //$NON-NLS-1$
+                if (aff == null || dic == null || !aff.isFile() || !dic.isFile())
                 {
-                    Global.tempLog("spellCheck", "словарь не найден: " + basePath); //$NON-NLS-1$ //$NON-NLS-2$
+                    Global.tempLog("spellCheck", "словарь не найден: " + trimmed); //$NON-NLS-1$ //$NON-NLS-2$
                     continue;
                 }
                 result.add(HunspellDictionary.load(aff, dic));
-                Global.tempLog("spellCheck", "словарь загружен: " + basePath); //$NON-NLS-1$ //$NON-NLS-2$
+                Global.tempLog("spellCheck", "словарь загружен: " + trimmed //$NON-NLS-1$ //$NON-NLS-2$
+                    + " (" + aff.getAbsolutePath() + ")"); //$NON-NLS-1$ //$NON-NLS-2$
             }
             catch (Exception e)
             {
-                Global.tempLog("spellCheck", "ошибка загрузки " + basePath + ": " + e); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                Global.tempLog("spellCheck", "ошибка загрузки " + trimmed + ": " + e); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             }
         }
-        return result;
+        return result.isEmpty() ? Collections.emptyList() : List.copyOf(result);
     }
 
-    private static final class Problem extends SpellingProblem
+    /**
+     * Абсолютный путь на диске или относительный путь ресурса бандла
+     * {@code tormozit.comfort} (без расширения).
+     */
+    private static File resolveDictionaryFile(String basePath, String extension)
     {
-        private final int offset;
-        private final int length;
-        private final String word;
-
-        Problem(int offset, int length, String word)
+        File direct = new File(basePath + extension);
+        if (direct.isFile())
+            return direct;
+        Bundle bundle = FrameworkUtil.getBundle(ComfortSpellingEngine.class);
+        if (bundle == null)
+            return null;
+        try
         {
-            this.offset = offset;
-            this.length = length;
-            this.word = word;
+            URL found = FileLocator.find(bundle, new Path(basePath + extension), null);
+            if (found == null)
+                return null;
+            URL fileUrl = FileLocator.toFileURL(found);
+            URI uri = new URI(fileUrl.getProtocol(), fileUrl.getPath(), null);
+            return new File(uri);
         }
-
-        @Override
-        public int getOffset()
+        catch (Exception e)
         {
-            return offset;
-        }
-
-        @Override
-        public int getLength()
-        {
-            return length;
-        }
-
-        @Override
-        public String getMessage()
-        {
-            return "Слово \"" + word + "\" отсутствует в словаре"; //$NON-NLS-1$ //$NON-NLS-2$
-        }
-
-        @Override
-        public ICompletionProposal[] getProposals()
-        {
-            return new ICompletionProposal[0];
+            Global.tempLog("spellCheck", "resolveDictionaryFile " + basePath + extension //$NON-NLS-1$ //$NON-NLS-2$
+                + ": " + e); //$NON-NLS-1$
+            return null;
         }
     }
 }

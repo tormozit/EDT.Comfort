@@ -4,9 +4,12 @@ import org.eclipse.compare.CompareEditorInput;
 import org.eclipse.compare.CompareConfiguration;
 import org.eclipse.compare.CompareViewerPane;
 import org.eclipse.compare.CompareViewerSwitchingPane;
+import org.eclipse.compare.IResourceProvider;
 import org.eclipse.compare.ITypedElement;
 import org.eclipse.compare.contentmergeviewer.TextMergeViewer;
 import org.eclipse.compare.structuremergeviewer.ICompareInput;
+import org.eclipse.core.resources.IFile;
+import org.eclipse.core.resources.IResource;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.IContributionItem;
 import org.eclipse.jface.action.IToolBarManager;
@@ -19,6 +22,7 @@ import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
@@ -184,8 +188,10 @@ public final class GitCompareCurrentLinesHook
         viewerControl.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
 
         CompareConfiguration config = editorInput.getCompareConfiguration();
-        String leftLabel = markWorkingCopyLabel(config != null ? config.getLeftLabel(null) : null);
-        String rightLabel = markWorkingCopyLabel(config != null ? config.getRightLabel(null) : null);
+        String rawLeftLabel = config != null ? config.getLeftLabel(null) : null;
+        String rawRightLabel = config != null ? config.getRightLabel(null) : null;
+        String leftLabel = markWorkingCopyLabel(rawLeftLabel);
+        String rightLabel = markWorkingCopyLabel(rawRightLabel);
 
         CompareCurrentLinesPanel panel = CompareCurrentLinesPanel.create(wrapper,
             labelOrDefault(leftLabel, "Слева:"), labelOrDefault(rightLabel, "Справа:")); //$NON-NLS-1$ //$NON-NLS-2$
@@ -205,7 +211,21 @@ public final class GitCompareCurrentLinesHook
         String irSyntaxVariant = IrCompareValuesHandler.syntaxVariantFor(resolveCompareType(editorInput));
         panel.setCompareInIrSupplier(() ->
             supplyFullTextsForIr(leftText, rightText, irTitle, leftLabel, rightLabel, irSyntaxVariant));
-        addCompareInIrToolbarAction(pane, panel);
+
+        /*
+         * «Показать в модуле» ведёт только в рабочую копию (реальный файл в workspace) —
+         * определяем сторону по исходной подписи EGit («Локальный: ...», см. markWorkingCopyLabel)
+         * ДО добавления суффикса, и резолвим её IFile через IResourceProvider (публичный API
+         * org.eclipse.compare, не reflection — LocalResourceTypedElement его реализует).
+         */
+        boolean leftIsWorkingCopy = rawLeftLabel != null && rawLeftLabel.startsWith("Локальный"); //$NON-NLS-1$
+        boolean rightIsWorkingCopy = rawRightLabel != null && rawRightLabel.startsWith("Локальный"); //$NON-NLS-1$
+        StyledText workingCopyText = leftIsWorkingCopy ? leftText : rightIsWorkingCopy ? rightText : null;
+        IFile workingCopyFile = leftIsWorkingCopy ? resolveTypedElementFile(editorInput, true)
+            : rightIsWorkingCopy ? resolveTypedElementFile(editorInput, false)
+            : null;
+
+        addCompareInIrToolbarAction(pane, panel, workingCopyFile, workingCopyText);
 
         TwoSideCurrentLinesSync.hook(panel, leftText, rightText);
     }
@@ -219,7 +239,8 @@ public final class GitCompareCurrentLinesHook
      * элемента (который у части штатных элементов может быть не задан) — пересобираем список:
      * наш пункт первым, затем то, что уже было.
      */
-    private static void addCompareInIrToolbarAction(CompareViewerPane pane, CompareCurrentLinesPanel panel)
+    private static void addCompareInIrToolbarAction(CompareViewerPane pane, CompareCurrentLinesPanel panel,
+        IFile workingCopyFile, StyledText workingCopyText)
     {
         IToolBarManager toolBarManager = CompareViewerPane.getToolBarManager(pane);
         if (toolBarManager == null)
@@ -237,12 +258,59 @@ public final class GitCompareCurrentLinesHook
         };
         compareInIrAction.setToolTipText(IrCompareValuesHandler.TOOLTIP + Global.pluginSignForTooltip());
         toolBarManager.add(compareInIrAction);
+
+        Action showInModuleAction = new Action(ShowInModuleHandler.MENU_LABEL)
+        {
+            @Override
+            public void run()
+            {
+                showInModule(pane, workingCopyFile, workingCopyText);
+            }
+        };
+        showInModuleAction.setToolTipText(ShowInModuleHandler.TOOLTIP + Global.pluginSignForTooltip());
+        showInModuleAction.setEnabled(workingCopyFile != null && workingCopyText != null);
+        toolBarManager.add(showInModuleAction);
+
         toolBarManager.add(panel.createVisibilityToggleAction());
         toolBarManager.add(new Separator());
         for (IContributionItem item : existingItems)
             toolBarManager.add(item);
 
         toolBarManager.update(true);
+    }
+
+    /**
+     * Не модальное окно (обычная вкладка редактора) — без подтверждения закрытия,
+     * сразу открываем реальный редактор рабочей копии на текущей строке.
+     */
+    private static void showInModule(CompareViewerPane pane, IFile workingCopyFile, StyledText workingCopyText)
+    {
+        if (workingCopyFile == null || workingCopyText == null || workingCopyText.isDisposed())
+            return;
+        IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+        IWorkbenchPage page = window != null ? window.getActivePage() : null;
+        if (page == null)
+            return;
+        int line1Based = CompareLineRangeMatcher.lineAtCaret(workingCopyText) + 1;
+        Shell shell = pane.isDisposed() ? null : pane.getShell();
+        ShowInModuleHandler.open(workingCopyFile, line1Based, page, shell);
+    }
+
+    /**
+     * {@code IResourceProvider} — публичный интерфейс {@code org.eclipse.compare}
+     * (не reflection): реализуется, в частности, EGit-овским
+     * {@code LocalResourceTypedElement} для стороны, которая является рабочей копией.
+     */
+    private static IFile resolveTypedElementFile(CompareEditorInput editorInput, boolean left)
+    {
+        Object result = editorInput.getCompareResult();
+        if (!(result instanceof ICompareInput compareInput))
+            return null;
+        ITypedElement element = left ? compareInput.getLeft() : compareInput.getRight();
+        if (!(element instanceof IResourceProvider resourceProvider))
+            return null;
+        IResource resource = resourceProvider.getResource();
+        return resource instanceof IFile file ? file : null;
     }
 
     /** Полные тексты обеих сторон (не текущей строки) — для кнопки «Сравнить ИР». */

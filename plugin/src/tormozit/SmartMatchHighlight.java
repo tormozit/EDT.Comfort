@@ -1,7 +1,9 @@
 package tormozit;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.jface.resource.JFaceResources;
@@ -44,6 +46,9 @@ public final class SmartMatchHighlight
     private static RGB cachedLightRgb;
     private static RGB cachedMatchBaseRgb;
     private static Font cachedBoldFont;
+    /** Кэш осветлённых системных FG для тёмной темы: SWT color id → owned Color. */
+    private static final Map<Integer, Color> cachedEffectiveSystemColors = new HashMap<>();
+    private static Boolean cachedEffectiveSystemDark;
 
     private SmartMatchHighlight() {}
 
@@ -409,8 +414,8 @@ public final class SmartMatchHighlight
     }
 
     /**
-     * Эффективный цвет для текущей темы: светлая — как в store; тёмная — осветление
-     * {@code shift = 255 - max(R,G,B)}. Общий для фильтра и серверных вызовов.
+     * Эффективный цвет для текущей темы: светлая — как передан; тёмная — осветление
+     * {@code shift = 255 - max(R,G,B)}. Общий для фильтра, серверных вызовов и явных FG.
      */
     public static RGB toEffectiveRgb(RGB lightStored)
     {
@@ -434,6 +439,28 @@ public final class SmartMatchHighlight
         return darkToLightRgb(displayed);
     }
 
+    /**
+     * Эффективный системный цвет шрифта: в светлой теме — штатный SWT (не dispose);
+     * в тёмной — owned Color из {@link #toEffectiveRgb(RGB)} (кэш, dispose в {@link #clearColorCache()}).
+     */
+    public static Color effectiveSystemColor(Display display, int swtColorId)
+    {
+        Display d = display != null && !display.isDisposed() ? display : currentDisplay();
+        boolean dark = isDarkTheme();
+        if (cachedEffectiveSystemDark != null && cachedEffectiveSystemDark.booleanValue() != dark)
+            disposeEffectiveSystemColors();
+        Color system = d.getSystemColor(swtColorId);
+        if (!dark)
+            return system;
+        cachedEffectiveSystemDark = Boolean.TRUE;
+        Color cached = cachedEffectiveSystemColors.get(Integer.valueOf(swtColorId));
+        if (cached != null && !cached.isDisposed())
+            return cached;
+        Color created = new Color(d, toEffectiveRgb(system.getRGB()));
+        cachedEffectiveSystemColors.put(Integer.valueOf(swtColorId), created);
+        return created;
+    }
+
     static RGB lightToDarkRgb(RGB light)
     {
         int shift = 255 - Math.max(light.red, Math.max(light.green, light.blue));
@@ -454,6 +481,18 @@ public final class SmartMatchHighlight
             cachedLightForeground.dispose();
         cachedLightForeground = null;
         cachedLightRgb = null;
+        disposeEffectiveSystemColors();
+    }
+
+    private static void disposeEffectiveSystemColors()
+    {
+        for (Color c : cachedEffectiveSystemColors.values())
+        {
+            if (c != null && !c.isDisposed())
+                c.dispose();
+        }
+        cachedEffectiveSystemColors.clear();
+        cachedEffectiveSystemDark = null;
     }
 
     /** Package-private (не {@code private}) — переиспользуется вне resolveMatchStyle(), напр. TypeComboOverlayHook. */

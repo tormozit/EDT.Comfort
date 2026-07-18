@@ -57,5 +57,8 @@ public class ComfortInitializer extends AbstractPreferenceInitializer
         store.setDefault(
             ComfortSettings.PREF_SPELLING_DICT_BASE_PATHS,
             ComfortSettings.DEFAULT_SPELLING_DICT_BASE_PATHS);
+        store.setDefault(
+            ComfortSettings.PREF_SPELLING_BOOTSTRAPPED,
+            ComfortSettings.DEFAULT_SPELLING_BOOTSTRAPPED);
     }
 }

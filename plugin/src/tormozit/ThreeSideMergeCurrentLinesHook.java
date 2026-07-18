@@ -1,13 +1,28 @@
 package tormozit;
 
+import java.nio.file.Path;
+
+import com._1c.g5.v8.dt.bsl.compare.BslModuleComparisonNode;
+import com._1c.g5.v8.dt.bsl.model.BslPackage;
+import com._1c.g5.v8.dt.compare.core.IComparisonSession;
+import com._1c.g5.v8.dt.compare.datasource.IComparisonDataSource;
+import com._1c.g5.v8.dt.compare.model.ComparisonNode;
+import com._1c.g5.v8.dt.compare.model.ComparisonSide;
 import com._1c.g5.v8.dt.compare.ui.editor.DtComparisonView;
+import com._1c.g5.v8.dt.compare.ui.mergeviewer.IThreeSideTextMergeInput;
 import com._1c.g5.v8.dt.compare.ui.mergeviewer.IThreeSideTextMergeViewerProvider;
 import com._1c.g5.v8.dt.compare.ui.mergeviewer.ThreeSideTextMergeViewer;
+import com._1c.g5.v8.dt.compare.ui.partialmodel.node.IPartialModelNode;
+import com._1c.g5.v8.dt.core.platform.IDtProject;
 
+import org.eclipse.compare.ITypedElement;
+import org.eclipse.core.resources.IFile;
+import org.eclipse.core.resources.IProject;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.IContributionItem;
 import org.eclipse.jface.action.IToolBarManager;
 import org.eclipse.jface.action.Separator;
+import org.eclipse.jface.window.Window;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.SashForm;
 import org.eclipse.swt.custom.StyledText;
@@ -20,6 +35,9 @@ import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Group;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.ui.IWorkbenchPage;
+import org.eclipse.ui.IWorkbenchWindow;
+import org.eclipse.ui.PlatformUI;
 
 /**
  * Панель «Текущая строка» (см. {@link CompareCurrentLinesPanel}) в любом окне
@@ -275,7 +293,7 @@ public final class ThreeSideMergeCurrentLinesHook
 
         ActivePair activePair = new ActivePair();
         panel.setCompareInIrSupplier(() -> supplyFullTextsForIr(panel, activePair));
-        addCompareInIrToolbarAction(viewer, panel);
+        addCompareInIrToolbarAction(provider, viewer, panel, activePair);
 
         hookStyledText(leftText, panel, provider, viewer, leftText, rightText, resultText, activePair);
         hookStyledText(rightText, panel, provider, viewer, leftText, rightText, resultText, activePair);
@@ -296,7 +314,8 @@ public final class ThreeSideMergeCurrentLinesHook
      * <p>{@code IToolBarManager} не даёт прямого «добавить в начало» без ID существующего
      * элемента — пересобираем список: наш пункт первым, затем то, что уже было.
      */
-    private static void addCompareInIrToolbarAction(ThreeSideTextMergeViewer viewer, CompareCurrentLinesPanel panel)
+    private static void addCompareInIrToolbarAction(IThreeSideTextMergeViewerProvider provider,
+        ThreeSideTextMergeViewer viewer, CompareCurrentLinesPanel panel, ActivePair activePair)
     {
         Object managerObj = Global.getField(viewer, "rightToolBarManager"); //$NON-NLS-1$
         if (!(managerObj instanceof IToolBarManager toolBarManager))
@@ -314,12 +333,170 @@ public final class ThreeSideMergeCurrentLinesHook
         };
         compareInIrAction.setToolTipText(IrCompareValuesHandler.TOOLTIP + Global.pluginSignForTooltip());
         toolBarManager.add(compareInIrAction);
+
+        Action showInModuleAction = new Action(ShowInModuleHandler.MENU_LABEL)
+        {
+            @Override
+            public void run()
+            {
+                showInModule(provider, viewer, activePair);
+            }
+        };
+        showInModuleAction.setToolTipText(ShowInModuleHandler.TOOLTIP + Global.pluginSignForTooltip());
+        toolBarManager.add(showInModuleAction);
+
         toolBarManager.add(panel.createVisibilityToggleAction());
         toolBarManager.add(new Separator());
         for (IContributionItem item : existingItems)
             toolBarManager.add(item);
 
         toolBarManager.update(true);
+    }
+
+    /**
+     * «Показать в модуле» — целевая сторона та же, что и у «Сравнить ИР»
+     * ({@code activePair.indexA}, всегда LEFT или RIGHT — никогда RESULT, см.
+     * {@link #syncThreeWayCurrentLines}: пара для ИР всегда «левая/правая ↔ итоговая»).
+     * Итоговая (Result) сторона своего модуля не имеет (временный буфер слияния) —
+     * поэтому, когда каретка в ней, {@code activePair.indexA} уже указывает на LEFT
+     * («вашу» сторону) — вести некуда, кроме как в MAIN, что и требуется.
+     *
+     * <p>Диалог «Настройка объединения модулей» — только кнопка OK, close() всегда
+     * сохраняет настройки; спрашиваем подтверждение «Да/Отмена». Диалог «Объединение» —
+     * OK (сохранить+применить) и Cancel (отменить) — спрашиваем «Сохранить/Не
+     * сохранять/Отмена» и симулируем нажатие соответствующей кнопки.
+     */
+    private static void showInModule(IThreeSideTextMergeViewerProvider provider, ThreeSideTextMergeViewer viewer,
+        ActivePair activePair)
+    {
+        StyledText activeWidget = activePair.widgetA;
+        if (activeWidget == null || activeWidget.isDisposed())
+            return;
+
+        ComparisonSide side = activePair.indexA == RIGHT ? ComparisonSide.OTHER : ComparisonSide.MAIN;
+        IFile file = resolveModuleFile(provider, viewer, side);
+        if (file == null)
+        {
+            log("showInModule: не удалось определить реальный файл модуля"); //$NON-NLS-1$
+            return;
+        }
+        int line1Based = CompareLineRangeMatcher.lineAtCaret(activeWidget) + 1;
+
+        if (!(provider instanceof Window dialogWindow) || dialogWindow.getShell() == null)
+            return;
+        Shell dialogShell = dialogWindow.getShell();
+
+        boolean structured = Global.getField(provider, "node") != null; //$NON-NLS-1$
+        if (structured)
+        {
+            ModalSaveCloseHelper.Choice choice = ModalSaveCloseHelper.confirmClose(dialogShell,
+                "Закрыть окно и сохранить настройки объединения?"); //$NON-NLS-1$
+            if (choice != ModalSaveCloseHelper.Choice.PROCEED)
+                return;
+            dialogWindow.close();
+        }
+        else
+        {
+            ModalSaveCloseHelper.SaveChoice choice = ModalSaveCloseHelper.confirmSaveClose(dialogShell,
+                "Сохранить изменения объединения перед переходом в модуль?"); //$NON-NLS-1$
+            if (choice == ModalSaveCloseHelper.SaveChoice.CANCEL)
+                return;
+            // buttonPressed(0)/(1) — те же id, что у штатных OK/Cancel, тот же путь сохранения/отмены.
+            Global.invokeVoid(provider, "buttonPressed", //$NON-NLS-1$
+                choice == ModalSaveCloseHelper.SaveChoice.SAVE ? 0 : 1);
+        }
+
+        IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+        IWorkbenchPage page = window != null ? window.getActivePage() : null;
+        if (page == null)
+            return;
+        ShowInModuleHandler.open(file, line1Based, page, window.getShell());
+    }
+
+    /**
+     * У «Настройка объединения модулей» (structured) — путь через дерево секций:
+     * приватное поле {@code node} диалога ({@link IPartialModelNode}, публичный тип) →
+     * {@code retrieveComparisonNode()} → {@link BslModuleComparisonNode} → символическая
+     * ссылка стороны ({@code getSymlink(ComparisonSide)}, наследуется от
+     * {@code SymlinkComparisonNode} через цепочку {@code ExternalPropertyComparisonNode
+     * → TopModelObjectsComparisonNode → TopComparisonNode}) → путь файла через
+     * {@code IComparisonDataSource.getPath(symlink, BslPackage.Literals.MODULE)}.
+     *
+     * <p>У «Объединение» (plain, дерева нет — поля {@code node} не существует) —
+     * запасной путь через {@code viewer.getInput()} (штатный {@code Viewer.getInput()}) →
+     * {@link IThreeSideTextMergeInput#getLeft()}/{@code getRight()} → {@code ITypedElement},
+     * чей конкретный класс (внутренний {@code BslModuleTypedElement}) хранит приватные
+     * {@code path}/{@code dataSource} без геттеров — только через рефлексию.
+     */
+    private static IFile resolveModuleFile(IThreeSideTextMergeViewerProvider provider,
+        ThreeSideTextMergeViewer viewer, ComparisonSide side)
+    {
+        IFile file = resolveViaPartialModelNode(provider, side);
+        if (file != null)
+            return file;
+        return resolveViaTypedElement(viewer, side);
+    }
+
+    private static IFile resolveViaPartialModelNode(IThreeSideTextMergeViewerProvider provider, ComparisonSide side)
+    {
+        if (!(Global.getField(provider, "node") instanceof IPartialModelNode partialModelNode)) //$NON-NLS-1$
+            return null;
+        try
+        {
+            ComparisonNode comparisonNode = partialModelNode.retrieveComparisonNode();
+            if (!(comparisonNode instanceof BslModuleComparisonNode moduleNode))
+                return null;
+            String symlink = moduleNode.getSymlink(side);
+            if (symlink == null)
+                return null;
+            IComparisonSession session = partialModelNode.getComparisonSession();
+            IComparisonDataSource dataSource = session != null ? session.getDataSource(side) : null;
+            return dataSource != null ? fileFromDataSource(dataSource, symlink) : null;
+        }
+        catch (RuntimeException e)
+        {
+            log("resolveViaPartialModelNode: " + e); //$NON-NLS-1$
+            return null;
+        }
+    }
+
+    private static IFile resolveViaTypedElement(ThreeSideTextMergeViewer viewer, ComparisonSide side)
+    {
+        if (!(viewer.getInput() instanceof IThreeSideTextMergeInput mergeInput))
+            return null;
+        ITypedElement element = side == ComparisonSide.OTHER ? mergeInput.getRight() : mergeInput.getLeft();
+        if (element == null)
+            return null;
+        try
+        {
+            Object pathObj = Global.getField(element, "path"); //$NON-NLS-1$
+            Object dataSourceObj = Global.getField(element, "dataSource"); //$NON-NLS-1$
+            if (!(pathObj instanceof Path path)
+                || !(dataSourceObj instanceof IComparisonDataSource dataSource))
+                return null;
+            return fileFromProject(dataSource, path.toString());
+        }
+        catch (RuntimeException e)
+        {
+            log("resolveViaTypedElement: " + e); //$NON-NLS-1$
+            return null;
+        }
+    }
+
+    private static IFile fileFromDataSource(IComparisonDataSource dataSource, String symlink)
+    {
+        String relPath = dataSource.getPath(symlink, BslPackage.Literals.MODULE);
+        return relPath != null ? fileFromProject(dataSource, relPath) : null;
+    }
+
+    private static IFile fileFromProject(IComparisonDataSource dataSource, String relPath)
+    {
+        IDtProject dtProject = dataSource.getDtProject();
+        IProject project = dtProject != null ? dtProject.getWorkspaceProject() : null;
+        if (project == null)
+            return null;
+        IFile file = project.getFile(relPath.replace('\\', '/'));
+        return file.exists() ? file : null;
     }
 
     /** Пара сторон, чья раскраска сейчас активна — источник для кнопки «Сравнить ИР» (полные тексты). */
