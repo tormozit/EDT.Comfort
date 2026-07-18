@@ -103,6 +103,16 @@ public final class SearchViewAggregationHook implements IStartup
     private static final Set<ISearchResult> RESULT_LISTENERS_INSTALLED =
             Collections.newSetFromMap(new WeakHashMap<>());
 
+    /**
+     * Счётчик открытий (двойных кликов) для диагностики #165: несколько кликов подряд (быстрее
+     * 1.5с) порождают перекрывающиеся цепочки {@code timerExec} у {@link #schedulePanelHealthDiag},
+     * и без этого счётчика их +0/+100/+500/+1500ms логи могли перемешиваться (что и видно было
+     * в присланном логе — "+1500ms" от предыдущего клика печатался после "open:" следующего).
+     * Каждый {@code open()} захватывает свой {@code seq}; устаревшие (перекрытые новым кликом)
+     * срабатывания молча пропускаются.
+     */
+    private static volatile int openSeq;
+
     // -----------------------------------------------------------------------
     // IStartup
     // -----------------------------------------------------------------------
@@ -159,6 +169,15 @@ public final class SearchViewAggregationHook implements IStartup
     private static volatile boolean searchQueryRunning;
     /** После старта поиска блокируем штатный спуск к терминальному узлу (в т.ч. в конце). */
     private static volatile boolean guardFirstRootSelection;
+    /**
+     * Счётчик «поколения» поиска: увеличивается в {@link #onSearchStarting()}. Отложенные
+     * (asyncExec/timerExec) продолжения — {@code restoreTableSelection}, диагностика
+     * {@code panelHealth} — захватывают текущее значение при планировании и сверяют его при
+     * срабатывании; если за это время стартовал новый поиск, продолжение — гонка с устаревшими
+     * данными (старые ключи/узлы/виджеты могли быть уже пересозданы) и должно молча выйти,
+     * а не пытаться применить результат к новому состоянию панели.
+     */
+    private static volatile int searchGeneration;
 
     private static final class SearchViewViewers
     {
@@ -176,8 +195,9 @@ public final class SearchViewAggregationHook implements IStartup
     {
         searchQueryRunning = true;
         guardFirstRootSelection = true;
+        searchGeneration++;
         SAVED_TABLE_SELECTION_BY_VIEWER.clear();
-        log("onSearchStarting: watch first root"); //$NON-NLS-1$
+        log("onSearchStarting: watch first root, gen=" + searchGeneration); //$NON-NLS-1$
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
@@ -794,8 +814,9 @@ public final class SearchViewAggregationHook implements IStartup
         Table table = tableViewer.getTable();
         if (table == null || table.isDisposed())
             return;
+        int gen = searchGeneration; // см. Javadoc searchGeneration — снимок «поколения» на момент планирования
         table.getDisplay().asyncExec(
-            () -> restoreTableSelection(treeViewer, tableViewer, contextNodes, previousKeys, terminal, 0));
+            () -> restoreTableSelection(treeViewer, tableViewer, contextNodes, previousKeys, terminal, 0, gen));
     }
 
     private static int expectedTableItemCount(List<Object> selectedNodes)
@@ -1570,8 +1591,18 @@ public final class SearchViewAggregationHook implements IStartup
      * после {@code changeSource} нужных строк в таблице ещё нет — повторяем попытку с задержкой.
      */
     private static void restoreTableSelection(TreeViewer treeViewer, TableViewer tableViewer,
-            List<Object> contextNodes, List<TableRowKey> previousKeys, boolean terminal, int attempt)
+            List<Object> contextNodes, List<TableRowKey> previousKeys, boolean terminal, int attempt, int gen)
     {
+        if (gen != searchGeneration)
+        {
+            // Пока ждали (timerExec-цепочка), стартовал новый поиск — ключи/узлы этого вызова
+            // относятся к прежнему поколению результатов. Молча выходим, не трогая уже
+            // пересозданные виджеты/модель новой панели (см. Javadoc searchGeneration).
+            if (attempt == 0)
+                log("restoreTableSelection: skip — устарело (новый поиск), gen=" + gen //$NON-NLS-1$
+                    + " current=" + searchGeneration); //$NON-NLS-1$
+            return;
+        }
         if (previousKeys == null || previousKeys.isEmpty())
         {
             if (attempt == 0)
@@ -1587,7 +1618,7 @@ public final class SearchViewAggregationHook implements IStartup
             if (attempt >= 40)
                 return;
             table.getDisplay().timerExec(100,
-                () -> restoreTableSelection(treeViewer, tableViewer, contextNodes, previousKeys, terminal, attempt + 1));
+                () -> restoreTableSelection(treeViewer, tableViewer, contextNodes, previousKeys, terminal, attempt + 1, gen));
             return;
         }
 
@@ -1628,7 +1659,7 @@ public final class SearchViewAggregationHook implements IStartup
             return;
         }
         table.getDisplay().timerExec(100,
-            () -> restoreTableSelection(treeViewer, tableViewer, contextNodes, previousKeys, terminal, attempt + 1));
+            () -> restoreTableSelection(treeViewer, tableViewer, contextNodes, previousKeys, terminal, attempt + 1, gen));
     }
 
     private static boolean hasChildren(Object node)
@@ -1889,11 +1920,12 @@ public final class SearchViewAggregationHook implements IStartup
             {
                 if (!ComfortSettings.isReplaceListFiltersEnabled())
                     return;
-                log("open: " + describePanelState(treeViewer, tableViewer, page)); //$NON-NLS-1$
-                schedulePanelHealthDiag(page, treeViewer, tableViewer, 0);
-                schedulePanelHealthDiag(page, treeViewer, tableViewer, 100);
-                schedulePanelHealthDiag(page, treeViewer, tableViewer, 500);
-                schedulePanelHealthDiag(page, treeViewer, tableViewer, 1500);
+                int seq = ++openSeq;
+                log("open: seq=" + seq + " " + describePanelState(treeViewer, tableViewer, page)); //$NON-NLS-1$ //$NON-NLS-2$
+                schedulePanelHealthDiag(page, treeViewer, tableViewer, 0, seq);
+                schedulePanelHealthDiag(page, treeViewer, tableViewer, 100, seq);
+                schedulePanelHealthDiag(page, treeViewer, tableViewer, 500, seq);
+                schedulePanelHealthDiag(page, treeViewer, tableViewer, 1500, seq);
             }
         };
         tableViewer.addOpenListener(openListener);
@@ -1901,21 +1933,23 @@ public final class SearchViewAggregationHook implements IStartup
     }
 
     private static void schedulePanelHealthDiag(ISearchResultPage page, TreeViewer treeViewer,
-            TableViewer tableViewer, int delayMs)
+            TableViewer tableViewer, int delayMs, int seq)
     {
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
         display.timerExec(delayMs, () -> {
+            if (seq != openSeq)
+                return; // перекрыто более новым кликом — не мешаем логи разных открытий
             if (treeViewer.getTree() == null || treeViewer.getTree().isDisposed())
                 return;
             if (tableViewer.getTable() == null || tableViewer.getTable().isDisposed())
                 return;
             String state = describePanelState(treeViewer, tableViewer, page);
-            log("panelHealth +" + delayMs + "ms: " + state); //$NON-NLS-1$ //$NON-NLS-2$
+            log("panelHealth seq=" + seq + " +" + delayMs + "ms: " + state); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             int treeItems = treeViewer.getTree().getItemCount();
             if (treeItems == 0)
-                log("TREE_EMPTIED +" + delayMs + "ms: " + state); //$NON-NLS-1$ //$NON-NLS-2$
+                log("TREE_EMPTIED seq=" + seq + " +" + delayMs + "ms: " + state); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         });
     }
 

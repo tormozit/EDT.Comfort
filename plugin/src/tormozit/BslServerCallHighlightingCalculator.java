@@ -40,15 +40,28 @@ public final class BslServerCallHighlightingCalculator
     public void provideHighlightingFor(XtextResource resource, IHighlightedPositionAcceptor acceptor,
         CancelIndicator cancelIndicator)
     {
-        if (resource == null || acceptor == null || isCanceled(cancelIndicator) || resource.getParseResult() == null)
-            return;
+        Global.tempLog("ServerCallHL-mutfree", "calc: called resource=" + resource //$NON-NLS-1$ //$NON-NLS-2$
+            + " acceptor=" + (acceptor == null ? "null" : acceptor.getClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$
+            + " canceled=" + isCanceled(cancelIndicator) //$NON-NLS-1$
+            + " parseResult=" + (resource == null ? "n/a" : resource.getParseResult())); //$NON-NLS-1$ //$NON-NLS-2$
 
-        if (!ComfortSettings.isServerCallHighlightingEnabled())
+        if (resource == null || acceptor == null || isCanceled(cancelIndicator) || resource.getParseResult() == null)
+        {
+            Global.tempLog("ServerCallHL-mutfree", "calc: early return (null/canceled/no parse result)"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+
+        boolean enabled = ComfortSettings.isServerCallHighlightingEnabled();
+        Global.tempLog("ServerCallHL-mutfree", "calc: isServerCallHighlightingEnabled=" + enabled); //$NON-NLS-1$ //$NON-NLS-2$
+        if (!enabled)
             return;
 
         EObject root = resource.getParseResult().getRootASTElement();
         if (root == null)
+        {
+            Global.tempLog("ServerCallHL-mutfree", "calc: rootASTElement null"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
+        }
 
         int invocations = 0;
         int serverCalls = 0;
@@ -70,6 +83,7 @@ public final class BslServerCallHighlightingCalculator
                 }
             }
         }
+        Global.tempLog("ServerCallHL-mutfree", "calc: invocations=" + invocations + " serverCalls=" + serverCalls); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (serverCalls > 0)
             Global.log(TAG, "provideHighlightingFor: invocations=" + invocations + " serverCalls=" + serverCalls); //$NON-NLS-1$ //$NON-NLS-2$
     }
@@ -145,13 +159,17 @@ public final class BslServerCallHighlightingCalculator
         String highlightingId)
     {
         List<INode> nodes = NodeModelUtils.findNodesForFeature(featureAccess, BslPackage.Literals.FEATURE_ACCESS__NAME);
+        int added = 0;
         for (INode node : nodes)
         {
             if (node.getLength() > 0)
             {
                 acceptor.addPosition(node.getOffset(), node.getLength(), highlightingId);
+                added++;
             }
         }
+        Global.tempLog("ServerCallHL-mutfree", "calc: highlightFeatureName nodes=" + nodes.size() //$NON-NLS-1$ //$NON-NLS-2$
+            + " added=" + added + " id=" + highlightingId); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private boolean isCanceled(CancelIndicator cancelIndicator)

@@ -56,29 +56,37 @@ public final class TwoSideCurrentLinesSync
         if (leftText == null || leftText.isDisposed() || rightText == null || rightText.isDisposed())
             return;
 
-        boolean sourceIsLeft = source == leftText;
-        StyledText otherText = sourceIsLeft ? rightText : leftText;
-
-        int sourceLine = CompareLineRangeMatcher.lineAtCaret(source);
-        String sourceLineText = CompareLineRangeMatcher.lineOrEmpty(source, sourceLine);
-
-        int matchedOtherLine = CompareLineRangeMatcher.findMatchedLine(source, sourceLine, otherText);
-        String otherLineText = matchedOtherLine >= 0
-            ? CompareLineRangeMatcher.lineOrEmpty(otherText, matchedOtherLine)
-            : null;
-
-        String leftLineText = sourceIsLeft ? sourceLineText : otherLineText;
-        String rightLineText = sourceIsLeft ? otherLineText : sourceLineText;
-
-        if (leftLineText == null || rightLineText == null)
+        try
         {
-            panel.renderPlain(0, leftLineText);
-            panel.renderPlain(1, rightLineText);
-            panel.resetScroll();
-            return;
-        }
+            boolean sourceIsLeft = source == leftText;
+            StyledText otherText = sourceIsLeft ? rightText : leftText;
 
-        CompareCurrentLineDiff.AlignedResult aligned = panel.renderPair(0, 1, leftLineText, rightLineText);
-        panel.scrollToFirstDifference(panel.getRow(1), aligned.rightTypes);
+            int sourceLine = CompareLineRangeMatcher.lineAtCaret(source);
+            String sourceLineText = CompareLineRangeMatcher.lineOrEmpty(source, sourceLine);
+
+            int matchedOtherLine = CompareLineRangeMatcher.findMatchedLine(source, sourceLine, otherText);
+            String otherLineText = matchedOtherLine >= 0
+                ? CompareLineRangeMatcher.lineOrEmpty(otherText, matchedOtherLine)
+                : null;
+
+            String leftLineText = sourceIsLeft ? sourceLineText : otherLineText;
+            String rightLineText = sourceIsLeft ? otherLineText : sourceLineText;
+
+            if (leftLineText == null || rightLineText == null)
+            {
+                panel.renderPlain(0, leftLineText);
+                panel.renderPlain(1, rightLineText);
+                panel.resetScroll();
+                return;
+            }
+
+            CompareCurrentLineDiff.AlignedResult aligned = panel.renderPair(0, 1, leftLineText, rightLineText);
+            panel.scrollToFirstDifference(panel.getRow(1), aligned.rightTypes);
+        }
+        catch (Exception e)
+        {
+            // Виджет мог измениться во время пересчёта (см. CompareLineRangeMatcher.findMatchedLine) — не крашим UI.
+            Global.tempLogException("showInModule", "TwoSideCurrentLinesSync.sync", e); //$NON-NLS-1$ //$NON-NLS-2$
+        }
     }
 }

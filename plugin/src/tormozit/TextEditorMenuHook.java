@@ -121,7 +121,7 @@ public class TextEditorMenuHook implements IStartup
 
     private void hookTextEditor(ITextEditor textEditor, IEditorPart editorPart, IWorkbenchPart part)
     {
-        Display.getDefault().asyncExec(() -> attachComfortMenu(textEditor, editorPart, part));
+        Display.getDefault().asyncExec(() -> attachComfortMenu(textEditor, editorPart, part, 0));
     }
 
     private void hookGranularEditor(DtGranularEditor<?> granular)
@@ -146,15 +146,23 @@ public class TextEditorMenuHook implements IStartup
             hookTextEditor(textEditor, granular, granular);
     }
 
-    private void attachComfortMenu(ITextEditor textEditor, IEditorPart editorPart, IWorkbenchPart part)
+    /** Число повторов ожидания viewer/меню через asyncExec, прежде чем сдаться (защита от вечного цикла). */
+    private static final int MAX_ATTACH_ATTEMPTS = 100;
+
+    private void attachComfortMenu(ITextEditor textEditor, IEditorPart editorPart, IWorkbenchPart part, int attempt)
     {
-        if (textEditor.getSite() == null)
+        if (textEditor.getSite() == null || isWorkbenchClosing())
             return;
 
         ISourceViewer viewer = TextEditor.getSourceViewer(textEditor);
         if (!(viewer instanceof SourceViewer sourceViewer))
         {
-            Display.getDefault().asyncExec(() -> attachComfortMenu(textEditor, editorPart, part));
+            // Если viewer/меню никогда не появятся (редактор не инициализируется/закрывается),
+            // ограничиваем число попыток — иначе asyncExec крутится вечно и не даёт
+            // Display.release() опустошить очередь при закрытии EDT (issue #130).
+            if (attempt >= MAX_ATTACH_ATTEMPTS)
+                return;
+            Display.getDefault().asyncExec(() -> attachComfortMenu(textEditor, editorPart, part, attempt + 1));
             return;
         }
 
@@ -167,12 +175,19 @@ public class TextEditorMenuHook implements IStartup
 
         if (textWidget.getMenu() == null)
         {
-            Display.getDefault().asyncExec(() -> attachComfortMenu(textEditor, editorPart, part));
+            if (attempt >= MAX_ATTACH_ATTEMPTS)
+                return;
+            Display.getDefault().asyncExec(() -> attachComfortMenu(textEditor, editorPart, part, attempt + 1));
             return;
         }
 
         TextEditorComfortMenu.attachWorkbench(textWidget, HOOK_MARKER, editorPart, part);
         TextEditorIdentifierSelectionHook.attachToTextEditor(textEditor);
+    }
+
+    private static boolean isWorkbenchClosing()
+    {
+        return !PlatformUI.isWorkbenchRunning() || PlatformUI.getWorkbench().isClosing();
     }
 
     /** Display-фильтр для {@code StyledText} без ITextEditor (DCS, DynamicListQueryDialog и т.п.). */

@@ -1,9 +1,12 @@
 package tormozit;
 
+import java.lang.reflect.Constructor;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.WeakHashMap;
 
 import org.eclipse.core.runtime.IProgressMonitor;
@@ -13,21 +16,22 @@ import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.IDocumentListener;
+import org.eclipse.jface.text.IInformationControl;
+import org.eclipse.jface.text.IInformationControlExtension2;
+import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.jface.text.Position;
 import org.eclipse.jdt.ui.PreferenceConstants;
 import org.eclipse.jface.text.IDocument;
-import org.eclipse.jface.text.contentassist.CompletionProposal;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
-import org.eclipse.jface.text.contentassist.IContextInformation;
 import org.eclipse.jface.text.quickassist.IQuickAssistInvocationContext;
 import org.eclipse.jface.text.source.Annotation;
 import org.eclipse.jface.text.source.IAnnotationModel;
 import org.eclipse.jface.text.source.IAnnotationModelExtension;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.util.IPropertyChangeListener;
-import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
@@ -48,6 +52,7 @@ import org.eclipse.xtext.RuleCall;
 import org.eclipse.xtext.nodemodel.ICompositeNode;
 import org.eclipse.xtext.nodemodel.ILeafNode;
 import org.eclipse.xtext.resource.XtextResource;
+import org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.util.concurrent.IUnitOfWork;
 
@@ -63,9 +68,20 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
 public final class BslModuleSpellCheckHook implements IStartup
 {
     private static final String JOB_NAME = "Комфорт: орфография модуля"; //$NON-NLS-1$
+    private static final String SUGGEST_JOB_NAME = "Комфорт: варианты орфографии"; //$NON-NLS-1$
     private static final int DEBOUNCE_MS = 600;
+    private static final int SUGGEST_MAX = 12;
+    private static final int SUGGEST_UI_THROTTLE_MS = 300;
+    private static final String LOADING_MARKER = "..."; //$NON-NLS-1$
+    /** Выше вариантов; Xtext {@code sortQuickfixes} иначе сортирует по алфавиту. */
+    private static final int PRIORITY_ADD_TO_DICTIONARY = 1000;
+    private static final int PRIORITY_SUGGESTION = 100;
+    private static final int PRIORITY_LOADING = 1;
 
     private static final Map<BslXtextEditor, EditorSession> SESSIONS = new WeakHashMap<>();
+    /** Активные сессии подсказок по слову (lowercase). */
+    private static final ConcurrentHashMap<String, SuggestSession> SUGGEST_SESSIONS =
+        new ConcurrentHashMap<>();
 
     @Override
     public void earlyStartup()
@@ -90,7 +106,8 @@ public final class BslModuleSpellCheckHook implements IStartup
             if (SpellingService.PREFERENCE_SPELLING_ENABLED.equals(prop)
                 || SpellingService.PREFERENCE_SPELLING_ENGINE.equals(prop)
                 || PreferenceConstants.SPELLING_LOCALE.equals(prop)
-                || ComfortSettings.PREF_SPELLING_CHECK_IDENTIFIERS_VISIBLE.equals(prop))
+                || ComfortSettings.PREF_SPELLING_CHECK_IDENTIFIERS_VISIBLE.equals(prop)
+                || isSpellingIgnorePreference(prop))
             {
                 Display.getDefault().asyncExec(BslModuleSpellCheckHook::onSpellingPrefsChanged);
             }
@@ -100,6 +117,19 @@ public final class BslModuleSpellCheckHook implements IStartup
         ContentAssistSettings cas = ContentAssistSettings.getInstance();
         if (cas != null)
             cas.getPreferenceStore().addPropertyChangeListener(listener);
+    }
+
+    private static boolean isSpellingIgnorePreference(String prop)
+    {
+        return PreferenceConstants.SPELLING_IGNORE_DIGITS.equals(prop)
+            || PreferenceConstants.SPELLING_IGNORE_MIXED.equals(prop)
+            || PreferenceConstants.SPELLING_IGNORE_SENTENCE.equals(prop)
+            || PreferenceConstants.SPELLING_IGNORE_UPPER.equals(prop)
+            || PreferenceConstants.SPELLING_IGNORE_URLS.equals(prop)
+            || PreferenceConstants.SPELLING_IGNORE_SINGLE_LETTERS.equals(prop)
+            || PreferenceConstants.SPELLING_IGNORE_NON_LETTERS.equals(prop)
+            || PreferenceConstants.SPELLING_IGNORE_JAVA_STRINGS.equals(prop)
+            || PreferenceConstants.SPELLING_IGNORE_AMPERSAND_IN_PROPERTIES.equals(prop);
     }
 
     private static void onSpellingPrefsChanged()
@@ -430,7 +460,9 @@ public final class BslModuleSpellCheckHook implements IStartup
                 for (ModuleProblem p : problems)
                 {
                     SpellingAnnotation ann = new SpellingAnnotation(p);
-                    batch.put(ann, new Position(p.getOffset(), p.getLength()));
+                    Position pos = new Position(p.getOffset(), p.getLength());
+                    p.attachPresentation(ann, pos, viewer);
+                    batch.put(ann, pos);
                 }
                 ext.replaceAnnotations(new Annotation[0], batch);
             }
@@ -439,7 +471,9 @@ public final class BslModuleSpellCheckHook implements IStartup
                 for (ModuleProblem p : problems)
                 {
                     SpellingAnnotation ann = new SpellingAnnotation(p);
-                    model.addAnnotation(ann, new Position(p.getOffset(), p.getLength()));
+                    Position pos = new Position(p.getOffset(), p.getLength());
+                    p.attachPresentation(ann, pos, viewer);
+                    model.addAnnotation(ann, pos);
                 }
             }
         }
@@ -577,12 +611,22 @@ public final class BslModuleSpellCheckHook implements IStartup
         private final int offset;
         private final int length;
         private final String word;
+        private volatile SpellingAnnotation annotation;
+        private volatile Position position;
+        private volatile ISourceViewer viewer;
 
         ModuleProblem(int offset, int length, String word)
         {
             this.offset = offset;
             this.length = length;
             this.word = word;
+        }
+
+        void attachPresentation(SpellingAnnotation annotation, Position position, ISourceViewer viewer)
+        {
+            this.annotation = annotation;
+            this.position = position;
+            this.viewer = viewer;
         }
 
         @Override
@@ -606,51 +650,266 @@ public final class BslModuleSpellCheckHook implements IStartup
         @Override
         public ICompletionProposal[] getProposals()
         {
-            return buildProposals(null);
+            return buildProposals(viewer);
         }
 
         @Override
         public ICompletionProposal[] getProposals(IQuickAssistInvocationContext context)
         {
-            ISourceViewer viewer = context != null ? context.getSourceViewer() : null;
-            return buildProposals(viewer);
+            ISourceViewer v = context != null ? context.getSourceViewer() : viewer;
+            if (v != null)
+                this.viewer = v;
+            return buildProposals(v);
         }
 
+        /**
+         * Сразу: «Добавить в словарь» + «…»; варианты догружает фоновый Job
+         * и обновляет открытый hover через {@code setInput}.
+         */
         private ICompletionProposal[] buildProposals(ISourceViewer viewer)
         {
-            List<String> suggestions = ComfortSpellingEngine.suggest(word, 12);
-            List<ICompletionProposal> result = new ArrayList<>(suggestions.size() + 1);
-            for (String s : suggestions)
-                result.add(new CompletionProposal(s, offset, length, s.length(), null, s, null, null));
+            ISourceViewer v = viewer != null ? viewer : this.viewer;
+            List<String> cached = ComfortSpellingEngine.peekSuggestCache(word, SUGGEST_MAX);
+            if (cached != null)
+                return snapshotProposals(v, cached, false);
+            SuggestSession session = SUGGEST_SESSIONS.computeIfAbsent(word.toLowerCase(java.util.Locale.ROOT),
+                k -> new SuggestSession(word));
+            session.ensureStarted(this, v);
+            return snapshotProposals(v, session.suggestionsSnapshot(), true);
+        }
+
+        private ICompletionProposal[] snapshotProposals(ISourceViewer viewer, List<String> suggestions,
+            boolean loading)
+        {
+            List<ICompletionProposal> result = new ArrayList<>(suggestions.size() + 2);
             result.add(new AddToDictionaryProposal(word, viewer));
+            for (String s : suggestions)
+            {
+                ConfigurableCompletionProposal p = new ConfigurableCompletionProposal(s, offset, length,
+                    s.length());
+                p.setPriority(PRIORITY_SUGGESTION);
+                p.setAutoInsertable(false);
+                result.add(p);
+            }
+            if (loading)
+                result.add(LoadingProposal.INSTANCE);
             return result.toArray(new ICompletionProposal[0]);
+        }
+
+        void refreshHoverIfOpen(List<String> suggestions, boolean loading)
+        {
+            SpellingAnnotation ann = annotation;
+            Position pos = position;
+            ISourceViewer v = viewer;
+            if (ann == null || pos == null || v == null)
+                return;
+            ICompletionProposal[] proposals = snapshotProposals(v, suggestions, loading);
+            refreshAnnotationHover(v, ann, pos, proposals);
         }
     }
 
-    private static final class AddToDictionaryProposal implements ICompletionProposal
+    /**
+     * Фоновый поиск вариантов; по мере нахождения — UI {@code setInput} у открытого hover.
+     */
+    private static final class SuggestSession
+    {
+        private final String word;
+        private final CopyOnWriteArrayList<String> suggestions = new CopyOnWriteArrayList<>();
+        private final CopyOnWriteArrayList<ModuleProblem> listeners = new CopyOnWriteArrayList<>();
+        private final Object uiLock = new Object();
+        private volatile Job job;
+        private volatile boolean done;
+        private long lastUiFlushMs;
+        private boolean uiFlushScheduled;
+
+        SuggestSession(String word)
+        {
+            this.word = word;
+        }
+
+        List<String> suggestionsSnapshot()
+        {
+            return List.copyOf(suggestions);
+        }
+
+        synchronized void ensureStarted(ModuleProblem problem, ISourceViewer viewer)
+        {
+            if (problem != null)
+            {
+                if (!listeners.contains(problem))
+                    listeners.add(problem);
+                if (viewer != null)
+                    problem.viewer = viewer;
+            }
+            if (done || job != null)
+            {
+                if (done && problem != null)
+                    problem.refreshHoverIfOpen(suggestionsSnapshot(), false);
+                return;
+            }
+            Job suggestJob = new Job(SUGGEST_JOB_NAME)
+            {
+                @Override
+                protected IStatus run(IProgressMonitor monitor)
+                {
+                    ComfortSpellingEngine.suggestStreaming(word, SUGGEST_MAX, suggestion ->
+                    {
+                        if (monitor.isCanceled())
+                            return;
+                        if (!suggestions.contains(suggestion))
+                            suggestions.add(suggestion);
+                        scheduleUiFlush(false);
+                    }, monitor);
+                    done = true;
+                    SUGGEST_SESSIONS.remove(word.toLowerCase(java.util.Locale.ROOT), SuggestSession.this);
+                    scheduleUiFlush(true);
+                    return Status.OK_STATUS;
+                }
+            };
+            suggestJob.setSystem(true);
+            suggestJob.setPriority(Job.DECORATE);
+            this.job = suggestJob;
+            suggestJob.schedule();
+            // Hover может ещё не успеть открыться — догоняющие flush с тем же throttle.
+            Display display = Display.getDefault();
+            if (display != null && !display.isDisposed())
+            {
+                display.timerExec(SUGGEST_UI_THROTTLE_MS, () -> scheduleUiFlush(false));
+                display.timerExec(SUGGEST_UI_THROTTLE_MS * 2, () -> scheduleUiFlush(false));
+                display.timerExec(SUGGEST_UI_THROTTLE_MS * 3, () -> scheduleUiFlush(done));
+            }
+        }
+
+        /** Не чаще {@link #SUGGEST_UI_THROTTLE_MS}; {@code force} — финальный снимок без «…». */
+        private void scheduleUiFlush(boolean force)
+        {
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            // timerExec / обновление hover — только из UI-потока (Job вызывает с Worker).
+            if (display.getThread() != Thread.currentThread())
+            {
+                display.asyncExec(() -> scheduleUiFlush(force));
+                return;
+            }
+            long delay;
+            synchronized (uiLock)
+            {
+                if (force)
+                {
+                    uiFlushScheduled = false;
+                    delay = 0;
+                }
+                else
+                {
+                    long now = System.currentTimeMillis();
+                    long wait = lastUiFlushMs + SUGGEST_UI_THROTTLE_MS - now;
+                    if (wait <= 0)
+                    {
+                        lastUiFlushMs = now;
+                        delay = 0;
+                    }
+                    else if (uiFlushScheduled)
+                        return;
+                    else
+                    {
+                        uiFlushScheduled = true;
+                        delay = wait;
+                    }
+                }
+            }
+            Runnable flush = () ->
+            {
+                synchronized (uiLock)
+                {
+                    uiFlushScheduled = false;
+                    lastUiFlushMs = System.currentTimeMillis();
+                }
+                List<String> snap = suggestionsSnapshot();
+                boolean showLoading = !done;
+                for (ModuleProblem p : listeners)
+                {
+                    if (p != null)
+                        p.refreshHoverIfOpen(snap, showLoading);
+                }
+            };
+            if (delay <= 0)
+                flush.run();
+            else
+                display.timerExec((int) delay, flush);
+        }
+    }
+
+    private static final class LoadingProposal extends ConfigurableCompletionProposal
+    {
+        static final LoadingProposal INSTANCE = new LoadingProposal();
+
+        private LoadingProposal()
+        {
+            super("", 0, 0, 0); //$NON-NLS-1$
+            setDisplayString(LOADING_MARKER);
+            setPriority(PRIORITY_LOADING);
+            setAutoInsertable(false);
+        }
+
+        @Override
+        public void apply(IDocument document)
+        {
+        }
+
+        @Override
+        public void apply(IDocument document, char trigger, int offset)
+        {
+        }
+
+        @Override
+        public void apply(ITextViewer viewer, char trigger, int stateMask, int offset)
+        {
+        }
+
+        @Override
+        public String getAdditionalProposalInfo()
+        {
+            return "Идёт поиск вариантов исправления…"; //$NON-NLS-1$
+        }
+    }
+
+    private static final class AddToDictionaryProposal extends ConfigurableCompletionProposal
     {
         private final String word;
         private final ISourceViewer viewer;
 
         AddToDictionaryProposal(String word, ISourceViewer viewer)
         {
+            super("", 0, 0, 0); //$NON-NLS-1$
             this.word = word;
             this.viewer = viewer;
+            setDisplayString("Добавить в словарь: " + word); //$NON-NLS-1$
+            setPriority(PRIORITY_ADD_TO_DICTIONARY);
+            setAutoInsertable(false);
+        }
+
+        private void addWord()
+        {
+            ComfortSpellingEngine.addUserWordFromUi(word);
         }
 
         @Override
         public void apply(IDocument document)
         {
-            ComfortSpellingEngine.addUserWord(word);
-            if (viewer != null)
-                SpellingProblem.removeAll(viewer, word);
-            rescheduleAllSessions();
+            addWord();
         }
 
         @Override
-        public Point getSelection(IDocument document)
+        public void apply(IDocument document, char trigger, int offset)
         {
-            return null;
+            addWord();
+        }
+
+        @Override
+        public void apply(ITextViewer viewer, char trigger, int stateMask, int offset)
+        {
+            addWord();
         }
 
         @Override
@@ -658,23 +917,77 @@ public final class BslModuleSpellCheckHook implements IStartup
         {
             return "Больше не помечать это слово как ошибку в проверке орфографии Comfort."; //$NON-NLS-1$
         }
+    }
 
-        @Override
-        public String getDisplayString()
+    /**
+     * Обновить открытый Xtext annotation hover новым списком proposals
+     * ({@code AnnotationInformationControl#setInput}).
+     */
+    private static void refreshAnnotationHover(ISourceViewer viewer, Annotation annotation,
+        Position position, ICompletionProposal[] proposals)
+    {
+        if (viewer == null || annotation == null || position == null || proposals == null)
+            return;
+        try
         {
-            return "Добавить в словарь: " + word; //$NON-NLS-1$
+            Object control = findVisibleHoverControl(viewer);
+            if (!(control instanceof IInformationControlExtension2 ext2))
+                return;
+            Class<?> infoClass = Class.forName(
+                "org.eclipse.xtext.ui.editor.hover.AnnotationWithQuickFixesHover$AnnotationInfo"); //$NON-NLS-1$
+            Constructor<?> ctor = infoClass.getConstructor(Annotation.class, Position.class,
+                ITextViewer.class, ICompletionProposal[].class);
+            Object info = ctor.newInstance(annotation, position, viewer, proposals);
+            ext2.setInput(info);
+            if (control instanceof IInformationControl ic)
+            {
+                Point hint = ic.computeSizeHint();
+                if (hint != null)
+                    ic.setSize(hint.x, hint.y);
+            }
         }
-
-        @Override
-        public Image getImage()
+        catch (Exception e)
         {
-            return null;
+            Global.tempLog("spellCheck", "refreshAnnotationHover: " + e); //$NON-NLS-1$ //$NON-NLS-2$
         }
+    }
 
-        @Override
-        public IContextInformation getContextInformation()
+    private static Object findVisibleHoverControl(ISourceViewer viewer)
+    {
+        Object[] managers = {
+            Global.getField(viewer, "fTextHoverManager"), //$NON-NLS-1$
+            Global.getField(viewer, "fInformationPresenter") //$NON-NLS-1$
+        };
+        for (Object manager : managers)
         {
-            return null;
+            if (manager == null)
+                continue;
+            Object control = Global.getField(manager, "fInformationControl"); //$NON-NLS-1$
+            if (isVisibleInfoControl(control))
+                return control;
+            Object replacer = Global.getField(manager, "fInformationControlReplacer"); //$NON-NLS-1$
+            if (replacer != null)
+            {
+                Object sticky = Global.getField(replacer, "fInformationControl"); //$NON-NLS-1$
+                if (isVisibleInfoControl(sticky))
+                    return sticky;
+            }
+        }
+        return null;
+    }
+
+    private static boolean isVisibleInfoControl(Object control)
+    {
+        if (!(control instanceof IInformationControl))
+            return false;
+        try
+        {
+            Object shell = Global.invoke(control, "getShell"); //$NON-NLS-1$
+            return shell instanceof Shell s && !s.isDisposed() && s.isVisible();
+        }
+        catch (Exception e)
+        {
+            return false;
         }
     }
 
@@ -685,5 +998,26 @@ public final class BslModuleSpellCheckHook implements IStartup
             if (session != null)
                 session.schedule(0);
         }
+    }
+
+    /**
+     * После изменения пользовательского словаря: снять/пересчитать аннотации
+     * с данным словом во всех открытых модулях.
+     */
+    static void onUserDictionaryChanged(String word, boolean added)
+    {
+        if (word == null || word.isEmpty())
+            return;
+        SUGGEST_SESSIONS.remove(word.toLowerCase(java.util.Locale.ROOT));
+        if (added)
+        {
+            for (EditorSession session : new ArrayList<>(SESSIONS.values()))
+            {
+                if (session == null || session.viewer == null)
+                    continue;
+                SpellingProblem.removeAll(session.viewer, word);
+            }
+        }
+        rescheduleAllSessions();
     }
 }

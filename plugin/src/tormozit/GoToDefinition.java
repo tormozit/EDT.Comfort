@@ -35,6 +35,7 @@ import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
+import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IEditorInput;
 import org.eclipse.ui.IEditorPart;
@@ -1160,7 +1161,13 @@ public class GoToDefinition extends AbstractHandler
         return openFileAtLine(file, line, page, shell);
     }
 
-    /** Не {@code private} — переиспользуется {@link ShowInModuleHandler}. */
+    /**
+     * Не {@code private} — переиспользуется {@link ShowInModuleHandler}. Ловим не только
+     * {@code PartInitException} — само открытие редактора ({@code IDE.openEditor}) тоже может
+     * бросить непроверяемое исключение (например, при восстановлении сохранённого состояния
+     * каретки/скролла для файла, уже открывавшегося ранее в этой сессии — независимо от
+     * {@link #revealLine}, которая вызывается уже ПОСЛЕ и отдельно ловит свои ошибки).
+     */
     static boolean openFileAtLine(IFile file, int line, IWorkbenchPage page, Shell shell)
     {
         try
@@ -1172,23 +1179,102 @@ public class GoToDefinition extends AbstractHandler
                 revealLine(editor, line);
             return true;
         }
-        catch (PartInitException e)
+        catch (Exception e)
         {
-            Global.log("GoToDefinition: openFileAtLine: " + e);
+            Global.tempLogException("showInModule", "openFileAtLine: " + file.getFullPath() + ", line=" + line, e); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return false;
-        } //$NON-NLS-1$
+        }
     }
 
-    /** Не {@code private} — переиспользуется {@link ShowInModuleHandler}. */
+    /**
+     * Не {@code private} — переиспользуется {@link ShowInModuleHandler}. Откладываем через
+     * {@code asyncExec} и ловим любое исключение (не только {@link BadLocationException}) —
+     * у свежесозданного редактора (типично для файла, ещё не открытого в этой сессии EDT)
+     * виджет {@code StyledText} может на момент вызова ещё не успеть синхронизироваться с
+     * документом, хотя сам документ уже отдаёт корректный {@code getLineOffset} — тогда
+     * {@code selectAndReveal} падает с SWT-исключением «Index out of bounds», которое не
+     * ловится как {@code BadLocationException} и всплывает как краш UI.
+     */
     static void revealLine(IEditorPart editor, int lineNumber)
     {
-        if (lineNumber <= 0 || !(editor instanceof ITextEditor)) 
+        if (lineNumber <= 0 || !(editor instanceof ITextEditor te))
             return;
-        ITextEditor te  = (ITextEditor) editor;
-        IDocument   doc = te.getDocumentProvider().getDocument(te.getEditorInput());
-        if (doc == null) return;
-        try { te.selectAndReveal(doc.getLineOffset(Math.max(0, lineNumber - 1)), 0); }
-        catch (BadLocationException ignored) {}
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() -> doRevealLine(te, lineNumber));
+    }
+
+    private static void doRevealLine(ITextEditor te, int lineNumber)
+    {
+        try
+        {
+            IDocument doc = te.getDocumentProvider().getDocument(te.getEditorInput());
+            if (doc == null)
+                return;
+            te.selectAndReveal(doc.getLineOffset(Math.max(0, lineNumber - 1)), 0);
+        }
+        catch (Exception e)
+        {
+            Global.tempLogException("showInModule", "revealLine: line=" + lineNumber, e); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /**
+     * Не {@code private} — переиспользуется {@link ShowInModuleHandler}. Открывает BSL-модуль
+     * тем же путём, что и «Перейти к определению» ({@link #openModuleRefViaUri}) — через
+     * {@code OpenHelper}/platform-URI, а не generic {@code IDE.openEditor}: модуль в EDT — это
+     * granular-редактор ({@code DtGranularEditor}), и открытие его как обычного файла (как делает
+     * {@link #openFileAtLine}) может рассинхронизировать редактор с документом — на практике
+     * это проявлялось как задвоение видимых строк в открывшемся редакторе. Переход строго по
+     * индексу строки (без «умного» поиска по тексту — в файле могут быть повторяющиеся/
+     * закомментированные дубли строк, поиск по содержимому ненадёжен).
+     */
+    static boolean openBslModuleAtLine(IFile file, int line1Based, IWorkbenchPage page, Shell shell)
+    {
+        if (file == null)
+            return false;
+        try
+        {
+            URI moduleUri = URI.createPlatformResourceURI(file.getFullPath().toString(), true)
+                               .appendFragment("/0"); //$NON-NLS-1$
+            IEditorPart editorPart = new OpenHelper().openEditor(moduleUri, (ISelection) null);
+            if (editorPart == null)
+            {
+                Global.tempLog("showInModule", "openBslModuleAtLine: openEditor вернул null для " + moduleUri); //$NON-NLS-1$ //$NON-NLS-2$
+                return false;
+            }
+            XtextEditor xtextEditor = BslHandlerUtil.extractXtextEditor(editorPart);
+            if (xtextEditor == null)
+            {
+                Global.tempLog("showInModule", "openBslModuleAtLine: extractXtextEditor вернул null"); //$NON-NLS-1$ //$NON-NLS-2$
+                return false;
+            }
+            IXtextDocument document = (IXtextDocument) xtextEditor.getDocument();
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return true;
+            display.asyncExec(() -> revealXtextLine(xtextEditor, document, line1Based));
+            return true;
+        }
+        catch (Exception e)
+        {
+            Global.tempLogException("showInModule", "openBslModuleAtLine: " + file.getFullPath(), e); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        }
+    }
+
+    private static void revealXtextLine(XtextEditor xtextEditor, IXtextDocument document, int line1Based)
+    {
+        try
+        {
+            int line0 = Math.max(0, Math.min(line1Based - 1, document.getNumberOfLines() - 1));
+            xtextEditor.selectAndReveal(document.getLineOffset(line0), 0);
+        }
+        catch (Exception e)
+        {
+            Global.tempLogException("showInModule", "revealXtextLine: line=" + line1Based, e); //$NON-NLS-1$ //$NON-NLS-2$
+        }
     }
 
     private static IFile findFileInWorkspace(String relPath, IWorkbenchPage page, IProject project)

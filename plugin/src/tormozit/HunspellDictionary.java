@@ -14,8 +14,11 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
+
+import org.eclipse.core.runtime.IProgressMonitor;
 
 /**
  * Упрощённый читатель словарей Hunspell/MySpell (пара файлов {@code .aff}/{@code .dic}),
@@ -27,9 +30,20 @@ import java.util.regex.PatternSyntaxException;
  */
 final class HunspellDictionary
 {
-    /** Буквы для генерации правок на расстоянии 1–2 (RU + EN). */
-    private static final String SUGGEST_LETTERS =
-        "абвгдеёжзийклмнопрстуфхцчшщъыьэюяabcdefghijklmnopqrstuvwxyz"; //$NON-NLS-1$
+    /** Алфавит словаря / слова — чтобы не гонять RU-правки для латиницы и наоборот. */
+    enum ScriptKind
+    {
+        CYRILLIC, LATIN, ANY
+    }
+
+    private static final String LETTERS_CYRILLIC =
+        "абвгдеёжзийклмнопрстуфхцчшщъыьэюя"; //$NON-NLS-1$
+    private static final String LETTERS_LATIN = "abcdefghijklmnopqrstuvwxyz"; //$NON-NLS-1$
+
+    /** Лимит проверок isCorrect на edit-distance 2 (в UI-потоке). */
+    private static final int DISTANCE2_MAX_CHECKS = 4000;
+    /** Distance 2 только для коротких слов — иначе подсказка подвисает. */
+    private static final int DISTANCE2_MAX_WORD_LEN = 7;
 
     private enum FlagMode
     {
@@ -61,22 +75,31 @@ final class HunspellDictionary
     private final Set<String> crossProductSuffixFlags = new HashSet<>();
     private final Set<String> crossProductPrefixFlags = new HashSet<>();
     private final Map<String, Boolean> resultCache = new ConcurrentHashMap<>();
+    private final ScriptKind script;
     private String forbiddenFlag;
     private FlagMode flagMode = FlagMode.CHAR;
 
-    private HunspellDictionary()
+    private HunspellDictionary(ScriptKind script)
     {
+        this.script = script != null ? script : ScriptKind.ANY;
     }
 
-    static HunspellDictionary load(File affFile, File dicFile) throws IOException
+    static HunspellDictionary load(File affFile, File dicFile, ScriptKind script) throws IOException
     {
-        HunspellDictionary dict = new HunspellDictionary();
+        HunspellDictionary dict = new HunspellDictionary(script);
         byte[] affBytes = Files.readAllBytes(affFile.toPath());
         Charset charset = detectCharset(affBytes);
         dict.parseAff(new String(affBytes, charset));
         byte[] dicBytes = Files.readAllBytes(dicFile.toPath());
         dict.parseDic(new String(dicBytes, charset));
         return dict;
+    }
+
+    boolean matchesScript(ScriptKind wordScript)
+    {
+        if (script == ScriptKind.ANY || wordScript == null || wordScript == ScriptKind.ANY)
+            return true;
+        return script == wordScript;
     }
 
     private static Charset detectCharset(byte[] affBytes)
@@ -153,7 +176,7 @@ final class HunspellDictionary
                     String prefixToken = suffix ? "SFX " : "PFX "; //$NON-NLS-1$ //$NON-NLS-2$
                     if (!ruleLine.startsWith(prefixToken))
                         continue;
-                    AffixRule rule = parseRuleLine(ruleLine, flag.length() + prefixToken.length());
+                    AffixRule rule = parseRuleLine(ruleLine, suffix);
                     if (rule != null)
                         rules.add(rule);
                     read++;
@@ -163,20 +186,23 @@ final class HunspellDictionary
         }
     }
 
-    private AffixRule parseRuleLine(String line, int afterFlagIndex)
+    /**
+     * Формат: {@code SFX|PFX flag strip add [condition]}. Пустые strip/add — токен {@code 0}.
+     * В en_US.aff поля выровнены несколькими пробелами; схлопываем {@code \\s+}.
+     * Условие Hunspell якорится к концу основы (SFX) или началу (PFX).
+     */
+    private AffixRule parseRuleLine(String line, boolean suffix)
     {
-        // Формат: "SFX|PFX flag strip add [condition]"; add может быть пустой строкой
-        // (представлена как отсутствующий токен между двумя пробелами), поэтому разбираем
-        // без схлопывания повторяющихся пробелов.
-        String[] tokens = line.split(" ", -1); //$NON-NLS-1$
-        List<String> fields = new ArrayList<>();
-        for (int k = 2; k < tokens.length; k++) // tokens[0]=SFX/PFX, tokens[1]=flag
-            fields.add(tokens[k]);
-        if (fields.size() < 2)
+        String[] tokens = line.trim().split("\\s+"); //$NON-NLS-1$
+        if (tokens.length < 4)
             return null;
-        String strip = normalizeZero(fields.get(0));
-        String add = normalizeZero(fields.get(1));
-        String rawCondition = fields.size() >= 3 ? fields.get(2) : "."; //$NON-NLS-1$
+        String strip = normalizeZero(tokens[2]);
+        String add = normalizeZero(tokens[3]);
+        // continuation/morph flags после '/' нам не нужны
+        int slash = add.indexOf('/');
+        if (slash >= 0)
+            add = add.substring(0, slash);
+        String rawCondition = tokens.length >= 5 ? tokens[4] : "."; //$NON-NLS-1$
         if (rawCondition.isEmpty())
             rawCondition = "."; //$NON-NLS-1$
         Pattern condition = null;
@@ -184,7 +210,17 @@ final class HunspellDictionary
         {
             try
             {
-                condition = Pattern.compile(rawCondition);
+                String anchored = rawCondition;
+                if (suffix)
+                {
+                    if (!anchored.endsWith("$")) //$NON-NLS-1$
+                        anchored = anchored + "$"; //$NON-NLS-1$
+                }
+                else if (!anchored.startsWith("^")) //$NON-NLS-1$
+                {
+                    anchored = "^" + anchored; //$NON-NLS-1$
+                }
+                condition = Pattern.compile(anchored);
             }
             catch (PatternSyntaxException e)
             {
@@ -267,53 +303,80 @@ final class HunspellDictionary
 
     /**
      * Варианты исправления: кандидаты на edit distance 1, при нехватке — 2
-     * (для слов не длиннее 12). Регистр подстраивается под исходное слово.
+     * (короткие слова, ограниченный бюджет проверок). Алфавит правок — по script словаря.
      */
     List<String> suggest(String word, int max)
     {
-        if (word == null || word.isEmpty() || max <= 0)
-            return List.of();
-        if (isCorrect(word))
-            return List.of();
         LinkedHashSet<String> found = new LinkedHashSet<>();
-        List<String> distance1 = edits1(word);
-        collectCorrectEdits(word, distance1, found, max, null);
-        // distance 2 только если на d1 пусто — полный перебор d1×d1 слишком тяжёл для UI
-        if (found.isEmpty() && word.length() <= 10)
+        suggestStreaming(word, max, found::add, null);
+        return new ArrayList<>(found);
+    }
+
+    /**
+     * Потоковая выдача вариантов (для фонового Job + наращивания UI).
+     * {@code onSuggestion} вызывается из потока Job, не из UI.
+     */
+    void suggestStreaming(String word, int max, Consumer<String> onSuggestion, IProgressMonitor monitor)
+    {
+        if (word == null || word.isEmpty() || max <= 0 || onSuggestion == null)
+            return;
+        if (isCorrect(word))
+            return;
+        String letters = lettersForEdits();
+        LinkedHashSet<String> found = new LinkedHashSet<>();
+        List<String> distance1 = edits1(word, letters);
+        collectCorrectEdits(word, distance1, found, max, null, onSuggestion, monitor);
+        if (found.isEmpty() && word.length() <= DISTANCE2_MAX_WORD_LEN
+            && (monitor == null || !monitor.isCanceled()))
         {
             int[] checks = { 0 };
             for (String e1 : distance1)
             {
-                if (found.size() >= max || checks[0] > 25000)
+                if (found.size() >= max || checks[0] > DISTANCE2_MAX_CHECKS)
                     break;
-                collectCorrectEdits(word, edits1(e1), found, max, checks);
+                if (monitor != null && monitor.isCanceled())
+                    break;
+                collectCorrectEdits(word, edits1(e1, letters), found, max, checks, onSuggestion, monitor);
             }
         }
-        return new ArrayList<>(found);
+    }
+
+    private String lettersForEdits()
+    {
+        if (script == ScriptKind.CYRILLIC)
+            return LETTERS_CYRILLIC;
+        if (script == ScriptKind.LATIN)
+            return LETTERS_LATIN;
+        return LETTERS_CYRILLIC + LETTERS_LATIN;
     }
 
     private void collectCorrectEdits(String original, List<String> candidates,
-        LinkedHashSet<String> found, int max, int[] checks)
+        LinkedHashSet<String> found, int max, int[] checks, Consumer<String> onSuggestion,
+        IProgressMonitor monitor)
     {
         for (String cand : candidates)
         {
             if (found.size() >= max)
                 return;
+            if (monitor != null && monitor.isCanceled())
+                return;
             if (checks != null)
             {
                 checks[0]++;
-                if (checks[0] > 25000)
+                if (checks[0] > DISTANCE2_MAX_CHECKS)
                     return;
             }
             if (cand.isEmpty() || cand.equalsIgnoreCase(original))
                 continue;
             if (!isCorrect(cand))
                 continue;
-            found.add(matchCase(original, cand));
+            String matched = matchCase(original, cand);
+            if (found.add(matched) && onSuggestion != null)
+                onSuggestion.accept(matched);
         }
     }
 
-    private static List<String> edits1(String word)
+    private static List<String> edits1(String word, String letters)
     {
         String w = word.toLowerCase(Locale.ROOT);
         int n = w.length();
@@ -324,9 +387,9 @@ final class HunspellDictionary
             edits.add(w.substring(0, i) + w.charAt(i + 1) + w.charAt(i) + w.substring(i + 2));
         for (int i = 0; i < n; i++)
         {
-            for (int j = 0; j < SUGGEST_LETTERS.length(); j++)
+            for (int j = 0; j < letters.length(); j++)
             {
-                char c = SUGGEST_LETTERS.charAt(j);
+                char c = letters.charAt(j);
                 if (w.charAt(i) == c)
                     continue;
                 edits.add(w.substring(0, i) + c + w.substring(i + 1));
@@ -334,8 +397,8 @@ final class HunspellDictionary
         }
         for (int i = 0; i <= n; i++)
         {
-            for (int j = 0; j < SUGGEST_LETTERS.length(); j++)
-                edits.add(w.substring(0, i) + SUGGEST_LETTERS.charAt(j) + w.substring(i));
+            for (int j = 0; j < letters.length(); j++)
+                edits.add(w.substring(0, i) + letters.charAt(j) + w.substring(i));
         }
         return new ArrayList<>(edits);
     }

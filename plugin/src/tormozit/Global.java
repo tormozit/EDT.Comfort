@@ -892,6 +892,15 @@ public final class Global
     }
 
     /** Сбрасывает накопленный буфер временных логов на диск (по одному append на тему). */
+    /** {@link #tempLog}, но текст — {@code context} плюс полный стектрейс {@code t}. */
+    public static void tempLogException(String topic, String context, Throwable t)
+    {
+        StringWriter sw = new StringWriter();
+        if (t != null)
+            t.printStackTrace(new PrintWriter(sw));
+        tempLog(topic, (context != null ? context : "") + System.lineSeparator() + sw); //$NON-NLS-1$
+    }
+
     public static void flushTempLogs()
     {
         java.util.Map<String, StringBuilder> toFlush;

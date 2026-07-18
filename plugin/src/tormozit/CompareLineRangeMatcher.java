@@ -54,25 +54,40 @@ public final class CompareLineRangeMatcher
      */
     public static int findMatchedLine(StyledText source, int sourceLine, StyledText other)
     {
-        LineRangeComparator sourceComparator = new LineRangeComparator(source);
-        LineRangeComparator otherComparator = new LineRangeComparator(other);
-        RangeDifference[] ranges = RangeDifferencer.findRanges(sourceComparator, otherComparator);
-
-        for (RangeDifference range : ranges)
+        try
         {
-            int selfStart = range.leftStart();
-            int selfLength = range.leftLength();
-            if (sourceLine < selfStart || sourceLine >= selfStart + selfLength)
-                continue;
+            LineRangeComparator sourceComparator = new LineRangeComparator(source);
+            LineRangeComparator otherComparator = new LineRangeComparator(other);
+            RangeDifference[] ranges = RangeDifferencer.findRanges(sourceComparator, otherComparator);
 
-            int otherStart = range.rightStart();
-            int otherLength = range.rightLength();
-            int relative = sourceLine - selfStart;
-            if (relative >= otherLength)
-                return -1;
-            return otherStart + relative;
+            for (RangeDifference range : ranges)
+            {
+                int selfStart = range.leftStart();
+                int selfLength = range.leftLength();
+                if (sourceLine < selfStart || sourceLine >= selfStart + selfLength)
+                    continue;
+
+                int otherStart = range.rightStart();
+                int otherLength = range.rightLength();
+                int relative = sourceLine - selfStart;
+                if (relative >= otherLength)
+                    return -1;
+                return otherStart + relative;
+            }
+            return -1;
         }
-        return -1;
+        catch (Exception e)
+        {
+            /*
+             * StyledText мог измениться (число строк) между чтением содержимого source/other —
+             * например, реальный редактор модуля открывается/синхронизируется в фоне, пока эта
+             * же панель сравнения ещё активна (см. showInModule) — тогда getLineCount()/getLine(i)
+             * внутри LineRangeComparator могут разойтись с фактическим состоянием виджета и
+             * бросить SWT-исключение «Index out of bounds». Не даём этому всплыть краше UI.
+             */
+            Global.tempLogException("showInModule", "CompareLineRangeMatcher.findMatchedLine", e); //$NON-NLS-1$ //$NON-NLS-2$
+            return -1;
+        }
     }
 
     /** Разбивка {@link StyledText} на строки для {@link RangeDifferencer}. */

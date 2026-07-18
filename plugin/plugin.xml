@@ -64,6 +64,7 @@
     <startup class="tormozit.SpellCheckHook"/>
     <startup class="tormozit.PropertySheetSpellCheckHook"/>
     <startup class="tormozit.BslModuleSpellCheckHook"/>
+    <startup class="tormozit.CommitMessageSpellCheckHook"/>
   </extension>
 
   <extension point="org.eclipse.ui.contexts">

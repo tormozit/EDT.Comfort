@@ -22,6 +22,7 @@ import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.IContributionItem;
 import org.eclipse.jface.action.IToolBarManager;
 import org.eclipse.jface.action.Separator;
+import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.window.Window;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.SashForm;
@@ -64,6 +65,7 @@ public final class ThreeSideMergeCurrentLinesHook
     private static final String SHELL_HANDLED_KEY = "tormozit.threeSideMergeCurrentLinesShellHandled"; //$NON-NLS-1$
     private static final String PANEL_ATTACHED_KEY = "tormozit.threeSideMergeCurrentLinesAttached"; //$NON-NLS-1$
     private static final String FILTER_ROW_RELAID_KEY = "tormozit.threeSideMergeFilterRowRelaid"; //$NON-NLS-1$
+    private static final String VIEWFORM_SPACING_ADJUSTED_KEY = "tormozit.threeSideMergeViewFormSpacingAdjusted"; //$NON-NLS-1$
     private static final String HOOK_MARKER_KEY = "tormozit.threeSideMergeCurrentLinesHooked"; //$NON-NLS-1$
 
     private static final int MAX_ATTEMPTS = 40;
@@ -265,10 +267,17 @@ public final class ThreeSideMergeCurrentLinesHook
          * Зазор между верхней панелью инструментов (topLeft — выбор вида объединения) и
          * содержимым (панели сравнения) ViewForm — публичное поле самого SWT
          * (org.eclipse.swt.custom.ViewForm.verticalSpacing, по умолчанию 1px), а не что-то
-         * приватное 1C — увеличиваем на пару пикселей штатным способом.
+         * приватное 1C — увеличиваем на пару пикселей штатным способом. viewFormControl —
+         * тот же {@code ThreeSideTextMergeViewerPanel}, что переживает переключение варианта
+         * объединения (пересоздаётся только внутренний вьюер) — без метки-маркера значение
+         * накапливалось бы на +2 при каждом переприсоединении.
          */
-        if (viewFormControl instanceof ViewForm viewForm)
+        if (viewFormControl instanceof ViewForm viewForm
+            && !Boolean.TRUE.equals(viewForm.getData(VIEWFORM_SPACING_ADJUSTED_KEY)))
+        {
             viewForm.verticalSpacing += 2;
+            viewForm.setData(VIEWFORM_SPACING_ADJUSTED_KEY, Boolean.TRUE);
+        }
 
         shrinkVerticalGaps(mergeViewerComposite);
         relocateFilterRow(mergeViewerComposite);
@@ -302,6 +311,32 @@ public final class ThreeSideMergeCurrentLinesHook
         StyledText initialSource = leftText != null ? leftText : rightText != null ? rightText : resultText;
         if (initialSource != null)
             syncThreeWayCurrentLines(initialSource, panel, provider, viewer, leftText, rightText, resultText, activePair);
+
+        /*
+         * Переключатель варианта объединения («Объединение встроенного языка»/«с учётом
+         * семантики»/«текста», топ-левое меню ViewForm) пересоздаёт вьюер — decompiled
+         * {@code ThreeSideTextMergeViewerPanel.updateViewer()}: уничтожает control СТАРОГО
+         * вьюера и создаёт НОВЫЙ {@code ThreeSideTextMergeViewer} с собственным
+         * rightToolBarManager — наши кнопки (добавленные в toolbar СТАРОГО вьюера) и ссылки
+         * на leftText/rightText/resultText (виджеты старого вьюера) становятся недействительны.
+         * Наша панель (panelControl) при этом не уничтожается (она не внутри control'а вьюера,
+         * а рядом, в mergeViewerComposite) — но её содержимое протухает без переприсоединения.
+         * На уничтожение control'а старого вьюера — переприсоединяемся с нуля.
+         */
+        Control oldViewerControl = viewer.getControl();
+        if (oldViewerControl != null && !oldViewerControl.isDisposed())
+        {
+            Shell shell = mergeViewerComposite.getShell();
+            oldViewerControl.addDisposeListener(e ->
+            {
+                if (!mergeViewerComposite.isDisposed())
+                    mergeViewerComposite.setData(PANEL_ATTACHED_KEY, null);
+                if (!panelControl.isDisposed())
+                    panelControl.dispose();
+                if (shell != null && !shell.isDisposed())
+                    scheduleAttach(shell, provider, 0);
+            });
+        }
     }
 
     /**
@@ -342,7 +377,14 @@ public final class ThreeSideMergeCurrentLinesHook
                 showInModule(provider, viewer, activePair);
             }
         };
-        showInModuleAction.setToolTipText(ShowInModuleHandler.TOOLTIP + Global.pluginSignForTooltip());
+        ImageDescriptor showInModuleIcon = ShowInModuleHandler.iconDescriptor();
+        if (showInModuleIcon != null)
+        {
+            showInModuleAction.setImageDescriptor(showInModuleIcon);
+            showInModuleAction.setText(""); //$NON-NLS-1$
+        }
+        showInModuleAction.setToolTipText(
+            ShowInModuleHandler.MENU_LABEL + " — " + ShowInModuleHandler.TOOLTIP + Global.pluginSignForTooltip()); //$NON-NLS-1$
         toolBarManager.add(showInModuleAction);
 
         toolBarManager.add(panel.createVisibilityToggleAction());
@@ -372,45 +414,53 @@ public final class ThreeSideMergeCurrentLinesHook
         StyledText activeWidget = activePair.widgetA;
         if (activeWidget == null || activeWidget.isDisposed())
             return;
-
-        ComparisonSide side = activePair.indexA == RIGHT ? ComparisonSide.OTHER : ComparisonSide.MAIN;
-        IFile file = resolveModuleFile(provider, viewer, side);
-        if (file == null)
+        try
         {
-            log("showInModule: не удалось определить реальный файл модуля"); //$NON-NLS-1$
-            return;
-        }
-        int line1Based = CompareLineRangeMatcher.lineAtCaret(activeWidget) + 1;
-
-        if (!(provider instanceof Window dialogWindow) || dialogWindow.getShell() == null)
-            return;
-        Shell dialogShell = dialogWindow.getShell();
-
-        boolean structured = Global.getField(provider, "node") != null; //$NON-NLS-1$
-        if (structured)
-        {
-            ModalSaveCloseHelper.Choice choice = ModalSaveCloseHelper.confirmClose(dialogShell,
-                "Закрыть окно и сохранить настройки объединения?"); //$NON-NLS-1$
-            if (choice != ModalSaveCloseHelper.Choice.PROCEED)
+            ComparisonSide side = activePair.indexA == RIGHT ? ComparisonSide.OTHER : ComparisonSide.MAIN;
+            IFile file = resolveModuleFile(provider, viewer, side);
+            if (file == null)
+            {
+                log("showInModule: не удалось определить реальный файл модуля"); //$NON-NLS-1$
                 return;
-            dialogWindow.close();
-        }
-        else
-        {
-            ModalSaveCloseHelper.SaveChoice choice = ModalSaveCloseHelper.confirmSaveClose(dialogShell,
-                "Сохранить изменения объединения перед переходом в модуль?"); //$NON-NLS-1$
-            if (choice == ModalSaveCloseHelper.SaveChoice.CANCEL)
-                return;
-            // buttonPressed(0)/(1) — те же id, что у штатных OK/Cancel, тот же путь сохранения/отмены.
-            Global.invokeVoid(provider, "buttonPressed", //$NON-NLS-1$
-                choice == ModalSaveCloseHelper.SaveChoice.SAVE ? 0 : 1);
-        }
+            }
+            int line1Based = CompareLineRangeMatcher.lineAtCaret(activeWidget) + 1;
 
-        IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
-        IWorkbenchPage page = window != null ? window.getActivePage() : null;
-        if (page == null)
-            return;
-        ShowInModuleHandler.open(file, line1Based, page, window.getShell());
+            if (!(provider instanceof Window dialogWindow) || dialogWindow.getShell() == null)
+                return;
+            Shell dialogShell = dialogWindow.getShell();
+
+            boolean structured = Global.getField(provider, "node") != null; //$NON-NLS-1$
+            if (structured)
+            {
+                ModalSaveCloseHelper.Choice choice = ModalSaveCloseHelper.confirmClose(dialogShell,
+                    "Закрыть окно и сохранить настройки объединения?"); //$NON-NLS-1$
+                if (choice != ModalSaveCloseHelper.Choice.PROCEED)
+                    return;
+                dialogWindow.close();
+            }
+            else
+            {
+                ModalSaveCloseHelper.SaveChoice choice = ModalSaveCloseHelper.confirmSaveClose(dialogShell,
+                    "Сохранить изменения объединения перед переходом в модуль?"); //$NON-NLS-1$
+                if (choice == ModalSaveCloseHelper.SaveChoice.CANCEL)
+                    return;
+                // buttonPressed(0)/(1) — те же id, что у штатных OK/Cancel, тот же путь сохранения/отмены.
+                Global.invokeVoid(provider, "buttonPressed", //$NON-NLS-1$
+                    choice == ModalSaveCloseHelper.SaveChoice.SAVE ? 0 : 1);
+            }
+
+            IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            IWorkbenchPage page = window != null ? window.getActivePage() : null;
+            if (page == null)
+                return;
+            ShowInModuleHandler.openBslModule(file, line1Based, page, window.getShell());
+        }
+        catch (Exception e)
+        {
+            Global.tempLogException("showInModule", "ThreeSideMergeCurrentLinesHook", e); //$NON-NLS-1$ //$NON-NLS-2$
+            ToastNotification.show(ShowInModuleHandler.MENU_LABEL,
+                "Ошибка перехода в модуль: " + e, 6000); //$NON-NLS-1$
+        }
     }
 
     /**

@@ -186,10 +186,13 @@ public class BSLEditorMenuHook implements IStartup
     // Автономный BslXtextEditor
     // =========================================================================
 
+    /** Число повторов ожидания viewer/меню через asyncExec, прежде чем сдаться (защита от вечного цикла). */
+    private static final int MAX_ATTACH_ATTEMPTS = 100;
+
     private void hookBslEditor(BslXtextEditor editor)
     {
         // Попытка немедленно, если виджет ещё не готов — повтор через asyncExec
-        Display.getDefault().asyncExec(() -> attachMenuToBslEditor(editor));
+        Display.getDefault().asyncExec(() -> attachMenuToBslEditor(editor, 0));
     }
 
     /**
@@ -197,7 +200,7 @@ public class BSLEditorMenuHook implements IStartup
      * Если виджет ещё не создан или меню не установлено — планирует повтор.
      * Дублирование предотвращается флагом {@link #HOOK_MARKER} на виджете.
      */
-    private void attachMenuToBslEditor(BslXtextEditor editor)
+    private void attachMenuToBslEditor(BslXtextEditor editor, int attempt)
     {
         ISourceViewer viewer = editor.getInternalSourceViewer();
         if (viewer instanceof SourceViewer sourceViewer)
@@ -207,13 +210,16 @@ public class BSLEditorMenuHook implements IStartup
                 ensureEmbeddedHooks(editor, textWidget);
         }
 
-        if (editor.getSite() == null)
-            return; // редактор ещё не инициализирован — меню позже
+        if (editor.getSite() == null || isWorkbenchClosing())
+            return; // редактор ещё не инициализирован (или EDT закрывается) — меню позже
 
         if (!(viewer instanceof SourceViewer))
         {
-            // Viewer ещё не создан — попробуем чуть позже
-            Display.getDefault().asyncExec(() -> attachMenuToBslEditor(editor));
+            // Viewer ещё не создан — попробуем чуть позже, но не бесконечно
+            // (иначе asyncExec крутится вечно и не даёт Display.release() опустошить очередь, issue #130)
+            if (attempt >= MAX_ATTACH_ATTEMPTS)
+                return;
+            Display.getDefault().asyncExec(() -> attachMenuToBslEditor(editor, attempt + 1));
             return;
         }
 
@@ -229,7 +235,9 @@ public class BSLEditorMenuHook implements IStartup
         if (menu == null || menu.isDisposed())
         {
             // Меню ещё не создано (XtextEditor регистрирует его позже)
-            Display.getDefault().asyncExec(() -> attachMenuToBslEditor(editor));
+            if (attempt >= MAX_ATTACH_ATTEMPTS)
+                return;
+            Display.getDefault().asyncExec(() -> attachMenuToBslEditor(editor, attempt + 1));
             return;
         }
 
@@ -251,6 +259,11 @@ public class BSLEditorMenuHook implements IStartup
             if (!menu.isDisposed())
                 menu.removeMenuListener(listener);
         });
+    }
+
+    private static boolean isWorkbenchClosing()
+    {
+        return !PlatformUI.isWorkbenchRunning() || PlatformUI.getWorkbench().isClosing();
     }
 
     /** Контекст Xtext и диагностика клавиш — без ожидания меню. */

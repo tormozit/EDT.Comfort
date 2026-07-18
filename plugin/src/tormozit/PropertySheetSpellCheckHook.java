@@ -1,11 +1,16 @@
 package tormozit;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
 
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.Status;
+import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.LineStyleEvent;
 import org.eclipse.swt.custom.LineStyleListener;
@@ -854,7 +859,8 @@ public final class PropertySheetSpellCheckHook implements IStartup
         String word = text.substring(segStart, segEnd);
         if (!hasLetter(word))
             return null;
-        boolean misspelled = word.length() >= 2 && !ComfortSpellingEngine.isCorrect(word);
+        boolean misspelled = word.length() >= 2
+            && ComfortSpellingEngine.isMisspelledAt(text, segStart, segEnd - segStart);
         return new WordSpan(segStart, segEnd - segStart, word, misspelled);
     }
 
@@ -870,6 +876,17 @@ public final class PropertySheetSpellCheckHook implements IStartup
         if (styled == null || styled.isDisposed())
             return;
         Menu menu = new Menu(styled);
+        // «Добавить в словарь» всегда первый пункт меню.
+        if (span != null && span.misspelled)
+        {
+            MenuItem addDict = new MenuItem(menu, SWT.PUSH);
+            addDict.setText("Добавить в словарь: " + span.word); //$NON-NLS-1$
+            addDict.addListener(SWT.Selection, e -> styled.getDisplay().asyncExec(() ->
+                ComfortSpellingEngine.addUserWordFromUi(span.word)));
+            fillSuggestionsAsync(menu, styled, span);
+            if (offerCopy)
+                new MenuItem(menu, SWT.SEPARATOR);
+        }
         if (offerCopy)
         {
             MenuItem copyItem = new MenuItem(menu, SWT.PUSH);
@@ -884,42 +901,6 @@ public final class PropertySheetSpellCheckHook implements IStartup
                     e -> styled.getDisplay().asyncExec(() -> cutSelection(styled)));
             }
         }
-        if (span != null && span.misspelled)
-        {
-            if (offerCopy)
-                new MenuItem(menu, SWT.SEPARATOR);
-            List<String> suggestions = ComfortSpellingEngine.suggest(span.word, 12);
-            Global.tempLog("spellCheck", "PropertySheetSpell: assist word=[" + span.word //$NON-NLS-1$ //$NON-NLS-2$
-                + "] suggestions=" + suggestions.size()); //$NON-NLS-1$
-            if (suggestions.isEmpty())
-            {
-                MenuItem empty = new MenuItem(menu, SWT.PUSH);
-                empty.setText("Нет вариантов исправления"); //$NON-NLS-1$
-                empty.setEnabled(false);
-            }
-            else
-            {
-                for (String suggestion : suggestions)
-                {
-                    MenuItem item = new MenuItem(menu, SWT.PUSH);
-                    item.setText(suggestion);
-                    item.addListener(SWT.Selection, e ->
-                    {
-                        String replacement = suggestion;
-                        styled.getDisplay().asyncExec(() -> applySuggestion(styled, span, replacement));
-                    });
-                }
-            }
-            new MenuItem(menu, SWT.SEPARATOR);
-            MenuItem addDict = new MenuItem(menu, SWT.PUSH);
-            addDict.setText("Добавить в словарь: " + span.word); //$NON-NLS-1$
-            addDict.addListener(SWT.Selection, e -> styled.getDisplay().asyncExec(() ->
-            {
-                ComfortSpellingEngine.addUserWord(span.word);
-                if (!styled.isDisposed())
-                    styled.redraw();
-            }));
-        }
         if (menu.getItemCount() == 0)
         {
             menu.dispose();
@@ -932,6 +913,169 @@ public final class PropertySheetSpellCheckHook implements IStartup
         }));
         menu.setLocation(displayX, displayY);
         menu.setVisible(true);
+    }
+
+    private static final int SUGGEST_MAX = 12;
+    private static final int SUGGEST_UI_THROTTLE_MS = 300;
+
+    /**
+     * Варианты в меню: из кэша сразу; иначе «…» и фоновый
+     * {@link ComfortSpellingEngine#suggestStreaming} с дописыванием перед «…»
+     * (не чаще раза в {@link #SUGGEST_UI_THROTTLE_MS} мс). «Добавить в словарь» остаётся первым.
+     */
+    private static void fillSuggestionsAsync(Menu menu, StyledText styled, WordSpan span)
+    {
+        List<String> cached = ComfortSpellingEngine.peekSuggestCache(span.word, SUGGEST_MAX);
+        if (cached != null)
+        {
+            Global.tempLog("spellCheck", "PropertySheetSpell: assist word=[" + span.word //$NON-NLS-1$ //$NON-NLS-2$
+                + "] cached=" + cached.size()); //$NON-NLS-1$
+            if (cached.isEmpty())
+            {
+                MenuItem empty = new MenuItem(menu, SWT.PUSH);
+                empty.setText("Нет вариантов исправления"); //$NON-NLS-1$
+                empty.setEnabled(false);
+            }
+            else
+            {
+                int at = 1; // сразу после «Добавить в словарь»
+                for (String suggestion : cached)
+                {
+                    addSuggestionMenuItem(menu, styled, span, suggestion, at);
+                    at++;
+                }
+            }
+            return;
+        }
+
+        MenuItem loading = new MenuItem(menu, SWT.PUSH);
+        loading.setText("..."); //$NON-NLS-1$
+        loading.setEnabled(false);
+
+        final String word = span.word;
+        final java.util.ArrayList<String> pending = new java.util.ArrayList<>();
+        final Object pendingLock = new Object();
+        final boolean[] flushScheduled = { false };
+        final long[] lastFlushMs = { 0L };
+
+        Runnable flushPending = () ->
+        {
+            if (menu.isDisposed() || loading.isDisposed())
+                return;
+            java.util.ArrayList<String> batch;
+            synchronized (pendingLock)
+            {
+                flushScheduled[0] = false;
+                lastFlushMs[0] = System.currentTimeMillis();
+                if (pending.isEmpty())
+                    return;
+                batch = new java.util.ArrayList<>(pending);
+                pending.clear();
+            }
+            int idx = menu.indexOf(loading);
+            for (String suggestion : batch)
+            {
+                if (menu.isDisposed() || loading.isDisposed())
+                    return;
+                idx = menu.indexOf(loading);
+                addSuggestionMenuItem(menu, styled, span, suggestion, idx >= 0 ? idx : 1);
+            }
+        };
+
+        Job job = new Job("Комфорт: варианты орфографии (свойства)") //$NON-NLS-1$
+        {
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                ComfortSpellingEngine.suggestStreaming(word, SUGGEST_MAX, suggestion ->
+                {
+                    if (monitor.isCanceled())
+                        return;
+                    Display display = styled.getDisplay();
+                    if (display == null || display.isDisposed())
+                        return;
+                    synchronized (pendingLock)
+                    {
+                        pending.add(suggestion);
+                        long now = System.currentTimeMillis();
+                        long wait = lastFlushMs[0] + SUGGEST_UI_THROTTLE_MS - now;
+                        if (wait <= 0)
+                        {
+                            flushScheduled[0] = false;
+                            display.asyncExec(flushPending);
+                        }
+                        else if (!flushScheduled[0])
+                        {
+                            flushScheduled[0] = true;
+                            int delay = (int) wait;
+                            // timerExec только из UI-потока
+                            display.asyncExec(() ->
+                            {
+                                if (!display.isDisposed())
+                                    display.timerExec(delay, flushPending);
+                            });
+                        }
+                    }
+                }, monitor);
+                Display display = styled.getDisplay();
+                if (display == null || display.isDisposed())
+                    return Status.OK_STATUS;
+                display.asyncExec(() ->
+                {
+                    flushPending.run();
+                    if (menu.isDisposed())
+                        return;
+                    if (!loading.isDisposed())
+                        loading.dispose();
+                    if (!menuHasSpellSuggestion(menu))
+                    {
+                        // сразу после «Добавить в словарь» (индекс 1)
+                        MenuItem empty = new MenuItem(menu, SWT.PUSH, Math.min(1, menu.getItemCount()));
+                        empty.setText("Нет вариантов исправления"); //$NON-NLS-1$
+                        empty.setEnabled(false);
+                    }
+                });
+                return Status.OK_STATUS;
+            }
+        };
+        job.setSystem(true);
+        job.setPriority(Job.DECORATE);
+        job.schedule();
+        menu.addListener(SWT.Dispose, e -> job.cancel());
+    }
+
+    private static boolean menuHasSpellSuggestion(Menu menu)
+    {
+        for (MenuItem item : menu.getItems())
+        {
+            if (item.isDisposed())
+                continue;
+            String t = item.getText();
+            if (t == null || t.isEmpty())
+                continue;
+            if (t.startsWith("Добавить в словарь") //$NON-NLS-1$
+                || t.startsWith("Копировать") || t.startsWith("Вырезать") //$NON-NLS-1$ //$NON-NLS-2$
+                || "...".equals(t) //$NON-NLS-1$
+                || "Нет вариантов исправления".equals(t)) //$NON-NLS-1$
+                continue;
+            return true;
+        }
+        return false;
+    }
+
+    private static void addSuggestionMenuItem(Menu menu, StyledText styled, WordSpan span,
+        String suggestion, int index)
+    {
+        // Не вставлять перед «Добавить в словарь» (индекс 0).
+        int safeIndex = index <= 0 ? 1 : index;
+        safeIndex = Math.min(safeIndex, menu.getItemCount());
+        MenuItem item = new MenuItem(menu, SWT.PUSH, safeIndex);
+        item.setText(suggestion);
+        item.addListener(SWT.Selection, e ->
+        {
+            String replacement = suggestion;
+            styled.getDisplay().asyncExec(() -> applySuggestion(styled, span, replacement));
+        });
     }
 
     private static void applySuggestion(StyledText styled, WordSpan span, String replacement)
@@ -995,6 +1139,26 @@ public final class PropertySheetSpellCheckHook implements IStartup
             ranges[i] = sr;
         }
         event.styles = ranges;
+    }
+
+    /** После изменения пользовательского словаря — перерисовать подчёркивания. */
+    static void onUserDictionaryChanged(String word, boolean added)
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        Runnable redraw = () ->
+        {
+            for (StyledText styled : new ArrayList<>(WIRED_OVERLAYS))
+            {
+                if (styled != null && !styled.isDisposed())
+                    styled.redraw();
+            }
+        };
+        if (display.getThread() == Thread.currentThread())
+            redraw.run();
+        else
+            display.asyncExec(redraw);
     }
 
     private static Color spellingUnderlineColor(Display display)

@@ -29,7 +29,7 @@ import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.IContributionItem;
 import org.eclipse.jface.action.IToolBarManager;
 import org.eclipse.jface.action.Separator;
-import org.eclipse.jface.text.BadLocationException;
+import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.swt.SWT;
@@ -285,7 +285,14 @@ public final class PasteWithCompareActions
                     showInModule();
                 }
             };
-            showInModuleAction.setToolTipText(ShowInModuleHandler.TOOLTIP + Global.pluginSignForTooltip());
+            ImageDescriptor showInModuleIcon = ShowInModuleHandler.iconDescriptor();
+            if (showInModuleIcon != null)
+            {
+                showInModuleAction.setImageDescriptor(showInModuleIcon);
+                showInModuleAction.setText(""); //$NON-NLS-1$
+            }
+            showInModuleAction.setToolTipText(
+                ShowInModuleHandler.MENU_LABEL + " — " + ShowInModuleHandler.TOOLTIP + Global.pluginSignForTooltip()); //$NON-NLS-1$
             toolBarManager.add(showInModuleAction);
             toolBarManager.add(currentLinesPanel.createVisibilityToggleAction());
             toolBarManager.add(new Separator());
@@ -314,39 +321,39 @@ public final class PasteWithCompareActions
         {
             if (ctx == null || ctx.editor == null || leftEditorText == null || leftEditorText.isDisposed())
                 return;
-            IFile file = ctx.editor.getEditorInput().getAdapter(IFile.class);
-            if (file == null)
-            {
-                Global.log("PasteWithCompareActions.showInModule: нет реального файла у левого редактора"); //$NON-NLS-1$
-                return;
-            }
-
-            int line1Based;
             try
             {
+                IFile file = ctx.editor.getEditorInput().getAdapter(IFile.class);
+                if (file == null)
+                {
+                    Global.log("PasteWithCompareActions.showInModule: нет реального файла у левого редактора"); //$NON-NLS-1$
+                    return;
+                }
+
                 int baseLine = ctx.viewer.getDocument().getLineOfOffset(ctx.offset);
                 int relativeLine = CompareLineRangeMatcher.lineAtCaret(leftEditorText);
-                line1Based = baseLine + relativeLine + 1;
+                int line1Based = baseLine + relativeLine + 1;
+
+                IWorkbenchPage page = ctx.editor.getEditorSite().getPage();
+                Shell workbenchShell = page.getWorkbenchWindow().getShell();
+
+                Shell dialogShell = leftEditorText.getShell();
+                ModalSaveCloseHelper.Choice choice = ModalSaveCloseHelper.confirmClose(dialogShell,
+                    "Закрыть окно сравнения и перейти в модуль?"); //$NON-NLS-1$
+                if (choice != ModalSaveCloseHelper.Choice.PROCEED)
+                    return;
+
+                cancelPressed();
+                dialogShell.close();
+
+                ShowInModuleHandler.openBslModule(file, line1Based, page, workbenchShell);
             }
-            catch (BadLocationException e)
+            catch (Exception e)
             {
-                Global.log("PasteWithCompareActions.showInModule: " + e); //$NON-NLS-1$
-                return;
+                Global.tempLogException("showInModule", "PasteWithCompareActions", e); //$NON-NLS-1$ //$NON-NLS-2$
+                ToastNotification.show(ShowInModuleHandler.MENU_LABEL,
+                    "Ошибка перехода в модуль: " + e, 6000); //$NON-NLS-1$
             }
-
-            IWorkbenchPage page = ctx.editor.getEditorSite().getPage();
-            Shell workbenchShell = page.getWorkbenchWindow().getShell();
-
-            Shell dialogShell = leftEditorText.getShell();
-            ModalSaveCloseHelper.Choice choice = ModalSaveCloseHelper.confirmClose(dialogShell,
-                "Закрыть окно сравнения и перейти в модуль?"); //$NON-NLS-1$
-            if (choice != ModalSaveCloseHelper.Choice.PROCEED)
-                return;
-
-            cancelPressed();
-            dialogShell.close();
-
-            ShowInModuleHandler.open(file, line1Based, page, workbenchShell);
         }
 
         /** Полные тексты обеих сторон (не текущей строки) — для кнопки «Сравнить ИР». */

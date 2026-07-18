@@ -14,6 +14,7 @@ import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.IContributionItem;
 import org.eclipse.jface.action.IToolBarManager;
 import org.eclipse.jface.action.Separator;
+import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
@@ -58,6 +59,19 @@ public final class GitCompareCurrentLinesHook
     private static final int MAX_ATTEMPTS = 40;
     private static final int RETRY_DELAY_MS = 50;
 
+    /**
+     * Ожидающие восстановления каретки после {@link #showInModule} — ключ: редактор сравнения,
+     * значение: куда её вернуть. Заполняется в {@code showInModule}, снимается и применяется
+     * в {@code partActivated} того же редактора (см. там подробное объяснение таймингов).
+     * {@link java.util.WeakHashMap} — не удерживает закрытый редактор, если реактивации не было.
+     */
+    private static final java.util.Map<IEditorPart, PendingCaretRestore> pendingCaretRestores =
+        new java.util.WeakHashMap<>();
+
+    private record PendingCaretRestore(StyledText widget, int offset)
+    {
+    }
+
     private GitCompareCurrentLinesHook()
     {
     }
@@ -99,7 +113,15 @@ public final class GitCompareCurrentLinesHook
                 if (ed != null)
                     tryHandleEditor(ed);
             }
-            @Override public void partActivated(IWorkbenchPartReference r)    {}
+            @Override
+            public void partActivated(IWorkbenchPartReference ref)
+            {
+                if (!(ref instanceof IEditorReference))
+                    return;
+                IEditorPart ed = ((IEditorReference) ref).getEditor(false);
+                if (ed != null)
+                    restorePendingCaret(ed);
+            }
             @Override public void partBroughtToTop(IWorkbenchPartReference r) {}
             @Override public void partClosed(IWorkbenchPartReference r)       {}
             @Override public void partDeactivated(IWorkbenchPartReference r)  {}
@@ -116,10 +138,10 @@ public final class GitCompareCurrentLinesHook
             return;
         if (!(input instanceof CompareEditorInput editorInput))
             return;
-        scheduleAttach(editorInput, 0);
+        scheduleAttach(editorInput, editor, 0);
     }
 
-    private static void scheduleAttach(CompareEditorInput editorInput, int attempt)
+    private static void scheduleAttach(CompareEditorInput editorInput, IEditorPart editor, int attempt)
     {
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
@@ -131,8 +153,8 @@ public final class GitCompareCurrentLinesHook
         }
         display.timerExec(attempt == 0 ? 100 : RETRY_DELAY_MS, () ->
         {
-            if (!tryAttach(editorInput))
-                scheduleAttach(editorInput, attempt + 1);
+            if (!tryAttach(editorInput, editor))
+                scheduleAttach(editorInput, editor, attempt + 1);
         });
     }
 
@@ -140,7 +162,7 @@ public final class GitCompareCurrentLinesHook
      * @return {@code true} — попытки прекращены (успех либо окончательно не подходит),
      *         {@code false} — контролы ещё не готовы, нужна повторная попытка.
      */
-    private static boolean tryAttach(CompareEditorInput editorInput)
+    private static boolean tryAttach(CompareEditorInput editorInput, IEditorPart editor)
     {
         Object paneObj = Global.getField(editorInput, "fContentInputPane"); //$NON-NLS-1$
         if (!(paneObj instanceof CompareViewerSwitchingPane pane) || pane.isDisposed())
@@ -159,12 +181,12 @@ public final class GitCompareCurrentLinesHook
         if (viewerControl == null || viewerControl.isDisposed() || viewerControl.getParent() != pane)
             return false;
 
-        attach(pane, viewerControl, editorInput, mergeViewer);
+        attach(pane, viewerControl, editorInput, mergeViewer, editor);
         return true;
     }
 
     private static void attach(CompareViewerSwitchingPane pane, Control viewerControl,
-        CompareEditorInput editorInput, TextMergeViewer viewer)
+        CompareEditorInput editorInput, TextMergeViewer viewer, IEditorPart editor)
     {
         if (pane.isDisposed())
             return;
@@ -225,9 +247,24 @@ public final class GitCompareCurrentLinesHook
             : rightIsWorkingCopy ? resolveTypedElementFile(editorInput, false)
             : null;
 
-        addCompareInIrToolbarAction(pane, panel, workingCopyFile, workingCopyText);
+        addCompareInIrToolbarAction(pane, panel, workingCopyFile, workingCopyText, editor);
 
         TwoSideCurrentLinesSync.hook(panel, leftText, rightText);
+
+        /*
+         * Переключатель варианта сравнения («Сравнение текста»/«с учётом семантики»/
+         * «встроенного языка», выпадающее меню в левом верхнем углу) пересоздаёт вьюер —
+         * механизм переключения считает содержимым pane именно то, что мы туда положили
+         * через setContent(wrapper), и при смене варианта уничтожает ЭТОТ control целиком
+         * (наш wrapper, включая панель «Текущая строка» и добавленные кнопки тулбара), подставляя
+         * новый вьюер напрямую. Переприсоединяемся с нуля при уничтожении wrapper.
+         */
+        wrapper.addDisposeListener(e ->
+        {
+            if (!pane.isDisposed())
+                pane.setData(PANEL_ATTACHED_KEY, null);
+            scheduleAttach(editorInput, editor, 0);
+        });
     }
 
     /**
@@ -240,7 +277,7 @@ public final class GitCompareCurrentLinesHook
      * наш пункт первым, затем то, что уже было.
      */
     private static void addCompareInIrToolbarAction(CompareViewerPane pane, CompareCurrentLinesPanel panel,
-        IFile workingCopyFile, StyledText workingCopyText)
+        IFile workingCopyFile, StyledText workingCopyText, IEditorPart editor)
     {
         IToolBarManager toolBarManager = CompareViewerPane.getToolBarManager(pane);
         if (toolBarManager == null)
@@ -264,10 +301,17 @@ public final class GitCompareCurrentLinesHook
             @Override
             public void run()
             {
-                showInModule(pane, workingCopyFile, workingCopyText);
+                showInModule(pane, workingCopyFile, workingCopyText, editor);
             }
         };
-        showInModuleAction.setToolTipText(ShowInModuleHandler.TOOLTIP + Global.pluginSignForTooltip());
+        ImageDescriptor showInModuleIcon = ShowInModuleHandler.iconDescriptor();
+        if (showInModuleIcon != null)
+        {
+            showInModuleAction.setImageDescriptor(showInModuleIcon);
+            showInModuleAction.setText(""); //$NON-NLS-1$
+        }
+        showInModuleAction.setToolTipText(
+            ShowInModuleHandler.MENU_LABEL + " — " + ShowInModuleHandler.TOOLTIP + Global.pluginSignForTooltip()); //$NON-NLS-1$
         showInModuleAction.setEnabled(workingCopyFile != null && workingCopyText != null);
         toolBarManager.add(showInModuleAction);
 
@@ -283,17 +327,71 @@ public final class GitCompareCurrentLinesHook
      * Не модальное окно (обычная вкладка редактора) — без подтверждения закрытия,
      * сразу открываем реальный редактор рабочей копии на текущей строке.
      */
-    private static void showInModule(CompareViewerPane pane, IFile workingCopyFile, StyledText workingCopyText)
+    private static void showInModule(CompareViewerPane pane, IFile workingCopyFile, StyledText workingCopyText,
+        IEditorPart editor)
     {
         if (workingCopyFile == null || workingCopyText == null || workingCopyText.isDisposed())
             return;
-        IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
-        IWorkbenchPage page = window != null ? window.getActivePage() : null;
-        if (page == null)
+        try
+        {
+            IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            IWorkbenchPage page = window != null ? window.getActivePage() : null;
+            if (page == null)
+                return;
+            int line1Based = CompareLineRangeMatcher.lineAtCaret(workingCopyText) + 1;
+            Shell shell = pane.isDisposed() ? null : pane.getShell();
+
+            /*
+             * Стектрейс краша (Eclipse, не наш код): org.eclipse.compare.contentmergeviewer
+             * .TextMergeViewer планирует отложенный UIJob-пересчёт подсветки различий, который
+             * срабатывает именно при повторной активации вкладки сравнения (не сразу после
+             * открытия модуля) — содержимое левой панели к этому моменту пересинхронизировано,
+             * а каретка виджета осталась на старом смещении — StyledText.setCaretLocations падает
+             * с «Index out of bounds» при попытке перерисовать каретку в недействительной позиции.
+             * Патчить сам TextMergeViewer нельзя (платформенный код) — убираем триггер: сбрасываем
+             * каретку в заведомо валидную позицию (0) сейчас, а возвращаем её обратно не по
+             * таймеру (непредсказуемо относительно момента реактивации — так и не сработало), а
+             * из {@code partActivated} этого же редактора, когда вкладка сравнения ДЕЙСТВИТЕЛЬНО
+             * активируется — см. {@link #restorePendingCaret}.
+             */
+            int originalCaretOffset = workingCopyText.getCaretOffset();
+            if (workingCopyText.getCharCount() > 0)
+                workingCopyText.setCaretOffset(0);
+            pendingCaretRestores.put(editor, new PendingCaretRestore(workingCopyText, originalCaretOffset));
+
+            ShowInModuleHandler.openBslModule(workingCopyFile, line1Based, page, shell);
+        }
+        catch (Exception e)
+        {
+            Global.tempLogException("showInModule", "GitCompareCurrentLinesHook: " + workingCopyFile.getFullPath(), e); //$NON-NLS-1$ //$NON-NLS-2$
+            ToastNotification.show(ShowInModuleHandler.MENU_LABEL,
+                "Ошибка перехода в модуль: " + e, 6000); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * Вызывается из {@code partActivated} для КАЖДОГО редактора при активации — если для этого
+     * редактора есть отложенное восстановление каретки, планируем его на два шага позже в
+     * очереди событий ({@code asyncExec} внутри {@code asyncExec}), чтобы почти наверняка
+     * оказаться ПОСЛЕ отложенного {@code UIJob}-пересчёта Eclipse (обычно однократный
+     * {@code asyncExec} от момента реактивации) — см. подробности в {@link #showInModule}.
+     * Точной гарантии порядка платформа не даёт, но так надёжнее фиксированной задержки.
+     */
+    private static void restorePendingCaret(IEditorPart editor)
+    {
+        PendingCaretRestore pending = pendingCaretRestores.remove(editor);
+        if (pending == null || pending.widget().isDisposed())
             return;
-        int line1Based = CompareLineRangeMatcher.lineAtCaret(workingCopyText) + 1;
-        Shell shell = pane.isDisposed() ? null : pane.getShell();
-        ShowInModuleHandler.open(workingCopyFile, line1Based, page, shell);
+        Display display = pending.widget().getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() -> display.asyncExec(() ->
+        {
+            if (pending.widget().isDisposed())
+                return;
+            int safeOffset = Math.min(pending.offset(), pending.widget().getCharCount());
+            pending.widget().setCaretOffset(Math.max(0, safeOffset));
+        }));
     }
 
     /**

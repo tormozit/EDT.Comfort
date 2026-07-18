@@ -83,16 +83,29 @@ public final class TextEditorIdentifierSelectionHook implements IStartup
         installKeyInterceptor(text);
     }
 
+    /** Число повторов ожидания viewer через asyncExec, прежде чем сдаться (защита от вечного цикла). */
+    private static final int MAX_ATTACH_ATTEMPTS = 100;
+
     /** Полное подключение по редактору (разрешает viewer сам). */
     public static void attachToTextEditor(ITextEditor textEditor)
     {
-        if (textEditor == null)
+        attachToTextEditor(textEditor, 0);
+    }
+
+    private static void attachToTextEditor(ITextEditor textEditor, int attempt)
+    {
+        if (textEditor == null || textEditor.getSite() == null || isWorkbenchClosing())
             return;
 
         ISourceViewer viewer = TextEditor.getSourceViewer(textEditor);
         if (viewer == null)
         {
-            Display.getDefault().asyncExec(() -> attachToTextEditor(textEditor));
+            // Если viewer никогда не появится (редактор не инициализируется/закрывается),
+            // ограничиваем число попыток — иначе asyncExec крутится вечно и не даёт
+            // Display.release() опустошить очередь при закрытии EDT (issue #130).
+            if (attempt >= MAX_ATTACH_ATTEMPTS)
+                return;
+            Display.getDefault().asyncExec(() -> attachToTextEditor(textEditor, attempt + 1));
             return;
         }
 
@@ -101,6 +114,11 @@ public final class TextEditorIdentifierSelectionHook implements IStartup
             return;
 
         attachToTextEditor(textEditor, textWidget);
+    }
+
+    private static boolean isWorkbenchClosing()
+    {
+        return !PlatformUI.isWorkbenchRunning() || PlatformUI.getWorkbench().isClosing();
     }
 
     /** Полное подключение, когда {@link StyledText} уже известен (BSL-хук). */

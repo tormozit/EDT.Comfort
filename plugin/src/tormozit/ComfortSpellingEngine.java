@@ -17,26 +17,41 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Consumer;
 
+import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.FileLocator;
 import org.eclipse.core.runtime.IPath;
 import org.eclipse.core.runtime.Path;
+import org.eclipse.jdt.internal.ui.text.spelling.SpellCheckEngine;
+import org.eclipse.jdt.internal.ui.text.spelling.SpellCheckIterator;
+import org.eclipse.jdt.internal.ui.text.spelling.engine.ISpellChecker;
+import org.eclipse.jdt.ui.PreferenceConstants;
+import org.eclipse.jface.text.Document;
+import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.Region;
+import org.eclipse.swt.widgets.Display;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.FrameworkUtil;
 
 /**
- * Загрузчик словарей Hunspell/MySpell и общая токенизация слов (camelCase)
- * для Platform dictionary, панели «Свойства» и орфографии модуля BSL.
- * Пути — {@link ComfortSettings#getSpellingDictionaryBasePaths()}.
+ * Загрузчик словарей Hunspell/MySpell и проверка текста для панели «Свойства»
+ * и орфографии модуля BSL.
+ * Поиск ошибок в тексте — через штатные {@link SpellCheckEngine}/{@link SpellCheckIterator}
+ * (флаги «Орфография»: URL, UPPER, digits, mixed и т.д.).
+ * Пути словарей — {@link ComfortSettings#getSpellingDictionaryBasePaths()}.
  * Пользовательские слова — {@code spelling-user-dictionary.txt} в stateLocation плагина.
  */
 public final class ComfortSpellingEngine
 {
     private static final String USER_DICT_FILE = "spelling-user-dictionary.txt"; //$NON-NLS-1$
+    private static final int SUGGEST_CACHE_MAX = 512;
 
     private static volatile List<HunspellDictionary> dictionaries;
     private static final Object USER_LOCK = new Object();
     private static volatile Set<String> userWords;
+    private static final ConcurrentHashMap<String, List<String>> suggestCache =
+        new ConcurrentHashMap<>();
 
     private ComfortSpellingEngine()
     {
@@ -61,27 +76,124 @@ public final class ComfortSpellingEngine
         return result;
     }
 
-    /** Подсказки исправления по всем загруженным словарям (порядок — RU, затем EN). */
+    /**
+     * Подсказки исправления: сначала словарь того же алфавита (латиница → EN, кириллица → RU),
+     * с кэшем. Не гоняем RU-словарь для {@code http} и т.п. — иначе UI подвисает на d2.
+     */
     static List<String> suggest(String word, int max)
     {
         if (word == null || word.isEmpty() || max <= 0)
             return List.of();
+        String cacheKey = suggestCacheKey(word, max);
+        List<String> cached = suggestCache.get(cacheKey);
+        if (cached != null)
+            return cached;
+        LinkedHashSet<String> merged = new LinkedHashSet<>();
+        suggestStreaming(word, max, merged::add, null);
+        List<String> result = merged.isEmpty() ? List.of() : List.copyOf(merged);
+        return cacheSuggest(cacheKey, result);
+    }
+
+    /** Кэш hit или {@code null}, если ещё не считали. */
+    static List<String> peekSuggestCache(String word, int max)
+    {
+        if (word == null || word.isEmpty() || max <= 0)
+            return null;
+        return suggestCache.get(suggestCacheKey(word, max));
+    }
+
+    /**
+     * Потоковый suggest для фонового Job. По завершении (если не отменён) кладёт
+     * накопленный список в кэш.
+     */
+    static void suggestStreaming(String word, int max, Consumer<String> onSuggestion,
+        IProgressMonitor monitor)
+    {
+        if (word == null || word.isEmpty() || max <= 0 || onSuggestion == null)
+            return;
+        String cacheKey = suggestCacheKey(word, max);
+        List<String> cached = suggestCache.get(cacheKey);
+        if (cached != null)
+        {
+            for (String s : cached)
+                onSuggestion.accept(s);
+            return;
+        }
+        HunspellDictionary.ScriptKind script = detectWordScript(word);
         LinkedHashSet<String> merged = new LinkedHashSet<>();
         for (HunspellDictionary dict : sharedDictionaries())
         {
-            for (String s : dict.suggest(word, max))
+            if (monitor != null && monitor.isCanceled())
+                return;
+            if (!dict.matchesScript(script))
+                continue;
+            dict.suggestStreaming(word, max, s ->
             {
-                merged.add(s);
-                if (merged.size() >= max)
-                    return List.copyOf(merged);
-            }
+                if (merged.add(s))
+                    onSuggestion.accept(s);
+            }, monitor);
+            if (merged.size() >= max)
+                break;
         }
-        return merged.isEmpty() ? List.of() : List.copyOf(merged);
+        if (monitor == null || !monitor.isCanceled())
+            cacheSuggest(cacheKey, merged.isEmpty() ? List.of() : List.copyOf(merged));
+    }
+
+    private static String suggestCacheKey(String word, int max)
+    {
+        return word.toLowerCase(Locale.ROOT) + '#' + max;
+    }
+
+    private static List<String> cacheSuggest(String key, List<String> value)
+    {
+        if (suggestCache.size() >= SUGGEST_CACHE_MAX)
+            suggestCache.clear();
+        suggestCache.put(key, value);
+        return value;
+    }
+
+    static HunspellDictionary.ScriptKind detectWordScript(String word)
+    {
+        boolean cyrillic = false;
+        boolean latin = false;
+        for (int i = 0; i < word.length(); i++)
+        {
+            char c = word.charAt(i);
+            if (!Character.isLetter(c))
+                continue;
+            Character.UnicodeBlock block = Character.UnicodeBlock.of(c);
+            if (block == Character.UnicodeBlock.CYRILLIC
+                || block == Character.UnicodeBlock.CYRILLIC_SUPPLEMENTARY)
+                cyrillic = true;
+            else if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))
+                latin = true;
+        }
+        if (cyrillic && latin)
+            return HunspellDictionary.ScriptKind.ANY;
+        if (cyrillic)
+            return HunspellDictionary.ScriptKind.CYRILLIC;
+        if (latin)
+            return HunspellDictionary.ScriptKind.LATIN;
+        return HunspellDictionary.ScriptKind.ANY;
+    }
+
+    private static HunspellDictionary.ScriptKind scriptFromDictPath(String basePath)
+    {
+        String lower = basePath.toLowerCase(Locale.ROOT);
+        if (lower.contains("en_") || lower.contains("/en") || lower.contains("\\en") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            || lower.contains("english")) //$NON-NLS-1$
+            return HunspellDictionary.ScriptKind.LATIN;
+        if (lower.contains("ru_") || lower.contains("russian") || lower.contains("aot") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            || lower.contains("/ru") || lower.contains("\\ru")) //$NON-NLS-1$ //$NON-NLS-2$
+            return HunspellDictionary.ScriptKind.CYRILLIC;
+        return HunspellDictionary.ScriptKind.ANY;
     }
 
     static boolean isCorrect(String word)
     {
         if (word == null || word.isEmpty())
+            return true;
+        if (isShortAllCapsWord(word))
             return true;
         if (isUserWord(word))
             return true;
@@ -92,6 +204,21 @@ public final class ComfortSpellingEngine
                 return true;
         }
         return false;
+    }
+
+    /** Слова только из заглавных букв длиной ≤ 3 (аббревиатуры вроде ИД, XML) не проверяем. */
+    private static boolean isShortAllCapsWord(String word)
+    {
+        int len = word.length();
+        if (len == 0 || len > 3)
+            return false;
+        for (int i = 0; i < len; i++)
+        {
+            char c = word.charAt(i);
+            if (!Character.isLetter(c) || !Character.isUpperCase(c))
+                return false;
+        }
+        return true;
     }
 
     /** Слово уже в пользовательском словаре Comfort (без учёта регистра). */
@@ -122,6 +249,78 @@ public final class ComfortSpellingEngine
             persistUserWords(set);
             return true;
         }
+    }
+
+    /**
+     * UI-добавление: словарь + тост «Отменить добавление» (10 с) + пересчёт
+     * подчёркиваний для этого слова во всех хуках орфографии.
+     *
+     * @return {@code true}, если слово было новым
+     */
+    static boolean addUserWordFromUi(String word)
+    {
+        if (word == null || word.isBlank())
+            return false;
+        String displayWord = word.trim();
+        if (!addUserWord(displayWord))
+            return false;
+        suggestCache.clear();
+        Runnable ui = () ->
+        {
+            refreshSpellingAfterUserWordChange(displayWord, true);
+            ToastNotification.show(
+                "Орфография", //$NON-NLS-1$
+                "Слово «" + displayWord + "» добавлено в словарь.", //$NON-NLS-1$ //$NON-NLS-2$
+                10_000,
+                () -> undoUserWordAdd(displayWord),
+                "Отменить добавление"); //$NON-NLS-1$
+        };
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return true;
+        if (display.getThread() == Thread.currentThread())
+            ui.run();
+        else
+            display.asyncExec(ui);
+        return true;
+    }
+
+    /** Удалить слово из пользовательского словаря. */
+    static boolean removeUserWord(String word)
+    {
+        if (word == null || word.isBlank())
+            return false;
+        String key = normalizeUserWord(word.trim());
+        if (key.isEmpty())
+            return false;
+        Set<String> set = userWordSet();
+        synchronized (USER_LOCK)
+        {
+            if (!set.remove(key))
+                return false;
+            persistUserWords(set);
+            return true;
+        }
+    }
+
+    private static void undoUserWordAdd(String word)
+    {
+        if (!removeUserWord(word))
+            return;
+        suggestCache.clear();
+        refreshSpellingAfterUserWordChange(word, false);
+        Global.tempLog("spellCheck", "user-dict undo: [" + word + "]"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * @param added {@code true} — слово только что добавлено (снять ошибки с этим словом);
+     *              {@code false} — отмена (пересчитать заново).
+     */
+    private static void refreshSpellingAfterUserWordChange(String word, boolean added)
+    {
+        BslModuleSpellCheckHook.onUserDictionaryChanged(word, added);
+        PropertySheetSpellCheckHook.onUserDictionaryChanged(word, added);
+        CommitMessageSpellCheckHook.onUserDictionaryChanged(word, added);
     }
 
     private static String normalizeUserWord(String word)
@@ -217,14 +416,74 @@ public final class ComfortSpellingEngine
     }
 
     /**
-     * Ошибочные диапазоны в {@code text} (относительные offset/length), с разбиением
-     * Pascal/camelCase и letter↔digit.
+     * Ошибочные диапазоны в {@code text} (относительные offset/length).
+     * Штатный путь JDT: {@link SpellCheckIterator} (пропуск URL и т.п.) +
+     * {@link ISpellChecker#execute} (флаги Ignore digits/mixed/UPPER/URLs/…).
+     * Fallback — собственный разбор, если checker недоступен.
      */
     static List<int[]> findMisspelledRanges(String text)
     {
-        List<int[]> result = new ArrayList<>();
         if (text == null || text.isEmpty())
+            return List.of();
+        List<int[]> viaJdt = findMisspelledRangesViaJdt(text);
+        if (viaJdt != null)
+            return viaJdt;
+        return findMisspelledRangesLegacy(text);
+    }
+
+    /**
+     * @return список диапазонов или {@code null}, если штатный checker недоступен
+     */
+    private static List<int[]> findMisspelledRangesViaJdt(String text)
+    {
+        try
+        {
+            ISpellChecker checker = SpellCheckEngine.getInstance().getSpellChecker();
+            if (checker == null)
+                return null;
+            Locale locale = checker.getLocale();
+            if (locale == null)
+            {
+                String localeKey = PreferenceConstants.getPreferenceStore()
+                    .getString(PreferenceConstants.SPELLING_LOCALE);
+                locale = SpellCheckEngine.convertToLocale(localeKey);
+            }
+            if (locale == null)
+                locale = new Locale("ru", "RU"); //$NON-NLS-1$ //$NON-NLS-2$
+            IDocument document = new Document(text);
+            SpellCheckIterator iterator = new SpellCheckIterator(document,
+                new Region(0, text.length()), locale, null);
+            List<int[]> result = new ArrayList<>();
+            checker.execute(event ->
+            {
+                if (event == null)
+                    return;
+                int begin = event.getBegin();
+                int end = event.getEnd();
+                if (begin < 0 || end < begin || begin >= text.length())
+                    return;
+                int length = Math.min(end, text.length() - 1) - begin + 1;
+                if (length > 0)
+                    result.add(new int[] { begin, length });
+            }, iterator);
             return result;
+        }
+        catch (IllegalStateException | LinkageError e)
+        {
+            Global.tempLog("spellCheck", "findMisspelledRangesViaJdt: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+        catch (RuntimeException e)
+        {
+            Global.tempLog("spellCheck", "findMisspelledRangesViaJdt: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+    }
+
+    /** Fallback без JDT iterator — camelCase-сегменты, без флагов «Орфография». */
+    private static List<int[]> findMisspelledRangesLegacy(String text)
+    {
+        List<int[]> result = new ArrayList<>();
         List<HunspellDictionary> dicts = sharedDictionaries();
         if (dicts.isEmpty())
             return result;
@@ -241,14 +500,14 @@ public final class ComfortSpellingEngine
             }
             if (start < 0)
                 continue;
-            addIfMisspelled(text, start, i, dicts, result);
+            addIfMisspelledLegacy(text, start, i, dicts, result);
             start = -1;
         }
         return result;
     }
 
-    private static void addIfMisspelled(String text, int start, int end, List<HunspellDictionary> dicts,
-        List<int[]> out)
+    private static void addIfMisspelledLegacy(String text, int start, int end,
+        List<HunspellDictionary> dicts, List<int[]> out)
     {
         while (start < end && isTrimChar(text.charAt(start)))
             start++;
@@ -279,6 +538,21 @@ public final class ComfortSpellingEngine
                 continue;
             out.add(new int[] { segStart, segEnd - segStart });
         }
+    }
+
+    /** Слово в диапазоне помечено штатной проверкой как ошибка. */
+    static boolean isMisspelledAt(String text, int offset, int length)
+    {
+        if (text == null || length <= 0 || offset < 0 || offset + length > text.length())
+            return false;
+        for (int[] r : findMisspelledRanges(text))
+        {
+            if (r[0] == offset && r[1] == length)
+                return true;
+            if (offset < r[0] + r[1] && offset + length > r[0])
+                return true;
+        }
+        return false;
     }
 
     static List<int[]> splitIdentifierSegments(String text, int start, int end)
@@ -313,6 +587,8 @@ public final class ComfortSpellingEngine
 
     private static boolean isCorrect(List<HunspellDictionary> dicts, String word)
     {
+        if (isShortAllCapsWord(word))
+            return true;
         if (isUserWord(word))
             return true;
         for (HunspellDictionary dict : dicts)
@@ -370,8 +646,10 @@ public final class ComfortSpellingEngine
                     Global.tempLog("spellCheck", "словарь не найден: " + trimmed); //$NON-NLS-1$ //$NON-NLS-2$
                     continue;
                 }
-                result.add(HunspellDictionary.load(aff, dic));
+                HunspellDictionary.ScriptKind script = scriptFromDictPath(trimmed);
+                result.add(HunspellDictionary.load(aff, dic, script));
                 Global.tempLog("spellCheck", "словарь загружен: " + trimmed //$NON-NLS-1$ //$NON-NLS-2$
+                    + " script=" + script //$NON-NLS-1$
                     + " (" + aff.getAbsolutePath() + ")"); //$NON-NLS-1$ //$NON-NLS-2$
             }
             catch (Exception e)

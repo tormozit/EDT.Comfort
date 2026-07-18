@@ -1,11 +1,15 @@
 package tormozit;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
 
@@ -18,7 +22,27 @@ import org.eclipse.jface.dialogs.IPageChangeProvider;
 import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.jface.preference.IPreferenceStore;
 import org.eclipse.jface.preference.PreferenceDialog;
+import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.IInformationControlCreator;
+import org.eclipse.jface.text.IRegion;
+import org.eclipse.jface.text.ITextHover;
+import org.eclipse.jface.text.ITextHoverExtension;
+import org.eclipse.jface.text.ITextHoverExtension2;
+import org.eclipse.jface.text.ITextViewer;
+import org.eclipse.jface.text.Position;
+import org.eclipse.jface.text.Region;
+import org.eclipse.jface.text.contentassist.CompletionProposal;
+import org.eclipse.jface.text.contentassist.ICompletionProposal;
+import org.eclipse.jface.text.source.Annotation;
+import org.eclipse.jface.text.source.IAnnotationModel;
+import org.eclipse.jface.text.source.ISourceViewer;
+import org.eclipse.jface.text.source.SourceViewer;
+import org.eclipse.jface.text.source.SourceViewerConfiguration;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.custom.StyledText;
+import org.eclipse.swt.dnd.Clipboard;
+import org.eclipse.swt.dnd.TextTransfer;
+import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Composite;
@@ -29,7 +53,11 @@ import org.eclipse.swt.widgets.Link;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IStartup;
+import org.eclipse.ui.IWorkbenchWindow;
+import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.editors.text.EditorsUI;
+import org.eclipse.ui.texteditor.spelling.SpellingAnnotation;
+import org.eclipse.ui.texteditor.spelling.SpellingProblem;
 import org.eclipse.ui.texteditor.spelling.SpellingService;
 
 /**
@@ -55,6 +83,12 @@ public final class SpellCheckHook implements IStartup
     private static final WeakHashMap<PreferenceDialog, Boolean> pageListenersAttached =
         new WeakHashMap<>();
 
+    private static final String HOVER_COPY_FILTER_KEY = "tormozit.spellHover.copyFilter.v4"; //$NON-NLS-1$
+
+    /** Последнее выделение в annotation-hover (к моменту Ctrl+C live-selection часто уже пуст). */
+    private static volatile String hoverSelectionText;
+    private static volatile Shell hoverSelectionShell;
+
     @Override
     public void earlyStartup()
     {
@@ -62,8 +96,219 @@ public final class SpellCheckHook implements IStartup
         bootstrapOnce();
         Display display = Display.getDefault();
         if (display != null && !display.isDisposed())
-            display.asyncExec(() -> installPreferencePageEnhancements(display));
+        {
+            display.asyncExec(() ->
+            {
+                installPreferencePageEnhancements(display);
+                installAnnotationHoverCopyFilter(display);
+            });
+        }
         logDiagnostics();
+    }
+
+    /**
+     * В annotation-hover заголовок — READ_ONLY {@link StyledText}: выделение мышью есть,
+     * а штатный Copy не берёт этот текст. Запоминаем selection по мыши и копируем
+     * по Ctrl+C через Display filter (без {@code activateHandler} — иначе конфликт
+     * с {@code WidgetMethodHandler} в WorkbenchContext).
+     */
+    static void installAnnotationHoverCopyFilter(Display display)
+    {
+        if (display == null || display.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(display.getData(HOVER_COPY_FILTER_KEY)))
+            return;
+        display.setData(HOVER_COPY_FILTER_KEY, Boolean.TRUE);
+
+        display.addFilter(SWT.MouseUp, e -> rememberHoverSelectionFromEvent(e));
+        display.addFilter(SWT.MouseDown, e -> rememberHoverSelectionFromEvent(e));
+
+        display.addFilter(SWT.KeyDown, e ->
+        {
+            if (display.isDisposed() || !isCopyKey(e))
+                return;
+            if (copyHoverSelectionIfAny(display))
+                e.doit = false;
+        });
+    }
+
+    private static void rememberHoverSelectionFromEvent(org.eclipse.swt.widgets.Event e)
+    {
+        if (!(e.widget instanceof StyledText st) || st.isDisposed())
+            return;
+        Shell shell = st.getShell();
+        if (!isAnnotationHoverShell(shell))
+            return;
+        String sel = st.getSelectionText();
+        if (sel == null || sel.isEmpty())
+            return;
+        hoverSelectionText = sel;
+        hoverSelectionShell = shell;
+        if (shell.getData(HOVER_COPY_FILTER_KEY) == null)
+        {
+            shell.setData(HOVER_COPY_FILTER_KEY, Boolean.TRUE);
+            shell.addDisposeListener(ev ->
+            {
+                if (hoverSelectionShell == shell)
+                {
+                    hoverSelectionShell = null;
+                    hoverSelectionText = null;
+                }
+            });
+        }
+    }
+
+    private static boolean copyHoverSelectionIfAny(Display display)
+    {
+        String sel = resolveHoverTextToCopy(display);
+        if (sel == null || sel.isEmpty())
+            return false;
+        copyTextToClipboard(display, sel);
+        return true;
+    }
+
+    private static boolean isCopyKey(org.eclipse.swt.widgets.Event e)
+    {
+        if ((e.stateMask & (SWT.CTRL | SWT.MOD1)) == 0)
+            return false;
+        // Ctrl+Insert — copy; Ctrl+Shift+Insert — не трогаем
+        if (e.keyCode == SWT.INSERT)
+            return (e.stateMask & SWT.SHIFT) == 0;
+        if ((e.stateMask & SWT.SHIFT) != 0)
+            return false;
+        int ch = e.character;
+        int code = e.keyCode;
+        return code == 'c' || code == 'C' || code == 0x43 || code == 0x63
+            || ch == 3 || ch == 'c' || ch == 'C'
+            || ch == 'с' || ch == 'С'; // русская раскладка, физическая клавиша C
+    }
+
+    private static String resolveHoverTextToCopy(Display display)
+    {
+        StyledText live = findAnnotationHoverStyledTextWithSelection(display);
+        if (live != null)
+        {
+            String sel = live.getSelectionText();
+            if (sel != null && !sel.isEmpty())
+                return sel;
+        }
+        String cached = hoverSelectionText;
+        Shell shell = hoverSelectionShell;
+        if (cached == null || cached.isEmpty())
+            return null;
+        if (shell == null || shell.isDisposed() || !shell.isVisible())
+            return null;
+        return cached;
+    }
+
+    private static void copyTextToClipboard(Display display, String text)
+    {
+        Clipboard cb = new Clipboard(display);
+        try
+        {
+            cb.setContents(new Object[] { text }, new Transfer[] { TextTransfer.getInstance() });
+        }
+        finally
+        {
+            cb.dispose();
+        }
+    }
+
+    private static boolean isAnnotationHoverShell(Shell shell)
+    {
+        if (shell == null || shell.isDisposed() || !shell.isVisible())
+            return false;
+        if (workbenchShells().contains(shell))
+            return false;
+        boolean hasLink = false;
+        boolean hasStyledText = false;
+        for (Control c : flattenControls(shell))
+        {
+            if (c instanceof Link)
+                hasLink = true;
+            if (c instanceof StyledText)
+                hasStyledText = true;
+        }
+        // annotation quick-fix: заголовок StyledText + ссылки предложений
+        if (hasLink && hasStyledText)
+            return true;
+        // до появления ссылок / без proposals — TOOL/ON_TOP shell с StyledText
+        int style = shell.getStyle();
+        return hasStyledText && ((style & SWT.ON_TOP) != 0 || (style & SWT.TOOL) != 0);
+    }
+
+    private static StyledText findAnnotationHoverStyledTextWithSelection(Display display)
+    {
+        StyledText fallback = null;
+        for (Shell shell : display.getShells())
+        {
+            if (!isAnnotationHoverShell(shell))
+                continue;
+            for (Control c : flattenControls(shell))
+            {
+                if (!(c instanceof StyledText st) || st.isDisposed())
+                    continue;
+                if (st.getSelectionCount() <= 0)
+                    continue;
+                if (hasLinkChild(shell))
+                    return st;
+                if (fallback == null)
+                    fallback = st;
+            }
+        }
+        return fallback;
+    }
+
+    private static boolean hasLinkChild(Shell shell)
+    {
+        for (Control c : flattenControls(shell))
+        {
+            if (c instanceof Link)
+                return true;
+        }
+        return false;
+    }
+
+    private static Set<Shell> workbenchShells()
+    {
+        Set<Shell> shells = new HashSet<>();
+        try
+        {
+            if (!PlatformUI.isWorkbenchRunning())
+                return shells;
+            for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
+            {
+                if (window == null)
+                    continue;
+                Shell shell = window.getShell();
+                if (shell != null && !shell.isDisposed())
+                    shells.add(shell);
+            }
+        }
+        catch (Exception ignored)
+        {
+            // ignore
+        }
+        return shells;
+    }
+
+    private static List<Control> flattenControls(Control root)
+    {
+        List<Control> result = new ArrayList<>();
+        collectControls(root, result);
+        return result;
+    }
+
+    private static void collectControls(Control control, List<Control> out)
+    {
+        if (control == null || control.isDisposed())
+            return;
+        out.add(control);
+        if (control instanceof Composite composite)
+        {
+            for (Control child : composite.getChildren())
+                collectControls(child, out);
+        }
     }
 
     private static void registerComfortPlatformDictionary()
@@ -521,6 +766,250 @@ public final class SpellCheckHook implements IStartup
         return "ru_ru".equalsIgnoreCase(normalized); //$NON-NLS-1$
     }
 
+    /**
+     * Единый интерактивный hover орфографии: UI как у Xtext
+     * {@code AnnotationWithQuickFixesHover}, варианты — из {@link SpellingProblem}
+     * и {@link ComfortSpellingEngine#suggest}.
+     *
+     * @return {@code true}, если hover установлен
+     */
+    static boolean installSpellingQuickFixHover(SourceViewer viewer,
+        SourceViewerConfiguration configuration)
+    {
+        if (viewer == null)
+            return false;
+        try
+        {
+            ComfortSpellingQuickFixHover textHover = new ComfortSpellingQuickFixHover(viewer);
+            if (configuration != null)
+            {
+                String[] types = configuration.getConfiguredContentTypes(viewer);
+                if (types != null)
+                {
+                    for (String type : types)
+                    {
+                        if (type != null)
+                            viewer.setTextHover(textHover, type);
+                    }
+                }
+            }
+            @SuppressWarnings("unchecked")
+            Map<Object, ITextHover> hovers =
+                (Map<Object, ITextHover>) Global.getField(viewer, "fTextHovers"); //$NON-NLS-1$
+            if (hovers != null)
+            {
+                for (Map.Entry<Object, ITextHover> entry : hovers.entrySet())
+                    entry.setValue(textHover);
+            }
+            // Сбросить кэш текущего hover в менеджере — иначе остаётся DefaultTextHover.
+            Object manager = Global.getField(viewer, "fTextHoverManager"); //$NON-NLS-1$
+            if (manager != null)
+                Global.setField(manager, "fTextHover", null); //$NON-NLS-1$
+            return true;
+        }
+        catch (Exception e)
+        {
+            Global.tempLog("spellCheck", "installSpellingQuickFixHover: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        }
+    }
+
+    /** Как в {@link BslModuleSpellCheckHook.ModuleProblem#getMessage()}. */
+    static String spellingErrorMessage(String word)
+    {
+        return "Орфографическая ошибка: " + (word != null ? word : ""); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * Hover орфографии: тот же {@code AnnotationInformationControl}, что в модуле BSL,
+     * но proposals собираем сами (без XtextQuickAssistProcessor).
+     */
+    private static final class ComfortSpellingQuickFixHover
+        implements ITextHover, ITextHoverExtension, ITextHoverExtension2
+    {
+        private final ISourceViewer viewer;
+        private final IInformationControlCreator controlCreator;
+
+        ComfortSpellingQuickFixHover(ISourceViewer viewer) throws Exception
+        {
+            this.viewer = viewer;
+            Class<?> hoverClass = Class.forName(
+                "org.eclipse.xtext.ui.editor.hover.AnnotationWithQuickFixesHover"); //$NON-NLS-1$
+            Object xtextHover = hoverClass.getConstructor().newInstance();
+            this.controlCreator = (IInformationControlCreator) hoverClass
+                .getMethod("getHoverControlCreator").invoke(xtextHover); //$NON-NLS-1$
+            Display display = Display.getCurrent();
+            if (display == null)
+                display = Display.getDefault();
+            installAnnotationHoverCopyFilter(display);
+        }
+
+        @Override
+        public IRegion getHoverRegion(ITextViewer textViewer, int offset)
+        {
+            SpellingHit hit = findSpelling(textViewer, offset);
+            if (hit != null)
+                return new Region(hit.position.getOffset(), hit.position.getLength());
+            return new Region(offset, 0);
+        }
+
+        @Override
+        public String getHoverInfo(ITextViewer textViewer, IRegion hoverRegion)
+        {
+            Object info = getHoverInfo2(textViewer, hoverRegion);
+            return info != null ? String.valueOf(info) : null;
+        }
+
+        @Override
+        public Object getHoverInfo2(ITextViewer textViewer, IRegion hoverRegion)
+        {
+            if (hoverRegion == null)
+                return null;
+            SpellingHit hit = findSpelling(textViewer, hoverRegion.getOffset());
+            if (hit == null)
+                return null;
+            SpellingProblem problem = hit.annotation.getSpellingProblem();
+            String word = readWord(textViewer, hit.position);
+            ICompletionProposal[] proposals = collectProposals(word, hit.position);
+            try
+            {
+                // Русификация заголовка: AnnotationInformationControl берёт annotation.getText().
+                Annotation displayAnnotation = new Annotation(hit.annotation.getType(), false,
+                    spellingErrorMessage(word));
+                Class<?> infoClass = Class.forName(
+                    "org.eclipse.xtext.ui.editor.hover.AnnotationWithQuickFixesHover$AnnotationInfo"); //$NON-NLS-1$
+                Constructor<?> ctor = infoClass.getConstructor(Annotation.class, Position.class,
+                    ITextViewer.class, ICompletionProposal[].class);
+                return ctor.newInstance(displayAnnotation, hit.position, textViewer, proposals);
+            }
+            catch (Exception e)
+            {
+                Global.tempLog("spellCheck", "quickFixHover AnnotationInfo: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+                return spellingErrorMessage(word);
+            }
+        }
+
+        @Override
+        public IInformationControlCreator getHoverControlCreator()
+        {
+            return controlCreator;
+        }
+
+        private static ICompletionProposal[] collectProposals(String word, Position position)
+        {
+            List<ICompletionProposal> result = new ArrayList<>();
+            if (word == null || word.isEmpty() || position == null)
+                return new ICompletionProposal[0];
+            // Свои варианты — штатный getProposals часто даёт только Add/Ignore без исправлений
+            // или пустой список после sort, а в hover нужен тот же UX, что в модуле.
+            result.add(new AddToDictionaryHoverProposal(word));
+            List<String> sug = ComfortSpellingEngine.suggest(word, 20);
+            for (String s : sug)
+                result.add(new CompletionProposal(s, position.getOffset(), position.getLength(),
+                    s.length(), null, s, null, null));
+            return result.toArray(new ICompletionProposal[0]);
+        }
+
+        private SpellingHit findSpelling(ITextViewer textViewer, int offset)
+        {
+            ISourceViewer sv = viewer;
+            if (textViewer instanceof ISourceViewer sourceViewer)
+                sv = sourceViewer;
+            if (sv == null)
+                return null;
+            IAnnotationModel model = sv.getAnnotationModel();
+            if (model == null)
+                return null;
+            Iterator<?> it = model.getAnnotationIterator();
+            while (it.hasNext())
+            {
+                Object next = it.next();
+                if (!(next instanceof SpellingAnnotation ann))
+                    continue;
+                Position pos = model.getPosition(ann);
+                if (pos != null && offset >= pos.getOffset()
+                    && offset < pos.getOffset() + Math.max(pos.getLength(), 1))
+                    return new SpellingHit(ann, pos);
+            }
+            return null;
+        }
+
+        private static String readWord(ITextViewer textViewer, Position position)
+        {
+            if (textViewer == null || position == null)
+                return ""; //$NON-NLS-1$
+            try
+            {
+                IDocument doc = textViewer.getDocument();
+                if (doc == null)
+                    return ""; //$NON-NLS-1$
+                return doc.get(position.getOffset(), position.getLength());
+            }
+            catch (Exception e)
+            {
+                return ""; //$NON-NLS-1$
+            }
+        }
+    }
+
+    private static final class SpellingHit
+    {
+        final SpellingAnnotation annotation;
+        final Position position;
+
+        SpellingHit(SpellingAnnotation annotation, Position position)
+        {
+            this.annotation = annotation;
+            this.position = position;
+        }
+    }
+
+    private static final class AddToDictionaryHoverProposal implements ICompletionProposal
+    {
+        private final String word;
+
+        AddToDictionaryHoverProposal(String word)
+        {
+            this.word = word;
+        }
+
+        @Override
+        public void apply(IDocument document)
+        {
+            ComfortSpellingEngine.addUserWordFromUi(word);
+        }
+
+        @Override
+        public org.eclipse.swt.graphics.Point getSelection(IDocument document)
+        {
+            return null;
+        }
+
+        @Override
+        public String getAdditionalProposalInfo()
+        {
+            return null;
+        }
+
+        @Override
+        public String getDisplayString()
+        {
+            return "Добавить в словарь: " + word; //$NON-NLS-1$
+        }
+
+        @Override
+        public org.eclipse.swt.graphics.Image getImage()
+        {
+            return null;
+        }
+
+        @Override
+        public org.eclipse.jface.text.contentassist.IContextInformation getContextInformation()
+        {
+            return null;
+        }
+    }
+
     private static final class HunspellSpellDictionary implements ISpellDictionary
     {
         private final List<HunspellDictionary> dicts;
@@ -540,7 +1029,11 @@ public final class SpellCheckHook implements IStartup
         @Override
         public Set<RankedWordProposal> getProposals(String word, boolean sentence)
         {
+            long t0 = System.currentTimeMillis();
             List<String> suggestions = ComfortSpellingEngine.suggest(word, 20);
+            Global.tempLog("spellCheck", "dict.getProposals word=[" + word + "] sentence=" //$NON-NLS-1$ //$NON-NLS-2$
+                + sentence + " size=" + suggestions.size() + " ms=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (System.currentTimeMillis() - t0) + " " + suggestions); //$NON-NLS-1$
             if (suggestions.isEmpty())
                 return Collections.emptySet();
             Set<RankedWordProposal> result = new HashSet<>();
@@ -562,7 +1055,7 @@ public final class SpellCheckHook implements IStartup
         @Override
         public void addWord(String word)
         {
-            ComfortSpellingEngine.addUserWord(word);
+            ComfortSpellingEngine.addUserWordFromUi(word);
         }
 
         @Override
