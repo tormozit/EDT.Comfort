@@ -48,36 +48,24 @@ public final class BslServerCallHighlightingConfiguration
     private TextStyle serverCallTextStyle()
     {
         TextStyle textStyle = new TextStyle();
-        textStyle.setColor(parseColor(ComfortSettings.getServerCallHighlightingColor()));
+        textStyle.setColor(effectiveServerCallColor(ComfortSettings.getServerCallHighlightingColor(),
+            ComfortSettings.DEFAULT_SERVER_CALL_HIGHLIGHTING_COLOR));
         return textStyle;
     }
 
     private TextStyle serverCallContextTextStyle()
     {
         TextStyle textStyle = new TextStyle();
-        textStyle.setColor(parseColor(ComfortSettings.getServerCallContextHighlightingColor()));
+        textStyle.setColor(effectiveServerCallColor(ComfortSettings.getServerCallContextHighlightingColor(),
+            ComfortSettings.DEFAULT_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR));
         return textStyle;
     }
 
-    private static RGB parseColor(String value)
+    /** Store держит RGB светлой темы; в UI редактора — эффективный цвет текущей темы. */
+    private static RGB effectiveServerCallColor(String stored, String fallback)
     {
-        if (value == null || value.isEmpty())
-            value = ComfortSettings.DEFAULT_SERVER_CALL_HIGHLIGHTING_COLOR;
-        try
-        {
-            String[] parts = value.split(","); //$NON-NLS-1$
-            return new RGB(
-                Integer.parseInt(parts[0].trim()),
-                Integer.parseInt(parts[1].trim()),
-                Integer.parseInt(parts[2].trim()));
-        }
-        catch (Exception e)
-        {
-            // Настоящий "аварийный" фолбэк — сюда попадаем только если даже
-            // ComfortSettings.DEFAULT_SERVER_CALL_HIGHLIGHTING_COLOR не парсится.
-            // Цвет по умолчанию задаётся только в ComfortSettings — не дублировать здесь.
-            return new RGB(0, 0, 0);
-        }
+        RGB light = ComfortSettings.parseRgb(stored, fallback);
+        return SmartMatchHighlight.toEffectiveRgb(light);
     }
 
     private static IHighlightingConfiguration createNativeDelegate()

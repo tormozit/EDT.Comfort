@@ -28,6 +28,9 @@ public class ComfortInitializer extends AbstractPreferenceInitializer
             ComfortSettings.PREF_REPLACE_LIST_FILTERS,
             ComfortSettings.DEFAULT_REPLACE_LIST_FILTERS);
         store.setDefault(
+            ComfortSettings.PREF_FILTER_MATCH_COLOR,
+            ComfortSettings.DEFAULT_FILTER_MATCH_COLOR);
+        store.setDefault(
             ComfortSettings.PREF_DEBUG_LOG,
             ComfortSettings.DEFAULT_DEBUG_LOG);
         store.setDefault(
@@ -51,5 +54,8 @@ public class ComfortInitializer extends AbstractPreferenceInitializer
         store.setDefault(
             ComfortSettings.PREF_COMPARE_CURRENT_LINES_VISIBLE,
             ComfortSettings.DEFAULT_COMPARE_CURRENT_LINES_VISIBLE);
+        store.setDefault(
+            ComfortSettings.PREF_SPELLING_DICT_BASE_PATHS,
+            ComfortSettings.DEFAULT_SPELLING_DICT_BASE_PATHS);
     }
 }

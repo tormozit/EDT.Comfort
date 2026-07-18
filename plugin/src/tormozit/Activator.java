@@ -55,6 +55,9 @@ public class Activator extends AbstractUIPlugin
             ComfortSettings.PREF_REPLACE_LIST_FILTERS,
             ComfortSettings.DEFAULT_REPLACE_LIST_FILTERS);
         settings.getPreferenceStore().setDefault(
+            ComfortSettings.PREF_FILTER_MATCH_COLOR,
+            ComfortSettings.DEFAULT_FILTER_MATCH_COLOR);
+        settings.getPreferenceStore().setDefault(
             ComfortSettings.PREF_DEBUG_LOG,
             ComfortSettings.DEFAULT_DEBUG_LOG);
         settings.getPreferenceStore().setDefault(
@@ -77,6 +80,10 @@ public class Activator extends AbstractUIPlugin
             ComfortSettings.DEFAULT_BRACKET_CONTENT_HINT_MIN_LINES);
         ContentAssistManager.init(settings);
         ComfortSettings.init(PLUGIN_ID);
+        settings.getPreferenceStore().addPropertyChangeListener(event -> {
+            if (ComfortSettings.PREF_FILTER_MATCH_COLOR.equals(event.getProperty()))
+                SmartMatchHighlight.clearColorCache();
+        });
         getPreferenceStore().setDefault(
             ComfortSettings.PREF_DEBUG_INSPECTOR_AUTO_CLOSE,
             ComfortSettings.DEFAULT_DEBUG_INSPECTOR_AUTO_CLOSE);

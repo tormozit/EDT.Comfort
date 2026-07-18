@@ -2,6 +2,7 @@ package tormozit;
 
 import org.eclipse.core.runtime.preferences.InstanceScope;
 import org.eclipse.jface.preference.IPreferenceStore;
+import org.eclipse.swt.graphics.RGB;
 import org.eclipse.ui.preferences.ScopedPreferenceStore;
 
 /**
@@ -41,6 +42,15 @@ public final class ComfortSettings
     /** Значение «Заменять фильтры в списках» по умолчанию. */
     public static final boolean DEFAULT_REPLACE_LIST_FILTERS = true;
 
+    /**
+     * Ключ: цвет подсветки вхождений smart-фильтра (хранятся RGB светлой темы, строка "R,G,B").
+     * В тёмной теме при отображении пересчитывается формулой {@link SmartMatchHighlight}.
+     */
+    public static final String PREF_FILTER_MATCH_COLOR = "comfort.filterMatch.color"; //$NON-NLS-1$
+
+    /** Цвет фильтра по умолчанию — RGB(150,0,0) в координатах светлой темы. */
+    public static final String DEFAULT_FILTER_MATCH_COLOR = "150,0,0"; //$NON-NLS-1$
+
     /** Общее логирование выключено по умолчанию. */
     public static final boolean DEFAULT_DEBUG_LOG = false;
 
@@ -79,10 +89,16 @@ public final class ComfortSettings
     /** Ключ: включена ли подсветка серверных вызовов в редакторе BSL. */
     public static final String PREF_SERVER_CALL_HIGHLIGHTING_ENABLED = "comfort.serverCallHighlighting.enabled"; //$NON-NLS-1$
 
-    /** Ключ: цвет подсветки серверных вызовов (строковое представление RGB). */
+    /**
+     * Ключ: цвет подсветки серверных вызовов (RGB светлой темы, строка "R,G,B").
+     * В тёмной теме при отображении — {@link SmartMatchHighlight#toEffectiveRgb}.
+     */
     public static final String PREF_SERVER_CALL_HIGHLIGHTING_COLOR = "comfort.serverCallHighlighting.color"; //$NON-NLS-1$
 
-    /** Ключ: цвет подсветки серверных вызовов "с контекстом" (&НаСервере), строка RGB. */
+    /**
+     * Ключ: цвет серверных вызовов "с контекстом" (&НаСервере); хранение/пересчёт как у
+     * {@link #PREF_SERVER_CALL_HIGHLIGHTING_COLOR}.
+     */
     public static final String PREF_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR =
         "comfort.serverCallHighlighting.contextColor"; //$NON-NLS-1$
 
@@ -128,6 +144,19 @@ public final class ComfortSettings
     /** Панель «Текущая строка» показывается по умолчанию. */
     public static final boolean DEFAULT_COMPARE_CURRENT_LINES_VISIBLE = true;
 
+    // ---- Spell checking ----
+
+    /**
+     * Ключ: пути к словарям Hunspell/MySpell для {@link ComfortSpellingEngine}
+     * (без расширения, каждый путь даёт пару {@code .aff}/{@code .dic}), через {@code ;}.
+     */
+    public static final String PREF_SPELLING_DICT_BASE_PATHS = "comfort.spelling.dictBasePaths"; //$NON-NLS-1$
+
+    /** Пути к словарям по умолчанию. */
+    public static final String DEFAULT_SPELLING_DICT_BASE_PATHS =
+        "C:\\Portable\\TurboConf\\SpellCheck\\russian-aot-ieyo;" //$NON-NLS-1$
+            + "C:\\Portable\\TurboConf\\SpellCheck\\en_US"; //$NON-NLS-1$
+
     private static ComfortSettings instance;
 
     private final ScopedPreferenceStore preferenceStore;
@@ -161,6 +190,62 @@ public final class ComfortSettings
         if (settings == null)
             return DEFAULT_REPLACE_LIST_FILTERS;
         return settings.preferenceStore.getBoolean(PREF_REPLACE_LIST_FILTERS);
+    }
+
+    /**
+     * Цвет подсветки фильтра в координатах светлой темы (как в store).
+     * Для показа пользователю в текущей теме — {@link SmartMatchHighlight#toEffectiveRgb(RGB)}.
+     */
+    public static RGB getFilterMatchLightRgb()
+    {
+        return parseRgb(getFilterMatchColorString(), DEFAULT_FILTER_MATCH_COLOR);
+    }
+
+    /** Цвет фильтра из store (строка "R,G,B"), светлая тема. */
+    public static String getFilterMatchColorString()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_FILTER_MATCH_COLOR;
+        String value = settings.preferenceStore.getString(PREF_FILTER_MATCH_COLOR);
+        if (value == null || value.isBlank())
+            return DEFAULT_FILTER_MATCH_COLOR;
+        return value;
+    }
+
+    static RGB parseRgb(String value, String fallback)
+    {
+        String raw = value;
+        if (raw == null || raw.isBlank())
+            raw = fallback;
+        try
+        {
+            String[] parts = raw.split(","); //$NON-NLS-1$
+            return new RGB(
+                clampByte(Integer.parseInt(parts[0].trim())),
+                clampByte(Integer.parseInt(parts[1].trim())),
+                clampByte(Integer.parseInt(parts[2].trim())));
+        }
+        catch (Exception e)
+        {
+            try
+            {
+                String[] parts = fallback.split(","); //$NON-NLS-1$
+                return new RGB(
+                    Integer.parseInt(parts[0].trim()),
+                    Integer.parseInt(parts[1].trim()),
+                    Integer.parseInt(parts[2].trim()));
+            }
+            catch (Exception ignored)
+            {
+                return new RGB(150, 0, 0);
+            }
+        }
+    }
+
+    private static int clampByte(int value)
+    {
+        return Math.max(0, Math.min(255, value));
     }
 
     /** Автопатч инспектора и префикс длинных строк в штатных деревьях (не команды меню). */
@@ -465,6 +550,18 @@ public final class ComfortSettings
         if (settings == null)
             return DEFAULT_BRACKET_CONTENT_HINT_ENABLED;
         return settings.preferenceStore.getBoolean(PREF_BRACKET_CONTENT_HINT_ENABLED);
+    }
+
+    // ---- Spell checking accessors ----
+
+    /** Пути к словарям Hunspell/MySpell (без расширения), заданные в настройках. */
+    public static String[] getSpellingDictionaryBasePaths()
+    {
+        ComfortSettings settings = instance;
+        String value = settings == null
+            ? DEFAULT_SPELLING_DICT_BASE_PATHS
+            : settings.preferenceStore.getString(PREF_SPELLING_DICT_BASE_PATHS);
+        return value.split(";"); //$NON-NLS-1$
     }
 
     /** Минимальное число видимых строк между конструкциями для показа подсказки. */

@@ -61,6 +61,16 @@
     <startup class="tormozit.BracketContentHintHook"/>
     <startup class="tormozit.GotoDefinitionFieldMenuHook"/>
     <startup class="tormozit.TypeComboOverlayHook"/>
+    <startup class="tormozit.SpellCheckHook"/>
+  </extension>
+
+  <extension point="org.eclipse.ui.workbench.texteditor.spellingEngine">
+    <engine
+        class="tormozit.ComfortSpellingEngine"
+        label="Комфорт (Hunspell RU/EN)"
+        id="tormozit.comfortSpellingEngine"
+        default="true">
+    </engine>
   </extension>
 
   <extension point="org.eclipse.ui.contexts">

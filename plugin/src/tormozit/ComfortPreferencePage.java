@@ -6,11 +6,14 @@ import org.eclipse.jface.preference.ColorFieldEditor;
 import org.eclipse.jface.preference.FieldEditor;
 import org.eclipse.jface.preference.FieldEditorPreferencePage;
 import org.eclipse.jface.preference.IPreferencePageContainer;
+import org.eclipse.jface.preference.IPreferenceStore;
 import org.eclipse.jface.preference.IntegerFieldEditor;
+import org.eclipse.jface.preference.PreferenceConverter;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.ControlAdapter;
 import org.eclipse.swt.events.ControlEvent;
 import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.layout.RowLayout;
@@ -56,6 +59,23 @@ public class ComfortPreferencePage
             + "\n"
             + "Изменение настройки применяется сразу для большинства механизмов; доработка поля «Тип» применяется только при следующем старте EDT."; //$NON-NLS-1$
 
+    private static final String THEME_AWARE_COLOR_TOOLTIP =
+            "В настройках показывается эффективный цвет текущей темы (то, что видно в UI).\n"
+            + "В хранилище всегда сохраняется нормализованный цвет светлой темы;\n"
+            + "для тёмной темы он пересчитывается автоматически."; //$NON-NLS-1$
+
+    private static final String FILTER_MATCH_COLOR_TOOLTIP =
+            "Цвет подсветки найденных фрагментов в списках с улучшенным фильтром.\n"
+            + THEME_AWARE_COLOR_TOOLTIP;
+
+    private static final String SERVER_CALL_COLOR_TOOLTIP =
+            "Цвет подсветки серверных вызовов в клиентском коде.\n"
+            + THEME_AWARE_COLOR_TOOLTIP;
+
+    private static final String SERVER_CALL_CONTEXT_COLOR_TOOLTIP =
+            "Цвет подсветки серверных вызовов с контекстом (&НаСервере).\n"
+            + THEME_AWARE_COLOR_TOOLTIP;
+
     public ComfortPreferencePage()
     {
         super(GRID);
@@ -84,6 +104,7 @@ public class ComfortPreferencePage
         createKeysLink();
 
         createReplaceListFiltersField();
+        createFilterMatchColorField();
 
         BooleanFieldEditor improveDebuggerField = new BooleanFieldEditor(
             ComfortSettings.PREF_IMPROVE_DEBUGGER_WINDOWS,
@@ -135,15 +156,19 @@ public class ComfortPreferencePage
             "Подсвечивать серверные вызовы в клиентском коде другим цветом.\n"
             + "При выключении серверные вызовы подсвечиваются стандартным стилем builtin-функций EDT."); //$NON-NLS-1$
 
-        addField(new ColorFieldEditor(
+        ThemeAwareColorFieldEditor serverCallColorField = new ThemeAwareColorFieldEditor(
             ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_COLOR,
             "Цвет серверных вызовов:", //$NON-NLS-1$
-            codeEditorGroup));
+            codeEditorGroup);
+        addField(serverCallColorField);
+        setFieldTooltip(serverCallColorField, SERVER_CALL_COLOR_TOOLTIP);
 
-        addField(new ColorFieldEditor(
+        ThemeAwareColorFieldEditor serverCallContextColorField = new ThemeAwareColorFieldEditor(
             ComfortSettings.PREF_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR,
             "Цвет серверных вызовов с контекстом:", //$NON-NLS-1$
-            codeEditorGroup));
+            codeEditorGroup);
+        addField(serverCallContextColorField);
+        setFieldTooltip(serverCallContextColorField, SERVER_CALL_CONTEXT_COLOR_TOOLTIP);
 
         BooleanFieldEditor bracketHintField = new BooleanFieldEditor(
             ComfortSettings.PREF_BRACKET_CONTENT_HINT_ENABLED,
@@ -216,6 +241,67 @@ public class ComfortPreferencePage
                 return;
             ComfortPreferences.openChangesUrl(REPLACE_LIST_FILTERS_DOC_URL);
         });
+    }
+
+    /** «Цвет фильтра» сразу под строкой «Улучшать списки». */
+    private void createFilterMatchColorField()
+    {
+        ThemeAwareColorFieldEditor colorField = new ThemeAwareColorFieldEditor(
+            ComfortSettings.PREF_FILTER_MATCH_COLOR,
+            "Цвет фильтра:", //$NON-NLS-1$
+            getFieldEditorParent());
+        addField(colorField);
+        setFieldTooltip(colorField, FILTER_MATCH_COLOR_TOOLTIP);
+    }
+
+    /**
+     * Color picker: в UI — эффективный цвет текущей темы; в store — RGB светлой темы.
+     */
+    private static final class ThemeAwareColorFieldEditor extends ColorFieldEditor
+    {
+        ThemeAwareColorFieldEditor(String name, String labelText, Composite parent)
+        {
+            super(name, labelText, parent);
+        }
+
+        @Override
+        protected void doLoad()
+        {
+            if (getColorSelector() == null)
+                return;
+            IPreferenceStore store = getPreferenceStore();
+            if (store == null)
+                return;
+            RGB light = PreferenceConverter.getColor(store, getPreferenceName());
+            getColorSelector().setColorValue(SmartMatchHighlight.toEffectiveRgb(light));
+        }
+
+        @Override
+        protected void doLoadDefault()
+        {
+            if (getColorSelector() == null)
+                return;
+            IPreferenceStore store = getPreferenceStore();
+            if (store == null)
+                return;
+            RGB light = PreferenceConverter.getDefaultColor(store, getPreferenceName());
+            getColorSelector().setColorValue(SmartMatchHighlight.toEffectiveRgb(light));
+        }
+
+        @Override
+        protected void doStore()
+        {
+            if (getColorSelector() == null)
+                return;
+            IPreferenceStore store = getPreferenceStore();
+            if (store == null)
+                return;
+            RGB displayed = getColorSelector().getColorValue();
+            RGB light = SmartMatchHighlight.toStoredLightRgb(displayed);
+            PreferenceConverter.setValue(store, getPreferenceName(), light);
+            if (ComfortSettings.PREF_FILTER_MATCH_COLOR.equals(getPreferenceName()))
+                SmartMatchHighlight.clearColorCache();
+        }
     }
 
     private static final String IMPROVE_DEBUGGER_WINDOWS_TOOLTIP =
@@ -613,6 +699,7 @@ public class ComfortPreferencePage
         boolean result = super.performOk();
         if (result)
         {
+            SmartMatchHighlight.clearColorCache();
             BslServerCallHighlightingHook.refreshAllEditors();
             BracketContentHintHook.refreshAllEditors();
         }

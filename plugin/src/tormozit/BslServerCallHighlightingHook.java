@@ -14,6 +14,7 @@ import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.jface.text.TextAttribute;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.FontData;
+import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
@@ -344,9 +345,11 @@ public final class BslServerCallHighlightingHook implements IStartup
             HashMap<String, TextAttribute> attributes = (HashMap<String, TextAttribute>)mapObj;
 
             putServerCallStyle(attributes, BslServerCallHighlightingConfiguration.SERVER_CALL_ID,
-                ComfortSettings.getServerCallHighlightingColor());
+                ComfortSettings.getServerCallHighlightingColor(),
+                ComfortSettings.DEFAULT_SERVER_CALL_HIGHLIGHTING_COLOR);
             putServerCallStyle(attributes, BslServerCallHighlightingConfiguration.SERVER_CALL_CONTEXT_ID,
-                ComfortSettings.getServerCallContextHighlightingColor());
+                ComfortSettings.getServerCallContextHighlightingColor(),
+                ComfortSettings.DEFAULT_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR);
 
             Global.log(TAG, "registerStyle: OK"); //$NON-NLS-1$
         }
@@ -356,9 +359,10 @@ public final class BslServerCallHighlightingHook implements IStartup
         }
     }
 
-    private static void putServerCallStyle(HashMap<String, TextAttribute> attributes, String id, String colorStr)
+    private static void putServerCallStyle(HashMap<String, TextAttribute> attributes, String id, String colorStr,
+            String fallback)
     {
-        TextAttribute attr = createServerCallTextAttribute(colorStr);
+        TextAttribute attr = createServerCallTextAttribute(colorStr, fallback);
         if (attr == null)
         {
             Global.log(TAG, "putServerCallStyle: failed to create TextAttribute for " + id); //$NON-NLS-1$
@@ -386,12 +390,13 @@ public final class BslServerCallHighlightingHook implements IStartup
 
     /** Стиль всегда {@code SWT.NONE} — только цвет, без модификации шрифта
      *  (жирный/курсив), чтобы текст оставался штатным. */
-    private static TextAttribute createServerCallTextAttribute(String colorStr)
+    private static TextAttribute createServerCallTextAttribute(String colorStr, String fallback)
     {
         try
         {
-            RGB rgb = parseColor(colorStr);
-            Color foreground = new Color(Display.getCurrent(), rgb.red, rgb.green, rgb.blue);
+            RGB light = ComfortSettings.parseRgb(colorStr, fallback);
+            RGB effective = SmartMatchHighlight.toEffectiveRgb(light);
+            Color foreground = new Color(Display.getCurrent(), effective);
             return new TextAttribute(foreground, null, org.eclipse.swt.SWT.NONE, null);
         }
         catch (Exception e)
@@ -399,33 +404,6 @@ public final class BslServerCallHighlightingHook implements IStartup
             Global.log(TAG, "createTextAttr failed: " + e.getMessage()); //$NON-NLS-1$
             return null;
         }
-    }
-
-    private static RGB parseColor(String value)
-    {
-        if (value == null || value.isEmpty())
-            value = ComfortSettings.DEFAULT_SERVER_CALL_HIGHLIGHTING_COLOR;
-        try
-        {
-            String[] parts = value.split(","); //$NON-NLS-1$
-            return new RGB(
-                Integer.parseInt(parts[0].trim()),
-                Integer.parseInt(parts[1].trim()),
-                Integer.parseInt(parts[2].trim()));
-        }
-        catch (Exception e)
-        {
-            // Настоящий "аварийный" фолбэк — сюда попадаем только если даже
-            // ComfortSettings.DEFAULT_SERVER_CALL_HIGHLIGHTING_COLOR не парсится.
-            // Цвет по умолчанию задаётся только в ComfortSettings — не дублировать здесь.
-            return new RGB(0, 0, 0);
-        }
-    }
-
-    private static class RGB
-    {
-        final int red, green, blue;
-        RGB(int r, int g, int b) { red = r; green = g; blue = b; }
     }
 
     private static Object findHighlightingReconciler(Object viewer)

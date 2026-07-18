@@ -34,20 +34,14 @@ import org.osgi.framework.Bundle;
  */
 public final class SmartMatchHighlight
 {
-    /** Светлая тема — насыщенный синий текст; тёмная — тот же оттенок, осветлённый в primeMatchColors */
-//    private static final int LIGHT_R = 0;
-//    private static final int LIGHT_G = 102;
-//    private static final int LIGHT_B = 204;
-    private static final int LIGHT_R = 150;
-    private static final int LIGHT_G = 0;
-    private static final int LIGHT_B = 0;
-
     /** Fallback-фон списка, если системные цвета SWT ещё «светлые» в тёмной EDT */
     private static final RGB DARK_LIST_FALLBACK = new RGB(51, 51, 51);
 
     private static Color cachedLightForeground;
     private static Color cachedMatchBackground;
     private static Color cachedMatchForeground;
+    /** Светлый RGB, из которого собраны кэшированные Color (для инвалидации при смене настройки). */
+    private static RGB cachedLightRgb;
     private static RGB cachedMatchBaseRgb;
     private static Font cachedBoldFont;
 
@@ -414,11 +408,66 @@ public final class SmartMatchHighlight
         return list.toArray(new StyleRange[0]);
     }
 
+    /**
+     * Эффективный цвет для текущей темы: светлая — как в store; тёмная — осветление
+     * {@code shift = 255 - max(R,G,B)}. Общий для фильтра и серверных вызовов.
+     */
+    public static RGB toEffectiveRgb(RGB lightStored)
+    {
+        if (lightStored == null)
+            return new RGB(0, 0, 0);
+        if (!isDarkTheme())
+            return lightStored;
+        return lightToDarkRgb(lightStored);
+    }
+
+    /**
+     * Нормализация к светлой теме для хранения: в светлой теме — как есть;
+     * в тёмной — обратная к {@link #toEffectiveRgb(RGB)} ({@code shift = min(R,G,B)}).
+     */
+    public static RGB toStoredLightRgb(RGB displayed)
+    {
+        if (displayed == null)
+            return new RGB(0, 0, 0);
+        if (!isDarkTheme())
+            return displayed;
+        return darkToLightRgb(displayed);
+    }
+
+    static RGB lightToDarkRgb(RGB light)
+    {
+        int shift = 255 - Math.max(light.red, Math.max(light.green, light.blue));
+        return new RGB(light.red + shift, light.green + shift, light.blue + shift);
+    }
+
+    static RGB darkToLightRgb(RGB dark)
+    {
+        int shift = Math.min(dark.red, Math.min(dark.green, dark.blue));
+        return new RGB(dark.red - shift, dark.green - shift, dark.blue - shift);
+    }
+
+    /** Сброс кэша цветов (смена настройки / темы). */
+    public static void clearColorCache()
+    {
+        disposeMatchColors();
+        if (cachedLightForeground != null && !cachedLightForeground.isDisposed())
+            cachedLightForeground.dispose();
+        cachedLightForeground = null;
+        cachedLightRgb = null;
+    }
+
     /** Package-private (не {@code private}) — переиспользуется вне resolveMatchStyle(), напр. TypeComboOverlayHook. */
     static Color lightForeground()
     {
-        if (cachedLightForeground == null || cachedLightForeground.isDisposed())
-            cachedLightForeground = new Color(currentDisplay(), LIGHT_R, LIGHT_G, LIGHT_B);
+        RGB light = ComfortSettings.getFilterMatchLightRgb();
+        if (cachedLightForeground == null || cachedLightForeground.isDisposed()
+            || cachedLightRgb == null || !cachedLightRgb.equals(light))
+        {
+            if (cachedLightForeground != null && !cachedLightForeground.isDisposed())
+                cachedLightForeground.dispose();
+            cachedLightForeground = new Color(currentDisplay(), light);
+            cachedLightRgb = light;
+        }
         return cachedLightForeground;
     }
 
@@ -456,7 +505,11 @@ public final class SmartMatchHighlight
 
     private static void primeMatchColors(Display display)
     {
-        if (cachedMatchForeground != null && !cachedMatchForeground.isDisposed())
+        RGB light = ComfortSettings.getFilterMatchLightRgb();
+        RGB expected = lightToDarkRgb(light);
+        if (cachedMatchForeground != null && !cachedMatchForeground.isDisposed()
+            && cachedLightRgb != null && cachedLightRgb.equals(light)
+            && expected.equals(cachedMatchForeground.getRGB()))
         {
             // #region agent log
             Global.tempLog("smart-match-fg", "primeMatchColors CACHE-HIT fg="
@@ -465,17 +518,12 @@ public final class SmartMatchHighlight
             return;
         }
         disposeMatchColors();
-        int shift = 255 - Math.max(LIGHT_R, Math.max(LIGHT_G, LIGHT_B));
-        int fr = LIGHT_R + shift;
-        int fgreen = LIGHT_G + shift;
-        int fb = LIGHT_B + shift;
-        cachedMatchForeground = new Color(display, fr, fgreen, fb);
+        cachedMatchForeground = new Color(display, expected);
+        cachedLightRgb = light;
         cachedMatchBaseRgb = DARK_LIST_FALLBACK;
         // #region agent log
-        Global.tempLog("smart-match-fg", "primeMatchColors RECREATE shift=" + shift
-            + " LIGHT=" + LIGHT_R + "," + LIGHT_G + "," + LIGHT_B
-            + " → cachedMatchForeground=" + fr + "," + fgreen + "," + fb
-            + " resultBg=null (no pill)");
+        Global.tempLog("smart-match-fg", "primeMatchColors RECREATE light=" + light
+            + " → cachedMatchForeground=" + expected + " resultBg=null (no pill)");
         // #endregion
     }
 
@@ -484,11 +532,12 @@ public final class SmartMatchHighlight
             boolean darkByRgb, boolean darkByTheme, Color resultFg, Color resultBg)
     {
         StringBuilder sb = new StringBuilder();
+        RGB light = ComfortSettings.getFilterMatchLightRgb();
         sb.append(where).append(" dark=").append(dark)
             .append(" darkByRgb=").append(darkByRgb)
             .append(" darkByTheme=").append(darkByTheme)
             .append(" baseRgb=").append(baseRgb)
-            .append(" LIGHT=").append(LIGHT_R).append(',').append(LIGHT_G).append(',').append(LIGHT_B)
+            .append(" LIGHT=").append(light.red).append(',').append(light.green).append(',').append(light.blue)
             .append(" resultFg=").append(rgbOf(resultFg))
             .append(" resultBg=").append(rgbOf(resultBg));
         sb.append(" | ").append(describeThemeProbe());
@@ -682,5 +731,6 @@ public final class SmartMatchHighlight
         cachedMatchBackground = null;
         cachedMatchForeground = null;
         cachedMatchBaseRgb = null;
+        // cachedLightRgb сбрасывает clearColorCache / lightForeground при смене pref
     }
 }
