@@ -406,8 +406,6 @@ public final class BslModuleSpellCheckHook implements IStartup
                         if (gen != scheduleGeneration)
                             return;
                         applyAnnotations(toApply);
-                        Global.tempLog("spellCheck", "BslModuleSpell: applied=" + toApply.size() //$NON-NLS-1$ //$NON-NLS-2$
-                            + " vis=[" + visOffset + "," + visLength + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     });
                     return Status.OK_STATUS;
                 }

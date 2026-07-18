@@ -57,7 +57,6 @@ import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.editors.text.EditorsUI;
 import org.eclipse.ui.texteditor.spelling.SpellingAnnotation;
-import org.eclipse.ui.texteditor.spelling.SpellingProblem;
 import org.eclipse.ui.texteditor.spelling.SpellingService;
 
 /**
@@ -868,7 +867,6 @@ public final class SpellCheckHook implements IStartup
             SpellingHit hit = findSpelling(textViewer, hoverRegion.getOffset());
             if (hit == null)
                 return null;
-            SpellingProblem problem = hit.annotation.getSpellingProblem();
             String word = readWord(textViewer, hit.position);
             ICompletionProposal[] proposals = collectProposals(word, hit.position);
             try
@@ -1029,11 +1027,7 @@ public final class SpellCheckHook implements IStartup
         @Override
         public Set<RankedWordProposal> getProposals(String word, boolean sentence)
         {
-            long t0 = System.currentTimeMillis();
             List<String> suggestions = ComfortSpellingEngine.suggest(word, 20);
-            Global.tempLog("spellCheck", "dict.getProposals word=[" + word + "] sentence=" //$NON-NLS-1$ //$NON-NLS-2$
-                + sentence + " size=" + suggestions.size() + " ms=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (System.currentTimeMillis() - t0) + " " + suggestions); //$NON-NLS-1$
             if (suggestions.isEmpty())
                 return Collections.emptySet();
             Set<RankedWordProposal> result = new HashSet<>();
