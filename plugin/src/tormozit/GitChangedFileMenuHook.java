@@ -82,6 +82,8 @@ public final class GitChangedFileMenuHook implements IStartup
 
     private static final String NAV_ITEM_TEXT = "Открыть в Навигаторе"; //$NON-NLS-1$
     private static final String OBJ_ITEM_TEXT = "Открыть объект";       //$NON-NLS-1$
+    /** Для файлов коммита (панель «История») — уточняем, что открывается рабочая версия, а не версия из коммита. */
+    private static final String OBJ_ITEM_TEXT_COMMIT = "Открыть рабочий объект"; //$NON-NLS-1$
     private static final String ADD_TO_SET_CMD = "tormozit.git.addToObjectSet"; //$NON-NLS-1$
     private static final String ADD_TO_SET_MARKER = "tormozit.gitAddToObjectSetItem"; //$NON-NLS-1$
 
@@ -738,8 +740,9 @@ public final class GitChangedFileMenuHook implements IStartup
                             addedItems.add(navItem);
 
                             MenuItem objItem = new MenuItem(submenu, SWT.PUSH);
+                            String objItemText = isHistoryView(view) ? OBJ_ITEM_TEXT_COMMIT : OBJ_ITEM_TEXT;
                             objItem.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
-                                OBJ_ITEM_TEXT, "tormozit.git.openObject", GIT_CONTEXT_ID));
+                                objItemText, "tormozit.git.openObject", GIT_CONTEXT_ID));
                             objItem.addSelectionListener(new SelectionAdapter()
                             {
                                 @Override
@@ -753,7 +756,8 @@ public final class GitChangedFileMenuHook implements IStartup
                             addIrHistoryItemIfNeeded(submenu, view, capturedFile, addedItems);
                         }
                     }
-                    else if (isHistoryView(view) && HistoryViewHandler.extractCommitSha(element) != null)
+                    else if (isHistoryView(view) && isCommitRowElement(element)
+                        && HistoryViewHandler.extractCommitSha(element) != null)
                     {
                         addCompareWithCommitItem(submenu, view, element, addedItems);
                     }
@@ -872,6 +876,20 @@ public final class GitChangedFileMenuHook implements IStartup
     // Навигаторе), но без диалога выбора коммита — коммит уже известен из
     // выбранной строки панели «История».
     // ========================================================================
+
+    /**
+     * Отличает строку коммита (верхняя таблица панели «История») от строки
+     * изменённого файла (нижний список файлов коммита) — у обеих
+     * {@link HistoryViewHandler#extractCommitSha} может успешно вернуть SHA
+     * (у файловой строки — через её собственный {@code getCommit()}), поэтому
+     * одного {@code extractCommitSha != null} недостаточно. Строка коммита сама
+     * является {@code AnyObjectId} ({@code getId()} есть), но не описывает путь
+     * файла ({@code getPath()} нет) — в отличие от {@code FileDiff}.
+     */
+    private static boolean isCommitRowElement(Object element)
+    {
+        return Global.call(element, "getPath") == null && Global.call(element, "getId") != null; //$NON-NLS-1$ //$NON-NLS-2$
+    }
 
     private static void addCompareWithCommitItem(Menu submenu, IViewPart view,
         Object commitElement, List<MenuItem> addedItems)
@@ -1201,10 +1219,27 @@ public final class GitChangedFileMenuHook implements IStartup
         return null;
     }
 
+    /**
+     * Резолвит {@link EObject}-владельца файла (форма, команда, макет и т.п.,
+     * а не только объект верхнего уровня). Полное имя строится тем же способом,
+     * что и для «Добавить в набор» ({@link ObjectSetsItems#fromFilePath}) —
+     * прежде всего через {@link GetRef#pathToFullName} (по пути файла в проекте):
+     * он корректно останавливается на владеющем объекте (например,
+     * {@code Forms/<Форма>/Module.bsl} → сама форма), не спускаясь глубже.
+     * {@link GoToDefinition#fullNameFromFile} (FQN-конвертер Xtext) — запасной
+     * вариант: для модулей форм он на практике даёт FQN с лишней парой сегментов
+     * («…Форма.<Имя>.Форма.Module»), из-за чего {@link GoToDefinition#resolveEObjectByQualifiedName}
+     * не находит объект — {@link MdTypeMapping#bmFqnToRuFullName} отбрасывает
+     * висячий сегмент только при нечётной длине FQN, а тут она чётная.
+     */
     public static EObject resolveEObject(IFile file)
     {
         try
         {
+            String relPath = file.getProjectRelativePath().toString();
+            if (GetRef.isConfigurationRootPath(relPath))
+                return null;
+
             IProject project = file.getProject();
             IV8ProjectManager projectManager =
                 (IV8ProjectManager) Global.getServiceByClass(IV8ProjectManager.class);
@@ -1213,7 +1248,14 @@ public final class GitChangedFileMenuHook implements IStartup
             IV8Project v8Project = projectManager.getProject(project);
             if (v8Project == null)
                 return null;
-            return GoToDefinition.resolveEObjectViaResourceSet(file, v8Project);
+
+            String fullName = GetRef.pathToFullName(relPath);
+            if (fullName == null || fullName.isBlank())
+                fullName = GoToDefinition.fullNameFromFile(file);
+            if (fullName == null || fullName.isBlank())
+                return null;
+
+            return GoToDefinition.resolveEObjectByQualifiedName(fullName, v8Project);
         }
         catch (Exception e)
         {

@@ -192,7 +192,7 @@ public final class ComfortNavigatorSearchEngine implements IModelObjectTreeSearc
 
         if (matcher.hasMultipleSections())
         {
-            String pathRu = MdTypeNames.translateDottedToRu(path.toString(".")); //$NON-NLS-1$
+            String pathRu = MdTypeMapping.translateDottedToRu(path.toString(".")); //$NON-NLS-1$
             if (!matcher.matchesTree(pathRu))
                 return false;
         }
@@ -219,7 +219,7 @@ public final class ComfortNavigatorSearchEngine implements IModelObjectTreeSearc
 
         if (matcher.hasMultipleSections())
         {
-            if (!matcher.matchesTree(MdTypeNames.translateDottedToRu(path.toString(".")))) //$NON-NLS-1$
+            if (!matcher.matchesTree(MdTypeMapping.translateDottedToRu(path.toString(".")))) //$NON-NLS-1$
                 return false;
         }
         else

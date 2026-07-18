@@ -4,7 +4,7 @@ import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.ui.dialogs.FilteredItemsSelectionDialog;
 import org.eclipse.ui.dialogs.FilteredItemsSelectionDialog.ItemsFilter;
 
-import tormozit.MdTypeNames;
+import tormozit.MdTypeMapping;
 import tormozit.SmartMatcher;
 
 public class OpenMdObjectItemsFilter extends FilteredItemsSelectionDialog.ItemsFilter {
@@ -93,7 +93,7 @@ public class OpenMdObjectItemsFilter extends FilteredItemsSelectionDialog.ItemsF
             if (description == null)
                 return null;
             String desc = description.toString();
-            String result = MdTypeNames.translateDottedToRu(desc);
+            String result = MdTypeMapping.translateDottedToRu(desc);
             return result != null && !result.isEmpty() ? result : null;
         } catch (Exception e) {
             return null;

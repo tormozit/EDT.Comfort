@@ -9,7 +9,6 @@ import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
-import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.ui.IWorkbenchPage;
@@ -64,11 +63,7 @@ public final class GitAddToObjectSetHandler extends AbstractHandler implements I
                     if (projectName == null)
                         projectName = commitFile.getProject().getName();
 
-                    EObject commitEObject = GitChangedFileMenuHook.resolveEObject(commitFile);
-                    if (commitEObject == null)
-                        continue;
-
-                    ObjectSets.Item commitItem = ObjectSetsItems.fromEObject(commitEObject, projectName);
+                    ObjectSets.Item commitItem = ObjectSetsItems.fromFilePath(commitFile);
                     if (commitItem != null)
                         items.add(commitItem);
                 }
@@ -77,17 +72,17 @@ public final class GitAddToObjectSetHandler extends AbstractHandler implements I
             if (projectName == null)
                 projectName = file.getProject().getName();
 
-            EObject eObject = GitChangedFileMenuHook.resolveEObject(file);
-            if (eObject == null)
-                continue;
-
-            ObjectSets.Item item = ObjectSetsItems.fromEObject(eObject, projectName);
+            ObjectSets.Item item = ObjectSetsItems.fromFilePath(file);
             if (item != null)
                 items.add(item);
         }
 
-        if (projectName == null || items.isEmpty())
+        if (items.isEmpty())
+        {
+            ToastNotification.show("Наборы объектов", //$NON-NLS-1$
+                "Не найдено объектов для добавления", 4000); //$NON-NLS-1$
             return null;
+        }
 
         ObjectSetsAddTargetState.getInstance().ensureForProject(projectName);
         ObjectSets.SetDef target = ObjectSetsAddTargetState.getInstance().getAddTargetSet(projectName);

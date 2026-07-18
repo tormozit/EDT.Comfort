@@ -278,6 +278,37 @@ public final class MdTypeMapping
         return FOLDER_TO_RU.get(type);
     }
 
+    /**
+     * Русское имя класса метаданных (BM/EMF, например {@code Catalog}, {@code CommonModule})
+     * в отображаемое русское ({@code Справочник}, {@code ОбщийМодуль}). В отличие от
+     * {@link #anyToRu}, при неизвестном типе возвращает исходную строку без изменений —
+     * нужно, чтобы секционный фильтр ({@link SmartMatcher#matchesTree}) мог сопоставлять
+     * русский текст фильтра с внутренним путём объекта (например {@code primary.getQualifiedName()}
+     * в {@link ComfortNavigatorSearchEngine} или {@code description} в {@code OpenMdObjectItemsFilter}),
+     * у которого первый (а иногда и промежуточные) сегмент — английское имя класса.
+     */
+    public static String ru(String enOrRu)
+    {
+        if (enOrRu == null)
+            return null;
+        String ru = anyToRu(enOrRu);
+        return ru != null ? ru : enOrRu;
+    }
+
+    /** Переводит каждый {@code '.'}-сегмент строки по отдельности; сегменты вне словаря не трогает. */
+    public static String translateDottedToRu(String dotted)
+    {
+        if (dotted == null || dotted.isEmpty())
+            return dotted;
+        StringBuilder result = new StringBuilder();
+        for (String part : dotted.split("\\.")) //$NON-NLS-1$
+        {
+            if (result.length() > 0) result.append('.');
+            result.append(ru(part));
+        }
+        return result.toString();
+    }
+
     public static String anyToEnSing(String type)
     {
         if (type == null) return null;

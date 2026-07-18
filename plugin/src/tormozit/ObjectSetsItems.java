@@ -92,6 +92,35 @@ final class ObjectSetsItems
         return new ObjectSets.Item(fullName, fullName, fullName, ownName);
     }
 
+    /**
+     * Строит {@link ObjectSets.Item} прямо по файлу, без резолва {@link EObject}
+     * через BM-транзакцию. Полное имя строится прежде всего через
+     * {@link GetRef#pathToFullName} (по пути файла в проекте) — он корректно
+     * останавливается на владеющем объекте (например, {@code Forms/<Форма>/Module.bsl}
+     * → сама форма), не спускаясь глубже. {@link GoToDefinition#fullNameFromFile}
+     * (FQN-конвертер Xtext) — запасной вариант: для модулей форм он на практике
+     * даёт FQN с лишней парой сегментов («…Форма.<Имя>.Форма.Module»), поскольку
+     * {@link MdTypeMapping#bmFqnToRuFullName} отбрасывает висячий сегмент только
+     * при нечётной длине FQN, а тут она чётная — то же самое, что ломало
+     * резолв {@link EObject} для «Открыть объект»/«Показать в Навигаторе»
+     * (см. {@link GitChangedFileMenuHook#resolveEObject}).
+     */
+    static ObjectSets.Item fromFilePath(org.eclipse.core.resources.IFile file)
+    {
+        if (file == null)
+            return null;
+        String relPath = file.getProjectRelativePath().toString();
+        if (GetRef.isConfigurationRootPath(relPath))
+            return null;
+        String fullName = GetRef.pathToFullName(relPath);
+        if (fullName == null || fullName.isBlank())
+            fullName = GoToDefinition.fullNameFromFile(file);
+        if (fullName == null || fullName.isBlank())
+            return null;
+        String ownName = lastSegment(fullName);
+        return new ObjectSets.Item(fullName, fullName, fullName, ownName);
+    }
+
     static AddResult addItemsToSet(ObjectSets.SetDef target, List<ObjectSets.Item> items, Shell shell)
     {
         if (target == null || items == null || items.isEmpty())

@@ -1013,17 +1013,47 @@ public class GoToDefinition extends AbstractHandler
 
     public static EObject resolveEObjectViaResourceSet(IFile file, IV8Project v8Project)
     {
+        QualifiedName fqn = fqnViaResourceSet(file);
+        if (fqn == null)
+            return null;
+        return resolveEObjectByQualifiedName(fqn.toString(), v8Project);
+    }
+
+    /**
+     * Полное русское имя МД-объекта (владельца файла) напрямую по FQN из
+     * {@link IQualifiedNameFilePathConverter} — без спуска по BM-дереву
+     * (см. {@link #resolveEObjectByQualifiedName}), который не умеет
+     * останавливаться на объекте-владельце модуля (форма, команда и т.п.)
+     * и требует чётного числа сегментов «тип-имя» после top-object.
+     * {@link MdTypeMapping#bmFqnToRuFullName} сам отбрасывает висячий
+     * последний сегмент типа модуля, если он есть, — т.е. для
+     * {@code Forms/<Форма>/Module.bsl} вернёт саму форму, а не модуль.
+     */
+    public static String fullNameFromFile(IFile file)
+    {
+        QualifiedName fqn = fqnViaResourceSet(file);
+        if (fqn == null)
+            return null;
+        return MdTypeMapping.bmFqnToRuFullName(fqn.toString());
+    }
+
+    private static QualifiedName fqnViaResourceSet(IFile file)
+    {
         URI fileUri = URI.createPlatformResourceURI(file.getFullPath().toString(), true);
         IResourceServiceProvider rsp =
             IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(fileUri);
-        IQualifiedNameFilePathConverter conv = rsp.get(IQualifiedNameFilePathConverter.class);
-        QualifiedName fqn = conv.getFqn(file);
-        if (fqn == null)
+        if (rsp == null)
         {
-            Global.log("GoToDefinition: getFqn вернул null для " + file.getFullPath()); //$NON-NLS-1$
+            Global.log("GoToDefinition: resourceServiceProvider не найден для " + file.getFullPath()); //$NON-NLS-1$
             return null;
         }
-        return resolveEObjectByQualifiedName(fqn.toString(), v8Project);
+        IQualifiedNameFilePathConverter conv = rsp.get(IQualifiedNameFilePathConverter.class);
+        if (conv == null)
+            return null;
+        QualifiedName fqn = conv.getFqn(file);
+        if (fqn == null)
+            Global.log("GoToDefinition: getFqn вернул null для " + file.getFullPath()); //$NON-NLS-1$
+        return fqn;
     }
 
     public static EObject resolveEObjectByQualifiedName(String fullName, IV8Project v8Project)

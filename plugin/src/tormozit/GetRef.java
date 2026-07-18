@@ -724,6 +724,33 @@ public class GetRef extends AbstractHandler implements IElementUpdater
         return rel.isEmpty() ? null : rel;
     }
 
+    /**
+     * Относится ли файл к самой конфигурации (корню проекта), а не к отдельному
+     * объекту МД — {@code src/Configuration/*} (и {@code src/ext/<расш>/Configuration/*}
+     * для расширений). Такие файлы (например, {@code MainSectionCommandInterface.cmi})
+     * не имеют полного имени объекта: {@link #pathToFullName} для них и так корректно
+     * возвращает {@code null} (папка {@code Configuration} не заведена в {@code FOLDER_TO_RU}),
+     * но вызывающий код не должен по этой причине проваливаться в резолв через
+     * {@link GoToDefinition#fullNameFromFile} — тот ошибочно находит для них FQN.
+     */
+    static boolean isConfigurationRootPath(String projectRelativePath)
+    {
+        if (projectRelativePath == null) return false;
+        String path = projectRelativePath.replace('\\', '/');
+        String relative;
+        if (path.startsWith("src/ext/")) //$NON-NLS-1$
+        {
+            String rest = path.substring("src/ext/".length()); //$NON-NLS-1$
+            int slash = rest.indexOf('/'); if (slash < 0) return false;
+            relative = rest.substring(slash + 1);
+        }
+        else if (path.startsWith("src/")) //$NON-NLS-1$
+            relative = path.substring("src/".length()); //$NON-NLS-1$
+        else return false;
+
+        return relative.equals("Configuration") || relative.startsWith("Configuration/"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
     static String pathToFullName(String projectRelativePath)
     {
         if (projectRelativePath == null) return null;
