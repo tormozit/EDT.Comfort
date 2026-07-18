@@ -2,18 +2,22 @@ package tormozit;
 
 import java.lang.reflect.Method;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.IPath;
+import org.eclipse.core.runtime.Platform;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.ISelectionProvider;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.StructuredSelection;
+import org.eclipse.jgit.lib.Repository;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
@@ -42,9 +46,18 @@ import org.eclipse.ui.contexts.IContextActivation;
 import org.eclipse.ui.contexts.IContextService;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IWindowListener;
+import org.osgi.framework.Bundle;
+import org.osgi.framework.BundleContext;
+import org.osgi.framework.ServiceReference;
 
+import com._1c.g5.v8.dt.compare.core.IComparisonManager;
+import com._1c.g5.v8.dt.compare.matching.MatchingStrategy;
+import com._1c.g5.v8.dt.core.filesystem.IProjectFileSystemSupportProvider;
+import com._1c.g5.v8.dt.core.filesystem.IQualifiedNameFilePathConverter;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
+
+import com.google.inject.Injector;
 
 import org.eclipse.e4.ui.model.application.ui.basic.MPart;
 
@@ -71,6 +84,18 @@ public final class GitChangedFileMenuHook implements IStartup
     private static final String OBJ_ITEM_TEXT = "Открыть объект";       //$NON-NLS-1$
     private static final String ADD_TO_SET_CMD = "tormozit.git.addToObjectSet"; //$NON-NLS-1$
     private static final String ADD_TO_SET_MARKER = "tormozit.gitAddToObjectSetItem"; //$NON-NLS-1$
+
+    private static final String COMPARE_WITH_COMMIT_TEXT =
+        "Сравнить рабочий каталог с коммитом"; //$NON-NLS-1$
+    private static final String COMPARE_UI_BUNDLE_ID = "com._1c.g5.v8.dt.compare.ui"; //$NON-NLS-1$
+    private static final String COMPARE_UTILS_CLASS =
+        "com._1c.g5.v8.dt.internal.compare.git.ui.handler.Utils"; //$NON-NLS-1$
+    private static final String COMPARE_UI_PLUGIN_CLASS =
+        "com._1c.g5.v8.dt.internal.compare.ui.CompareUiPlugin"; //$NON-NLS-1$
+    private static final String COMPARISON_EDITOR_OPEN_HELPER_CLASS =
+        "com._1c.g5.v8.dt.internal.compare.ui.editor.IComparisonEditorOpenHelper"; //$NON-NLS-1$
+    private static final String MONITORING_EVENT_DISPATCHER_CLASS =
+        "com._1c.g5.ides.monitoring.IMonitoringEventDispatcher"; //$NON-NLS-1$
 
     /**
      * Snapshot мультивыделения, сохранённый при открытии меню.
@@ -607,7 +632,7 @@ public final class GitChangedFileMenuHook implements IStartup
         return null;
     }
 
-    /** @return selection from the widget's own Table/Tree items, or null */
+    /** @return full selection (all items) from the widget's own Table/Tree, or null */
     private static ISelection selectionOfClickedControl(Widget submenuWidget)
     {
         if (!(submenuWidget instanceof Menu submenu))
@@ -622,22 +647,26 @@ public final class GitChangedFileMenuHook implements IStartup
         if (!(data instanceof Control control) || control.isDisposed())
             return null;
 
-        Object element = null;
+        List<Object> elements = new ArrayList<>();
         if (control instanceof Table table)
         {
-            TableItem[] items = table.getSelection();
-            if (items.length > 0)
-                element = items[0].getData();
+            for (TableItem ti : table.getSelection())
+            {
+                if (ti.getData() != null)
+                    elements.add(ti.getData());
+            }
         }
         else if (control instanceof Tree tree)
         {
-            TreeItem[] items = tree.getSelection();
-            if (items.length > 0)
-                element = items[0].getData();
+            for (TreeItem ti : tree.getSelection())
+            {
+                if (ti.getData() != null)
+                    elements.add(ti.getData());
+            }
         }
 
-        if (element != null)
-            return new StructuredSelection(element);
+        if (!elements.isEmpty())
+            return new StructuredSelection(elements);
         return null;
     }
 
@@ -652,10 +681,11 @@ public final class GitChangedFileMenuHook implements IStartup
             {
                 ISelection selection = selectionOf(view);
 
-                // Try to get selection from the viewer that owns the clicked control
+                // Селекция control'а, из которого реально вызвано меню, всегда точнее,
+                // чем selection provider части (у HistoryView он отражает выделение
+                // таблицы коммитов, даже если меню открыто над списком файлов коммита).
                 ISelection viewerSel = selectionOfClickedControl(e.widget);
-                if (viewerSel instanceof IStructuredSelection vs
-                    && (selection == null || vs.size() > ((IStructuredSelection) selection).size()))
+                if (viewerSel instanceof IStructuredSelection vs && !vs.isEmpty())
                     selection = vs;
 
                 if (selection == null)
@@ -722,6 +752,10 @@ public final class GitChangedFileMenuHook implements IStartup
 
                             addIrHistoryItemIfNeeded(submenu, view, capturedFile, addedItems);
                         }
+                    }
+                    else if (isHistoryView(view) && HistoryViewHandler.extractCommitSha(element) != null)
+                    {
+                        addCompareWithCommitItem(submenu, view, element, addedItems);
                     }
                 }
 
@@ -832,6 +866,151 @@ public final class GitChangedFileMenuHook implements IStartup
         addedItems.add(irItem);
     }
 
+    // ========================================================================
+    // HistoryView: «Сравнить рабочий каталог с коммитом» — полное сравнение
+    // конфигурации (как «Групповая разработка / Сравнить / Коммит...» в
+    // Навигаторе), но без диалога выбора коммита — коммит уже известен из
+    // выбранной строки панели «История».
+    // ========================================================================
+
+    private static void addCompareWithCommitItem(Menu submenu, IViewPart view,
+        Object commitElement, List<MenuItem> addedItems)
+    {
+        MenuItem item = new MenuItem(submenu, SWT.PUSH);
+        item.setText(COMPARE_WITH_COMMIT_TEXT);
+        item.addSelectionListener(new SelectionAdapter()
+        {
+            @Override
+            public void widgetSelected(SelectionEvent ev)
+            {
+                performCompareWithCommit(view, commitElement, submenu.getShell());
+            }
+        });
+        addedItems.add(item);
+    }
+
+    /**
+     * Повторяет поведение EDT-обработчика {@code DtCompareWithCommitHandler}
+     * («Групповая разработка / Сравнить / Коммит...» в Навигаторе) после
+     * закрытия диалога выбора коммита — вызывает ту же готовую функцию
+     * {@code Utils.performCompareWith(...)} бандла {@code com._1c.g5.v8.dt.compare.ui},
+     * но с уже известным коммитом вместо показа {@code DtCommitSelectionDialog}.
+     */
+    /**
+     * Репозиторий, с которым сейчас работает панель «История»
+     * ({@code GenericHistoryView}/{@code HistoryView}), через рефлексию к его
+     * {@code IHistoryPage.currentRepo}.
+     */
+    public static Repository resolveRepository(IWorkbenchPart view)
+    {
+        try
+        {
+            Object historyPage = Global.call(view, "getHistoryPage"); //$NON-NLS-1$
+            Object repoObj = historyPage != null ? Global.getField(historyPage, "currentRepo") : null; //$NON-NLS-1$
+            if (repoObj instanceof Repository repository)
+                return repository;
+        }
+        catch (Exception ignored)
+        {
+        }
+        return null;
+    }
+
+    private static void performCompareWithCommit(IViewPart view, Object commitElement, Shell shell)
+    {
+        try
+        {
+            String sha = HistoryViewHandler.extractCommitSha(commitElement);
+            if (sha == null)
+            {
+                Global.log("CompareWithCommit: не удалось извлечь SHA коммита"); //$NON-NLS-1$
+                return;
+            }
+
+            Repository repository = resolveRepository(view);
+            if (repository == null)
+            {
+                Global.log("CompareWithCommit: repository не найден"); //$NON-NLS-1$
+                return;
+            }
+
+            IProject project = resolveProject(view, commitElement);
+            if (project == null)
+            {
+                Global.log("CompareWithCommit: project не найден"); //$NON-NLS-1$
+                return;
+            }
+
+            Bundle compareUiBundle = Platform.getBundle(COMPARE_UI_BUNDLE_ID);
+            if (compareUiBundle == null)
+            {
+                Global.log("CompareWithCommit: бандл " + COMPARE_UI_BUNDLE_ID + " не найден"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            Class<?> utilsCls = compareUiBundle.loadClass(COMPARE_UTILS_CLASS);
+            Class<?> pluginCls = compareUiBundle.loadClass(COMPARE_UI_PLUGIN_CLASS);
+            Class<?> helperCls = compareUiBundle.loadClass(COMPARISON_EDITOR_OPEN_HELPER_CLASS);
+            Class<?> monitoringCls = compareUiBundle.loadClass(MONITORING_EVENT_DISPATCHER_CLASS);
+
+            Object plugin = Global.invoke(pluginCls, "getDefault"); //$NON-NLS-1$
+            Object injectorObj = plugin != null ? Global.invoke(plugin, "getInjector") : null; //$NON-NLS-1$
+            if (!(injectorObj instanceof Injector injector))
+            {
+                Global.log("CompareWithCommit: injector бандла compare.ui не найден"); //$NON-NLS-1$
+                return;
+            }
+
+            Object comparisonEditorOpenHelper = injector.getInstance(helperCls);
+            Object monitoringEventDispatcher = injector.getInstance(monitoringCls);
+
+            BundleContext ctx = Global.ourContext();
+            ServiceReference<IComparisonManager> comparisonManagerRef =
+                ctx.getServiceReference(IComparisonManager.class);
+            IComparisonManager comparisonManager = ctx.getService(comparisonManagerRef);
+            IQualifiedNameFilePathConverter filePathConverter =
+                (IQualifiedNameFilePathConverter) Global.getField(comparisonManager,
+                    "qualifiedNameFilePathConverter"); //$NON-NLS-1$
+
+            IV8ProjectManager v8ProjectManager =
+                (IV8ProjectManager) Global.getServiceByClass(IV8ProjectManager.class);
+
+            IProjectFileSystemSupportProvider fileSystemSupportProvider =
+                Global.getOsgiService(IProjectFileSystemSupportProvider.class);
+            if (fileSystemSupportProvider == null)
+                fileSystemSupportProvider = injector.getInstance(IProjectFileSystemSupportProvider.class);
+
+            Object commitDisplayRepr = Global.invoke(utilsCls, "getCommitUserRepresentation", //$NON-NLS-1$
+                repository, sha);
+            String displayRepr = commitDisplayRepr instanceof String s ? s : sha;
+
+            Map<IProject, List<Object>> projectsToPathFilter = new HashMap<>();
+            projectsToPathFilter.put(project, new ArrayList<>());
+
+            Global.invoke(utilsCls, "performCompareWith", //$NON-NLS-1$
+                repository,
+                sha,
+                displayRepr,
+                "Team.CompareWithCommit", //$NON-NLS-1$
+                MatchingStrategy.UUID_THEN_NAME,
+                Boolean.FALSE,
+                Boolean.FALSE,
+                projectsToPathFilter,
+                shell,
+                COMPARE_WITH_COMMIT_TEXT,
+                null,
+                filePathConverter,
+                v8ProjectManager,
+                comparisonManager,
+                comparisonEditorOpenHelper,
+                fileSystemSupportProvider,
+                monitoringEventDispatcher);
+        }
+        catch (Exception ex)
+        {
+            Global.log("CompareWithCommit: " + ex); //$NON-NLS-1$
+        }
+    }
+
     private static String extractCommitShaFrom(IViewPart view)
     {
         ISelection sel = selectionOf(view);
@@ -839,6 +1018,63 @@ public final class GitChangedFileMenuHook implements IStartup
             return "";
         Object element = ss.getFirstElement();
         return HistoryViewHandler.extractCommitSha(element);
+    }
+
+    // ========================================================================
+    // HistoryView: файлы, изменённые коммитом (для «Добавить в набор» по
+    // выделению в списке коммитов)
+    // ========================================================================
+
+    /**
+     * Файлы, изменённые коммитом {@code sha} (diff с первым родителем;
+     * для коммита без родителей — diff с пустым деревом). Удалённые файлы
+     * не включаются — их уже не с чем сопоставить в наборе объектов.
+     */
+    public static List<IFile> resolveFilesChangedByCommit(Repository repository, String sha)
+    {
+        List<IFile> result = new ArrayList<>();
+        if (repository == null || sha == null || sha.isBlank())
+            return result;
+        try (org.eclipse.jgit.revwalk.RevWalk walk = new org.eclipse.jgit.revwalk.RevWalk(repository))
+        {
+            org.eclipse.jgit.revwalk.RevCommit commit =
+                walk.parseCommit(org.eclipse.jgit.lib.ObjectId.fromString(sha));
+            org.eclipse.jgit.revwalk.RevCommit parent = commit.getParentCount() > 0
+                ? walk.parseCommit(commit.getParent(0).getId()) : null;
+            walk.parseHeaders(commit);
+            org.eclipse.jgit.lib.ObjectId oldTree = parent != null ? parent.getTree() : null;
+
+            try (org.eclipse.jgit.diff.DiffFormatter df =
+                new org.eclipse.jgit.diff.DiffFormatter(org.eclipse.jgit.util.io.NullOutputStream.INSTANCE))
+            {
+                df.setRepository(repository);
+                df.setDetectRenames(true);
+                List<org.eclipse.jgit.diff.DiffEntry> diffs = df.scan(oldTree, commit.getTree());
+                for (org.eclipse.jgit.diff.DiffEntry entry : diffs)
+                {
+                    if (entry.getChangeType() == org.eclipse.jgit.diff.DiffEntry.ChangeType.DELETE)
+                        continue;
+                    IFile file = fileFromRepoPath(repository, entry.getNewPath());
+                    if (file != null && file.exists())
+                        result.add(file);
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            Global.log("GitChangedFileMenu: resolveFilesChangedByCommit(" + sha + "): " + e); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        return result;
+    }
+
+    private static IFile fileFromRepoPath(Repository repository, String relativePath)
+    {
+        if (relativePath == null || relativePath.isBlank())
+            return null;
+        java.io.File absolute = new java.io.File(repository.getWorkTree(), relativePath);
+        IPath location = org.eclipse.core.runtime.Path.fromOSString(absolute.getAbsolutePath());
+        IFile[] files = ResourcesPlugin.getWorkspace().getRoot().findFilesForLocation(location);
+        return files != null && files.length > 0 ? files[0] : null;
     }
 
     // ========================================================================

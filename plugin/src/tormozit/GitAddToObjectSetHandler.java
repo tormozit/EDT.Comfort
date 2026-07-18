@@ -39,11 +39,41 @@ public final class GitAddToObjectSetHandler extends AbstractHandler implements I
         // Определяем проект из первого подходящего файла selection
         String projectName = null;
         List<ObjectSets.Item> items = new ArrayList<>();
+        org.eclipse.jgit.lib.Repository repository = null;
+        boolean repositoryLookedUp = false;
         for (Object element : selection.toList())
         {
             IFile file = GitChangedFileMenuHook.resolveFile(part, element);
             if (file == null || !file.exists())
+            {
+                // Не файл — возможно, коммит (выделение в списке коммитов панели «История»).
+                // Разворачиваем в файлы, изменённые этим коммитом.
+                String sha = HistoryViewHandler.extractCommitSha(element);
+                if (sha == null)
+                    continue;
+                if (!repositoryLookedUp)
+                {
+                    repository = GitChangedFileMenuHook.resolveRepository(part);
+                    repositoryLookedUp = true;
+                }
+                if (repository == null)
+                    continue;
+
+                for (IFile commitFile : GitChangedFileMenuHook.resolveFilesChangedByCommit(repository, sha))
+                {
+                    if (projectName == null)
+                        projectName = commitFile.getProject().getName();
+
+                    EObject commitEObject = GitChangedFileMenuHook.resolveEObject(commitFile);
+                    if (commitEObject == null)
+                        continue;
+
+                    ObjectSets.Item commitItem = ObjectSetsItems.fromEObject(commitEObject, projectName);
+                    if (commitItem != null)
+                        items.add(commitItem);
+                }
                 continue;
+            }
             if (projectName == null)
                 projectName = file.getProject().getName();
 
