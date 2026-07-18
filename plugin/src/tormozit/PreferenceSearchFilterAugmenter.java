@@ -16,9 +16,9 @@ import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.CLabel;
 import org.eclipse.swt.graphics.Color;
-import org.eclipse.swt.graphics.Font;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.graphics.TextStyle;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
@@ -460,44 +460,75 @@ final class PreferenceSearchFilterAugmenter
     private static final String ORIGINAL_FOREGROUND_KEY =
             "tormozit.PreferenceSearchFilterAugmenter.originalForeground"; //$NON-NLS-1$
 
-    private static final String ORIGINAL_FONT_KEY =
-            "tormozit.PreferenceSearchFilterAugmenter.originalFont"; //$NON-NLS-1$
-
     /**
-     * Красит только цвет/жирность шрифта контрола — фон НЕ трогаем вообще
-     * (единый стандарт подсветки в проекте, см. {@code OpenMdObjectHook}:
-     * только шрифт, без фона). И трогаем {@code setForeground}/{@code
-     * setFont} только у контролов, которые хоть раз реально подсвечивались —
-     * иначе прямой вызов этих сеттеров на КАЖДОМ контроле страницы при каждом
-     * пересчёте рвёт CSS-стилизацию тёмной темы Eclipse 4 (см. историю правок).
+     * Красит только цвет текста контрола — ни фон, ни шрифт не трогаем.
+     * Жирный шрифт (в отличие от дерева, где строку перерисовывает
+     * {@code StyledString}/{@code TreeViewer}) на живом SWT {@code Label}/
+     * {@code Button} шире обычного, а границы контрола уже вычислены
+     * {@code GridLayout} родителя при создании страницы — прямой
+     * {@code setFont} не запускает пересчёт, и более широкий текст
+     * обрезается (см. жалобу пользователя, скриншот «Включить проверку
+     * орфографи[и]»). Трогаем {@code setForeground} только у контролов,
+     * которые хоть раз реально подсвечивались — иначе прямой вызов этого
+     * сеттера на КАЖДОМ контроле страницы при каждом пересчёте рвёт
+     * CSS-стилизацию тёмной темы Eclipse 4 (см. историю правок).
      */
     private static void applyMatchStyle(Control control, boolean isMatch)
     {
         if (isMatch)
         {
             if (control.getData(ORIGINAL_FOREGROUND_KEY) == null)
-            {
                 control.setData(ORIGINAL_FOREGROUND_KEY, control.getForeground());
-                control.setData(ORIGINAL_FONT_KEY, control.getFont());
-            }
             TextStyle style = new TextStyle();
             noBackgroundStyler(control).applyStyles(style);
+            // #region agent log
+            Color before = control.getForeground();
+            // #endregion
             if (style.foreground != null)
                 control.setForeground(style.foreground);
-            if (style.font != null)
-                control.setFont(style.font);
+            // #region agent log
+            Color after = control.getForeground();
+            Global.tempLog("smart-match-fg", "prefs.applyMatchStyle MATCH "
+                + control.getClass().getSimpleName()
+                + " text=" + truncateControlText(control)
+                + " styleFg=" + rgbOfColor(style.foreground)
+                + " beforeSet=" + rgbOfColor(before)
+                + " afterSet=" + rgbOfColor(after));
+            // #endregion
             return;
         }
 
         Object originalFg = control.getData(ORIGINAL_FOREGROUND_KEY);
         if (originalFg instanceof Color fg && !fg.isDisposed())
             control.setForeground(fg);
-        Object originalFont = control.getData(ORIGINAL_FONT_KEY);
-        if (originalFont instanceof Font font && !font.isDisposed())
-            control.setFont(font);
         // Если контрол никогда не подсвечивался (originalFg == null) — вообще
         // не трогаем его, чтобы не срывать CSS-стилизацию темы.
     }
+
+    // #region agent log
+    private static String truncateControlText(Control control)
+    {
+        String raw = null;
+        if (control instanceof Label label)
+            raw = label.getText();
+        else if (control instanceof Button button)
+            raw = button.getText();
+        else if (control instanceof CLabel clabel)
+            raw = clabel.getText();
+        if (raw == null)
+            return ""; //$NON-NLS-1$
+        String t = raw.replace('\n', ' ').replace('\r', ' ');
+        return t.length() > 40 ? t.substring(0, 40) + "…" : t;
+    }
+
+    private static String rgbOfColor(Color c)
+    {
+        if (c == null || c.isDisposed())
+            return "null";
+        RGB r = c.getRGB();
+        return r.red + "," + r.green + "," + r.blue;
+    }
+    // #endregion
 
     private static void wireHighlighting(TreeViewer viewer, Text filterControl)
     {
@@ -571,12 +602,10 @@ final class PreferenceSearchFilterAugmenter
      * {@code SmartMatchHighlight.styler(...)} в тёмной теме красит фон не
      * случайно: тёмный foreground (DARK_MATCH_FG) там — часть СВЯЗАННОЙ пары
      * со светлым фоном-плашкой (DARK_MATCH_BG), сам по себе на тёмном фоне
-     * страницы он почти нечитаем. Поэтому просто отбросить background из
-     * готового стиля недостаточно — вместо парного тёмного foreground берём
-     * {@link SmartMatchHighlight#lightForeground()}: тот самый самостоятельный
-     * «только текст» цвет, которым уже пользуется светлая ветка и который не
-     * привязан к фону. Жирность (font) берём из стокового стиля как есть —
-     * она одинакова в обеих ветках {@code resolveMatchStyle}.
+     * страницы он почти нечитаем. Поэтому background не переносим, а
+     * foreground берём из {@link SmartMatchHighlight#textOnlyForeground(Control)}
+     * (светлая тема — LIGHT_*, тёмная — осветлённый оттенок из primeMatchColors).
+     * Жирность (font) — из стокового стиля.
      */
     private static Styler noBackgroundStyler(Control context)
     {
@@ -588,8 +617,17 @@ final class PreferenceSearchFilterAugmenter
             {
                 TextStyle temp = new TextStyle();
                 base.applyStyles(temp);
-                textStyle.foreground = SmartMatchHighlight.lightForeground();
+                Color textOnly = SmartMatchHighlight.textOnlyForeground(context);
+                textStyle.foreground = textOnly;
                 textStyle.font = temp.font;
+                // #region agent log
+                Global.tempLog("smart-match-fg", "prefs.noBackgroundStyler"
+                    + " baseFg=" + rgbOfColor(temp.foreground)
+                    + " baseBg=" + rgbOfColor(temp.background)
+                    + " textOnlyFg=" + rgbOfColor(textOnly)
+                    + " context=" + (context == null || context.isDisposed()
+                        ? "null/disposed" : context.getClass().getSimpleName()));
+                // #endregion
                 // background намеренно не переносим
             }
         };

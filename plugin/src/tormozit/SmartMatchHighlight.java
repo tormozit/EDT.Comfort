@@ -3,6 +3,7 @@ package tormozit;
 import java.util.ArrayList;
 import java.util.List;
 
+import org.eclipse.core.runtime.Platform;
 import org.eclipse.jface.resource.JFaceResources;
 import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.jface.viewers.StyledString.Styler;
@@ -15,8 +16,8 @@ import org.eclipse.swt.graphics.FontData;
 import org.eclipse.swt.graphics.GC;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.RGB;
-import org.eclipse.swt.graphics.TextStyle;
 import org.eclipse.swt.graphics.Rectangle;
+import org.eclipse.swt.graphics.TextStyle;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
@@ -26,16 +27,20 @@ import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.themes.ITheme;
+import org.osgi.framework.Bundle;
 
 /**
  * Подсветка совпадений smart-фильтра: единые цвета для текущей и прочих строк.
  */
 public final class SmartMatchHighlight
 {
-    /** Светлая тема — насыщенный синий текст */
-    private static final int LIGHT_R = 0;
-    private static final int LIGHT_G = 102;
-    private static final int LIGHT_B = 204;
+    /** Светлая тема — насыщенный синий текст; тёмная — тот же оттенок, осветлённый в primeMatchColors */
+//    private static final int LIGHT_R = 0;
+//    private static final int LIGHT_G = 102;
+//    private static final int LIGHT_B = 204;
+    private static final int LIGHT_R = 150;
+    private static final int LIGHT_G = 0;
+    private static final int LIGHT_B = 0;
 
     /** Fallback-фон списка, если системные цвета SWT ещё «светлые» в тёмной EDT */
     private static final RGB DARK_LIST_FALLBACK = new RGB(51, 51, 51);
@@ -188,41 +193,76 @@ public final class SmartMatchHighlight
         Display display = currentDisplay();
         RGB baseRgb = resolveMatchBaseRgb(context, display);
         Font font = boldFont();
-        if (isDarkMatchRgb(baseRgb) || isDarkTheme())
+        boolean darkByRgb = isDarkMatchRgb(baseRgb);
+        boolean darkByTheme = isDarkTheme();
+        boolean dark = darkByRgb || darkByTheme;
+        MatchStyle style;
+        if (dark)
         {
             primeMatchColors(display);
-            return new MatchStyle(cachedMatchForeground, cachedMatchBackground, font);
+            // Осветлённый FG из формулы — самостоятельный (как LIGHT_*), без плашки.
+            // Плашка DARK_MATCH_BG была парой к почти чёрному DARK_MATCH_FG.
+            style = new MatchStyle(cachedMatchForeground, null, font);
         }
-        return new MatchStyle(lightForeground(), null, font);
+        else
+        {
+            style = new MatchStyle(lightForeground(), null, font);
+        }
+        // #region agent log
+        logMatchDecision("resolveMatchStyle", context, baseRgb, dark, darkByRgb, darkByTheme, style.foreground,
+            style.background);
+        // #endregion
+        return style;
     }
 
     private static RGB resolveMatchBaseRgb(Control context, Display display)
     {
-        if (context != null && !context.isDisposed())
-        {
-            Color bg = context.getBackground();
-            if (bg != null && !bg.isDisposed() && isDarkMatchRgb(bg.getRGB()))
-                return bg.getRGB();
-        }
+        // Поле фильтра / Label часто остаются со светлым SWT-фоном при тёмной
+        // CSS-теме EDT — ищем реально тёмный фон у предков (Shell/страница).
+        RGB ancestorDark = findDarkBackgroundRgb(context);
+        if (ancestorDark != null)
+            return ancestorDark;
         Color widget = display.getSystemColor(SWT.COLOR_WIDGET_BACKGROUND);
-        if (isDarkMatchRgb(widget.getRGB()))
+        if (isDarkLuminance(widget.getRGB()))
             return widget.getRGB();
         Color list = display.getSystemColor(SWT.COLOR_LIST_BACKGROUND);
-        if (isDarkMatchRgb(list.getRGB()))
+        if (isDarkLuminance(list.getRGB()))
             return list.getRGB();
         if (isDarkTheme())
             return DARK_LIST_FALLBACK;
         return list.getRGB();
     }
 
+    /** Тёмный фон у control или предков; {@code null} — не найден. */
+    private static RGB findDarkBackgroundRgb(Control context)
+    {
+        Control walk = context;
+        while (walk != null && !walk.isDisposed())
+        {
+            Color bg = walk.getBackground();
+            if (bg != null && !bg.isDisposed())
+            {
+                RGB rgb = bg.getRGB();
+                if (isDarkLuminance(rgb))
+                    return rgb;
+            }
+            walk = walk.getParent();
+        }
+        return null;
+    }
+
+    private static boolean isDarkLuminance(RGB rgb)
+    {
+        if (rgb == null)
+            return false;
+        int lum = (rgb.red * 299 + rgb.green * 587 + rgb.blue * 114) / 1000;
+        return lum < 128;
+    }
+
     private static boolean isDarkMatchRgb(RGB rgb)
     {
-        if (rgb != null)
-        {
-            int lum = (rgb.red * 299 + rgb.green * 587 + rgb.blue * 114) / 1000;
-            if (lum < 128)
-                return true;
-        }
+        if (isDarkLuminance(rgb))
+            return true;
         return isDarkTheme();
     }
 
@@ -382,26 +422,181 @@ public final class SmartMatchHighlight
         return cachedLightForeground;
     }
 
+    /**
+     * Цвет совпадения «только текст» (без плашки): светлая тема — {@link #lightForeground()},
+     * тёмная — осветлённый оттенок из {@link #primeMatchColors(Display)}.
+     * Для Preferences и др., где background из {@link #styler(Control)} нельзя переносить.
+     */
+    static Color textOnlyForeground(Control context)
+    {
+        Display display = currentDisplay();
+        RGB baseRgb = resolveMatchBaseRgb(context, display);
+        boolean darkByRgb = isDarkMatchRgb(baseRgb);
+        boolean darkByTheme = isDarkTheme();
+        RGB ancestorDarkRgb = findDarkBackgroundRgb(context);
+        boolean darkByAncestor = ancestorDarkRgb != null;
+        boolean dark = darkByRgb || darkByTheme || darkByAncestor;
+        Color fg;
+        if (dark)
+        {
+            primeMatchColors(display);
+            fg = cachedMatchForeground;
+        }
+        else
+        {
+            fg = lightForeground();
+        }
+        // #region agent log
+        logMatchDecision("textOnlyForeground", context, baseRgb, dark, darkByRgb, darkByTheme, fg, null);
+        Global.tempLog("smart-match-fg", "  flags darkByAncestor=" + darkByAncestor
+            + " ancestorDarkRgb=" + ancestorDarkRgb);
+        // #endregion
+        return fg;
+    }
+
     private static void primeMatchColors(Display display)
     {
-        if (cachedMatchBackground == null || cachedMatchBackground.isDisposed()
-            || cachedMatchForeground == null || cachedMatchForeground.isDisposed())
+        if (cachedMatchForeground != null && !cachedMatchForeground.isDisposed())
         {
-            disposeMatchColors();
-            Color base = new Color(display, DARK_LIST_FALLBACK);
-            try
+            // #region agent log
+            Global.tempLog("smart-match-fg", "primeMatchColors CACHE-HIT fg="
+                + cachedMatchForeground.getRGB() + " resultBg=null");
+            // #endregion
+            return;
+        }
+        disposeMatchColors();
+        int shift = 255 - Math.max(LIGHT_R, Math.max(LIGHT_G, LIGHT_B));
+        int fr = LIGHT_R + shift;
+        int fgreen = LIGHT_G + shift;
+        int fb = LIGHT_B + shift;
+        cachedMatchForeground = new Color(display, fr, fgreen, fb);
+        cachedMatchBaseRgb = DARK_LIST_FALLBACK;
+        // #region agent log
+        Global.tempLog("smart-match-fg", "primeMatchColors RECREATE shift=" + shift
+            + " LIGHT=" + LIGHT_R + "," + LIGHT_G + "," + LIGHT_B
+            + " → cachedMatchForeground=" + fr + "," + fgreen + "," + fb
+            + " resultBg=null (no pill)");
+        // #endregion
+    }
+
+    // #region agent log
+    private static void logMatchDecision(String where, Control context, RGB baseRgb, boolean dark,
+            boolean darkByRgb, boolean darkByTheme, Color resultFg, Color resultBg)
+    {
+        StringBuilder sb = new StringBuilder();
+        sb.append(where).append(" dark=").append(dark)
+            .append(" darkByRgb=").append(darkByRgb)
+            .append(" darkByTheme=").append(darkByTheme)
+            .append(" baseRgb=").append(baseRgb)
+            .append(" LIGHT=").append(LIGHT_R).append(',').append(LIGHT_G).append(',').append(LIGHT_B)
+            .append(" resultFg=").append(rgbOf(resultFg))
+            .append(" resultBg=").append(rgbOf(resultBg));
+        sb.append(" | ").append(describeThemeProbe());
+        sb.append(" | ").append(describeControlChain(context));
+        sb.append(" | callers=").append(tormozitCallers(8));
+        Global.tempLog("smart-match-fg", sb.toString());
+    }
+
+    private static String rgbOf(Color c)
+    {
+        if (c == null || c.isDisposed())
+            return "null";
+        RGB r = c.getRGB();
+        return r.red + "," + r.green + "," + r.blue;
+    }
+
+    private static String describeThemeProbe()
+    {
+        String workbenchId = null;
+        String e4Id = null;
+        try
+        {
+            if (PlatformUI.isWorkbenchRunning())
             {
-                cachedMatchBackground = ListSelectionThemeColors.matchBackground(base);
-                cachedMatchForeground = ListSelectionThemeColors.matchForeground(base);
-                cachedMatchBaseRgb = DARK_LIST_FALLBACK;
-            }
-            finally
-            {
-                if (!base.isDisposed())
-                    base.dispose();
+                ITheme theme = PlatformUI.getWorkbench().getThemeManager().getCurrentTheme();
+                workbenchId = theme != null ? theme.getId() : null;
+                e4Id = e4CssThemeId();
             }
         }
+        catch (Exception ignored) {}
+        Display display = currentDisplay();
+        Color listBg = display.getSystemColor(SWT.COLOR_LIST_BACKGROUND);
+        Color widgetBg = display.getSystemColor(SWT.COLOR_WIDGET_BACKGROUND);
+        return "workbenchTheme=" + workbenchId
+            + " e4CssTheme=" + e4Id
+            + " COLOR_LIST_BACKGROUND=" + rgbOf(listBg)
+            + " COLOR_WIDGET_BACKGROUND=" + rgbOf(widgetBg)
+            + " isDarkTheme()=" + isDarkTheme();
     }
+
+    private static String e4CssThemeId()
+    {
+        try
+        {
+            Bundle cssTheme = Platform.getBundle("org.eclipse.e4.ui.css.swt.theme"); //$NON-NLS-1$
+            if (cssTheme == null)
+                return "<no-bundle>";
+            Class<?> engineClass = cssTheme.loadClass("org.eclipse.e4.ui.css.swt.theme.IThemeEngine"); //$NON-NLS-1$
+            Object engine = PlatformUI.getWorkbench().getService(engineClass);
+            if (engine == null)
+                return "<no-engine>";
+            Object active = Global.invoke(engine, "getActiveTheme"); //$NON-NLS-1$
+            if (active == null)
+                return "<no-active>";
+            Object id = Global.invoke(active, "getId"); //$NON-NLS-1$
+            return id instanceof String ? (String) id : String.valueOf(id);
+        }
+        catch (Exception ex)
+        {
+            return "<err:" + ex.getClass().getSimpleName() + ">";
+        }
+    }
+
+    private static String describeControlChain(Control context)
+    {
+        if (context == null)
+            return "context=null";
+        if (context.isDisposed())
+            return "context=disposed";
+        StringBuilder sb = new StringBuilder("context=");
+        Control walk = context;
+        int depth = 0;
+        while (walk != null && !walk.isDisposed() && depth < 8)
+        {
+            if (depth > 0)
+                sb.append(" <- ");
+            Color bg = walk.getBackground();
+            Color fg = walk.getForeground();
+            sb.append(walk.getClass().getSimpleName())
+                .append("{bg=").append(rgbOf(bg))
+                .append(" fg=").append(rgbOf(fg)).append('}');
+            walk = walk.getParent();
+            depth++;
+        }
+        return sb.toString();
+    }
+
+    private static String tormozitCallers(int max)
+    {
+        StringBuilder sb = new StringBuilder();
+        int n = 0;
+        for (StackTraceElement el : Thread.currentThread().getStackTrace())
+        {
+            String cn = el.getClassName();
+            if (!cn.startsWith("tormozit.")) //$NON-NLS-1$
+                continue;
+            if (cn.contains("SmartMatchHighlight") && el.getMethodName().startsWith("log")) //$NON-NLS-1$ //$NON-NLS-2$
+                continue;
+            if (n > 0)
+                sb.append(" <- ");
+            sb.append(cn.substring("tormozit.".length())).append('.').append(el.getMethodName()) //$NON-NLS-1$
+                .append(':').append(el.getLineNumber());
+            if (++n >= max)
+                break;
+        }
+        return sb.length() == 0 ? "-" : sb.toString();
+    }
+    // #endregion
 
     private static Font boldFont()
     {
@@ -422,16 +617,11 @@ public final class SmartMatchHighlight
             if (PlatformUI.isWorkbenchRunning())
             {
                 ITheme theme = PlatformUI.getWorkbench().getThemeManager().getCurrentTheme();
-                if (theme != null)
-                {
-                    String id = theme.getId();
-                    if (id != null)
-                    {
-                        String lower = id.toLowerCase();
-                        if (lower.contains("dark") || lower.contains("dracula") || lower.contains("night"))
-                            return true;
-                    }
-                }
+                if (themeIdLooksDark(theme != null ? theme.getId() : null))
+                    return true;
+                // EDT тёмная тема живёт в e4 CSS, а не в IThemeManager
+                if (e4CssThemeLooksDark())
+                    return true;
             }
         }
         catch (Exception ignored) {}
@@ -444,6 +634,37 @@ public final class SmartMatchHighlight
         if (ListSelectionThemeColors.isDarkColor(widgetBg))
             return true;
         return false;
+    }
+
+    private static boolean themeIdLooksDark(String id)
+    {
+        if (id == null)
+            return false;
+        String lower = id.toLowerCase();
+        return lower.contains("dark") || lower.contains("dracula") || lower.contains("night");
+    }
+
+    private static boolean e4CssThemeLooksDark()
+    {
+        try
+        {
+            Bundle cssTheme = Platform.getBundle("org.eclipse.e4.ui.css.swt.theme"); //$NON-NLS-1$
+            if (cssTheme == null)
+                return false;
+            Class<?> engineClass = cssTheme.loadClass("org.eclipse.e4.ui.css.swt.theme.IThemeEngine"); //$NON-NLS-1$
+            Object engine = PlatformUI.getWorkbench().getService(engineClass);
+            if (engine == null)
+                return false;
+            Object active = Global.invoke(engine, "getActiveTheme"); //$NON-NLS-1$
+            if (active == null)
+                return false;
+            Object id = Global.invoke(active, "getId"); //$NON-NLS-1$
+            return id instanceof String && themeIdLooksDark((String) id);
+        }
+        catch (Exception ignored)
+        {
+            return false;
+        }
     }
 
     private static Display currentDisplay()
