@@ -66,6 +66,7 @@ import java.util.Map;
 import org.eclipse.core.commands.Command;
 import org.eclipse.core.commands.ParameterizedCommand;
 import org.eclipse.jface.bindings.Binding;
+import org.eclipse.jface.bindings.BindingManager;
 import org.eclipse.jface.bindings.Scheme;
 import org.eclipse.jface.bindings.keys.KeyBinding;
 import org.eclipse.jface.bindings.keys.KeySequence;
@@ -601,16 +602,8 @@ public final class ComfortKeysPreferences
         {
             // copy() не годится (создаёт пустую альтернативную привязку без сочетания и без U,
             // см. правку выше) — своя логика через savePreferences+tombstone.
-            if (applyUserPriority(selected, true))
-            {
-                // KeyController.BindingModel — свой снимок, отдельный от IBindingService;
-                // savePreferences+readRegistryAndPreferences его не обновляет — правим сразу,
-                // чтобы флажок и колонка «Поль.» не показывали устаревшее состояние. Из-за этого
-                // же расхождения (свой BindingManager у диалога, см. performOk→saveBindings)
-                // изменение не переживает «OK»/переоткрытие — restoreBinding ниже устраняет это
-                // только для обратного направления; сюда пока не перенесено осознанно.
+            if (applyUserPriority(controller, selected, true))
                 selected.setUserDelta(Integer.valueOf(Binding.USER));
-            }
         }
         else
         {
@@ -629,14 +622,21 @@ public final class ComfortKeysPreferences
     }
 
     /**
-     * Поднимает/снимает приоритет привязки {@code selected} до USER — тот же приём, что
+     * Поднимает приоритет привязки {@code selected} до USER — тот же приём, что
      * {@code PriorityGlobalKeyBindingHook.ensurePersistedGlobalOverrides}: USER-запись на
      * активной схеме с тем же сочетанием + tombstone (USER-запись с {@code commandId=null})
      * на родительской схеме, чтобы не плодить вторую конфликтующую строку в Keys. Пишет
-     * через {@code IBindingService.savePreferences} и сразу {@code readRegistryAndPreferences},
-     * иначе диалог останется показывать устаревшее состояние.
+     * через {@code IBindingService.savePreferences} и сразу {@code readRegistryAndPreferences}.
+     *
+     * <p>Дополнительно зеркалит те же add/remove в приватный {@code KeyController.fBindingManager}
+     * (получен рефлексией — иначе нет способа до него дотянуться): {@code performOk()} страницы
+     * вызывает {@code KeyController.saveBindings()}, который берёт данные ИМЕННО из этого приватного
+     * менеджера, а не из живого {@code IBindingService}, — без зеркалирования «Применить»/«OK»
+     * перезаписывали бы наше изменение обратно (подтверждено пользователем: U появляется, но не
+     * переживает «Применить»). {@link Binding#equals} у {@link KeyBinding} сравнивает по полям,
+     * поэтому {@code removeBinding} находит нужную запись даже как объект другого менеджера.
      */
-    private static boolean applyUserPriority(BindingElement selected, boolean makeUser)
+    private static boolean applyUserPriority(KeyController controller, BindingElement selected, boolean makeUser)
     {
         IBindingService bindingServiceRaw =
                 PlatformUI.getWorkbench().getService(IBindingService.class);
@@ -729,6 +729,10 @@ public final class ComfortKeysPreferences
             }
             Global.tempLog("userPriorityToggle", "cmd=" + commandId + " saved+reread ok" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                     + " targetStillPresentAfterReread=" + stillPresentAfter); //$NON-NLS-1$
+
+            syncDialogPrivateBindingManager(controller, targetKey, tombstoneKey, sequence,
+                    parameterized, activeSchemeId, contextId, makeUser);
+
             return true;
         }
         catch (java.io.IOException e)
@@ -737,6 +741,58 @@ public final class ComfortKeysPreferences
             Global.tempLog("userPriorityToggle", "cmd=" + commandId + " savePreferences IOException " + e); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return false;
         }
+    }
+
+    /**
+     * Зеркалит add/remove на приватном {@code KeyController.fBindingManager} — см. javadoc
+     * {@link #applyUserPriority}. Молча выходит, если поле не нашлось (не ломает основной
+     * путь через {@code IBindingService} — тот уже отработал к этому моменту).
+     */
+    private static void syncDialogPrivateBindingManager(
+            KeyController controller,
+            String targetKey,
+            String tombstoneKey,
+            KeySequence sequence,
+            ParameterizedCommand parameterized,
+            String activeSchemeId,
+            String contextId,
+            boolean makeUser)
+    {
+        Object rawManager = Global.getField(controller, "fBindingManager"); //$NON-NLS-1$
+        if (!(rawManager instanceof BindingManager dialogManager))
+        {
+            Global.tempLog("userPriorityToggle", "fBindingManager not found via reflection"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+
+        int removed = 0;
+        for (Binding binding : dialogManager.getBindings())
+        {
+            if (binding.getType() != Binding.USER)
+                continue;
+            TriggerSequence bindingTrigger = binding.getTriggerSequence();
+            String key = binding.getSchemeId() + '|' + binding.getContextId() + '|'
+                    + (bindingTrigger != null ? bindingTrigger.format() : ""); //$NON-NLS-1$
+            if (key.equals(targetKey) || key.equals(tombstoneKey))
+            {
+                dialogManager.removeBinding(binding);
+                removed++;
+            }
+        }
+
+        if (makeUser)
+        {
+            dialogManager.addBinding(new KeyBinding(
+                    sequence, parameterized, activeSchemeId, contextId, null, null, null, Binding.USER));
+            if (!DEFAULT_SCHEME_ID_FOR_TOGGLE.equals(activeSchemeId))
+            {
+                dialogManager.addBinding(new KeyBinding(
+                        sequence, null, DEFAULT_SCHEME_ID_FOR_TOGGLE, contextId, null, null, null, Binding.USER));
+            }
+        }
+
+        Global.tempLog("userPriorityToggle", "synced dialog fBindingManager removed=" + removed //$NON-NLS-1$ //$NON-NLS-2$
+                + " makeUser=" + makeUser); //$NON-NLS-1$
     }
 
     private static final String DEFAULT_SCHEME_ID_FOR_TOGGLE =

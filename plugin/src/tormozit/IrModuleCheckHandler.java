@@ -280,8 +280,25 @@ public final class IrModuleCheckHandler
                 }
                 catch (BadLocationException ignored) {}
 
+                // Длина подсветки — по длине слова из ошибки (Слово). ИР иногда добавляет к слову
+                // синтаксический хвост (например, открывающую скобку вызова метода — "Записать("),
+                // такие нецидентификаторные хвостовые символы в подсветку включать не нужно.
+                int length = highlightLength(err.word);
+
+                String actualSubstring;
+                try
+                {
+                    actualSubstring = doc.get(rawOffset, Math.min(length, Math.max(0, doc.getLength() - rawOffset)));
+                }
+                catch (Exception ex)
+                {
+                    actualSubstring = "<из диапазона>"; //$NON-NLS-1$
+                }
+                Global.tempLog("irModuleCheck", "marker word=" + err.word + " pos=" + err.position //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " lfOffset=" + lfOffset + " rawOffset=" + rawOffset + " length=" + length //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " line=" + lineNumber + " docSubstring=[" + actualSubstring + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 IrModuleCheckDebug.log("marker pos=" + err.position + " rawOffset=" + rawOffset //$NON-NLS-1$ //$NON-NLS-2$
-                    + " line=" + lineNumber); //$NON-NLS-1$
+                    + " line=" + lineNumber + " length=" + length); //$NON-NLS-1$ //$NON-NLS-2$
 
                 String message = buildMessage(err);
 
@@ -299,7 +316,7 @@ public final class IrModuleCheckHandler
                 marker.setMessage(message);
                 marker.setCreatedAt(err.detectedAt != null ? err.detectedAt : System.currentTimeMillis());
                 StandardExtraInfo.TEXT_OFFSET.put(marker, rawOffset);
-                StandardExtraInfo.TEXT_LENGTH.put(marker, 1);
+                StandardExtraInfo.TEXT_LENGTH.put(marker, length);
                 StandardExtraInfo.TEXT_LINE.put(marker, lineNumber);
                 // Без TEXT_URI_TO_PROBLEM BslMarkerUiHandler.showMarker(...) выходит сразу же —
                 // двойной клик по строке в панели «Ошибки конфигурации» ничего не делает.
@@ -311,7 +328,7 @@ public final class IrModuleCheckHandler
                 editorMarker.setAttribute(IMarker.SEVERITY, IMarker.SEVERITY_WARNING);
                 editorMarker.setAttribute(IMarker.LINE_NUMBER, lineNumber);
                 editorMarker.setAttribute(IMarker.CHAR_START, rawOffset);
-                editorMarker.setAttribute(IMarker.CHAR_END, rawOffset + 1);
+                editorMarker.setAttribute(IMarker.CHAR_END, rawOffset + length);
                 editorMarker.setAttribute(EDITOR_MARKER_ATTR, EDITOR_MARKER_ATTR_VALUE);
             }
 
@@ -332,6 +349,26 @@ public final class IrModuleCheckHandler
             Global.tempLogException("irModuleCheck", "applyMarkers", e); //$NON-NLS-1$ //$NON-NLS-2$
             ToastNotification.show(MENU_LABEL, "Ошибка применения маркеров: " + e.getMessage(), 5_000); //$NON-NLS-1$
         }
+    }
+
+    /**
+     * Длина подсветки маркера по слову ошибки: обрезает хвостовые нецидентификаторные символы
+     * (скобки, точки и т.п. — например, ИР отдаёт «Записать(» для вызова метода). Пустое/{@code null}
+     * слово или слово целиком из таких символов — точка (1 символ).
+     */
+    private static int highlightLength(String word)
+    {
+        if (word == null || word.isBlank())
+            return 1;
+        int end = word.length();
+        while (end > 0)
+        {
+            char c = word.charAt(end - 1);
+            if (Character.isLetterOrDigit(c) || c == '_')
+                break;
+            end--;
+        }
+        return end > 0 ? end : 1;
     }
 
     private static String buildMessage(IxdErrorTableParser.CheckError err)

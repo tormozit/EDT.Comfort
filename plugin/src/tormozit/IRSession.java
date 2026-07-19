@@ -83,6 +83,9 @@ public final class IRSession
         /** Кэш HWND главного окна ИР (native value) для повторных modal-сессий. */
         private volatile long cachedIrMainHwnd;
 
+        /** Тост COM-ошибки — не чаще одного раза за жизнь этой сессии (антиспам при автодополнении). */
+        private final AtomicBoolean comErrorToastShown = new AtomicBoolean(false);
+
         IRSession(IRApplication.State state, LocalDateTime startTime, long pid, String platformVersion,
                   Object root, Object processObj, String appTitle, org.eclipse.core.resources.IProject project,
                   ExecutorService executor, InfobaseReference infobase)
@@ -428,7 +431,48 @@ public final class IRSession
         Object invokeCodeEditorQuiet(String method, Object... args)
         {
             ensureCodeEditor();
-            return ComBridge.invoke(codeEditor, method, args);
+            try
+            {
+                return ComBridge.invoke(codeEditor, method, args);
+            }
+            catch (RuntimeException e)
+            {
+                notifyComErrorOnce(e);
+                throw e;
+            }
+        }
+
+        /**
+         * Первый COM-сбой за сессию — тост пользователю. Повторные (каждая буква assist) молчат.
+         * Гиперссылка «Отключить ИР» только если для инфобазы не включён «Авто ИР».
+         */
+        void notifyComErrorOnce(Throwable error)
+        {
+            if (error == null || !comErrorToastShown.compareAndSet(false, true))
+                return;
+            String raw = error.getMessage();
+            if (raw == null || raw.isBlank())
+                raw = error.getClass().getSimpleName();
+            String detail = ComBridge.formatErrorForNotification(raw);
+            if (detail.isEmpty())
+                return;
+            Global.log("IRSession", detail); //$NON-NLS-1$
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            final String toastText = detail;
+            final InfobaseReference ib = infobase;
+            final boolean offerDisconnect = ib != null
+                && !IRApplication.getInstance().isAutoConnect(ib);
+            display.asyncExec(() ->
+            {
+                if (offerDisconnect)
+                    ToastNotification.show(IRApplication.toastTitle(), toastText, 8_000,
+                        () -> IRApplication.disconnect(ib),
+                        "Отключить ИР"); //$NON-NLS-1$
+                else
+                    ToastNotification.show(IRApplication.toastTitle(), toastText, 8_000);
+            });
         }
 
         private boolean canPumpUserMessages()

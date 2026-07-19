@@ -610,13 +610,6 @@
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.IrModuleCheckCommandHandler"
         commandId="tormozit.IrModuleCheck">
-      <activeWhen>
-        <with variable="activeContexts">
-          <iterate operator="or">
-            <equals value="org.eclipse.xtext.ui.XtextEditorScope"/>
-          </iterate>
-        </with>
-      </activeWhen>
     </handler>
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.IrModuleCheckClearCommandHandler"
@@ -700,7 +693,7 @@
             <command
               commandId="tormozit.RecentPlaces"
               label = "Последние"
-              icon="icons/obj16/recent_places.gif"
+              icon="icons/obj16/recent_places.png"
               tooltip="Последние посещённые методы и объекты метаданных (Комфорт)"
               style="push">
             </command>
@@ -710,7 +703,7 @@
           locationURI="toolbar:com._1c.g5.v8.dt.ui2.navigator?after=com._1c.g5.v8.dt.navigator.ui.filterBySubsystems">
         <command
             commandId="tormozit.navigator.filterByObjectSet"
-            icon="icons/obj16/Favorites.gif"
+            icon="icons/obj16/Favorites.png"
             label="Фильтр по набору"
             style="toggle"
             tooltip="Показать только объекты активного набора; вытесняет фильтр подсистем (Комфорт)"/>
@@ -732,7 +725,7 @@
         allowMultiple="false"
         category="tormozit.views"
         class="tormozit.RecentPlacesView"
-        icon="icons/obj16/recent_places.gif"
+        icon="icons/obj16/recent_places.png"
         id="tormozit.RecentPlacesView"
         name="Последние места"
         restorable="true"/>
@@ -740,7 +733,7 @@
         allowMultiple="false"
         category="tormozit.views"
         class="tormozit.ObjectSetsView"
-        icon="icons/obj16/Favorites.gif"
+        icon="icons/obj16/Favorites.png"
         id="tormozit.ObjectSetsView"
         name="Наборы объектов"
         restorable="true"/>

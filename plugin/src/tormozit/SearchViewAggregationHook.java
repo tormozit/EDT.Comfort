@@ -1,5 +1,6 @@
 package tormozit;
 
+import java.lang.ref.WeakReference;
 import java.text.MessageFormat;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -103,6 +104,16 @@ public final class SearchViewAggregationHook implements IStartup
     private static final String RESIZE_DIAG_HOOKED_KEY = "tormozit.searchAggregationResizeDiag"; //$NON-NLS-1$
     /** Период опроса {@link #installPanelWatchdog} — раз в 1с, независимо от кликов/поисков. */
     private static final int WATCHDOG_INTERVAL_MS = 1000;
+    /**
+     * #165: после Open deferred-{@code CTabFolder.onMouse} может скрыть content «Поиск» при
+     * визуально всё ещё выбранной вкладке. Короткое окно: filter мыши на PartStack + немедленный
+     * desync-heal. Не откатываем чужие вкладки (клик по «Журнал Комфорт» — штатно).
+     */
+    /**
+     * Clip_851980: race {@code onMouse} пришёл на +5с после open — при 3000ms окно уже
+     * истекло, filter не сработал. Держим запас под deferred mouse после открытия редактора.
+     */
+    private static final int OPEN_PROTECT_MS = 10000;
     /** Как {@code Messages.IMatchItem_Total_matches_count_pattern__0} в search.ui. */
     private static final String MATCH_COUNT_SUFFIX_PATTERN = " ({0} \u0441\u043E\u043E\u0442\u0432\u0435\u0442\u0441\u0442\u0432\u0438\u0439)"; //$NON-NLS-1$
 
@@ -119,6 +130,13 @@ public final class SearchViewAggregationHook implements IStartup
      * срабатывания молча пропускаются.
      */
     private static volatile int openSeq;
+    /** {@link System#currentTimeMillis()} до которого действует защита после Open. */
+    private static volatile long openProtectDeadlineMs;
+    /** Момент {@code open} для дельты в логах heal/block. */
+    private static volatile long openArmedAtMs;
+    private static volatile WeakReference<org.eclipse.swt.custom.CTabFolder> searchPartStackFolderRef;
+    private static volatile WeakReference<org.eclipse.swt.custom.CTabItem> searchPartStackItemRef;
+    private static volatile boolean partStackMouseGuardInstalled;
 
     // -----------------------------------------------------------------------
     // IStartup
@@ -131,6 +149,7 @@ public final class SearchViewAggregationHook implements IStartup
             IWorkbench wb = PlatformUI.getWorkbench();
             if (wb == null)
                 return;
+            installPartStackMouseGuard();
             for (IWorkbenchWindow window : wb.getWorkbenchWindows())
                 hookWindow(window);
             wb.addWindowListener(new org.eclipse.ui.IWindowListener()
@@ -223,6 +242,8 @@ public final class SearchViewAggregationHook implements IStartup
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
+        // #165 триггерится двойным кликом по строке результата, не завершением поиска —
+        // автофикс только в open/panelHealth/watchdog, здесь не лечим.
         display.asyncExec(() -> startFirstRootWatch(0));
     }
 
@@ -1913,34 +1934,40 @@ public final class SearchViewAggregationHook implements IStartup
      * они остаются живыми и полными данных, даже если {@code SearchView} в этот момент показывает
      * СОВСЕМ ДРУГУЮ страницу (например, свежий фоновый поиск EDT переключил активную страницу через
      * pagebook) — тогда то, что видит пользователь, вообще не наши дерево/таблица, а чужой пустой
-     * плейсхолдер поверх/вместо них. Поэтому теперь дополнительно проверяем {@code samePage}
-     * (наша страница всё ещё активна в {@code SearchView}) и {@code treeVisible}
-     * ({@link Tree#isVisible()} — учитывает видимость всей цепочки родителей, а не просто
-     * {@code isDisposed()}).
+     * плейсхолдер поверх/вместо них. Поэтому дополнительно: {@code samePage}, {@code treeVisible},
+     * и {@code searchPartVisible} — иначе штатный клик на «Журнал Комфорт» (ради лога) даёт
+     * ложный {@code treeVisible=false} и выглядит как #165 (ошибка разбора Clip_851973).
      */
     private static final class PanelState
     {
         final int treeItems;
         final boolean treeVisible;
         final boolean samePage;
+        final boolean searchPartVisible;
         final String activePageClass;
         final String tableState;
         final String inputState;
 
-        PanelState(int treeItems, boolean treeVisible, boolean samePage,
+        PanelState(int treeItems, boolean treeVisible, boolean samePage, boolean searchPartVisible,
                 String activePageClass, String tableState, String inputState)
         {
             this.treeItems = treeItems;
             this.treeVisible = treeVisible;
             this.samePage = samePage;
+            this.searchPartVisible = searchPartVisible;
             this.activePageClass = activePageClass;
             this.tableState = tableState;
             this.inputState = inputState;
         }
 
-        /** «Проблема» — то, что реально соответствует жалобе «панель опустела»: не наша активная страница видна, либо дерево не видно, либо пусто. */
+        /**
+         * «Проблема» #165 — пользователь смотрит на Search ({@code searchPartVisible}), а дерево
+         * пусто/не видно/не та страница. Скрытость из‑за другой вкладки стека — не проблема.
+         */
         boolean isProblem()
         {
+            if (!searchPartVisible)
+                return false;
             return !samePage || !treeVisible || treeItems == 0;
         }
 
@@ -1948,6 +1975,7 @@ public final class SearchViewAggregationHook implements IStartup
         public String toString()
         {
             return "{treeItems=" + treeItems + " treeVisible=" + treeVisible //$NON-NLS-1$ //$NON-NLS-2$
+                + " searchPartVisible=" + searchPartVisible //$NON-NLS-1$
                 + " " + tableState + " " + inputState //$NON-NLS-1$ //$NON-NLS-2$
                 + " activePage=" + activePageClass + " samePage=" + samePage + "}"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
@@ -1962,6 +1990,7 @@ public final class SearchViewAggregationHook implements IStartup
         boolean treeVisible = !treeDisposed && tree.isVisible();
 
         boolean samePage = false;
+        boolean searchPartVisible = false;
         String activePageClass = "?"; //$NON-NLS-1$
         try
         {
@@ -1973,6 +2002,8 @@ public final class SearchViewAggregationHook implements IStartup
                 ISearchResultPage currentActive = resultView.getActivePage();
                 samePage = currentActive == page;
                 activePageClass = currentActive != null ? currentActive.getClass().getSimpleName() : "null"; //$NON-NLS-1$
+                IWorkbenchPage wbPage = view.getSite() != null ? view.getSite().getPage() : null;
+                searchPartVisible = wbPage != null && wbPage.isPartVisible(view);
             }
         }
         catch (Exception e)
@@ -1998,7 +2029,7 @@ public final class SearchViewAggregationHook implements IStartup
             inputState = "input=ERR:" + e.getClass().getSimpleName(); //$NON-NLS-1$
         }
 
-        return new PanelState(treeItems, treeVisible, samePage, activePageClass,
+        return new PanelState(treeItems, treeVisible, samePage, searchPartVisible, activePageClass,
             describeTableSelectionState(tableViewer), inputState);
     }
 
@@ -2021,9 +2052,9 @@ public final class SearchViewAggregationHook implements IStartup
             @Override
             public void open(OpenEvent event)
             {
-                // Диагностика #165 — независимо от «Улучшать списки» (см. Javadoc tryPatch),
-                // log() сам молчит, если выключено «Общее логирование».
+                // Диагностика #165 — независимо от «Улучшать списки» (см. Javadoc tryPatch).
                 int seq = ++openSeq;
+                beginOpenPartStackProtect(treeViewer.getTree());
                 log("open: seq=" + seq + " " + describePanelState(treeViewer, tableViewer, page)); //$NON-NLS-1$ //$NON-NLS-2$
                 schedulePanelHealthDiag(page, treeViewer, tableViewer, 0, seq);
                 schedulePanelHealthDiag(page, treeViewer, tableViewer, 100, seq);
@@ -2069,12 +2100,10 @@ public final class SearchViewAggregationHook implements IStartup
                 {
                     log((isProblem ? "WATCHDOG_PROBLEM_START: " : "WATCHDOG_PROBLEM_END: ") + state); //$NON-NLS-1$ //$NON-NLS-2$
                     if (isProblem && !state.treeVisible)
-                    {
                         log("WATCHDOG_ANCESTOR_CHAIN: " + describeAncestorChain(tree)); //$NON-NLS-1$
-                        trySelfHealHiddenCTabFolderChild(tree);
-                    }
                     wasProblem[0] = isProblem;
                 }
+                // Автофикс — только сразу из HIDE/onMouse (см. installResizeDiag), не раз в секунду.
             }
             display.timerExec(WATCHDOG_INTERVAL_MS, tickHolder[0]);
         };
@@ -2108,11 +2137,31 @@ public final class SearchViewAggregationHook implements IStartup
                 : src != null ? src.getClass().getSimpleName() + "@" + System.identityHashCode(src) : "?"; //$NON-NLS-1$ //$NON-NLS-2$
             String eventName = event.type == SWT.Resize ? "RESIZE" : event.type == SWT.Show ? "SHOW" : "HIDE"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             log(eventName + " " + who + ": " + describeBounds(src)); //$NON-NLS-1$ //$NON-NLS-2$
-            // HIDE летит СИНХРОННО изнутри Control.setVisible(false) — стек вызовов в этот момент
-            // укажет ИМЕННО того, кто скрыл виджет (по факту прошлого лога: HIDE на content-Composite
-            // вкладки «Поиск» внутри CTabFolder, без обратного SHOW — нужно найти вызывающий код).
-            if (event.type == SWT.Hide)
-                log("HIDE stacktrace: " + describeCurrentStackTrace()); //$NON-NLS-1$
+            // HIDE синхронно из setVisible(false) — стек покажет вызывающий код.
+            // Штатный клик на другую вкладку стека (в т.ч. «Журнал Комфорт») тоже даёт HIDE —
+            // desync-heal сработает только если selection всё ещё «Поиск» (см. plan #165).
+            if (event.type != SWT.Hide)
+                return;
+            String stack = describeCurrentStackTrace();
+            log("HIDE stacktrace: " + stack); //$NON-NLS-1$
+            boolean fromCTab = stack.contains("CTabFolder.onMouse") //$NON-NLS-1$
+                || stack.contains("CTabFolder.setSelection"); //$NON-NLS-1$
+            if (!fromCTab)
+                return;
+            if (!isOpenProtectActive())
+            {
+                // Clip_851980: onMouse пришёл после истечения окна — filter уже не действует.
+                log("OPEN_PROTECT: HIDE/onMouse outside protect +" + msSinceOpenArmed() + "ms"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            Display display = event.display != null ? event.display : Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            display.asyncExec(() -> {
+                if (tree.isDisposed())
+                    return;
+                tryHealSearchPartStackDesync("HIDE/onMouse"); //$NON-NLS-1$
+            });
         };
         addAncestorListenerChain(tree, listener);
         addAncestorListenerChain(table, listener);
@@ -2183,66 +2232,174 @@ public final class SearchViewAggregationHook implements IStartup
         return sb.toString();
     }
 
-    /**
-     * КОСТЫЛЬ: почему он вообще нужен.
-     *
-     * <p>Баг («опустевшая» панель поиска — дерево пустое, хотя данные и выделение на месте,
-     * таблица справа полна) диагностирован ПОЛНОСТЬЮ вне нашего кода. Стек вызовов, пойманный
-     * {@link #installResizeDiag} на живом воспроизведении у пользователя:
-     * <pre>
-     * Control.setVisible(false)
-     *   at org.eclipse.swt.custom.CTabFolder.setSelection(CTabFolder.java:3240/3248)
-     *   at org.eclipse.swt.custom.CTabFolder.onMouse(CTabFolder.java:1891)
-     *   at org.eclipse.swt.custom.CTabFolder.lambda$0(CTabFolder.java:332)
-     * </pre>
-     * — это штатный {@code CTabFolder} (панель вкладок «Иерархия вызовов / Поиск / Ошибки
-     * конфигурации / ...», в которую EDT докует наш {@code SearchView} среди прочих) сам, своим
-     * внутренним обработчиком мыши, скрывает content-composite вкладки «Поиск» (вызывая
-     * {@code setSelection} — по всей видимости, интерпретируя какое-то мышиное событие как клик
-     * по другой вкладке; по свидетельству пользователя — коррелирует с сужением ВСЕГО вида-стека
-     * и открытием тяжёлого редактора модуля в этот момент, из-за чего рвётся тайминг). После этого
-     * {@code CTabFolder} никогда не вызывает обратный {@code setVisible(true)} для этой вкладки —
-     * заголовок вкладки «Поиск» остаётся подсвеченным как выбранный (внутренняя книга CTabFolder
-     * этого не разруливает сама), а её контент так и остаётся невидимым навсегда. Это дефект
-     * (или как минимум крайне неприятная гонка) в самом {@code org.eclipse.swt.custom.CTabFolder}
-     * из платформы Eclipse — чинить его исходники нам недоступно и не наша ответственность.
-     *
-     * <p>Отключение «Улучшать списки» баг НЕ убирает (см. переписку с пользователем) — значит,
-     * агрегация/колонка «Путь» тут ни при чём напрямую. Полное удаление плагина баг убирает —
-     * вероятно, потому что другие безусловные хуки плагина (подсветка серверных вызовов, content
-     * assist, hover и т.п.) чуть смещают тайминг вокруг открытия редактора и тем самым делают эту
-     * гонку в {@code CTabFolder} более вероятной, а не потому что мы сами вызываем {@code setVisible}.
-     *
-     * <p>Раз платформенный баг не в нашей власти — компенсируем СЛЕДСТВИЕ, не причину: как только
-     * {@link #installPanelWatchdog} видит «данные целы, но дерево невидимо» ({@code treeVisible=false}
-     * при {@code treeItems>0}), поднимаемся по цепочке родителей до composite, ЧЕЙ РОДИТЕЛЬ —
-     * именно {@code CTabFolder} (то самое место разрыва по стеку выше), и принудительно вызываем на
-     * НЁМ {@code setVisible(true)}. Это ТОЛЬКО восстанавливает физический показ контента — не
-     * трогает данные/выделение/модель и не лезет в собственную бухгалтерию {@code CTabFolder}
-     * (какая вкладка у него "выбрана" внутри — не меняем, там и так уже "Поиск", просто её контент
-     * был скрыт). Проверка "родитель именно CTabFolder" — намеренно узкая: у обычного штатного
-     * переключения на busy-заглушку (см. {@code ConfigurationSearchViewPage.showBusyLabel} — тоже
-     * даёт HIDE, но на СВОЙ, другой composite, чей родитель — {@code PageBook}, не {@code CTabFolder})
-     * этот автофикс не сработает и не должен — то скрытие штатное и самокорректируется.
-     */
-    private static void trySelfHealHiddenCTabFolderChild(Control control)
+    private static boolean isOpenProtectActive()
     {
-        Control cur = control;
+        return System.currentTimeMillis() < openProtectDeadlineMs;
+    }
+
+    private static long msSinceOpenArmed()
+    {
+        long armed = openArmedAtMs;
+        return armed <= 0 ? -1 : System.currentTimeMillis() - armed;
+    }
+
+    /** Запомнить PartStack «Поиск» и включить короткое окно защиты после Open. */
+    private static void beginOpenPartStackProtect(Control tree)
+    {
+        openArmedAtMs = System.currentTimeMillis();
+        openProtectDeadlineMs = openArmedAtMs + OPEN_PROTECT_MS;
+        PartStackTab stack = findSearchPartStackTab(tree);
+        if (stack == null)
+        {
+            searchPartStackFolderRef = null;
+            searchPartStackItemRef = null;
+            log("OPEN_PROTECT: PartStack не найден, protect +" + OPEN_PROTECT_MS + "ms"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        searchPartStackFolderRef = new WeakReference<>(stack.folder);
+        searchPartStackItemRef = new WeakReference<>(stack.item);
+        log("OPEN_PROTECT: armed +" + OPEN_PROTECT_MS + "ms tab=" + describeCTabItem(stack.item)); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * Блокирует MouseDown/Up на PartStack-{@code CTabFolder} только в {@link #OPEN_PROTECT_MS}
+     * после Open — чтобы deferred-{@code onMouse} не делал {@code setSelection}.
+     */
+    private static void installPartStackMouseGuard()
+    {
+        if (partStackMouseGuardInstalled)
+            return;
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        partStackMouseGuardInstalled = true;
+        Listener guard = event -> {
+            if (!isOpenProtectActive())
+                return;
+            WeakReference<org.eclipse.swt.custom.CTabFolder> ref = searchPartStackFolderRef;
+            org.eclipse.swt.custom.CTabFolder folder = ref != null ? ref.get() : null;
+            if (folder == null || folder.isDisposed() || event.widget != folder)
+                return;
+            event.doit = false;
+            String kind = event.type == SWT.MouseDown ? "MouseDown" //$NON-NLS-1$
+                : event.type == SWT.MouseUp ? "MouseUp" : "Mouse"; //$NON-NLS-1$ //$NON-NLS-2$
+            log("OPEN_PROTECT: blocked " + kind + " on PartStack +" + msSinceOpenArmed() + "ms"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        };
+        display.addFilter(SWT.MouseDown, guard);
+        display.addFilter(SWT.MouseUp, guard);
+        log("OPEN_PROTECT: Display mouse filter installed"); //$NON-NLS-1$
+    }
+
+    /**
+     * Восстановление рассинхрона #165: вкладка «Поиск» выбрана ({@code getSelection()==item}),
+     * а её content скрыт. Чужую вкладку стека не трогаем.
+     */
+    private static void tryHealSearchPartStackDesync(String reason)
+    {
+        if (!isOpenProtectActive())
+            return;
+        WeakReference<org.eclipse.swt.custom.CTabFolder> folderRef = searchPartStackFolderRef;
+        WeakReference<org.eclipse.swt.custom.CTabItem> itemRef = searchPartStackItemRef;
+        org.eclipse.swt.custom.CTabFolder folder = folderRef != null ? folderRef.get() : null;
+        org.eclipse.swt.custom.CTabItem ourItem = itemRef != null ? itemRef.get() : null;
+        if (folder == null || folder.isDisposed() || ourItem == null || ourItem.isDisposed())
+            return;
+        org.eclipse.swt.custom.CTabItem selected = folder.getSelection();
+        if (selected != ourItem)
+        {
+            // Штатный уход на другую вкладку (в т.ч. «Журнал Комфорт») — не наш баг.
+            log("SELF_HEAL desync skip (" + reason + "): selection=" //$NON-NLS-1$ //$NON-NLS-2$
+                + describeCTabItem(selected) + " +" + msSinceOpenArmed() + "ms"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        Control content = ourItem.getControl();
+        if (content == null || content.isDisposed() || content.getVisible())
+            return;
+
+        log("SELF_HEAL desync (" + reason + "): content hidden while Поиск selected +" //$NON-NLS-1$ //$NON-NLS-2$
+            + msSinceOpenArmed() + "ms"); //$NON-NLS-1$
+        folder.setRedraw(false);
+        try
+        {
+            org.eclipse.swt.custom.CTabItem other = findOtherCTabItem(folder, ourItem);
+            if (other != null)
+            {
+                // early-return setSelection(index==selected) не вызывает setVisible(true).
+                folder.setSelection(other);
+                folder.setSelection(ourItem);
+            }
+            else
+            {
+                // Единственная вкладка — безопасный setVisible на уже выбранном content.
+                content.setVisible(true);
+            }
+        }
+        finally
+        {
+            if (!folder.isDisposed())
+                folder.setRedraw(true);
+        }
+        Control after = ourItem.isDisposed() ? null : ourItem.getControl();
+        log("SELF_HEAL desync done: contentOwnVisible=" //$NON-NLS-1$
+            + (after == null || after.isDisposed() ? "?" : Boolean.toString(after.getVisible())) //$NON-NLS-1$
+            + " +" + msSinceOpenArmed() + "ms"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static final class PartStackTab
+    {
+        final org.eclipse.swt.custom.CTabFolder folder;
+        final org.eclipse.swt.custom.CTabItem item;
+
+        PartStackTab(org.eclipse.swt.custom.CTabFolder folder, org.eclipse.swt.custom.CTabItem item)
+        {
+            this.folder = folder;
+            this.item = item;
+        }
+    }
+
+    private static PartStackTab findSearchPartStackTab(Control tree)
+    {
+        if (tree == null || tree.isDisposed())
+            return null;
+        Control cur = tree;
         for (int depth = 0; cur != null && !cur.isDisposed() && depth < 20; depth++)
         {
             Control parent = cur.getParent();
-            if (parent instanceof org.eclipse.swt.custom.CTabFolder && !cur.getVisible())
+            if (parent instanceof org.eclipse.swt.custom.CTabFolder)
             {
-                cur.setVisible(true);
-                log("SELF_HEAL: setVisible(true) на " + cur.getClass().getSimpleName() //$NON-NLS-1$
-                    + "@" + System.identityHashCode(cur) //$NON-NLS-1$
-                    + " (родитель CTabFolder), результат ownVisible=" + cur.getVisible()); //$NON-NLS-1$
-                return;
+                org.eclipse.swt.custom.CTabFolder folder = (org.eclipse.swt.custom.CTabFolder) parent;
+                for (org.eclipse.swt.custom.CTabItem item : folder.getItems())
+                {
+                    if (item != null && !item.isDisposed() && item.getControl() == cur)
+                        return new PartStackTab(folder, item);
+                }
+                return null;
             }
             if (parent instanceof org.eclipse.swt.widgets.Shell || parent == null)
                 break;
             cur = parent;
         }
+        return null;
+    }
+
+    private static org.eclipse.swt.custom.CTabItem findOtherCTabItem(
+            org.eclipse.swt.custom.CTabFolder folder, org.eclipse.swt.custom.CTabItem ourItem)
+    {
+        for (org.eclipse.swt.custom.CTabItem item : folder.getItems())
+        {
+            if (item != null && !item.isDisposed() && item != ourItem)
+                return item;
+        }
+        return null;
+    }
+
+    private static String describeCTabItem(org.eclipse.swt.custom.CTabItem item)
+    {
+        if (item == null || item.isDisposed())
+            return "null"; //$NON-NLS-1$
+        Control c = item.getControl();
+        return "'" + item.getText() + "' ctrlVisible=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (c == null || c.isDisposed() ? "?" : Boolean.toString(c.getVisible())); //$NON-NLS-1$
     }
 
     private static void schedulePanelHealthDiag(ISearchResultPage page, TreeViewer treeViewer,
@@ -2260,9 +2417,7 @@ public final class SearchViewAggregationHook implements IStartup
                 return;
             PanelState state = computePanelState(treeViewer, tableViewer, page);
             log("panelHealth seq=" + seq + " +" + delayMs + "ms: " + state); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            // Сигналим не только на пустое дерево, но и на "не наша страница активна"/"дерево не видно" —
-            // именно так выглядела жалоба пользователя, когда счётчики элементов при этом были в порядке
-            // (см. Javadoc PanelState.isProblem()).
+            // Только диагностика — автофикс только из HIDE→asyncExec (desync), не отсюда.
             if (state.isProblem())
                 log("TREE_EMPTIED seq=" + seq + " +" + delayMs + "ms: " + state); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         });

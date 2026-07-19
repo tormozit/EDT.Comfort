@@ -2,6 +2,8 @@ package tormozit;
 
 import java.util.WeakHashMap;
 
+import org.eclipse.jface.dialogs.IPageChangeProvider;
+import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.jface.preference.IPreferencePage;
 import org.eclipse.jface.preference.PreferenceDialog;
 import org.eclipse.swt.SWT;
@@ -21,6 +23,9 @@ public final class ComfortKeysPageHook implements IStartup
     private static final int RETRY_MS = 100;
 
     private static final WeakHashMap<Shell, Boolean> pendingApplies =
+            new WeakHashMap<>();
+
+    private static final WeakHashMap<PreferenceDialog, Boolean> pageListenersAttached =
             new WeakHashMap<>();
 
     @Override
@@ -45,11 +50,43 @@ public final class ComfortKeysPageHook implements IStartup
                 return;
             if (!isPreferencesShell(shell))
                 return;
+            PreferenceDialog dialog = findPreferenceDialog(shell);
+            if (dialog != null)
+                attachPageChangedListener(dialog, display, shell);
             scheduleTryApplyOnce(display, shell);
         };
 
         display.addFilter(SWT.Show, listener);
         display.addFilter(SWT.Activate, listener);
+    }
+
+    /**
+     * Ручное переключение страницы в дереве параметров не порождает
+     * SWT.Show/SWT.Activate у Shell (он не пересоздаётся и не активируется
+     * заново), поэтому без этого слушателя патч «Клавиш» применялся только
+     * если попасть в 3-секундное окно ретраев scheduleTryApply или случайно
+     * переключить фокус окна.
+     */
+    private static void attachPageChangedListener(PreferenceDialog dialog, Display display,
+            Shell shell)
+    {
+        if (!(dialog instanceof IPageChangeProvider provider))
+            return;
+        synchronized (pageListenersAttached)
+        {
+            if (Boolean.TRUE.equals(pageListenersAttached.get(dialog)))
+                return;
+            pageListenersAttached.put(dialog, Boolean.TRUE);
+        }
+        IPageChangedListener pageListener = event ->
+        {
+            Shell target = shell;
+            if (target == null || target.isDisposed())
+                target = dialog.getShell();
+            if (target != null && !target.isDisposed())
+                scheduleTryApplyOnce(display, target);
+        };
+        provider.addPageChangedListener(pageListener);
     }
 
     private static boolean isPreferencesShell(Shell shell)
