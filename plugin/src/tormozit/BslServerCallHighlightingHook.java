@@ -14,6 +14,8 @@ import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.core.runtime.preferences.IEclipsePreferences;
+import org.eclipse.core.runtime.preferences.InstanceScope;
 import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.jface.text.TextAttribute;
 import org.eclipse.jface.text.TextPresentation;
@@ -75,11 +77,25 @@ public final class BslServerCallHighlightingHook implements IStartup
                 String prop = event.getProperty();
                 if (ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_ENABLED.equals(prop)
                     || ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_COLOR.equals(prop)
-                    || ComfortSettings.PREF_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR.equals(prop))
+                    || ComfortSettings.PREF_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR.equals(prop)
+                    || ComfortSettings.PREF_FILTER_MATCH_COLOR.equals(prop))
                 {
-                    PlatformUI.getWorkbench().getDisplay().asyncExec(BslServerCallHighlightingHook::refreshAllEditors);
+                    PlatformUI.getWorkbench().getDisplay().asyncExec(() -> {
+                        SmartMatchHighlight.clearColorCache();
+                        refreshAllEditors();
+                    });
                 }
             });
+
+        // Смена e4 CSS темы (светлая↔тёмная): сброс кэша FG и пересчёт подсветки.
+        IEclipsePreferences themeNode = InstanceScope.INSTANCE.getNode(
+            "org.eclipse.e4.ui.css.swt.theme"); //$NON-NLS-1$
+        themeNode.addPreferenceChangeListener(event -> {
+            PlatformUI.getWorkbench().getDisplay().asyncExec(() -> {
+                SmartMatchHighlight.clearColorCache();
+                refreshAllEditors();
+            });
+        });
     }
 
     static void refreshAllEditors()

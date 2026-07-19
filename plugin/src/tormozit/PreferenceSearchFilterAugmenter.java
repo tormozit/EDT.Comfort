@@ -25,7 +25,6 @@ import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
-import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.graphics.TextStyle;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
@@ -495,20 +494,8 @@ final class PreferenceSearchFilterAugmenter
                 control.setData(ORIGINAL_FOREGROUND_KEY, control.getForeground());
             TextStyle style = new TextStyle();
             noBackgroundStyler(control).applyStyles(style);
-            // #region agent log
-            Color before = control.getForeground();
-            // #endregion
             if (style.foreground != null)
                 control.setForeground(style.foreground);
-            // #region agent log
-            Color after = control.getForeground();
-            Global.tempLog("smart-match-fg", "prefs.applyMatchStyle MATCH "
-                + control.getClass().getSimpleName()
-                + " text=" + truncateControlText(control)
-                + " styleFg=" + rgbOfColor(style.foreground)
-                + " beforeSet=" + rgbOfColor(before)
-                + " afterSet=" + rgbOfColor(after));
-            // #endregion
             return;
         }
 
@@ -518,31 +505,6 @@ final class PreferenceSearchFilterAugmenter
         // Если контрол никогда не подсвечивался (originalFg == null) — вообще
         // не трогаем его, чтобы не срывать CSS-стилизацию темы.
     }
-
-    // #region agent log
-    private static String truncateControlText(Control control)
-    {
-        String raw = null;
-        if (control instanceof Label label)
-            raw = label.getText();
-        else if (control instanceof Button button)
-            raw = button.getText();
-        else if (control instanceof CLabel clabel)
-            raw = clabel.getText();
-        if (raw == null)
-            return ""; //$NON-NLS-1$
-        String t = raw.replace('\n', ' ').replace('\r', ' ');
-        return t.length() > 40 ? t.substring(0, 40) + "…" : t;
-    }
-
-    private static String rgbOfColor(Color c)
-    {
-        if (c == null || c.isDisposed())
-            return "null";
-        RGB r = c.getRGB();
-        return r.red + "," + r.green + "," + r.blue;
-    }
-    // #endregion
 
     private static void wireHighlighting(TreeViewer viewer, Text filterControl)
     {
@@ -631,17 +593,8 @@ final class PreferenceSearchFilterAugmenter
             {
                 TextStyle temp = new TextStyle();
                 base.applyStyles(temp);
-                Color textOnly = SmartMatchHighlight.textOnlyForeground(context);
-                textStyle.foreground = textOnly;
+                textStyle.foreground = SmartMatchHighlight.textOnlyForeground(context);
                 textStyle.font = temp.font;
-                // #region agent log
-                Global.tempLog("smart-match-fg", "prefs.noBackgroundStyler"
-                    + " baseFg=" + rgbOfColor(temp.foreground)
-                    + " baseBg=" + rgbOfColor(temp.background)
-                    + " textOnlyFg=" + rgbOfColor(textOnly)
-                    + " context=" + (context == null || context.isDisposed()
-                        ? "null/disposed" : context.getClass().getSimpleName()));
-                // #endregion
                 // background намеренно не переносим
             }
         };

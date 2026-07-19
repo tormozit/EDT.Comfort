@@ -192,9 +192,7 @@ public final class SmartMatchHighlight
         Display display = currentDisplay();
         RGB baseRgb = resolveMatchBaseRgb(context, display);
         Font font = boldFont();
-        boolean darkByRgb = isDarkMatchRgb(baseRgb);
-        boolean darkByTheme = isDarkTheme();
-        boolean dark = darkByRgb || darkByTheme;
+        boolean dark = isDarkMatchRgb(baseRgb) || isDarkTheme();
         MatchStyle style;
         if (dark)
         {
@@ -207,10 +205,6 @@ public final class SmartMatchHighlight
         {
             style = new MatchStyle(lightForeground(), null, font);
         }
-        // #region agent log
-        logMatchDecision("resolveMatchStyle", context, baseRgb, dark, darkByRgb, darkByTheme, style.foreground,
-            style.background);
-        // #endregion
         return style;
     }
 
@@ -414,21 +408,22 @@ public final class SmartMatchHighlight
     }
 
     /**
-     * Эффективный цвет для текущей темы: светлая — как передан; тёмная — осветление
-     * {@code shift = 255 - max(R,G,B)}. Общий для фильтра, серверных вызовов и явных FG.
+     * Эффективный цвет для текущей темы. Store всегда в координатах светлой темы;
+     * в тёмной — {@link #invertLightness(RGB)} (HSL L' = 1−L, обратимо).
      */
     public static RGB toEffectiveRgb(RGB lightStored)
     {
         if (lightStored == null)
             return new RGB(0, 0, 0);
+        RGB light = sanitizeStoredLightRgb(lightStored);
         if (!isDarkTheme())
-            return lightStored;
-        return lightToDarkRgb(lightStored);
+            return light;
+        return invertLightness(light);
     }
 
     /**
-     * Нормализация к светлой теме для хранения: в светлой теме — как есть;
-     * в тёмной — обратная к {@link #toEffectiveRgb(RGB)} ({@code shift = min(R,G,B)}).
+     * Нормализация к светлой теме для хранения. В тёмной теме — тот же
+     * {@link #invertLightness(RGB)} (f∘f = id), в светлой — как есть.
      */
     public static RGB toStoredLightRgb(RGB displayed)
     {
@@ -436,7 +431,35 @@ public final class SmartMatchHighlight
             return new RGB(0, 0, 0);
         if (!isDarkTheme())
             return displayed;
-        return darkToLightRgb(displayed);
+        return invertLightness(displayed);
+    }
+
+    /**
+     * Лечит store, куда по ошибке записали dark-effective вместо светлого:
+     * яркий RGB (L&gt;0.55), после инверсии заметно темнее → возвращаем инверсию как истинный light.
+     */
+    public static RGB sanitizeStoredLightRgb(RGB stored)
+    {
+        if (stored == null)
+            return new RGB(0, 0, 0);
+        float l = hslLightness(stored);
+        if (l <= 0.55f)
+            return stored;
+        RGB inverted = invertLightness(stored);
+        float lInv = hslLightness(inverted);
+        if (lInv < l - 0.05f)
+            return inverted;
+        return stored;
+    }
+
+    private static float hslLightness(RGB rgb)
+    {
+        float r = rgb.red / 255f;
+        float g = rgb.green / 255f;
+        float b = rgb.blue / 255f;
+        float max = Math.max(r, Math.max(g, b));
+        float min = Math.min(r, Math.min(g, b));
+        return (max + min) / 2f;
     }
 
     /**
@@ -461,16 +484,79 @@ public final class SmartMatchHighlight
         return created;
     }
 
-    static RGB lightToDarkRgb(RGB light)
+    /**
+     * Инверсия светлоты в HSL (H и S без изменений). Involutive: повтор даёт исходный RGB.
+     * Универсальная схема light↔dark для цветов шрифта.
+     */
+    public static RGB invertLightness(RGB rgb)
     {
-        int shift = 255 - Math.max(light.red, Math.max(light.green, light.blue));
-        return new RGB(light.red + shift, light.green + shift, light.blue + shift);
+        float r = rgb.red / 255f;
+        float g = rgb.green / 255f;
+        float b = rgb.blue / 255f;
+        float max = Math.max(r, Math.max(g, b));
+        float min = Math.min(r, Math.min(g, b));
+        float h;
+        float s;
+        float l = (max + min) / 2f;
+        if (max == min)
+        {
+            h = 0f;
+            s = 0f;
+        }
+        else
+        {
+            float d = max - min;
+            s = l > 0.5f ? d / (2f - max - min) : d / (max + min);
+            if (max == r)
+                h = ((g - b) / d + (g < b ? 6f : 0f)) / 6f;
+            else if (max == g)
+                h = ((b - r) / d + 2f) / 6f;
+            else
+                h = ((r - g) / d + 4f) / 6f;
+        }
+        return hslToRgb(h, s, 1f - l);
     }
 
-    static RGB darkToLightRgb(RGB dark)
+    private static RGB hslToRgb(float h, float s, float l)
     {
-        int shift = Math.min(dark.red, Math.min(dark.green, dark.blue));
-        return new RGB(dark.red - shift, dark.green - shift, dark.blue - shift);
+        float r;
+        float g;
+        float b;
+        if (s == 0f)
+        {
+            r = g = b = l;
+        }
+        else
+        {
+            float q = l < 0.5f ? l * (1f + s) : l + s - l * s;
+            float p = 2f * l - q;
+            r = hueToRgb(p, q, h + 1f / 3f);
+            g = hueToRgb(p, q, h);
+            b = hueToRgb(p, q, h - 1f / 3f);
+        }
+        return new RGB(clampByte(Math.round(r * 255f)), clampByte(Math.round(g * 255f)),
+            clampByte(Math.round(b * 255f)));
+    }
+
+    private static int clampByte(int value)
+    {
+        return Math.max(0, Math.min(255, value));
+    }
+
+    private static float hueToRgb(float p, float q, float t)
+    {
+        float tt = t;
+        if (tt < 0f)
+            tt += 1f;
+        if (tt > 1f)
+            tt -= 1f;
+        if (tt < 1f / 6f)
+            return p + (q - p) * 6f * tt;
+        if (tt < 1f / 2f)
+            return q;
+        if (tt < 2f / 3f)
+            return p + (q - p) * (2f / 3f - tt) * 6f;
+        return p;
     }
 
     /** Сброс кэша цветов (смена настройки / темы). */
@@ -519,172 +605,29 @@ public final class SmartMatchHighlight
     {
         Display display = currentDisplay();
         RGB baseRgb = resolveMatchBaseRgb(context, display);
-        boolean darkByRgb = isDarkMatchRgb(baseRgb);
-        boolean darkByTheme = isDarkTheme();
-        RGB ancestorDarkRgb = findDarkBackgroundRgb(context);
-        boolean darkByAncestor = ancestorDarkRgb != null;
-        boolean dark = darkByRgb || darkByTheme || darkByAncestor;
-        Color fg;
+        boolean dark = isDarkMatchRgb(baseRgb) || isDarkTheme()
+            || findDarkBackgroundRgb(context) != null;
         if (dark)
         {
             primeMatchColors(display);
-            fg = cachedMatchForeground;
+            return cachedMatchForeground;
         }
-        else
-        {
-            fg = lightForeground();
-        }
-        // #region agent log
-        logMatchDecision("textOnlyForeground", context, baseRgb, dark, darkByRgb, darkByTheme, fg, null);
-        Global.tempLog("smart-match-fg", "  flags darkByAncestor=" + darkByAncestor
-            + " ancestorDarkRgb=" + ancestorDarkRgb);
-        // #endregion
-        return fg;
+        return lightForeground();
     }
 
     private static void primeMatchColors(Display display)
     {
         RGB light = ComfortSettings.getFilterMatchLightRgb();
-        RGB expected = lightToDarkRgb(light);
+        RGB expected = toEffectiveRgb(light);
         if (cachedMatchForeground != null && !cachedMatchForeground.isDisposed()
             && cachedLightRgb != null && cachedLightRgb.equals(light)
             && expected.equals(cachedMatchForeground.getRGB()))
-        {
-            // #region agent log
-            Global.tempLog("smart-match-fg", "primeMatchColors CACHE-HIT fg="
-                + cachedMatchForeground.getRGB() + " resultBg=null");
-            // #endregion
             return;
-        }
         disposeMatchColors();
         cachedMatchForeground = new Color(display, expected);
         cachedLightRgb = light;
         cachedMatchBaseRgb = DARK_LIST_FALLBACK;
-        // #region agent log
-        Global.tempLog("smart-match-fg", "primeMatchColors RECREATE light=" + light
-            + " → cachedMatchForeground=" + expected + " resultBg=null (no pill)");
-        // #endregion
     }
-
-    // #region agent log
-    private static void logMatchDecision(String where, Control context, RGB baseRgb, boolean dark,
-            boolean darkByRgb, boolean darkByTheme, Color resultFg, Color resultBg)
-    {
-        StringBuilder sb = new StringBuilder();
-        RGB light = ComfortSettings.getFilterMatchLightRgb();
-        sb.append(where).append(" dark=").append(dark)
-            .append(" darkByRgb=").append(darkByRgb)
-            .append(" darkByTheme=").append(darkByTheme)
-            .append(" baseRgb=").append(baseRgb)
-            .append(" LIGHT=").append(light.red).append(',').append(light.green).append(',').append(light.blue)
-            .append(" resultFg=").append(rgbOf(resultFg))
-            .append(" resultBg=").append(rgbOf(resultBg));
-        sb.append(" | ").append(describeThemeProbe());
-        sb.append(" | ").append(describeControlChain(context));
-        sb.append(" | callers=").append(tormozitCallers(8));
-        Global.tempLog("smart-match-fg", sb.toString());
-    }
-
-    private static String rgbOf(Color c)
-    {
-        if (c == null || c.isDisposed())
-            return "null";
-        RGB r = c.getRGB();
-        return r.red + "," + r.green + "," + r.blue;
-    }
-
-    private static String describeThemeProbe()
-    {
-        String workbenchId = null;
-        String e4Id = null;
-        try
-        {
-            if (PlatformUI.isWorkbenchRunning())
-            {
-                ITheme theme = PlatformUI.getWorkbench().getThemeManager().getCurrentTheme();
-                workbenchId = theme != null ? theme.getId() : null;
-                e4Id = e4CssThemeId();
-            }
-        }
-        catch (Exception ignored) {}
-        Display display = currentDisplay();
-        Color listBg = display.getSystemColor(SWT.COLOR_LIST_BACKGROUND);
-        Color widgetBg = display.getSystemColor(SWT.COLOR_WIDGET_BACKGROUND);
-        return "workbenchTheme=" + workbenchId
-            + " e4CssTheme=" + e4Id
-            + " COLOR_LIST_BACKGROUND=" + rgbOf(listBg)
-            + " COLOR_WIDGET_BACKGROUND=" + rgbOf(widgetBg)
-            + " isDarkTheme()=" + isDarkTheme();
-    }
-
-    private static String e4CssThemeId()
-    {
-        try
-        {
-            Bundle cssTheme = Platform.getBundle("org.eclipse.e4.ui.css.swt.theme"); //$NON-NLS-1$
-            if (cssTheme == null)
-                return "<no-bundle>";
-            Class<?> engineClass = cssTheme.loadClass("org.eclipse.e4.ui.css.swt.theme.IThemeEngine"); //$NON-NLS-1$
-            Object engine = PlatformUI.getWorkbench().getService(engineClass);
-            if (engine == null)
-                return "<no-engine>";
-            Object active = Global.invoke(engine, "getActiveTheme"); //$NON-NLS-1$
-            if (active == null)
-                return "<no-active>";
-            Object id = Global.invoke(active, "getId"); //$NON-NLS-1$
-            return id instanceof String ? (String) id : String.valueOf(id);
-        }
-        catch (Exception ex)
-        {
-            return "<err:" + ex.getClass().getSimpleName() + ">";
-        }
-    }
-
-    private static String describeControlChain(Control context)
-    {
-        if (context == null)
-            return "context=null";
-        if (context.isDisposed())
-            return "context=disposed";
-        StringBuilder sb = new StringBuilder("context=");
-        Control walk = context;
-        int depth = 0;
-        while (walk != null && !walk.isDisposed() && depth < 8)
-        {
-            if (depth > 0)
-                sb.append(" <- ");
-            Color bg = walk.getBackground();
-            Color fg = walk.getForeground();
-            sb.append(walk.getClass().getSimpleName())
-                .append("{bg=").append(rgbOf(bg))
-                .append(" fg=").append(rgbOf(fg)).append('}');
-            walk = walk.getParent();
-            depth++;
-        }
-        return sb.toString();
-    }
-
-    private static String tormozitCallers(int max)
-    {
-        StringBuilder sb = new StringBuilder();
-        int n = 0;
-        for (StackTraceElement el : Thread.currentThread().getStackTrace())
-        {
-            String cn = el.getClassName();
-            if (!cn.startsWith("tormozit.")) //$NON-NLS-1$
-                continue;
-            if (cn.contains("SmartMatchHighlight") && el.getMethodName().startsWith("log")) //$NON-NLS-1$ //$NON-NLS-2$
-                continue;
-            if (n > 0)
-                sb.append(" <- ");
-            sb.append(cn.substring("tormozit.".length())).append('.').append(el.getMethodName()) //$NON-NLS-1$
-                .append(':').append(el.getLineNumber());
-            if (++n >= max)
-                break;
-        }
-        return sb.length() == 0 ? "-" : sb.toString();
-    }
-    // #endregion
 
     private static Font boldFont()
     {

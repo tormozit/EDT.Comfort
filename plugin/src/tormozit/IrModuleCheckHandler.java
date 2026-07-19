@@ -334,10 +334,16 @@ public final class IrModuleCheckHandler
 
             Marker[] existing = markerManager.getMarkers(project, sourceKey);
             int removedCount = existing != null ? existing.length : 0;
+            Global.tempLog("irModuleCheck", "applyMarkers sourceKey=" + sourceKey //$NON-NLS-1$ //$NON-NLS-2$
+                + " existingBeforeRemove=" + removedCount + " toAdd=" + markers.size()); //$NON-NLS-1$ //$NON-NLS-2$
 
             markerManager.removeMarkers(project, sourceKey);
             if (!markers.isEmpty())
                 markerManager.setMarkers(project, sourceKey, markers.toArray(new Marker[0]));
+
+            Marker[] afterAdd = markerManager.getMarkers(project, sourceKey);
+            Global.tempLog("irModuleCheck", "applyMarkers after setMarkers count=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (afterAdd != null ? afterAdd.length : -1));
 
             ToastNotification.show(MENU_LABEL,
                 "Модуль " + moduleName + ": добавлено ошибок " + markers.size() //$NON-NLS-1$ //$NON-NLS-2$

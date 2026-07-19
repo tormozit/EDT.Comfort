@@ -251,7 +251,8 @@ public final class ComfortSettings
      */
     public static RGB getFilterMatchLightRgb()
     {
-        return parseRgb(getFilterMatchColorString(), DEFAULT_FILTER_MATCH_COLOR);
+        return SmartMatchHighlight.sanitizeStoredLightRgb(
+            parseRgb(getFilterMatchColorString(), DEFAULT_FILTER_MATCH_COLOR));
     }
 
     /** Цвет фильтра из store (строка "R,G,B"), светлая тема. */

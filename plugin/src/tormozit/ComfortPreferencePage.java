@@ -60,9 +60,8 @@ public class ComfortPreferencePage
             + "Изменение настройки применяется сразу для большинства механизмов; доработка поля «Тип» применяется только при следующем старте EDT."; //$NON-NLS-1$
 
     private static final String THEME_AWARE_COLOR_TOOLTIP =
-            "В настройках показывается эффективный цвет текущей темы (то, что видно в UI).\n"
-            + "В хранилище всегда сохраняется нормализованный цвет светлой темы;\n"
-            + "для тёмной темы он пересчитывается автоматически."; //$NON-NLS-1$
+            "В контроле — цвет текущей темы. В хранилище — всегда вариант для светлой темы.\n"
+            + "При сохранении в тёмной теме цвет из контрола обратно пересчитывается (HSL: инверсия светлоты)."; //$NON-NLS-1$
 
     private static final String FILTER_MATCH_COLOR_TOOLTIP =
             "Цвет подсветки найденных фрагментов в списках с улучшенным фильтром.\n"
@@ -273,13 +272,41 @@ public class ComfortPreferencePage
     }
 
     /**
-     * Color picker: в UI — эффективный цвет текущей темы; в store — RGB светлой темы.
+     * Color picker: store = светлый RGB; в тёмной теме в контроле — {@link SmartMatchHighlight#invertLightness};
+     * при Save из контрола — обратный invert → светлый в store.
      */
     private static final class ThemeAwareColorFieldEditor extends ColorFieldEditor
     {
+        /** Страница открыта в тёмной теме → в контроле должен быть effective. */
+        private boolean controlShowsDarkEffective;
+        private RGB lastLightFromStore;
+
         ThemeAwareColorFieldEditor(String name, String labelText, Composite parent)
         {
             super(name, labelText, parent);
+        }
+
+        private void applyLightToControl(RGB lightFromStore)
+        {
+            lastLightFromStore = lightFromStore;
+            controlShowsDarkEffective = SmartMatchHighlight.isDarkTheme();
+            // Явно: в тёмной — invert, без повторного isDarkTheme внутри toEffectiveRgb.
+            RGB forControl = controlShowsDarkEffective
+                ? SmartMatchHighlight.invertLightness(lightFromStore)
+                : lightFromStore;
+            getColorSelector().setColorValue(forControl);
+            // Повторно после отрисовки страницы — на случай если что-то перезапишет селектор.
+            org.eclipse.swt.widgets.Button button = getColorSelector().getButton();
+            if (button != null && !button.isDisposed())
+            {
+                RGB again = forControl;
+                button.getDisplay().asyncExec(() -> {
+                    if (getColorSelector() == null || getColorSelector().getButton() == null
+                        || getColorSelector().getButton().isDisposed())
+                        return;
+                    getColorSelector().setColorValue(again);
+                });
+            }
         }
 
         @Override
@@ -290,8 +317,11 @@ public class ComfortPreferencePage
             IPreferenceStore store = getPreferenceStore();
             if (store == null)
                 return;
-            RGB light = PreferenceConverter.getColor(store, getPreferenceName());
-            getColorSelector().setColorValue(SmartMatchHighlight.toEffectiveRgb(light));
+            RGB raw = PreferenceConverter.getColor(store, getPreferenceName());
+            RGB light = SmartMatchHighlight.sanitizeStoredLightRgb(raw);
+            if (light.red != raw.red || light.green != raw.green || light.blue != raw.blue)
+                PreferenceConverter.setValue(store, getPreferenceName(), light);
+            applyLightToControl(light);
         }
 
         @Override
@@ -302,8 +332,7 @@ public class ComfortPreferencePage
             IPreferenceStore store = getPreferenceStore();
             if (store == null)
                 return;
-            RGB light = PreferenceConverter.getDefaultColor(store, getPreferenceName());
-            getColorSelector().setColorValue(SmartMatchHighlight.toEffectiveRgb(light));
+            applyLightToControl(PreferenceConverter.getDefaultColor(store, getPreferenceName()));
         }
 
         @Override
@@ -314,11 +343,31 @@ public class ComfortPreferencePage
             IPreferenceStore store = getPreferenceStore();
             if (store == null)
                 return;
-            RGB displayed = getColorSelector().getColorValue();
-            RGB light = SmartMatchHighlight.toStoredLightRgb(displayed);
-            PreferenceConverter.setValue(store, getPreferenceName(), light);
-            if (ComfortSettings.PREF_FILTER_MATCH_COLOR.equals(getPreferenceName()))
-                SmartMatchHighlight.clearColorCache();
+            RGB fromControl = getColorSelector().getColorValue();
+            RGB toStore;
+            if (controlShowsDarkEffective || SmartMatchHighlight.isDarkTheme())
+            {
+                // В контроле должен быть effective. Если там всё ещё светлый с store —
+                // load не сработал: не инвертируем повторно (иначе испортим store).
+                if (lastLightFromStore != null
+                    && fromControl.red == lastLightFromStore.red
+                    && fromControl.green == lastLightFromStore.green
+                    && fromControl.blue == lastLightFromStore.blue)
+                {
+                    toStore = lastLightFromStore;
+                }
+                else
+                {
+                    toStore = SmartMatchHighlight.invertLightness(fromControl);
+                }
+            }
+            else
+            {
+                toStore = fromControl;
+            }
+            PreferenceConverter.setValue(store, getPreferenceName(), toStore);
+            lastLightFromStore = toStore;
+            SmartMatchHighlight.clearColorCache();
         }
     }
 
