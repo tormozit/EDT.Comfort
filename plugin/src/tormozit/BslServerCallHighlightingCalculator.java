@@ -34,37 +34,20 @@ import com._1c.g5.v8.dt.bsl.model.util.BslUtil;
 public final class BslServerCallHighlightingCalculator
     implements ISemanticHighlightingCalculator
 {
-    private static final String TAG = "ServerCallCalc"; //$NON-NLS-1$
-
     @Override
     public void provideHighlightingFor(XtextResource resource, IHighlightedPositionAcceptor acceptor,
         CancelIndicator cancelIndicator)
     {
-        Global.tempLog("ServerCallHL-mutfree", "calc: called resource=" + resource //$NON-NLS-1$ //$NON-NLS-2$
-            + " acceptor=" + (acceptor == null ? "null" : acceptor.getClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$
-            + " canceled=" + isCanceled(cancelIndicator) //$NON-NLS-1$
-            + " parseResult=" + (resource == null ? "n/a" : resource.getParseResult())); //$NON-NLS-1$ //$NON-NLS-2$
-
         if (resource == null || acceptor == null || isCanceled(cancelIndicator) || resource.getParseResult() == null)
-        {
-            Global.tempLog("ServerCallHL-mutfree", "calc: early return (null/canceled/no parse result)"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
 
-        boolean enabled = ComfortSettings.isServerCallHighlightingEnabled();
-        Global.tempLog("ServerCallHL-mutfree", "calc: isServerCallHighlightingEnabled=" + enabled); //$NON-NLS-1$ //$NON-NLS-2$
-        if (!enabled)
+        if (!ComfortSettings.isServerCallHighlightingEnabled())
             return;
 
         EObject root = resource.getParseResult().getRootASTElement();
         if (root == null)
-        {
-            Global.tempLog("ServerCallHL-mutfree", "calc: rootASTElement null"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
 
-        int invocations = 0;
-        int serverCalls = 0;
         TreeIterator<EObject> iterator = root.eAllContents();
         while (iterator.hasNext())
         {
@@ -72,20 +55,9 @@ public final class BslServerCallHighlightingCalculator
                 return;
 
             EObject element = iterator.next();
-            if (element instanceof Invocation)
-            {
-                invocations++;
-                Invocation inv = (Invocation)element;
-                if (inv.isIsServerCall())
-                {
-                    serverCalls++;
-                    highlightInvocation(inv, acceptor);
-                }
-            }
+            if (element instanceof Invocation inv && inv.isIsServerCall())
+                highlightInvocation(inv, acceptor);
         }
-        Global.tempLog("ServerCallHL-mutfree", "calc: invocations=" + invocations + " serverCalls=" + serverCalls); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        if (serverCalls > 0)
-            Global.log(TAG, "provideHighlightingFor: invocations=" + invocations + " serverCalls=" + serverCalls); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private void highlightInvocation(Invocation invocation, IHighlightedPositionAcceptor acceptor)
@@ -105,7 +77,7 @@ public final class BslServerCallHighlightingCalculator
      * Серверный вызов "с контекстом" (&НаСервере) красится отдельным стилем от
      * вызова "без контекста" (&НаСервереБезКонтекста) — различие определяется
      * прагмой резолвленного метода. Если метод резолвить не удалось, используется
-     * базовый стиль (прежнее поведение).
+     * базовый стиль.
      */
     private String resolveHighlightingId(FeatureAccess methodAccess)
     {
@@ -159,17 +131,11 @@ public final class BslServerCallHighlightingCalculator
         String highlightingId)
     {
         List<INode> nodes = NodeModelUtils.findNodesForFeature(featureAccess, BslPackage.Literals.FEATURE_ACCESS__NAME);
-        int added = 0;
         for (INode node : nodes)
         {
             if (node.getLength() > 0)
-            {
                 acceptor.addPosition(node.getOffset(), node.getLength(), highlightingId);
-                added++;
-            }
         }
-        Global.tempLog("ServerCallHL-mutfree", "calc: highlightFeatureName nodes=" + nodes.size() //$NON-NLS-1$ //$NON-NLS-2$
-            + " added=" + added + " id=" + highlightingId); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private boolean isCanceled(CancelIndicator cancelIndicator)

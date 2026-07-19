@@ -8,7 +8,6 @@ import java.util.IdentityHashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
-import java.util.WeakHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import org.eclipse.core.runtime.IProgressMonitor;
@@ -18,7 +17,6 @@ import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.jface.dialogs.IPageChangedListener;
 import org.eclipse.jface.text.TextAttribute;
 import org.eclipse.jface.text.TextPresentation;
-import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.widgets.Display;
@@ -45,39 +43,31 @@ import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
 
+/**
+ * Подключает подсветку серверных вызовов к BSL-редакторам: оборачивает
+ * {@code newCalculator} реконсилера и применяет полный цикл Xtext-highlighting
+ * (включая {@code updatePresentation}) после открытия/активации.
+ */
 public final class BslServerCallHighlightingHook implements IStartup
 {
     private static final String TAG = "ServerCallHL"; //$NON-NLS-1$
-    /** Временная тема диагностики: работает ли применение подсветки mutation-free путём. */
-    private static final String MUTFREE_DIAG_TOPIC = "ServerCallHL-mutfree"; //$NON-NLS-1$
     private static final AtomicBoolean installed = new AtomicBoolean();
     private static final List<Object> patchedReconcilers = new ArrayList<>();
     private static final Map<DtGranularEditor<?>, IPageChangedListener> pageListeners = new HashMap<>();
-    private static final Map<Object, BslXtextEditor> reconcilerEditors = new WeakHashMap<>();
-    /** Обратная карта — для повторного триггера пересчёта при активации standalone-редактора. */
-    private static final Map<BslXtextEditor, Object> editorReconcilers = new WeakHashMap<>();
-    /** Debounce Job'ов apply на реконсилер (partOpened+Activated+BroughtToTop иначе дают тройной залп). */
+    /** Debounce Job'ов apply: partOpened+Activated+BroughtToTop иначе дают тройной залп. */
     private static final Map<Object, Job> pendingApplyJobs = new IdentityHashMap<>();
-    /** Задержка debounce, чтобы Opened/Activated/BroughtToTop схлопнулись в один apply. */
     private static final long APPLY_DEBOUNCE_MS = 50L;
 
     @Override
     public void earlyStartup()
     {
         if (!installed.compareAndSet(false, true))
-        {
-            Global.log(TAG, "earlyStartup already installed, skipping"); //$NON-NLS-1$
             return;
-        }
 
-        Global.log(TAG, "earlyStartup called"); //$NON-NLS-1$
         PlatformUI.getWorkbench().getDisplay().asyncExec(() -> {
-            IWorkbenchWindow[] windows = PlatformUI.getWorkbench().getWorkbenchWindows();
-            Global.log(TAG, "workbench windows: " + windows.length); //$NON-NLS-1$
-            for (IWorkbenchWindow window : windows)
+            for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
                 registerWindow(window);
             PlatformUI.getWorkbench().addWindowListener(new WindowAdapter());
-            Global.log(TAG, "window listener registered"); //$NON-NLS-1$
         });
 
         Activator.getDefault().getPreferenceStore()
@@ -87,47 +77,30 @@ public final class BslServerCallHighlightingHook implements IStartup
                     || ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_COLOR.equals(prop)
                     || ComfortSettings.PREF_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR.equals(prop))
                 {
-                    Global.log(TAG, "property changed: " + prop); //$NON-NLS-1$
                     PlatformUI.getWorkbench().getDisplay().asyncExec(BslServerCallHighlightingHook::refreshAllEditors);
                 }
             });
-        Global.log(TAG, "property listener registered"); //$NON-NLS-1$
     }
 
     static void refreshAllEditors()
     {
         if (!installed.get())
-        {
-            Global.log(TAG, "refreshAllEditors: not installed"); //$NON-NLS-1$
             return;
-        }
         if (PlatformUI.getWorkbench().getDisplay() == null
             || PlatformUI.getWorkbench().getDisplay().isDisposed())
-        {
-            Global.log(TAG, "refreshAllEditors: display null/disposed"); //$NON-NLS-1$
             return;
-        }
-        Global.log(TAG, "refreshAllEditors: refreshing " + patchedReconcilers.size() + " reconcilers"); //$NON-NLS-1$ //$NON-NLS-2$
         for (Object reconciler : patchedReconcilers)
         {
-            // Обновляем TextAttribute (цвет/стиль) перед пересчётом — иначе refresh
-            // просто заново нарисует старым, закэшированным значением. Раньше это
-            // делал отдельный updateServerCallStyleInProvider(), вызываемый только
-            // из property-change слушателя на Activator.getDefault().getPreferenceStore(),
-            // но ComfortPreferencePage.performOk() зовёт только refreshAllEditors()
-            // напрямую (без слушателя) — цвет из «Параметров» из-за этого не долетал.
             registerServerCallStyle(reconciler);
-            forceRefresh(reconciler);
+            applyHighlightingNow(reconciler);
         }
     }
 
     /**
-     * Mutation-free применение подсветки после wrap калькулятора. Штатный
-     * {@code HighlightingReconciler.modelChanged} на переоткрытом standalone-модуле
-     * часто выходит рано (~10µs) из‑за гонки {@code presenter.isCanceled} с параллельными
-     * refresh Job'ами; диагностический путь, который только вызывал
-     * {@code reconcilePositions}, считал позиции, но не вызывал {@code updatePresentation}.
-     * Здесь — полный пайплайн Xtext до применения презентации, с debounce на реконсилер.
+     * Применяет подсветку после wrap калькулятора: полный пайплайн Xtext до
+     * {@code updatePresentation}, с debounce на реконсилер. Штатный
+     * {@code modelChanged} на переоткрытом standalone-модуле часто выходит рано
+     * из‑за гонки с параллельными refresh Job'ами.
      */
     private static void applyHighlightingNow(Object reconciler)
     {
@@ -138,26 +111,16 @@ public final class BslServerCallHighlightingHook implements IStartup
 
             XtextSourceViewer sourceViewer = resolveSourceViewer(hr);
             if (sourceViewer == null)
-            {
-                Global.tempLog(MUTFREE_DIAG_TOPIC, "apply: sourceViewer null"); //$NON-NLS-1$
                 return;
-            }
             IXtextDocument document = sourceViewer.getXtextDocument();
             if (document == null)
-            {
-                Global.tempLog(MUTFREE_DIAG_TOPIC, "apply: document null"); //$NON-NLS-1$
                 return;
-            }
 
             synchronized (pendingApplyJobs)
             {
                 Job previous = pendingApplyJobs.get(hr);
                 if (previous != null)
-                {
                     previous.cancel();
-                    Global.tempLog(MUTFREE_DIAG_TOPIC, "apply: debounced hr=" //$NON-NLS-1$
-                        + System.identityHashCode(hr));
-                }
 
                 Job job = new Job("Comfort: server-call highlighting apply") //$NON-NLS-1$
                 {
@@ -169,21 +132,17 @@ public final class BslServerCallHighlightingHook implements IStartup
                             if (monitor.isCanceled())
                                 return Status.CANCEL_STATUS;
 
-                            Boolean got = document.tryReadOnly(resource ->
+                            document.tryReadOnly(resource ->
                             {
                                 if (monitor.isCanceled())
                                     return Boolean.FALSE;
-                                Global.tempLog(MUTFREE_DIAG_TOPIC, "apply: LOCK ACQUIRED resource=" //$NON-NLS-1$
-                                    + resource + " hr=" + System.identityHashCode(hr)); //$NON-NLS-1$
                                 runFullHighlightingApply(hr, resource, monitor);
                                 return Boolean.TRUE;
                             });
-                            if (got == null)
-                                Global.tempLog(MUTFREE_DIAG_TOPIC, "apply: LOCK FAILED (null result)"); //$NON-NLS-1$
                         }
                         catch (Exception e)
                         {
-                            Global.tempLog(MUTFREE_DIAG_TOPIC, "apply: job failed: " //$NON-NLS-1$
+                            Global.log(TAG, "applyHighlightingNow job failed: " //$NON-NLS-1$
                                 + e.getClass().getSimpleName() + " " + e.getMessage()); //$NON-NLS-1$
                         }
                         finally
@@ -223,16 +182,14 @@ public final class BslServerCallHighlightingHook implements IStartup
         }
         catch (Exception e)
         {
-            Global.log(TAG, "resolveSourceViewer failed: " + e.getMessage()); //$NON-NLS-1$
             return null;
         }
     }
 
     /**
      * Полный аналог тела {@code HighlightingReconciler.modelChanged} до
-     * {@code updatePresentation}, без раннего выхода штатного {@code modelChanged}
-     * (который на reopen standalone часто no-op). Управляет флагом {@code reconciling},
-     * чтобы параллельный native reconcile не вошёл в середину.
+     * {@code updatePresentation}. Управляет флагом {@code reconciling}, чтобы
+     * параллельный native reconcile не вошёл в середину.
      */
     @SuppressWarnings("unchecked")
     private static void runFullHighlightingApply(HighlightingReconciler hr, XtextResource resource,
@@ -254,7 +211,7 @@ public final class BslServerCallHighlightingHook implements IStartup
             || addedField == null || removedField == null || startMethod == null
             || reconcileMethod == null || updateMethod == null || stopMethod == null)
         {
-            Global.tempLog(MUTFREE_DIAG_TOPIC, "apply: reflection members missing"); //$NON-NLS-1$
+            Global.log(TAG, "runFullHighlightingApply: reflection members missing"); //$NON-NLS-1$
             return;
         }
 
@@ -272,18 +229,12 @@ public final class BslServerCallHighlightingHook implements IStartup
 
             Object lock = reconcileLockField.get(hr);
             if (lock == null)
-            {
-                Global.tempLog(MUTFREE_DIAG_TOPIC, "apply: fReconcileLock null"); //$NON-NLS-1$
                 return;
-            }
 
             synchronized (lock)
             {
                 if (reconcilingField.getBoolean(hr))
-                {
-                    Global.tempLog(MUTFREE_DIAG_TOPIC, "apply: skipped already reconciling"); //$NON-NLS-1$
                     return;
-                }
                 reconcilingField.setBoolean(hr, true);
             }
 
@@ -291,39 +242,24 @@ public final class BslServerCallHighlightingHook implements IStartup
             try
             {
                 if (monitor != null && monitor.isCanceled())
-                {
-                    Global.tempLog(MUTFREE_DIAG_TOPIC, "apply: skipped canceled (monitor)"); //$NON-NLS-1$
                     return;
-                }
 
                 Object presenterObj = presenterField.get(hr);
                 if (!(presenterObj instanceof HighlightingPresenter p))
-                {
-                    Global.tempLog(MUTFREE_DIAG_TOPIC, "apply: presenter missing"); //$NON-NLS-1$
                     return;
-                }
                 presenter = p;
 
                 presenter.setCanceled(false);
                 if (presenter.isCanceled())
-                {
-                    Global.tempLog(MUTFREE_DIAG_TOPIC, "apply: skipped canceled"); //$NON-NLS-1$
                     return;
-                }
 
                 startMethod.invoke(hr);
                 if (presenter.isCanceled() || (monitor != null && monitor.isCanceled()))
-                {
-                    Global.tempLog(MUTFREE_DIAG_TOPIC, "apply: skipped canceled (after start)"); //$NON-NLS-1$
                     return;
-                }
 
                 reconcileMethod.invoke(hr, resource, CancelIndicator.NullImpl);
                 if (presenter.isCanceled() || (monitor != null && monitor.isCanceled()))
-                {
-                    Global.tempLog(MUTFREE_DIAG_TOPIC, "apply: skipped canceled (after reconcile)"); //$NON-NLS-1$
                     return;
-                }
 
                 List<AttributedPosition> added =
                     (List<AttributedPosition>)addedField.get(hr);
@@ -333,16 +269,9 @@ public final class BslServerCallHighlightingHook implements IStartup
                 if (textPresentation == null
                     || presenter.isCanceled()
                     || (monitor != null && monitor.isCanceled()))
-                {
-                    Global.tempLog(MUTFREE_DIAG_TOPIC, "apply: skipped canceled (after createPresentation)"); //$NON-NLS-1$
                     return;
-                }
 
                 updateMethod.invoke(hr, textPresentation, added, removed, resource);
-                Global.tempLog(MUTFREE_DIAG_TOPIC, "apply: presentation scheduled added=" //$NON-NLS-1$
-                    + (added == null ? -1 : added.size()) + " removed=" //$NON-NLS-1$
-                    + (removed == null ? -1 : removed.size())
-                    + " hr=" + System.identityHashCode(hr)); //$NON-NLS-1$
             }
             finally
             {
@@ -352,10 +281,8 @@ public final class BslServerCallHighlightingHook implements IStartup
                 {
                     stopMethod.invoke(hr);
                 }
-                catch (Exception stopEx)
+                catch (Exception ignored)
                 {
-                    Global.tempLog(MUTFREE_DIAG_TOPIC, "apply: stopReconcilingPositions failed: " //$NON-NLS-1$
-                        + stopEx.getMessage());
                 }
                 synchronized (lock)
                 {
@@ -366,122 +293,8 @@ public final class BslServerCallHighlightingHook implements IStartup
         catch (Exception e)
         {
             Throwable cause = e.getCause() != null ? e.getCause() : e;
-            Global.tempLog(MUTFREE_DIAG_TOPIC, "apply: runFullHighlightingApply failed: " //$NON-NLS-1$
+            Global.log(TAG, "runFullHighlightingApply failed: " //$NON-NLS-1$
                 + cause.getClass().getSimpleName() + " " + cause.getMessage()); //$NON-NLS-1$
-        }
-    }
-
-    /**
-     * {@link HighlightingReconciler#refresh()} (публичный, тот же путь, что
-     * {@code install()} при первом открытии редактора) НЕ годится: внутри он берёт
-     * {@code document.tryReadOnly(...)} — не блокирующий вариант, который тихо
-     * ничего не делает (без единой ошибки), если read-lock сразу не достался —
-     * подтверждено экспериментом: после перехода на {@code refresh()} раскраска
-     * серверных вызовов переставала появляться. Прямой вызов
-     * {@code HighlightingReconciler.modelChanged(resource)} — та же проблема.
-     * Единственный надёжный способ — настоящее изменение документа (идёт через
-     * блокирующий путь), поэтому делаем тривиальный самовосстанавливающийся edit:
-     * заменяем первый символ документа на него же самого, это порождает
-     * {@code DocumentEvent} и запускает штатный конвейер пересвязывания.
-     * <p>
-     * Побочный эффект: этот {@code DocumentEvent} — даже самовосстанавливающийся —
-     * взводит модифицированность редактора; {@code DirtyStateEditorSupport.markEditorClean()}
-     * тут не помогает (это внутреннее состояние Xtext, а не {@code ITextEditor.isDirty()}).
-     * Второй самозаменяющий edit с восстановленным modification stamp тоже не годится:
-     * он порождает ещё один {@code DocumentEvent}, и {@code HighlightingReconciler
-     * .updatePresentation()} (сверяет {@code resourceSet.getModificationStamp()} перед
-     * применением) отбрасывает результат ПЕРВОГО пересчёта как устаревший — раскраска
-     * пропадает (подтверждено экспериментом). Поэтому модифицированность снимаем без
-     * единой лишней записи в документ — напрямую через {@code fCanBeSaved} в
-     * {@code ElementInfo} документ-провайдера (см. {@link #resetDirtyFlagIfClean}),
-     * тем же приёмом, что использует сам {@code XtextDocumentProvider
-     * .UnchangedElementListener}.
-     * <p>
-     * При открытии редактора не используется (визуальный артефакт); остаётся для
-     * {@link #refreshAllEditors()} при смене настроек цвета.
-     */
-    private static void forceRefresh(Object reconciler)
-    {
-        try
-        {
-            if (!(reconciler instanceof HighlightingReconciler hr))
-            {
-                Global.log(TAG, "forceRefresh: not a HighlightingReconciler, class=" //$NON-NLS-1$
-                    + reconciler.getClass().getName());
-                return;
-            }
-
-            Field sourceViewerField = findField(HighlightingReconciler.class, "sourceViewer"); //$NON-NLS-1$
-            if (sourceViewerField == null)
-            {
-                Global.log(TAG, "forceRefresh: 'sourceViewer' field not found"); //$NON-NLS-1$
-                return;
-            }
-            sourceViewerField.setAccessible(true);
-            Object sourceViewerObj = sourceViewerField.get(hr);
-            if (!(sourceViewerObj instanceof XtextSourceViewer sourceViewer))
-            {
-                Global.log(TAG, "forceRefresh: sourceViewer=" //$NON-NLS-1$
-                    + (sourceViewerObj == null ? "null" : sourceViewerObj.getClass().getName())); //$NON-NLS-1$
-                return;
-            }
-
-            IXtextDocument document = sourceViewer.getXtextDocument();
-            if (document == null)
-            {
-                Global.log(TAG, "forceRefresh: xtextDocument null"); //$NON-NLS-1$
-                return;
-            }
-
-            if (document.getLength() == 0)
-            {
-                Global.log(TAG, "forceRefresh: document empty, nothing to trigger on"); //$NON-NLS-1$
-                return;
-            }
-
-            BslXtextEditor editorForCleanup = reconcilerEditors.get(reconciler);
-            boolean wasDirty = editorForCleanup != null && editorForCleanup.isDirty();
-
-            /*
-             * Сама правка (self-replace) остаётся — единственный проверенно надёжный способ
-             * реально прогнать пересчёт (см. класс-комментарий выше про refresh()/modelChanged()
-             * с тихим no-op). Но её визуальный эффект (кратковременное задвоение строк, пока
-             * презентация пересчитывается и переприменяется к StyledText) подавляем через
-             * setRedraw — правка и обработка вызванного ею DocumentEvent идут БЕЗ перерисовки,
-             * возвращаем перерисовку отложенно (следующий цикл событий), когда пересчитанная
-             * подсветка уже применена и виджет можно перерисовать один раз чисто.
-             */
-            StyledText textWidget = sourceViewer.getTextWidget();
-            if (textWidget != null && !textWidget.isDisposed())
-                textWidget.setRedraw(false);
-            try
-            {
-                char firstChar = document.getChar(0);
-                document.replace(0, 1, String.valueOf(firstChar));
-                Global.log(TAG, "forceRefresh: self-replace edit triggered at offset 0"); //$NON-NLS-1$
-            }
-            finally
-            {
-                if (textWidget != null && !textWidget.isDisposed())
-                {
-                    Display display = textWidget.getDisplay();
-                    if (display != null && !display.isDisposed())
-                        display.asyncExec(() ->
-                        {
-                            if (!textWidget.isDisposed())
-                                textWidget.setRedraw(true);
-                        });
-                    else
-                        textWidget.setRedraw(true);
-                }
-            }
-
-            if (editorForCleanup != null && !wasDirty)
-                resetDirtyFlagIfClean(editorForCleanup);
-        }
-        catch (Exception e)
-        {
-            Global.log(TAG, "forceRefresh failed: " + e.getClass().getSimpleName() + " " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -490,9 +303,7 @@ public final class BslServerCallHighlightingHook implements IStartup
         window.getPartService().addPartListener(new PartAdapter());
         for (IWorkbenchPage page : window.getPages())
         {
-            IEditorReference[] refs = page.getEditorReferences();
-            Global.log(TAG, "registerWindow: " + refs.length + " editors in page"); //$NON-NLS-1$ //$NON-NLS-2$
-            for (IEditorReference ref : refs)
+            for (IEditorReference ref : page.getEditorReferences())
                 inspectEditor(ref);
         }
     }
@@ -502,46 +313,27 @@ public final class BslServerCallHighlightingHook implements IStartup
         try
         {
             IWorkbenchPart part = ref.getPart(false);
-            Global.log(TAG, "  editor: id=" + ref.getId() + " part=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (part == null ? "null" : part.getClass().getName()));
-
             if (part instanceof BslXtextEditor)
-            {
                 patchEditor((BslXtextEditor)part);
-            }
             else if (part instanceof DtGranularEditor)
-            {
                 patchGranularEditor((DtGranularEditor<?>)part);
-            }
         }
         catch (Exception e)
         {
-            Global.log(TAG, "  inspectEditor failed: " + e.getMessage()); //$NON-NLS-1$
+            Global.log(TAG, "inspectEditor failed: " + e.getMessage()); //$NON-NLS-1$
         }
     }
 
-    /**
-     * Повторный триггер пересчёта при активации/выносе-наверх уже пропатченного standalone
-     * BSL-редактора — форма получает такое переигрывание бесплатно через IPageChangedListener
-     * на каждое переключение вкладки внутри неё, у standalone-модуля такого источника нет,
-     * поэтому даём его явно. ВАЖНО: заново резолвим реконсилер через patchEditor(editor), а не
-     * берём закэшированную ссылку из editorReconcilers — если Xtext успел пересоздать/переустановить
-     * реконсилер после реального связывания, старая ссылка мертва и ничего не драйвит (та же
-     * логика, что и у patchFormPageIfBsl для форм — он тоже резолвит заново на каждой странице).
-     */
+    /** Повторный apply при активации standalone-редактора (у форм есть pageChanged). */
     private static void refreshOnActivate(IWorkbenchPartReference ref)
     {
         try
         {
             IWorkbenchPart part = ref.getPart(false);
             if (part instanceof BslXtextEditor editor)
-            {
                 patchEditor(editor);
-            }
             else if (part instanceof DtGranularEditor)
-            {
                 patchGranularEditor((DtGranularEditor<?>)part);
-            }
         }
         catch (Exception e)
         {
@@ -597,27 +389,12 @@ public final class BslServerCallHighlightingHook implements IStartup
 
             Object reconciler = findHighlightingReconciler(viewer);
             if (reconciler == null)
-            {
-                Global.log(TAG, "patchEditor: reconciler not found"); //$NON-NLS-1$
                 return;
-            }
 
             boolean firstTimeWrap = wrapCalculator(reconciler);
             if (firstTimeWrap && !patchedReconcilers.contains(reconciler))
                 patchedReconcilers.add(reconciler);
-            reconcilerEditors.put(reconciler, editor);
-            editorReconcilers.put(editor, reconciler);
             registerServerCallStyle(reconciler);
-            if (firstTimeWrap)
-                Global.log(TAG, "patchEditor: OK, patched=" + patchedReconcilers.size()); //$NON-NLS-1$
-
-            /*
-             * forceRefresh() (self-replace) при открытии редактора ОТКЛЮЧЁН — визуальный
-             * артефакт. Вместо него — applyHighlightingNow(): полный mutation-free пайплайн
-             * до updatePresentation, с debounce. Вызывается КАЖДЫЙ раз при patchEditor
-             * (не только при первом wrap) — формы получают повтор через IPageChangedListener,
-             * standalone — через PartAdapter.partActivated/partBroughtToTop.
-             */
             applyHighlightingNow(reconciler);
         }
         catch (Exception e)
@@ -632,24 +409,17 @@ public final class BslServerCallHighlightingHook implements IStartup
         {
             Field field = findField(reconciler.getClass(), "attributeProvider"); //$NON-NLS-1$
             if (field == null)
-            {
-                Global.log(TAG, "getAttrProvider: 'attributeProvider' not found"); //$NON-NLS-1$
                 return null;
-            }
             field.setAccessible(true);
             return field.get(reconciler);
         }
         catch (Exception e)
         {
-            Global.log(TAG, "getAttrProvider failed: " + e.getMessage()); //$NON-NLS-1$
             return null;
         }
     }
 
-    /** Регистрирует/обновляет стили {@code SERVER_CALL_ID}/{@code SERVER_CALL_CONTEXT_ID}
-     *  в собственном {@code attributeProvider} конкретного реконсилера — этот
-     *  провайдер не является общим синглтоном для всех редакторов, поэтому
-     *  регистрировать стиль нужно у каждого патченного реконсилера отдельно. */
+    /** Регистрирует/обновляет стили серверных вызовов в attributeProvider реконсилера. */
     @SuppressWarnings("unchecked")
     private static void registerServerCallStyle(Object reconciler)
     {
@@ -660,17 +430,11 @@ public final class BslServerCallHighlightingHook implements IStartup
         {
             Field attrsField = findField(attributeProvider.getClass(), "attributes"); //$NON-NLS-1$
             if (attrsField == null)
-            {
-                Global.log(TAG, "registerStyle: 'attributes' not found on " + attributeProvider.getClass().getName()); //$NON-NLS-1$
                 return;
-            }
             attrsField.setAccessible(true);
             Object mapObj = attrsField.get(attributeProvider);
             if (!(mapObj instanceof HashMap))
-            {
-                Global.log(TAG, "registerStyle: attributes is not HashMap"); //$NON-NLS-1$
                 return;
-            }
             HashMap<String, TextAttribute> attributes = (HashMap<String, TextAttribute>)mapObj;
 
             putServerCallStyle(attributes, BslServerCallHighlightingConfiguration.SERVER_CALL_ID,
@@ -679,8 +443,6 @@ public final class BslServerCallHighlightingHook implements IStartup
             putServerCallStyle(attributes, BslServerCallHighlightingConfiguration.SERVER_CALL_CONTEXT_ID,
                 ComfortSettings.getServerCallContextHighlightingColor(),
                 ComfortSettings.DEFAULT_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR);
-
-            Global.log(TAG, "registerStyle: OK"); //$NON-NLS-1$
         }
         catch (Exception e)
         {
@@ -693,21 +455,11 @@ public final class BslServerCallHighlightingHook implements IStartup
     {
         TextAttribute attr = createServerCallTextAttribute(colorStr, fallback);
         if (attr == null)
-        {
-            Global.log(TAG, "putServerCallStyle: failed to create TextAttribute for " + id); //$NON-NLS-1$
             return;
-        }
         attributes.put(id, attr);
 
-        // TextAttributeProvider.getMergedAttributes(ids) кэширует результат
-        // объединения нескольких id (напр. когда серверный вызов совпадает по
-        // диапазону с нативным "Methods") под отдельным ключом
-        // "$$$Merged:.../id/...$$$" и пересчитывает его ТОЛЬКО если такого
-        // ключа ещё нет в attributes — иначе рендер вечно берёт объединённый
-        // стиль с тем цветом, что был при первом вычислении. Точный merged-ключ
-        // не собрать (порядок id заранее не известен), поэтому просто
-        // выбрасываем все "$$$Merged:...$$$"-записи, где встречается этот id —
-        // они лениво пересчитаются заново.
+        // TextAttributeProvider кэширует merged-стили под ключом "$$$Merged:...$$$";
+        // сбрасываем записи с этим id, чтобы цвет из настроек применился заново.
         Iterator<String> keys = attributes.keySet().iterator();
         while (keys.hasNext())
         {
@@ -717,8 +469,7 @@ public final class BslServerCallHighlightingHook implements IStartup
         }
     }
 
-    /** Стиль всегда {@code SWT.NONE} — только цвет, без модификации шрифта
-     *  (жирный/курсив), чтобы текст оставался штатным. */
+    /** Только цвет, без жирного/курсива. */
     private static TextAttribute createServerCallTextAttribute(String colorStr, String fallback)
     {
         try
@@ -730,7 +481,6 @@ public final class BslServerCallHighlightingHook implements IStartup
         }
         catch (Exception e)
         {
-            Global.log(TAG, "createTextAttr failed: " + e.getMessage()); //$NON-NLS-1$
             return null;
         }
     }
@@ -782,8 +532,6 @@ public final class BslServerCallHighlightingHook implements IStartup
                 return false;
 
             newCalcField.set(reconciler, new DelegatingCalculator(original));
-            Global.tempLog(MUTFREE_DIAG_TOPIC, "wrapCalculator: OK, reconciler=" //$NON-NLS-1$
-                + System.identityHashCode(reconciler));
             return true;
         }
         catch (Exception e)
@@ -825,65 +573,6 @@ public final class BslServerCallHighlightingHook implements IStartup
             }
         }
         return null;
-    }
-
-    /**
-     * Снимает модифицированность редактора без единой записи в документ — напрямую
-     * через {@code fCanBeSaved} в {@code AbstractDocumentProvider.ElementInfo} (тот
-     * же публичный флаг, что читает/пишет {@code XtextDocumentProvider
-     * .UnchangedElementListener.documentChanged()}), и штатно оповещает об этом
-     * оповещателем {@code fireElementDirtyStateChanged}, чтобы у {@code ITextEditor}
-     * (и заголовка вкладки) сразу обновился признак "*". Оба метода/поля —
-     * {@code protected}/пакетные в {@code AbstractDocumentProvider}, отсюда рефлексия.
-     */
-    private static void resetDirtyFlagIfClean(BslXtextEditor editor)
-    {
-        try
-        {
-            Object provider = editor.getDocumentProvider();
-            Object input = editor.getEditorInput();
-            if (provider == null || input == null)
-                return;
-
-            Method getElementInfo = findMethod(provider.getClass(), "getElementInfo", Object.class); //$NON-NLS-1$
-            if (getElementInfo == null)
-            {
-                Global.log(TAG, "resetDirtyFlagIfClean: 'getElementInfo' not found"); //$NON-NLS-1$
-                return;
-            }
-            getElementInfo.setAccessible(true);
-            Object elementInfo = getElementInfo.invoke(provider, input);
-            if (elementInfo == null)
-            {
-                Global.log(TAG, "resetDirtyFlagIfClean: elementInfo null"); //$NON-NLS-1$
-                return;
-            }
-
-            Field canBeSavedField = findField(elementInfo.getClass(), "fCanBeSaved"); //$NON-NLS-1$
-            if (canBeSavedField == null)
-            {
-                Global.log(TAG, "resetDirtyFlagIfClean: 'fCanBeSaved' not found"); //$NON-NLS-1$
-                return;
-            }
-            canBeSavedField.setAccessible(true);
-            canBeSavedField.set(elementInfo, false);
-
-            Method fireDirty = findMethod(provider.getClass(), "fireElementDirtyStateChanged", //$NON-NLS-1$
-                Object.class, boolean.class);
-            if (fireDirty == null)
-            {
-                Global.log(TAG, "resetDirtyFlagIfClean: 'fireElementDirtyStateChanged' not found"); //$NON-NLS-1$
-                return;
-            }
-            fireDirty.setAccessible(true);
-            fireDirty.invoke(provider, input, false);
-
-            Global.log(TAG, "resetDirtyFlagIfClean: OK"); //$NON-NLS-1$
-        }
-        catch (Exception e)
-        {
-            Global.log(TAG, "resetDirtyFlagIfClean failed: " + e.getClass().getSimpleName() + " " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
-        }
     }
 
     private static Class<?> loadClass(String name)

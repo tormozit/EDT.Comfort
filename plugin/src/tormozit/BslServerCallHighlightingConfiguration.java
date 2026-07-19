@@ -16,7 +16,6 @@ import org.eclipse.core.runtime.Platform;
 public final class BslServerCallHighlightingConfiguration
     implements IHighlightingConfiguration
 {
-    private static final String TAG = "ServerCallCfg"; //$NON-NLS-1$
     public static final String SERVER_CALL_ID = Activator.PLUGIN_ID + ".serverCall"; //$NON-NLS-1$
     /** Серверный вызов "с контекстом" (&НаСервере) — в отличие от &НаСервереБезКонтекста. */
     public static final String SERVER_CALL_CONTEXT_ID = Activator.PLUGIN_ID + ".serverCallContext"; //$NON-NLS-1$
@@ -34,14 +33,11 @@ public final class BslServerCallHighlightingConfiguration
     @Override
     public void configure(IHighlightingConfigurationAcceptor acceptor)
     {
-        Global.log(TAG, "configure called"); //$NON-NLS-1$
         if (delegate != null)
             delegate.configure(acceptor);
 
         acceptor.acceptDefaultHighlighting(SERVER_CALL_ID, SERVER_CALL_LABEL, serverCallTextStyle());
         acceptor.acceptDefaultHighlighting(SERVER_CALL_CONTEXT_ID, SERVER_CALL_CONTEXT_LABEL, serverCallContextTextStyle());
-        Global.log(TAG, "configure: SERVER_CALL_ID=" + SERVER_CALL_ID //$NON-NLS-1$
-            + " SERVER_CALL_CONTEXT_ID=" + SERVER_CALL_CONTEXT_ID); //$NON-NLS-1$
     }
 
     /** Стиль всегда обычный — только цвет, без модификации шрифта (жирный/курсив). */
