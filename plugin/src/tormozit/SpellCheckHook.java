@@ -1,5 +1,6 @@
 package tormozit;
 
+import java.io.File;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
@@ -7,12 +8,15 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
 
+import org.eclipse.core.filesystem.EFS;
+import org.eclipse.core.filesystem.IFileStore;
 import org.eclipse.jdt.internal.ui.text.spelling.SpellCheckEngine;
 import org.eclipse.jdt.internal.ui.text.spelling.engine.ISpellCheckEngine;
 import org.eclipse.jdt.internal.ui.text.spelling.engine.ISpellDictionary;
@@ -43,19 +47,29 @@ import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
+import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.layout.GridData;
+import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Group;
 import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Link;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.ui.IEditorInput;
+import org.eclipse.ui.IEditorPart;
+import org.eclipse.ui.IPropertyListener;
 import org.eclipse.ui.IStartup;
+import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.editors.text.EditorsUI;
+import org.eclipse.ui.ide.IDE;
+import org.eclipse.ui.texteditor.IDocumentProvider;
+import org.eclipse.ui.texteditor.ITextEditor;
 import org.eclipse.ui.texteditor.spelling.SpellingAnnotation;
 import org.eclipse.ui.texteditor.spelling.SpellingService;
 
@@ -81,8 +95,11 @@ public final class SpellCheckHook implements IStartup
     private static final WeakHashMap<Shell, Boolean> pendingEnhance = new WeakHashMap<>();
     private static final WeakHashMap<PreferenceDialog, Boolean> pageListenersAttached =
         new WeakHashMap<>();
+    private static final WeakHashMap<IEditorPart, Boolean> userDictEditorsHooked =
+        new WeakHashMap<>();
 
     private static final String HOVER_COPY_FILTER_KEY = "tormozit.spellHover.copyFilter.v4"; //$NON-NLS-1$
+    private static volatile boolean reloadingUserDictEditor;
 
     /** Последнее выделение в annotation-hover (к моменту Ctrl+C live-selection часто уже пуст). */
     private static volatile String hoverSelectionText;
@@ -93,6 +110,8 @@ public final class SpellCheckHook implements IStartup
     {
         registerComfortPlatformDictionary();
         bootstrapOnce();
+        bootstrapIgnoreMixedOnce();
+        bootstrapIgnoreDigitsOnce();
         Display display = Display.getDefault();
         if (display != null && !display.isDisposed())
         {
@@ -317,18 +336,14 @@ public final class SpellCheckHook implements IStartup
             List<HunspellDictionary> dicts = ComfortSpellingEngine.sharedDictionaries();
             if (dicts.isEmpty())
             {
-                Global.tempLog("spellCheck", "registerDictionary: нет загруженных Hunspell-словарей"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
             ISpellCheckEngine engine = SpellCheckEngine.getInstance();
             engine.registerDictionary(PLATFORM_LOCALE, new HunspellSpellDictionary(dicts));
             boolean inCombo = publishLocaleInPlatformDictionaryCombo(PLATFORM_LOCALE);
-            Global.tempLog("spellCheck", "registerDictionary: locale=" + PLATFORM_LOCALE //$NON-NLS-1$ //$NON-NLS-2$
-                + " dicts=" + dicts.size() + " inCombo=" + inCombo); //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (Exception | Error e)
         {
-            Global.tempLog("spellCheck", "registerDictionary ИСКЛЮЧЕНИЕ: " + e); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -366,12 +381,10 @@ public final class SpellCheckHook implements IStartup
             cache.set(null, mutable);
             Set<Locale> after = SpellCheckEngine.getLocalesWithInstalledDictionaries();
             boolean ok = after != null && after.contains(locale);
-            Global.tempLog("spellCheck", "publishLocale: reflect ok=" + ok + " locales=" + after); //$NON-NLS-1$ //$NON-NLS-2$
             return ok;
         }
         catch (Exception e)
         {
-            Global.tempLog("spellCheck", "publishLocale ИСКЛЮЧЕНИЕ: " + e); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
     }
@@ -397,7 +410,6 @@ public final class SpellCheckHook implements IStartup
     {
         if (ComfortSettings.isSpellingBootstrapped())
         {
-            Global.tempLog("spellCheck", "bootstrap уже выполнен, prefs не трогаем"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         EditorsUI.getPreferenceStore().setValue(SpellingService.PREFERENCE_SPELLING_ENABLED, true);
@@ -406,8 +418,33 @@ public final class SpellCheckHook implements IStartup
         PreferenceConstants.getPreferenceStore().setValue(PreferenceConstants.SPELLING_LOCALE,
             ComfortSettings.SPELLING_PLATFORM_LOCALE);
         ComfortSettings.setSpellingBootstrapped(true);
-        Global.tempLog("spellCheck", "bootstrap: spellingEnabled=true, engine=Default, locale=" //$NON-NLS-1$ //$NON-NLS-2$
-            + ComfortSettings.SPELLING_PLATFORM_LOCALE);
+    }
+
+    /**
+     * Однократно выключить «Ignore mixed case words», чтобы CamelCase можно было
+     * дробить по сегментам. Отдельный флаг — для установок, где platformDict уже
+     * прогнан. Дальше выбор пользователя не перезаписываем.
+     */
+    private static void bootstrapIgnoreMixedOnce()
+    {
+        if (ComfortSettings.isSpellingIgnoreMixedBootstrapped())
+            return;
+        PreferenceConstants.getPreferenceStore().setValue(
+            PreferenceConstants.SPELLING_IGNORE_MIXED, false);
+        ComfortSettings.setSpellingIgnoreMixedBootstrapped(true);
+    }
+
+    /**
+     * Однократно выключить «Ignore words with digits», чтобы цифры считались
+     * разделителями сегментов. Дальше выбор пользователя не перезаписываем.
+     */
+    private static void bootstrapIgnoreDigitsOnce()
+    {
+        if (ComfortSettings.isSpellingIgnoreDigitsBootstrapped())
+            return;
+        PreferenceConstants.getPreferenceStore().setValue(
+            PreferenceConstants.SPELLING_IGNORE_DIGITS, false);
+        ComfortSettings.setSpellingIgnoreDigitsBootstrapped(true);
     }
 
     /**
@@ -490,6 +527,7 @@ public final class SpellCheckHook implements IStartup
         Combo combo = findPlatformDictionaryCombo(shell);
         if (combo == null || combo.isDisposed())
             return false;
+        translateSpellingPageLabels(shell);
         relabelPlatformDictionaryCombo(combo);
         boolean linkOk = installUserDictionaryLink(combo);
         String target = ComfortSettings.SPELLING_PLATFORM_DICT_LABEL;
@@ -503,6 +541,243 @@ public final class SpellCheckHook implements IStartup
             }
         }
         return labeled && linkOk;
+    }
+
+    /**
+     * Русификация видимых надписей страницы «Орфография» (JDT/EditorsUI NLS).
+     * Сравнение без {@code &} и лишних пробелов; идемпотентно.
+     * У флажков OptionsConfigurationBlock ставит узкий {@code widthHint} под EN —
+     * после смены текста расширяем hint по {@code computeSize}.
+     * В тултип — оригинальная английская подпись (без суффикса «Комфорт»).
+     */
+    private static void translateSpellingPageLabels(Shell shell)
+    {
+        Map<String, SpellingPageLabel> map = spellingPageLabels();
+        walkControls(shell, control ->
+        {
+            if (control == null || control.isDisposed())
+                return;
+            if (control instanceof Label label)
+            {
+                SpellingPageLabel lab = map.get(normalizeSpellingLabel(label.getText()));
+                if (lab == null)
+                    return;
+                if (!lab.ru.equals(label.getText()))
+                    label.setText(lab.ru);
+                applySpellingOriginalTooltip(label, lab.en);
+            }
+            else if (control instanceof Button button)
+            {
+                SpellingPageLabel lab = map.get(normalizeSpellingLabel(button.getText()));
+                if (lab != null)
+                {
+                    if (!lab.ru.equals(button.getText()))
+                        button.setText(lab.ru);
+                    applySpellingOriginalTooltip(button, lab.en);
+                }
+                // JDT OptionsConfigurationBlock: узкий widthHint под EN — расширить под текущий текст
+                expandSpellingButtonWidthHint(button);
+            }
+            else if (control instanceof Group group)
+            {
+                SpellingPageLabel lab = map.get(normalizeSpellingLabel(group.getText()));
+                if (lab == null)
+                    return;
+                if (!lab.ru.equals(group.getText()))
+                    group.setText(lab.ru);
+                // Группам тултип не нужен (и перекрывает подсказки флажков); сброс со старых сборок
+                if (lab.en.equals(group.getToolTipText()))
+                    group.setToolTipText(null);
+            }
+            else if (control instanceof Link link)
+            {
+                String plain = link.getText();
+                if (plain == null)
+                    return;
+                // Link может быть в виде <a>text</a>
+                String inner = plain.replace("<a>", "").replace("</a>", ""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                SpellingPageLabel lab = map.get(normalizeSpellingLabel(inner));
+                if (lab == null)
+                    return;
+                if (!lab.ru.equals(inner))
+                    link.setText(plain.contains("<a>") ? "<a>" + lab.ru + "</a>" : lab.ru); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                applySpellingOriginalTooltip(link, lab.en);
+            }
+            else if (control instanceof Combo comboCtrl)
+            {
+                String[] items = comboCtrl.getItems();
+                if (items == null)
+                    return;
+                boolean changed = false;
+                SpellingPageLabel selectedLab = null;
+                int sel = comboCtrl.getSelectionIndex();
+                for (int i = 0; i < items.length; i++)
+                {
+                    SpellingPageLabel lab = map.get(normalizeSpellingLabel(items[i]));
+                    if (lab == null)
+                        continue;
+                    if (!lab.ru.equals(items[i]))
+                    {
+                        items[i] = lab.ru;
+                        changed = true;
+                    }
+                    if (i == sel)
+                        selectedLab = lab;
+                }
+                if (changed)
+                {
+                    comboCtrl.setItems(items);
+                    if (sel >= 0 && sel < items.length)
+                        comboCtrl.select(sel);
+                }
+                if (selectedLab != null)
+                    applySpellingOriginalTooltip(comboCtrl, selectedLab.en);
+            }
+        });
+        if (!shell.isDisposed())
+            shell.layout(true, true);
+    }
+
+    /** Английский оригинал в тултип; если тултип уже есть (ссылка Comfort) — дописать снизу. */
+    private static void applySpellingOriginalTooltip(Control control, String en)
+    {
+        if (control == null || control.isDisposed() || en == null || en.isEmpty())
+            return;
+        String current = control.getToolTipText();
+        if (current == null || current.isEmpty() || en.equals(current))
+        {
+            control.setToolTipText(en);
+            return;
+        }
+        if (current.contains(en))
+            return;
+        control.setToolTipText(current + "\n\n" + en); //$NON-NLS-1$
+    }
+
+    /** Расширить {@code GridData.widthHint} флажка под фактическую ширину текста. */
+    private static void expandSpellingButtonWidthHint(Button button)
+    {
+        if (button == null || button.isDisposed())
+            return;
+        Object layoutData = button.getLayoutData();
+        if (!(layoutData instanceof GridData gd) || gd.widthHint <= 0)
+            return;
+        Point need = button.computeSize(SWT.DEFAULT, SWT.DEFAULT, true);
+        if (need == null || need.x <= gd.widthHint)
+            return;
+        gd.widthHint = need.x;
+        Composite parent = button.getParent();
+        if (parent != null && !parent.isDisposed())
+            parent.layout(true, true);
+    }
+
+    /** RU-подпись + EN для тултипа; ключи — нормализованный EN, RU и устаревшие RU. */
+    private static Map<String, SpellingPageLabel> spellingPageLabels()
+    {
+        Map<String, SpellingPageLabel> map = new LinkedHashMap<>();
+        putSpellingLabel(map, "Enable spell checking", "Включить проверку орфографии"); //$NON-NLS-1$ //$NON-NLS-2$
+        putSpellingLabel(map, "Select spelling engine to use:", "Движок проверки орфографии:"); //$NON-NLS-1$ //$NON-NLS-2$
+        putSpellingLabel(map, "Default spelling engine", "Стандартный движок"); //$NON-NLS-1$ //$NON-NLS-2$
+        putSpellingLabel(map, "Options", "Параметры"); //$NON-NLS-1$ //$NON-NLS-2$
+        putSpellingLabel(map, "Dictionaries", "Словари"); //$NON-NLS-1$ //$NON-NLS-2$
+        putSpellingLabel(map, "Dictionary", "Словарь"); //$NON-NLS-1$ //$NON-NLS-2$
+        putSpellingLabel(map, "Advanced", "Дополнительно"); //$NON-NLS-1$ //$NON-NLS-2$
+        putSpellingLabel(map, "Platform dictionary:", "Системный словарь:"); //$NON-NLS-1$ //$NON-NLS-2$
+        SpellingPageLabel userDict = putSpellingLabel(map, "User defined dictionary:", //$NON-NLS-1$
+            "Пользовательский словарь:"); //$NON-NLS-1$
+        aliasSpellingLabel(map, "User defined dictionary", userDict); //$NON-NLS-1$
+        aliasSpellingLabel(map, "Пользовательский словарь", userDict); //$NON-NLS-1$
+        putSpellingLabel(map, "Browse...", "Обзор..."); //$NON-NLS-1$ //$NON-NLS-2$
+        putSpellingLabel(map, "Encoding:", "Кодировка:"); //$NON-NLS-1$ //$NON-NLS-2$
+        putSpellingLabel(map, "Variables...", "Переменные..."); //$NON-NLS-1$ //$NON-NLS-2$
+        putSpellingLabel(map, "Make dictionary available to content assist", //$NON-NLS-1$
+            "Словарь в автодополнении"); //$NON-NLS-1$
+        putSpellingLabel(map,
+            "The user dictionary is a text file with one word on each line", //$NON-NLS-1$
+            "Пользовательский словарь — текст, по одному слову в строке"); //$NON-NLS-1$
+        // Короткие подписи: у OptionsConfigurationBlock узкий widthHint под EN.
+        putSpellingLabel(map, "Ignore words with digits", "Игнорировать слова с цифрами"); //$NON-NLS-1$ //$NON-NLS-2$
+        SpellingPageLabel mixed = putSpellingLabel(map, "Ignore mixed case words", //$NON-NLS-1$
+            "Игнорировать смешанный регистр"); //$NON-NLS-1$
+        aliasSpellingLabel(map, "Игнорировать слова со смешанным регистром", mixed); //$NON-NLS-1$
+        SpellingPageLabel sentence = putSpellingLabel(map, "Ignore sentence capitalization", //$NON-NLS-1$
+            "Игнорировать регистр предложения"); //$NON-NLS-1$
+        aliasSpellingLabel(map, "Игнорировать регистр начала предложения", sentence); //$NON-NLS-1$
+        putSpellingLabel(map, "Ignore upper case words", "Игнорировать слова ЗАГЛАВНЫМИ"); //$NON-NLS-1$ //$NON-NLS-2$
+        putSpellingLabel(map, "Ignore internet addresses", "Игнорировать интернет-адреса"); //$NON-NLS-1$ //$NON-NLS-2$
+        putSpellingLabel(map, "Ignore single letters", "Игнорировать одиночные буквы"); //$NON-NLS-1$ //$NON-NLS-2$
+        SpellingPageLabel javaStr = putSpellingLabel(map, "Ignore Java string literals", //$NON-NLS-1$
+            "Игнорировать строки Java"); //$NON-NLS-1$
+        aliasSpellingLabel(map, "Игнорировать строковые литералы Java", javaStr); //$NON-NLS-1$
+        SpellingPageLabel props = putSpellingLabel(map, "Ignore '&' in Java properties files", //$NON-NLS-1$
+            "Игнорировать '&' в .properties"); //$NON-NLS-1$
+        aliasSpellingLabel(map, "Ignore '&&' in &Java properties files", props); //$NON-NLS-1$
+        aliasSpellingLabel(map, "Игнорировать '&&' в файлах свойств Java", props); //$NON-NLS-1$
+        SpellingPageLabel nonLetters = putSpellingLabel(map, "Ignore non-letters at word boundaries", //$NON-NLS-1$
+            "Игнорировать небуквы у границ"); //$NON-NLS-1$
+        aliasSpellingLabel(map, "Игнорировать небуквы на границах слов", nonLetters); //$NON-NLS-1$
+        putSpellingLabel(map, "Maximum number of correction proposals:", //$NON-NLS-1$
+            "Макс. число вариантов исправления:"); //$NON-NLS-1$
+        putSpellingLabel(map, "Maximum number of problems reported per file:", //$NON-NLS-1$
+            "Макс. число проблем на файл:"); //$NON-NLS-1$
+        putSpellingLabel(map, "none", "нет"); //$NON-NLS-1$ //$NON-NLS-2$
+        aliasSpellingLabel(map, "Использовать словарь в автодополнении", //$NON-NLS-1$
+            map.get(normalizeSpellingLabel("Словарь в автодополнении"))); //$NON-NLS-1$
+        return map;
+    }
+
+    private static SpellingPageLabel putSpellingLabel(Map<String, SpellingPageLabel> map, String en,
+        String ru)
+    {
+        SpellingPageLabel lab = new SpellingPageLabel(ru, en);
+        map.put(normalizeSpellingLabel(en), lab);
+        map.put(normalizeSpellingLabel(ru), lab);
+        return lab;
+    }
+
+    private static void aliasSpellingLabel(Map<String, SpellingPageLabel> map, String otherKey,
+        SpellingPageLabel lab)
+    {
+        if (lab != null)
+            map.put(normalizeSpellingLabel(otherKey), lab);
+    }
+
+    /** Русская подпись настройки + английский оригинал для тултипа. */
+    private static final class SpellingPageLabel
+    {
+        final String ru;
+        final String en;
+
+        SpellingPageLabel(String ru, String en)
+        {
+            this.ru = ru;
+            this.en = en;
+        }
+    }
+
+    /**
+     * Убрать mnemonic {@code &X}, сохранить литерал {@code &&} → {@code &},
+     * схлопнуть пробелы.
+     */
+    private static String normalizeSpellingLabel(String text)
+    {
+        if (text == null)
+            return ""; //$NON-NLS-1$
+        StringBuilder sb = new StringBuilder(text.length());
+        for (int i = 0; i < text.length(); i++)
+        {
+            char c = text.charAt(i);
+            if (c == '&' && i + 1 < text.length() && text.charAt(i + 1) == '&')
+            {
+                sb.append('&');
+                i++;
+                continue;
+            }
+            if (c == '&')
+                continue;
+            sb.append(c);
+        }
+        return sb.toString().trim().replaceAll("\\s+", " "); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static PreferenceDialog findPreferenceDialog(Shell shell)
@@ -572,20 +847,14 @@ public final class SpellCheckHook implements IStartup
         String[] items = combo.getItems();
         if (items == null)
             return;
-        boolean changed = false;
         for (int i = 0; i < items.length; i++)
         {
             String item = items[i];
             if (item == null || target.equals(item))
                 continue;
             if (isStockRussianPlatformLabel(item))
-            {
                 combo.setItem(i, target);
-                changed = true;
-            }
         }
-        if (changed)
-            Global.tempLog("spellCheck", "relabel Platform dictionary → " + target); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /**
@@ -647,15 +916,15 @@ public final class SpellCheckHook implements IStartup
         link.setText("<a>" + USER_DICT_LINK_TEXT + "</a>"); //$NON-NLS-1$ //$NON-NLS-2$
         link.setToolTipText(
             "Файл слов, добавленных через «Добавить в словарь» при проверке орфографии Comfort.\n"
-            + "Открыть в проводнике ОС."); //$NON-NLS-1$
+            + "Открыть в текстовом редакторе Eclipse; при сохранении словарь сортируется и подхватывается сразу."
+            + "\n\nUser defined dictionary"); //$NON-NLS-1$
         // Без grab/END — иначе 4-я колонка GridLayout растягивается и появляется «дырка».
         link.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false));
         link.addListener(SWT.Selection, e ->
         {
             if (!USER_DICT_LINK_TEXT.equals(e.text))
                 return;
-            NavigatorShowInExplorerHandler.showInExplorer(
-                ComfortSpellingEngine.getUserDictionaryFile(), combo.getShell());
+            openUserDictionaryInEclipseEditor();
         });
         if (belowAnchor != null && !belowAnchor.isDisposed())
             link.moveAbove(belowAnchor);
@@ -663,8 +932,92 @@ public final class SpellCheckHook implements IStartup
             link.moveBelow(combo);
         parent.setData(LINK_INSTALLED_KEY, Boolean.TRUE);
         parent.layout(true, true);
-        Global.tempLog("spellCheck", "user-dict link installed on Spelling page"); //$NON-NLS-1$ //$NON-NLS-2$
         return true;
+    }
+
+    /** Открыть {@code spelling-user-dictionary.txt} в системном текстовом редакторе Eclipse. */
+    private static void openUserDictionaryInEclipseEditor()
+    {
+        try
+        {
+            File file = ComfortSpellingEngine.ensureUserDictionaryFile();
+            if (file == null)
+            {
+                ToastNotification.show("Орфография", //$NON-NLS-1$
+                    "Не удалось определить файл пользовательского словаря.", 5_000); //$NON-NLS-1$
+                return;
+            }
+            IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            if (window == null)
+                return;
+            IWorkbenchPage page = window.getActivePage();
+            if (page == null)
+                return;
+            IFileStore store = EFS.getLocalFileSystem().getStore(file.toURI());
+            IEditorPart editor = IDE.openEditorOnFileStore(page, store);
+            hookUserDictionaryEditorSave(editor);
+        }
+        catch (Exception e)
+        {
+            ToastNotification.show("Орфография", //$NON-NLS-1$
+                "Не удалось открыть словарь: " + e.getMessage(), 5_000); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * После Save (dirty → clean) перечитать файл в память и синхронизировать буфер
+     * редактора с отсортированной записью на диск.
+     */
+    private static void hookUserDictionaryEditorSave(IEditorPart editor)
+    {
+        if (editor == null)
+            return;
+        synchronized (userDictEditorsHooked)
+        {
+            if (Boolean.TRUE.equals(userDictEditorsHooked.get(editor)))
+                return;
+            userDictEditorsHooked.put(editor, Boolean.TRUE);
+        }
+        final boolean[] wasDirty = { editor.isDirty() };
+        IPropertyListener listener = (source, propId) ->
+        {
+            if (propId != IEditorPart.PROP_DIRTY || reloadingUserDictEditor)
+                return;
+            boolean dirty = editor.isDirty();
+            if (wasDirty[0] && !dirty)
+            {
+                reloadingUserDictEditor = true;
+                try
+                {
+                    ComfortSpellingEngine.reloadUserDictionaryFromDisk();
+                    refreshUserDictionaryEditorContent(editor);
+                }
+                finally
+                {
+                    reloadingUserDictEditor = false;
+                    wasDirty[0] = editor.isDirty();
+                }
+            }
+            else
+                wasDirty[0] = dirty;
+        };
+        editor.addPropertyListener(listener);
+    }
+
+    private static void refreshUserDictionaryEditorContent(IEditorPart editor)
+    {
+        if (!(editor instanceof ITextEditor textEditor))
+            return;
+        try
+        {
+            IDocumentProvider provider = textEditor.getDocumentProvider();
+            IEditorInput input = textEditor.getEditorInput();
+            if (provider != null && input != null)
+                provider.resetDocument(input);
+        }
+        catch (Exception e)
+        {
+        }
     }
 
     private static Link findExistingUserDictLink(Composite parent)
@@ -721,14 +1074,6 @@ public final class SpellCheckHook implements IStartup
         IPreferenceStore editorsStore = EditorsUI.getPreferenceStore();
         IPreferenceStore jdtStore = PreferenceConstants.getPreferenceStore();
         Set<Locale> locales = SpellCheckEngine.getLocalesWithInstalledDictionaries();
-        Global.tempLog("spellCheck", "spellingEnabled=" //$NON-NLS-1$ //$NON-NLS-2$
-            + editorsStore.getBoolean(SpellingService.PREFERENCE_SPELLING_ENABLED)
-            + " engine=" + editorsStore.getString(SpellingService.PREFERENCE_SPELLING_ENGINE) //$NON-NLS-1$
-            + " locale=" + jdtStore.getString(PreferenceConstants.SPELLING_LOCALE) //$NON-NLS-1$
-            + " bootstrapped=" + ComfortSettings.isSpellingBootstrapped() //$NON-NLS-1$
-            + " platformLocales=" + locales //$NON-NLS-1$
-            + " label=" + ComfortSettings.SPELLING_PLATFORM_DICT_LABEL //$NON-NLS-1$
-            + " comfortActive=" + isComfortPlatformSpellingActive()); //$NON-NLS-1$
     }
 
     /**
@@ -808,7 +1153,6 @@ public final class SpellCheckHook implements IStartup
         }
         catch (Exception e)
         {
-            Global.tempLog("spellCheck", "installSpellingQuickFixHover: " + e); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
     }
@@ -882,7 +1226,6 @@ public final class SpellCheckHook implements IStartup
             }
             catch (Exception e)
             {
-                Global.tempLog("spellCheck", "quickFixHover AnnotationInfo: " + e); //$NON-NLS-1$ //$NON-NLS-2$
                 return spellingErrorMessage(word);
             }
         }

@@ -86,12 +86,23 @@ final class HunspellDictionary
 
     static HunspellDictionary load(File affFile, File dicFile, ScriptKind script) throws IOException
     {
+        return load(affFile, dicFile, script, null);
+    }
+
+    /**
+     * @param dicCharset кодировка {@code .dic}; {@code null} — как у {@code SET} в {@code .aff}
+     *            (для comfort-extra UTF-8 при KOI8-R aff AOT)
+     */
+    static HunspellDictionary load(File affFile, File dicFile, ScriptKind script, Charset dicCharset)
+        throws IOException
+    {
         HunspellDictionary dict = new HunspellDictionary(script);
         byte[] affBytes = Files.readAllBytes(affFile.toPath());
-        Charset charset = detectCharset(affBytes);
-        dict.parseAff(new String(affBytes, charset));
+        Charset affCharset = detectCharset(affBytes);
+        dict.parseAff(new String(affBytes, affCharset));
         byte[] dicBytes = Files.readAllBytes(dicFile.toPath());
-        dict.parseDic(new String(dicBytes, charset));
+        Charset forDic = dicCharset != null ? dicCharset : affCharset;
+        dict.parseDic(new String(dicBytes, forDic));
         return dict;
     }
 
@@ -116,7 +127,6 @@ final class HunspellDictionary
                 }
                 catch (Exception e)
                 {
-                    Global.tempLog("spellCheck", "unknown charset " + name + ", using UTF-8"); //$NON-NLS-1$ //$NON-NLS-2$
                     return StandardCharsets.UTF_8;
                 }
             }
@@ -224,7 +234,6 @@ final class HunspellDictionary
             }
             catch (PatternSyntaxException e)
             {
-                Global.tempLog("spellCheck", "bad condition regex: " + rawCondition + " (" + e + ")"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 condition = null;
             }
         }
@@ -239,11 +248,18 @@ final class HunspellDictionary
     private void parseDic(String text)
     {
         String[] lines = text.split("\r?\n"); //$NON-NLS-1$
-        for (int i = 1; i < lines.length; i++) // первая строка - количество слов, пропускаем
+        boolean countSkipped = false;
+        for (int i = 0; i < lines.length; i++)
         {
-            String line = lines[i];
-            if (line.isEmpty())
+            String line = lines[i].trim();
+            if (line.isEmpty() || line.startsWith("#")) //$NON-NLS-1$
                 continue;
+            // Первая непустая не-комментарий — счётчик слов Hunspell (пропускаем)
+            if (!countSkipped)
+            {
+                countSkipped = true;
+                continue;
+            }
             int spaceIdx = line.indexOf(' ');
             if (spaceIdx < 0)
                 spaceIdx = line.indexOf('\t');

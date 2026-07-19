@@ -61,6 +61,12 @@ public class ComfortInitializer extends AbstractPreferenceInitializer
             ComfortSettings.PREF_SPELLING_BOOTSTRAPPED,
             ComfortSettings.DEFAULT_SPELLING_BOOTSTRAPPED);
         store.setDefault(
+            ComfortSettings.PREF_SPELLING_IGNORE_MIXED_BOOTSTRAPPED,
+            ComfortSettings.DEFAULT_SPELLING_IGNORE_MIXED_BOOTSTRAPPED);
+        store.setDefault(
+            ComfortSettings.PREF_SPELLING_IGNORE_DIGITS_BOOTSTRAPPED,
+            ComfortSettings.DEFAULT_SPELLING_IGNORE_DIGITS_BOOTSTRAPPED);
+        store.setDefault(
             ComfortSettings.PREF_SPELLING_CHECK_IDENTIFIERS_VISIBLE,
             ComfortSettings.DEFAULT_SPELLING_CHECK_IDENTIFIERS_VISIBLE);
     }

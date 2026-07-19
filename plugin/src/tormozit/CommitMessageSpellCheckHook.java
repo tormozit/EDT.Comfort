@@ -1,8 +1,24 @@
 package tormozit;
 
 import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.WeakHashMap;
 
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.Status;
+import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.jface.text.DocumentEvent;
+import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.IDocumentListener;
+import org.eclipse.jface.text.Position;
+import org.eclipse.jface.text.contentassist.ICompletionProposal;
+import org.eclipse.jface.text.source.Annotation;
+import org.eclipse.jface.text.source.IAnnotationModel;
+import org.eclipse.jface.text.source.IAnnotationModelExtension;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.jface.text.source.SourceViewerConfiguration;
@@ -19,12 +35,15 @@ import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.texteditor.spelling.SpellingAnnotation;
 import org.eclipse.ui.texteditor.spelling.SpellingProblem;
 
 /**
  * Орфография в поле сообщения коммита EGit ({@code SpellcheckableMessageArea} /
- * {@code StagingView$…}): тот же интерактивный hover с proposals, что в модуле BSL
- * ({@link SpellCheckHook#installSpellingQuickFixHover}).
+ * {@code StagingView$…}): те же правила токенизации, что BSL/свойства —
+ * {@link ComfortSpellingEngine#findMisspelledRanges}; hover —
+ * {@link SpellCheckHook#installSpellingQuickFixHover}.
+ * Штатный SpellingReconcileStrategy отключается (иначе whole-token без CamelCase).
  */
 public final class CommitMessageSpellCheckHook implements IStartup
 {
@@ -34,10 +53,13 @@ public final class CommitMessageSpellCheckHook implements IStartup
     private static final String STAGING_VIEW_CLASS =
         "org.eclipse.egit.ui.internal.staging.StagingView"; //$NON-NLS-1$
     private static final String HOOKED_KEY = "tormozit.commitSpell.hover"; //$NON-NLS-1$
+    private static final String JOB_NAME = "Comfort: орфография сообщения коммита"; //$NON-NLS-1$
     private static final int SCAN_RETRY_MS = 400;
     private static final int SCAN_MAX_ATTEMPTS = 80;
+    private static final int DEBOUNCE_MS = 400;
 
     private static final WeakHashMap<Control, Boolean> hookedAreas = new WeakHashMap<>();
+    private static final WeakHashMap<SourceViewer, CommitSpellSession> sessions = new WeakHashMap<>();
 
     private static volatile Class<?> spellAreaClass;
     private static volatile String loggedStagingClass;
@@ -50,7 +72,6 @@ public final class CommitMessageSpellCheckHook implements IStartup
             return;
         display.asyncExec(() ->
         {
-            Global.tempLog("spellCheck", "commitSpell: earlyStartup"); //$NON-NLS-1$ //$NON-NLS-2$
             installWorkbenchListeners();
             scheduleScanAll(0);
         });
@@ -90,7 +111,6 @@ public final class CommitMessageSpellCheckHook implements IStartup
         }
         catch (Exception e)
         {
-            Global.tempLog("spellCheck", "commitSpell: windowListener: " + e); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -158,7 +178,6 @@ public final class CommitMessageSpellCheckHook implements IStartup
             if (!SpellCheckHook.isComfortPlatformSpellingActive())
             {
                 if (attempt == 0)
-                    Global.tempLog("spellCheck", "commitSpell: Comfort spelling inactive, skip"); //$NON-NLS-1$ //$NON-NLS-2$
                 if (attempt < SCAN_MAX_ATTEMPTS)
                     scheduleScanAll(attempt + 1);
                 return;
@@ -193,12 +212,8 @@ public final class CommitMessageSpellCheckHook implements IStartup
             }
             catch (Exception e)
             {
-                Global.tempLog("spellCheck", "commitSpell: scan: " + e); //$NON-NLS-1$ //$NON-NLS-2$
             }
-            // Не логируем периодические проходы — только первую установку hover.
             if (hooked > 0)
-                Global.tempLog("spellCheck", "commitSpell: scan attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                    + " areas=" + found + " newlyHooked=" + hooked); //$NON-NLS-1$ //$NON-NLS-2$
             if (attempt < SCAN_MAX_ATTEMPTS)
                 scheduleScanAll(attempt + 1);
         });
@@ -234,18 +249,13 @@ public final class CommitMessageSpellCheckHook implements IStartup
                         && !stagingClass.equals(loggedStagingClass))
                     {
                         loggedStagingClass = stagingClass;
-                        Global.tempLog("spellCheck", "commitSpell: staging class=" //$NON-NLS-1$ //$NON-NLS-2$
-                            + stagingClass);
                     }
                     Object area = Global.getField(view, "commitMessageText"); //$NON-NLS-1$
                     if (!(area instanceof Control control))
                     {
-                        // Один раз на отсутствие поля — иначе спам при каждом scan.
                         if (loggedStagingClass == null || !loggedStagingClass.endsWith("#noText")) //$NON-NLS-1$
                         {
                             loggedStagingClass = stagingClass + "#noText"; //$NON-NLS-1$
-                            Global.tempLog("spellCheck", "commitSpell: StagingView.commitMessageText=" //$NON-NLS-1$ //$NON-NLS-2$
-                                + (area == null ? "null" : area.getClass().getName())); //$NON-NLS-1$
                         }
                         continue;
                     }
@@ -324,13 +334,7 @@ public final class CommitMessageSpellCheckHook implements IStartup
         boolean already = Boolean.TRUE.equals(area.getData(HOOKED_KEY)) || hookedAreas.containsKey(area);
         Object viewerObj = Global.getField(area, "sourceViewer"); //$NON-NLS-1$
         if (!(viewerObj instanceof SourceViewer viewer))
-        {
-            if (!already)
-                Global.tempLog("spellCheck", "commitSpell: area без SourceViewer: class=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + area.getClass().getName() + " field=" //$NON-NLS-1$
-                    + (viewerObj == null ? "null" : viewerObj.getClass().getName())); //$NON-NLS-1$
             return false;
-        }
         try
         {
             Object configObj = Global.getField(area, "configuration"); //$NON-NLS-1$
@@ -339,52 +343,74 @@ public final class CommitMessageSpellCheckHook implements IStartup
             // Переустанавливаем hover: configure()/recreate может вернуть DefaultTextHover.
             if (!SpellCheckHook.installSpellingQuickFixHover(viewer, config))
             {
-                Global.tempLog("spellCheck", "commitSpell: installSpellingQuickFixHover failed on " //$NON-NLS-1$ //$NON-NLS-2$
-                    + area.getClass().getName());
                 return false;
             }
+            disableDefaultSpellReconciler(viewer);
+            CommitSpellSession session = sessions.get(viewer);
+            if (session == null)
+            {
+                session = new CommitSpellSession(viewer);
+                sessions.put(viewer, session);
+                session.attach();
+            }
+            session.schedule(0);
             if (!already)
             {
                 area.setData(HOOKED_KEY, Boolean.TRUE);
                 hookedAreas.put(area, Boolean.TRUE);
-                area.addDisposeListener(e -> hookedAreas.remove(area));
-                Global.tempLog("spellCheck", "commitSpell: hover installed on " //$NON-NLS-1$ //$NON-NLS-2$
-                    + area.getClass().getName());
+                area.addDisposeListener(e ->
+                {
+                    hookedAreas.remove(area);
+                    CommitSpellSession s = sessions.remove(viewer);
+                    if (s != null)
+                        s.dispose();
+                });
                 return true;
             }
             return false;
         }
         catch (Exception e)
         {
-            Global.tempLog("spellCheck", "commitSpell: installHover: " + e); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
     }
 
     /**
-     * После изменения пользовательского словаря: снять ошибки с этим словом
-     * или форсировать reconcile при отмене.
+     * EGit ставит {@code SpellingReconcileStrategy} (DefaultSpellChecker, whole-token).
+     * Отключаем через {@code fReconciler} (публичного get/setReconciler у SourceViewer нет) —
+     * проверку ведёт {@link CommitSpellSession} через findMisspelledRanges.
+     */
+    private static void disableDefaultSpellReconciler(SourceViewer viewer)
+    {
+        if (viewer == null)
+            return;
+        try
+        {
+            Object reconciler = Global.getField(viewer, "fReconciler"); //$NON-NLS-1$
+            if (reconciler == null)
+                return;
+            Global.invoke(reconciler, "uninstall"); //$NON-NLS-1$
+            Global.setField(viewer, "fReconciler", null); //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+        }
+    }
+
+    /**
+     * После изменения пользовательского словаря — перескан Comfort-сессий.
      */
     static void onUserDictionaryChanged(String word, boolean added)
     {
-        if (word == null || word.isEmpty())
-            return;
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
         Runnable run = () ->
         {
-            for (Control area : new ArrayList<>(hookedAreas.keySet()))
+            for (CommitSpellSession session : new ArrayList<>(sessions.values()))
             {
-                if (area == null || area.isDisposed())
-                    continue;
-                Object viewerObj = Global.getField(area, "sourceViewer"); //$NON-NLS-1$
-                if (!(viewerObj instanceof ISourceViewer viewer))
-                    continue;
-                if (added)
-                    SpellingProblem.removeAll(viewer, word);
-                else
-                    forceSpellReconcile(viewer);
+                if (session != null)
+                    session.schedule(0);
             }
         };
         if (display.getThread() == Thread.currentThread())
@@ -393,19 +419,241 @@ public final class CommitMessageSpellCheckHook implements IStartup
             display.asyncExec(run);
     }
 
-    private static void forceSpellReconcile(ISourceViewer viewer)
+    /** Debounced Job: {@link ComfortSpellingEngine#findMisspelledRanges} → SpellingAnnotation. */
+    private static final class CommitSpellSession
     {
-        if (viewer == null)
-            return;
-        try
+        private final SourceViewer viewer;
+        private final IDocumentListener documentListener;
+        private volatile Job job;
+        private int scheduleGeneration;
+
+        CommitSpellSession(SourceViewer viewer)
         {
-            Object reconciler = Global.getField(viewer, "fReconciler"); //$NON-NLS-1$
-            if (reconciler != null)
-                Global.invoke(reconciler, "forceReconciling"); //$NON-NLS-1$
+            this.viewer = viewer;
+            this.documentListener = new IDocumentListener()
+            {
+                @Override
+                public void documentAboutToBeChanged(DocumentEvent event)
+                {
+                }
+
+                @Override
+                public void documentChanged(DocumentEvent event)
+                {
+                    schedule(DEBOUNCE_MS);
+                }
+            };
         }
-        catch (Exception e)
+
+        void attach()
         {
-            Global.tempLog("spellCheck", "commitSpell: forceReconciling: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            IDocument doc = viewer.getDocument();
+            if (doc != null)
+                doc.addDocumentListener(documentListener);
+        }
+
+        void dispose()
+        {
+            cancelJob();
+            try
+            {
+                IDocument doc = viewer.getDocument();
+                if (doc != null)
+                    doc.removeDocumentListener(documentListener);
+            }
+            catch (Exception ignored)
+            {
+            }
+            removeAllSpellingAnnotations();
+        }
+
+        void schedule(int delayMs)
+        {
+            if (!SpellCheckHook.isComfortPlatformSpellingActive())
+            {
+                cancelJob();
+                removeAllSpellingAnnotations();
+                return;
+            }
+            final int gen = ++scheduleGeneration;
+            cancelJob();
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            display.timerExec(Math.max(0, delayMs), () ->
+            {
+                if (gen != scheduleGeneration)
+                    return;
+                startJob(gen);
+            });
+        }
+
+        private void cancelJob()
+        {
+            if (job != null)
+                job.cancel();
+            job = null;
+        }
+
+        private void startJob(int gen)
+        {
+            if (!SpellCheckHook.isComfortPlatformSpellingActive())
+                return;
+            IDocument document = viewer.getDocument();
+            if (document == null)
+                return;
+            final String text;
+            try
+            {
+                text = document.get();
+            }
+            catch (Exception e)
+            {
+                return;
+            }
+            Job checkJob = new Job(JOB_NAME)
+            {
+                @Override
+                protected IStatus run(IProgressMonitor monitor)
+                {
+                    if (monitor.isCanceled() || gen != scheduleGeneration)
+                        return Status.CANCEL_STATUS;
+                    List<int[]> ranges = ComfortSpellingEngine.findMisspelledRanges(text);
+                    if (monitor.isCanceled() || gen != scheduleGeneration)
+                        return Status.CANCEL_STATUS;
+                    List<CommitProblem> problems = new ArrayList<>();
+                    if (ranges != null)
+                    {
+                        for (int[] r : ranges)
+                        {
+                            if (r == null || r.length < 2 || r[1] <= 0)
+                                continue;
+                            int off = r[0];
+                            int len = r[1];
+                            if (off < 0 || off + len > text.length())
+                                continue;
+                            String word = text.substring(off, off + len);
+                            problems.add(new CommitProblem(off, len, word));
+                        }
+                    }
+                    final List<CommitProblem> toApply = problems;
+                    Display.getDefault().asyncExec(() ->
+                    {
+                        if (gen != scheduleGeneration)
+                            return;
+                        applyAnnotations(toApply);
+                    });
+                    return Status.OK_STATUS;
+                }
+            };
+            checkJob.setSystem(true);
+            checkJob.setPriority(Job.DECORATE);
+            this.job = checkJob;
+            checkJob.schedule();
+        }
+
+        void removeAllSpellingAnnotations()
+        {
+            IAnnotationModel model = viewer.getAnnotationModel();
+            if (model == null)
+                return;
+            List<Annotation> toRemove = new ArrayList<>();
+            Iterator<?> it = model.getAnnotationIterator();
+            while (it.hasNext())
+            {
+                Object next = it.next();
+                if (next instanceof SpellingAnnotation)
+                    toRemove.add((Annotation) next);
+            }
+            if (toRemove.isEmpty())
+                return;
+            if (model instanceof IAnnotationModelExtension ext)
+            {
+                Annotation[] arr = toRemove.toArray(new Annotation[0]);
+                ext.replaceAnnotations(arr, Map.of());
+            }
+            else
+            {
+                for (Annotation a : toRemove)
+                    model.removeAnnotation(a);
+            }
+        }
+
+        void applyAnnotations(List<CommitProblem> problems)
+        {
+            IAnnotationModel model = viewer.getAnnotationModel();
+            if (model == null)
+                return;
+            // Полный replace всех spelling — штатный reconciler мог успеть что-то положить
+            List<Annotation> toRemove = new ArrayList<>();
+            Iterator<?> it = model.getAnnotationIterator();
+            while (it.hasNext())
+            {
+                Object next = it.next();
+                if (next instanceof SpellingAnnotation)
+                    toRemove.add((Annotation) next);
+            }
+            Map<Annotation, Position> batch = new LinkedHashMap<>();
+            if (problems != null)
+            {
+                for (CommitProblem p : problems)
+                {
+                    SpellingAnnotation ann = new SpellingAnnotation(p);
+                    batch.put(ann, new Position(p.getOffset(), p.getLength()));
+                }
+            }
+            if (model instanceof IAnnotationModelExtension ext)
+            {
+                Annotation[] removeArr = toRemove.toArray(new Annotation[0]);
+                ext.replaceAnnotations(removeArr, batch);
+            }
+            else
+            {
+                for (Annotation a : toRemove)
+                    model.removeAnnotation(a);
+                for (Map.Entry<Annotation, Position> e : batch.entrySet())
+                    model.addAnnotation(e.getKey(), e.getValue());
+            }
+        }
+    }
+
+    /** Маркер Comfort-проблемы в сообщении коммита (сегмент после findMisspelledRanges). */
+    private static final class CommitProblem extends SpellingProblem
+    {
+        private final int offset;
+        private final int length;
+        private final String word;
+
+        CommitProblem(int offset, int length, String word)
+        {
+            this.offset = offset;
+            this.length = length;
+            this.word = word;
+        }
+
+        @Override
+        public int getOffset()
+        {
+            return offset;
+        }
+
+        @Override
+        public int getLength()
+        {
+            return length;
+        }
+
+        @Override
+        public String getMessage()
+        {
+            return SpellCheckHook.spellingErrorMessage(word);
+        }
+
+        @Override
+        public ICompletionProposal[] getProposals()
+        {
+            // Hover собирает proposals сам (SpellCheckHook.ComfortSpellingQuickFixHover)
+            return new ICompletionProposal[0];
         }
     }
 }

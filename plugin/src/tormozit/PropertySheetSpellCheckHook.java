@@ -173,8 +173,6 @@ public final class PropertySheetSpellCheckHook implements IStartup
             }
             int attached = tryAttachAll(view, attempt);
             if (attached > 0 && (attempt == 0 || attempt % 10 == 0))
-                Global.tempLog("spellCheck", "PropertySheetSpell: attach=" + attached //$NON-NLS-1$ //$NON-NLS-2$
-                    + " attempt=" + attempt); //$NON-NLS-1$
             if (attempt < 100)
                 scheduleAttach(view, attempt + 1);
             else
@@ -208,8 +206,6 @@ public final class PropertySheetSpellCheckHook implements IStartup
         if (lightText == null)
         {
             if (attempt == 0 || attempt == 50)
-                Global.tempLog("spellCheck", "PropertySheetSpell: LightText не найден для «" //$NON-NLS-1$ //$NON-NLS-2$
-                    + label + "»"); //$NON-NLS-1$
             return false;
         }
         if (ATTACHED_LIGHT.contains(lightText))
@@ -224,12 +220,9 @@ public final class PropertySheetSpellCheckHook implements IStartup
         });
         if (!ok)
         {
-            Global.tempLog("spellCheck", "PropertySheetSpell: listener fail «" + label + "»"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return false;
         }
         ATTACHED_LIGHT.add(lightText);
-        Global.tempLog("spellCheck", "PropertySheetSpell: подключено «" + label + "» light=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + lightText.getClass().getName());
         return true;
     }
 
@@ -304,7 +297,6 @@ public final class PropertySheetSpellCheckHook implements IStartup
         Object mapObj = renderer != null ? Global.getField(renderer, "viewModelToView") : null; //$NON-NLS-1$
         if (!(mapObj instanceof Map<?, ?> map))
         {
-            Global.tempLog("spellCheck", "PropertySheetSpell: dump map=null"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         StringBuilder labels = new StringBuilder();
@@ -324,7 +316,6 @@ public final class PropertySheetSpellCheckHook implements IStartup
             if (n >= 40)
                 break;
         }
-        Global.tempLog("spellCheck", "PropertySheetSpell: dump labels(" + n + ")=" + labels); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
         for (String want : FIELD_LABELS)
         {
@@ -356,8 +347,6 @@ public final class PropertySheetSpellCheckHook implements IStartup
                 if (after.length() > 200)
                     break;
             }
-            Global.tempLog("spellCheck", "PropertySheetSpell: after «" + want + "» found=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + found + " next=[" + after + "]"); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -382,10 +371,6 @@ public final class PropertySheetSpellCheckHook implements IStartup
             if (!ATTACHED_LIGHT.contains(owner))
             {
                 ATTACHED_LIGHT.add(owner);
-                Global.tempLog("spellCheck", "PropertySheetSpell: direct-attach multiline=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + isMultilineLightText(owner)
-                    + " label=" + findLabelBeforeLightTextInOpenSheets(owner) //$NON-NLS-1$
-                    + " textLen=" + lightTextLength(owner)); //$NON-NLS-1$
             }
             wireOverlay(styled);
         };
@@ -688,10 +673,6 @@ public final class PropertySheetSpellCheckHook implements IStartup
         int miss = sample == null || sample.isEmpty()
             ? 0
             : ComfortSpellingEngine.findMisspelledRanges(sample).size();
-        Global.tempLog("spellCheck", "PropertySheetSpell: overlay wired paint+lineStyles textLen=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (sample == null ? 0 : sample.length())
-            + " misspelled=" + miss //$NON-NLS-1$
-            + " multiline=" + isMultilineLightText(owner)); //$NON-NLS-1$
     }
 
     /** Красная волна под ошибочными сегментами (поверх текста оверлея). */
@@ -789,7 +770,6 @@ public final class PropertySheetSpellCheckHook implements IStartup
         {
             cb.dispose();
         }
-        Global.tempLog("spellCheck", "PropertySheetSpell: copy len=" + sel.length()); //$NON-NLS-1$ //$NON-NLS-2$
         return true;
     }
 
@@ -928,8 +908,6 @@ public final class PropertySheetSpellCheckHook implements IStartup
         List<String> cached = ComfortSpellingEngine.peekSuggestCache(span.word, SUGGEST_MAX);
         if (cached != null)
         {
-            Global.tempLog("spellCheck", "PropertySheetSpell: assist word=[" + span.word //$NON-NLS-1$ //$NON-NLS-2$
-                + "] cached=" + cached.size()); //$NON-NLS-1$
             if (cached.isEmpty())
             {
                 MenuItem empty = new MenuItem(menu, SWT.PUSH);
@@ -1088,8 +1066,6 @@ public final class PropertySheetSpellCheckHook implements IStartup
         styled.replaceTextRange(span.start, span.length, replacement);
         styled.setCaretOffset(span.start + replacement.length());
         styled.redraw();
-        Global.tempLog("spellCheck", "PropertySheetSpell: applied [" + span.word + "] → [" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + replacement + "]"); //$NON-NLS-1$
     }
 
     private static final class WordSpan

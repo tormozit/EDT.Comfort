@@ -12,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -27,6 +28,7 @@ import org.eclipse.jdt.internal.ui.text.spelling.SpellCheckEngine;
 import org.eclipse.jdt.internal.ui.text.spelling.SpellCheckIterator;
 import org.eclipse.jdt.internal.ui.text.spelling.engine.ISpellChecker;
 import org.eclipse.jdt.ui.PreferenceConstants;
+import org.eclipse.jface.preference.IPreferenceStore;
 import org.eclipse.jface.text.Document;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.Region;
@@ -35,16 +37,25 @@ import org.osgi.framework.Bundle;
 import org.osgi.framework.FrameworkUtil;
 
 /**
- * Загрузчик словарей Hunspell/MySpell и проверка текста для панели «Свойства»
- * и орфографии модуля BSL.
- * Поиск ошибок в тексте — через штатные {@link SpellCheckEngine}/{@link SpellCheckIterator}
- * (флаги «Орфография»: URL, UPPER, digits, mixed и т.д.).
+ * Загрузчик словарей Hunspell/MySpell и единые правила токенизации Comfort.
+ * Единственный источник диапазонов ошибок — {@link #findMisspelledRanges}
+ * (BSL, свойства, сообщение коммита): {@link SpellCheckIterator} + при необходимости
+ * {@link #splitIdentifierSegments} (CamelCase / цифры) по флагам «Орфография».
+ * {@link #isCorrect} — boolean для штатного DefaultSpellChecker (Java-комментарии и т.п.):
+ * те же сегменты, без своих аннотаций.
  * Пути словарей — {@link ComfortSettings#getSpellingDictionaryBasePaths()}.
+ * Дополнение Comfort — {@code dictionaries/hunspell/comfort-extra-ru.dic} (UTF-8, леммы + флаги AOT)
+ * с морфологией из {@code russian-aot-ieyo.aff}; большой {@code .dic} AOT не правим.
  * Пользовательские слова — {@code spelling-user-dictionary.txt} в stateLocation плагина.
  */
 public final class ComfortSpellingEngine
 {
     private static final String USER_DICT_FILE = "spelling-user-dictionary.txt"; //$NON-NLS-1$
+    private static final String AOT_RU_BASE = "dictionaries/hunspell/russian-aot-ieyo"; //$NON-NLS-1$
+    /** Леммы IT/1С; .aff берём у AOT (не дублируем). */
+    private static final String EXTRA_RU_DIC_BASE = "dictionaries/hunspell/comfort-extra-ru"; //$NON-NLS-1$
+    /** ISO 639 languages + ISO 3166 countries (lowercase). */
+    private static volatile Set<String> LOCALE_CODES;
     private static final int SUGGEST_CACHE_MAX = 512;
 
     private static volatile List<HunspellDictionary> dictionaries;
@@ -195,15 +206,61 @@ public final class ComfortSpellingEngine
             return true;
         if (isShortAllCapsWord(word))
             return true;
+        if (isLocaleCode(word))
+            return true;
         if (isUserWord(word))
             return true;
         List<HunspellDictionary> dicts = sharedDictionaries();
-        for (HunspellDictionary dict : dicts)
+        if (isCorrect(dicts, word))
+            return true;
+        // DefaultSpellChecker не дробит CamelCase/цифры — те же условия, что findMisspelledRanges.
+        if (!shouldSplitIdentifierToken(word, false))
+            return false;
+        return isCorrectByIdentifierSegments(word, dicts);
+    }
+
+    /**
+     * Когда Comfort дробит токен iterator’а на сегменты (как в findMisspelledRangesViaJdt).
+     */
+    private static boolean shouldSplitIdentifierToken(String word, boolean startsSentence)
+    {
+        if (word == null || word.isEmpty())
+            return false;
+        IPreferenceStore prefs = PreferenceConstants.getPreferenceStore();
+        if (containsDigit(word) && !prefs.getBoolean(PreferenceConstants.SPELLING_IGNORE_DIGITS))
+            return true;
+        return isMixedCaseWord(word, startsSentence)
+            && !prefs.getBoolean(PreferenceConstants.SPELLING_IGNORE_MIXED);
+    }
+
+    /**
+     * {@code ТолстыйКлиент} / {@code item2Name}: все буквенные сегменты ≥2 верны в словаре.
+     * Один сегмент или нет буквенных частей — {@code false} (целое уже проверено выше).
+     */
+    private static boolean isCorrectByIdentifierSegments(String word, List<HunspellDictionary> dicts)
+    {
+        if (word == null || word.length() < 2 || dicts == null || dicts.isEmpty())
+            return false;
+        List<int[]> segments = splitIdentifierSegments(word, 0, word.length());
+        if (segments.size() <= 1)
+            return false;
+        boolean anyLetterSeg = false;
+        for (int[] seg : segments)
         {
-            if (dict.isCorrect(word))
-                return true;
+            int segStart = seg[0];
+            int segEnd = seg[1];
+            if (segEnd - segStart < 2)
+                continue;
+            String part = word.substring(segStart, segEnd);
+            if (!hasLetter(part))
+                continue;
+            anyLetterSeg = true;
+            if (isShortAllCapsWord(part) || isLocaleCode(part) || isUserWord(part))
+                continue;
+            if (!isCorrect(dicts, part))
+                return false;
         }
-        return false;
+        return anyLetterSeg;
     }
 
     /** Слова только из заглавных букв длиной ≤ 3 (аббревиатуры вроде ИД, XML) не проверяем. */
@@ -219,6 +276,38 @@ public final class ComfortSpellingEngine
                 return false;
         }
         return true;
+    }
+
+    /** Двухбуквенные ISO-коды языков/стран ({@code ru}, {@code en}, {@code ua}, {@code kz}). */
+    private static boolean isLocaleCode(String word)
+    {
+        return word != null && word.length() == 2
+            && localeCodeSet().contains(word.toLowerCase(Locale.ROOT));
+    }
+
+    private static Set<String> localeCodeSet()
+    {
+        Set<String> cached = LOCALE_CODES;
+        if (cached != null)
+            return cached;
+        synchronized (ComfortSpellingEngine.class)
+        {
+            if (LOCALE_CODES != null)
+                return LOCALE_CODES;
+            Set<String> set = new HashSet<>();
+            for (String lang : Locale.getISOLanguages())
+            {
+                if (lang != null && !lang.isEmpty())
+                    set.add(lang.toLowerCase(Locale.ROOT));
+            }
+            for (String country : Locale.getISOCountries())
+            {
+                if (country != null && !country.isEmpty())
+                    set.add(country.toLowerCase(Locale.ROOT));
+            }
+            LOCALE_CODES = Set.copyOf(set);
+            return LOCALE_CODES;
+        }
     }
 
     /** Слово уже в пользовательском словаре Comfort (без учёта регистра). */
@@ -309,7 +398,6 @@ public final class ComfortSpellingEngine
             return;
         suggestCache.clear();
         refreshSpellingAfterUserWordChange(word, false);
-        Global.tempLog("spellCheck", "user-dict undo: [" + word + "]"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /**
@@ -321,6 +409,14 @@ public final class ComfortSpellingEngine
         BslModuleSpellCheckHook.onUserDictionaryChanged(word, added);
         PropertySheetSpellCheckHook.onUserDictionaryChanged(word, added);
         CommitMessageSpellCheckHook.onUserDictionaryChanged(word, added);
+    }
+
+    /** Полный пересчёт орфографии после перечитывания файла словаря. */
+    private static void refreshSpellingAfterUserDictionaryReload()
+    {
+        BslModuleSpellCheckHook.onUserDictionaryChanged(null, false);
+        PropertySheetSpellCheckHook.onUserDictionaryChanged(null, false);
+        CommitMessageSpellCheckHook.onUserDictionaryChanged(null, false);
     }
 
     private static String normalizeUserWord(String word)
@@ -366,10 +462,13 @@ public final class ComfortSpellingEngine
         }
         catch (IOException e)
         {
-            Global.tempLog("spellCheck", "user-dict load: " + e); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
+    /**
+     * Запись на диск всегда в нижнем регистре и по возрастанию
+     * ({@link Collections#sort(List)}).
+     */
     private static void persistUserWords(Set<String> words)
     {
         File file = userDictionaryFile();
@@ -394,7 +493,6 @@ public final class ComfortSpellingEngine
         }
         catch (IOException e)
         {
-            Global.tempLog("spellCheck", "user-dict save: " + e); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -410,6 +508,48 @@ public final class ComfortSpellingEngine
         return location.append(USER_DICT_FILE).toFile();
     }
 
+    /**
+     * Создать файл словаря при отсутствии (пустое отсортированное содержимое)
+     * и вернуть путь.
+     */
+    static File ensureUserDictionaryFile()
+    {
+        File file = getUserDictionaryFile();
+        if (file == null)
+            return null;
+        synchronized (USER_LOCK)
+        {
+            Set<String> set = userWordSet();
+            if (!file.isFile())
+                persistUserWords(set);
+        }
+        return file;
+    }
+
+    /**
+     * Перечитать файл в память, нормализовать, перезаписать отсортированным,
+     * сбросить suggest-кэш и обновить орфографию в UI.
+     */
+    static void reloadUserDictionaryFromDisk()
+    {
+        synchronized (USER_LOCK)
+        {
+            Set<String> fresh = ConcurrentHashMap.newKeySet();
+            loadUserWords(fresh);
+            userWords = fresh;
+            persistUserWords(fresh);
+        }
+        suggestCache.clear();
+        Runnable ui = ComfortSpellingEngine::refreshSpellingAfterUserDictionaryReload;
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        if (display.getThread() == Thread.currentThread())
+            ui.run();
+        else
+            display.asyncExec(ui);
+    }
+
     private static File userDictionaryFile()
     {
         return getUserDictionaryFile();
@@ -417,9 +557,10 @@ public final class ComfortSpellingEngine
 
     /**
      * Ошибочные диапазоны в {@code text} (относительные offset/length).
-     * Штатный путь JDT: {@link SpellCheckIterator} (пропуск URL и т.п.) +
-     * {@link ISpellChecker#execute} (флаги Ignore digits/mixed/UPPER/URLs/…).
-     * Fallback — собственный разбор, если checker недоступен.
+     * Штатный {@link SpellCheckIterator} (URL и т.п.) + проверка Hunspell;
+     * при выключенном {@code SPELLING_IGNORE_MIXED} / {@code SPELLING_IGNORE_DIGITS} —
+     * дробление CamelCase и по цифрам через {@link #splitIdentifierSegments}.
+     * Fallback — legacy-разбор.
      */
     static List<int[]> findMisspelledRanges(String text)
     {
@@ -432,7 +573,7 @@ public final class ComfortSpellingEngine
     }
 
     /**
-     * @return список диапазонов или {@code null}, если штатный checker недоступен
+     * @return список диапазонов или {@code null}, если штатный checker/iterator недоступен
      */
     private static List<int[]> findMisspelledRangesViaJdt(String text)
     {
@@ -442,10 +583,10 @@ public final class ComfortSpellingEngine
             if (checker == null)
                 return null;
             Locale locale = checker.getLocale();
+            IPreferenceStore prefs = PreferenceConstants.getPreferenceStore();
             if (locale == null)
             {
-                String localeKey = PreferenceConstants.getPreferenceStore()
-                    .getString(PreferenceConstants.SPELLING_LOCALE);
+                String localeKey = prefs.getString(PreferenceConstants.SPELLING_LOCALE);
                 locale = SpellCheckEngine.convertToLocale(localeKey);
             }
             if (locale == null)
@@ -453,31 +594,109 @@ public final class ComfortSpellingEngine
             IDocument document = new Document(text);
             SpellCheckIterator iterator = new SpellCheckIterator(document,
                 new Region(0, text.length()), locale, null);
+            if (prefs.getBoolean(PreferenceConstants.SPELLING_IGNORE_SINGLE_LETTERS))
+                iterator.setIgnoreSingleLetters(true);
+            boolean ignoreMixed = prefs.getBoolean(PreferenceConstants.SPELLING_IGNORE_MIXED);
+            boolean ignoreUpper = prefs.getBoolean(PreferenceConstants.SPELLING_IGNORE_UPPER);
+            boolean ignoreDigits = prefs.getBoolean(PreferenceConstants.SPELLING_IGNORE_DIGITS);
             List<int[]> result = new ArrayList<>();
-            checker.execute(event ->
+            while (iterator.hasNext())
             {
-                if (event == null)
-                    return;
-                int begin = event.getBegin();
-                int end = event.getEnd();
+                String word = iterator.next();
+                if (word == null || word.isEmpty())
+                    continue;
+                int begin = iterator.getBegin();
+                int end = iterator.getEnd();
                 if (begin < 0 || end < begin || begin >= text.length())
-                    return;
-                int length = Math.min(end, text.length() - 1) - begin + 1;
-                if (length > 0)
-                    result.add(new int[] { begin, length });
-            }, iterator);
+                    continue;
+                int tokenEnd = Math.min(end + 1, text.length());
+                if (tokenEnd <= begin)
+                    continue;
+                boolean hasDigit = containsDigit(word);
+                if (ignoreDigits && hasDigit)
+                    continue;
+                if (ignoreUpper && isAllUpperLetters(word))
+                    continue;
+                boolean startsSentence = iterator.startsSentence();
+                boolean mixed = isMixedCaseWord(word, startsSentence);
+                if (mixed && ignoreMixed)
+                    continue;
+                if (shouldSplitIdentifierToken(word, startsSentence))
+                {
+                    for (int[] seg : splitIdentifierSegments(text, begin, tokenEnd))
+                    {
+                        int segStart = seg[0];
+                        int segEnd = seg[1];
+                        if (segEnd - segStart < 2)
+                            continue;
+                        String part = text.substring(segStart, segEnd);
+                        if (!hasLetter(part))
+                            continue;
+                        if (isCorrect(part))
+                            continue;
+                        result.add(new int[] { segStart, segEnd - segStart });
+                    }
+                }
+                else if (word.length() >= 2 && !isCorrect(word))
+                {
+                    result.add(new int[] { begin, tokenEnd - begin });
+                }
+            }
             return result;
         }
         catch (IllegalStateException | LinkageError e)
         {
-            Global.tempLog("spellCheck", "findMisspelledRangesViaJdt: " + e); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
         catch (RuntimeException e)
         {
-            Global.tempLog("spellCheck", "findMisspelledRangesViaJdt: " + e); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
+    }
+
+    /** Как DefaultSpellChecker.isMixedCase: первая заглавная в начале предложения не считается. */
+    private static boolean isMixedCaseWord(String word, boolean startsSentence)
+    {
+        if (word == null || word.length() < 2)
+            return false;
+        boolean hasLower = false;
+        boolean hasUpper = false;
+        for (int i = 0; i < word.length(); i++)
+        {
+            char c = word.charAt(i);
+            if (!Character.isLetter(c))
+                continue;
+            if (Character.isLowerCase(c))
+                hasLower = true;
+            else if (Character.isUpperCase(c) && (i > 0 || !startsSentence))
+                hasUpper = true;
+        }
+        return hasLower && hasUpper;
+    }
+
+    private static boolean isAllUpperLetters(String word)
+    {
+        boolean any = false;
+        for (int i = 0; i < word.length(); i++)
+        {
+            char c = word.charAt(i);
+            if (!Character.isLetter(c))
+                continue;
+            any = true;
+            if (!Character.isUpperCase(c))
+                return false;
+        }
+        return any;
+    }
+
+    private static boolean containsDigit(String word)
+    {
+        for (int i = 0; i < word.length(); i++)
+        {
+            if (Character.isDigit(word.charAt(i)))
+                return true;
+        }
+        return false;
     }
 
     /** Fallback без JDT iterator — camelCase-сегменты, без флагов «Орфография». */
@@ -589,6 +808,8 @@ public final class ComfortSpellingEngine
     {
         if (isShortAllCapsWord(word))
             return true;
+        if (isLocaleCode(word))
+            return true;
         if (isUserWord(word))
             return true;
         for (HunspellDictionary dict : dicts)
@@ -643,21 +864,38 @@ public final class ComfortSpellingEngine
                 File dic = resolveDictionaryFile(trimmed, ".dic"); //$NON-NLS-1$
                 if (aff == null || dic == null || !aff.isFile() || !dic.isFile())
                 {
-                    Global.tempLog("spellCheck", "словарь не найден: " + trimmed); //$NON-NLS-1$ //$NON-NLS-2$
                     continue;
                 }
                 HunspellDictionary.ScriptKind script = scriptFromDictPath(trimmed);
                 result.add(HunspellDictionary.load(aff, dic, script));
-                Global.tempLog("spellCheck", "словарь загружен: " + trimmed //$NON-NLS-1$ //$NON-NLS-2$
-                    + " script=" + script //$NON-NLS-1$
-                    + " (" + aff.getAbsolutePath() + ")"); //$NON-NLS-1$ //$NON-NLS-2$
             }
             catch (Exception e)
             {
-                Global.tempLog("spellCheck", "ошибка загрузки " + trimmed + ": " + e); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             }
         }
+        loadComfortExtraRu(result);
         return result.isEmpty() ? Collections.emptyList() : List.copyOf(result);
+    }
+
+    /**
+     * Леммы Comfort + аффиксы AOT (без своей копии .aff). {@code .dic} — UTF-8.
+     */
+    private static void loadComfortExtraRu(List<HunspellDictionary> result)
+    {
+        try
+        {
+            File aff = resolveDictionaryFile(AOT_RU_BASE, ".aff"); //$NON-NLS-1$
+            File dic = resolveDictionaryFile(EXTRA_RU_DIC_BASE, ".dic"); //$NON-NLS-1$
+            if (aff == null || dic == null || !aff.isFile() || !dic.isFile())
+            {
+                return;
+            }
+            result.add(HunspellDictionary.load(aff, dic, HunspellDictionary.ScriptKind.CYRILLIC,
+                StandardCharsets.UTF_8));
+        }
+        catch (Exception e)
+        {
+        }
     }
 
     /**
@@ -683,8 +921,6 @@ public final class ComfortSpellingEngine
         }
         catch (Exception e)
         {
-            Global.tempLog("spellCheck", "resolveDictionaryFile " + basePath + extension //$NON-NLS-1$ //$NON-NLS-2$
-                + ": " + e); //$NON-NLS-1$
             return null;
         }
     }

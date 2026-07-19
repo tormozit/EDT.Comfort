@@ -212,6 +212,12 @@ powershell -NoProfile -File "C:\VC\EDT.Comfort\.cursor\scripts\repair-double-eol
 
 Фильтр коллекции: `DebugCollectionFilterEraseSupport` (`filterSkipItem`).
 
+## SWT: Ctrl+<буква> не долетает до KeyDown (нативный акселератор Win32)
+
+Повторяется (`KeyBindingToastHook`/Ctrl+Shift+F, `PreferenceSearchFilterAugmenter.wireTreeCopy`/Ctrl+C): `SWT.KeyDown`, даже `Display.addFilter(SWT.KeyDown, …)`, не видит букву при зажатом Ctrl (только «чистые» модификаторы) — если сочетание совпадает с нативным Win32-акселератором меню (в т.ч. штатный Edit → Copy), Windows транслирует его в `WM_COMMAND` до создания SWT-события. Это системное ограничение, не баг конкретного хука — доп. диагностика через SWT-хуки бесполезна.
+
+**Решение:** перехватывать команду, не клавишу — `ICommandService.addExecutionListener` (`preExecute`/`notHandled` срабатывают независимо от пути; `ExecutionEvent.getTrigger()` при необходимости). Эталоны: `KeyBindingToastHook`, `PreferenceSearchFilterAugmenter.wireTreeCopy`/`handlePossibleTreeCopy`. Для View с `IActionBars` — альтернатива через `globalActions`, см. `DebugInspectorTreeEnhancement.hookGlobalCopyAction()` (не подходит для модальных диалогов вроде `PreferenceDialog`).
+
 ## Комфорт-подменю (сортировка)
 
 Использовать `ComfortSubmenuHelper.createSortedMenuItem` везде, где элементы добавляются в подменю «Комфорт»; несколько хуков могут разделять один и тот же экземпляр подменю.

@@ -2,6 +2,10 @@ package tormozit;
 
 import java.util.List;
 
+import org.eclipse.core.commands.ExecutionEvent;
+import org.eclipse.core.commands.ExecutionException;
+import org.eclipse.core.commands.IExecutionListener;
+import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.jface.preference.IPreferenceNode;
 import org.eclipse.jface.preference.IPreferencePage;
 import org.eclipse.jface.preference.PreferenceDialog;
@@ -15,6 +19,9 @@ import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.CLabel;
+import org.eclipse.swt.dnd.Clipboard;
+import org.eclipse.swt.dnd.TextTransfer;
+import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
@@ -33,6 +40,9 @@ import org.eclipse.swt.widgets.ProgressBar;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.swt.widgets.Tree;
+import org.eclipse.swt.widgets.TreeItem;
+import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.ui.dialogs.FilteredTree;
 import org.eclipse.ui.dialogs.PatternFilter;
 
@@ -76,6 +86,8 @@ final class PreferenceSearchFilterAugmenter
         if (Boolean.TRUE.equals(tree.getData(WIRED_KEY)))
             return;
         tree.setData(WIRED_KEY, Boolean.TRUE);
+
+        wireTreeCopy(tree);
 
         ViewerFilter[] existing = viewer.getFilters();
         PatternFilter original = findPatternFilter(existing);
@@ -651,5 +663,93 @@ final class PreferenceSearchFilterAugmenter
                 return patternFilter;
         }
         return null;
+    }
+
+    /** Дерево, для которого сейчас нужно перехватывать команду Copy (см. {@link #wireTreeCopy}). */
+    private static volatile Tree copyTargetTree;
+    private static boolean copyExecutionListenerInstalled;
+
+    /**
+     * Ctrl+C при фокусе на дереве категорий копирует название выбранной
+     * страницы. Диагностикой в этом же чате доказано (лог {@code preferenceTreeCopy.log}):
+     * буква {@code C} при зажатом Ctrl НЕ порождает {@code SWT.KeyDown} вообще нигде
+     * в {@code Display} — нативная Win32-трансляция акселератора съедает её раньше,
+     * чем SWT успевает создать событие (тот же архитектурный потолок, что раскопан для
+     * {@code KeyBindingToastHook}/Ctrl+Shift+F). Поэтому перехват — не через
+     * {@code SWT.KeyDown}, а через {@code ICommandService.addExecutionListener} на команде
+     * {@code org.eclipse.ui.edit.copy}: срабатывание команды долетает независимо от пути
+     * (обычный KeyDown или нативный акселератор), см. {@code ExecutionEvent.getTrigger()}
+     * в {@code KeyBindingToastHook}.
+     */
+    private static void wireTreeCopy(Tree tree)
+    {
+        copyTargetTree = tree;
+        tree.addDisposeListener(e ->
+        {
+            if (copyTargetTree == tree)
+                copyTargetTree = null;
+        });
+        installCopyExecutionListener();
+    }
+
+    private static void installCopyExecutionListener()
+    {
+        if (copyExecutionListenerInstalled || PlatformUI.getWorkbench() == null)
+            return;
+        ICommandService commandService = PlatformUI.getWorkbench().getService(ICommandService.class);
+        if (commandService == null)
+            return;
+        commandService.addExecutionListener(new IExecutionListener()
+        {
+            @Override
+            public void preExecute(String commandId, ExecutionEvent event)
+            {
+                handlePossibleTreeCopy(commandId);
+            }
+
+            @Override
+            public void postExecuteSuccess(String commandId, Object returnValue)
+            {
+            }
+
+            @Override
+            public void notHandled(String commandId, NotHandledException exception)
+            {
+                handlePossibleTreeCopy(commandId);
+            }
+
+            @Override
+            public void postExecuteFailure(String commandId, ExecutionException exception)
+            {
+            }
+        });
+        copyExecutionListenerInstalled = true;
+    }
+
+    private static void handlePossibleTreeCopy(String commandId)
+    {
+        Tree tree = copyTargetTree;
+        if (tree == null || tree.isDisposed() || tree.getDisplay().getFocusControl() != tree)
+            return;
+        Global.tempLog("preferenceTreeCopy", "cmd id=" + commandId + " while tree focused"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        if (!"org.eclipse.ui.edit.copy".equals(commandId)) //$NON-NLS-1$
+            return;
+        TreeItem[] selection = tree.getSelection();
+        if (selection.length == 0)
+            return;
+        Object data = selection[0].getData();
+        String text = data instanceof IPreferenceNode node ? node.getLabelText() : selection[0].getText();
+        if (text == null || text.isBlank())
+            return;
+        Clipboard clipboard = new Clipboard(tree.getDisplay());
+        try
+        {
+            clipboard.setContents(new Object[] {text}, new Transfer[] {TextTransfer.getInstance()});
+            Global.tempLog("preferenceTreeCopy", "clipboard set via command, text=[" + text + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+        finally
+        {
+            clipboard.dispose();
+        }
     }
 }

@@ -10,7 +10,8 @@
     <startup class="tormozit.ApplicationEditorHook"/>
     <startup class="tormozit.DataCompositionSchemaEditorHook"/> 
     <startup class="tormozit.MoxelEditorHook"/>
-    <startup class="tormozit.BSLEditorMenuHook"/> 
+    <startup class="tormozit.BSLEditorMenuHook"/>
+    <startup class="tormozit.BslModulePositionMemoryHook"/>
     <startup class="tormozit.TextEditorRightClickCaretHook"/>
     <startup class="tormozit.TextEditorIdentifierSelectionHook"/>
     <startup class="tormozit.TextEditorMenuHook"/>
@@ -797,6 +798,10 @@
         searchResultClass="tormozit.CompareSearchResult"
         class="tormozit.CompareSearchResultPage">
     </viewPage>
+  </extension>
+
+  <extension point="com._1c.g5.v8.dt.bsl.ui.bslHoverContributor">
+    <bslHoverContributor class="tormozit.ComfortBslAnnotationHoverContributor"/>
   </extension>
 
   <!--

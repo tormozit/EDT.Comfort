@@ -179,6 +179,28 @@ public final class ComfortSettings
     public static final boolean DEFAULT_SPELLING_BOOTSTRAPPED = false;
 
     /**
+     * Ключ: однократно выключили JDT {@code spelling_ignore_mixed}
+     * (чтобы CamelCase дробился по сегментам). После {@code true} выбор пользователя
+     * не перезаписываем.
+     */
+    public static final String PREF_SPELLING_IGNORE_MIXED_BOOTSTRAPPED =
+        "comfort.spelling.ignoreMixedBootstrapped"; //$NON-NLS-1$
+
+    /** По умолчанию one-shot для ignore mixed ещё не выполнялся. */
+    public static final boolean DEFAULT_SPELLING_IGNORE_MIXED_BOOTSTRAPPED = false;
+
+    /**
+     * Ключ: однократно выключили JDT {@code spelling_ignore_digits}
+     * (чтобы цифры были разделителями сегментов). После {@code true} выбор пользователя
+     * не перезаписываем.
+     */
+    public static final String PREF_SPELLING_IGNORE_DIGITS_BOOTSTRAPPED =
+        "comfort.spelling.ignoreDigitsBootstrapped"; //$NON-NLS-1$
+
+    /** По умолчанию one-shot для ignore digits ещё не выполнялся. */
+    public static final boolean DEFAULT_SPELLING_IGNORE_DIGITS_BOOTSTRAPPED = false;
+
+    /**
      * Ключ: проверять орфографию идентификаторов (и строковых литералов) в видимой
      * области модуля BSL. Выкл. — только «обычные» слова в комментариях.
      */
@@ -618,6 +640,58 @@ public final class ComfortSettings
         catch (Exception ex)
         {
             Global.log("ComfortSettings save error (spellingBootstrapped): " + ex); //$NON-NLS-1$
+        }
+    }
+
+    /** One-shot «выключить ignore mixed» уже выполнен. */
+    public static boolean isSpellingIgnoreMixedBootstrapped()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_SPELLING_IGNORE_MIXED_BOOTSTRAPPED;
+        return settings.preferenceStore.getBoolean(PREF_SPELLING_IGNORE_MIXED_BOOTSTRAPPED);
+    }
+
+    /** Отметить, что one-shot ignore mixed выполнен. */
+    public static void setSpellingIgnoreMixedBootstrapped(boolean bootstrapped)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        settings.preferenceStore.setValue(PREF_SPELLING_IGNORE_MIXED_BOOTSTRAPPED, bootstrapped);
+        try
+        {
+            settings.preferenceStore.save();
+        }
+        catch (Exception ex)
+        {
+            Global.log("ComfortSettings save error (ignoreMixedBootstrapped): " + ex); //$NON-NLS-1$
+        }
+    }
+
+    /** One-shot «выключить ignore digits» уже выполнен. */
+    public static boolean isSpellingIgnoreDigitsBootstrapped()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_SPELLING_IGNORE_DIGITS_BOOTSTRAPPED;
+        return settings.preferenceStore.getBoolean(PREF_SPELLING_IGNORE_DIGITS_BOOTSTRAPPED);
+    }
+
+    /** Отметить, что one-shot ignore digits выполнен. */
+    public static void setSpellingIgnoreDigitsBootstrapped(boolean bootstrapped)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        settings.preferenceStore.setValue(PREF_SPELLING_IGNORE_DIGITS_BOOTSTRAPPED, bootstrapped);
+        try
+        {
+            settings.preferenceStore.save();
+        }
+        catch (Exception ex)
+        {
+            Global.log("ComfortSettings save error (ignoreDigitsBootstrapped): " + ex); //$NON-NLS-1$
         }
     }
 
