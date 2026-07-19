@@ -376,6 +376,11 @@
         categoryId="tormozit.commands.global"
         description="Открыть проверку модуля через приложение ИР. Активно только при подключённом ИР. Настраивайте только «Редактирование источника Xtext». Остальные контексты не редактируйте. (Комфорт)"/>
     <command
+        id="tormozit.IrModuleCheckClearMarkers"
+        name="Очистить ошибки ИР"
+        categoryId="tormozit.commands.global"
+        description="Удалить все маркеры, оставленные проверкой модуля ИР, для текущего проекта (на случай некорректного результата проверки). Настраивайте только «Редактирование источника Xtext». Остальные контексты не редактируйте. (Комфорт)"/>
+    <command
         id="tormozit.IrDeclareExpressionType"
         name="Объявить тип выражения ИР"
         categoryId="tormozit.commands.global"
@@ -605,6 +610,17 @@
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.IrModuleCheckCommandHandler"
         commandId="tormozit.IrModuleCheck">
+      <activeWhen>
+        <with variable="activeContexts">
+          <iterate operator="or">
+            <equals value="org.eclipse.xtext.ui.XtextEditorScope"/>
+          </iterate>
+        </with>
+      </activeWhen>
+    </handler>
+    <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.IrModuleCheckClearCommandHandler"
+        commandId="tormozit.IrModuleCheckClearMarkers">
       <activeWhen>
         <with variable="activeContexts">
           <iterate operator="or">

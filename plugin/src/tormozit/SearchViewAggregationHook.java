@@ -101,8 +101,8 @@ public final class SearchViewAggregationHook implements IStartup
     private static final String OPEN_DIAG_HOOKED_KEY = "tormozit.searchAggregationOpenDiag"; //$NON-NLS-1$
     private static final String WATCHDOG_HOOKED_KEY = "tormozit.searchAggregationWatchdog"; //$NON-NLS-1$
     private static final String RESIZE_DIAG_HOOKED_KEY = "tormozit.searchAggregationResizeDiag"; //$NON-NLS-1$
-    /** Период опроса {@link #installPanelWatchdog} — раз в 2с, независимо от кликов/поисков. */
-    private static final int WATCHDOG_INTERVAL_MS = 2000;
+    /** Период опроса {@link #installPanelWatchdog} — раз в 1с, независимо от кликов/поисков. */
+    private static final int WATCHDOG_INTERVAL_MS = 1000;
     /** Как {@code Messages.IMatchItem_Total_matches_count_pattern__0} в search.ui. */
     private static final String MATCH_COUNT_SUFFIX_PATTERN = " ({0} \u0441\u043E\u043E\u0442\u0432\u0435\u0442\u0441\u0442\u0432\u0438\u0439)"; //$NON-NLS-1$
 
@@ -382,9 +382,18 @@ public final class SearchViewAggregationHook implements IStartup
     // и может смениться, если пользователь переключил вид поиска)
     // -----------------------------------------------------------------------
 
+    /**
+     * Диагностика #165 (watchdog/resize/hide/panelHealth) должна работать независимо от
+     * «Улучшать списки» (ComfortSettings.isReplaceListFiltersEnabled): по факту репорта — баг
+     * опустошения панели воспроизводится и при ВЫКЛЮЧЕННОЙ этой настройке (значит дело не в
+     * агрегации/колонке «Путь»), но раньше schedulePatch/tryPatch целиком гейтились этим флагом —
+     * с выключенной настройкой ни один диагностический слушатель даже не устанавливался. Теперь
+     * гейт — «включена хотя бы агрегация ИЛИ общее логирование» (иначе диагностика молчала бы,
+     * даже если пользователь явно включил логирование, чтобы найти этот баг).
+     */
     private static void schedulePatch(IViewPart view, int attempt)
     {
-        if (!ComfortSettings.isReplaceListFiltersEnabled())
+        if (!ComfortSettings.isReplaceListFiltersEnabled() && !Global.isLogEnabled())
             return;
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
@@ -393,8 +402,8 @@ public final class SearchViewAggregationHook implements IStartup
         display.timerExec(delay, () -> {
             if (display.isDisposed())
                 return;
-            if (!ComfortSettings.isReplaceListFiltersEnabled())
-                return; // настройку могли выключить, пока ждали появления страницы
+            if (!ComfortSettings.isReplaceListFiltersEnabled() && !Global.isLogEnabled())
+                return; // обе настройки могли выключить, пока ждали появления страницы
             if (!tryPatch(view) && attempt < 40)
                 schedulePatch(view, attempt + 1);
         });
@@ -446,13 +455,6 @@ public final class SearchViewAggregationHook implements IStartup
             if (treeViewer.getTree() == null || treeViewer.getTree().isDisposed())
                 return false;
 
-            installTreeMatchCountLabelProvider(treeViewer);
-            // Диагностика #165: подписка на новый SearchResult даже если дерево уже hook'нуто.
-            installSearchResultDiagListener(activePage);
-
-            if (treeViewer.getTree().getData(HOOKED_KEY) != null)
-                return true; // уже установлен для этого дерева
-
             Object tableViewerObj = Global.getField(treeLayout, "tableViewer"); //$NON-NLS-1$
             if (!(tableViewerObj instanceof TableViewer))
             {
@@ -461,12 +463,26 @@ public final class SearchViewAggregationHook implements IStartup
             }
             TableViewer tableViewer = (TableViewer) tableViewerObj;
 
-            installAggregationListener(treeViewer, tableViewer);
-            installPathColumn(tableViewer);
-            installTableCopyHandler(treeViewer, tableViewer);
+            // Диагностика #165 — своя, независимая от «Улучшать списки» (у каждого install*
+            // своя защита от повторной установки через *_HOOKED_KEY, поэтому вызывать безусловно
+            // безопасно): баг опустошения панели воспроизводится и с выключенной агрегацией,
+            // так что диагностика обязана работать сама по себе, без привязки к этой фиче.
+            installSearchResultDiagListener(activePage);
             installOpenDiagMonitor(activePage, treeViewer, tableViewer);
             installPanelWatchdog(activePage, treeViewer, tableViewer);
             installResizeDiag(treeViewer, tableViewer);
+
+            if (!ComfortSettings.isReplaceListFiltersEnabled())
+                return true; // диагностика уже установлена, сама фича — выключена, дальше не идём
+
+            installTreeMatchCountLabelProvider(treeViewer);
+
+            if (treeViewer.getTree().getData(HOOKED_KEY) != null)
+                return true; // фича уже установлена для этого дерева
+
+            installAggregationListener(treeViewer, tableViewer);
+            installPathColumn(tableViewer);
+            installTableCopyHandler(treeViewer, tableViewer);
             TreeSoleChildAutoExpand.installForComfortLists(treeViewer);
 
             treeViewer.getTree().setData(HOOKED_KEY, Boolean.TRUE);
@@ -2005,8 +2021,8 @@ public final class SearchViewAggregationHook implements IStartup
             @Override
             public void open(OpenEvent event)
             {
-                if (!ComfortSettings.isReplaceListFiltersEnabled())
-                    return;
+                // Диагностика #165 — независимо от «Улучшать списки» (см. Javadoc tryPatch),
+                // log() сам молчит, если выключено «Общее логирование».
                 int seq = ++openSeq;
                 log("open: seq=" + seq + " " + describePanelState(treeViewer, tableViewer, page)); //$NON-NLS-1$ //$NON-NLS-2$
                 schedulePanelHealthDiag(page, treeViewer, tableViewer, 0, seq);
@@ -2025,7 +2041,7 @@ public final class SearchViewAggregationHook implements IStartup
      * жизни страницы результатов. Нужен потому, что по факту двух присланных логов опустошение
      * панели пользователь замечал не сразу после клика, а позже (когда просто смотрел на панель) —
      * то есть вне 1.5-секундного окна `panelHealth`. Логируем только на ПЕРЕХОДЕ между
-     * здоровым/проблемным состоянием (не каждые 2с), чтобы не заспамить журнал «Комфорт».
+     * здоровым/проблемным состоянием (не каждую секунду), чтобы не заспамить журнал «Комфорт».
      */
     private static void installPanelWatchdog(ISearchResultPage page, TreeViewer treeViewer,
             TableViewer tableViewer)
@@ -2045,13 +2061,18 @@ public final class SearchViewAggregationHook implements IStartup
             Table tbl = tableViewer.getTable();
             if (tree == null || tree.isDisposed() || tbl == null || tbl.isDisposed())
                 return; // страница закрыта/пересоздана — часы сами останавливаются, не перепланируем
-            if (ComfortSettings.isReplaceListFiltersEnabled())
+            // Диагностика #165 — независимо от «Улучшать списки» (см. Javadoc tryPatch).
             {
                 PanelState state = computePanelState(treeViewer, tableViewer, page);
                 boolean isProblem = state.isProblem();
                 if (isProblem != wasProblem[0])
                 {
                     log((isProblem ? "WATCHDOG_PROBLEM_START: " : "WATCHDOG_PROBLEM_END: ") + state); //$NON-NLS-1$ //$NON-NLS-2$
+                    if (isProblem && !state.treeVisible)
+                    {
+                        log("WATCHDOG_ANCESTOR_CHAIN: " + describeAncestorChain(tree)); //$NON-NLS-1$
+                        trySelfHealHiddenCTabFolderChild(tree);
+                    }
                     wasProblem[0] = isProblem;
                 }
             }
@@ -2061,14 +2082,14 @@ public final class SearchViewAggregationHook implements IStartup
     }
 
     /**
-     * Синхронный перехват {@code SWT.Resize} на дерево/таблицу и их родителей. В отличие от
-     * {@link #installPanelWatchdog} (опрос раз в 2с) и {@link #schedulePanelHealthDiag}
-     * (таймер после клика) — это единственный способ поймать изменение размера ИМЕННО в тот
-     * кадр, когда оно произошло: по свидетельству с видео, опустошение панели совпадает с первой
-     * отрисовкой редактора модуля — то есть, вероятно, воркбенч в этот момент перекраивает
-     * раскладку (открытие тяжёлого многостраничного {@code DtGranularEditor}) и наш
-     * {@code SashForm}/дерево/таблица на кадр (или насовсем) схлопываются в размере. Resize-событие
-     * летит синхронно на UI-потоке в момент самого ресайза — таймер бы это пропустил.
+     * Синхронный перехват {@code SWT.Resize}/{@code SWT.Show}/{@code SWT.Hide} на дерево/таблицу
+     * и ВСЮ цепочку родителей до {@code Shell}. По факту первого пойманного
+     * {@code WATCHDOG_PROBLEM_START} (treeItems=1, samePage=true, но treeVisible=false, и при
+     * этом ни одного {@code RESIZE} в логе) — размер не менялся, кто-то вызвал
+     * {@code setVisible(false)} на одном из родителей ({@code Control.isVisible()} учитывает всю
+     * цепочку, а {@code SWT.Resize} на {@code setVisible} не срабатывает — отсюда и молчание
+     * прежней версии этой диагностики). {@code SWT.Show}/{@code SWT.Hide} ловят именно это,
+     * синхронно, с указанием какого именно виджета в цепочке это коснулось.
      */
     private static void installResizeDiag(TreeViewer treeViewer, TableViewer tableViewer)
     {
@@ -2078,26 +2099,36 @@ public final class SearchViewAggregationHook implements IStartup
         table.setData(RESIZE_DIAG_HOOKED_KEY, Boolean.TRUE);
 
         Control tree = treeViewer.getTree();
-        Listener resizeListener = event -> {
-            if (!ComfortSettings.isReplaceListFiltersEnabled())
-                return;
+        Listener listener = event -> {
+            // Диагностика #165 — независимо от «Улучшать списки» (см. Javadoc tryPatch),
+            // log() сам молчит, если выключено «Общее логирование».
             Control src = event.widget instanceof Control ? (Control) event.widget : null;
             String who = src == tree ? "tree" //$NON-NLS-1$
                 : src == table ? "table" //$NON-NLS-1$
-                : src != null ? src.getClass().getSimpleName() : "?"; //$NON-NLS-1$
-            log("RESIZE " + who + ": " + describeBounds(src)); //$NON-NLS-1$ //$NON-NLS-2$
+                : src != null ? src.getClass().getSimpleName() + "@" + System.identityHashCode(src) : "?"; //$NON-NLS-1$ //$NON-NLS-2$
+            String eventName = event.type == SWT.Resize ? "RESIZE" : event.type == SWT.Show ? "SHOW" : "HIDE"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            log(eventName + " " + who + ": " + describeBounds(src)); //$NON-NLS-1$ //$NON-NLS-2$
+            // HIDE летит СИНХРОННО изнутри Control.setVisible(false) — стек вызовов в этот момент
+            // укажет ИМЕННО того, кто скрыл виджет (по факту прошлого лога: HIDE на content-Composite
+            // вкладки «Поиск» внутри CTabFolder, без обратного SHOW — нужно найти вызывающий код).
+            if (event.type == SWT.Hide)
+                log("HIDE stacktrace: " + describeCurrentStackTrace()); //$NON-NLS-1$
         };
-        addResizeListenerChain(tree, resizeListener);
-        addResizeListenerChain(table, resizeListener);
+        addAncestorListenerChain(tree, listener);
+        addAncestorListenerChain(table, listener);
     }
 
-    /** Вешает Resize-листенер на сам control и до 3 уровней родителей (SashForm/pageContainer). */
-    private static void addResizeListenerChain(Control control, Listener listener)
+    /** Вешает Resize/Show/Hide-листенер на сам control и всех родителей до {@code Shell}. */
+    private static void addAncestorListenerChain(Control control, Listener listener)
     {
         Control cur = control;
-        for (int depth = 0; cur != null && !cur.isDisposed() && depth < 4; depth++)
+        for (int depth = 0; cur != null && !cur.isDisposed() && depth < 20; depth++)
         {
             cur.addListener(SWT.Resize, listener);
+            cur.addListener(SWT.Show, listener);
+            cur.addListener(SWT.Hide, listener);
+            if (cur instanceof org.eclipse.swt.widgets.Shell)
+                break;
             cur = cur.getParent();
         }
     }
@@ -2107,8 +2138,111 @@ public final class SearchViewAggregationHook implements IStartup
         if (control == null || control.isDisposed())
             return "disposed"; //$NON-NLS-1$
         Rectangle b = control.getBounds();
-        boolean visible = control.isVisible();
-        return "bounds=" + b.width + "x" + b.height + " visible=" + visible; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        // getVisible() — собственный флаг видимости этого виджета (без учёта родителей);
+        // isVisible() — с учётом всей цепочки. Расхождение между ними у РАЗНЫХ виджетов
+        // цепочки как раз укажет, на каком уровне видимость была снята.
+        return "bounds=" + b.width + "x" + b.height //$NON-NLS-1$ //$NON-NLS-2$
+            + " ownVisible=" + control.getVisible() + " chainVisible=" + control.isVisible(); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** Стек текущего потока (обычно UI-потока) — для HIDE-события, которое летит синхронно из места вызова {@code setVisible(false)}. */
+    private static String describeCurrentStackTrace()
+    {
+        StackTraceElement[] trace = Thread.currentThread().getStackTrace();
+        StringBuilder sb = new StringBuilder();
+        // Пропускаем верхние кадры самой диагностики (getStackTrace/эта лямбда/SWT dispatch) —
+        // начинаем с кадра, где реально начинается чужой код, пока не упрёмся в предсказуемый потолок.
+        int printed = 0;
+        for (StackTraceElement el : trace)
+        {
+            String cls = el.getClassName();
+            if (cls.equals(Thread.class.getName()) || cls.contains("SearchViewAggregationHook")) //$NON-NLS-1$
+                continue;
+            sb.append("\n    at ").append(el); //$NON-NLS-1$
+            if (++printed >= 40)
+                break;
+        }
+        return sb.toString();
+    }
+
+    /** Резервный дамп всей цепочки родителей — на случай, если SHOW/HIDE-событие не долетело до установки листенера. */
+    private static String describeAncestorChain(Control control)
+    {
+        StringBuilder sb = new StringBuilder();
+        Control cur = control;
+        for (int depth = 0; cur != null && !cur.isDisposed() && depth < 20; depth++)
+        {
+            if (depth > 0)
+                sb.append(" > "); //$NON-NLS-1$
+            sb.append(cur.getClass().getSimpleName()).append('@').append(System.identityHashCode(cur))
+                .append('(').append(describeBounds(cur)).append(')');
+            if (cur instanceof org.eclipse.swt.widgets.Shell)
+                break;
+            cur = cur.getParent();
+        }
+        return sb.toString();
+    }
+
+    /**
+     * КОСТЫЛЬ: почему он вообще нужен.
+     *
+     * <p>Баг («опустевшая» панель поиска — дерево пустое, хотя данные и выделение на месте,
+     * таблица справа полна) диагностирован ПОЛНОСТЬЮ вне нашего кода. Стек вызовов, пойманный
+     * {@link #installResizeDiag} на живом воспроизведении у пользователя:
+     * <pre>
+     * Control.setVisible(false)
+     *   at org.eclipse.swt.custom.CTabFolder.setSelection(CTabFolder.java:3240/3248)
+     *   at org.eclipse.swt.custom.CTabFolder.onMouse(CTabFolder.java:1891)
+     *   at org.eclipse.swt.custom.CTabFolder.lambda$0(CTabFolder.java:332)
+     * </pre>
+     * — это штатный {@code CTabFolder} (панель вкладок «Иерархия вызовов / Поиск / Ошибки
+     * конфигурации / ...», в которую EDT докует наш {@code SearchView} среди прочих) сам, своим
+     * внутренним обработчиком мыши, скрывает content-composite вкладки «Поиск» (вызывая
+     * {@code setSelection} — по всей видимости, интерпретируя какое-то мышиное событие как клик
+     * по другой вкладке; по свидетельству пользователя — коррелирует с сужением ВСЕГО вида-стека
+     * и открытием тяжёлого редактора модуля в этот момент, из-за чего рвётся тайминг). После этого
+     * {@code CTabFolder} никогда не вызывает обратный {@code setVisible(true)} для этой вкладки —
+     * заголовок вкладки «Поиск» остаётся подсвеченным как выбранный (внутренняя книга CTabFolder
+     * этого не разруливает сама), а её контент так и остаётся невидимым навсегда. Это дефект
+     * (или как минимум крайне неприятная гонка) в самом {@code org.eclipse.swt.custom.CTabFolder}
+     * из платформы Eclipse — чинить его исходники нам недоступно и не наша ответственность.
+     *
+     * <p>Отключение «Улучшать списки» баг НЕ убирает (см. переписку с пользователем) — значит,
+     * агрегация/колонка «Путь» тут ни при чём напрямую. Полное удаление плагина баг убирает —
+     * вероятно, потому что другие безусловные хуки плагина (подсветка серверных вызовов, content
+     * assist, hover и т.п.) чуть смещают тайминг вокруг открытия редактора и тем самым делают эту
+     * гонку в {@code CTabFolder} более вероятной, а не потому что мы сами вызываем {@code setVisible}.
+     *
+     * <p>Раз платформенный баг не в нашей власти — компенсируем СЛЕДСТВИЕ, не причину: как только
+     * {@link #installPanelWatchdog} видит «данные целы, но дерево невидимо» ({@code treeVisible=false}
+     * при {@code treeItems>0}), поднимаемся по цепочке родителей до composite, ЧЕЙ РОДИТЕЛЬ —
+     * именно {@code CTabFolder} (то самое место разрыва по стеку выше), и принудительно вызываем на
+     * НЁМ {@code setVisible(true)}. Это ТОЛЬКО восстанавливает физический показ контента — не
+     * трогает данные/выделение/модель и не лезет в собственную бухгалтерию {@code CTabFolder}
+     * (какая вкладка у него "выбрана" внутри — не меняем, там и так уже "Поиск", просто её контент
+     * был скрыт). Проверка "родитель именно CTabFolder" — намеренно узкая: у обычного штатного
+     * переключения на busy-заглушку (см. {@code ConfigurationSearchViewPage.showBusyLabel} — тоже
+     * даёт HIDE, но на СВОЙ, другой composite, чей родитель — {@code PageBook}, не {@code CTabFolder})
+     * этот автофикс не сработает и не должен — то скрытие штатное и самокорректируется.
+     */
+    private static void trySelfHealHiddenCTabFolderChild(Control control)
+    {
+        Control cur = control;
+        for (int depth = 0; cur != null && !cur.isDisposed() && depth < 20; depth++)
+        {
+            Control parent = cur.getParent();
+            if (parent instanceof org.eclipse.swt.custom.CTabFolder && !cur.getVisible())
+            {
+                cur.setVisible(true);
+                log("SELF_HEAL: setVisible(true) на " + cur.getClass().getSimpleName() //$NON-NLS-1$
+                    + "@" + System.identityHashCode(cur) //$NON-NLS-1$
+                    + " (родитель CTabFolder), результат ownVisible=" + cur.getVisible()); //$NON-NLS-1$
+                return;
+            }
+            if (parent instanceof org.eclipse.swt.widgets.Shell || parent == null)
+                break;
+            cur = parent;
+        }
     }
 
     private static void schedulePanelHealthDiag(ISearchResultPage page, TreeViewer treeViewer,

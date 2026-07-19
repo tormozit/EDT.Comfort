@@ -71,6 +71,7 @@ public class BSLEditorMenuHook implements IStartup
     private static final String ITEM_TEXT_FormatText = IrFormatTextHandler.MENU_LABEL;
     private static final String ITEM_TEXT_FindReferences = IrFindReferencesHandler.MENU_LABEL;
     private static final String ITEM_TEXT_ModuleCheck = IrModuleCheckHandler.MENU_LABEL;
+    private static final String ITEM_TEXT_ModuleCheckClear = IrModuleCheckClearHandler.MENU_LABEL;
     private static final String ITEM_TEXT_DeclareExpressionType = IrDeclareExpressionTypeHandler.MENU_LABEL;
 
     private static final String SURROUND_HINT =
@@ -450,6 +451,24 @@ public class BSLEditorMenuHook implements IStartup
                     });
                     addedItems.add(moduleCheckItem);
 
+                    MenuItem moduleCheckClearItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
+                        ComfortSubmenuHelper.menuItemTextWithKeyBinding(
+                            ITEM_TEXT_ModuleCheckClear,
+                            IrModuleCheckClearHandler.COMMAND_ID,
+                            IrModuleCheckClearCommandHandler.BINDING_CONTEXT_ID));
+                    moduleCheckClearItem.setToolTipText(
+                        "Удалить все маркеры, оставленные проверкой модуля ИР, для текущего проекта"
+                            + Global.pluginSignForTooltip());
+                    moduleCheckClearItem.addSelectionListener(new SelectionAdapter()
+                    {
+                        @Override
+                        public void widgetSelected(SelectionEvent ev)
+                        {
+                            runModuleCheckClearCommand(editor);
+                        }
+                    });
+                    addedItems.add(moduleCheckClearItem);
+
                     MenuItem formatItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
                         ComfortSubmenuHelper.menuItemTextWithKeyBinding(
                             ITEM_TEXT_FormatText,
@@ -667,6 +686,24 @@ public class BSLEditorMenuHook implements IStartup
             // fallback ниже
         }
         IrModuleCheckHandler.checkModule(editor);
+    }
+
+    private static void runModuleCheckClearCommand(BslXtextEditor editor)
+    {
+        try
+        {
+            IHandlerService handlerService = editor.getSite().getService(IHandlerService.class);
+            if (handlerService != null)
+            {
+                handlerService.executeCommand(IrModuleCheckClearHandler.COMMAND_ID, null);
+                return;
+            }
+        }
+        catch (Exception ignored)
+        {
+            // fallback ниже
+        }
+        IrModuleCheckClearHandler.clearMarkers(editor);
     }
 
     private static void runDeclareExpressionTypeCommand(BslXtextEditor editor)
