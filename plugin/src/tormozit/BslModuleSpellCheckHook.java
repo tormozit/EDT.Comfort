@@ -1,10 +1,13 @@
 package tormozit;
 
 import java.lang.reflect.Constructor;
+import java.net.URL;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -12,14 +15,27 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.WeakHashMap;
 
+import org.osgi.framework.Bundle;
+
+import org.eclipse.core.commands.ExecutionEvent;
+import org.eclipse.core.commands.ExecutionException;
+import org.eclipse.core.commands.IExecutionListener;
+import org.eclipse.core.commands.NotHandledException;
+import org.eclipse.core.resources.IFile;
+import org.eclipse.core.resources.IProject;
+import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.Path;
+import org.eclipse.core.runtime.Platform;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.emf.common.util.EList;
 import org.eclipse.emf.common.util.URI;
+import org.eclipse.emf.common.util.TreeIterator;
 import org.eclipse.emf.ecore.EClass;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.EReference;
 import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.action.Action;
@@ -27,21 +43,29 @@ import org.eclipse.jface.action.ActionContributionItem;
 import org.eclipse.jface.action.IContributionItem;
 import org.eclipse.jface.action.IToolBarManager;
 import org.eclipse.jface.action.ToolBarManager;
+import org.eclipse.jface.resource.ImageDescriptor;
+import org.eclipse.jface.text.AbstractInformationControlManager;
 import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.IDocumentListener;
 import org.eclipse.jface.text.IInformationControl;
+import org.eclipse.jface.text.IInformationControlCreator;
 import org.eclipse.jface.text.IInformationControlExtension2;
 import org.eclipse.jface.text.IRegion;
+import org.eclipse.jface.text.Region;
 import org.eclipse.jface.text.ITextHover;
 import org.eclipse.jface.text.ITextHoverExtension;
 import org.eclipse.jface.text.ITextHoverExtension2;
 import org.eclipse.jface.text.ITextSelection;
 import org.eclipse.jface.text.ITextViewer;
+import org.eclipse.jface.text.ITextViewerExtension5;
 import org.eclipse.jface.text.Position;
 import org.eclipse.jface.text.TextSelection;
 import org.eclipse.jdt.ui.PreferenceConstants;
 import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.contentassist.CompletionProposal;
+import org.eclipse.jface.text.contentassist.ContentAssistant;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
+import org.eclipse.jface.text.contentassist.IContentAssistProcessor;
 import org.eclipse.jface.text.quickassist.IQuickAssistInvocationContext;
 import org.eclipse.jface.text.source.Annotation;
 import org.eclipse.jface.text.source.IAnnotationModel;
@@ -49,10 +73,19 @@ import org.eclipse.jface.text.source.IAnnotationModelExtension;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.jface.util.IPropertyChangeListener;
+import org.eclipse.swt.SWT;
+import org.eclipse.swt.browser.Browser;
+import org.eclipse.swt.custom.StyledText;
+import org.eclipse.swt.dnd.Clipboard;
+import org.eclipse.swt.dnd.TextTransfer;
+import org.eclipse.swt.dnd.Transfer;
+import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
-import org.eclipse.swt.widgets.Label;
+import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.ToolBar;
 import org.eclipse.ui.IEditorPart;
@@ -65,14 +98,18 @@ import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.IWindowListener;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.ui.editors.text.EditorsUI;
 import org.eclipse.ui.texteditor.spelling.SpellingAnnotation;
 import org.eclipse.ui.texteditor.spelling.SpellingProblem;
 import org.eclipse.ui.texteditor.spelling.SpellingService;
 import org.eclipse.xtext.AbstractRule;
+import org.eclipse.xtext.CrossReference;
 import org.eclipse.xtext.EcoreUtil2;
+import org.eclipse.xtext.GrammarUtil;
 import org.eclipse.xtext.Keyword;
 import org.eclipse.xtext.RuleCall;
+import org.eclipse.xtext.diagnostics.Diagnostic;
 import org.eclipse.xtext.nodemodel.ICompositeNode;
 import org.eclipse.xtext.nodemodel.ILeafNode;
 import org.eclipse.xtext.nodemodel.INode;
@@ -82,14 +119,22 @@ import org.eclipse.xtext.resource.EObjectAtOffsetHelper;
 import org.eclipse.xtext.resource.IEObjectDescription;
 import org.eclipse.xtext.resource.IResourceServiceProvider;
 import org.eclipse.xtext.resource.XtextResource;
+import org.eclipse.xtext.scoping.IScope;
+import org.eclipse.xtext.scoping.IScopeProvider;
 import org.eclipse.xtext.ui.editor.XtextEditor;
 import org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal;
+import org.eclipse.xtext.ui.editor.hover.IEObjectHover;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
+import org.eclipse.xtext.ui.editor.validation.XtextAnnotation;
 import org.eclipse.xtext.ui.refactoring.ui.IRenameContextFactory;
 import org.eclipse.xtext.ui.refactoring.ui.IRenameElementContext;
 import org.eclipse.xtext.ui.refactoring.ui.IRenameSupport;
 import org.eclipse.xtext.util.concurrent.IUnitOfWork;
+import org.eclipse.xtext.validation.Issue;
 
+import com._1c.g5.v8.dt.bm.index.emf.IBmEmfIndexManager;
+import com._1c.g5.v8.dt.bm.index.emf.IBmEmfIndexProvider;
+import com._1c.g5.v8.dt.bsl.linking.BslLinkingDiagnosticErrorCodes;
 import com._1c.g5.v8.dt.bsl.model.BslContextDefMethod;
 import com._1c.g5.v8.dt.bsl.model.BslContextDefProperty;
 import com._1c.g5.v8.dt.bsl.model.BslPackage;
@@ -102,6 +147,7 @@ import com._1c.g5.v8.dt.bsl.model.StaticFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.Variable;
 import com._1c.g5.v8.dt.bsl.resource.DynamicFeatureAccessComputer;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import com._1c.g5.v8.dt.bsl.ui.hover.BslDispatchingEObjectTextHover;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
 import com._1c.g5.v8.dt.mcore.ContextsItem;
@@ -112,6 +158,7 @@ import com._1c.g5.v8.dt.mcore.McorePackage;
 import com._1c.g5.v8.dt.mcore.Property;
 import com._1c.g5.v8.dt.mcore.Type;
 import com._1c.g5.v8.dt.mcore.util.Environments;
+import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
 import com._1c.g5.v8.dt.platform.IEObjectProvider;
 import com._1c.g5.v8.dt.platform.version.Version;
 
@@ -167,6 +214,7 @@ public final class BslModuleSpellCheckHook implements IStartup
         {
             installWorkbenchHooks();
             installPreferenceListener();
+            installHoverCopyExecutionListener();
         });
     }
 
@@ -204,6 +252,149 @@ public final class BslModuleSpellCheckHook implements IStartup
             || PreferenceConstants.SPELLING_IGNORE_NON_LETTERS.equals(prop)
             || PreferenceConstants.SPELLING_IGNORE_JAVA_STRINGS.equals(prop)
             || PreferenceConstants.SPELLING_IGNORE_AMPERSAND_IN_PROPERTIES.equals(prop);
+    }
+
+    private static volatile boolean hoverCopyListenerInstalled;
+
+    /**
+     * Ctrl+C над ховером кода (annotation/quick-fix hover, {@code BrowserInformationControl})
+     * не долетает как {@code SWT.KeyDown} — тот же архитектурный потолок, что и для
+     * {@code KeyBindingToastHook}/Ctrl+Shift+F и {@code PreferenceSearchFilterAugmenter.wireTreeCopy}:
+     * нативный Win32-акселератор съедает букву раньше SWT. Перехват — через
+     * {@code ICommandService.addExecutionListener} на {@code org.eclipse.ui.edit.copy}.
+     */
+    private static void installHoverCopyExecutionListener()
+    {
+        if (hoverCopyListenerInstalled || PlatformUI.getWorkbench() == null)
+            return;
+        ICommandService commandService = PlatformUI.getWorkbench().getService(ICommandService.class);
+        if (commandService == null)
+            return;
+        commandService.addExecutionListener(new IExecutionListener()
+        {
+            @Override
+            public void preExecute(String commandId, ExecutionEvent event)
+            {
+                handlePossibleHoverCopy(commandId);
+            }
+
+            @Override
+            public void postExecuteSuccess(String commandId, Object returnValue)
+            {
+            }
+
+            @Override
+            public void notHandled(String commandId, NotHandledException exception)
+            {
+                handlePossibleHoverCopy(commandId);
+            }
+
+            @Override
+            public void postExecuteFailure(String commandId, ExecutionException exception)
+            {
+            }
+        });
+        hoverCopyListenerInstalled = true;
+    }
+
+    private static void handlePossibleHoverCopy(String commandId)
+    {
+        if (!"org.eclipse.ui.edit.copy".equals(commandId)) //$NON-NLS-1$
+            return;
+        Display display = Display.getCurrent();
+        if (display == null)
+            return;
+        Control focus = display.getFocusControl();
+        if (focus == null)
+            return;
+        Shell hoverShell = findActiveHoverShellContaining(focus);
+        if (hoverShell == null)
+            return;
+        String text = extractHoverCopyText(focus);
+        if (text == null || text.isBlank())
+            return;
+        Clipboard clipboard = new Clipboard(display);
+        try
+        {
+            clipboard.setContents(new Object[] { text }, new Transfer[] { TextTransfer.getInstance() });
+        }
+        finally
+        {
+            clipboard.dispose();
+        }
+    }
+
+    /** Фокус — внутри shell'а сейчас видимого ховера одного из открытых BSL-редакторов. */
+    private static Shell findActiveHoverShellContaining(Control focus)
+    {
+        for (EditorSession session : SESSIONS.values())
+        {
+            if (session == null || session.viewer == null)
+                continue;
+            HoverControlRef ref = findVisibleHoverControlRef(session.viewer);
+            if (ref == null)
+                continue;
+            Shell shell = infoControlShell(ref.control);
+            if (shell == null || shell.isDisposed())
+                continue;
+            if (isDescendantOrSelf(focus, shell))
+                return shell;
+        }
+        return null;
+    }
+
+    private static boolean isDescendantOrSelf(Control control, Shell shell)
+    {
+        for (Control c = control; c != null; c = c.getParent())
+        {
+            if (c == shell)
+                return true;
+        }
+        return false;
+    }
+
+    /** Выделение в ховере, иначе весь его текст ({@code Browser} — HTML, {@code StyledText} — как есть). */
+    private static String extractHoverCopyText(Control focus)
+    {
+        Shell shell = focus.getShell();
+        Browser browser = findDescendant(shell, Browser.class);
+        if (browser != null)
+        {
+            Object selection = browser.evaluate(
+                "return window.getSelection() ? window.getSelection().toString() : '';"); //$NON-NLS-1$
+            if (selection instanceof String s && !s.isBlank())
+                return s;
+            Object full = browser.evaluate(
+                "return document.body ? (document.body.innerText || document.body.textContent || '') : '';"); //$NON-NLS-1$
+            return full instanceof String s ? s : null;
+        }
+        StyledText styled = focus instanceof StyledText st ? st : findDescendant(shell, StyledText.class);
+        if (styled != null)
+        {
+            String selection = styled.getSelectionText();
+            if (selection != null && !selection.isBlank())
+                return selection;
+            return styled.getText();
+        }
+        return null;
+    }
+
+    private static <T extends Control> T findDescendant(Control root, Class<T> type)
+    {
+        if (root == null)
+            return null;
+        if (type.isInstance(root))
+            return type.cast(root);
+        if (root instanceof Composite composite)
+        {
+            for (Control child : composite.getChildren())
+            {
+                T found = findDescendant(child, type);
+                if (found != null)
+                    return found;
+            }
+        }
+        return null;
     }
 
     private static void onSpellingPrefsChanged()
@@ -2068,6 +2259,35 @@ public final class BslModuleSpellCheckHook implements IStartup
         return kept.toArray(new ICompletionProposal[0]);
     }
 
+    /** Префикс display string у предложений issue #176 - см. {@link #isIssue176Proposal}. */
+    private static final String ISSUE176_PROPOSAL_PREFIX = "Заменить на '"; //$NON-NLS-1$
+
+    private static boolean isIssue176Proposal(ICompletionProposal p)
+    {
+        if (p == null)
+            return false;
+        String display = p.getDisplayString();
+        return display != null && display.startsWith(ISSUE176_PROPOSAL_PREFIX);
+    }
+
+    /**
+     * issue #176: без этой очистки предложение "Заменить на '...'" дублируется при каждом
+     * пересчёте hover (например, при листании страниц/маркеров sticky-тулбара) - filtered
+     * читает уже накопленный nonSpellingFallback и снова добавляет своё поверх.
+     */
+    private static ICompletionProposal[] withoutIssue176Proposals(ICompletionProposal[] proposals)
+    {
+        if (proposals == null || proposals.length == 0)
+            return proposals != null ? proposals : new ICompletionProposal[0];
+        List<ICompletionProposal> kept = new ArrayList<>(proposals.length);
+        for (ICompletionProposal p : proposals)
+        {
+            if (p != null && !isIssue176Proposal(p))
+                kept.add(p);
+        }
+        return kept.toArray(new ICompletionProposal[0]);
+    }
+
     static ICompletionProposal[] proposalsForAnnotation(Annotation annotation, ISourceViewer viewer,
         ICompletionProposal[] nonSpellingFallback)
     {
@@ -2077,17 +2297,369 @@ public final class BslModuleSpellCheckHook implements IStartup
             ICompletionProposal[] fromProblem = mp.getProposals();
             return fromProblem != null ? fromProblem : new ICompletionProposal[0];
         }
-        return nonSpellingFallback != null ? nonSpellingFallback : new ICompletionProposal[0];
+        ICompletionProposal[] base = withoutIssue176Proposals(
+            nonSpellingFallback != null ? nonSpellingFallback : new ICompletionProposal[0]);
+        Global.tempLog("issue176", "proposalsForAnnotation: annotationClass=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (annotation != null ? annotation.getClass().getName() : "null") + " type=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (annotation != null ? annotation.getType() : "null") + " isXtextAnnotation=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (annotation instanceof XtextAnnotation));
+        if (annotation instanceof XtextAnnotation xa)
+        {
+            // Свои "Заменить на '...'" визуально должны выглядеть как штатные исправления -
+            // берём иконку у любого уже существующего предложения в этом же списке.
+            Image fallbackIcon = null;
+            for (ICompletionProposal p : base)
+            {
+                if (p != null && p.getImage() != null)
+                {
+                    fallbackIcon = p.getImage();
+                    break;
+                }
+            }
+            ICompletionProposal extra =
+                similarNameProposalForUnresolvedReference(xa, viewer, fallbackIcon);
+            if (extra != null)
+            {
+                ICompletionProposal[] withExtra = Arrays.copyOf(base, base.length + 1);
+                withExtra[base.length] = extra;
+                return withExtra;
+            }
+        }
+        return base;
     }
 
     /**
-     * Фильтр proposals + кнопки «Назад/Вперёд» в sticky toolbar BSL
-     * ({@code IBslHoverContributor}). Вызывается из {@code fillToolBar} до отрисовки
-     * списка исправлений — здесь надёжнее, чем обёртка fTextHovers.
+     * issue #176: для штатной ошибки EDT "не найдено" - предложить существующее имя, если оно
+     * отличается от введённого ровно на одну правку (вставка/удаление/замена символа). См.
+     * {@link #buildSimilarNameProposal} - сначала {@link IScope} несвязавшейся ссылки (когда BSL
+     * резолвит имя как cross-reference), затем {@link #candidateNameTable}. {@code undefined-type}
+     * покрывается платформенными типами из {@link #platformApiNames()} (каталог
+     * {@code McorePackage.Literals.TYPE_ITEM}). {@code undefined-label} пока не поддержан - метки
+     * не входят ни в один из трёх источников {@link #candidateNameTable}.
+     *
+     * <p>{@code SU74} - легаси-код старого чекера (не из {@link BslLinkingDiagnosticErrorCodes}),
+     * "Свойство (метод) объекта не обнаружено" - обращение через точку (`Объект.Метод`) к
+     * несуществующему свойству/методу. Кандидаты ищутся в той же общей таблице (не только среди
+     * членов конкретного типа объекта слева от точки) - при опечатке на расстоянии 1 это обычно
+     * не даёт ложных срабатываний.
+     */
+    private static final Set<String> DECLARED_NAME_ERROR_CODES = Set.of(
+        BslLinkingDiagnosticErrorCodes.UNDEFINED_VARIABLE,
+        BslLinkingDiagnosticErrorCodes.UNDEFINED_METHOD,
+        BslLinkingDiagnosticErrorCodes.UNDEFINED_FUNCTION,
+        BslLinkingDiagnosticErrorCodes.UNDEFINED_TYPE,
+        "SU74"); //$NON-NLS-1$
+
+    private static ICompletionProposal similarNameProposalForUnresolvedReference(XtextAnnotation xa,
+        ISourceViewer viewer, Image icon)
+    {
+        try
+        {
+            Issue issue = xa.getIssue();
+            String code = issue != null ? issue.getCode() : null;
+            Global.tempLog("issue176", "similarNameProposalForUnresolvedReference: code=" + code //$NON-NLS-1$ //$NON-NLS-2$
+                + " message=" + (issue != null ? issue.getMessage() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
+            boolean isLinking = Diagnostic.LINKING_DIAGNOSTIC.equals(code);
+            boolean isDeclaredNameCode = DECLARED_NAME_ERROR_CODES.contains(code);
+            if (issue == null || !(isLinking || isDeclaredNameCode))
+                return null;
+            Integer offset = issue.getOffset();
+            Integer length = issue.getLength();
+            IXtextDocument document = xa.getDocument();
+            if (offset == null || length == null || document == null)
+                return null;
+            return document.readOnly(
+                (IUnitOfWork<ICompletionProposal, XtextResource>) resource -> buildSimilarNameProposal(
+                    resource, viewer, offset, length, icon));
+        }
+        catch (Exception e)
+        {
+            Global.tempLog("issue176", "similarNameProposalForUnresolvedReference: исключение " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+    }
+
+    /**
+     * issue #176: единая таблица кандидатов - сначала точный {@link IScope} несвязавшейся
+     * cross-reference (если BSL резолвит имя в этой позиции именно так - например, общий модуль),
+     * затем {@link #candidateNameTable(XtextResource)} (переменные/методы модуля + платформенный
+     * API + объекты метаданных), и в последнюю очередь - тот же движок, что у штатного Ctrl+Space
+     * ({@link #closestNameFromContentAssist}), для случаев вроде членов конкретного типа объекта
+     * после точки, которых нет в плоской общей таблице.
+     */
+    private static ICompletionProposal buildSimilarNameProposal(XtextResource resource,
+        ISourceViewer viewer, int offset, int length, Image icon)
+    {
+        ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(),
+            offset);
+        if (leaf == null)
+        {
+            Global.tempLog("issue176", "buildSimilarNameProposal: leaf==null offset=" + offset); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+        String typed = leaf.getText();
+        String best = closestNameFromScope(resource, leaf, typed);
+        if (best == null)
+            best = closestNameFromTable(resource, typed);
+        if (best == null)
+            best = closestNameFromContentAssist(viewer, offset, typed);
+        Global.tempLog("issue176", "buildSimilarNameProposal: typed='" + typed + "' best=" + best); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        if (best == null || best.equals(typed))
+            return null;
+        return new CompletionProposal(best, offset, length, best.length(), icon,
+            ISSUE176_PROPOSAL_PREFIX + best + "'", null, null); //$NON-NLS-1$
+    }
+
+    /**
+     * Тот же список, что даёт штатный Ctrl+Space в этой позиции - через delegate
+     * {@link IContentAssistProcessor} BSL-редактора. Вызывается на UI-потоке через
+     * {@link Display#syncExec} - hover сам по себе считается на фоновом потоке, а не в живом
+     * SWT-вызове синхронно из UI, поэтому дедлока тут не возникает (в отличие от прямого вызова
+     * без syncExec, который падал {@code SWTException: Invalid thread access} - см. лог issue176
+     * от 2026-07-19).
+     */
+    private static String closestNameFromContentAssist(ISourceViewer viewer, int offset, String typed)
+    {
+        if (!(viewer instanceof SourceViewer sourceViewer))
+        {
+            Global.tempLog("issue176", "closestNameFromContentAssist: viewer не SourceViewer"); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return null;
+        ICompletionProposal[][] holder = new ICompletionProposal[1][];
+        display.syncExec(() ->
+        {
+            try
+            {
+                ContentAssistant contentAssist = ContentAssistPatcher.getContentAssistant(sourceViewer);
+                if (contentAssist == null)
+                {
+                    Global.tempLog("issue176", "closestNameFromContentAssist: contentAssist==null"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
+                IContentAssistProcessor current =
+                    contentAssist.getContentAssistProcessor(IDocument.DEFAULT_CONTENT_TYPE);
+                IContentAssistProcessor xtextProcessor = current instanceof SmartContentAssistProcessor scp
+                    ? scp.getDelegate() : current;
+                if (xtextProcessor == null)
+                {
+                    Global.tempLog("issue176", "closestNameFromContentAssist: processor==null"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
+                // offset - начало ещё не набранного слова, чтобы получить полный список
+                // кандидатов в этой позиции, без префиксной фильтрации по опечатке.
+                holder[0] = xtextProcessor.computeCompletionProposals(viewer, offset);
+            }
+            catch (Exception e)
+            {
+                Global.tempLog("issue176", "closestNameFromContentAssist: исключение " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        });
+        ICompletionProposal[] raw = holder[0];
+        Global.tempLog("issue176", "closestNameFromContentAssist: typed='" + typed + "' raw.length=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + (raw != null ? raw.length : -1));
+        if (raw == null)
+            return null;
+        StringBuilder names = new StringBuilder();
+        String best = null;
+        for (ICompletionProposal p : raw)
+        {
+            String candidate = p instanceof ConfigurableCompletionProposal ccp
+                ? ccp.getReplacementString() : p.getDisplayString();
+            // Шаблоны методов приходят как "Имя(, , );" - расстояние правки сравниваем
+            // по голому имени, до скобки параметров (как normalizeFilterKey в IrBslCompletionSupport).
+            String baseName = baseNameOf(candidate);
+            if (names.length() > 0)
+                names.append(", "); //$NON-NLS-1$
+            names.append(baseName);
+            if (best == null && baseName != null && isEditDistanceOne(typed, baseName))
+                best = baseName;
+        }
+        Global.tempLog("issue176", "closestNameFromContentAssist: raw names=" + names); //$NON-NLS-1$ //$NON-NLS-2$
+        return best;
+    }
+
+    /** "Имя(, , );" / "Имя()" → "Имя" - как {@code IrBslCompletionSupport.normalizeFilterKey}. */
+    private static String baseNameOf(String text)
+    {
+        if (text == null)
+            return null;
+        int paren = text.indexOf('(');
+        return (paren >= 0 ? text.substring(0, paren) : text).strip();
+    }
+
+    private static String closestNameFromScope(XtextResource resource, ILeafNode leaf, String typed)
+    {
+        CrossReference crossReference = GrammarUtil.containingCrossReference(leaf.getGrammarElement());
+        EReference reference = crossReference != null ? GrammarUtil.getReference(crossReference) : null;
+        EObject semanticElement = NodeModelUtils.findActualSemanticObjectFor(leaf);
+        EObject context = semanticElement != null ? semanticElement.eContainer() : null;
+        if (reference == null || context == null)
+            return null;
+        IScopeProvider scopeProvider = resource.getResourceServiceProvider().get(IScopeProvider.class);
+        IScope scope = scopeProvider.getScope(context, reference);
+        for (IEObjectDescription d : scope.getAllElements())
+        {
+            String name = d.getName().getLastSegment();
+            if (name != null && isEditDistanceOne(typed, name))
+                return name;
+        }
+        return null;
+    }
+
+    private static String closestNameFromTable(XtextResource resource, String typed)
+    {
+        for (String name : candidateNameTable(resource))
+        {
+            if (isEditDistanceOne(typed, name))
+                return name;
+        }
+        return null;
+    }
+
+    /**
+     * issue #176: единая таблица валидных имён в модуле - без обращения к SWT/UI-потоку и без
+     * Guice-override {@code bslUiModuleExtension} (оба пути закрыты, см. javadoc класса и память
+     * feedback-bsl-ui-module-extension-verifyerror). Три безопасных источника, уже проверенных
+     * в этом же файле/плагине:
+     * <ul>
+     * <li>объявленные в модуле {@link Variable}/{@link FormalParam}/процедуры и функции
+     * ({@code com._1c.g5.v8.dt.bsl.model.Method}) - обход {@code eAllContents()};
+     * <li>платформенный API (методы/свойства/типы) - {@link #platformApiNames()}, уже готовый
+     * кэш из {@link IEObjectProvider};
+     * <li>объекты метаданных проекта (общие модули, справочники, документы и т.п., то есть и
+     * "типы", и "общие модули" из требования) - BM-индекс через {@code IBmEmfIndexManager}
+     * (тот же паттерн, что в {@code ComfortNavigatorSearchEngine.buildTrie}).
+     * </ul>
+     */
+    private static Set<String> candidateNameTable(XtextResource resource)
+    {
+        LinkedHashSet<String> names = new LinkedHashSet<>();
+        if (!resource.getContents().isEmpty())
+        {
+            TreeIterator<EObject> it = resource.getContents().get(0).eAllContents();
+            while (it.hasNext())
+            {
+                EObject o = it.next();
+                if (o instanceof Variable v && v.getName() != null)
+                    names.add(v.getName());
+                else if (o instanceof FormalParam p && p.getName() != null)
+                    names.add(p.getName());
+                else if (o instanceof com._1c.g5.v8.dt.bsl.model.Method m && m.getName() != null)
+                    names.add(m.getName());
+            }
+        }
+        names.addAll(platformApiNames());
+        names.addAll(metadataObjectNames(resource));
+        Global.tempLog("issue176", "candidateNameTable: total=" + names.size()); //$NON-NLS-1$ //$NON-NLS-2$
+        return names;
+    }
+
+    /** Имена всех объектов метаданных проекта (общие модули, справочники, документы и т.п.) - BM-индекс. */
+    private static Set<String> metadataObjectNames(XtextResource resource)
+    {
+        try
+        {
+            IProject project = projectOf(resource);
+            if (project == null)
+            {
+                Global.tempLog("issue176", "metadataObjectNames: project==null uri=" + resource.getURI()); //$NON-NLS-1$ //$NON-NLS-2$
+                return Set.of();
+            }
+            IBmEmfIndexManager manager = Global.getOsgiService(IBmEmfIndexManager.class);
+            IBmEmfIndexProvider indexProvider = manager != null ? manager.getEmfIndexProvider(project) : null;
+            if (indexProvider == null)
+            {
+                Global.tempLog("issue176", "metadataObjectNames: indexProvider==null manager=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + (manager != null));
+                return Set.of();
+            }
+            Iterable<IEObjectDescription> index =
+                indexProvider.getEObjectIndexByType(MdClassPackage.Literals.MD_OBJECT);
+            if (index == null)
+                return Set.of();
+            LinkedHashSet<String> names = new LinkedHashSet<>();
+            for (IEObjectDescription d : index)
+            {
+                QualifiedName qn = d != null ? d.getName() : null;
+                String last = qn != null && !qn.isEmpty() ? qn.getLastSegment() : null;
+                if (last != null && !last.isEmpty())
+                    names.add(last);
+            }
+            return names;
+        }
+        catch (Exception e)
+        {
+            Global.tempLog("issue176", "metadataObjectNames: исключение " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            return Set.of();
+        }
+    }
+
+    private static IProject projectOf(XtextResource resource)
+    {
+        URI uri = resource.getURI();
+        if (uri == null || !uri.isPlatformResource())
+            return null;
+        String platformString = uri.toPlatformString(true);
+        if (platformString == null)
+            return null;
+        IFile file = ResourcesPlugin.getWorkspace().getRoot().getFile(new Path(platformString));
+        return file != null ? file.getProject() : null;
+    }
+
+    /** {@code true}, если a и b различаются ровно на одну вставку/удаление/замену символа. */
+    private static boolean isEditDistanceOne(String a, String b)
+    {
+        if (a.equals(b))
+            return false;
+        int la = a.length();
+        int lb = b.length();
+        if (Math.abs(la - lb) > 1)
+            return false;
+        int i = 0;
+        int j = 0;
+        boolean editUsed = false;
+        while (i < la && j < lb)
+        {
+            if (a.charAt(i) == b.charAt(j))
+            {
+                i++;
+                j++;
+                continue;
+            }
+            if (editUsed)
+                return false;
+            editUsed = true;
+            if (la == lb)
+            {
+                i++;
+                j++;
+            }
+            else if (la > lb)
+                i++;
+            else
+                j++;
+        }
+        return true;
+    }
+
+    private static final String BSL_UI_BUNDLE = "com._1c.g5.v8.dt.bsl.ui"; //$NON-NLS-1$
+    private static final String SYNTAX_HELP_ICON = "icons/eview/syntax_help.png"; //$NON-NLS-1$
+    /** Отдельный presenter описания — без mouse-recompute {@code fTextHoverManager}. */
+    private static volatile IdentifierDocHoverPresenter identifierDocPresenter;
+
+    /**
+     * Фильтр proposals + кнопки sticky toolbar BSL ({@code IBslHoverContributor}):
+     * «Назад/Вперёд» между маркерами и справа кнопка с иконкой синтакс-помощника
+     * (открывает штатную подсказку с описанием идентификатора).
      */
     static void installAnnotationNavigationActions(IToolBarManager manager,
         Collection<Annotation> annotations)
     {
+        Global.tempLog("issue176", "installAnnotationNavigationActions: annotations=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (annotations != null ? annotations.size() : -1));
         if (annotations == null || annotations.isEmpty())
             return;
         List<Annotation> list = new ArrayList<>(annotations);
@@ -2095,31 +2667,106 @@ public final class BslModuleSpellCheckHook implements IStartup
         // BSL getAnnotations иногда отдаёт 1 маркер, хотя на offset есть и spelling
         list = expandAnnotationsAtOffset(viewer, list);
         Object info = findLiveAnnotationInfo(viewer, list);
-        int filtered = applyProposalFilterToInfo(info, viewer, list);
-        if (manager == null || list.size() < 2)
+        applyProposalFilterToInfo(info, viewer, list);
+        if (manager == null)
             return;
-        // Сохраняем полный список для force-toolbar после setInput
-        if (viewer != null)
+        int pageIndex = 0;
+        boolean hasNav = list.size() >= 2;
+        if (hasNav && viewer != null)
+        {
+            pageIndex = annotationHoverNav != null && annotationHoverNav.viewer == viewer
+                ? annotationHoverNav.index : 0;
             annotationHoverNav = new AnnotationHoverNavState(viewer, list,
                 annotationHoverNav != null && annotationHoverNav.viewer == viewer
                     ? annotationHoverNav.nonSpellingProposals : new ICompletionProposal[0],
-                annotationHoverNav != null && annotationHoverNav.viewer == viewer
-                    ? annotationHoverNav.index : 0);
-        addAnnotationNavActions(manager, list, viewer);
+                pageIndex);
+        }
+        int offset = resolveAnnotationOffset(viewer, list);
+        boolean hasSyntax = viewer != null && offset >= 0
+            && hasIdentifierDocumentation(viewer, offset);
+        if (!hasNav && !hasSyntax)
+            return;
+        addAnnotationToolbarActions(manager, list, viewer, pageIndex, offset, hasSyntax);
         manager.update(true);
         layoutNavToolbar(manager);
     }
 
-    private static void addAnnotationNavActions(IToolBarManager manager, List<Annotation> list,
-        ISourceViewer viewer)
+    private static void addAnnotationToolbarActions(IToolBarManager manager, List<Annotation> list,
+        ISourceViewer viewer, int index, int docOffset, boolean showSyntaxHelp)
     {
-        if (manager == null || list == null || list.size() < 2)
+        if (manager == null)
             return;
-        removeAnnotationNavActions(manager);
-        // MODE_FORCE_TEXT: после setInput status-toolbar часто рисует только icon,
-        // а shared-image после removeAll становится «пустой» — кнопки пропадают визуально.
-        manager.add(forceTextContribution(new AnnotationNavAction(false, list, viewer)));
-        manager.add(forceTextContribution(new AnnotationNavAction(true, list, viewer)));
+        removeAnnotationToolbarActions(manager);
+        if (list != null && list.size() >= 2)
+        {
+            int page = index;
+            if (page < 0 || page >= list.size())
+                page = 0;
+            // MODE_FORCE_TEXT: после setInput status-toolbar часто рисует только icon,
+            // а shared-image после removeAll становится «пустой» — кнопки пропадают визуально.
+            manager.add(forceTextContribution(new AnnotationNavAction(false, list, viewer)));
+            manager.add(forceTextContribution(newAnnotationNavPageAction(page, list.size())));
+            manager.add(forceTextContribution(new AnnotationNavAction(true, list, viewer)));
+        }
+        if (showSyntaxHelp && viewer != null && docOffset >= 0)
+        {
+            // Без spacer: status-bar уже прижимает ToolBar вправо; spacer в ToolBar
+            // давал скачущую ширину при layout.
+            manager.add(newAnnotationSyntaxHelpAction(viewer, docOffset));
+        }
+    }
+
+    private static Action newAnnotationNavPageAction(int pageIndex, int pageCount)
+    {
+        Action page = new Action()
+        {
+            @Override
+            public void run()
+            {
+                // Только отображение номера страницы.
+            }
+        };
+        page.setId("tormozit.comfort.annNavPage"); //$NON-NLS-1$
+        page.setEnabled(false);
+        page.setText(" " + (pageIndex + 1) + "/" + pageCount + " "); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        page.setToolTipText("Маркер " + (pageIndex + 1) + " из " + pageCount); //$NON-NLS-1$ //$NON-NLS-2$
+        return page;
+    }
+
+    private static Action newAnnotationSyntaxHelpAction(ISourceViewer viewer, int offset)
+    {
+        Action action = new Action()
+        {
+            @Override
+            public void run()
+            {
+                openStandardIdentifierDocHover(viewer, offset);
+            }
+        };
+        action.setId("tormozit.comfort.annSyntaxHelp"); //$NON-NLS-1$
+        ImageDescriptor icon = syntaxHelpImageDescriptor();
+        if (icon != null)
+            action.setImageDescriptor(icon);
+        else
+            action.setText("?"); //$NON-NLS-1$
+        action.setToolTipText("Открыть описание" + Global.pluginSignForTooltip()); //$NON-NLS-1$
+        return action;
+    }
+
+    private static ImageDescriptor syntaxHelpImageDescriptor()
+    {
+        try
+        {
+            Bundle bundle = Platform.getBundle(BSL_UI_BUNDLE);
+            if (bundle == null)
+                return null;
+            URL url = bundle.getEntry(SYNTAX_HELP_ICON);
+            return url != null ? ImageDescriptor.createFromURL(url) : null;
+        }
+        catch (RuntimeException e)
+        {
+            return null;
+        }
     }
 
     private static ActionContributionItem forceTextContribution(Action action)
@@ -2129,16 +2776,465 @@ public final class BslModuleSpellCheckHook implements IStartup
         return item;
     }
 
-    private static void removeAnnotationNavActions(IToolBarManager manager)
+    private static void removeAnnotationToolbarActions(IToolBarManager manager)
     {
         if (manager == null)
             return;
         IContributionItem prev = manager.find("tormozit.comfort.annNavPrev"); //$NON-NLS-1$
         if (prev != null)
             manager.remove(prev);
+        IContributionItem page = manager.find("tormozit.comfort.annNavPage"); //$NON-NLS-1$
+        if (page != null)
+            manager.remove(page);
         IContributionItem next = manager.find("tormozit.comfort.annNavNext"); //$NON-NLS-1$
         if (next != null)
             manager.remove(next);
+        IContributionItem syntax = manager.find("tormozit.comfort.annSyntaxHelp"); //$NON-NLS-1$
+        if (syntax != null)
+            manager.remove(syntax);
+    }
+
+    private static int resolveAnnotationOffset(ISourceViewer viewer, List<Annotation> list)
+    {
+        if (viewer == null || list == null || list.isEmpty())
+            return -1;
+        IAnnotationModel model = viewer.getAnnotationModel();
+        if (model == null)
+            return -1;
+        for (Annotation a : list)
+        {
+            Position p = model.getPosition(a);
+            if (p != null && !p.isDeleted)
+                return p.getOffset();
+        }
+        return -1;
+    }
+
+    /** Есть ли штатное описание идентификатора на offset (для кнопки с иконкой). */
+    private static boolean hasIdentifierDocumentation(ISourceViewer viewer, int offset)
+    {
+        return prepareIdentifierDocHover(viewer, offset) != null;
+    }
+
+    private static final class IdentifierDocHoverOpen
+    {
+        final Object info;
+        final IInformationControlCreator creator;
+        final IRegion region;
+
+        IdentifierDocHoverOpen(Object info, IInformationControlCreator creator, IRegion region)
+        {
+            this.info = info;
+            this.creator = creator;
+            this.region = region;
+        }
+    }
+
+    private static IdentifierDocHoverOpen prepareIdentifierDocHover(ISourceViewer viewer, int offset)
+    {
+        if (viewer == null || offset < 0)
+            return null;
+        try
+        {
+            if (!(viewer.getDocument() instanceof IXtextDocument xdoc))
+                return null;
+            URI resourceUri = xdoc.getResourceURI();
+            if (resourceUri == null)
+                return null;
+            IResourceServiceProvider rsp = IResourceServiceProvider.Registry.INSTANCE
+                .getResourceServiceProvider(resourceUri);
+            if (rsp == null)
+                return null;
+            IEObjectHover hover = rsp.get(IEObjectHover.class);
+            if (!(hover instanceof BslDispatchingEObjectTextHover bslHover))
+                return null;
+            IRegion region = bslHover.getHoverRegion(viewer, offset);
+            if (region == null)
+                region = new Region(offset, 1);
+            Object info = bslHover.getHoverInfo2(viewer, region);
+            if (info == null)
+                return null;
+            String html = IrBslHoverHtml.readHtml(info);
+            if (html == null || html.isBlank())
+                return null;
+            String fragment = IrBslHoverHtml.extractInsertableFragment(html);
+            fragment = IrBslHoverHtml.stripIrEmbeddedChrome(fragment);
+            String plain = fragment.replaceAll("(?is)<[^>]+>", "").trim(); //$NON-NLS-1$ //$NON-NLS-2$
+            if (plain.isBlank())
+                return null;
+            IInformationControlCreator creator = bslHover.getHoverControlCreator();
+            if (creator == null)
+                return null;
+            return new IdentifierDocHoverOpen(info, creator, region);
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+    }
+
+    /**
+     * Закрыть sticky annotation hover и показать описание по offset исходного popup.
+     * Отдельный presenter: constraints копируются с {@code fTextHoverManager}, без
+     * mouse-{@code computeInformation} (иначе контент прыгает под указатель).
+     */
+    private static void openStandardIdentifierDocHover(ISourceViewer viewer, int offset)
+    {
+        if (viewer == null)
+            return;
+        int useOffset = resolveDocHoverOffset(viewer, offset);
+        if (useOffset < 0)
+            return;
+        IdentifierDocHoverOpen prepared = prepareIdentifierDocHover(viewer, useOffset);
+        if (prepared == null)
+        {
+            Global.tempLog("ann-doc", "prepare empty offset=" + useOffset); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        closeAnnotationHover(viewer);
+        Display display = Display.getCurrent();
+        if (display == null)
+            display = Display.getDefault();
+        if (display == null)
+            return;
+        final int loggedOffset = useOffset;
+        display.asyncExec(() ->
+        {
+            Global.tempLog("ann-doc", "show offset=" + loggedOffset); //$NON-NLS-1$ //$NON-NLS-2$
+            showPreparedIdentifierDocHover(viewer, prepared);
+        });
+    }
+
+    /** Offset из AnnotationInfo исходного popup, иначе из кнопки toolbar. */
+    private static int resolveDocHoverOffset(ISourceViewer viewer, int fallbackOffset)
+    {
+        try
+        {
+            HoverControlRef hover = findHoverControlRef(viewer, false);
+            if (hover != null)
+            {
+                Object info = Global.getField(hover.control, "fInput"); //$NON-NLS-1$
+                if (info == null && hover.manager != null)
+                    info = Global.getField(hover.manager, "fInformation"); //$NON-NLS-1$
+                if (isAnnotationInfo(info))
+                {
+                    Object pos = Global.getField(info, "position"); //$NON-NLS-1$
+                    if (pos instanceof Position p && !p.isDeleted)
+                        return p.getOffset();
+                }
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+        return fallbackOffset;
+    }
+
+    private static void showPreparedIdentifierDocHover(ISourceViewer viewer,
+        IdentifierDocHoverOpen prepared)
+    {
+        if (viewer == null || prepared == null)
+            return;
+        try
+        {
+            StyledText widget = viewer.getTextWidget();
+            if (widget == null || widget.isDisposed())
+                return;
+            Rectangle area = subjectAreaForRegion(viewer, prepared.region);
+            if (area == null)
+            {
+                Global.tempLog("ann-doc", "no subject area"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            disposeIdentifierDocPresenter();
+            // Иначе штатный mouse-hover открывает второй попап поверх нашего.
+            suppressEditorTextHovers(viewer);
+            IdentifierDocHoverPresenter presenter =
+                new IdentifierDocHoverPresenter(prepared.creator, viewer);
+            Object srcMgr = Global.getField(viewer, "fTextHoverManager"); //$NON-NLS-1$
+            copyHoverSizeConstraints(srcMgr, presenter);
+            presenter.install(widget);
+            presenter.show(prepared.info, area);
+            identifierDocPresenter = presenter;
+            Global.tempLog("ann-doc", "presented via IdentifierDocHoverPresenter"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (Exception e)
+        {
+            restoreEditorTextHovers(viewer);
+            Global.tempLog("ann-doc", "show fail: " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    private static void suppressEditorTextHovers(ISourceViewer viewer)
+    {
+        if (viewer == null)
+            return;
+        for (String field : new String[] { "fTextHoverManager", "fInformationPresenter" }) //$NON-NLS-1$ //$NON-NLS-2$
+        {
+            Object mgr = Global.getField(viewer, field);
+            if (!(mgr instanceof AbstractInformationControlManager aim))
+                continue;
+            try
+            {
+                aim.disposeInformationControl();
+                aim.setEnabled(false);
+            }
+            catch (Exception ignored)
+            {
+            }
+        }
+    }
+
+    private static void restoreEditorTextHovers(ISourceViewer viewer)
+    {
+        if (viewer == null)
+            return;
+        for (String field : new String[] { "fTextHoverManager", "fInformationPresenter" }) //$NON-NLS-1$ //$NON-NLS-2$
+        {
+            Object mgr = Global.getField(viewer, field);
+            if (!(mgr instanceof AbstractInformationControlManager aim))
+                continue;
+            try
+            {
+                aim.setEnabled(true);
+            }
+            catch (Exception ignored)
+            {
+            }
+        }
+    }
+
+    private static void copyHoverSizeConstraints(Object fromManager,
+        AbstractInformationControlManager to)
+    {
+        if (fromManager == null || to == null)
+            return;
+        try
+        {
+            Object w = Global.getField(fromManager, "fWidthConstraint"); //$NON-NLS-1$
+            Object h = Global.getField(fromManager, "fHeightConstraint"); //$NON-NLS-1$
+            Object min = Global.getField(fromManager, "fEnforceAsMinimalSize"); //$NON-NLS-1$
+            Object max = Global.getField(fromManager, "fEnforceAsMaximalSize"); //$NON-NLS-1$
+            if (w instanceof Integer width && h instanceof Integer height)
+            {
+                to.setSizeConstraints(width, height,
+                    Boolean.TRUE.equals(min), Boolean.TRUE.equals(max));
+            }
+            Object mx = Global.getField(fromManager, "fMarginX"); //$NON-NLS-1$
+            Object my = Global.getField(fromManager, "fMarginY"); //$NON-NLS-1$
+            if (mx instanceof Integer marginX && my instanceof Integer marginY)
+                to.setMargins(marginX, marginY);
+        }
+        catch (Exception ignored)
+        {
+        }
+    }
+
+    private static void disposeIdentifierDocPresenter()
+    {
+        IdentifierDocHoverPresenter prev = identifierDocPresenter;
+        identifierDocPresenter = null;
+        if (prev == null)
+            return;
+        ISourceViewer viewer = prev.viewer;
+        try
+        {
+            prev.disposeInformationControl();
+            prev.dispose();
+        }
+        catch (Exception ignored)
+        {
+        }
+        restoreEditorTextHovers(viewer);
+    }
+
+    /**
+     * Presenter описания идентификатора: constraints как у editor hover,
+     * без пересчёта по текущей мыши. Closer — клик снаружи / Esc
+     * ({@link AbstractInformationControlManager} сам closer не ставит).
+     */
+    private static final class IdentifierDocHoverPresenter extends AbstractInformationControlManager
+    {
+        private final ISourceViewer viewer;
+        private Object pendingInfo;
+        private Rectangle pendingArea;
+
+        IdentifierDocHoverPresenter(IInformationControlCreator creator, ISourceViewer viewer)
+        {
+            super(creator);
+            this.viewer = viewer;
+            setCloser(new DocHoverCloser());
+        }
+
+        void show(Object info, Rectangle subjectArea)
+        {
+            pendingInfo = info;
+            pendingArea = subjectArea;
+            setInformation(info, subjectArea);
+        }
+
+        @Override
+        protected void computeInformation()
+        {
+            if (pendingInfo != null && pendingArea != null)
+                setInformation(pendingInfo, pendingArea);
+            else
+                setInformation((Object) null, null);
+        }
+
+        @Override
+        protected void hideInformationControl()
+        {
+            pendingInfo = null;
+            pendingArea = null;
+            super.hideInformationControl();
+            if (identifierDocPresenter == this)
+                identifierDocPresenter = null;
+            restoreEditorTextHovers(viewer);
+        }
+
+        private final class DocHoverCloser
+            implements IInformationControlCloser, Listener
+        {
+            private Control subjectControl;
+            private IInformationControl informationControl;
+            private Display display;
+            private boolean active;
+
+            @Override
+            public void setSubjectControl(Control control)
+            {
+                subjectControl = control;
+            }
+
+            @Override
+            public void setInformationControl(IInformationControl control)
+            {
+                informationControl = control;
+            }
+
+            @Override
+            public void start(Rectangle subjectArea)
+            {
+                if (active)
+                    return;
+                active = true;
+                display = subjectControl != null && !subjectControl.isDisposed()
+                    ? subjectControl.getDisplay() : Display.getCurrent();
+                if (display == null || display.isDisposed())
+                    return;
+                // Не закрывать тем же MouseDown, которым нажали кнопку toolbar.
+                display.asyncExec(() ->
+                {
+                    if (!active || display.isDisposed())
+                        return;
+                    display.addFilter(SWT.MouseDown, this);
+                    display.addFilter(SWT.KeyDown, this);
+                });
+            }
+
+            @Override
+            public void stop()
+            {
+                if (!active)
+                    return;
+                active = false;
+                if (display == null || display.isDisposed())
+                    return;
+                display.removeFilter(SWT.MouseDown, this);
+                display.removeFilter(SWT.KeyDown, this);
+            }
+
+            @Override
+            public void handleEvent(org.eclipse.swt.widgets.Event event)
+            {
+                if (!active)
+                    return;
+                if (event.type == SWT.KeyDown && event.keyCode == SWT.ESC)
+                {
+                    hideInformationControl();
+                    return;
+                }
+                if (event.type != SWT.MouseDown)
+                    return;
+                Shell shell = infoControlShell(informationControl);
+                if (shell != null && !shell.isDisposed()
+                    && event.widget instanceof Control clicked
+                    && isControlUnderShell(clicked, shell))
+                    return;
+                hideInformationControl();
+            }
+        }
+    }
+
+    private static boolean isControlUnderShell(Control control, Shell shell)
+    {
+        for (Control c = control; c != null; c = c.getParent())
+        {
+            if (c == shell)
+                return true;
+        }
+        return false;
+    }
+
+    /** Subject area в координатах text widget — как у {@code TextViewerHoverManager}. */
+    private static Rectangle subjectAreaForRegion(ISourceViewer viewer, IRegion region)
+    {
+        if (viewer == null || region == null)
+            return null;
+        StyledText widget = viewer.getTextWidget();
+        if (widget == null || widget.isDisposed())
+            return null;
+        int modelStart = region.getOffset();
+        int modelEnd = modelStart + Math.max(region.getLength(), 1);
+        int widgetStart = modelStart;
+        int widgetEnd = modelEnd;
+        if (viewer instanceof ITextViewerExtension5 ext5)
+        {
+            int mappedStart = ext5.modelOffset2WidgetOffset(modelStart);
+            int mappedEnd = ext5.modelOffset2WidgetOffset(modelEnd);
+            if (mappedStart >= 0)
+                widgetStart = mappedStart;
+            if (mappedEnd >= 0)
+                widgetEnd = mappedEnd;
+        }
+        int charCount = widget.getCharCount();
+        widgetStart = Math.max(0, Math.min(widgetStart, charCount));
+        widgetEnd = Math.max(widgetStart + 1, Math.min(widgetEnd, charCount));
+        try
+        {
+            Point p1 = widget.getLocationAtOffset(widgetStart);
+            Point p2 = widget.getLocationAtOffset(widgetEnd);
+            int lineH = widget.getLineHeight(widgetStart);
+            return new Rectangle(p1.x, p1.y, Math.max(p2.x - p1.x, 1), lineH);
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+    }
+
+    private static void closeAnnotationHover(ISourceViewer viewer)
+    {
+        HoverControlRef hover = findHoverControlRef(viewer, false);
+        if (hover == null)
+            return;
+        try
+        {
+            if (hover.control instanceof IInformationControl ic)
+                ic.setVisible(false);
+            if (hover.manager instanceof AbstractInformationControlManager mgr)
+                mgr.disposeInformationControl();
+            else if (hover.manager != null)
+                Global.invoke(hover.manager, "disposeInformationControl"); //$NON-NLS-1$
+            Object replacer = hover.manager != null
+                ? Global.getField(hover.manager, "fInformationControlReplacer") : null; //$NON-NLS-1$
+            if (replacer != null)
+                Global.invoke(replacer, "disposeInformationControl"); //$NON-NLS-1$
+        }
+        catch (Exception ignored)
+        {
+        }
     }
 
     private static List<Annotation> expandAnnotationsAtOffset(ISourceViewer viewer,
@@ -2175,6 +3271,7 @@ public final class BslModuleSpellCheckHook implements IStartup
         }
         return merged;
     }
+
 
     /** Текущий AnnotationInfo sticky/hover: предпочитаем fInformation менеджера и sticky-control. */
     private static Object findLiveAnnotationInfo(ISourceViewer viewer, List<Annotation> annotations)
@@ -2228,6 +3325,9 @@ public final class BslModuleSpellCheckHook implements IStartup
     private static int applyProposalFilterToInfo(Object info, ISourceViewer viewer,
         List<Annotation> atOffset)
     {
+        Global.tempLog("issue176", "applyProposalFilterToInfo: infoClass=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (info != null ? info.getClass().getName() : "null") + " isAnnotationInfo=" //$NON-NLS-1$ //$NON-NLS-2$
+            + isAnnotationInfo(info));
         if (!isAnnotationInfo(info))
             return -1;
         Object annObj = Global.getField(info, "annotation"); //$NON-NLS-1$
@@ -2532,6 +3632,8 @@ public final class BslModuleSpellCheckHook implements IStartup
         @Override
         public Object getHoverInfo2(ITextViewer textViewer, IRegion hoverRegion)
         {
+            Global.tempLog("issue176", "AnnotationHoverProposalFilter.getHoverInfo2: delegateExt2=" //$NON-NLS-1$ //$NON-NLS-2$
+                + delegateExt2);
             Object info = delegateExt2 != null
                 ? delegateExt2.getHoverInfo2(textViewer, hoverRegion)
                 : null;
@@ -2771,29 +3873,31 @@ public final class BslModuleSpellCheckHook implements IStartup
                 return;
             }
             List<Annotation> list = annotations;
-            if (list == null || list.size() < 2)
+            if (list == null || list.isEmpty())
             {
                 AnnotationHoverNavState state = annotationHoverNav;
-                if (state != null && state.annotations.size() >= 2)
+                if (state != null && !state.annotations.isEmpty())
                     list = state.annotations;
             }
-            if (list == null || list.size() < 2)
-            {
-                manager.update(true);
-                return;
-            }
-            addAnnotationNavActions(manager, list, viewer);
-            manager.update(true);
+            if (list == null)
+                list = List.of();
             int idx = index;
-            if (idx < 0 || idx >= list.size())
+            if (list.size() >= 2 && (idx < 0 || idx >= list.size()))
             {
                 AnnotationHoverNavState state = annotationHoverNav;
                 idx = state != null ? state.index : 0;
             }
-            // setStatusText() no-op когда shell уже visible — пишем в label напрямую.
-            Object statusLabel = Global.getField(control, "fStatusLabel"); //$NON-NLS-1$
-            if (statusLabel instanceof Label label && !label.isDisposed())
-                label.setText((idx + 1) + "/" + list.size()); //$NON-NLS-1$
+            int offset = resolveAnnotationOffset(viewer, list);
+            boolean hasSyntax = viewer != null && offset >= 0
+                && hasIdentifierDocumentation(viewer, offset);
+            if (list.size() < 2 && !hasSyntax)
+            {
+                removeAnnotationToolbarActions(manager);
+                manager.update(true);
+                return;
+            }
+            addAnnotationToolbarActions(manager, list, viewer, idx, offset, hasSyntax);
+            manager.update(true);
             layoutNavToolbar(manager);
         }
         catch (Exception e)

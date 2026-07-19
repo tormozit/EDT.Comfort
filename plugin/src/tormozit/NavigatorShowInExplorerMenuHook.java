@@ -41,6 +41,10 @@ public final class NavigatorShowInExplorerMenuHook implements IStartup
     private static final String ITEM_TOOLTIP =
             "Открыть проводник ОС на файле или папке выбранного элемента навигатора" //$NON-NLS-1$
             + Global.pluginSignForTooltip();
+    private static final String ITEM_TEXT_PROJECT_STRUCTURE = "Показать в Структуре проекта"; //$NON-NLS-1$
+    private static final String ITEM_TOOLTIP_PROJECT_STRUCTURE =
+            "Показать файл или папку выбранного элемента навигатора в Project Explorer" //$NON-NLS-1$
+            + Global.pluginSignForTooltip();
 
     @Override
     public void earlyStartup()
@@ -218,7 +222,7 @@ public final class NavigatorShowInExplorerMenuHook implements IStartup
 
         MenuAdapter subListener = new MenuAdapter()
         {
-            private final List<MenuItem> added = new ArrayList<>(2);
+            private final List<MenuItem> added = new ArrayList<>(4);
 
             @Override
             public void menuShown(MenuEvent e)
@@ -229,10 +233,10 @@ public final class NavigatorShowInExplorerMenuHook implements IStartup
                 if (NavigatorResourceResolver.resolveFirst(structured) == null)
                     return;
 
-                MenuItem item = new MenuItem(comfortSub, SWT.PUSH);
-                item.setText(ITEM_TEXT);
-                item.setToolTipText(ITEM_TOOLTIP);
-                item.addSelectionListener(new SelectionAdapter()
+                MenuItem explorerItem = ComfortSubmenuHelper.createSortedMenuItem(
+                    comfortSub, SWT.PUSH, ITEM_TEXT);
+                explorerItem.setToolTipText(ITEM_TOOLTIP);
+                explorerItem.addSelectionListener(new SelectionAdapter()
                 {
                     @Override
                     public void widgetSelected(SelectionEvent ev)
@@ -242,7 +246,22 @@ public final class NavigatorShowInExplorerMenuHook implements IStartup
                             NavigatorShowInExplorerHandler.showInExplorer(currentStructured, comfortSub.getShell());
                     }
                 });
-                added.add(item);
+                added.add(explorerItem);
+
+                MenuItem structureItem = ComfortSubmenuHelper.createSortedMenuItem(
+                    comfortSub, SWT.PUSH, ITEM_TEXT_PROJECT_STRUCTURE);
+                structureItem.setToolTipText(ITEM_TOOLTIP_PROJECT_STRUCTURE);
+                structureItem.addSelectionListener(new SelectionAdapter()
+                {
+                    @Override
+                    public void widgetSelected(SelectionEvent ev)
+                    {
+                        ISelection current = viewer.getSelection();
+                        if (current instanceof IStructuredSelection currentStructured)
+                            NavigatorShowInProjectStructureHandler.showInProjectStructure(currentStructured);
+                    }
+                });
+                added.add(structureItem);
             }
 
             @Override

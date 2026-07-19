@@ -331,6 +331,11 @@
         categoryId="tormozit.commands.global"
         description="Открыть проводник ОС на файле или папке выбранного элемента навигатора (Комфорт)"/>
     <command
+        id="tormozit.navigator.showInProjectStructure"
+        name="Показать в Структуре проекта"
+        categoryId="tormozit.commands.global"
+        description="Показать файл или папку выбранного элемента навигатора в Project Explorer (Комфорт)"/>
+    <command
         id="tormozit.PasteWithCompare"
         name="Вставить со сравнением"
         categoryId="tormozit.commands.global"
@@ -526,6 +531,15 @@
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.NavigatorShowInExplorerHandler"
         commandId="tormozit.navigator.showInExplorer">
+      <activeWhen>
+        <with variable="activePartId">
+          <equals value="com._1c.g5.v8.dt.ui2.navigator"/>
+        </with>
+      </activeWhen>
+    </handler>
+    <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.NavigatorShowInProjectStructureHandler"
+        commandId="tormozit.navigator.showInProjectStructure">
       <activeWhen>
         <with variable="activePartId">
           <equals value="com._1c.g5.v8.dt.ui2.navigator"/>
@@ -817,6 +831,10 @@
   не помог — краш идёт из нативных фоновых задач EDT напрямую, а не через наш content-assist
   пробник). Точный механизм влияния этой точки расширения на нативный баг не выяснен, но
   корреляция полностью надёжна на этой сборке EDT/БСП_3. НЕ включать без свежего теста.
+  Повторно проверено 2026-07-19 (issue #176): включение с ПУСТЫМ Guice-модулем
+  (tormozit.EmptyBslUiModuleDiag, без единого биндинга) вызвало тот же VerifyError -
+  краш от самого факта включения точки расширения, не от содержимого модуля.
+  Точка расширения полностью нерабочая на этой сборке EDT/БСП_3, а не только конкретный биндинг.
   -->
 
 </plugin>

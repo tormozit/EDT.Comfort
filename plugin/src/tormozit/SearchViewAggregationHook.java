@@ -37,10 +37,13 @@ import org.eclipse.search.ui.NewSearchUI;
 import org.eclipse.search.ui.SearchResultEvent;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.graphics.Image;
+import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
+import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableColumn;
 import org.eclipse.swt.widgets.TableItem;
@@ -96,6 +99,10 @@ public final class SearchViewAggregationHook implements IStartup
     private static final String HOOKED_KEY = "tormozit.searchAggregationHooked"; //$NON-NLS-1$
     private static final String TREE_COUNT_LABEL_HOOKED_KEY = "tormozit.searchTreeCountLabelHooked"; //$NON-NLS-1$
     private static final String OPEN_DIAG_HOOKED_KEY = "tormozit.searchAggregationOpenDiag"; //$NON-NLS-1$
+    private static final String WATCHDOG_HOOKED_KEY = "tormozit.searchAggregationWatchdog"; //$NON-NLS-1$
+    private static final String RESIZE_DIAG_HOOKED_KEY = "tormozit.searchAggregationResizeDiag"; //$NON-NLS-1$
+    /** Период опроса {@link #installPanelWatchdog} — раз в 2с, независимо от кликов/поисков. */
+    private static final int WATCHDOG_INTERVAL_MS = 2000;
     /** Как {@code Messages.IMatchItem_Total_matches_count_pattern__0} в search.ui. */
     private static final String MATCH_COUNT_SUFFIX_PATTERN = " ({0} \u0441\u043E\u043E\u0442\u0432\u0435\u0442\u0441\u0442\u0432\u0438\u0439)"; //$NON-NLS-1$
 
@@ -458,6 +465,8 @@ public final class SearchViewAggregationHook implements IStartup
             installPathColumn(tableViewer);
             installTableCopyHandler(treeViewer, tableViewer);
             installOpenDiagMonitor(activePage, treeViewer, tableViewer);
+            installPanelWatchdog(activePage, treeViewer, tableViewer);
+            installResizeDiag(treeViewer, tableViewer);
             TreeSoleChildAutoExpand.installForComfortLists(treeViewer);
 
             treeViewer.getTree().setData(HOOKED_KEY, Boolean.TRUE);
@@ -1879,11 +1888,82 @@ public final class SearchViewAggregationHook implements IStartup
     // Диагностика #165 (только журнал «Комфорт», без изменения поведения)
     // -----------------------------------------------------------------------
 
-    private static String describePanelState(TreeViewer treeViewer, TableViewer tableViewer,
+    /**
+     * Снимок состояния панели поиска для диагностики #165. Раньше проверялись только счётчики
+     * элементов нашего {@code treeViewer}/{@code tableViewer} — но по факту двух логов, где
+     * {@code panelHealth} рапортовал "здоров" (items не пусты), а пользователь тем не менее видел
+     * пустую панель с плейсхолдером "Поиск...", это оказалось недостаточно: наши виджеты — это
+     * КОНКРЕТНЫЕ объекты, захваченные при установке хука на страницу результатов; сами по себе
+     * они остаются живыми и полными данных, даже если {@code SearchView} в этот момент показывает
+     * СОВСЕМ ДРУГУЮ страницу (например, свежий фоновый поиск EDT переключил активную страницу через
+     * pagebook) — тогда то, что видит пользователь, вообще не наши дерево/таблица, а чужой пустой
+     * плейсхолдер поверх/вместо них. Поэтому теперь дополнительно проверяем {@code samePage}
+     * (наша страница всё ещё активна в {@code SearchView}) и {@code treeVisible}
+     * ({@link Tree#isVisible()} — учитывает видимость всей цепочки родителей, а не просто
+     * {@code isDisposed()}).
+     */
+    private static final class PanelState
+    {
+        final int treeItems;
+        final boolean treeVisible;
+        final boolean samePage;
+        final String activePageClass;
+        final String tableState;
+        final String inputState;
+
+        PanelState(int treeItems, boolean treeVisible, boolean samePage,
+                String activePageClass, String tableState, String inputState)
+        {
+            this.treeItems = treeItems;
+            this.treeVisible = treeVisible;
+            this.samePage = samePage;
+            this.activePageClass = activePageClass;
+            this.tableState = tableState;
+            this.inputState = inputState;
+        }
+
+        /** «Проблема» — то, что реально соответствует жалобе «панель опустела»: не наша активная страница видна, либо дерево не видно, либо пусто. */
+        boolean isProblem()
+        {
+            return !samePage || !treeVisible || treeItems == 0;
+        }
+
+        @Override
+        public String toString()
+        {
+            return "{treeItems=" + treeItems + " treeVisible=" + treeVisible //$NON-NLS-1$ //$NON-NLS-2$
+                + " " + tableState + " " + inputState //$NON-NLS-1$ //$NON-NLS-2$
+                + " activePage=" + activePageClass + " samePage=" + samePage + "}"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+    }
+
+    private static PanelState computePanelState(TreeViewer treeViewer, TableViewer tableViewer,
             ISearchResultPage page)
     {
         Tree tree = treeViewer != null ? treeViewer.getTree() : null;
-        int treeItems = tree == null || tree.isDisposed() ? -1 : tree.getItemCount();
+        boolean treeDisposed = tree == null || tree.isDisposed();
+        int treeItems = treeDisposed ? -1 : tree.getItemCount();
+        boolean treeVisible = !treeDisposed && tree.isVisible();
+
+        boolean samePage = false;
+        String activePageClass = "?"; //$NON-NLS-1$
+        try
+        {
+            IViewPart view = findSearchViewPart();
+            if (!(view instanceof ISearchResultViewPart resultView))
+                activePageClass = "NO_SEARCH_VIEW"; //$NON-NLS-1$
+            else
+            {
+                ISearchResultPage currentActive = resultView.getActivePage();
+                samePage = currentActive == page;
+                activePageClass = currentActive != null ? currentActive.getClass().getSimpleName() : "null"; //$NON-NLS-1$
+            }
+        }
+        catch (Exception e)
+        {
+            activePageClass = "ERR:" + e.getClass().getSimpleName(); //$NON-NLS-1$
+        }
+
         String inputState = "input=?"; //$NON-NLS-1$
         try
         {
@@ -1901,8 +1981,15 @@ public final class SearchViewAggregationHook implements IStartup
         {
             inputState = "input=ERR:" + e.getClass().getSimpleName(); //$NON-NLS-1$
         }
-        return "{treeItems=" + treeItems + " " + describeTableSelectionState(tableViewer) //$NON-NLS-1$ //$NON-NLS-2$
-            + " " + inputState + "}"; //$NON-NLS-1$ //$NON-NLS-2$
+
+        return new PanelState(treeItems, treeVisible, samePage, activePageClass,
+            describeTableSelectionState(tableViewer), inputState);
+    }
+
+    private static String describePanelState(TreeViewer treeViewer, TableViewer tableViewer,
+            ISearchResultPage page)
+    {
+        return computePanelState(treeViewer, tableViewer, page).toString();
     }
 
     private static void installOpenDiagMonitor(ISearchResultPage page, TreeViewer treeViewer,
@@ -1932,6 +2019,98 @@ public final class SearchViewAggregationHook implements IStartup
         treeViewer.addOpenListener(openListener);
     }
 
+    /**
+     * Непрерывный опрос состояния панели раз в {@link #WATCHDOG_INTERVAL_MS} — в отличие от
+     * {@link #installOpenDiagMonitor} (который проверяет только 1.5с после клика), живёт всё время
+     * жизни страницы результатов. Нужен потому, что по факту двух присланных логов опустошение
+     * панели пользователь замечал не сразу после клика, а позже (когда просто смотрел на панель) —
+     * то есть вне 1.5-секундного окна `panelHealth`. Логируем только на ПЕРЕХОДЕ между
+     * здоровым/проблемным состоянием (не каждые 2с), чтобы не заспамить журнал «Комфорт».
+     */
+    private static void installPanelWatchdog(ISearchResultPage page, TreeViewer treeViewer,
+            TableViewer tableViewer)
+    {
+        Table table = tableViewer.getTable();
+        if (table == null || table.isDisposed() || table.getData(WATCHDOG_HOOKED_KEY) != null)
+            return;
+        table.setData(WATCHDOG_HOOKED_KEY, Boolean.TRUE);
+
+        boolean[] wasProblem = { false };
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        Runnable[] tickHolder = new Runnable[1];
+        tickHolder[0] = () -> {
+            Tree tree = treeViewer.getTree();
+            Table tbl = tableViewer.getTable();
+            if (tree == null || tree.isDisposed() || tbl == null || tbl.isDisposed())
+                return; // страница закрыта/пересоздана — часы сами останавливаются, не перепланируем
+            if (ComfortSettings.isReplaceListFiltersEnabled())
+            {
+                PanelState state = computePanelState(treeViewer, tableViewer, page);
+                boolean isProblem = state.isProblem();
+                if (isProblem != wasProblem[0])
+                {
+                    log((isProblem ? "WATCHDOG_PROBLEM_START: " : "WATCHDOG_PROBLEM_END: ") + state); //$NON-NLS-1$ //$NON-NLS-2$
+                    wasProblem[0] = isProblem;
+                }
+            }
+            display.timerExec(WATCHDOG_INTERVAL_MS, tickHolder[0]);
+        };
+        display.timerExec(WATCHDOG_INTERVAL_MS, tickHolder[0]);
+    }
+
+    /**
+     * Синхронный перехват {@code SWT.Resize} на дерево/таблицу и их родителей. В отличие от
+     * {@link #installPanelWatchdog} (опрос раз в 2с) и {@link #schedulePanelHealthDiag}
+     * (таймер после клика) — это единственный способ поймать изменение размера ИМЕННО в тот
+     * кадр, когда оно произошло: по свидетельству с видео, опустошение панели совпадает с первой
+     * отрисовкой редактора модуля — то есть, вероятно, воркбенч в этот момент перекраивает
+     * раскладку (открытие тяжёлого многостраничного {@code DtGranularEditor}) и наш
+     * {@code SashForm}/дерево/таблица на кадр (или насовсем) схлопываются в размере. Resize-событие
+     * летит синхронно на UI-потоке в момент самого ресайза — таймер бы это пропустил.
+     */
+    private static void installResizeDiag(TreeViewer treeViewer, TableViewer tableViewer)
+    {
+        Table table = tableViewer.getTable();
+        if (table == null || table.isDisposed() || table.getData(RESIZE_DIAG_HOOKED_KEY) != null)
+            return;
+        table.setData(RESIZE_DIAG_HOOKED_KEY, Boolean.TRUE);
+
+        Control tree = treeViewer.getTree();
+        Listener resizeListener = event -> {
+            if (!ComfortSettings.isReplaceListFiltersEnabled())
+                return;
+            Control src = event.widget instanceof Control ? (Control) event.widget : null;
+            String who = src == tree ? "tree" //$NON-NLS-1$
+                : src == table ? "table" //$NON-NLS-1$
+                : src != null ? src.getClass().getSimpleName() : "?"; //$NON-NLS-1$
+            log("RESIZE " + who + ": " + describeBounds(src)); //$NON-NLS-1$ //$NON-NLS-2$
+        };
+        addResizeListenerChain(tree, resizeListener);
+        addResizeListenerChain(table, resizeListener);
+    }
+
+    /** Вешает Resize-листенер на сам control и до 3 уровней родителей (SashForm/pageContainer). */
+    private static void addResizeListenerChain(Control control, Listener listener)
+    {
+        Control cur = control;
+        for (int depth = 0; cur != null && !cur.isDisposed() && depth < 4; depth++)
+        {
+            cur.addListener(SWT.Resize, listener);
+            cur = cur.getParent();
+        }
+    }
+
+    private static String describeBounds(Control control)
+    {
+        if (control == null || control.isDisposed())
+            return "disposed"; //$NON-NLS-1$
+        Rectangle b = control.getBounds();
+        boolean visible = control.isVisible();
+        return "bounds=" + b.width + "x" + b.height + " visible=" + visible; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
     private static void schedulePanelHealthDiag(ISearchResultPage page, TreeViewer treeViewer,
             TableViewer tableViewer, int delayMs, int seq)
     {
@@ -1945,10 +2124,12 @@ public final class SearchViewAggregationHook implements IStartup
                 return;
             if (tableViewer.getTable() == null || tableViewer.getTable().isDisposed())
                 return;
-            String state = describePanelState(treeViewer, tableViewer, page);
+            PanelState state = computePanelState(treeViewer, tableViewer, page);
             log("panelHealth seq=" + seq + " +" + delayMs + "ms: " + state); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            int treeItems = treeViewer.getTree().getItemCount();
-            if (treeItems == 0)
+            // Сигналим не только на пустое дерево, но и на "не наша страница активна"/"дерево не видно" —
+            // именно так выглядела жалоба пользователя, когда счётчики элементов при этом были в порядке
+            // (см. Javadoc PanelState.isProblem()).
+            if (state.isProblem())
                 log("TREE_EMPTIED seq=" + seq + " +" + delayMs + "ms: " + state); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         });
     }
