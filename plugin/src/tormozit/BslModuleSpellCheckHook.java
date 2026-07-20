@@ -3762,20 +3762,12 @@ public final class BslModuleSpellCheckHook implements IStartup
             if (b.width > 0 && b.height > 0)
             {
                 rememberSpellingHoverShellBounds(b);
-                Global.tempLog("morph-dialog-pos", //$NON-NLS-1$
-                    "peek: live " + b.x + "," + b.y + " " + b.width + "x" + b.height); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
                 return new Rectangle(b.x, b.y, b.width, b.height);
             }
         }
         Rectangle cached = lastSpellingHoverBounds;
         if (cached == null)
-        {
-            Global.tempLog("morph-dialog-pos", "peek: no live, no cache"); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
-        }
-        Global.tempLog("morph-dialog-pos", //$NON-NLS-1$
-            "peek: cache " + cached.x + "," + cached.y + " " + cached.width + "x" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-                + cached.height);
         return new Rectangle(cached.x, cached.y, cached.width, cached.height);
     }
 

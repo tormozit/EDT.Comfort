@@ -467,91 +467,37 @@ public final class ComfortSpellingEngine
         return true;
     }
 
-    /** Границы видимого окна подсказки орфографии (для позиционирования диалога). */
+    /** Границы hover орфографии (live или кэш BSL) для позиционирования диалога. */
     private static Rectangle captureSpellingHoverBounds(Display display)
     {
         Rectangle fromBsl = BslModuleSpellCheckHook.peekSpellingHoverShellBounds();
         if (fromBsl != null)
-        {
-            Global.tempLog("morph-dialog-pos", //$NON-NLS-1$
-                "capture: via BSL hover/cache " + rectBrief(fromBsl)); //$NON-NLS-1$
             return fromBsl;
-        }
         if (display == null || display.isDisposed())
-        {
-            Global.tempLog("morph-dialog-pos", "capture: display null"); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
-        }
         Control focus = display.getFocusControl();
-        String focusInfo = focus == null || focus.isDisposed() ? "null"
-            : focus.getClass().getSimpleName() + " shell=" + shellBrief(focus.getShell()); //$NON-NLS-1$
-        Global.tempLog("morph-dialog-pos", "capture: focus=" + focusInfo); //$NON-NLS-1$ //$NON-NLS-2$
         if (focus != null && !focus.isDisposed())
         {
             Shell focused = focus.getShell();
             if (MorphAddWordDialog.isLikelySpellingHoverShell(focused, true))
-            {
-                Rectangle b = focused.getBounds();
-                Global.tempLog("morph-dialog-pos", "capture: via focus " + rectBrief(b)); //$NON-NLS-1$ //$NON-NLS-2$
-                return b;
-            }
-            Global.tempLog("morph-dialog-pos", //$NON-NLS-1$
-                "capture: focus shell rejected " + shellBrief(focused)); //$NON-NLS-1$
+                return focused.getBounds();
         }
         Shell active = display.getActiveShell();
-        Global.tempLog("morph-dialog-pos", "capture: active=" + shellBrief(active)); //$NON-NLS-1$ //$NON-NLS-2$
         if (MorphAddWordDialog.isLikelySpellingHoverShell(active, true))
-        {
-            Rectangle b = active.getBounds();
-            Global.tempLog("morph-dialog-pos", "capture: via active " + rectBrief(b)); //$NON-NLS-1$ //$NON-NLS-2$
-            return b;
-        }
-        StringBuilder all = new StringBuilder("capture: shells="); //$NON-NLS-1$
+            return active.getBounds();
         Shell lastVisible = null;
         Shell lastHidden = null;
         for (Shell s : display.getShells())
         {
-            all.append(" [").append(shellBrief(s)); //$NON-NLS-1$
-            if (MorphAddWordDialog.isLikelySpellingHoverShell(s, true))
-            {
-                all.append(" OK]"); //$NON-NLS-1$
-                if (s.isVisible())
-                    lastVisible = s;
-                else
-                    lastHidden = s;
-            }
+            if (!MorphAddWordDialog.isLikelySpellingHoverShell(s, true))
+                continue;
+            if (s.isVisible())
+                lastVisible = s;
             else
-                all.append(" no]"); //$NON-NLS-1$
+                lastHidden = s;
         }
-        Global.tempLog("morph-dialog-pos", all.toString()); //$NON-NLS-1$
         Shell pick = lastVisible != null ? lastVisible : lastHidden;
-        if (pick != null)
-        {
-            Rectangle b = pick.getBounds();
-            Global.tempLog("morph-dialog-pos", //$NON-NLS-1$
-                "capture: via scan vis=" + pick.isVisible() + " " + rectBrief(b)); //$NON-NLS-1$ //$NON-NLS-2$
-            return b;
-        }
-        Global.tempLog("morph-dialog-pos", "capture: no hover"); //$NON-NLS-1$ //$NON-NLS-2$
-        return null;
-    }
-
-    private static String shellBrief(Shell shell)
-    {
-        if (shell == null || shell.isDisposed())
-            return "null"; //$NON-NLS-1$
-        Rectangle b = shell.getBounds();
-        return "vis=" + shell.isVisible() //$NON-NLS-1$
-            + " style=0x" + Integer.toHexString(shell.getStyle()) //$NON-NLS-1$
-            + " " + rectBrief(b) //$NON-NLS-1$
-            + " text='" + (shell.getText() != null ? shell.getText() : "") + "'"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-    }
-
-    private static String rectBrief(Rectangle r)
-    {
-        if (r == null)
-            return "null"; //$NON-NLS-1$
-        return r.x + "," + r.y + " " + r.width + "x" + r.height; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        return pick != null ? pick.getBounds() : null;
     }
 
     /** Удалить слово из пользовательского словаря. */
@@ -2006,33 +1952,21 @@ public final class ComfortSpellingEngine
         protected Point getInitialLocation(Point initialSize)
         {
             Rectangle hb = hoverAnchorBounds;
-            Global.tempLog("morph-dialog-pos", //$NON-NLS-1$
-                "loc: captured=" + rectBrief(hoverAnchorBounds) //$NON-NLS-1$
-                    + " size=" + initialSize.x + "x" + initialSize.y); //$NON-NLS-1$ //$NON-NLS-2$
             if (hb == null)
             {
                 Shell anchor = findSpellingHoverAnchorShell();
                 if (anchor != null && !anchor.isDisposed())
-                {
                     hb = anchor.getBounds();
-                    Global.tempLog("morph-dialog-pos", //$NON-NLS-1$
-                        "loc: fallback shell " + shellBrief(anchor)); //$NON-NLS-1$
-                }
             }
             if (hb == null)
-            {
-                Point def = super.getInitialLocation(initialSize);
-                Global.tempLog("morph-dialog-pos", //$NON-NLS-1$
-                    "loc: default " + def.x + "," + def.y); //$NON-NLS-1$ //$NON-NLS-2$
-                return def;
-            }
+                return super.getInitialLocation(initialSize);
             Shell ref = getShell();
             Monitor monitor = ref != null && !ref.isDisposed() ? ref.getMonitor() : null;
             if (monitor == null && getParentShell() != null)
                 monitor = getParentShell().getMonitor();
             Rectangle area = monitor != null ? monitor.getClientArea()
                 : Display.getDefault().getClientArea();
-            // Левый верхний угол hover (не справа от края).
+            // Левый верхний угол hover.
             int x = hb.x;
             int y = hb.y;
             if (x + initialSize.x > area.x + area.width)
@@ -2043,9 +1977,6 @@ public final class ComfortSpellingEngine
                 y = area.y + area.height - initialSize.y;
             if (y < area.y)
                 y = area.y;
-            Global.tempLog("morph-dialog-pos", //$NON-NLS-1$
-                "loc: result " + x + "," + y + " hover=" + rectBrief(hb) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " mon=" + rectBrief(area)); //$NON-NLS-1$
             return new Point(x, y);
         }
 
@@ -2085,7 +2016,6 @@ public final class ComfortSpellingEngine
 
         /**
          * @param allowHidden {@code true} — shell уже скрыт после клика по proposal
-         *                    (в логе: 245×101 vis=false)
          */
         static boolean isLikelySpellingHoverShell(Shell shell, boolean allowHidden)
         {
