@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <?eclipse version="3.4"?>
 <plugin>
-
   <extension point="org.eclipse.ui.startup">
     <startup class="tormozit.ComfortShutdownHook"/>
     <startup class="tormozit.ActiveProjectTracker"/>
@@ -16,6 +15,7 @@
     <startup class="tormozit.TextEditorIdentifierSelectionHook"/>
     <startup class="tormozit.TextEditorMenuHook"/>
     <startup class="tormozit.QueryTextEditDialogHook"/>
+    <startup class="tormozit.QueryConstructorFilterHook"/>
     <startup class="tormozit.FormEditorHook"/>
     <startup class="tormozit.TreeSoleChildAutoExpand"/>
     <startup class="tormozit.IrKeyBindingHook"/>
@@ -69,9 +69,6 @@
     <startup class="tormozit.FilterBySubsystemsDialogHook"/>
     <startup class="tormozit.GitChangedFileMenuHook"/>
     <startup class="tormozit.TextEditorFastSearchKeyBindingHook"/> 
-    <!-- issue #165: SearchViewAggregationHook полностью оправдан (строгий тест — отключение
-         не остановило баг) — восстановлен. SearchPanelIndependentDiag (отдельный дублирующий
-         диагностический класс) удалён 2026-07-20 по явной команде пользователя. -->
     <startup class="tormozit.SearchViewAggregationHook"/>
     <startup class="tormozit.FileSearchResultsHook"/>
     <startup class="tormozit.ConfigurationSearchDialogHook"/>
@@ -758,6 +755,17 @@
         class="tormozit.ComfortPreferencePage"
         id="tormozit.ComfortPreferencePages"
         name="Комфорт"/>
+  </extension>
+
+  <extension point="org.eclipse.ui.propertyPages">
+    <page
+        class="tormozit.ComfortPreferencePage"
+        id="tormozit.ComfortPropertyPage"
+        name="Комфорт">
+      <enabledWhen>
+        <adapt type="org.eclipse.core.resources.IProject"/>
+      </enabledWhen>
+    </page>
   </extension>
 
   <extension point="org.eclipse.core.runtime.preferences">

@@ -12,6 +12,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.WeakHashMap;
 
@@ -49,16 +50,19 @@ import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.layout.GridData;
+import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.FileDialog;
 import org.eclipse.swt.widgets.Group;
 import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Link;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.swt.widgets.Text;
 import org.eclipse.ui.IEditorInput;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IPropertyListener;
@@ -87,8 +91,14 @@ public final class SpellCheckHook implements IStartup
 
     private static final Locale PLATFORM_LOCALE = new Locale("ru", "RU"); //$NON-NLS-1$ //$NON-NLS-2$
 
-    private static final String USER_DICT_LINK_TEXT = "Пользовательский словарь"; //$NON-NLS-1$
-    private static final String LINK_INSTALLED_KEY = "tormozit.spellCheck.userDictLink"; //$NON-NLS-1$
+    private static final String COMFORT_DICT_ROW_KEY = "tormozit.spellCheck.comfortDictRow"; //$NON-NLS-1$
+    private static final String USER_DICT_CAPTION_KEY = "tormozit.spellCheck.userDictCaption"; //$NON-NLS-1$
+    private static final String COMFORT_DICT_LABEL = "Словарь Комфорт:"; //$NON-NLS-1$
+    private static final String COMFORT_DICT_OPEN_LINK = "Открыть"; //$NON-NLS-1$
+    private static final String USER_DICT_CAPTION_EN =
+        "The user dictionary is a text file with one word on each line"; //$NON-NLS-1$
+    private static final String USER_DICT_CAPTION_RU =
+        "Пользовательский словарь — текст, по одному слову в строке"; //$NON-NLS-1$
     private static final int MAX_ENHANCE_ATTEMPTS = 40;
     private static final int ENHANCE_RETRY_MS = 100;
 
@@ -448,9 +458,8 @@ public final class SpellCheckHook implements IStartup
     }
 
     /**
-     * Страница «Орфография»: переименовать Platform dictionary и поставить ссылку
-     * «Пользовательский словарь» на место пустого placeholder справа от combo.
-     * Ретраи — страница создаётся лениво при выборе в дереве параметров.
+     * Страница «Орфография»: подпись Comfort у Platform dictionary, строка
+     * «Словарь Комфорт» под пользовательским словарём Eclipse, caption → тултип.
      */
     private static void installPreferencePageEnhancements(Display display)
     {
@@ -519,7 +528,7 @@ public final class SpellCheckHook implements IStartup
         display.timerExec(ENHANCE_RETRY_MS, () -> scheduleEnhance(display, shell, attempt + 1));
     }
 
-    /** @return {@code true}, если combo найден, подпись Comfort и ссылка на месте */
+    /** @return {@code true}, если combo найден, подпись Comfort и строка словаря на месте */
     private static boolean enhanceSpellingPage(Shell shell)
     {
         if (shell == null || shell.isDisposed())
@@ -529,7 +538,8 @@ public final class SpellCheckHook implements IStartup
             return false;
         translateSpellingPageLabels(shell);
         relabelPlatformDictionaryCombo(combo);
-        boolean linkOk = installUserDictionaryLink(combo);
+        hideUserDictionaryCaption(shell);
+        boolean rowOk = installComfortDictionaryRow(combo);
         String target = ComfortSettings.SPELLING_PLATFORM_DICT_LABEL;
         boolean labeled = false;
         for (String item : combo.getItems())
@@ -540,7 +550,7 @@ public final class SpellCheckHook implements IStartup
                 break;
             }
         }
-        return labeled && linkOk;
+        return labeled && rowOk;
     }
 
     /**
@@ -881,73 +891,609 @@ public final class SpellCheckHook implements IStartup
             && (lower.contains("росси") || lower.contains("russia") || !lower.contains("(")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
-    private static boolean installUserDictionaryLink(Combo combo)
+    /**
+     * Надпись под «Пользовательский словарь» Eclipse → тултип поля/лейбла.
+     * В сетке 4 колонки JDT: Label | Text(span=2) | кнопки, затем ряд
+     * пустой Label + caption(span=3). Скрываем оба — иначе пустой Label
+     * занимает колонку 0 и сдвигает «Словарь Комфорт» вправо.
+     */
+    private static void hideUserDictionaryCaption(Shell shell)
     {
-        Composite parent = combo.getParent();
+        if (shell == null || shell.isDisposed())
+            return;
+        Label caption = findUserDictionaryCaptionLabel(shell);
+        if (caption == null || caption.isDisposed())
+            return;
+        if (!Boolean.TRUE.equals(shell.getData(USER_DICT_CAPTION_KEY)))
+        {
+            String tip = USER_DICT_CAPTION_RU + "\n\n" + USER_DICT_CAPTION_EN; //$NON-NLS-1$
+            Label userLabel = findUserDictionaryFieldLabel(shell);
+            if (userLabel != null && !userLabel.isDisposed())
+                applySpellingOriginalTooltip(userLabel, tip);
+            Text userText = findUserDictionaryPathText(shell);
+            if (userText != null && !userText.isDisposed())
+                userText.setToolTipText(tip);
+            shell.setData(USER_DICT_CAPTION_KEY, Boolean.TRUE);
+        }
+        excludeUserDictionaryDescriptionRow(caption);
+    }
+
+    /** Caption (span 3) и пустой Label-спейсер перед ним — exclude из GridLayout. */
+    private static void excludeUserDictionaryDescriptionRow(Label caption)
+    {
+        if (caption == null || caption.isDisposed())
+            return;
+        Composite parent = caption.getParent();
+        if (parent == null || parent.isDisposed())
+            return;
+        excludeFromGrid(caption);
+        Control[] children = parent.getChildren();
+        for (int i = 0; i < children.length; i++)
+        {
+            if (children[i] != caption)
+                continue;
+            // Спейсер сразу перед caption; если между ними уже Comfort — ищем пустой Label назад.
+            for (int j = i - 1; j >= 0; j--)
+            {
+                Control prev = children[j];
+                if (isComfortDictionaryRowControl(prev))
+                    continue;
+                if (prev instanceof Label spacer && isBlankLabel(spacer))
+                    excludeFromGrid(spacer);
+                break;
+            }
+            break;
+        }
+        parent.layout(true, true);
+    }
+
+    private static void excludeFromGrid(Control control)
+    {
+        if (control == null || control.isDisposed())
+            return;
+        control.setVisible(false);
+        Object ld = control.getLayoutData();
+        if (ld instanceof GridData gd)
+        {
+            gd.exclude = true;
+            gd.heightHint = 0;
+        }
+    }
+
+    private static boolean isBlankLabel(Label label)
+    {
+        if (label == null || label.isDisposed())
+            return false;
+        String text = label.getText();
+        return text == null || text.isBlank();
+    }
+
+    private static Label findUserDictionaryCaptionLabel(Control root)
+    {
+        Label[] found = { null };
+        walkControls(root, control ->
+        {
+            if (found[0] != null || !(control instanceof Label label) || label.isDisposed())
+                return;
+            String n = normalizeSpellingLabel(label.getText());
+            if (normalizeSpellingLabel(USER_DICT_CAPTION_EN).equals(n)
+                || normalizeSpellingLabel(USER_DICT_CAPTION_RU).equals(n))
+                found[0] = label;
+        });
+        return found[0];
+    }
+
+    private static Label findUserDictionaryFieldLabel(Control root)
+    {
+        Label[] found = { null };
+        walkControls(root, control ->
+        {
+            if (found[0] != null || !(control instanceof Label label) || label.isDisposed())
+                return;
+            String n = normalizeSpellingLabel(label.getText());
+            if ("пользовательский словарь:".equals(n) //$NON-NLS-1$
+                || "user defined dictionary:".equals(n)) //$NON-NLS-1$
+                found[0] = label;
+        });
+        return found[0];
+    }
+
+    private static Text findUserDictionaryPathText(Control root)
+    {
+        Label userLabel = findUserDictionaryFieldLabel(root);
+        if (userLabel == null)
+            return null;
+        Composite parent = userLabel.getParent();
+        if (parent == null || parent.isDisposed())
+            return null;
+        Control[] children = parent.getChildren();
+        boolean afterLabel = false;
+        for (Control child : children)
+        {
+            if (child == userLabel)
+            {
+                afterLabel = true;
+                continue;
+            }
+            if (!afterLabel)
+                continue;
+            if (child instanceof Text text && !text.isDisposed())
+                return text;
+        }
+        return null;
+    }
+
+    /**
+     * Строка «Словарь Комфорт» в GridLayout(4) группы «Словари» JDT:
+     * Label | Text(span=2) | Composite(«Обзор…» + ссылка «Открыть») —
+     * как «Пользовательский словарь» (Label | Text(span=2) | Обзор/Переменные).
+     */
+    private static boolean installComfortDictionaryRow(Combo platformCombo)
+    {
+        Composite parent = platformCombo.getParent();
         if (parent == null || parent.isDisposed())
             return false;
-        if (Boolean.TRUE.equals(parent.getData(LINK_INSTALLED_KEY)))
-            return findExistingUserDictLink(parent) != null;
-
-        Control placeholder = findPlaceholderAfterCombo(combo);
-        Control belowAnchor = null;
-        if (placeholder != null && !placeholder.isDisposed())
+        Control anchor = findComfortDictionaryInsertAnchor(parent);
+        if (anchor == null)
         {
-            Control[] children = parent.getChildren();
-            for (int i = 0; i < children.length - 1; i++)
+            Shell shell = platformCombo.getShell();
+            Text userText = findUserDictionaryPathText(shell);
+            if (userText != null && !userText.isDisposed())
             {
-                if (children[i] == placeholder)
-                {
-                    belowAnchor = children[i + 1];
-                    break;
-                }
+                parent = userText.getParent();
+                anchor = findComfortDictionaryInsertAnchor(parent);
             }
-            placeholder.dispose();
         }
-        else if (findExistingUserDictLink(parent) != null)
-        {
-            parent.setData(LINK_INSTALLED_KEY, Boolean.TRUE);
-            return true;
-        }
-        else
+        if (parent == null || parent.isDisposed() || anchor == null)
             return false;
 
-        Link link = new Link(parent, SWT.NONE);
-        link.setText("<a>" + USER_DICT_LINK_TEXT + "</a>"); //$NON-NLS-1$ //$NON-NLS-2$
-        link.setToolTipText(
-            "Словарь Comfort (spelling-user-morph.dic): лемма или лемма/флаг AOT "
-            + "(например гиперссылка/15) — с морфологией; без «/» — только эта форма.\n"
-            + "Пополняется через «Добавить в словарь». После сохранения в редакторе "
-            + "словарь подхватывается сразу.\n\n"
-            + "Поле ниже («Пользовательский словарь») — штатный словарь Eclipse: "
-            + "текстовый файл, по одному слову в строке, без морфологии."); //$NON-NLS-1$
-        // Без grab/END — иначе 4-я колонка GridLayout растягивается и появляется «дырка».
-        link.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false));
-        link.addListener(SWT.Selection, e ->
+        // Спейсер+caption до вставки Comfort — иначе Comfort стартует с колонки 1.
+        Label caption = findUserDictionaryCaptionLabel(parent);
+        if (caption != null)
+            excludeUserDictionaryDescriptionRow(caption);
+
+        Composite legacyRow = findLegacyComfortDictionaryRow(parent);
+        if (legacyRow != null && !legacyRow.isDisposed())
+            legacyRow.dispose();
+
+        if (findComfortDictionaryPathText(parent) != null
+            && findComfortDictionaryActionsComposite(parent) != null)
         {
-            if (!USER_DICT_LINK_TEXT.equals(e.text))
-                return;
-            openUserMorphDictionaryInEclipseEditor();
+            placeComfortDictionaryRow(parent,
+                findComfortDictionaryLabel(parent),
+                findComfortDictionaryPathText(parent),
+                findComfortDictionaryActionsComposite(parent));
+            ensureComfortPathTextSpan(findComfortDictionaryPathText(parent));
+            updateComfortDictionaryRowVisibility(parent, platformCombo);
+            return true;
+        }
+        if (findComfortDictionaryPathText(parent) != null)
+            disposeComfortDictionaryRowControls(parent);
+
+        Label userLabel = findUserDictionaryFieldLabel(parent);
+        Text userText = findUserDictionaryPathText(parent);
+        Composite userButtons = findUserDictionaryButtonsComposite(parent);
+
+        Label label = new Label(parent, SWT.NONE);
+        label.setText(COMFORT_DICT_LABEL);
+        label.setData(COMFORT_DICT_ROW_KEY, Boolean.TRUE);
+        label.setLayoutData(copyGridData(userLabel,
+            new GridData(SWT.BEGINNING, SWT.CENTER, false, false)));
+
+        Text pathText = new Text(parent, SWT.BORDER);
+        pathText.setData(COMFORT_DICT_ROW_KEY, "path"); //$NON-NLS-1$
+        GridData pathGd = copyGridData(userText,
+            new GridData(SWT.FILL, SWT.CENTER, true, false, 2, 1));
+        pathGd.horizontalSpan = 2;
+        pathGd.grabExcessHorizontalSpace = true;
+        pathText.setLayoutData(pathGd);
+        pathText.setToolTipText(
+            "Общий morph-словарь Comfort (лемма или лемма/флаг AOT).\n"
+            + "Путь меняйте только если стандартный файл не устраивает "
+            + "(по умолчанию — spelling-comfort-common.dic в stateLocation плагина).\n"
+            + "Проектный словарь — Свойства проекта → Комфорт "
+            + "(.comfort/spelling-comfort-project.dic)."); //$NON-NLS-1$
+
+        Composite actions = new Composite(parent, SWT.NONE);
+        actions.setData(COMFORT_DICT_ROW_KEY, "actions"); //$NON-NLS-1$
+        GridLayout actionsLayout = new GridLayout(2, false);
+        actionsLayout.marginWidth = 0;
+        actionsLayout.marginHeight = 0;
+        if (userButtons != null && !userButtons.isDisposed()
+            && userButtons.getLayout() instanceof GridLayout srcLayout)
+        {
+            actionsLayout.horizontalSpacing = srcLayout.horizontalSpacing;
+            actionsLayout.verticalSpacing = srcLayout.verticalSpacing;
+        }
+        actions.setLayout(actionsLayout);
+        actions.setLayoutData(copyGridData(userButtons,
+            new GridData(SWT.FILL, SWT.CENTER, false, false)));
+
+        Button browse = new Button(actions, SWT.PUSH);
+        browse.setText("Обзор..."); //$NON-NLS-1$
+        Button userBrowse = firstButtonIn(userButtons);
+        browse.setLayoutData(copyGridData(userBrowse,
+            new GridData(SWT.FILL, SWT.CENTER, false, false)));
+
+        Link open = new Link(actions, SWT.NONE);
+        open.setText("<a>" + COMFORT_DICT_OPEN_LINK + "</a>"); //$NON-NLS-1$ //$NON-NLS-2$
+        open.setToolTipText("Открыть файл словаря Comfort в редакторе"); //$NON-NLS-1$
+        open.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
+
+        placeComfortDictionaryRow(parent, label, pathText, actions);
+
+        fillComfortDictionaryPathText(pathText);
+        browse.addListener(SWT.Selection, e -> browseComfortDictionaryFile(pathText));
+        open.addListener(SWT.Selection, e ->
+        {
+            applyComfortDictionaryPathFromText(pathText, false);
+            openCommonUserMorphDictionaryInEclipseEditor();
         });
-        if (belowAnchor != null && !belowAnchor.isDisposed())
-            link.moveAbove(belowAnchor);
-        else
-            link.moveBelow(combo);
-        parent.setData(LINK_INSTALLED_KEY, Boolean.TRUE);
+        pathText.addListener(SWT.FocusOut, e -> applyComfortDictionaryPathFromText(pathText, true));
+        pathText.addListener(SWT.Traverse, e ->
+        {
+            if (e.detail == SWT.TRAVERSE_RETURN)
+            {
+                applyComfortDictionaryPathFromText(pathText, true);
+                e.doit = false;
+            }
+        });
+
+        final Composite rowParent = parent;
+        platformCombo.addListener(SWT.Selection,
+            e -> updateComfortDictionaryRowVisibility(rowParent, platformCombo));
+
+        updateComfortDictionaryRowVisibility(parent, platformCombo);
         parent.layout(true, true);
         return true;
     }
 
-    /** Открыть {@code spelling-user-morph.dic} в системном текстовом редакторе Eclipse. */
-    private static void openUserMorphDictionaryInEclipseEditor()
+    /** Порядок детей: … caption/спейсер → Label → Text → actions (новая строка сетки с кол. 0). */
+    private static void placeComfortDictionaryRow(
+        Composite parent, Label label, Text pathText, Composite actions)
+    {
+        if (parent == null || parent.isDisposed())
+            return;
+        Control anchor = findComfortDictionaryInsertAnchor(parent);
+        if (anchor == null || label == null || pathText == null || actions == null)
+            return;
+        if (label.isDisposed() || pathText.isDisposed() || actions.isDisposed())
+            return;
+        actions.moveBelow(anchor);
+        pathText.moveBelow(anchor);
+        label.moveBelow(anchor);
+    }
+
+    private static void ensureComfortPathTextSpan(Text pathText)
+    {
+        if (pathText == null || pathText.isDisposed())
+            return;
+        Object ld = pathText.getLayoutData();
+        if (ld instanceof GridData gd)
+        {
+            gd.horizontalSpan = 2;
+            gd.grabExcessHorizontalSpace = true;
+        }
+        else
+            pathText.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false, 2, 1));
+    }
+
+    private static Label findComfortDictionaryLabel(Composite parent)
+    {
+        if (parent == null || parent.isDisposed())
+            return null;
+        for (Control child : parent.getChildren())
+        {
+            if (child instanceof Label label && !label.isDisposed()
+                && Boolean.TRUE.equals(label.getData(COMFORT_DICT_ROW_KEY)))
+                return label;
+        }
+        return null;
+    }
+
+    private static GridData copyGridData(Control template, GridData fallback)
+    {
+        if (template != null && !template.isDisposed()
+            && template.getLayoutData() instanceof GridData src)
+        {
+            GridData gd = new GridData(src.horizontalAlignment, src.verticalAlignment,
+                src.grabExcessHorizontalSpace, src.grabExcessVerticalSpace,
+                src.horizontalSpan, src.verticalSpan);
+            gd.widthHint = src.widthHint;
+            gd.heightHint = src.heightHint;
+            gd.horizontalIndent = src.horizontalIndent;
+            gd.verticalIndent = src.verticalIndent;
+            gd.minimumWidth = src.minimumWidth;
+            gd.minimumHeight = src.minimumHeight;
+            return gd;
+        }
+        return fallback;
+    }
+
+    private static Composite findLegacyComfortDictionaryRow(Composite parent)
+    {
+        if (parent == null || parent.isDisposed())
+            return null;
+        for (Control child : parent.getChildren())
+        {
+            // Старая полная строка: Composite с Boolean.TRUE и Text внутри.
+            // Кнопки Comfort помечены "buttons" — не трогать.
+            if (!(child instanceof Composite composite) || composite.isDisposed())
+                continue;
+            if (!Boolean.TRUE.equals(composite.getData(COMFORT_DICT_ROW_KEY)))
+                continue;
+            for (Control nested : composite.getChildren())
+            {
+                if (nested instanceof Text)
+                    return composite;
+            }
+        }
+        return null;
+    }
+
+    private static Composite findComfortDictionaryActionsComposite(Composite parent)
+    {
+        if (parent == null || parent.isDisposed())
+            return null;
+        for (Control child : parent.getChildren())
+        {
+            if (!(child instanceof Composite composite) || composite.isDisposed())
+                continue;
+            if (!"actions".equals(composite.getData(COMFORT_DICT_ROW_KEY))) //$NON-NLS-1$
+                continue;
+            for (Control nested : composite.getChildren())
+            {
+                if (nested instanceof Link)
+                    return composite;
+            }
+        }
+        return null;
+    }
+
+    private static Button firstButtonIn(Composite composite)
+    {
+        if (composite == null || composite.isDisposed())
+            return null;
+        for (Control child : composite.getChildren())
+        {
+            if (child instanceof Button button && !button.isDisposed())
+                return button;
+        }
+        return null;
+    }
+
+    private static void disposeComfortDictionaryRowControls(Composite parent)
+    {
+        if (parent == null || parent.isDisposed())
+            return;
+        Control[] children = parent.getChildren();
+        for (int i = children.length - 1; i >= 0; i--)
+        {
+            Control child = children[i];
+            if (isComfortDictionaryRowControl(child) && !child.isDisposed())
+                child.dispose();
+        }
+    }
+
+    private static Composite findUserDictionaryButtonsComposite(Composite parent)
+    {
+        Text userText = findUserDictionaryPathText(parent);
+        if (userText == null)
+            return null;
+        Control[] children = parent.getChildren();
+        boolean after = false;
+        for (Control child : children)
+        {
+            if (child == userText)
+            {
+                after = true;
+                continue;
+            }
+            if (!after)
+                continue;
+            if (isComfortDictionaryRowControl(child))
+                continue;
+            if (child instanceof Composite composite && !composite.isDisposed())
+                return composite;
+            if (child instanceof Label)
+                break;
+            break;
+        }
+        return null;
+    }
+
+    private static Control findComfortDictionaryInsertAnchor(Composite parent)
+    {
+        Text userText = findUserDictionaryPathText(parent);
+        if (userText == null)
+            return findUserDictionaryCaptionLabel(parent);
+        Control[] children = parent.getChildren();
+        Control lastOfRow = userText;
+        boolean afterText = false;
+        boolean seenButtons = false;
+        for (Control child : children)
+        {
+            if (child == userText)
+            {
+                afterText = true;
+                continue;
+            }
+            if (!afterText)
+                continue;
+            // Уже вставленный Comfort не якорь и не стоп — переставим после caption.
+            if (isComfortDictionaryRowControl(child))
+                continue;
+            if (!seenButtons && child instanceof Composite)
+            {
+                lastOfRow = child;
+                seenButtons = true;
+                continue;
+            }
+            // Пустой спейсер + caption; дальше — кодировка (Group/Composite) в той же группе.
+            if (seenButtons && child instanceof Label)
+            {
+                lastOfRow = child;
+                continue;
+            }
+            if (!seenButtons && child instanceof Button)
+            {
+                lastOfRow = child;
+                continue;
+            }
+            break;
+        }
+        return lastOfRow;
+    }
+
+    private static boolean isComfortDictionaryRowControl(Control control)
+    {
+        if (control == null || control.isDisposed())
+            return false;
+        Object data = control.getData(COMFORT_DICT_ROW_KEY);
+        return data != null;
+    }
+
+    private static Text findComfortDictionaryPathText(Composite parent)
+    {
+        if (parent == null || parent.isDisposed())
+            return null;
+        for (Control child : parent.getChildren())
+        {
+            if (child instanceof Text text && !text.isDisposed()
+                && "path".equals(child.getData(COMFORT_DICT_ROW_KEY))) //$NON-NLS-1$
+                return text;
+            if (child instanceof Composite composite && !composite.isDisposed()
+                && Boolean.TRUE.equals(composite.getData(COMFORT_DICT_ROW_KEY)))
+            {
+                for (Control nested : composite.getChildren())
+                {
+                    if (nested instanceof Text text && !nested.isDisposed())
+                        return text;
+                }
+            }
+        }
+        return null;
+    }
+
+    private static void fillComfortDictionaryPathText(Text pathText)
+    {
+        if (pathText == null || pathText.isDisposed())
+            return;
+        String custom = ComfortSettings.getSpellingCommonMorphDictionaryPath();
+        pathText.setText(custom != null && !custom.isBlank() ? custom : ""); //$NON-NLS-1$
+    }
+
+    private static void browseComfortDictionaryFile(Text pathText)
+    {
+        if (pathText == null || pathText.isDisposed())
+            return;
+        FileDialog dialog = new FileDialog(pathText.getShell(), SWT.SAVE);
+        dialog.setText("Словарь Комфорт"); //$NON-NLS-1$
+        dialog.setFilterExtensions(new String[] { "*.dic", "*.*" }); //$NON-NLS-1$ //$NON-NLS-2$
+        dialog.setFilterNames(new String[] { "Hunspell dictionary (*.dic)", "Все файлы" }); //$NON-NLS-1$ //$NON-NLS-2$
+        String current = pathText.getText();
+        if (current != null && !current.isBlank())
+        {
+            File f = new File(current.trim());
+            if (f.getParent() != null)
+                dialog.setFilterPath(f.getParent());
+            dialog.setFileName(f.getName());
+        }
+        else
+        {
+            File def = ComfortSpellingEngine.defaultCommonUserMorphDictionaryFile();
+            if (def != null)
+            {
+                if (def.getParent() != null)
+                    dialog.setFilterPath(def.getParent());
+                dialog.setFileName(def.getName());
+            }
+        }
+        String chosen = dialog.open();
+        if (chosen == null || chosen.isBlank())
+            return;
+        pathText.setText(chosen);
+        applyComfortDictionaryPathFromText(pathText, true);
+    }
+
+    private static void applyComfortDictionaryPathFromText(Text pathText, boolean reloadIfChanged)
+    {
+        if (pathText == null || pathText.isDisposed())
+            return;
+        String raw = pathText.getText() != null ? pathText.getText().trim() : ""; //$NON-NLS-1$
+        File def = ComfortSpellingEngine.defaultCommonUserMorphDictionaryFile();
+        String defPath = def != null ? def.getAbsolutePath() : ""; //$NON-NLS-1$
+        // Пусто или путь = default → храним пусто (стандартный файл).
+        String toStore = raw.isEmpty() || raw.equalsIgnoreCase(defPath) ? "" : raw; //$NON-NLS-1$
+        String previous = ComfortSettings.getSpellingCommonMorphDictionaryPath();
+        if (Objects.equals(previous, toStore))
+        {
+            if (toStore.isEmpty() && !raw.isEmpty())
+                pathText.setText(""); //$NON-NLS-1$
+            return;
+        }
+        ComfortSettings.setSpellingCommonMorphDictionaryPath(toStore);
+        if (toStore.isEmpty())
+            pathText.setText(""); //$NON-NLS-1$
+        ComfortSpellingEngine.ensureCommonUserMorphDictionaryFile();
+        if (reloadIfChanged)
+            ComfortSpellingEngine.reloadUserMorphDictionaryFromDisk();
+    }
+
+    private static void updateComfortDictionaryRowVisibility(Composite parent, Combo platformCombo)
+    {
+        if (parent == null || parent.isDisposed())
+            return;
+        boolean visible = isComfortPlatformDictionarySelected(platformCombo);
+        for (Control child : parent.getChildren())
+        {
+            if (!isComfortDictionaryRowControl(child))
+                continue;
+            child.setVisible(visible);
+            Object ld = child.getLayoutData();
+            if (ld instanceof GridData gd)
+                gd.exclude = !visible;
+        }
+        parent.layout(true, true);
+    }
+
+    private static boolean isComfortPlatformDictionarySelected(Combo combo)
+    {
+        if (combo == null || combo.isDisposed())
+            return false;
+        String text = combo.getText();
+        if (text == null)
+            return false;
+        if (ComfortSettings.SPELLING_PLATFORM_DICT_LABEL.equals(text))
+            return true;
+        String lower = text.toLowerCase(Locale.ROOT);
+        return lower.contains("комфорт") || lower.contains("hunspell"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** Открыть общий morph-словарь Comfort в текстовом редакторе Eclipse. */
+    static void openCommonUserMorphDictionaryInEclipseEditor()
+    {
+        openMorphDictionaryInEclipseEditor(
+            ComfortSpellingEngine.ensureCommonUserMorphDictionaryFile(),
+            "Не удалось определить файл общего пользовательского словаря Comfort."); //$NON-NLS-1$
+    }
+
+    /** Открыть проектный {@code .comfort/spelling-comfort-project.dic}. */
+    static void openProjectUserMorphDictionaryInEclipseEditor(
+        org.eclipse.core.resources.IProject project)
+    {
+        openMorphDictionaryInEclipseEditor(
+            ComfortSpellingEngine.ensureProjectUserMorphDictionaryFile(project),
+            "Не удалось создать пользовательский словарь в проекте."); //$NON-NLS-1$
+    }
+
+    private static void openMorphDictionaryInEclipseEditor(File file, String missingMessage)
     {
         try
         {
-            File file = ComfortSpellingEngine.ensureUserMorphDictionaryFile();
             if (file == null)
             {
-                ToastNotification.show("Орфография", //$NON-NLS-1$
-                    "Не удалось определить файл пользовательского словаря Comfort.", 5_000); //$NON-NLS-1$
+                ToastNotification.show("Орфография", missingMessage, 5_000); //$NON-NLS-1$
                 return;
             }
             IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
@@ -1021,17 +1567,6 @@ public final class SpellCheckHook implements IStartup
         catch (Exception e)
         {
         }
-    }
-
-    private static Link findExistingUserDictLink(Composite parent)
-    {
-        for (Control child : parent.getChildren())
-        {
-            if (child instanceof Link link && !link.isDisposed()
-                && link.getText() != null && link.getText().contains(USER_DICT_LINK_TEXT))
-                return link;
-        }
-        return null;
     }
 
     /** Пустой {@link Label}-placeholder справа от Platform dictionary combo (GridLayout 4). */

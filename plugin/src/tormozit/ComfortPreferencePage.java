@@ -1,5 +1,8 @@
 package tormozit;
 
+import org.eclipse.core.resources.IProject;
+import org.eclipse.core.resources.IResource;
+import org.eclipse.core.runtime.IAdaptable;
 import org.eclipse.jface.dialogs.IDialogConstants;
 import org.eclipse.jface.preference.BooleanFieldEditor;
 import org.eclipse.jface.preference.ColorFieldEditor;
@@ -25,19 +28,22 @@ import org.eclipse.swt.widgets.Link;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.ui.IWorkbench;
 import org.eclipse.ui.IWorkbenchPreferencePage;
+import org.eclipse.ui.IWorkbenchPropertyPage;
 import org.eclipse.ui.preferences.IWorkbenchPreferenceContainer;
 
 /**
- * Страница настроек плагина Comfort в разделе
- * «Параметры → Комфорт (Tormozit)».
+ * Страница настроек плагина Comfort:
+ * «Параметры → Комфорт» (workspace) и «Свойства проекта → Комфорт» (словарь проекта).
  *
  * <p>Поле «Символы» автооткрытия подсказки скрыто — его значение захардкожено в
  * {@link ContentAssistSettings#CHARSET_VALUE}.
  */
 public class ComfortPreferencePage
         extends FieldEditorPreferencePage
-        implements IWorkbenchPreferencePage
+        implements IWorkbenchPreferencePage, IWorkbenchPropertyPage
 {
+    private IAdaptable element;
+
     private Text installedVersionText;
     private Text installedDateText;
     private Text latestVersionText;
@@ -83,22 +89,93 @@ public class ComfortPreferencePage
     @Override
     public void init(IWorkbench workbench)
     {
-        setPreferenceStore(
-            ContentAssistSettings.getInstance().getPreferenceStore());
-        setDescription("Настройки плагина Комфорт (Tormozit).");
+        ensurePreferenceStore();
+        if (isProjectPreferencePage())
+            setDescription("Настройки Комфорт для проекта."); //$NON-NLS-1$
+        else
+            setDescription("Настройки плагина Комфорт (Tormozit).");
+    }
+
+    @Override
+    public void setElement(IAdaptable element)
+    {
+        this.element = element;
+        ensurePreferenceStore();
+        if (isProjectPreferencePage())
+            setDescription("Настройки Комфорт для проекта."); //$NON-NLS-1$
+    }
+
+    @Override
+    public IAdaptable getElement()
+    {
+        return element;
+    }
+
+    private void ensurePreferenceStore()
+    {
+        if (getPreferenceStore() != null)
+            return;
+        ContentAssistSettings settings = ContentAssistSettings.getInstance();
+        if (settings != null)
+            setPreferenceStore(settings.getPreferenceStore());
+    }
+
+    private boolean isProjectPreferencePage()
+    {
+        return getProject() != null;
+    }
+
+    private IProject getProject()
+    {
+        if (element == null)
+            return null;
+        IProject project = element.getAdapter(IProject.class);
+        if (project != null)
+            return project;
+        IResource resource = element.getAdapter(IResource.class);
+        return resource != null ? resource.getProject() : null;
     }
 
     @Override
     public void createControl(Composite parent)
     {
+        ensurePreferenceStore();
         super.createControl(parent);
-        refreshVersionSection();
-        ComfortUpdateChecker.checkAsync(true, this::refreshVersionSection);
+        if (!isProjectPreferencePage())
+        {
+            refreshVersionSection();
+            ComfortUpdateChecker.checkAsync(true, this::refreshVersionSection);
+        }
+    }
+
+    /**
+     * Для свойств проекта не используем FieldEditorPreferencePage: без {@code addField}
+     * родитель с {@code horizontalSpan=2} даёт пустую страницу.
+     */
+    @Override
+    protected Control createContents(Composite parent)
+    {
+        ensurePreferenceStore();
+        if (isProjectPreferencePage())
+        {
+            if (getDescription() == null || getDescription().isBlank())
+                setDescription("Настройки Комфорт для проекта."); //$NON-NLS-1$
+            Composite area = new Composite(parent, SWT.NONE);
+            area.setLayout(new GridLayout(1, false));
+            area.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+            createProjectDictionarySection(area);
+            return area;
+        }
+        return super.createContents(parent);
     }
 
     @Override
     protected void createFieldEditors()
     {
+        ensurePreferenceStore();
+        if (isProjectPreferencePage())
+            return;
+
         createVersionSection();
         createKeysLink();
 
@@ -220,10 +297,69 @@ public class ComfortPreferencePage
             + "слова с заглавной буквой не на первой позиции (как в CamelCase) пропускаются.", //$NON-NLS-1$
             spellingIdentsHost);
 
+        createCommonDictionaryLink();
         createLoggingGroup();
 
         // Поле «Символы» намеренно не добавляется:
         // значение задано константой ContentAssistSettings.CHARSET_VALUE
+    }
+
+    /** Ссылка на общий morph-словарь (workspace). */
+    private void createCommonDictionaryLink()
+    {
+        Composite parent = getFieldEditorParent();
+        Link link = new Link(parent, SWT.NONE);
+        link.setText("<a>Общий пользовательский словарь</a>"); //$NON-NLS-1$
+        GridData gd = new GridData(SWT.FILL, SWT.CENTER, true, false);
+        gd.horizontalSpan = 2;
+        gd.verticalIndent = 8;
+        link.setLayoutData(gd);
+        link.setToolTipText(
+            "Файл spelling-comfort-common.dic в каталоге состояния плагина (все проекты).\n"
+            + "Лемма или лемма/флаг AOT. Проектный словарь — в Свойствах проекта → Комфорт."); //$NON-NLS-1$
+        link.addListener(SWT.Selection, e ->
+        {
+            if (!"Общий пользовательский словарь".equals(e.text)) //$NON-NLS-1$
+                return;
+            SpellCheckHook.openCommonUserMorphDictionaryInEclipseEditor();
+        });
+    }
+
+    /** Режим «По проекту»: только ссылка на словарь проекта. */
+    private void createProjectDictionarySection(Composite parent)
+    {
+        Label hint = new Label(parent, SWT.WRAP);
+        hint.setText(
+            "Пользовательский словарь орфографии этого проекта "
+            + "(.comfort/spelling-comfort-project.dic). Коммитьте файл в git — "
+            + "при merge строки сливаются; Comfort пересчитывает счётчик при загрузке."); //$NON-NLS-1$
+        GridData hintGd = new GridData(SWT.FILL, SWT.TOP, true, false);
+        hintGd.widthHint = 420;
+        hint.setLayoutData(hintGd);
+
+        Link link = new Link(parent, SWT.NONE);
+        link.setText("<a>Пользовательский словарь</a>"); //$NON-NLS-1$
+        GridData linkGd = new GridData(SWT.FILL, SWT.CENTER, true, false);
+        linkGd.verticalIndent = 8;
+        link.setLayoutData(linkGd);
+        IProject project = getProject();
+        link.setEnabled(project != null && project.isAccessible());
+        link.setToolTipText(
+            "Открыть .comfort/spelling-comfort-project.dic в редакторе. "
+            + "После Save словарь подхватывается сразу."); //$NON-NLS-1$
+        link.addListener(SWT.Selection, e ->
+        {
+            if (!"Пользовательский словарь".equals(e.text)) //$NON-NLS-1$
+                return;
+            IProject p = getProject();
+            if (p == null || !p.isAccessible())
+            {
+                ToastNotification.show("Орфография", //$NON-NLS-1$
+                    "Проект недоступен.", 5_000); //$NON-NLS-1$
+                return;
+            }
+            SpellCheckHook.openProjectUserMorphDictionaryInEclipseEditor(p);
+        });
     }
 
     /**

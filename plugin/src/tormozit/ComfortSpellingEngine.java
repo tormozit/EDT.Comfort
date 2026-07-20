@@ -12,14 +12,18 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 
+import org.eclipse.core.resources.IProject;
+import org.eclipse.core.resources.IResource;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.FileLocator;
 import org.eclipse.core.runtime.IPath;
@@ -53,6 +57,10 @@ import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Monitor;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Text;
+import org.eclipse.ui.IWorkbench;
+import org.eclipse.ui.IWorkbenchPage;
+import org.eclipse.ui.IWorkbenchWindow;
+import org.eclipse.ui.PlatformUI;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.FrameworkUtil;
 
@@ -66,13 +74,16 @@ import org.osgi.framework.FrameworkUtil;
  * Пути словарей — {@link ComfortSettings#getSpellingDictionaryBasePaths()}.
  * Дополнение Comfort — {@code dictionaries/hunspell/comfort-extra-ru.dic} (UTF-8, леммы + флаги AOT)
  * с морфологией из {@code russian-aot-ieyo.aff}; большой {@code .dic} AOT не правим.
- * Старые точные слова — {@code spelling-user-dictionary.txt}; новые из UI —
- * {@code spelling-user-morph.dic} (лемма или лемма/флаг AOT) в stateLocation.
+ * Старые точные слова — {@code spelling-user-dictionary.txt}; morph из UI —
+ * общий {@code spelling-comfort-common.dic} (stateLocation или путь из настроек)
+ * и проектный {@code .comfort/spelling-comfort-project.dic} (оба в проверке).
  */
 public final class ComfortSpellingEngine
 {
     private static final String USER_DICT_FILE = "spelling-user-dictionary.txt"; //$NON-NLS-1$
-    private static final String USER_MORPH_DICT_FILE = "spelling-user-morph.dic"; //$NON-NLS-1$
+    private static final String USER_MORPH_DICT_FILE_COMMON = "spelling-comfort-common.dic"; //$NON-NLS-1$
+    private static final String USER_MORPH_DICT_FILE_PROJECT = "spelling-comfort-project.dic"; //$NON-NLS-1$
+    private static final String PROJECT_MORPH_DIR = ".comfort"; //$NON-NLS-1$
     private static final String AOT_RU_BASE = "dictionaries/hunspell/russian-aot-ieyo"; //$NON-NLS-1$
     /** Леммы IT/1С; .aff берём у AOT (не дублируем). */
     private static final String EXTRA_RU_DIC_BASE = "dictionaries/hunspell/comfort-extra-ru"; //$NON-NLS-1$
@@ -85,9 +96,14 @@ public final class ComfortSpellingEngine
     private static final Object USER_LOCK = new Object();
     private static final Object USER_MORPH_LOCK = new Object();
     private static volatile Set<String> userWords;
+    /** Общий morph-dic (stateLocation). */
     private static volatile HunspellDictionary userMorphDictionary;
+    /** Проектный morph-dic активного проекта. */
+    private static volatile HunspellDictionary projectMorphDictionary;
+    private static volatile String projectMorphProjectName;
     private static final ConcurrentHashMap<String, List<String>> suggestCache =
         new ConcurrentHashMap<>();
+    private static volatile boolean projectMorphListenerInstalled;
 
     private ComfortSpellingEngine()
     {
@@ -245,20 +261,25 @@ public final class ComfortSpellingEngine
         return isCorrectByIdentifierSegments(word, dicts);
     }
 
-    /** Штатные словари + пользовательский morph-dic (если загружен). */
+    /** Штатные словари + общий и проектный morph-dic (если загружены). */
     private static List<HunspellDictionary> dictionariesForCheck()
     {
+        ensureProjectMorphListener();
         List<HunspellDictionary> base = sharedDictionaries();
-        HunspellDictionary morph = sharedUserMorphDictionary();
-        if (morph == null)
+        HunspellDictionary common = sharedCommonUserMorphDictionary();
+        HunspellDictionary project = sharedProjectUserMorphDictionary();
+        if (common == null && project == null)
             return base;
-        List<HunspellDictionary> all = new ArrayList<>(base.size() + 1);
+        List<HunspellDictionary> all = new ArrayList<>(base.size() + 2);
         all.addAll(base);
-        all.add(morph);
+        if (common != null)
+            all.add(common);
+        if (project != null)
+            all.add(project);
         return all;
     }
 
-    private static HunspellDictionary sharedUserMorphDictionary()
+    private static HunspellDictionary sharedCommonUserMorphDictionary()
     {
         HunspellDictionary result = userMorphDictionary;
         if (result != null)
@@ -268,11 +289,105 @@ public final class ComfortSpellingEngine
             result = userMorphDictionary;
             if (result == null)
             {
-                result = loadUserMorphDictionary();
+                result = loadUserMorphDictionary(getCommonUserMorphDictionaryFile());
                 userMorphDictionary = result;
             }
             return result;
         }
+    }
+
+    private static HunspellDictionary sharedProjectUserMorphDictionary()
+    {
+        IProject project = resolveSpellingProject();
+        String name = project != null ? project.getName() : null;
+        synchronized (USER_MORPH_LOCK)
+        {
+            if (Objects.equals(name, projectMorphProjectName))
+                return projectMorphDictionary;
+            projectMorphProjectName = name;
+            projectMorphDictionary = name == null ? null
+                : loadUserMorphDictionary(getProjectUserMorphDictionaryFile(project));
+            return projectMorphDictionary;
+        }
+    }
+
+    private static IProject resolveSpellingProject()
+    {
+        return Global.getActiveProject((IWorkbenchPage) null, false);
+    }
+
+    /** Сброс кэша проектного словаря и пересчёт орфографии (смена активного проекта). */
+    static void onActiveProjectChanged()
+    {
+        synchronized (USER_MORPH_LOCK)
+        {
+            projectMorphProjectName = null;
+            projectMorphDictionary = null;
+        }
+        suggestCache.clear();
+        Runnable ui = ComfortSpellingEngine::refreshSpellingAfterUserDictionaryReload;
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        if (display.getThread() == Thread.currentThread())
+            ui.run();
+        else
+            display.asyncExec(ui);
+    }
+
+    private static void ensureProjectMorphListener()
+    {
+        if (projectMorphListenerInstalled)
+            return;
+        synchronized (ComfortSpellingEngine.class)
+        {
+            if (projectMorphListenerInstalled)
+                return;
+            projectMorphListenerInstalled = true;
+        }
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        Runnable install = () ->
+        {
+            IWorkbench wb = PlatformUI.getWorkbench();
+            if (wb == null)
+                return;
+            for (IWorkbenchWindow window : wb.getWorkbenchWindows())
+            {
+                if (window == null)
+                    continue;
+                for (IWorkbenchPage page : window.getPages())
+                {
+                    ActiveProjectTracker.bootstrapPage(page);
+                    ActiveProjectTracker.addListener(page,
+                        (p, previous, current) -> onActiveProjectChanged());
+                }
+            }
+            wb.addWindowListener(new org.eclipse.ui.IWindowListener()
+            {
+                @Override
+                public void windowOpened(IWorkbenchWindow w)
+                {
+                    if (w == null)
+                        return;
+                    for (IWorkbenchPage page : w.getPages())
+                    {
+                        ActiveProjectTracker.bootstrapPage(page);
+                        ActiveProjectTracker.addListener(page,
+                            (p, previous, current) -> onActiveProjectChanged());
+                    }
+                }
+
+                @Override public void windowActivated(IWorkbenchWindow w) {}
+                @Override public void windowDeactivated(IWorkbenchWindow w) {}
+                @Override public void windowClosed(IWorkbenchWindow w) {}
+            });
+        };
+        if (display.getThread() == Thread.currentThread())
+            install.run();
+        else
+            display.asyncExec(install);
     }
 
     /**
@@ -397,7 +512,7 @@ public final class ComfortSpellingEngine
     }
 
     /**
-     * UI-добавление: диалог морфологии → {@code spelling-user-morph.dic} + тост
+     * UI-добавление: диалог морфологии → общий или проектный morph-dic + тост
      * «Отменить» + пересчёт подчёркиваний.
      *
      * @return {@code true}, если запись была новой
@@ -443,12 +558,16 @@ public final class ComfortSpellingEngine
             return false;
         String lemma = chosen.lemma.trim();
         String flag = chosen.morphology ? chosen.flag : null;
-        if (!addUserMorphEntry(lemma, flag))
+        boolean projectScoped = chosen.projectScoped;
+        if (projectScoped && resolveSpellingProject() == null)
+            projectScoped = false;
+        if (!addUserMorphEntry(lemma, flag, projectScoped))
             return false;
         suggestCache.clear();
         String toastLemma = lemma;
         String toastFlag = flag;
-        int dictSize = userMorphDictionarySize();
+        boolean toastProject = projectScoped;
+        int dictSize = userMorphDictionarySize(projectScoped);
         Runnable ui = () ->
         {
             refreshSpellingAfterUserWordChange(toastLemma, true);
@@ -457,7 +576,7 @@ public final class ComfortSpellingEngine
                 "Слово «" + toastLemma + "» добавлено в словарь. Всего слов: " //$NON-NLS-1$ //$NON-NLS-2$
                     + dictSize + ".", //$NON-NLS-1$
                 10_000,
-                () -> undoUserMorphAdd(toastLemma, toastFlag),
+                () -> undoUserMorphAdd(toastLemma, toastFlag, toastProject),
                 "Отменить добавление"); //$NON-NLS-1$
         };
         if (display.getThread() == Thread.currentThread())
@@ -526,9 +645,9 @@ public final class ComfortSpellingEngine
         refreshSpellingAfterUserWordChange(word, false);
     }
 
-    private static void undoUserMorphAdd(String lemma, String flagOrNull)
+    private static void undoUserMorphAdd(String lemma, String flagOrNull, boolean projectScoped)
     {
-        if (!removeUserMorphEntry(lemma, flagOrNull))
+        if (!removeUserMorphEntry(lemma, flagOrNull, projectScoped))
             return;
         suggestCache.clear();
         refreshSpellingAfterUserWordChange(lemma, false);
@@ -1080,9 +1199,34 @@ public final class ComfortSpellingEngine
         }
     }
 
-    // --- Пользовательский morph-словарь (лемма или лемма/флаг) ---
+    // --- Пользовательский morph-словарь (общий + проектный) ---
 
-    private static File getUserMorphDictionaryFile()
+    private static File getCommonUserMorphDictionaryFile()
+    {
+        String custom = ComfortSettings.getSpellingCommonMorphDictionaryPath();
+        if (custom != null && !custom.isBlank())
+            return new File(custom);
+        Activator activator = Activator.getDefault();
+        if (activator == null)
+            return null;
+        IPath location = activator.getStateLocation();
+        if (location == null)
+            return null;
+        return location.append(USER_MORPH_DICT_FILE_COMMON).toFile();
+    }
+
+    private static File getProjectUserMorphDictionaryFile(IProject project)
+    {
+        if (project == null || !project.isAccessible())
+            return null;
+        IPath location = project.getLocation();
+        if (location == null)
+            return null;
+        return location.append(PROJECT_MORPH_DIR).append(USER_MORPH_DICT_FILE_PROJECT).toFile();
+    }
+
+    /** Путь общего словаря по умолчанию (stateLocation), без учёта custom pref. */
+    static File defaultCommonUserMorphDictionaryFile()
     {
         Activator activator = Activator.getDefault();
         if (activator == null)
@@ -1090,15 +1234,30 @@ public final class ComfortSpellingEngine
         IPath location = activator.getStateLocation();
         if (location == null)
             return null;
-        return location.append(USER_MORPH_DICT_FILE).toFile();
+        return location.append(USER_MORPH_DICT_FILE_COMMON).toFile();
     }
 
-    /**
-     * Создать {@code spelling-user-morph.dic} при отсутствии и вернуть путь.
-     */
-    static File ensureUserMorphDictionaryFile()
+    /** Создать общий morph-dic при отсутствии и вернуть путь. */
+    static File ensureCommonUserMorphDictionaryFile()
     {
-        File file = getUserMorphDictionaryFile();
+        return ensureMorphDictionaryFile(getCommonUserMorphDictionaryFile());
+    }
+
+    /** Создать проектный {@code .comfort/spelling-comfort-project.dic} и вернуть путь. */
+    static File ensureProjectUserMorphDictionaryFile(IProject project)
+    {
+        return ensureMorphDictionaryFile(getProjectUserMorphDictionaryFile(project));
+    }
+
+    private static File morphDictionaryFile(boolean projectScoped)
+    {
+        if (projectScoped)
+            return getProjectUserMorphDictionaryFile(resolveSpellingProject());
+        return getCommonUserMorphDictionaryFile();
+    }
+
+    private static File ensureMorphDictionaryFile(File file)
+    {
         if (file == null)
             return null;
         synchronized (USER_MORPH_LOCK)
@@ -1115,16 +1274,30 @@ public final class ComfortSpellingEngine
     }
 
     /**
-     * Перечитать morph-dic с диска, нормализовать счётчик, перезагрузить Hunspell
-     * и обновить орфографию в UI.
+     * Перечитать общий и проектный morph-dic с диска, нормализовать счётчик,
+     * перезагрузить Hunspell и обновить орфографию в UI.
      */
     static void reloadUserMorphDictionaryFromDisk()
     {
         synchronized (USER_MORPH_LOCK)
         {
-            List<String> entries = readUserMorphEntries();
-            writeUserMorphEntries(entries);
-            reloadUserMorphDictionaryLocked();
+            File common = getCommonUserMorphDictionaryFile();
+            if (common != null && common.isFile())
+            {
+                List<String> entries = readUserMorphEntries(common);
+                writeUserMorphEntries(common, entries);
+            }
+            IProject project = resolveSpellingProject();
+            File projectFile = getProjectUserMorphDictionaryFile(project);
+            if (projectFile != null && projectFile.isFile())
+            {
+                List<String> entries = readUserMorphEntries(projectFile);
+                writeUserMorphEntries(projectFile, entries);
+                refreshProjectMorphResource(project);
+            }
+            userMorphDictionary = loadUserMorphDictionary(common);
+            projectMorphProjectName = project != null ? project.getName() : null;
+            projectMorphDictionary = loadUserMorphDictionary(projectFile);
         }
         suggestCache.clear();
         Runnable ui = ComfortSpellingEngine::refreshSpellingAfterUserDictionaryReload;
@@ -1137,17 +1310,15 @@ public final class ComfortSpellingEngine
             display.asyncExec(ui);
     }
 
-    private static HunspellDictionary loadUserMorphDictionary()
+    private static HunspellDictionary loadUserMorphDictionary(File dic)
     {
         try
         {
             File aff = resolveDictionaryFile(AOT_RU_BASE, ".aff"); //$NON-NLS-1$
             if (aff == null || !aff.isFile())
                 return null;
-            File dic = getUserMorphDictionaryFile();
             if (dic == null)
                 return null;
-            ensureUserMorphFile(dic);
             if (!dic.isFile())
                 return null;
             return HunspellDictionary.load(aff, dic, HunspellDictionary.ScriptKind.CYRILLIC,
@@ -1169,25 +1340,65 @@ public final class ComfortSpellingEngine
         Files.writeString(dic.toPath(), "0\n", StandardCharsets.UTF_8); //$NON-NLS-1$
     }
 
-    private static void reloadUserMorphDictionaryLocked()
+    private static void reloadCommonUserMorphDictionaryLocked()
     {
-        userMorphDictionary = loadUserMorphDictionary();
+        userMorphDictionary = loadUserMorphDictionary(getCommonUserMorphDictionaryFile());
+    }
+
+    private static void reloadProjectUserMorphDictionaryLocked()
+    {
+        IProject project = resolveSpellingProject();
+        projectMorphProjectName = project != null ? project.getName() : null;
+        projectMorphDictionary = loadUserMorphDictionary(
+            getProjectUserMorphDictionaryFile(project));
+        refreshProjectMorphResource(project);
+    }
+
+    private static void refreshProjectMorphResource(IProject project)
+    {
+        if (project == null || !project.isAccessible())
+            return;
+        try
+        {
+            IResource folder = project.findMember(PROJECT_MORPH_DIR);
+            if (folder != null)
+                folder.refreshLocal(IResource.DEPTH_INFINITE, null);
+            else
+                project.refreshLocal(IResource.DEPTH_ONE, null);
+        }
+        catch (Exception e)
+        {
+        }
     }
 
     /**
      * @param flagOrNull {@code null}/пусто — только лемма без морфологии
+     * @param projectScoped {@code true} — проектный dic активного проекта
      * @return {@code true}, если запись новая
      */
-    static boolean addUserMorphEntry(String lemma, String flagOrNull)
+    static boolean addUserMorphEntry(String lemma, String flagOrNull, boolean projectScoped)
     {
         if (lemma == null || lemma.isBlank())
+            return false;
+        if (projectScoped && resolveSpellingProject() == null)
             return false;
         String stem = lemma.trim();
         String flag = normalizeMorphFlag(flagOrNull);
         String line = formatMorphLine(stem, flag);
         synchronized (USER_MORPH_LOCK)
         {
-            List<String> entries = readUserMorphEntries();
+            File file = morphDictionaryFile(projectScoped);
+            if (file == null)
+                return false;
+            try
+            {
+                ensureUserMorphFile(file);
+            }
+            catch (IOException e)
+            {
+                return false;
+            }
+            List<String> entries = readUserMorphEntries(file);
             String stemKey = stem.toLowerCase(Locale.ROOT);
             List<String> kept = new ArrayList<>(entries.size());
             boolean same = false;
@@ -1207,22 +1418,26 @@ public final class ComfortSpellingEngine
             if (same)
                 return false;
             kept.add(line);
-            writeUserMorphEntries(kept);
-            reloadUserMorphDictionaryLocked();
+            writeUserMorphEntries(file, kept);
+            if (projectScoped)
+                reloadProjectUserMorphDictionaryLocked();
+            else
+                reloadCommonUserMorphDictionaryLocked();
             return true;
         }
     }
 
-    /** Число записей в {@code spelling-user-morph.dic}. */
-    static int userMorphDictionarySize()
+    /** Число записей в выбранном morph-dic. */
+    static int userMorphDictionarySize(boolean projectScoped)
     {
         synchronized (USER_MORPH_LOCK)
         {
-            return readUserMorphEntries().size();
+            File file = morphDictionaryFile(projectScoped);
+            return readUserMorphEntries(file).size();
         }
     }
 
-    static boolean removeUserMorphEntry(String lemma, String flagOrNull)
+    static boolean removeUserMorphEntry(String lemma, String flagOrNull, boolean projectScoped)
     {
         if (lemma == null || lemma.isBlank())
             return false;
@@ -1230,7 +1445,10 @@ public final class ComfortSpellingEngine
         String flag = normalizeMorphFlag(flagOrNull);
         synchronized (USER_MORPH_LOCK)
         {
-            List<String> entries = readUserMorphEntries();
+            File file = morphDictionaryFile(projectScoped);
+            if (file == null || !file.isFile())
+                return false;
+            List<String> entries = readUserMorphEntries(file);
             boolean removed = false;
             List<String> kept = new ArrayList<>(entries.size());
             for (String existing : entries)
@@ -1247,8 +1465,11 @@ public final class ComfortSpellingEngine
             }
             if (!removed)
                 return false;
-            writeUserMorphEntries(kept);
-            reloadUserMorphDictionaryLocked();
+            writeUserMorphEntries(file, kept);
+            if (projectScoped)
+                reloadProjectUserMorphDictionaryLocked();
+            else
+                reloadCommonUserMorphDictionaryLocked();
             return true;
         }
     }
@@ -1256,14 +1477,14 @@ public final class ComfortSpellingEngine
     /**
      * Существующая запись с той же леммой (без учёта регистра), или {@code null}.
      */
-    private static MorphLineParsed findUserMorphEntry(String lemma)
+    private static MorphLineParsed findUserMorphEntry(String lemma, boolean projectScoped)
     {
         if (lemma == null || lemma.isBlank())
             return null;
         String stemKey = lemma.trim().toLowerCase(Locale.ROOT);
         synchronized (USER_MORPH_LOCK)
         {
-            for (String existing : readUserMorphEntries())
+            for (String existing : readUserMorphEntries(morphDictionaryFile(projectScoped)))
             {
                 MorphLineParsed parsed = parseMorphLine(existing);
                 if (parsed != null && parsed.lemma.toLowerCase(Locale.ROOT).equals(stemKey))
@@ -1277,9 +1498,10 @@ public final class ComfortSpellingEngine
      * @return существующая запись, если новая (лемма+флаг) её заместит; {@code null},
      *         если конфликта нет или запись уже совпадает
      */
-    private static MorphLineParsed findMorphReplaceConflict(String lemma, String flagOrNull)
+    private static MorphLineParsed findMorphReplaceConflict(String lemma, String flagOrNull,
+        boolean projectScoped)
     {
-        MorphLineParsed existing = findUserMorphEntry(lemma);
+        MorphLineParsed existing = findUserMorphEntry(lemma, projectScoped);
         if (existing == null)
             return null;
         if (flagsEqual(existing.flag, normalizeMorphFlag(flagOrNull)))
@@ -1350,10 +1572,9 @@ public final class ComfortSpellingEngine
         return new MorphLineParsed(lemma, flag.isEmpty() ? null : flag);
     }
 
-    private static List<String> readUserMorphEntries()
+    private static List<String> readUserMorphEntries(File file)
     {
         List<String> entries = new ArrayList<>();
-        File file = getUserMorphDictionaryFile();
         if (file == null || !file.isFile())
             return entries;
         try
@@ -1368,7 +1589,8 @@ public final class ComfortSpellingEngine
                 if (!countSkipped)
                 {
                     countSkipped = true;
-                    continue;
+                    if (line.chars().allMatch(Character::isDigit))
+                        continue;
                 }
                 MorphLineParsed parsed = parseMorphLine(line);
                 if (parsed != null)
@@ -1381,9 +1603,8 @@ public final class ComfortSpellingEngine
         return entries;
     }
 
-    private static void writeUserMorphEntries(List<String> entries)
+    private static void writeUserMorphEntries(File file, List<String> entries)
     {
-        File file = getUserMorphDictionaryFile();
         if (file == null)
             return;
         try
@@ -1391,12 +1612,14 @@ public final class ComfortSpellingEngine
             File parent = file.getParentFile();
             if (parent != null && !parent.isDirectory())
                 parent.mkdirs();
+            List<String> sorted = new ArrayList<>(entries);
+            sorted.sort(Comparator.comparing(s -> s.toLowerCase(Locale.ROOT)));
             try (BufferedWriter writer = new BufferedWriter(
                 new OutputStreamWriter(Files.newOutputStream(file.toPath()), StandardCharsets.UTF_8)))
             {
-                writer.write(Integer.toString(entries.size()));
+                writer.write(Integer.toString(sorted.size()));
                 writer.newLine();
-                for (String entry : entries)
+                for (String entry : sorted)
                 {
                     writer.write(entry);
                     writer.newLine();
@@ -1412,11 +1635,22 @@ public final class ComfortSpellingEngine
     {
         if (lemma == null || lemma.isBlank())
             return List.of();
-        HunspellDictionary dict = sharedUserMorphDictionary();
+        HunspellDictionary dict = sharedCommonUserMorphDictionary();
+        if (dict == null)
+            dict = sharedProjectUserMorphDictionary();
         if (dict == null)
         {
             // Aff для превью — из бандла; dic может быть пустым
-            dict = loadUserMorphDictionary();
+            File common = getCommonUserMorphDictionaryFile();
+            try
+            {
+                if (common != null)
+                    ensureUserMorphFile(common);
+            }
+            catch (IOException e)
+            {
+            }
+            dict = loadUserMorphDictionary(common);
         }
         if (dict == null)
             return List.of(lemma.trim());
@@ -1440,12 +1674,14 @@ public final class ComfortSpellingEngine
         final String lemma;
         final boolean morphology;
         final String flag;
+        final boolean projectScoped;
 
-        MorphAddResult(String lemma, boolean morphology, String flag)
+        MorphAddResult(String lemma, boolean morphology, String flag, boolean projectScoped)
         {
             this.lemma = lemma;
             this.morphology = morphology;
             this.flag = flag;
+            this.projectScoped = projectScoped;
         }
     }
 
@@ -1891,6 +2127,7 @@ public final class ComfortSpellingEngine
         private final String seedWord;
         /** Границы hover на момент открытия; {@code null} — искать shell заново / default. */
         private final Rectangle hoverAnchorBounds;
+        private Button projectDictCheck;
         private Text lemmaText;
         private Button morphCheck;
         private Combo posCombo;
@@ -1923,6 +2160,12 @@ public final class ComfortSpellingEngine
         MorphAddResult result()
         {
             return result;
+        }
+
+        private boolean isProjectDictSelected()
+        {
+            return projectDictCheck != null && !projectDictCheck.isDisposed()
+                && projectDictCheck.getEnabled() && projectDictCheck.getSelection();
         }
 
         @Override
@@ -2057,6 +2300,31 @@ public final class ComfortSpellingEngine
             Composite area = (Composite) super.createDialogArea(parent);
             dialogArea = area;
             area.setLayout(new GridLayout(2, false));
+
+            IProject project = resolveSpellingProject();
+            projectDictCheck = new Button(area, SWT.CHECK);
+            projectDictCheck.setText("Словарь в проекте"); //$NON-NLS-1$
+            GridData projectGd = new GridData(SWT.FILL, SWT.CENTER, true, false);
+            projectGd.horizontalSpan = 2;
+            projectDictCheck.setLayoutData(projectGd);
+            boolean canUseProject = project != null;
+            projectDictCheck.setEnabled(canUseProject);
+            projectDictCheck.setSelection(
+                canUseProject && ComfortSettings.isSpellingAddToProjectDictionary());
+            projectDictCheck.setToolTipText(canUseProject
+                ? "Писать в .comfort/spelling-comfort-project.dic активного проекта (для git)." //$NON-NLS-1$
+                : "Нет активного проекта — доступен только общий словарь."); //$NON-NLS-1$
+            projectDictCheck.addSelectionListener(new SelectionAdapter()
+            {
+                @Override
+                public void widgetSelected(SelectionEvent e)
+                {
+                    ComfortSettings.setSpellingAddToProjectDictionary(
+                        projectDictCheck.getSelection());
+                    if (!updating)
+                        refreshPreviewAndWarning();
+                }
+            });
 
             Label lemmaLabel = new Label(area, SWT.NONE);
             lemmaLabel.setText("Лемма:"); //$NON-NLS-1$
@@ -2527,9 +2795,10 @@ public final class ComfortSpellingEngine
         private void refreshReplaceWarning(String lemma, String flagOrNull)
         {
             String text = ""; //$NON-NLS-1$
+            boolean projectScoped = isProjectDictSelected();
             if (lemma != null && !lemma.isEmpty() && morphTypeMismatchMessage() == null)
             {
-                MorphLineParsed existing = findUserMorphEntry(lemma);
+                MorphLineParsed existing = findUserMorphEntry(lemma, projectScoped);
                 if (existing != null)
                 {
                     if (flagsEqual(existing.flag, normalizeMorphFlag(flagOrNull)))
@@ -2560,7 +2829,14 @@ public final class ComfortSpellingEngine
                 return;
             boolean morph = morphCheck.getSelection();
             String flag = morph ? selectedParadigm().flag : null;
-            MorphLineParsed conflict = findMorphReplaceConflict(lemma, flag);
+            boolean projectScoped = isProjectDictSelected();
+            if (projectDictCheck != null && !projectDictCheck.isDisposed()
+                && projectDictCheck.getEnabled())
+            {
+                ComfortSettings.setSpellingAddToProjectDictionary(
+                    projectDictCheck.getSelection());
+            }
+            MorphLineParsed conflict = findMorphReplaceConflict(lemma, flag, projectScoped);
             if (conflict != null)
             {
                 String message = "Лемма «" + lemma //$NON-NLS-1$
@@ -2574,7 +2850,7 @@ public final class ComfortSpellingEngine
             }
             else
             {
-                MorphLineParsed same = findUserMorphEntry(lemma);
+                MorphLineParsed same = findUserMorphEntry(lemma, projectScoped);
                 if (same != null && flagsEqual(same.flag, normalizeMorphFlag(flag)))
                 {
                     MessageDialog.openInformation(getShell(),
@@ -2583,7 +2859,7 @@ public final class ComfortSpellingEngine
                     return;
                 }
             }
-            result = new MorphAddResult(lemma, morph, flag);
+            result = new MorphAddResult(lemma, morph, flag, projectScoped);
             super.okPressed();
         }
     }

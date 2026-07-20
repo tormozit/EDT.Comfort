@@ -210,6 +210,25 @@ public final class ComfortSettings
     /** По умолчанию проверка идентификаторов выключена (меньше шума). */
     public static final boolean DEFAULT_SPELLING_CHECK_IDENTIFIERS_VISIBLE = false;
 
+    /**
+     * Ключ: в диалоге «Добавить в словарь» писать в проектный morph-dic
+     * ({@code .comfort/spelling-comfort-project.dic}), а не в общий.
+     */
+    public static final String PREF_SPELLING_ADD_TO_PROJECT_DICTIONARY =
+        "comfort.spelling.addToProjectDictionary"; //$NON-NLS-1$
+
+    /** По умолчанию — общий пользовательский словарь. */
+    public static final boolean DEFAULT_SPELLING_ADD_TO_PROJECT_DICTIONARY = false;
+
+    /**
+     * Абсолютный путь к общему morph-словарю Comfort.
+     * Пусто — файл по умолчанию в stateLocation плагина.
+     */
+    public static final String PREF_SPELLING_COMMON_MORPH_PATH =
+        "comfort.spelling.commonMorphDictionaryPath"; //$NON-NLS-1$
+
+    public static final String DEFAULT_SPELLING_COMMON_MORPH_PATH = ""; //$NON-NLS-1$
+
     private static ComfortSettings instance;
 
     private final ScopedPreferenceStore preferenceStore;
@@ -707,6 +726,60 @@ public final class ComfortSettings
         if (settings == null)
             return DEFAULT_SPELLING_CHECK_IDENTIFIERS_VISIBLE;
         return settings.preferenceStore.getBoolean(PREF_SPELLING_CHECK_IDENTIFIERS_VISIBLE);
+    }
+
+    /** Писать новые слова из UI в проектный словарь (запоминается в диалоге). */
+    public static boolean isSpellingAddToProjectDictionary()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_SPELLING_ADD_TO_PROJECT_DICTIONARY;
+        return settings.preferenceStore.getBoolean(PREF_SPELLING_ADD_TO_PROJECT_DICTIONARY);
+    }
+
+    /** Запомнить выбор флажка «Словарь в проекте». */
+    public static void setSpellingAddToProjectDictionary(boolean addToProject)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        settings.preferenceStore.setValue(PREF_SPELLING_ADD_TO_PROJECT_DICTIONARY, addToProject);
+        try
+        {
+            settings.preferenceStore.save();
+        }
+        catch (Exception ex)
+        {
+            Global.log("ComfortSettings save error (addToProjectDictionary): " + ex); //$NON-NLS-1$
+        }
+    }
+
+    /** Путь к общему morph-словарю Comfort; пусто — default в stateLocation. */
+    public static String getSpellingCommonMorphDictionaryPath()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_SPELLING_COMMON_MORPH_PATH;
+        String value = settings.preferenceStore.getString(PREF_SPELLING_COMMON_MORPH_PATH);
+        return value != null ? value.trim() : DEFAULT_SPELLING_COMMON_MORPH_PATH;
+    }
+
+    /** Сохранить путь к общему morph-словарю (пусто = default). */
+    public static void setSpellingCommonMorphDictionaryPath(String path)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        String value = path != null ? path.trim() : ""; //$NON-NLS-1$
+        settings.preferenceStore.setValue(PREF_SPELLING_COMMON_MORPH_PATH, value);
+        try
+        {
+            settings.preferenceStore.save();
+        }
+        catch (Exception ex)
+        {
+            Global.log("ComfortSettings save error (commonMorphPath): " + ex); //$NON-NLS-1$
+        }
     }
 
     /** Минимальное число видимых строк между конструкциями для показа подсказки. */

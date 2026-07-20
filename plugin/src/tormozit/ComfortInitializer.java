@@ -69,5 +69,11 @@ public class ComfortInitializer extends AbstractPreferenceInitializer
         store.setDefault(
             ComfortSettings.PREF_SPELLING_CHECK_IDENTIFIERS_VISIBLE,
             ComfortSettings.DEFAULT_SPELLING_CHECK_IDENTIFIERS_VISIBLE);
+        store.setDefault(
+            ComfortSettings.PREF_SPELLING_ADD_TO_PROJECT_DICTIONARY,
+            ComfortSettings.DEFAULT_SPELLING_ADD_TO_PROJECT_DICTIONARY);
+        store.setDefault(
+            ComfortSettings.PREF_SPELLING_COMMON_MORPH_PATH,
+            ComfortSettings.DEFAULT_SPELLING_COMMON_MORPH_PATH);
     }
 }
