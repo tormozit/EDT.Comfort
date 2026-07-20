@@ -2041,6 +2041,8 @@ public final class BslModuleSpellCheckHook implements IStartup
 
         private void addWord()
         {
+            // Зафиксировать границы hover до dispose при открытии модального диалога.
+            BslModuleSpellCheckHook.peekSpellingHoverShellBounds();
             ComfortSpellingEngine.addUserWordFromUi(word);
         }
 
@@ -3680,6 +3682,8 @@ public final class BslModuleSpellCheckHook implements IStartup
 
     /** Сигнатура последнего setInput — не дёргать UI повторно тем же списком. */
     private static volatile String lastHoverProposalSig;
+    /** Последние известные границы spelling hover (до dispose после клика proposal). */
+    private static volatile Rectangle lastSpellingHoverBounds;
     /** Защита от reentrant setInput (fillToolBar → getProposals → refresh → setInput). */
     private static int hoverSetInputDepth;
     /** Макс. высота sticky-hover за сессию одного control — при смене маркера не сжимаем. */
@@ -3734,6 +3738,42 @@ public final class BslModuleSpellCheckHook implements IStartup
         return ref != null ? ref.control : null;
     }
 
+    /**
+     * Границы shell annotation/sticky hover BSL. Сначала живой control (в т.ч. скрытый),
+     * иначе последний кэш — к клику proposal hover уже dispose.
+     */
+    static Rectangle peekSpellingHoverShellBounds()
+    {
+        for (EditorSession session : SESSIONS.values())
+        {
+            if (session == null || session.viewer == null)
+                continue;
+            HoverControlRef ref = findHoverControlRef(session.viewer, false);
+            if (ref == null)
+                continue;
+            Shell shell = infoControlShell(ref.control);
+            if (shell == null || shell.isDisposed())
+                continue;
+            Rectangle b = shell.getBounds();
+            if (b.width > 0 && b.height > 0)
+            {
+                rememberSpellingHoverShellBounds(b);
+                return new Rectangle(b.x, b.y, b.width, b.height);
+            }
+        }
+        Rectangle cached = lastSpellingHoverBounds;
+        if (cached == null)
+            return null;
+        return new Rectangle(cached.x, cached.y, cached.width, cached.height);
+    }
+
+    private static void rememberSpellingHoverShellBounds(Rectangle b)
+    {
+        if (b == null || b.width < 80 || b.height < 40 || b.width >= 700 || b.height >= 500)
+            return;
+        lastSpellingHoverBounds = new Rectangle(b.x, b.y, b.width, b.height);
+    }
+
     private static HoverControlRef findVisibleHoverControlRef(ISourceViewer viewer)
     {
         return findHoverControlRef(viewer, true);
@@ -3762,7 +3802,10 @@ public final class BslModuleSpellCheckHook implements IStartup
                 continue;
             Object sticky = Global.getField(replacer, "fInformationControl"); //$NON-NLS-1$
             if (isUsableInfoControl(sticky, requireVisible))
+            {
+                rememberHoverControlBounds(sticky);
                 return new HoverControlRef(sticky, manager);
+            }
         }
         // 2) обычный hover
         for (Object manager : managers)
@@ -3771,9 +3814,20 @@ public final class BslModuleSpellCheckHook implements IStartup
                 continue;
             Object control = Global.getField(manager, "fInformationControl"); //$NON-NLS-1$
             if (isUsableInfoControl(control, requireVisible))
+            {
+                rememberHoverControlBounds(control);
                 return new HoverControlRef(control, manager);
+            }
         }
         return null;
+    }
+
+    private static void rememberHoverControlBounds(Object control)
+    {
+        Shell shell = infoControlShell(control);
+        if (shell == null || shell.isDisposed())
+            return;
+        rememberSpellingHoverShellBounds(shell.getBounds());
     }
 
     private static boolean isVisibleInfoControl(Object control)

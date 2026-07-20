@@ -318,6 +318,37 @@ final class HunspellDictionary
     }
 
     /**
+     * Превью словоформ по флагу AOT: основа + применение SFX с этим {@code flag}
+     * (без приставок). Пустой/неизвестный flag — только лемма.
+     */
+    List<String> expandForms(String lemma, String flag, int max)
+    {
+        LinkedHashSet<String> forms = new LinkedHashSet<>();
+        if (lemma == null || lemma.isEmpty() || max <= 0)
+            return List.of();
+        forms.add(lemma);
+        if (flag == null || flag.isBlank())
+            return new ArrayList<>(forms);
+        List<AffixRule> rules = suffixRules.get(flag.trim());
+        if (rules == null || rules.isEmpty())
+            return new ArrayList<>(forms);
+        for (AffixRule rule : rules)
+        {
+            if (forms.size() >= max)
+                break;
+            if (!rule.conditionMatches(lemma))
+                continue;
+            if (!rule.strip.isEmpty() && !lemma.endsWith(rule.strip))
+                continue;
+            String stem = lemma.substring(0, lemma.length() - rule.strip.length());
+            String form = stem + rule.add;
+            if (!form.isEmpty())
+                forms.add(form);
+        }
+        return new ArrayList<>(forms);
+    }
+
+    /**
      * Варианты исправления: кандидаты на edit distance 1, при нехватке — 2
      * (короткие слова, ограниченный бюджет проверок). Алфавит правок — по script словаря.
      */

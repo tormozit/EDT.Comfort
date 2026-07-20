@@ -915,16 +915,19 @@ public final class SpellCheckHook implements IStartup
         Link link = new Link(parent, SWT.NONE);
         link.setText("<a>" + USER_DICT_LINK_TEXT + "</a>"); //$NON-NLS-1$ //$NON-NLS-2$
         link.setToolTipText(
-            "Файл слов, добавленных через «Добавить в словарь» при проверке орфографии Comfort.\n"
-            + "Открыть в текстовом редакторе Eclipse; при сохранении словарь сортируется и подхватывается сразу."
-            + "\n\nUser defined dictionary"); //$NON-NLS-1$
+            "Словарь Comfort (spelling-user-morph.dic): лемма или лемма/флаг AOT "
+            + "(например гиперссылка/15) — с морфологией; без «/» — только эта форма.\n"
+            + "Пополняется через «Добавить в словарь». После сохранения в редакторе "
+            + "словарь подхватывается сразу.\n\n"
+            + "Поле ниже («Пользовательский словарь») — штатный словарь Eclipse: "
+            + "текстовый файл, по одному слову в строке, без морфологии."); //$NON-NLS-1$
         // Без grab/END — иначе 4-я колонка GridLayout растягивается и появляется «дырка».
         link.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false));
         link.addListener(SWT.Selection, e ->
         {
             if (!USER_DICT_LINK_TEXT.equals(e.text))
                 return;
-            openUserDictionaryInEclipseEditor();
+            openUserMorphDictionaryInEclipseEditor();
         });
         if (belowAnchor != null && !belowAnchor.isDisposed())
             link.moveAbove(belowAnchor);
@@ -935,16 +938,16 @@ public final class SpellCheckHook implements IStartup
         return true;
     }
 
-    /** Открыть {@code spelling-user-dictionary.txt} в системном текстовом редакторе Eclipse. */
-    private static void openUserDictionaryInEclipseEditor()
+    /** Открыть {@code spelling-user-morph.dic} в системном текстовом редакторе Eclipse. */
+    private static void openUserMorphDictionaryInEclipseEditor()
     {
         try
         {
-            File file = ComfortSpellingEngine.ensureUserDictionaryFile();
+            File file = ComfortSpellingEngine.ensureUserMorphDictionaryFile();
             if (file == null)
             {
                 ToastNotification.show("Орфография", //$NON-NLS-1$
-                    "Не удалось определить файл пользовательского словаря.", 5_000); //$NON-NLS-1$
+                    "Не удалось определить файл пользовательского словаря Comfort.", 5_000); //$NON-NLS-1$
                 return;
             }
             IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
@@ -955,7 +958,7 @@ public final class SpellCheckHook implements IStartup
                 return;
             IFileStore store = EFS.getLocalFileSystem().getStore(file.toURI());
             IEditorPart editor = IDE.openEditorOnFileStore(page, store);
-            hookUserDictionaryEditorSave(editor);
+            hookUserMorphDictionaryEditorSave(editor);
         }
         catch (Exception e)
         {
@@ -965,10 +968,10 @@ public final class SpellCheckHook implements IStartup
     }
 
     /**
-     * После Save (dirty → clean) перечитать файл в память и синхронизировать буфер
-     * редактора с отсортированной записью на диск.
+     * После Save (dirty → clean) перечитать morph-dic и синхронизировать буфер
+     * редактора с нормализованной записью на диск.
      */
-    private static void hookUserDictionaryEditorSave(IEditorPart editor)
+    private static void hookUserMorphDictionaryEditorSave(IEditorPart editor)
     {
         if (editor == null)
             return;
@@ -989,7 +992,7 @@ public final class SpellCheckHook implements IStartup
                 reloadingUserDictEditor = true;
                 try
                 {
-                    ComfortSpellingEngine.reloadUserDictionaryFromDisk();
+                    ComfortSpellingEngine.reloadUserMorphDictionaryFromDisk();
                     refreshUserDictionaryEditorContent(editor);
                 }
                 finally

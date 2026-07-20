@@ -32,7 +32,27 @@ import org.eclipse.jface.preference.IPreferenceStore;
 import org.eclipse.jface.text.Document;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.Region;
+import org.eclipse.jface.dialogs.Dialog;
+import org.eclipse.jface.dialogs.IDialogConstants;
+import org.eclipse.jface.dialogs.MessageDialog;
+import org.eclipse.jface.window.Window;
+import org.eclipse.swt.SWT;
+import org.eclipse.swt.events.ModifyListener;
+import org.eclipse.swt.events.SelectionAdapter;
+import org.eclipse.swt.events.SelectionEvent;
+import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.graphics.Rectangle;
+import org.eclipse.swt.layout.GridData;
+import org.eclipse.swt.layout.GridLayout;
+import org.eclipse.swt.widgets.Button;
+import org.eclipse.swt.widgets.Combo;
+import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Label;
+import org.eclipse.swt.widgets.Monitor;
+import org.eclipse.swt.widgets.Shell;
+import org.eclipse.swt.widgets.Text;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.FrameworkUtil;
 
@@ -46,21 +66,26 @@ import org.osgi.framework.FrameworkUtil;
  * Пути словарей — {@link ComfortSettings#getSpellingDictionaryBasePaths()}.
  * Дополнение Comfort — {@code dictionaries/hunspell/comfort-extra-ru.dic} (UTF-8, леммы + флаги AOT)
  * с морфологией из {@code russian-aot-ieyo.aff}; большой {@code .dic} AOT не правим.
- * Пользовательские слова — {@code spelling-user-dictionary.txt} в stateLocation плагина.
+ * Старые точные слова — {@code spelling-user-dictionary.txt}; новые из UI —
+ * {@code spelling-user-morph.dic} (лемма или лемма/флаг AOT) в stateLocation.
  */
 public final class ComfortSpellingEngine
 {
     private static final String USER_DICT_FILE = "spelling-user-dictionary.txt"; //$NON-NLS-1$
+    private static final String USER_MORPH_DICT_FILE = "spelling-user-morph.dic"; //$NON-NLS-1$
     private static final String AOT_RU_BASE = "dictionaries/hunspell/russian-aot-ieyo"; //$NON-NLS-1$
     /** Леммы IT/1С; .aff берём у AOT (не дублируем). */
     private static final String EXTRA_RU_DIC_BASE = "dictionaries/hunspell/comfort-extra-ru"; //$NON-NLS-1$
     /** ISO 639 languages + ISO 3166 countries (lowercase). */
     private static volatile Set<String> LOCALE_CODES;
     private static final int SUGGEST_CACHE_MAX = 512;
+    private static final int MORPH_PREVIEW_MAX = 8;
 
     private static volatile List<HunspellDictionary> dictionaries;
     private static final Object USER_LOCK = new Object();
+    private static final Object USER_MORPH_LOCK = new Object();
     private static volatile Set<String> userWords;
+    private static volatile HunspellDictionary userMorphDictionary;
     private static final ConcurrentHashMap<String, List<String>> suggestCache =
         new ConcurrentHashMap<>();
 
@@ -132,7 +157,8 @@ public final class ComfortSpellingEngine
         }
         HunspellDictionary.ScriptKind script = detectWordScript(word);
         LinkedHashSet<String> merged = new LinkedHashSet<>();
-        for (HunspellDictionary dict : sharedDictionaries())
+        List<HunspellDictionary> all = dictionariesForCheck();
+        for (HunspellDictionary dict : all)
         {
             if (monitor != null && monitor.isCanceled())
                 return;
@@ -210,13 +236,43 @@ public final class ComfortSpellingEngine
             return true;
         if (isUserWord(word))
             return true;
-        List<HunspellDictionary> dicts = sharedDictionaries();
+        List<HunspellDictionary> dicts = dictionariesForCheck();
         if (isCorrect(dicts, word))
             return true;
         // DefaultSpellChecker не дробит CamelCase/цифры — те же условия, что findMisspelledRanges.
         if (!shouldSplitIdentifierToken(word, false))
             return false;
         return isCorrectByIdentifierSegments(word, dicts);
+    }
+
+    /** Штатные словари + пользовательский morph-dic (если загружен). */
+    private static List<HunspellDictionary> dictionariesForCheck()
+    {
+        List<HunspellDictionary> base = sharedDictionaries();
+        HunspellDictionary morph = sharedUserMorphDictionary();
+        if (morph == null)
+            return base;
+        List<HunspellDictionary> all = new ArrayList<>(base.size() + 1);
+        all.addAll(base);
+        all.add(morph);
+        return all;
+    }
+
+    private static HunspellDictionary sharedUserMorphDictionary()
+    {
+        HunspellDictionary result = userMorphDictionary;
+        if (result != null)
+            return result;
+        synchronized (USER_MORPH_LOCK)
+        {
+            result = userMorphDictionary;
+            if (result == null)
+            {
+                result = loadUserMorphDictionary();
+                userMorphDictionary = result;
+            }
+            return result;
+        }
     }
 
     /**
@@ -341,37 +397,161 @@ public final class ComfortSpellingEngine
     }
 
     /**
-     * UI-добавление: словарь + тост «Отменить добавление» (10 с) + пересчёт
-     * подчёркиваний для этого слова во всех хуках орфографии.
+     * UI-добавление: диалог морфологии → {@code spelling-user-morph.dic} + тост
+     * «Отменить» + пересчёт подчёркиваний.
      *
-     * @return {@code true}, если слово было новым
+     * @return {@code true}, если запись была новой
      */
     static boolean addUserWordFromUi(String word)
     {
         if (word == null || word.isBlank())
             return false;
-        String displayWord = word.trim();
-        if (!addUserWord(displayWord))
-            return false;
-        suggestCache.clear();
-        Runnable ui = () ->
-        {
-            refreshSpellingAfterUserWordChange(displayWord, true);
-            ToastNotification.show(
-                "Орфография", //$NON-NLS-1$
-                "Слово «" + displayWord + "» добавлено в словарь.", //$NON-NLS-1$ //$NON-NLS-2$
-                10_000,
-                () -> undoUserWordAdd(displayWord),
-                "Отменить добавление"); //$NON-NLS-1$
-        };
+        String seed = word.trim();
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
-            return true;
+            return false;
+        MorphAddResult[] box = new MorphAddResult[1];
+        Runnable openDialog = () ->
+        {
+            Shell shell = display.getActiveShell();
+            if (shell == null || shell.isDisposed())
+            {
+                Shell[] shells = display.getShells();
+                if (shells != null)
+                {
+                    for (Shell s : shells)
+                    {
+                        if (s != null && !s.isDisposed())
+                        {
+                            shell = s;
+                            break;
+                        }
+                    }
+                }
+            }
+            Rectangle hoverBounds = captureSpellingHoverBounds(display);
+            MorphAddWordDialog dialog = new MorphAddWordDialog(shell, seed, hoverBounds);
+            if (dialog.open() == Window.OK)
+                box[0] = dialog.result();
+        };
+        if (display.getThread() == Thread.currentThread())
+            openDialog.run();
+        else
+            display.syncExec(openDialog);
+        MorphAddResult chosen = box[0];
+        if (chosen == null || chosen.lemma == null || chosen.lemma.isBlank())
+            return false;
+        String lemma = chosen.lemma.trim();
+        String flag = chosen.morphology ? chosen.flag : null;
+        if (!addUserMorphEntry(lemma, flag))
+            return false;
+        suggestCache.clear();
+        String toastLemma = lemma;
+        String toastFlag = flag;
+        int dictSize = userMorphDictionarySize();
+        Runnable ui = () ->
+        {
+            refreshSpellingAfterUserWordChange(toastLemma, true);
+            ToastNotification.show(
+                "Орфография", //$NON-NLS-1$
+                "Слово «" + toastLemma + "» добавлено в словарь. Всего слов: " //$NON-NLS-1$ //$NON-NLS-2$
+                    + dictSize + ".", //$NON-NLS-1$
+                10_000,
+                () -> undoUserMorphAdd(toastLemma, toastFlag),
+                "Отменить добавление"); //$NON-NLS-1$
+        };
         if (display.getThread() == Thread.currentThread())
             ui.run();
         else
             display.asyncExec(ui);
         return true;
+    }
+
+    /** Границы видимого окна подсказки орфографии (для позиционирования диалога). */
+    private static Rectangle captureSpellingHoverBounds(Display display)
+    {
+        Rectangle fromBsl = BslModuleSpellCheckHook.peekSpellingHoverShellBounds();
+        if (fromBsl != null)
+        {
+            Global.tempLog("morph-dialog-pos", //$NON-NLS-1$
+                "capture: via BSL hover/cache " + rectBrief(fromBsl)); //$NON-NLS-1$
+            return fromBsl;
+        }
+        if (display == null || display.isDisposed())
+        {
+            Global.tempLog("morph-dialog-pos", "capture: display null"); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+        Control focus = display.getFocusControl();
+        String focusInfo = focus == null || focus.isDisposed() ? "null"
+            : focus.getClass().getSimpleName() + " shell=" + shellBrief(focus.getShell()); //$NON-NLS-1$
+        Global.tempLog("morph-dialog-pos", "capture: focus=" + focusInfo); //$NON-NLS-1$ //$NON-NLS-2$
+        if (focus != null && !focus.isDisposed())
+        {
+            Shell focused = focus.getShell();
+            if (MorphAddWordDialog.isLikelySpellingHoverShell(focused, true))
+            {
+                Rectangle b = focused.getBounds();
+                Global.tempLog("morph-dialog-pos", "capture: via focus " + rectBrief(b)); //$NON-NLS-1$ //$NON-NLS-2$
+                return b;
+            }
+            Global.tempLog("morph-dialog-pos", //$NON-NLS-1$
+                "capture: focus shell rejected " + shellBrief(focused)); //$NON-NLS-1$
+        }
+        Shell active = display.getActiveShell();
+        Global.tempLog("morph-dialog-pos", "capture: active=" + shellBrief(active)); //$NON-NLS-1$ //$NON-NLS-2$
+        if (MorphAddWordDialog.isLikelySpellingHoverShell(active, true))
+        {
+            Rectangle b = active.getBounds();
+            Global.tempLog("morph-dialog-pos", "capture: via active " + rectBrief(b)); //$NON-NLS-1$ //$NON-NLS-2$
+            return b;
+        }
+        StringBuilder all = new StringBuilder("capture: shells="); //$NON-NLS-1$
+        Shell lastVisible = null;
+        Shell lastHidden = null;
+        for (Shell s : display.getShells())
+        {
+            all.append(" [").append(shellBrief(s)); //$NON-NLS-1$
+            if (MorphAddWordDialog.isLikelySpellingHoverShell(s, true))
+            {
+                all.append(" OK]"); //$NON-NLS-1$
+                if (s.isVisible())
+                    lastVisible = s;
+                else
+                    lastHidden = s;
+            }
+            else
+                all.append(" no]"); //$NON-NLS-1$
+        }
+        Global.tempLog("morph-dialog-pos", all.toString()); //$NON-NLS-1$
+        Shell pick = lastVisible != null ? lastVisible : lastHidden;
+        if (pick != null)
+        {
+            Rectangle b = pick.getBounds();
+            Global.tempLog("morph-dialog-pos", //$NON-NLS-1$
+                "capture: via scan vis=" + pick.isVisible() + " " + rectBrief(b)); //$NON-NLS-1$ //$NON-NLS-2$
+            return b;
+        }
+        Global.tempLog("morph-dialog-pos", "capture: no hover"); //$NON-NLS-1$ //$NON-NLS-2$
+        return null;
+    }
+
+    private static String shellBrief(Shell shell)
+    {
+        if (shell == null || shell.isDisposed())
+            return "null"; //$NON-NLS-1$
+        Rectangle b = shell.getBounds();
+        return "vis=" + shell.isVisible() //$NON-NLS-1$
+            + " style=0x" + Integer.toHexString(shell.getStyle()) //$NON-NLS-1$
+            + " " + rectBrief(b) //$NON-NLS-1$
+            + " text='" + (shell.getText() != null ? shell.getText() : "") + "'"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    private static String rectBrief(Rectangle r)
+    {
+        if (r == null)
+            return "null"; //$NON-NLS-1$
+        return r.x + "," + r.y + " " + r.width + "x" + r.height; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     /** Удалить слово из пользовательского словаря. */
@@ -398,6 +578,14 @@ public final class ComfortSpellingEngine
             return;
         suggestCache.clear();
         refreshSpellingAfterUserWordChange(word, false);
+    }
+
+    private static void undoUserMorphAdd(String lemma, String flagOrNull)
+    {
+        if (!removeUserMorphEntry(lemma, flagOrNull))
+            return;
+        suggestCache.clear();
+        refreshSpellingAfterUserWordChange(lemma, false);
     }
 
     /**
@@ -724,7 +912,7 @@ public final class ComfortSpellingEngine
     private static List<int[]> findMisspelledRangesLegacy(String text)
     {
         List<int[]> result = new ArrayList<>();
-        List<HunspellDictionary> dicts = sharedDictionaries();
+        List<HunspellDictionary> dicts = dictionariesForCheck();
         if (dicts.isEmpty())
             return result;
         int start = -1;
@@ -943,6 +1131,1530 @@ public final class ComfortSpellingEngine
         catch (Exception e)
         {
             return null;
+        }
+    }
+
+    // --- Пользовательский morph-словарь (лемма или лемма/флаг) ---
+
+    private static File getUserMorphDictionaryFile()
+    {
+        Activator activator = Activator.getDefault();
+        if (activator == null)
+            return null;
+        IPath location = activator.getStateLocation();
+        if (location == null)
+            return null;
+        return location.append(USER_MORPH_DICT_FILE).toFile();
+    }
+
+    /**
+     * Создать {@code spelling-user-morph.dic} при отсутствии и вернуть путь.
+     */
+    static File ensureUserMorphDictionaryFile()
+    {
+        File file = getUserMorphDictionaryFile();
+        if (file == null)
+            return null;
+        synchronized (USER_MORPH_LOCK)
+        {
+            try
+            {
+                ensureUserMorphFile(file);
+            }
+            catch (IOException e)
+            {
+            }
+        }
+        return file;
+    }
+
+    /**
+     * Перечитать morph-dic с диска, нормализовать счётчик, перезагрузить Hunspell
+     * и обновить орфографию в UI.
+     */
+    static void reloadUserMorphDictionaryFromDisk()
+    {
+        synchronized (USER_MORPH_LOCK)
+        {
+            List<String> entries = readUserMorphEntries();
+            writeUserMorphEntries(entries);
+            reloadUserMorphDictionaryLocked();
+        }
+        suggestCache.clear();
+        Runnable ui = ComfortSpellingEngine::refreshSpellingAfterUserDictionaryReload;
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        if (display.getThread() == Thread.currentThread())
+            ui.run();
+        else
+            display.asyncExec(ui);
+    }
+
+    private static HunspellDictionary loadUserMorphDictionary()
+    {
+        try
+        {
+            File aff = resolveDictionaryFile(AOT_RU_BASE, ".aff"); //$NON-NLS-1$
+            if (aff == null || !aff.isFile())
+                return null;
+            File dic = getUserMorphDictionaryFile();
+            if (dic == null)
+                return null;
+            ensureUserMorphFile(dic);
+            if (!dic.isFile())
+                return null;
+            return HunspellDictionary.load(aff, dic, HunspellDictionary.ScriptKind.CYRILLIC,
+                StandardCharsets.UTF_8);
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+    }
+
+    private static void ensureUserMorphFile(File dic) throws IOException
+    {
+        if (dic.isFile())
+            return;
+        File parent = dic.getParentFile();
+        if (parent != null && !parent.isDirectory())
+            parent.mkdirs();
+        Files.writeString(dic.toPath(), "0\n", StandardCharsets.UTF_8); //$NON-NLS-1$
+    }
+
+    private static void reloadUserMorphDictionaryLocked()
+    {
+        userMorphDictionary = loadUserMorphDictionary();
+    }
+
+    /**
+     * @param flagOrNull {@code null}/пусто — только лемма без морфологии
+     * @return {@code true}, если запись новая
+     */
+    static boolean addUserMorphEntry(String lemma, String flagOrNull)
+    {
+        if (lemma == null || lemma.isBlank())
+            return false;
+        String stem = lemma.trim();
+        String flag = normalizeMorphFlag(flagOrNull);
+        String line = formatMorphLine(stem, flag);
+        synchronized (USER_MORPH_LOCK)
+        {
+            List<String> entries = readUserMorphEntries();
+            String stemKey = stem.toLowerCase(Locale.ROOT);
+            List<String> kept = new ArrayList<>(entries.size());
+            boolean same = false;
+            for (String existing : entries)
+            {
+                MorphLineParsed parsed = parseMorphLine(existing);
+                if (parsed == null)
+                    continue;
+                if (parsed.lemma.toLowerCase(Locale.ROOT).equals(stemKey))
+                {
+                    if (flagsEqual(parsed.flag, flag))
+                        same = true;
+                    continue;
+                }
+                kept.add(existing);
+            }
+            if (same)
+                return false;
+            kept.add(line);
+            writeUserMorphEntries(kept);
+            reloadUserMorphDictionaryLocked();
+            return true;
+        }
+    }
+
+    /** Число записей в {@code spelling-user-morph.dic}. */
+    static int userMorphDictionarySize()
+    {
+        synchronized (USER_MORPH_LOCK)
+        {
+            return readUserMorphEntries().size();
+        }
+    }
+
+    static boolean removeUserMorphEntry(String lemma, String flagOrNull)
+    {
+        if (lemma == null || lemma.isBlank())
+            return false;
+        String stemKey = lemma.trim().toLowerCase(Locale.ROOT);
+        String flag = normalizeMorphFlag(flagOrNull);
+        synchronized (USER_MORPH_LOCK)
+        {
+            List<String> entries = readUserMorphEntries();
+            boolean removed = false;
+            List<String> kept = new ArrayList<>(entries.size());
+            for (String existing : entries)
+            {
+                MorphLineParsed parsed = parseMorphLine(existing);
+                if (parsed != null
+                    && parsed.lemma.toLowerCase(Locale.ROOT).equals(stemKey)
+                    && flagsEqual(parsed.flag, flag))
+                {
+                    removed = true;
+                    continue;
+                }
+                kept.add(existing);
+            }
+            if (!removed)
+                return false;
+            writeUserMorphEntries(kept);
+            reloadUserMorphDictionaryLocked();
+            return true;
+        }
+    }
+
+    /**
+     * Существующая запись с той же леммой (без учёта регистра), или {@code null}.
+     */
+    private static MorphLineParsed findUserMorphEntry(String lemma)
+    {
+        if (lemma == null || lemma.isBlank())
+            return null;
+        String stemKey = lemma.trim().toLowerCase(Locale.ROOT);
+        synchronized (USER_MORPH_LOCK)
+        {
+            for (String existing : readUserMorphEntries())
+            {
+                MorphLineParsed parsed = parseMorphLine(existing);
+                if (parsed != null && parsed.lemma.toLowerCase(Locale.ROOT).equals(stemKey))
+                    return parsed;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * @return существующая запись, если новая (лемма+флаг) её заместит; {@code null},
+     *         если конфликта нет или запись уже совпадает
+     */
+    private static MorphLineParsed findMorphReplaceConflict(String lemma, String flagOrNull)
+    {
+        MorphLineParsed existing = findUserMorphEntry(lemma);
+        if (existing == null)
+            return null;
+        if (flagsEqual(existing.flag, normalizeMorphFlag(flagOrNull)))
+            return null;
+        return existing;
+    }
+
+    private static String describeMorphEntry(MorphLineParsed entry)
+    {
+        if (entry == null)
+            return ""; //$NON-NLS-1$
+        if (entry.flag == null)
+            return entry.lemma + " (без морфологии)"; //$NON-NLS-1$
+        MorphParadigm byFlag = paradigmByFlag(entry.flag);
+        if (byFlag != null)
+            return entry.lemma + " — " + byFlag.describe(); //$NON-NLS-1$
+        return entry.lemma + "/" + entry.flag; //$NON-NLS-1$
+    }
+
+    private static MorphParadigm paradigmByFlag(String flag)
+    {
+        if (flag == null)
+            return null;
+        for (MorphParadigm p : MORPH_PARADIGMS)
+        {
+            if (p.flag.equals(flag))
+                return p;
+        }
+        return null;
+    }
+
+    private static String normalizeMorphFlag(String flagOrNull)
+    {
+        if (flagOrNull == null)
+            return null;
+        String t = flagOrNull.trim();
+        return t.isEmpty() ? null : t;
+    }
+
+    private static boolean flagsEqual(String a, String b)
+    {
+        if (a == null)
+            return b == null;
+        return a.equals(b);
+    }
+
+    private static String formatMorphLine(String lemma, String flagOrNull)
+    {
+        if (flagOrNull == null)
+            return lemma;
+        return lemma + "/" + flagOrNull; //$NON-NLS-1$
+    }
+
+    private static MorphLineParsed parseMorphLine(String line)
+    {
+        if (line == null)
+            return null;
+        String trimmed = line.trim();
+        if (trimmed.isEmpty() || trimmed.startsWith("#")) //$NON-NLS-1$
+            return null;
+        int slash = trimmed.indexOf('/');
+        if (slash < 0)
+            return new MorphLineParsed(trimmed, null);
+        String lemma = trimmed.substring(0, slash).trim();
+        String flag = trimmed.substring(slash + 1).trim();
+        if (lemma.isEmpty())
+            return null;
+        return new MorphLineParsed(lemma, flag.isEmpty() ? null : flag);
+    }
+
+    private static List<String> readUserMorphEntries()
+    {
+        List<String> entries = new ArrayList<>();
+        File file = getUserMorphDictionaryFile();
+        if (file == null || !file.isFile())
+            return entries;
+        try
+        {
+            List<String> lines = Files.readAllLines(file.toPath(), StandardCharsets.UTF_8);
+            boolean countSkipped = false;
+            for (String raw : lines)
+            {
+                String line = raw.trim();
+                if (line.isEmpty() || line.startsWith("#")) //$NON-NLS-1$
+                    continue;
+                if (!countSkipped)
+                {
+                    countSkipped = true;
+                    continue;
+                }
+                MorphLineParsed parsed = parseMorphLine(line);
+                if (parsed != null)
+                    entries.add(formatMorphLine(parsed.lemma, parsed.flag));
+            }
+        }
+        catch (IOException e)
+        {
+        }
+        return entries;
+    }
+
+    private static void writeUserMorphEntries(List<String> entries)
+    {
+        File file = getUserMorphDictionaryFile();
+        if (file == null)
+            return;
+        try
+        {
+            File parent = file.getParentFile();
+            if (parent != null && !parent.isDirectory())
+                parent.mkdirs();
+            try (BufferedWriter writer = new BufferedWriter(
+                new OutputStreamWriter(Files.newOutputStream(file.toPath()), StandardCharsets.UTF_8)))
+            {
+                writer.write(Integer.toString(entries.size()));
+                writer.newLine();
+                for (String entry : entries)
+                {
+                    writer.write(entry);
+                    writer.newLine();
+                }
+            }
+        }
+        catch (IOException e)
+        {
+        }
+    }
+
+    private static List<String> previewMorphForms(String lemma, String flagOrNull)
+    {
+        if (lemma == null || lemma.isBlank())
+            return List.of();
+        HunspellDictionary dict = sharedUserMorphDictionary();
+        if (dict == null)
+        {
+            // Aff для превью — из бандла; dic может быть пустым
+            dict = loadUserMorphDictionary();
+        }
+        if (dict == null)
+            return List.of(lemma.trim());
+        return dict.expandForms(lemma.trim(), flagOrNull, MORPH_PREVIEW_MAX);
+    }
+
+    private static final class MorphLineParsed
+    {
+        final String lemma;
+        final String flag;
+
+        MorphLineParsed(String lemma, String flag)
+        {
+            this.lemma = lemma;
+            this.flag = flag;
+        }
+    }
+
+    private static final class MorphAddResult
+    {
+        final String lemma;
+        final boolean morphology;
+        final String flag;
+
+        MorphAddResult(String lemma, boolean morphology, String flag)
+        {
+            this.lemma = lemma;
+            this.morphology = morphology;
+            this.flag = flag;
+        }
+    }
+
+    private enum MorphPos
+    {
+        NOUN("Существительное"), //$NON-NLS-1$
+        ADJ("Прилагательное"), //$NON-NLS-1$
+        VERB("Глагол"); //$NON-NLS-1$
+
+        final String label;
+
+        MorphPos(String label)
+        {
+            this.label = label;
+        }
+    }
+
+    private enum MorphGender
+    {
+        MASC("мужской"), //$NON-NLS-1$
+        FEM("женский"), //$NON-NLS-1$
+        NEUT("средний"); //$NON-NLS-1$
+
+        final String label;
+
+        MorphGender(String label)
+        {
+            this.label = label;
+        }
+    }
+
+    private enum MorphNumber
+    {
+        SING("единственное"), //$NON-NLS-1$
+        PLUR("множественное"); //$NON-NLS-1$
+
+        final String label;
+
+        MorphNumber(String label)
+        {
+            this.label = label;
+        }
+    }
+
+    /** Тип склонения / окончания (для сущ.) или шаблон (прил./глаг.). */
+    private enum MorphDeclension
+    {
+        KA("на -ка"), //$NON-NLS-1$
+        A_YA("на -а/-я"), //$NON-NLS-1$
+        ZERO("нулевое окончание"), //$NON-NLS-1$
+        ADJ_YI("на -ый"), //$NON-NLS-1$
+        ADJ_II("на -ий"), //$NON-NLS-1$
+        ADJ_OI("на -ой"), //$NON-NLS-1$
+        VERB_T("на -ть"), //$NON-NLS-1$
+        VERB_TSYA("на -ться"); //$NON-NLS-1$
+
+        final String label;
+
+        MorphDeclension(String label)
+        {
+            this.label = label;
+        }
+    }
+
+    /**
+     * Курируемая парадигма UI → флаг AOT. Для существительных AOT-лемма — ед.ч.;
+     * мн.ч. в UI — признак формы, флаг тот же (от ед.ч. основы).
+     */
+    private static final class MorphParadigm
+    {
+        final String id;
+        final MorphPos pos;
+        final MorphGender gender;
+        final MorphNumber number;
+        final MorphDeclension declension;
+        final String flag;
+
+        MorphParadigm(String id, MorphPos pos, MorphGender gender, MorphNumber number,
+            MorphDeclension declension, String flag)
+        {
+            this.id = id;
+            this.pos = pos;
+            this.gender = gender;
+            this.number = number;
+            this.declension = declension;
+            this.flag = flag;
+        }
+
+        String describe()
+        {
+            if (pos == MorphPos.NOUN)
+                return pos.label + ", " + gender.label + ", " + number.label + ", " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + declension.label;
+            return pos.label + ", " + declension.label; //$NON-NLS-1$
+        }
+    }
+
+    private static final List<MorphParadigm> MORPH_PARADIGMS = List.of(
+        // сущ. ед.ч.
+        new MorphParadigm("noun_fem_sing_ka", MorphPos.NOUN, MorphGender.FEM, MorphNumber.SING,
+            MorphDeclension.KA, "15"), //$NON-NLS-1$ //$NON-NLS-2$
+        new MorphParadigm("noun_fem_sing_a", MorphPos.NOUN, MorphGender.FEM, MorphNumber.SING,
+            MorphDeclension.A_YA, "50"), //$NON-NLS-1$ //$NON-NLS-2$
+        new MorphParadigm("noun_masc_sing_zero", MorphPos.NOUN, MorphGender.MASC, MorphNumber.SING,
+            MorphDeclension.ZERO, "32"), //$NON-NLS-1$ //$NON-NLS-2$
+        new MorphParadigm("noun_neut_sing_zero", MorphPos.NOUN, MorphGender.NEUT, MorphNumber.SING,
+            MorphDeclension.ZERO, "45"), //$NON-NLS-1$ //$NON-NLS-2$
+        // сущ. мн.ч. — те же флаги AOT (лемма должна быть ед.ч.)
+        new MorphParadigm("noun_fem_plur_ka", MorphPos.NOUN, MorphGender.FEM, MorphNumber.PLUR,
+            MorphDeclension.KA, "15"), //$NON-NLS-1$ //$NON-NLS-2$
+        new MorphParadigm("noun_fem_plur_a", MorphPos.NOUN, MorphGender.FEM, MorphNumber.PLUR,
+            MorphDeclension.A_YA, "50"), //$NON-NLS-1$ //$NON-NLS-2$
+        new MorphParadigm("noun_masc_plur_zero", MorphPos.NOUN, MorphGender.MASC, MorphNumber.PLUR,
+            MorphDeclension.ZERO, "32"), //$NON-NLS-1$ //$NON-NLS-2$
+        new MorphParadigm("noun_neut_plur_zero", MorphPos.NOUN, MorphGender.NEUT, MorphNumber.PLUR,
+            MorphDeclension.ZERO, "45"), //$NON-NLS-1$ //$NON-NLS-2$
+        // прил. / глаг.
+        new MorphParadigm("adj_yi", MorphPos.ADJ, null, null, MorphDeclension.ADJ_YI, "8"), //$NON-NLS-1$ //$NON-NLS-2$
+        new MorphParadigm("adj_ii", MorphPos.ADJ, null, null, MorphDeclension.ADJ_II, "2"), //$NON-NLS-1$ //$NON-NLS-2$
+        new MorphParadigm("adj_oi", MorphPos.ADJ, null, null, MorphDeclension.ADJ_OI, "5"), //$NON-NLS-1$ //$NON-NLS-2$
+        new MorphParadigm("verb_t", MorphPos.VERB, null, null, MorphDeclension.VERB_T, "2433"), //$NON-NLS-1$ //$NON-NLS-2$
+        new MorphParadigm("verb_tsya", MorphPos.VERB, null, null, MorphDeclension.VERB_TSYA,
+            "151")); //$NON-NLS-1$ //$NON-NLS-2$
+
+    private static MorphParadigm paradigmById(String id)
+    {
+        for (MorphParadigm p : MORPH_PARADIGMS)
+        {
+            if (p.id.equals(id))
+                return p;
+        }
+        return MORPH_PARADIGMS.get(2);
+    }
+
+    private static MorphParadigm findParadigm(MorphPos pos, MorphGender gender, MorphNumber number,
+        MorphDeclension declension)
+    {
+        for (MorphParadigm p : MORPH_PARADIGMS)
+        {
+            if (p.pos != pos)
+                continue;
+            if (pos == MorphPos.NOUN)
+            {
+                if (p.gender == gender && p.number == number && p.declension == declension)
+                    return p;
+            }
+            else if (p.declension == declension)
+                return p;
+        }
+        return null;
+    }
+
+    private static List<MorphDeclension> declensionsFor(MorphPos pos, MorphNumber number,
+        MorphGender gender)
+    {
+        LinkedHashSet<MorphDeclension> set = new LinkedHashSet<>();
+        for (MorphParadigm p : MORPH_PARADIGMS)
+        {
+            if (p.pos != pos)
+                continue;
+            if (pos == MorphPos.NOUN)
+            {
+                if (number != null && p.number != number)
+                    continue;
+                if (gender != null && p.gender != gender)
+                    continue;
+            }
+            set.add(p.declension);
+        }
+        return new ArrayList<>(set);
+    }
+
+    /**
+     * Сводит форму прилагательного к словарной (им.п. м.р. ед.ч.): куколдного → куколдный.
+     * {@code null}, если не похоже на прилагательное.
+     */
+    private static MorphGuess guessAdjective(String raw, String lower)
+    {
+        if (raw == null || lower == null || lower.length() < 3)
+            return null;
+        MorphGuess g = new MorphGuess();
+        g.morphology = true;
+        g.pos = MorphPos.ADJ;
+        g.gender = MorphGender.MASC;
+        g.number = MorphNumber.SING;
+        if (lower.endsWith("ый")) //$NON-NLS-1$
+        {
+            g.lemma = raw;
+            g.declension = MorphDeclension.ADJ_YI;
+            g.paradigmId = "adj_yi"; //$NON-NLS-1$
+            return g;
+        }
+        if (lower.endsWith("ий")) //$NON-NLS-1$
+        {
+            g.lemma = raw;
+            g.declension = MorphDeclension.ADJ_II;
+            g.paradigmId = "adj_ii"; //$NON-NLS-1$
+            return g;
+        }
+        if (lower.endsWith("ой") && !lower.endsWith("ого") && !lower.endsWith("ому") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            && !lower.endsWith("ою")) //$NON-NLS-1$
+        {
+            // им.п. м.р. на -ой (большой) или спорные формы — предпочитаем -ой
+            g.lemma = raw;
+            g.declension = MorphDeclension.ADJ_OI;
+            g.paradigmId = "adj_oi"; //$NON-NLS-1$
+            return g;
+        }
+        // Косвенные падежи → словарная форма
+        String stem;
+        MorphDeclension decl;
+        String paradId;
+        if (lower.endsWith("его") || lower.endsWith("ему") || lower.endsWith("ими")) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        {
+            stem = raw.substring(0, raw.length() - 3);
+            decl = MorphDeclension.ADJ_II;
+            paradId = "adj_ii"; //$NON-NLS-1$
+            g.lemma = stem + "ий"; //$NON-NLS-1$
+        }
+        else if (lower.endsWith("им") || lower.endsWith("ем") || lower.endsWith("яя") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            || lower.endsWith("юю") || lower.endsWith("ее") || lower.endsWith("ие") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            || lower.endsWith("их")) //$NON-NLS-1$
+        {
+            stem = raw.substring(0, raw.length() - 2);
+            decl = MorphDeclension.ADJ_II;
+            paradId = "adj_ii"; //$NON-NLS-1$
+            g.lemma = stem + "ий"; //$NON-NLS-1$
+        }
+        else if (lower.endsWith("ого") || lower.endsWith("ому") || lower.endsWith("ыми")) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        {
+            stem = raw.substring(0, raw.length() - 3);
+            char last = stem.isEmpty() ? 0 : Character.toLowerCase(stem.charAt(stem.length() - 1));
+            if (isAdjOyStemFinal(last))
+            {
+                decl = MorphDeclension.ADJ_OI;
+                paradId = "adj_oi"; //$NON-NLS-1$
+                g.lemma = stem + "ой"; //$NON-NLS-1$
+            }
+            else
+            {
+                decl = MorphDeclension.ADJ_YI;
+                paradId = "adj_yi"; //$NON-NLS-1$
+                g.lemma = stem + "ый"; //$NON-NLS-1$
+            }
+        }
+        else if (lower.endsWith("ым") || lower.endsWith("ом") || lower.endsWith("ая") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            || lower.endsWith("ую") || lower.endsWith("ое") || lower.endsWith("ые") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            || lower.endsWith("ых") || lower.endsWith("ою")) //$NON-NLS-1$ //$NON-NLS-2$
+        {
+            stem = raw.substring(0, raw.length() - 2);
+            char last = stem.isEmpty() ? 0 : Character.toLowerCase(stem.charAt(stem.length() - 1));
+            if (isAdjOyStemFinal(last))
+            {
+                decl = MorphDeclension.ADJ_OI;
+                paradId = "adj_oi"; //$NON-NLS-1$
+                g.lemma = stem + "ой"; //$NON-NLS-1$
+            }
+            else
+            {
+                decl = MorphDeclension.ADJ_YI;
+                paradId = "adj_yi"; //$NON-NLS-1$
+                g.lemma = stem + "ый"; //$NON-NLS-1$
+            }
+        }
+        else
+            return null;
+        g.declension = decl;
+        g.paradigmId = paradId;
+        return g;
+    }
+
+    private static boolean isAdjOyStemFinal(char last)
+    {
+        return last == 'г' || last == 'к' || last == 'х' || last == 'ж' || last == 'ш'
+            || last == 'ч' || last == 'щ' || last == 'ц';
+    }
+
+    /**
+     * Сводит форму глагола к инфинитиву: куколдил → куколдить, улыбался → улыбаться.
+     */
+    private static MorphGuess guessVerb(String raw, String lower)
+    {
+        if (raw == null || lower == null || lower.length() < 2)
+            return null;
+        MorphGuess g = new MorphGuess();
+        g.morphology = true;
+        g.pos = MorphPos.VERB;
+        g.gender = MorphGender.MASC;
+        g.number = MorphNumber.SING;
+        if (lower.endsWith("ться")) //$NON-NLS-1$
+        {
+            g.lemma = raw;
+            g.declension = MorphDeclension.VERB_TSYA;
+            g.paradigmId = "verb_tsya"; //$NON-NLS-1$
+            return g;
+        }
+        if (lower.endsWith("тись")) //$NON-NLS-1$
+        {
+            g.lemma = raw.substring(0, raw.length() - 4) + "ться"; //$NON-NLS-1$
+            g.declension = MorphDeclension.VERB_TSYA;
+            g.paradigmId = "verb_tsya"; //$NON-NLS-1$
+            return g;
+        }
+        if (lower.endsWith("ть")) //$NON-NLS-1$
+        {
+            g.lemma = raw;
+            g.declension = MorphDeclension.VERB_T;
+            g.paradigmId = "verb_t"; //$NON-NLS-1$
+            return g;
+        }
+        // прош. вр. возвратные: -лся/-лась/-лось/-лись
+        if (lower.endsWith("лся") || lower.endsWith("лась") || lower.endsWith("лось") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            || lower.endsWith("лись")) //$NON-NLS-1$
+        {
+            int cut = lower.endsWith("лся") ? 3 : 4; //$NON-NLS-1$
+            g.lemma = raw.substring(0, raw.length() - cut) + "ться"; //$NON-NLS-1$
+            g.declension = MorphDeclension.VERB_TSYA;
+            g.paradigmId = "verb_tsya"; //$NON-NLS-1$
+            return g;
+        }
+        // прош. вр.: -ла/-ло/-ли, затем -л (куколдил → куколдить)
+        if (lower.endsWith("ла") || lower.endsWith("ло") || lower.endsWith("ли")) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        {
+            g.lemma = raw.substring(0, raw.length() - 2) + "ть"; //$NON-NLS-1$
+            g.declension = MorphDeclension.VERB_T;
+            g.paradigmId = "verb_t"; //$NON-NLS-1$
+            return g;
+        }
+        if (lower.endsWith("л") && lower.length() > 2) //$NON-NLS-1$
+        {
+            g.lemma = raw.substring(0, raw.length() - 1) + "ть"; //$NON-NLS-1$
+            g.declension = MorphDeclension.VERB_T;
+            g.paradigmId = "verb_t"; //$NON-NLS-1$
+            return g;
+        }
+        return null;
+    }
+
+    /** Эвристика: лемма + часть речи + род/число/склонение по окончанию. */
+    private static MorphGuess guessMorphology(String seed)
+    {
+        String raw = seed == null ? "" : seed.trim(); //$NON-NLS-1$
+        String w = raw.toLowerCase(Locale.ROOT);
+        MorphGuess verb = guessVerb(raw, w);
+        if (verb != null)
+            return verb;
+        MorphGuess adj = guessAdjective(raw, w);
+        if (adj != null)
+            return adj;
+        return guessMorphologyForPos(seed, MorphPos.NOUN);
+    }
+
+    /**
+     * Эвристика обрезки окончания от исходного слова при выбранной части речи
+     * (смена POS в диалоге — снова от оригинала, не от уже урезанной леммы).
+     */
+    private static MorphGuess guessMorphologyForPos(String seed, MorphPos pos)
+    {
+        String raw = seed == null ? "" : seed.trim(); //$NON-NLS-1$
+        String w = raw.toLowerCase(Locale.ROOT);
+        MorphGuess g = new MorphGuess();
+        g.lemma = raw.isEmpty() ? w : raw;
+        g.morphology = true;
+        g.pos = pos != null ? pos : MorphPos.NOUN;
+        g.gender = MorphGender.MASC;
+        g.number = MorphNumber.SING;
+        g.declension = MorphDeclension.ZERO;
+        if (g.pos == MorphPos.VERB)
+        {
+            MorphGuess verb = guessVerb(raw, w);
+            if (verb != null)
+                return verb;
+            g.declension = MorphDeclension.VERB_T;
+            g.paradigmId = "verb_t"; //$NON-NLS-1$
+            return g;
+        }
+        if (g.pos == MorphPos.ADJ)
+        {
+            MorphGuess adj = guessAdjective(raw, w);
+            if (adj != null)
+                return adj;
+            g.declension = MorphDeclension.ADJ_YI;
+            g.paradigmId = "adj_yi"; //$NON-NLS-1$
+            return g;
+        }
+        // NOUN
+        if (w.endsWith("ка")) //$NON-NLS-1$
+        {
+            g.gender = MorphGender.FEM;
+            g.declension = MorphDeclension.KA;
+            g.paradigmId = "noun_fem_sing_ka"; //$NON-NLS-1$
+            return g;
+        }
+        if (w.endsWith("ки") && w.length() > 2) //$NON-NLS-1$
+        {
+            g.gender = MorphGender.FEM;
+            g.declension = MorphDeclension.KA;
+            g.lemma = raw.substring(0, raw.length() - 1) + "а"; //$NON-NLS-1$
+            g.paradigmId = "noun_fem_sing_ka"; //$NON-NLS-1$
+            return g;
+        }
+        if (w.endsWith("а") || w.endsWith("я")) //$NON-NLS-1$ //$NON-NLS-2$
+        {
+            g.gender = MorphGender.FEM;
+            g.declension = MorphDeclension.A_YA;
+            g.paradigmId = "noun_fem_sing_a"; //$NON-NLS-1$
+            return g;
+        }
+        if (w.endsWith("ы") || w.endsWith("и")) //$NON-NLS-1$ //$NON-NLS-2$
+        {
+            g.gender = MorphGender.MASC;
+            g.declension = MorphDeclension.ZERO;
+            g.lemma = raw.substring(0, raw.length() - 1);
+            g.paradigmId = "noun_masc_sing_zero"; //$NON-NLS-1$
+            return g;
+        }
+        if (w.endsWith("о") || w.endsWith("е") || w.endsWith("ё")) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        {
+            g.gender = MorphGender.NEUT;
+            g.declension = MorphDeclension.ZERO;
+            g.paradigmId = "noun_neut_sing_zero"; //$NON-NLS-1$
+            return g;
+        }
+        g.gender = MorphGender.MASC;
+        g.declension = MorphDeclension.ZERO;
+        g.paradigmId = "noun_masc_sing_zero"; //$NON-NLS-1$
+        return g;
+    }
+
+    private static final class MorphGuess
+    {
+        String lemma;
+        boolean morphology;
+        MorphPos pos;
+        MorphGender gender;
+        MorphNumber number;
+        MorphDeclension declension;
+        String paradigmId;
+    }
+
+    private static final class MorphAddWordDialog extends Dialog
+    {
+        private final String seedWord;
+        /** Границы hover на момент открытия; {@code null} — искать shell заново / default. */
+        private final Rectangle hoverAnchorBounds;
+        private Text lemmaText;
+        private Button morphCheck;
+        private Combo posCombo;
+        private Label genderLabel;
+        private Combo genderCombo;
+        private Label numberLabel;
+        private Combo numberCombo;
+        private Label declensionLabel;
+        private Combo declensionCombo;
+        private Label previewLabel;
+        private Label typeHintLabel;
+        private Label replaceWarningLabel;
+        private Composite dialogArea;
+        private MorphAddResult result;
+        private boolean updating;
+        /** Высота по полной компоновке (существительное); не сжимаем при смене POS. */
+        private int preferredShellHeight;
+
+        MorphAddWordDialog(Shell parentShell, String seedWord, Rectangle hoverAnchorBounds)
+        {
+            super(parentShell);
+            this.seedWord = seedWord != null ? seedWord : ""; //$NON-NLS-1$
+            this.hoverAnchorBounds = hoverAnchorBounds != null
+                ? new Rectangle(hoverAnchorBounds.x, hoverAnchorBounds.y,
+                    hoverAnchorBounds.width, hoverAnchorBounds.height)
+                : null;
+            setShellStyle(SWT.DIALOG_TRIM | SWT.APPLICATION_MODAL | SWT.RESIZE);
+        }
+
+        MorphAddResult result()
+        {
+            return result;
+        }
+
+        @Override
+        protected void configureShell(Shell shell)
+        {
+            super.configureShell(shell);
+            shell.setText(Global.withPluginWindowTitle("Добавить в словарь")); //$NON-NLS-1$
+        }
+
+        @Override
+        protected Point getInitialSize()
+        {
+            // Высота — по максимальной компоновке (сущ.: число + род + склонение).
+            setNounFieldsVisible(true);
+            if (dialogArea != null && !dialogArea.isDisposed())
+                dialogArea.layout(true, true);
+            getShell().layout(true, true);
+            Point computed = getShell().computeSize(SWT.DEFAULT, SWT.DEFAULT, true);
+            updateNounControlsVisible();
+            if (dialogArea != null && !dialogArea.isDisposed())
+                dialogArea.layout(true, true);
+            preferredShellHeight = computed.y;
+            return new Point(Math.max(420, computed.x), computed.y);
+        }
+
+        @Override
+        protected Point getInitialLocation(Point initialSize)
+        {
+            Rectangle hb = hoverAnchorBounds;
+            Global.tempLog("morph-dialog-pos", //$NON-NLS-1$
+                "loc: captured=" + rectBrief(hoverAnchorBounds) //$NON-NLS-1$
+                    + " size=" + initialSize.x + "x" + initialSize.y); //$NON-NLS-1$ //$NON-NLS-2$
+            if (hb == null)
+            {
+                Shell anchor = findSpellingHoverAnchorShell();
+                if (anchor != null && !anchor.isDisposed())
+                {
+                    hb = anchor.getBounds();
+                    Global.tempLog("morph-dialog-pos", //$NON-NLS-1$
+                        "loc: fallback shell " + shellBrief(anchor)); //$NON-NLS-1$
+                }
+            }
+            if (hb == null)
+            {
+                Point def = super.getInitialLocation(initialSize);
+                Global.tempLog("morph-dialog-pos", //$NON-NLS-1$
+                    "loc: default " + def.x + "," + def.y); //$NON-NLS-1$ //$NON-NLS-2$
+                return def;
+            }
+            Shell ref = getShell();
+            Monitor monitor = ref != null && !ref.isDisposed() ? ref.getMonitor() : null;
+            if (monitor == null && getParentShell() != null)
+                monitor = getParentShell().getMonitor();
+            Rectangle area = monitor != null ? monitor.getClientArea()
+                : Display.getDefault().getClientArea();
+            // Левый верхний угол hover (не справа от края).
+            int x = hb.x;
+            int y = hb.y;
+            if (x + initialSize.x > area.x + area.width)
+                x = Math.max(area.x, area.x + area.width - initialSize.x);
+            if (x < area.x)
+                x = area.x;
+            if (y + initialSize.y > area.y + area.height)
+                y = area.y + area.height - initialSize.y;
+            if (y < area.y)
+                y = area.y;
+            Global.tempLog("morph-dialog-pos", //$NON-NLS-1$
+                "loc: result " + x + "," + y + " hover=" + rectBrief(hb) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    + " mon=" + rectBrief(area)); //$NON-NLS-1$
+            return new Point(x, y);
+        }
+
+        private Shell findSpellingHoverAnchorShell()
+        {
+            Display display = Display.getCurrent();
+            if (display == null)
+                display = Display.getDefault();
+            if (display == null)
+                return null;
+            Control focus = display.getFocusControl();
+            if (focus != null && !focus.isDisposed())
+            {
+                Shell focused = focus.getShell();
+                if (isLikelySpellingHoverShell(focused, true))
+                    return focused;
+            }
+            Shell active = display.getActiveShell();
+            if (isLikelySpellingHoverShell(active, true))
+                return active;
+            Shell parent = getParentShell();
+            if (isLikelySpellingHoverShell(parent, true))
+                return parent;
+            Shell best = null;
+            for (Shell s : display.getShells())
+            {
+                if (isLikelySpellingHoverShell(s, true))
+                    best = s;
+            }
+            return best;
+        }
+
+        static boolean isLikelySpellingHoverShell(Shell shell)
+        {
+            return isLikelySpellingHoverShell(shell, false);
+        }
+
+        /**
+         * @param allowHidden {@code true} — shell уже скрыт после клика по proposal
+         *                    (в логе: 245×101 vis=false)
+         */
+        static boolean isLikelySpellingHoverShell(Shell shell, boolean allowHidden)
+        {
+            if (shell == null || shell.isDisposed())
+                return false;
+            if (!allowHidden && !shell.isVisible())
+                return false;
+            String title = shell.getText();
+            if (title != null && title.contains("Добавить в словарь")) //$NON-NLS-1$
+                return false;
+            int style = shell.getStyle();
+            if ((style & SWT.APPLICATION_MODAL) != 0)
+                return false;
+            Rectangle b = shell.getBounds();
+            if (b.width < 80 || b.height < 40)
+                return false;
+            if (b.width >= 700 || b.height >= 500)
+                return false;
+            return true;
+        }
+
+        @Override
+        protected boolean isResizable()
+        {
+            return true;
+        }
+
+        @Override
+        protected void createButtonsForButtonBar(Composite parent)
+        {
+            createButton(parent, IDialogConstants.OK_ID, "Добавить", true); //$NON-NLS-1$
+            createButton(parent, IDialogConstants.CANCEL_ID, "Отмена", false); //$NON-NLS-1$
+            updateAddButtonAndTypeHint();
+        }
+
+        @Override
+        protected Control createDialogArea(Composite parent)
+        {
+            Composite area = (Composite) super.createDialogArea(parent);
+            dialogArea = area;
+            area.setLayout(new GridLayout(2, false));
+
+            Label lemmaLabel = new Label(area, SWT.NONE);
+            lemmaLabel.setText("Лемма:"); //$NON-NLS-1$
+            lemmaText = new Text(area, SWT.BORDER);
+            lemmaText.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+
+            morphCheck = new Button(area, SWT.CHECK);
+            morphCheck.setText("Морфология"); //$NON-NLS-1$
+            GridData morphGd = new GridData(SWT.FILL, SWT.CENTER, true, false);
+            morphGd.horizontalSpan = 2;
+            morphCheck.setLayoutData(morphGd);
+            morphCheck.setSelection(true);
+
+            Label posLabel = new Label(area, SWT.NONE);
+            posLabel.setText("Часть речи:"); //$NON-NLS-1$
+            posCombo = new Combo(area, SWT.READ_ONLY | SWT.DROP_DOWN);
+            posCombo.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+            for (MorphPos pos : MorphPos.values())
+                posCombo.add(pos.label);
+
+            numberLabel = new Label(area, SWT.NONE);
+            numberLabel.setText("Число:"); //$NON-NLS-1$
+            numberLabel.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false));
+            numberCombo = new Combo(area, SWT.READ_ONLY | SWT.DROP_DOWN);
+            numberCombo.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+            for (MorphNumber number : MorphNumber.values())
+                numberCombo.add(number.label);
+
+            genderLabel = new Label(area, SWT.NONE);
+            genderLabel.setText("Род:"); //$NON-NLS-1$
+            genderLabel.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false));
+            genderCombo = new Combo(area, SWT.READ_ONLY | SWT.DROP_DOWN);
+            genderCombo.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+            for (MorphGender gender : MorphGender.values())
+                genderCombo.add(gender.label);
+
+            declensionLabel = new Label(area, SWT.NONE);
+            declensionLabel.setText("Склонение:"); //$NON-NLS-1$
+            declensionCombo = new Combo(area, SWT.READ_ONLY | SWT.DROP_DOWN);
+            declensionCombo.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+            declensionCombo.setToolTipText(
+                "Тип задаёт словарное окончание леммы. При морфологии лемма должна "
+                    + "оканчиваться соответственно: -ка, -а/-я, -ый/-ий/-ой, -ть/-ться "
+                    + "и т.п. Иначе формы не строятся."); //$NON-NLS-1$
+
+            Label prevTitle = new Label(area, SWT.NONE);
+            prevTitle.setText("Формы:"); //$NON-NLS-1$
+            prevTitle.setLayoutData(new GridData(SWT.LEFT, SWT.TOP, false, false));
+            previewLabel = new Label(area, SWT.WRAP);
+            GridData prevGd = new GridData(SWT.FILL, SWT.TOP, true, false);
+            prevGd.widthHint = 320;
+            previewLabel.setLayoutData(prevGd);
+
+            typeHintLabel = new Label(area, SWT.WRAP);
+            GridData typeHintGd = new GridData(SWT.FILL, SWT.CENTER, true, false);
+            typeHintGd.horizontalSpan = 2;
+            typeHintGd.widthHint = 400;
+            typeHintLabel.setLayoutData(typeHintGd);
+            typeHintLabel.setForeground(
+                area.getDisplay().getSystemColor(SWT.COLOR_DARK_BLUE));
+
+            replaceWarningLabel = new Label(area, SWT.WRAP);
+            GridData warnGd = new GridData(SWT.FILL, SWT.CENTER, true, false);
+            warnGd.horizontalSpan = 2;
+            warnGd.widthHint = 400;
+            replaceWarningLabel.setLayoutData(warnGd);
+            replaceWarningLabel.setForeground(
+                area.getDisplay().getSystemColor(SWT.COLOR_DARK_RED));
+
+            MorphGuess guess = guessMorphology(seedWord);
+            updating = true;
+            lemmaText.setText(guess.lemma != null ? guess.lemma : seedWord);
+            morphCheck.setSelection(guess.morphology);
+            selectPos(guess.pos);
+            selectNumber(guess.number);
+            selectGender(guess.gender);
+            refillDeclensions(guess.pos, guess.number, guess.gender, guess.declension);
+            updating = false;
+
+            ModifyListener refresh = e ->
+            {
+                if (!updating)
+                    refreshPreviewAndWarning();
+            };
+            lemmaText.addModifyListener(refresh);
+            SelectionAdapter morphListener = new SelectionAdapter()
+            {
+                @Override
+                public void widgetSelected(SelectionEvent e)
+                {
+                    if (updating)
+                        return;
+                    updating = true;
+                    if (!morphCheck.getSelection())
+                    {
+                        lemmaText.setText(seedWord);
+                    }
+                    else
+                    {
+                        MorphGuess g = guessMorphology(seedWord);
+                        lemmaText.setText(g.lemma != null ? g.lemma : seedWord);
+                        selectPos(g.pos);
+                        selectNumber(g.number);
+                        selectGender(g.gender);
+                        refillDeclensions(g.pos, g.number, g.gender, g.declension);
+                    }
+                    updating = false;
+                    updateMorphEnabled();
+                    updateNounControlsVisible();
+                    if (selectedPos() == MorphPos.NOUN)
+                        declensionLabel.setText("Склонение:"); //$NON-NLS-1$
+                    else
+                        declensionLabel.setText("Тип:"); //$NON-NLS-1$
+                    refreshPreviewAndWarning();
+                }
+            };
+            morphCheck.addSelectionListener(morphListener);
+            posCombo.addSelectionListener(new SelectionAdapter()
+            {
+                @Override
+                public void widgetSelected(SelectionEvent e)
+                {
+                    if (updating)
+                        return;
+                    if (morphCheck.getSelection())
+                        applyHeuristicFromSeed(selectedPos());
+                    updateNounControlsVisible();
+                    updateMorphEnabled();
+                    if (selectedPos() == MorphPos.NOUN)
+                        declensionLabel.setText("Склонение:"); //$NON-NLS-1$
+                    else
+                        declensionLabel.setText("Тип:"); //$NON-NLS-1$
+                    refreshPreviewAndWarning();
+                }
+            });
+            genderCombo.addSelectionListener(new SelectionAdapter()
+            {
+                @Override
+                public void widgetSelected(SelectionEvent e)
+                {
+                    if (updating)
+                        return;
+                    refillDeclensions(selectedPos(), selectedNumber(), selectedGender(), null);
+                    refreshPreviewAndWarning();
+                }
+            });
+            numberCombo.addSelectionListener(new SelectionAdapter()
+            {
+                @Override
+                public void widgetSelected(SelectionEvent e)
+                {
+                    if (updating)
+                        return;
+                    updateMorphEnabled();
+                    refillDeclensions(selectedPos(), selectedNumber(), selectedGender(), null);
+                    refreshPreviewAndWarning();
+                }
+            });
+            declensionCombo.addSelectionListener(new SelectionAdapter()
+            {
+                @Override
+                public void widgetSelected(SelectionEvent e)
+                {
+                    if (!updating)
+                        refreshPreviewAndWarning();
+                }
+            });
+
+            updateMorphEnabled();
+            updateNounControlsVisible();
+            refreshPreviewAndWarning();
+            return area;
+        }
+
+        private void updateNounControlsVisible()
+        {
+            setNounFieldsVisible(selectedPos() == MorphPos.NOUN);
+        }
+
+        /** Пересчёт леммы/склонения от {@link #seedWord} под выбранную часть речи. */
+        private void applyHeuristicFromSeed(MorphPos pos)
+        {
+            MorphGuess g = guessMorphologyForPos(seedWord, pos);
+            updating = true;
+            lemmaText.setText(g.lemma != null ? g.lemma : seedWord);
+            if (pos == MorphPos.NOUN)
+            {
+                selectNumber(g.number);
+                selectGender(g.gender);
+            }
+            refillDeclensions(pos,
+                pos == MorphPos.NOUN ? g.number : null,
+                pos == MorphPos.NOUN ? g.gender : null,
+                g.declension);
+            updating = false;
+        }
+
+        private void setNounFieldsVisible(boolean noun)
+        {
+            if (numberLabel == null || numberLabel.isDisposed())
+                return;
+            numberLabel.setVisible(noun);
+            numberCombo.setVisible(noun);
+            genderLabel.setVisible(noun);
+            genderCombo.setVisible(noun);
+            ((GridData) numberLabel.getLayoutData()).exclude = !noun;
+            ((GridData) numberCombo.getLayoutData()).exclude = !noun;
+            ((GridData) genderLabel.getLayoutData()).exclude = !noun;
+            ((GridData) genderCombo.getLayoutData()).exclude = !noun;
+            if (dialogArea != null && !dialogArea.isDisposed())
+                dialogArea.layout(true, true);
+            // Не сжимаем shell при скрытии полей сущ. — высота от макс. компоновки.
+            Shell shell = getShell();
+            if (shell != null && !shell.isDisposed() && preferredShellHeight > 0)
+            {
+                Point size = shell.getSize();
+                if (size.y < preferredShellHeight)
+                    shell.setSize(size.x, preferredShellHeight);
+            }
+        }
+
+        private void selectPos(MorphPos pos)
+        {
+            MorphPos target = pos != null ? pos : MorphPos.NOUN;
+            MorphPos[] values = MorphPos.values();
+            for (int i = 0; i < values.length; i++)
+            {
+                if (values[i] == target)
+                {
+                    posCombo.select(i);
+                    return;
+                }
+            }
+            posCombo.select(0);
+        }
+
+        private MorphPos selectedPos()
+        {
+            int idx = posCombo.getSelectionIndex();
+            MorphPos[] values = MorphPos.values();
+            if (idx < 0 || idx >= values.length)
+                return MorphPos.NOUN;
+            return values[idx];
+        }
+
+        private void selectGender(MorphGender gender)
+        {
+            MorphGender target = gender != null ? gender : MorphGender.MASC;
+            MorphGender[] values = MorphGender.values();
+            for (int i = 0; i < values.length; i++)
+            {
+                if (values[i] == target)
+                {
+                    genderCombo.select(i);
+                    return;
+                }
+            }
+            genderCombo.select(0);
+        }
+
+        private MorphGender selectedGender()
+        {
+            int idx = genderCombo.getSelectionIndex();
+            MorphGender[] values = MorphGender.values();
+            if (idx < 0 || idx >= values.length)
+                return MorphGender.MASC;
+            return values[idx];
+        }
+
+        private void selectNumber(MorphNumber number)
+        {
+            MorphNumber target = number != null ? number : MorphNumber.SING;
+            MorphNumber[] values = MorphNumber.values();
+            for (int i = 0; i < values.length; i++)
+            {
+                if (values[i] == target)
+                {
+                    numberCombo.select(i);
+                    return;
+                }
+            }
+            numberCombo.select(0);
+        }
+
+        private MorphNumber selectedNumber()
+        {
+            int idx = numberCombo.getSelectionIndex();
+            MorphNumber[] values = MorphNumber.values();
+            if (idx < 0 || idx >= values.length)
+                return MorphNumber.SING;
+            return values[idx];
+        }
+
+        private void refillDeclensions(MorphPos pos, MorphNumber number, MorphGender gender,
+            MorphDeclension prefer)
+        {
+            List<MorphDeclension> list = declensionsFor(pos, number, gender);
+            declensionCombo.removeAll();
+            int select = 0;
+            for (int i = 0; i < list.size(); i++)
+            {
+                MorphDeclension d = list.get(i);
+                declensionCombo.add(d.label);
+                if (prefer != null && prefer == d)
+                    select = i;
+            }
+            if (!list.isEmpty())
+                declensionCombo.select(select);
+        }
+
+        private MorphDeclension selectedDeclension()
+        {
+            MorphPos pos = selectedPos();
+            MorphNumber number = pos == MorphPos.NOUN ? selectedNumber() : null;
+            MorphGender gender = pos == MorphPos.NOUN ? selectedGender() : null;
+            List<MorphDeclension> list = declensionsFor(pos, number, gender);
+            int idx = declensionCombo.getSelectionIndex();
+            if (idx < 0 || idx >= list.size())
+                return list.isEmpty() ? MorphDeclension.ZERO : list.get(0);
+            return list.get(idx);
+        }
+
+        private MorphParadigm selectedParadigm()
+        {
+            MorphPos pos = selectedPos();
+            MorphDeclension decl = selectedDeclension();
+            if (pos == MorphPos.NOUN)
+            {
+                MorphParadigm p = findParadigm(pos, selectedGender(), selectedNumber(), decl);
+                if (p != null)
+                    return p;
+                return paradigmById("noun_masc_sing_zero"); //$NON-NLS-1$
+            }
+            MorphParadigm p = findParadigm(pos, null, null, decl);
+            return p != null ? p : paradigmById("adj_yi"); //$NON-NLS-1$
+        }
+
+        private String selectedFlagOrNull()
+        {
+            return morphCheck.getSelection() ? selectedParadigm().flag : null;
+        }
+
+        private void updateMorphEnabled()
+        {
+            boolean on = morphCheck.getSelection();
+            posCombo.setEnabled(on);
+            numberCombo.setEnabled(on);
+            genderCombo.setEnabled(on);
+            declensionCombo.setEnabled(on);
+            previewLabel.setEnabled(on);
+        }
+
+        private void refreshPreviewAndWarning()
+        {
+            String lemma = lemmaText.getText() != null ? lemmaText.getText().trim() : ""; //$NON-NLS-1$
+            if (!morphCheck.getSelection())
+            {
+                previewLabel.setText(lemma.isEmpty() ? "—" : lemma); //$NON-NLS-1$
+            }
+            else
+            {
+                MorphParadigm p = selectedParadigm();
+                List<String> forms = previewMorphForms(lemma, p.flag);
+                String formsText = forms.isEmpty() ? "—" : String.join(", ", forms); //$NON-NLS-1$ //$NON-NLS-2$
+                previewLabel.setText(formsText);
+            }
+            refreshReplaceWarning(lemma, selectedFlagOrNull());
+            updateAddButtonAndTypeHint();
+        }
+
+        /**
+         * @return текст подсказки при несоответствии леммы типу, иначе {@code null}
+         */
+        private String morphTypeMismatchMessage()
+        {
+            if (!morphCheck.getSelection())
+                return null;
+            String lemma = lemmaText.getText() != null ? lemmaText.getText().trim() : ""; //$NON-NLS-1$
+            if (lemma.isEmpty())
+                return "Укажите лемму."; //$NON-NLS-1$
+            MorphDeclension decl = selectedDeclension();
+            if (lemmaMatchesDeclension(lemma, decl))
+                return null;
+            String ending = declensionRequiredEndingLabel(decl);
+            if (ending == null)
+                return null;
+            return "Лемма должна оканчиваться на " + ending //$NON-NLS-1$
+                + " — словарная форма для типа «" + decl.label + "». " //$NON-NLS-1$ //$NON-NLS-2$
+                + "Сейчас «" + lemma + "» этому не соответствует, формы не строятся."; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        private static boolean lemmaMatchesDeclension(String lemma, MorphDeclension decl)
+        {
+            if (lemma == null || lemma.isEmpty() || decl == null)
+                return false;
+            String w = lemma.toLowerCase(Locale.ROOT);
+            switch (decl)
+            {
+            case KA:
+                return w.endsWith("ка"); //$NON-NLS-1$
+            case A_YA:
+                return w.endsWith("а") || w.endsWith("я"); //$NON-NLS-1$ //$NON-NLS-2$
+            case ZERO:
+                return true;
+            case ADJ_YI:
+                return w.endsWith("ый"); //$NON-NLS-1$
+            case ADJ_II:
+                return w.endsWith("ий"); //$NON-NLS-1$
+            case ADJ_OI:
+                return w.endsWith("ой"); //$NON-NLS-1$
+            case VERB_T:
+                return w.endsWith("ть") && !w.endsWith("ться"); //$NON-NLS-1$ //$NON-NLS-2$
+            case VERB_TSYA:
+                return w.endsWith("ться"); //$NON-NLS-1$
+            default:
+                return true;
+            }
+        }
+
+        private static String declensionRequiredEndingLabel(MorphDeclension decl)
+        {
+            if (decl == null)
+                return null;
+            switch (decl)
+            {
+            case KA:
+                return "-ка"; //$NON-NLS-1$
+            case A_YA:
+                return "-а/-я"; //$NON-NLS-1$
+            case ZERO:
+                return null;
+            case ADJ_YI:
+                return "-ый"; //$NON-NLS-1$
+            case ADJ_II:
+                return "-ий"; //$NON-NLS-1$
+            case ADJ_OI:
+                return "-ой"; //$NON-NLS-1$
+            case VERB_T:
+                return "-ть (инфинитив)"; //$NON-NLS-1$
+            case VERB_TSYA:
+                return "-ться"; //$NON-NLS-1$
+            default:
+                return null;
+            }
+        }
+
+        private void updateAddButtonAndTypeHint()
+        {
+            String mismatch = morphTypeMismatchMessage();
+            if (typeHintLabel != null && !typeHintLabel.isDisposed())
+            {
+                String text = mismatch != null ? mismatch : ""; //$NON-NLS-1$
+                typeHintLabel.setText(text);
+                GridData gd = (GridData) typeHintLabel.getLayoutData();
+                gd.exclude = text.isEmpty();
+                typeHintLabel.setVisible(!text.isEmpty());
+                if (dialogArea != null && !dialogArea.isDisposed())
+                    dialogArea.layout(true, true);
+            }
+            Button add = getButton(IDialogConstants.OK_ID);
+            if (add != null && !add.isDisposed())
+            {
+                String lemma = lemmaText.getText() != null ? lemmaText.getText().trim() : ""; //$NON-NLS-1$
+                add.setEnabled(!lemma.isEmpty() && mismatch == null);
+            }
+        }
+
+        private void refreshReplaceWarning(String lemma, String flagOrNull)
+        {
+            String text = ""; //$NON-NLS-1$
+            if (lemma != null && !lemma.isEmpty() && morphTypeMismatchMessage() == null)
+            {
+                MorphLineParsed existing = findUserMorphEntry(lemma);
+                if (existing != null)
+                {
+                    if (flagsEqual(existing.flag, normalizeMorphFlag(flagOrNull)))
+                    {
+                        text = "Эта лемма уже есть в словаре с такими же настройками."; //$NON-NLS-1$
+                    }
+                    else
+                    {
+                        text = "Внимание: будет замещена существующая запись «" //$NON-NLS-1$
+                            + describeMorphEntry(existing) + "»."; //$NON-NLS-1$
+                    }
+                }
+            }
+            replaceWarningLabel.setText(text);
+            GridData warnGd = (GridData) replaceWarningLabel.getLayoutData();
+            warnGd.exclude = text.isEmpty();
+            replaceWarningLabel.setVisible(!text.isEmpty());
+            replaceWarningLabel.getParent().layout(true, true);
+        }
+
+        @Override
+        protected void okPressed()
+        {
+            String lemma = lemmaText.getText() != null ? lemmaText.getText().trim() : ""; //$NON-NLS-1$
+            if (lemma.isEmpty())
+                return;
+            if (morphTypeMismatchMessage() != null)
+                return;
+            boolean morph = morphCheck.getSelection();
+            String flag = morph ? selectedParadigm().flag : null;
+            MorphLineParsed conflict = findMorphReplaceConflict(lemma, flag);
+            if (conflict != null)
+            {
+                String message = "Лемма «" + lemma //$NON-NLS-1$
+                    + "» уже есть в словаре как «" //$NON-NLS-1$
+                    + describeMorphEntry(conflict)
+                    + "». Заменить запись новыми настройками?"; //$NON-NLS-1$
+                if (!MessageDialog.openConfirm(getShell(),
+                    Global.withPluginWindowTitle("Замещение леммы"), //$NON-NLS-1$
+                    message))
+                    return;
+            }
+            else
+            {
+                MorphLineParsed same = findUserMorphEntry(lemma);
+                if (same != null && flagsEqual(same.flag, normalizeMorphFlag(flag)))
+                {
+                    MessageDialog.openInformation(getShell(),
+                        Global.withPluginWindowTitle("Добавить в словарь"), //$NON-NLS-1$
+                        "Эта лемма уже есть в словаре с такими же настройками."); //$NON-NLS-1$
+                    return;
+                }
+            }
+            result = new MorphAddResult(lemma, morph, flag);
+            super.okPressed();
         }
     }
 }
