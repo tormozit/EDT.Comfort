@@ -491,7 +491,7 @@ public final class BslServerCallHighlightingHook implements IStartup
         try
         {
             RGB light = ComfortSettings.parseRgb(colorStr, fallback);
-            RGB effective = SmartMatchHighlight.toEffectiveRgb(light);
+            RGB effective = ThemeAwareColors.toEffectiveRgb(light);
             Color foreground = new Color(Display.getCurrent(), effective);
             return new TextAttribute(foreground, null, org.eclipse.swt.SWT.NONE, null);
         }

@@ -295,7 +295,7 @@ public class CompareSearchResultPage implements ISearchResultPage
         @Override
         public void applyStyles(TextStyle textStyle)
         {
-            textStyle.foreground = SmartMatchHighlight.effectiveSystemColor(
+            textStyle.foreground = ThemeAwareColors.effectiveSystemColor(
                 Display.getCurrent(), SWT.COLOR_DARK_GRAY);
         }
     };

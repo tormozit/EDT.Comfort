@@ -591,7 +591,7 @@ public final class ComfortSpellingEngine
             }
             if (locale == null)
                 locale = new Locale("ru", "RU"); //$NON-NLS-1$ //$NON-NLS-2$
-            IDocument document = new Document(text);
+            IDocument document = new Document(maskAmpersand(text));
             SpellCheckIterator iterator = new SpellCheckIterator(document,
                 new Region(0, text.length()), locale, null);
             if (prefs.getBoolean(PreferenceConstants.SPELLING_IGNORE_SINGLE_LETTERS))
@@ -652,6 +652,27 @@ public final class ComfortSpellingEngine
         {
             return null;
         }
+    }
+
+    /**
+     * {@link SpellCheckIterator} рассчитан на Javadoc и трактует {@code &<буква>} без
+     * завершающей {@code ;} как незакрытую HTML-сущность - в этом случае склеивает {@code &}
+     * со следующим словом в один токен ({@code "&Ссылка"} вместо {@code "Ссылка"}), и токен не
+     * находится в словаре. В BSL {@code &} - синтаксис параметра запроса/директивы, а не начало
+     * сущности, поэтому гасим его пробелом (та же длина строки, смещения диапазонов не съезжают)
+     * до передачи текста в итератор.
+     */
+    private static String maskAmpersand(String text)
+    {
+        if (text.indexOf('&') < 0)
+            return text;
+        char[] chars = text.toCharArray();
+        for (int i = 0; i < chars.length; i++)
+        {
+            if (chars[i] == '&')
+                chars[i] = ' ';
+        }
+        return new String(chars);
     }
 
     /** Как DefaultSpellChecker.isMixedCase: первая заглавная в начале предложения не считается. */

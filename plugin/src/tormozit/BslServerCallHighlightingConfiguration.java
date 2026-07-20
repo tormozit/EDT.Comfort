@@ -61,7 +61,7 @@ public final class BslServerCallHighlightingConfiguration
     private static RGB effectiveServerCallColor(String stored, String fallback)
     {
         RGB light = ComfortSettings.parseRgb(stored, fallback);
-        return SmartMatchHighlight.toEffectiveRgb(light);
+        return ThemeAwareColors.toEffectiveRgb(light);
     }
 
     private static IHighlightingConfiguration createNativeDelegate()

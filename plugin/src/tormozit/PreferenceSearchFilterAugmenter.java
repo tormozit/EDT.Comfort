@@ -297,7 +297,7 @@ final class PreferenceSearchFilterAugmenter
     private static Color accentColor(Control control)
     {
         Display display = control.getDisplay();
-        return display.getSystemColor(SmartMatchHighlight.isDarkTheme() ? SWT.COLOR_YELLOW : SWT.COLOR_DARK_YELLOW);
+        return display.getSystemColor(ThemeAwareColors.isDarkTheme() ? SWT.COLOR_YELLOW : SWT.COLOR_DARK_YELLOW);
     }
 
     /**

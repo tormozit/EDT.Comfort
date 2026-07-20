@@ -101,7 +101,7 @@ public final class FileSearchResultsHook implements IStartup
         @Override
         public void applyStyles(TextStyle textStyle)
         {
-            textStyle.foreground = SmartMatchHighlight.effectiveSystemColor(
+            textStyle.foreground = ThemeAwareColors.effectiveSystemColor(
                 Display.getCurrent(), SWT.COLOR_DARK_BLUE);
         }
     };
@@ -347,7 +347,8 @@ public final class FileSearchResultsHook implements IStartup
             updateTableFromSelection(treeViewer, tableViewer);
 
         installFileTreeMatchCount(treeViewer);
-        TreeSoleChildAutoExpand.installForComfortLists(treeViewer);
+        TreeSoleChildAutoExpand.installWhitelisted(
+                TreeSoleChildAutoExpand.Target.SEARCH_FILES, treeViewer);
 
         log("installSplitLayout: done");
     }

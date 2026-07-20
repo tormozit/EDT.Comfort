@@ -17,6 +17,7 @@
     <startup class="tormozit.TextEditorMenuHook"/>
     <startup class="tormozit.QueryTextEditDialogHook"/>
     <startup class="tormozit.FormEditorHook"/>
+    <startup class="tormozit.TreeSoleChildAutoExpand"/>
     <startup class="tormozit.IrKeyBindingHook"/>
     <startup class="tormozit.IrBslEditorHoverHook"/>
     <startup class="tormozit.PriorityGlobalKeyBindingHook"/>
@@ -157,12 +158,6 @@
           contextId="org.eclipse.xtext.ui.XtextEditorScope"
           schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
           sequence="M3+M2+F">
-    </key>
-    <key
-          commandId="tormozit.IrModuleCheck"
-          contextId="org.eclipse.xtext.ui.XtextEditorScope"
-          schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
-          sequence="M1+F7">
     </key>
     <key
           commandId="tormozit.CollectionSkeleton"
@@ -693,7 +688,7 @@
             <command
               commandId="tormozit.RecentPlaces"
               label = "Последние"
-              icon="icons/obj16/recent_places.gif"
+              icon="icons/obj16/recent_places.png"
               tooltip="Последние посещённые методы и объекты метаданных (Комфорт)"
               style="push">
             </command>
@@ -703,7 +698,7 @@
           locationURI="toolbar:com._1c.g5.v8.dt.ui2.navigator?after=com._1c.g5.v8.dt.navigator.ui.filterBySubsystems">
         <command
             commandId="tormozit.navigator.filterByObjectSet"
-            icon="icons/obj16/Favorites.gif"
+            icon="icons/etool16/object_set_filter_star.png"
             label="Фильтр по набору"
             style="toggle"
             tooltip="Показать только объекты активного набора; вытесняет фильтр подсистем (Комфорт)"/>
@@ -725,7 +720,7 @@
         allowMultiple="false"
         category="tormozit.views"
         class="tormozit.RecentPlacesView"
-        icon="icons/obj16/recent_places.gif"
+        icon="icons/obj16/recent_places.png"
         id="tormozit.RecentPlacesView"
         name="Последние места"
         restorable="true"/>
@@ -733,7 +728,7 @@
         allowMultiple="false"
         category="tormozit.views"
         class="tormozit.ObjectSetsView"
-        icon="icons/obj16/Favorites.gif"
+        icon="icons/etool16/object_set_filter_star.png"
         id="tormozit.ObjectSetsView"
         name="Наборы объектов"
         restorable="true"/>

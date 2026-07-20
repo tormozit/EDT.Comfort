@@ -272,7 +272,7 @@ public class ComfortPreferencePage
     }
 
     /**
-     * Color picker: store = светлый RGB; в тёмной теме в контроле — {@link SmartMatchHighlight#invertLightness};
+     * Color picker: store = светлый RGB; в тёмной теме в контроле — {@link ThemeAwareColors#invertLightness};
      * при Save из контрола — обратный invert → светлый в store.
      */
     private static final class ThemeAwareColorFieldEditor extends ColorFieldEditor
@@ -289,10 +289,10 @@ public class ComfortPreferencePage
         private void applyLightToControl(RGB lightFromStore)
         {
             lastLightFromStore = lightFromStore;
-            controlShowsDarkEffective = SmartMatchHighlight.isDarkTheme();
+            controlShowsDarkEffective = ThemeAwareColors.isDarkTheme();
             // Явно: в тёмной — invert, без повторного isDarkTheme внутри toEffectiveRgb.
             RGB forControl = controlShowsDarkEffective
-                ? SmartMatchHighlight.invertLightness(lightFromStore)
+                ? ThemeAwareColors.invertLightness(lightFromStore)
                 : lightFromStore;
             getColorSelector().setColorValue(forControl);
             // Повторно после отрисовки страницы — на случай если что-то перезапишет селектор.
@@ -318,7 +318,7 @@ public class ComfortPreferencePage
             if (store == null)
                 return;
             RGB raw = PreferenceConverter.getColor(store, getPreferenceName());
-            RGB light = SmartMatchHighlight.sanitizeStoredLightRgb(raw);
+            RGB light = ThemeAwareColors.sanitizeStoredLightRgb(raw);
             if (light.red != raw.red || light.green != raw.green || light.blue != raw.blue)
                 PreferenceConverter.setValue(store, getPreferenceName(), light);
             applyLightToControl(light);
@@ -345,7 +345,7 @@ public class ComfortPreferencePage
                 return;
             RGB fromControl = getColorSelector().getColorValue();
             RGB toStore;
-            if (controlShowsDarkEffective || SmartMatchHighlight.isDarkTheme())
+            if (controlShowsDarkEffective || ThemeAwareColors.isDarkTheme())
             {
                 // В контроле должен быть effective. Если там всё ещё светлый с store —
                 // load не сработал: не инвертируем повторно (иначе испортим store).
@@ -358,7 +358,7 @@ public class ComfortPreferencePage
                 }
                 else
                 {
-                    toStore = SmartMatchHighlight.invertLightness(fromControl);
+                    toStore = ThemeAwareColors.invertLightness(fromControl);
                 }
             }
             else
@@ -783,7 +783,7 @@ public class ComfortPreferencePage
         int indent = convertHorizontalDLUsToPixels(IDialogConstants.INDENT + 12);
         gd.horizontalIndent = indent;
         hint.setLayoutData(gd);
-        hint.setForeground(SmartMatchHighlight.effectiveSystemColor(
+        hint.setForeground(ThemeAwareColors.effectiveSystemColor(
             parent.getDisplay(), SWT.COLOR_DARK_GRAY));
 
         parent.addControlListener(new ControlAdapter()

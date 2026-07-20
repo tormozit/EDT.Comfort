@@ -232,13 +232,15 @@ public class CompareConfigMenuHook implements IStartup
                     if (v != null)
                     {
                         listener.setTreeViewer(v);
-                        TreeSoleChildAutoExpand.installForComfortLists(v);
+                        TreeSoleChildAutoExpand.installWhitelisted(
+                                TreeSoleChildAutoExpand.Target.COMPARE_CONFIG, v);
                     }
                 });
                 return;
             }
             listener.setTreeViewer(viewer);
-            TreeSoleChildAutoExpand.installForComfortLists(viewer);
+            TreeSoleChildAutoExpand.installWhitelisted(
+                    TreeSoleChildAutoExpand.Target.COMPARE_CONFIG, viewer);
         });
     }
 

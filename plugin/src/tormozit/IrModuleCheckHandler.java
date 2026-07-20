@@ -4,7 +4,12 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
@@ -102,33 +107,45 @@ public final class IrModuleCheckHandler
         }
     }
 
+    /** Интервал опроса файла результатов проверки. */
+    private static final long IXD_POLL_INTERVAL_MS = 300;
+    /** Максимальное время опроса — с запасом под общий таймаут {@link #RESULT_WAIT_MINUTES} на Job. */
+    private static final long IXD_POLL_MAX_MS = 4 * 60_000;
+    /** Если файл вообще не менялся с базового состояния — считаем, что ИР переиспользовал кэш
+     *  (модуль не менялся с прошлой проверки) и не ждём дальше этого времени. */
+    private static final long IXD_POLL_UNCHANGED_GRACE_MS = 2_000;
+
     /** COM-поток {@link IRSession#executor}; sync уже выполнен через {@link IRSession#syncCodeEditorToIR}. */
     private static String checkModuleOnComThread(IRSession irSession, String moduleName)
     {
         try
         {
             irSession.invokeCodeEditor("РазобратьТекущийКонтекст"); //$NON-NLS-1$
+
+            // Путь к файлу результатов вычисляем ДО запуска проверки — чтобы зафиксировать базовое
+            // состояние файла (mtime/размер) и по нему определить, когда ИР допишет новые результаты.
+            Object ixdRaw = ComBridge.invoke(irSession.codeEditor, "ИмяФайлаМодуляИзИмениМодуля", moduleName, "ixd"); //$NON-NLS-1$ //$NON-NLS-2$
+            String ixdPath = ComBridge.toString(ixdRaw);
+            Global.tempLog("irModuleCheck", "ixdPath (до запуска проверки)=" + ixdPath); //$NON-NLS-1$ //$NON-NLS-2$
+            Path ixdFile = ixdPath != null && !ixdPath.isBlank() ? Path.of(ixdPath) : null;
+            long baselineMtime = ixdFile != null ? readMtimeOrZero(ixdFile) : 0;
+            long baselineSize = ixdFile != null ? readSizeOrMinusOne(ixdFile) : -1;
+
             irSession.showWindow();
             irSession.invokeCodeEditor("ОткрытьПроверкуМодуля"); //$NON-NLS-1$
             WinWindowActivator.sendCtrlEnterToIrAfterDelay(irSession, CTRL_ENTER_DELAY_MS);
+            long sleepStart = System.currentTimeMillis();
             Thread.sleep(PRE_WAIT_DELAY_MS);
+            long sleepActualMs = System.currentTimeMillis() - sleepStart;
+            Global.tempLog("irModuleCheck", "PRE_WAIT_DELAY_MS запрошено=" + PRE_WAIT_DELAY_MS //$NON-NLS-1$ //$NON-NLS-2$
+                + " фактически=" + sleepActualMs); //$NON-NLS-1$
 
-            Object irCommon = irSession.getModule("ирОбщий"); //$NON-NLS-1$
-            IrModuleCheckDebug.log("wait ТекущаяДатаЛкс module=" + moduleName); //$NON-NLS-1$
-            long waitStart = System.currentTimeMillis();
-            Object dateRaw = ComBridge.invoke(irCommon, "ТекущаяДатаЛкс"); // блокирует до завершения проверки в ИР //$NON-NLS-1$
-            long waitMs = System.currentTimeMillis() - waitStart;
-            Global.tempLog("irModuleCheck", "ТекущаяДатаЛкс waitMs=" + waitMs //$NON-NLS-1$ //$NON-NLS-2$
-                + " resultClass=" + (dateRaw == null ? "null" : dateRaw.getClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$
-                + " resultToString=" + dateRaw); //$NON-NLS-1$
+            // ТекущаяДатаЛкс() эмпирически НЕ дожидается завершения проверки модуля в ИР (замерено
+            // waitMs~0-2мс при любой длительности проверки) — вместо блокирующего вызова опрашиваем
+            // сам файл результатов до появления/стабилизации новых данных.
+            waitForIxdFileReady(ixdFile, baselineMtime, baselineSize);
 
-            Object ixdRaw = ComBridge.invoke(irSession.codeEditor, "ИмяФайлаМодуляИзИмениМодуля", moduleName, "ixd"); //$NON-NLS-1$ //$NON-NLS-2$
-            Global.tempLog("irModuleCheck", "ИмяФайлаМодуляИзИмениМодуля(" + moduleName + ",ixd)" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " resultClass=" + (ixdRaw == null ? "null" : ixdRaw.getClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$
-                + " resultToString=" + ixdRaw); //$NON-NLS-1$
-            String ixdPath = ComBridge.toString(ixdRaw);
-            Global.tempLog("irModuleCheck", "ixdPath after ComBridge.toString=" + ixdPath); //$NON-NLS-1$ //$NON-NLS-2$
-            logIxdFileState("checkModuleOnComThread (сразу после получения пути)", ixdPath); //$NON-NLS-1$
+            logIxdFileState("checkModuleOnComThread (после опроса)", ixdPath); //$NON-NLS-1$
             IrModuleCheckDebug.log("done ixd=" + ixdPath); //$NON-NLS-1$
             return ixdPath;
         }
@@ -137,6 +154,85 @@ public final class IrModuleCheckHandler
             Global.log("IrModuleCheckHandler: " + e.getMessage()); //$NON-NLS-1$
             throw e instanceof RuntimeException re ? re : new RuntimeException(e);
         }
+    }
+
+    private static long readMtimeOrZero(Path p)
+    {
+        try
+        {
+            return Files.exists(p) ? Files.getLastModifiedTime(p).toMillis() : 0;
+        }
+        catch (Exception e)
+        {
+            return 0;
+        }
+    }
+
+    private static long readSizeOrMinusOne(Path p)
+    {
+        try
+        {
+            return Files.exists(p) ? Files.size(p) : -1;
+        }
+        catch (Exception e)
+        {
+            return -1;
+        }
+    }
+
+    /**
+     * Опрашивает файл результатов проверки до появления новых (изменившихся с {@code baselineMtime}/
+     * {@code baselineSize}) и стабилизировавшихся (два одинаковых замера размера подряд) данных.
+     * Если файл вообще не менялся дольше {@link #IXD_POLL_UNCHANGED_GRACE_MS} — считаем, что ИР
+     * переиспользовал кэш непроверенного заново модуля, и завершаем опрос как есть.
+     */
+    private static void waitForIxdFileReady(Path ixdFile, long baselineMtime, long baselineSize)
+    {
+        if (ixdFile == null)
+            return;
+
+        long deadline = System.currentTimeMillis() + IXD_POLL_MAX_MS;
+        long unchangedGraceDeadline = System.currentTimeMillis() + IXD_POLL_UNCHANGED_GRACE_MS;
+        boolean sawChange = false;
+        long lastSizeAfterChange = Long.MIN_VALUE;
+
+        while (System.currentTimeMillis() < deadline)
+        {
+            boolean exists = Files.exists(ixdFile);
+            long mtime = exists ? readMtimeOrZero(ixdFile) : 0;
+            long size = exists ? readSizeOrMinusOne(ixdFile) : -1;
+            boolean changed = !exists || mtime != baselineMtime || size != baselineSize;
+
+            if (changed)
+                sawChange = true;
+
+            if (sawChange)
+            {
+                if (exists && size == lastSizeAfterChange)
+                {
+                    Global.tempLog("irModuleCheck", "waitForIxdFileReady: стабилизировался, size=" + size); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
+                lastSizeAfterChange = size;
+            }
+            else if (System.currentTimeMillis() > unchangedGraceDeadline)
+            {
+                Global.tempLog("irModuleCheck", //$NON-NLS-1$
+                    "waitForIxdFileReady: файл не менялся — считаем, что ИР переиспользовал кэш"); //$NON-NLS-1$
+                return;
+            }
+
+            try
+            {
+                Thread.sleep(IXD_POLL_INTERVAL_MS);
+            }
+            catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+                return;
+            }
+        }
+        Global.tempLog("irModuleCheck", "waitForIxdFileReady: истёк таймаут опроса"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /** Ждёт результат в фоновой {@link Job} (не на UI-потоке — ожидание может занять до {@link #RESULT_WAIT_MINUTES} минут). */
@@ -263,6 +359,33 @@ public final class IrModuleCheckHandler
                     m.delete();
             }
 
+            // Старые маркеры этого файла — снимок ДО удаления, чтобы сопоставить с новыми и посчитать
+            // добавленные/удалённые, а не только итог. Матчим ТОЛЬКО по тексту сообщения (метод +
+            // слово/тип ошибки/родитель/комментарий) — позиция и номер строки в сравнении не участвуют
+            // вообще, они «плавают» между проверками и не являются признаком другой ошибки.
+            // Считаем ЧАСТОТЫ, а не множество: у разных ошибок текст сообщения может совпадать дословно
+            // (например, одна и та же «НеизвестноеСлово «X»» на двух разных строках) — обычный Set
+            // схлопнул бы такие дубликаты в одну запись и испортил подсчёт добавленных/удалённых.
+            // ВАЖНО: getMarkers(project, Object) матчит по Marker.getMarkerObjectId() (у PlainEObjectMarker
+            // это собственный уникальный id каждого маркера) — с sourceKey он никогда не совпадёт и
+            // всегда вернёт пусто. Единственный проверенный рабочий способ получить «свои» маркеры —
+            // выборка по checkId (индекс CHECK_ID, задаётся явно через setCheckId) с фильтром по
+            // sourceObjectId уже на своей стороне.
+            Collection<Marker> ourMarkers = markerManager.getMarkers(project, Set.of(CHECK_ID));
+            Map<String, Integer> oldCounts = new HashMap<>();
+            if (ourMarkers != null)
+            {
+                for (Marker old : ourMarkers)
+                {
+                    if (!sourceKey.equals(old.getSourceObjectId()))
+                        continue;
+                    String msg = old.getMessage();
+                    if (msg != null)
+                        oldCounts.merge(msg, 1, Integer::sum);
+                }
+            }
+            Map<String, Integer> newCounts = new HashMap<>();
+
             Document doc = snapshotRawText != null ? new Document(snapshotRawText) : new Document(""); //$NON-NLS-1$
             List<Marker> markers = new ArrayList<>();
             for (IxdErrorTableParser.CheckError err : errors)
@@ -306,6 +429,11 @@ public final class IrModuleCheckHandler
                 marker.setUri(fileUri);
                 marker.setProject(project);
                 marker.setCheckId(CHECK_ID);
+                // Без этого маркер не попадает в индекс DIRECT_DEPS/SOURCE_DEPS по sourceObject —
+                // removeMarkers(project, sourceKey) и авто-очистка внутри setMarkers ищут именно
+                // по этому полю, а не по параметру sourceObject самого вызова. Без setSourceObjectId
+                // старые маркеры этого файла никогда не находятся и не удаляются — только копятся.
+                marker.setSourceObjectId(sourceKey);
                 // "BslEditor" — sourceType, под который зарегистрирован BslMarkerDynamicDataProvider
                 // (бандл com._1c.g5.v8.dt.bsl, extension markerDynamicDataProvider): он умеет резолвить
                 // PlainEObjectMarker с platform-URI на .bsl-файл. Пустой sourceType уходит в дефолтный
@@ -322,6 +450,7 @@ public final class IrModuleCheckHandler
                 // двойной клик по строке в панели «Ошибки конфигурации» ничего не делает.
                 StandardExtraInfo.TEXT_URI_TO_PROBLEM.put(marker, sourceKey);
                 markers.add(marker);
+                newCounts.merge(message, 1, Integer::sum);
 
                 IMarker editorMarker = file.createMarker(IMarker.PROBLEM);
                 editorMarker.setAttribute(IMarker.MESSAGE, message);
@@ -332,28 +461,107 @@ public final class IrModuleCheckHandler
                 editorMarker.setAttribute(EDITOR_MARKER_ATTR, EDITOR_MARKER_ATTR_VALUE);
             }
 
-            Marker[] existing = markerManager.getMarkers(project, sourceKey);
-            int removedCount = existing != null ? existing.length : 0;
-            Global.tempLog("irModuleCheck", "applyMarkers sourceKey=" + sourceKey //$NON-NLS-1$ //$NON-NLS-2$
-                + " existingBeforeRemove=" + removedCount + " toAdd=" + markers.size()); //$NON-NLS-1$ //$NON-NLS-2$
+            // Сопоставление старых и новых по частоте текста сообщения — офсет/строка не участвуют.
+            // Для каждого текста: если новых экземпляров больше — разница считается добавленными,
+            // если меньше — удалёнными (так дубликаты одинакового текста не искажают подсчёт).
+            int addedCount = 0;
+            int removedCount = 0;
+            Set<String> allMessages = new HashSet<>(oldCounts.keySet());
+            allMessages.addAll(newCounts.keySet());
+            for (String msg : allMessages)
+            {
+                int oldN = oldCounts.getOrDefault(msg, 0);
+                int newN = newCounts.getOrDefault(msg, 0);
+                if (newN > oldN)
+                    addedCount += newN - oldN;
+                else if (oldN > newN)
+                    removedCount += oldN - newN;
+            }
 
+            Global.tempLog("irModuleCheck", "applyMarkers sourceKey=" + sourceKey //$NON-NLS-1$ //$NON-NLS-2$
+                + " old=" + oldCounts.values().stream().mapToInt(Integer::intValue).sum() //$NON-NLS-1$
+                + " new=" + newCounts.values().stream().mapToInt(Integer::intValue).sum() //$NON-NLS-1$
+                + " added=" + addedCount + " removed=" + removedCount); //$NON-NLS-1$ //$NON-NLS-2$
+
+            // Полное удаление всех старых маркеров этого файла перед загрузкой новых — без частичной
+            // замены, чтобы не оставалось «осиротевших» записей, даже если сопоставление выше неточное.
             markerManager.removeMarkers(project, sourceKey);
             if (!markers.isEmpty())
                 markerManager.setMarkers(project, sourceKey, markers.toArray(new Marker[0]));
 
-            Marker[] afterAdd = markerManager.getMarkers(project, sourceKey);
-            Global.tempLog("irModuleCheck", "applyMarkers after setMarkers count=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (afterAdd != null ? afterAdd.length : -1));
+            Collection<Marker> afterAdd = markerManager.getMarkers(project, Set.of(CHECK_ID));
+            long afterAddForFile = afterAdd == null ? -1
+                : afterAdd.stream().filter(m -> sourceKey.equals(m.getSourceObjectId())).count();
+            Global.tempLog("irModuleCheck", "applyMarkers after setMarkers countForFile=" + afterAddForFile //$NON-NLS-1$ //$NON-NLS-2$
+                + " totalOurMarkersInProject=" + (afterAdd != null ? afterAdd.size() : -1)); //$NON-NLS-1$
 
             ToastNotification.show(MENU_LABEL,
-                "Модуль " + moduleName + ": добавлено ошибок " + markers.size() //$NON-NLS-1$ //$NON-NLS-2$
-                    + ", удалено " + removedCount, 5_000); //$NON-NLS-1$
+                "Модуль " + moduleName + ": добавлено " + addedCount //$NON-NLS-1$ //$NON-NLS-2$
+                    + ", удалено " + removedCount, 6_000); //$NON-NLS-1$
         }
         catch (Exception e)
         {
             IrModuleCheckDebug.problem("applyMarkers: " + e); //$NON-NLS-1$
             Global.tempLogException("irModuleCheck", "applyMarkers", e); //$NON-NLS-1$ //$NON-NLS-2$
             ToastNotification.show(MENU_LABEL, "Ошибка применения маркеров: " + e.getMessage(), 5_000); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * issue #176: снять один конкретный marker после применения quick fix (переименования слова
+     * в тексте) - и подчёркивание в редакторе, и запись в панели «Ошибки конфигурации», не трогая
+     * остальные ошибки файла. Точечного удаления одного {@link Marker} в {@link IMarkerManager}
+     * нет - минимальная единица замены это весь набор для {@code (sourceObjectId, checkId)} (см.
+     * тот же паттерн {@code removeMarkers}+{@code setMarkers} в {@link #applyMarkers} выше),
+     * поэтому пересобираем и переотправляем список без одного элемента.
+     *
+     * @param editorMarker marker ошибки ИР, на которую применили исправление - используется
+     *      только для сопоставления по тексту сообщения ({@link IMarker#MESSAGE}) и удаляется
+     */
+    public static void removeSingleMarkerAfterFix(IProject project, IFile file, IMarker editorMarker)
+    {
+        if (project == null || file == null || editorMarker == null)
+            return;
+        try
+        {
+            String message = editorMarker.getAttribute(IMarker.MESSAGE, null);
+            if (editorMarker.exists())
+                editorMarker.delete();
+
+            IMarkerManager markerManager = Global.getOsgiService(IMarkerManager.class);
+            if (markerManager == null || message == null)
+                return;
+            URI fileUri = URI.createPlatformResourceURI(file.getFullPath().toString(), true);
+            String sourceKey = fileUri.toString();
+            Collection<Marker> ourMarkers = markerManager.getMarkers(project, Set.of(CHECK_ID));
+            if (ourMarkers == null)
+                return;
+            List<Marker> remaining = new ArrayList<>();
+            boolean removedOne = false;
+            for (Marker m : ourMarkers)
+            {
+                if (!sourceKey.equals(m.getSourceObjectId()))
+                    continue;
+                if (!removedOne && message.equals(m.getMessage()))
+                {
+                    removedOne = true;
+                    continue;
+                }
+                remaining.add(m);
+            }
+            if (!removedOne)
+                return;
+            // Тот же паттерн, что в applyMarkers выше: полная пересборка набора для файла,
+            // частичного API нет.
+            markerManager.removeMarkers(project, sourceKey);
+            if (!remaining.isEmpty())
+                markerManager.setMarkers(project, sourceKey, remaining.toArray(new Marker[0]));
+            IrModuleCheckDebug.log("removeSingleMarkerAfterFix: убран 1 marker sourceKey=" + sourceKey //$NON-NLS-1$
+                + " осталось=" + remaining.size()); //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+            IrModuleCheckDebug.problem("removeSingleMarkerAfterFix: " + e); //$NON-NLS-1$
         }
     }
 
@@ -377,11 +585,11 @@ public final class IrModuleCheckHandler
         return end > 0 ? end : 1;
     }
 
+    private static final String MESSAGE_PREFIX = "ИР: "; //$NON-NLS-1$
+
     private static String buildMessage(IxdErrorTableParser.CheckError err)
     {
         StringBuilder sb = new StringBuilder();
-        if (err.method != null && !err.method.isBlank())
-            sb.append(err.method).append(": "); //$NON-NLS-1$
         if (err.comment != null && !err.comment.isBlank())
             sb.append(err.comment.strip());
         else
@@ -393,7 +601,8 @@ public final class IrModuleCheckHandler
             if (err.parentType != null && !err.parentType.isBlank())
                 sb.append(" (").append(err.parentType).append(')'); //$NON-NLS-1$
         }
-        return sb.length() > 0 ? sb.toString() : "Ошибка проверки модуля"; //$NON-NLS-1$
+        String body = sb.length() > 0 ? sb.toString() : "Ошибка проверки модуля"; //$NON-NLS-1$
+        return MESSAGE_PREFIX + body;
     }
 
     // -------------------------------------------------------------------------

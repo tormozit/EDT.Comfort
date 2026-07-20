@@ -251,7 +251,7 @@ public final class ComfortSettings
      */
     public static RGB getFilterMatchLightRgb()
     {
-        return SmartMatchHighlight.sanitizeStoredLightRgb(
+        return ThemeAwareColors.sanitizeStoredLightRgb(
             parseRgb(getFilterMatchColorString(), DEFAULT_FILTER_MATCH_COLOR));
     }
 

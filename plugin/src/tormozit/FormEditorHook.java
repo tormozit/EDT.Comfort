@@ -15,7 +15,6 @@ import org.eclipse.jface.action.IMenuListener;
 import org.eclipse.jface.action.IMenuManager;
 import org.eclipse.jface.action.MenuManager;
 import org.eclipse.emf.ecore.EObject;
-import org.eclipse.jface.viewers.AbstractTreeViewer;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.StructuredSelection;
@@ -29,14 +28,8 @@ import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.ui.IEditorPart;
-import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IStartup;
-import org.eclipse.ui.IPartListener2;
-import org.eclipse.ui.IWorkbench;
 import org.eclipse.ui.IWorkbenchPage;
-import org.eclipse.ui.IWorkbenchPartReference;
-import org.eclipse.ui.IWorkbenchWindow;
-import org.eclipse.ui.IWindowListener;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.actions.CompoundContributionItem;
 
@@ -105,12 +98,6 @@ public class FormEditorHook implements IStartup
     /** Контекст EDT: фокус в дереве реквизитов формы. */
     public static final String ATTRIBUTES_CONTEXT_ID =
             "com._1c.g5.v8.dt.form.ui.formEditor.attributes"; //$NON-NLS-1$
-
-    private static final String FORM_EDITOR_ID =
-            "com._1c.g5.v8.dt.form.ui.formEditor"; //$NON-NLS-1$
-
-    private static final String ORDINARY_FORM_EDITOR_ID =
-            "com._1c.g5.v8.dt.form.ui.ordinaryFormEditor"; //$NON-NLS-1$
     // -----------------------------------------------------------------------
     // Константы — правый клик (RightClickSelect)
     // -----------------------------------------------------------------------
@@ -210,120 +197,6 @@ public class FormEditorHook implements IStartup
         display.addFilter(SWT.MouseDown, FormEditorHook::handleMouseDown);
         display.addFilter(SWT.MouseDoubleClick, FormEditorHook::handleMouseDoubleClick);
         display.addFilter(SWT.MenuDetect, FormEditorHook::handleMenuDetect);
-        hookFormEditorAutoExpand();
-    }
-
-    private static void hookFormEditorAutoExpand()
-    {
-        if (!PlatformUI.isWorkbenchRunning())
-            return;
-
-        IWorkbench workbench = PlatformUI.getWorkbench();
-        for (IWorkbenchWindow window : workbench.getWorkbenchWindows())
-            hookFormEditorWindow(window);
-
-        workbench.addWindowListener(new IWindowListener()
-        {
-            @Override public void windowOpened(IWorkbenchWindow window) { hookFormEditorWindow(window); }
-            @Override public void windowActivated(IWorkbenchWindow window) {}
-            @Override public void windowDeactivated(IWorkbenchWindow window) {}
-            @Override public void windowClosed(IWorkbenchWindow window) {}
-        });
-    }
-
-    private static void hookFormEditorWindow(IWorkbenchWindow window)
-    {
-        IWorkbenchPage page = window.getActivePage();
-        if (page != null)
-        {
-            for (IEditorReference ref : page.getEditorReferences())
-            {
-                IEditorPart editor = ref.getEditor(false);
-                if (editor != null && isFormEditor(editor))
-                    scheduleHookItemsTreeAutoExpand();
-            }
-        }
-
-        window.getPartService().addPartListener(new IPartListener2()
-        {
-            @Override
-            public void partOpened(IWorkbenchPartReference ref)
-            {
-                IEditorPart editor = editorFromReference(ref);
-                if (editor != null && isFormEditor(editor))
-                    scheduleHookItemsTreeAutoExpand();
-            }
-
-            @Override
-            public void partActivated(IWorkbenchPartReference ref)
-            {
-                IEditorPart editor = editorFromReference(ref);
-                if (editor != null && isFormEditor(editor))
-                    scheduleHookItemsTreeAutoExpand();
-            }
-
-            @Override public void partBroughtToTop(IWorkbenchPartReference ref) {}
-            @Override public void partClosed(IWorkbenchPartReference ref) {}
-            @Override public void partDeactivated(IWorkbenchPartReference ref) {}
-            @Override public void partHidden(IWorkbenchPartReference ref) {}
-            @Override public void partVisible(IWorkbenchPartReference ref) {}
-            @Override public void partInputChanged(IWorkbenchPartReference ref) {}
-        });
-    }
-
-    private static IEditorPart editorFromReference(IWorkbenchPartReference ref)
-    {
-        return ref instanceof IEditorReference editorRef ? editorRef.getEditor(false) : null;
-    }
-
-    private static boolean isFormEditor(IEditorPart editor)
-    {
-        String id = editor.getSite().getId();
-        return FORM_EDITOR_ID.equals(id) || ORDINARY_FORM_EDITOR_ID.equals(id);
-    }
-
-    private static void scheduleHookItemsTreeAutoExpand()
-    {
-        Display.getDefault().asyncExec(() -> scheduleHookItemsTreeAutoExpand(0));
-    }
-
-    private static void scheduleHookItemsTreeAutoExpand(int attempt)
-    {
-        if (!ComfortSettings.isReplaceListFiltersEnabled())
-            return;
-
-        FormEditorPage page = FormEditor.getActiveFormEditorPage();
-        if (hookItemsTreeAutoExpand(page))
-            return;
-
-        if (attempt < 20)
-            Display.getDefault().timerExec(150, () -> scheduleHookItemsTreeAutoExpand(attempt + 1));
-    }
-
-    private static boolean hookItemsTreeAutoExpand(FormEditorPage page)
-    {
-        if (page == null)
-            return false;
-
-        Tree itemsTree = getItemsTree(page);
-        if (itemsTree == null || itemsTree.isDisposed())
-            return false;
-
-        // Дерево реквизитов (attributesViewer) содержит циклы — авторазворачивание только для itemsViewer.
-        Tree attributesTree = getAttributesTree(page);
-        if (itemsTree == attributesTree)
-            return false;
-
-        Object viewer = Global.getField(page, "itemsViewer"); //$NON-NLS-1$
-        if (!(viewer instanceof AbstractTreeViewer treeViewer))
-            return false;
-
-        Object attributesViewer = Global.getField(page, "attributesViewer"); //$NON-NLS-1$
-        if (viewer == attributesViewer)
-            return false;
-
-        TreeSoleChildAutoExpand.installForComfortLists(treeViewer);
-        return true;
     }
 
     // -----------------------------------------------------------------------
@@ -502,9 +375,6 @@ public class FormEditorHook implements IStartup
             return;
         }
 
-        if (page != null && tree == getItemsTree(page) && tree != getAttributesTree(page))
-            hookItemsTreeAutoExpand(page);
-
         if (Boolean.TRUE.equals(swtMenu.getData(HOOK_MARKER)))
             return;
         swtMenu.setData(HOOK_MARKER, Boolean.TRUE);
@@ -653,17 +523,6 @@ public class FormEditorHook implements IStartup
         if (page == null)
             return null;
         Object viewer = Global.getField(page, "attributesViewer"); //$NON-NLS-1$
-        if (viewer == null)
-            return null;
-        Object treeObj = Global.call(viewer, "getTree"); //$NON-NLS-1$
-        return treeObj instanceof Tree ? (Tree) treeObj : null;
-    }
-
-    private static Tree getItemsTree(FormEditorPage page)
-    {
-        if (page == null)
-            return null;
-        Object viewer = Global.getField(page, "itemsViewer"); //$NON-NLS-1$
         if (viewer == null)
             return null;
         Object treeObj = Global.call(viewer, "getTree"); //$NON-NLS-1$

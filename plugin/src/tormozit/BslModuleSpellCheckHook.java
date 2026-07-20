@@ -22,7 +22,9 @@ import org.eclipse.core.commands.ExecutionException;
 import org.eclipse.core.commands.IExecutionListener;
 import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.core.resources.IFile;
+import org.eclipse.core.resources.IMarker;
 import org.eclipse.core.resources.IProject;
+import org.eclipse.core.resources.IResource;
 import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
@@ -100,6 +102,7 @@ import org.eclipse.ui.IWindowListener;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.ui.editors.text.EditorsUI;
+import org.eclipse.ui.texteditor.MarkerAnnotation;
 import org.eclipse.ui.texteditor.spelling.SpellingAnnotation;
 import org.eclipse.ui.texteditor.spelling.SpellingProblem;
 import org.eclipse.ui.texteditor.spelling.SpellingService;
@@ -2266,8 +2269,78 @@ public final class BslModuleSpellCheckHook implements IStartup
     {
         if (p == null)
             return false;
+        if (p instanceof WordFoundInfoProposal)
+            return true;
         String display = p.getDisplayString();
         return display != null && display.startsWith(ISSUE176_PROPOSAL_PREFIX);
+    }
+
+    /**
+     * issue #176: анализатор ИР может не знать о реально существующем слове (своя, отдельная от
+     * EDT метаданных база) - информационная строка без изменения текста. Для ошибок ИР (marker !=
+     * null) клик всё же должен снимать ложный marker - подтверждение "слово корректно", как и
+     * замена в {@link MarkerClearingReplaceProposal}, просто без правки документа. Для
+     * {@link XtextAnnotation} (marker == null) снимать нечего - живая валидация сама разберётся.
+     */
+    private static final class WordFoundInfoProposal extends ConfigurableCompletionProposal
+    {
+        private final IMarker marker;
+
+        WordFoundInfoProposal(int offset, int length, IMarker marker)
+        {
+            super("", offset, length, 0); //$NON-NLS-1$
+            setDisplayString("Слово найдено в штатном списке"); //$NON-NLS-1$
+            setAutoInsertable(false);
+            this.marker = marker;
+        }
+
+        @Override
+        public void apply(IDocument document)
+        {
+            clearMarkerIfAny();
+        }
+
+        @Override
+        public void apply(IDocument document, char trigger, int offset)
+        {
+            clearMarkerIfAny();
+        }
+
+        @Override
+        public void apply(ITextViewer viewer, char trigger, int stateMask, int offset)
+        {
+            clearMarkerIfAny();
+        }
+
+        private void clearMarkerIfAny()
+        {
+            if (marker == null)
+                return;
+            try
+            {
+                IResource resource = marker.getResource();
+                IProject project = resource != null ? resource.getProject() : null;
+                if (project != null && resource instanceof IFile file)
+                    IrModuleCheckHandler.removeSingleMarkerAfterFix(project, file, marker);
+            }
+            catch (Exception e)
+            {
+                Global.tempLog("issue176", "WordFoundInfoProposal: исключение " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        @Override
+        public Point getSelection(IDocument document)
+        {
+            return null;
+        }
+
+        @Override
+        public String getAdditionalProposalInfo()
+        {
+            return "Проверка ИР могла не увидеть это слово в актуальных метаданных - " //$NON-NLS-1$
+                + "оно найдено среди объявленных в модуле/платформенных/объектов метаданных."; //$NON-NLS-1$
+        }
     }
 
     /**
@@ -2303,29 +2376,63 @@ public final class BslModuleSpellCheckHook implements IStartup
             + (annotation != null ? annotation.getClass().getName() : "null") + " type=" //$NON-NLS-1$ //$NON-NLS-2$
             + (annotation != null ? annotation.getType() : "null") + " isXtextAnnotation=" //$NON-NLS-1$ //$NON-NLS-2$
             + (annotation instanceof XtextAnnotation));
-        if (annotation instanceof XtextAnnotation xa)
+        // Свои "Заменить на '...'" визуально должны выглядеть как штатные исправления -
+        // берём иконку у любого уже существующего предложения в этом же списке.
+        Image fallbackIcon = null;
+        for (ICompletionProposal p : base)
         {
-            // Свои "Заменить на '...'" визуально должны выглядеть как штатные исправления -
-            // берём иконку у любого уже существующего предложения в этом же списке.
-            Image fallbackIcon = null;
-            for (ICompletionProposal p : base)
+            if (p != null && p.getImage() != null)
             {
-                if (p != null && p.getImage() != null)
-                {
-                    fallbackIcon = p.getImage();
-                    break;
-                }
-            }
-            ICompletionProposal extra =
-                similarNameProposalForUnresolvedReference(xa, viewer, fallbackIcon);
-            if (extra != null)
-            {
-                ICompletionProposal[] withExtra = Arrays.copyOf(base, base.length + 1);
-                withExtra[base.length] = extra;
-                return withExtra;
+                fallbackIcon = p.getImage();
+                break;
             }
         }
+        ICompletionProposal extra = null;
+        if (annotation instanceof XtextAnnotation xa)
+            extra = similarNameProposalForUnresolvedReference(xa, viewer, fallbackIcon);
+        else if (annotation instanceof MarkerAnnotation ma)
+            extra = similarNameProposalForIrUnknownWord(ma.getMarker(), viewer, fallbackIcon);
+        if (extra != null)
+        {
+            ICompletionProposal[] withExtra = Arrays.copyOf(base, base.length + 1);
+            withExtra[base.length] = extra;
+            return withExtra;
+        }
         return base;
+    }
+
+    /**
+     * issue #176: ошибки проверки модуля через ИР (см. {@code IrModuleCheckHandler}) - это не
+     * {@link XtextAnnotation}, а обычная {@link MarkerAnnotation} над штатным {@code IMarker.PROBLEM}
+     * (своя, отдельная от Xtext-валидации система - см. {@code IrModuleCheckHandler.buildMessage}:
+     * сообщение вида {@code "ИР: <errorType> «<слово>»..."}). Пока поддержан только вид
+     * {@code НеизвестноеСлово}. Смысл поиска кандидата тот же, что и для {@link XtextAnnotation} -
+     * переиспользуем {@link #buildSimilarNameProposal} по offset/length из marker'а.
+     */
+    private static ICompletionProposal similarNameProposalForIrUnknownWord(IMarker marker,
+        ISourceViewer viewer, Image icon)
+    {
+        if (marker == null || viewer == null)
+            return null;
+        try
+        {
+            String message = marker.getAttribute(IMarker.MESSAGE, null);
+            Global.tempLog("issue176", "similarNameProposalForIrUnknownWord: message=" + message); //$NON-NLS-1$ //$NON-NLS-2$
+            if (message == null || !message.contains("НеизвестноеСлово")) //$NON-NLS-1$
+                return null;
+            int offset = marker.getAttribute(IMarker.CHAR_START, -1);
+            int end = marker.getAttribute(IMarker.CHAR_END, -1);
+            if (offset < 0 || end <= offset || !(viewer.getDocument() instanceof IXtextDocument document))
+                return null;
+            int length = end - offset;
+            return document.readOnly(
+                resource -> buildSimilarNameProposal(resource, viewer, offset, length, icon, marker));
+        }
+        catch (Exception e)
+        {
+            Global.tempLog("issue176", "similarNameProposalForIrUnknownWord: исключение " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
     }
 
     /**
@@ -2370,7 +2477,7 @@ public final class BslModuleSpellCheckHook implements IStartup
                 return null;
             return document.readOnly(
                 (IUnitOfWork<ICompletionProposal, XtextResource>) resource -> buildSimilarNameProposal(
-                    resource, viewer, offset, length, icon));
+                    resource, viewer, offset, length, icon, null));
         }
         catch (Exception e)
         {
@@ -2384,11 +2491,11 @@ public final class BslModuleSpellCheckHook implements IStartup
      * cross-reference (если BSL резолвит имя в этой позиции именно так - например, общий модуль),
      * затем {@link #candidateNameTable(XtextResource)} (переменные/методы модуля + платформенный
      * API + объекты метаданных), и в последнюю очередь - тот же движок, что у штатного Ctrl+Space
-     * ({@link #closestNameFromContentAssist}), для случаев вроде членов конкретного типа объекта
+     * ({@link #matchFromContentAssist}), для случаев вроде членов конкретного типа объекта
      * после точки, которых нет в плоской общей таблице.
      */
     private static ICompletionProposal buildSimilarNameProposal(XtextResource resource,
-        ISourceViewer viewer, int offset, int length, Image icon)
+        ISourceViewer viewer, int offset, int length, Image icon, IMarker markerToClear)
     {
         ILeafNode leaf = NodeModelUtils.findLeafNodeAtOffset(resource.getParseResult().getRootNode(),
             offset);
@@ -2398,16 +2505,161 @@ public final class BslModuleSpellCheckHook implements IStartup
             return null;
         }
         String typed = leaf.getText();
-        String best = closestNameFromScope(resource, leaf, typed);
-        if (best == null)
-            best = closestNameFromTable(resource, typed);
-        if (best == null)
-            best = closestNameFromContentAssist(viewer, offset, typed);
-        Global.tempLog("issue176", "buildSimilarNameProposal: typed='" + typed + "' best=" + best); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        if (best == null || best.equals(typed))
+        if (!isIdentifierLike(typed))
+        {
+            // issue #176 (2026-07-20): офсет из ИР-маркера иногда попадает не на слово, а на
+            // соседний символ/пробел (см. лог issue176 - typed='=' и typed=' ' для одной и той же
+            // ошибки при разных наведениях, хотя офсет в marker'е не менялся) - похоже на гонку с
+            // фоновым пересчётом модели редактора, а не постоянно неверный офсет (тот же hover
+            // чаще возвращает верное слово). Не подставлять случайный однобуквенный "вариант" -
+            // честно ничего не предлагать, чем "Заменить на 'ф'".
+            Global.tempLog("issue176", "buildSimilarNameProposal: typed='" + typed //$NON-NLS-1$ //$NON-NLS-2$
+                + "' не похоже на идентификатор, offset=" + offset + " - пропуск"); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
-        return new CompletionProposal(best, offset, length, best.length(), icon,
-            ISSUE176_PROPOSAL_PREFIX + best + "'", null, null); //$NON-NLS-1$
+        }
+        NameMatch match = matchFromScope(resource, leaf, typed);
+        if (match == null)
+            match = matchFromTable(resource, typed);
+        if (match == null)
+            match = matchFromContentAssist(viewer, offset, typed);
+        Global.tempLog("issue176", "buildSimilarNameProposal: typed='" + typed + "' match=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + (match != null ? (match.exact ? "exact:" : "close:") + match.name : "null")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        if (match == null)
+            return null;
+        if (match.exact)
+        {
+            // issue #176: слово реально существует (анализатор ИР может не знать о нём - своя,
+            // отдельная от EDT метаданных база) - показать информационную строку без действия,
+            // а не "Заменить на 'X'" на то же самое слово.
+            return new WordFoundInfoProposal(offset, length, markerToClear);
+        }
+        if (match.name.equals(typed))
+            return null;
+        if (markerToClear != null)
+            return new MarkerClearingReplaceProposal(match.name, offset, length, icon, markerToClear);
+        return new CompletionProposal(match.name, offset, length, match.name.length(), icon,
+            ISSUE176_PROPOSAL_PREFIX + match.name + "'", null, null); //$NON-NLS-1$
+    }
+
+    /**
+     * issue #176: как обычная замена текста, но дополнительно снимает marker ошибки ИР после
+     * применения - иначе устаревшее подчёркивание/запись в панели «Ошибки конфигурации» остаются
+     * висеть до следующего ручного запуска проверки, а офсет в них после правки текста уже не
+     * соответствует слову (см. {@link IrModuleCheckHandler#removeSingleMarkerAfterFix}). Для
+     * {@link XtextAnnotation} такое снятие не нужно - живая валидация переисчитывается сама.
+     */
+    private static final class MarkerClearingReplaceProposal extends ConfigurableCompletionProposal
+    {
+        private final IMarker marker;
+
+        MarkerClearingReplaceProposal(String replacement, int offset, int length, Image icon,
+            IMarker marker)
+        {
+            super(replacement, offset, length, replacement.length());
+            setImage(icon);
+            setDisplayString(ISSUE176_PROPOSAL_PREFIX + replacement + "'"); //$NON-NLS-1$
+            setAutoInsertable(false);
+            this.marker = marker;
+        }
+
+        @Override
+        public void apply(IDocument document)
+        {
+            replaceAndClearMarker(document);
+        }
+
+        @Override
+        public void apply(ITextViewer viewer, char trigger, int stateMask, int offset)
+        {
+            replaceAndClearMarker(viewer != null ? viewer.getDocument() : null);
+        }
+
+        @Override
+        public void apply(IDocument document, char trigger, int offset)
+        {
+            replaceAndClearMarker(document);
+        }
+
+        /**
+         * issue #176: {@link ConfigurableCompletionProposal} реализует и
+         * {@link org.eclipse.jface.text.contentassist.ICompletionProposalExtension2#apply(ITextViewer, char, int, int)},
+         * и обычный {@link #apply(IDocument)} - UI этого hover'а вызывает свой вариант независимо
+         * от базовой реализации (см. рабочий образец {@link SpellingReplaceProposal}, там та же
+         * схема с единой точкой замены). Без единого метода-точки замена и снятие marker'а
+         * происходили по разным путям и дублировались.
+         */
+        private void replaceAndClearMarker(IDocument document)
+        {
+            if (document != null)
+            {
+                try
+                {
+                    document.replace(getReplacementOffset(), getReplacementLength(),
+                        getReplacementString());
+                }
+                catch (Exception e)
+                {
+                    Global.tempLog("issue176", "MarkerClearingReplaceProposal: замена исключение " + e); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+            }
+            try
+            {
+                IResource resource = marker.getResource();
+                IProject project = resource != null ? resource.getProject() : null;
+                if (project != null && resource instanceof IFile file)
+                    IrModuleCheckHandler.removeSingleMarkerAfterFix(project, file, marker);
+            }
+            catch (Exception e)
+            {
+                Global.tempLog("issue176", "MarkerClearingReplaceProposal: исключение " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+    }
+
+    /** Результат поиска в {@link #candidateNameTable}/{@link IScope}/content-assist. */
+    private static final class NameMatch
+    {
+        final boolean exact;
+        final String name;
+
+        NameMatch(boolean exact, String name)
+        {
+            this.exact = exact;
+            this.name = name;
+        }
+    }
+
+    /** Точное совпадение имеет приоритет и останавливает перебор сразу; иначе - первое на расстоянии 1. */
+    private static NameMatch matchInNames(Iterable<String> names, String typed)
+    {
+        String close = null;
+        for (String name : names)
+        {
+            if (name == null)
+                continue;
+            if (name.equals(typed))
+                return new NameMatch(true, name);
+            if (close == null && isEditDistanceOne(typed, name))
+                close = name;
+        }
+        return close != null ? new NameMatch(false, close) : null;
+    }
+
+    /** {@code true}, если текст похож на BSL-идентификатор (буква/underscore + буквы/цифры/underscore). */
+    private static boolean isIdentifierLike(String text)
+    {
+        if (text == null || text.isEmpty())
+            return false;
+        char first = text.charAt(0);
+        if (!Character.isLetter(first) && first != '_')
+            return false;
+        for (int i = 1; i < text.length(); i++)
+        {
+            char c = text.charAt(i);
+            if (!Character.isLetterOrDigit(c) && c != '_')
+                return false;
+        }
+        return true;
     }
 
     /**
@@ -2418,7 +2670,7 @@ public final class BslModuleSpellCheckHook implements IStartup
      * без syncExec, который падал {@code SWTException: Invalid thread access} - см. лог issue176
      * от 2026-07-19).
      */
-    private static String closestNameFromContentAssist(ISourceViewer viewer, int offset, String typed)
+    private static NameMatch matchFromContentAssist(ISourceViewer viewer, int offset, String typed)
     {
         if (!(viewer instanceof SourceViewer sourceViewer))
         {
@@ -2428,6 +2680,24 @@ public final class BslModuleSpellCheckHook implements IStartup
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return null;
+        // issue #176 диагностика 2026-07-20: тот же typed/offset иногда даёт 12, иногда 0
+        // кандидатов при повторном вызове почти сразу подряд - логируем всё, что может объяснить
+        // разницу между вызовами (сам offset, текст документа вокруг него, идентичность viewer
+        // и processor, состояние document.get(offset-5, 15)).
+        try
+        {
+            IDocument doc = sourceViewer.getDocument();
+            int from = Math.max(0, offset - 5);
+            int len = doc != null ? Math.min(15, doc.getLength() - from) : 0;
+            String around = doc != null && len > 0 ? doc.get(from, len) : "?"; //$NON-NLS-1$
+            Global.tempLog("issue176", "closestNameFromContentAssist: offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
+                + " typed='" + typed + "' viewer=" + System.identityHashCode(sourceViewer) //$NON-NLS-1$ //$NON-NLS-2$
+                + " around='" + around + "'"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (Exception e)
+        {
+            Global.tempLog("issue176", "closestNameFromContentAssist: диагностика offset исключение " + e); //$NON-NLS-1$ //$NON-NLS-2$
+        }
         ICompletionProposal[][] holder = new ICompletionProposal[1][];
         display.syncExec(() ->
         {
@@ -2448,9 +2718,29 @@ public final class BslModuleSpellCheckHook implements IStartup
                     Global.tempLog("issue176", "closestNameFromContentAssist: processor==null"); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
                 }
+                ITextSelection selBefore = viewer.getSelectionProvider() != null
+                    && viewer.getSelectionProvider().getSelection() instanceof ITextSelection ts ? ts : null;
+                Point selectedRange = viewer.getSelectedRange();
+                Global.tempLog("issue176", "closestNameFromContentAssist: processor=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + System.identityHashCode(xtextProcessor) + " selectionBefore=" //$NON-NLS-1$
+                    + (selBefore != null ? selBefore.getOffset() + "/" + selBefore.getLength() : "null") //$NON-NLS-1$ //$NON-NLS-2$
+                    + " viewerSelectedRange=" //$NON-NLS-1$
+                    + (selectedRange != null ? selectedRange.x + "/" + selectedRange.y : "null")); //$NON-NLS-1$ //$NON-NLS-2$
                 // offset - начало ещё не набранного слова, чтобы получить полный список
                 // кандидатов в этой позиции, без префиксной фильтрации по опечатке.
                 holder[0] = xtextProcessor.computeCompletionProposals(viewer, offset);
+                // issue #176 (2026-07-20): при одинаковых offset/viewer/processor/selection
+                // результат детерминированно чередуется 12/0/12/0 - внутреннее состояние
+                // XtextContentAssistProcessor (мы вызываем его напрямую, в обход обычного
+                // жизненного цикла сессии автодополнения от реального ContentAssistant). Пустой
+                // результат - не "нет кандидатов", а сбой этого состояния - повторный вызов
+                // в рамках того же самого вычисления детерминированно возвращает верный список.
+                if (holder[0] == null || holder[0].length == 0)
+                {
+                    Global.tempLog("issue176", //$NON-NLS-1$
+                        "closestNameFromContentAssist: пустой результат, повтор"); //$NON-NLS-1$ //$NON-NLS-2$
+                    holder[0] = xtextProcessor.computeCompletionProposals(viewer, offset);
+                }
             }
             catch (Exception e)
             {
@@ -2462,23 +2752,18 @@ public final class BslModuleSpellCheckHook implements IStartup
             + (raw != null ? raw.length : -1));
         if (raw == null)
             return null;
-        StringBuilder names = new StringBuilder();
-        String best = null;
+        List<String> baseNames = new ArrayList<>(raw.length);
         for (ICompletionProposal p : raw)
         {
             String candidate = p instanceof ConfigurableCompletionProposal ccp
                 ? ccp.getReplacementString() : p.getDisplayString();
             // Шаблоны методов приходят как "Имя(, , );" - расстояние правки сравниваем
             // по голому имени, до скобки параметров (как normalizeFilterKey в IrBslCompletionSupport).
-            String baseName = baseNameOf(candidate);
-            if (names.length() > 0)
-                names.append(", "); //$NON-NLS-1$
-            names.append(baseName);
-            if (best == null && baseName != null && isEditDistanceOne(typed, baseName))
-                best = baseName;
+            baseNames.add(baseNameOf(candidate));
         }
-        Global.tempLog("issue176", "closestNameFromContentAssist: raw names=" + names); //$NON-NLS-1$ //$NON-NLS-2$
-        return best;
+        Global.tempLog("issue176", "closestNameFromContentAssist: raw names=" //$NON-NLS-1$ //$NON-NLS-2$
+            + String.join(", ", baseNames)); //$NON-NLS-1$
+        return matchInNames(baseNames, typed);
     }
 
     /** "Имя(, , );" / "Имя()" → "Имя" - как {@code IrBslCompletionSupport.normalizeFilterKey}. */
@@ -2490,7 +2775,7 @@ public final class BslModuleSpellCheckHook implements IStartup
         return (paren >= 0 ? text.substring(0, paren) : text).strip();
     }
 
-    private static String closestNameFromScope(XtextResource resource, ILeafNode leaf, String typed)
+    private static NameMatch matchFromScope(XtextResource resource, ILeafNode leaf, String typed)
     {
         CrossReference crossReference = GrammarUtil.containingCrossReference(leaf.getGrammarElement());
         EReference reference = crossReference != null ? GrammarUtil.getReference(crossReference) : null;
@@ -2500,23 +2785,15 @@ public final class BslModuleSpellCheckHook implements IStartup
             return null;
         IScopeProvider scopeProvider = resource.getResourceServiceProvider().get(IScopeProvider.class);
         IScope scope = scopeProvider.getScope(context, reference);
+        List<String> names = new ArrayList<>();
         for (IEObjectDescription d : scope.getAllElements())
-        {
-            String name = d.getName().getLastSegment();
-            if (name != null && isEditDistanceOne(typed, name))
-                return name;
-        }
-        return null;
+            names.add(d.getName().getLastSegment());
+        return matchInNames(names, typed);
     }
 
-    private static String closestNameFromTable(XtextResource resource, String typed)
+    private static NameMatch matchFromTable(XtextResource resource, String typed)
     {
-        for (String name : candidateNameTable(resource))
-        {
-            if (isEditDistanceOne(typed, name))
-                return name;
-        }
-        return null;
+        return matchInNames(candidateNameTable(resource), typed);
     }
 
     /**

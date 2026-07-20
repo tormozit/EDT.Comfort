@@ -323,8 +323,8 @@ public final class GlobalLogView extends ViewPart
     private void applyHighlight(String line, int lineOffset)
     {
         Display display = logText.getDisplay();
-        Color keyColor = SmartMatchHighlight.effectiveSystemColor(display, SWT.COLOR_DARK_BLUE);
-        Color errorColor = SmartMatchHighlight.effectiveSystemColor(display, SWT.COLOR_DARK_RED);
+        Color keyColor = ThemeAwareColors.effectiveSystemColor(display, SWT.COLOR_DARK_BLUE);
+        Color errorColor = ThemeAwareColors.effectiveSystemColor(display, SWT.COLOR_DARK_RED);
         highlightToken(line, lineOffset, "filterTrace", keyColor); //$NON-NLS-1$
         highlightToken(line, lineOffset, "filter=\"", keyColor); //$NON-NLS-1$
         highlightToken(line, lineOffset, "docFilter=\"", keyColor); //$NON-NLS-1$
