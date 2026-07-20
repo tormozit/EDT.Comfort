@@ -20,6 +20,9 @@ import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.ModifyEvent;
 import org.eclipse.swt.events.ModifyListener;
+import org.eclipse.swt.custom.CTabFolder;
+import org.eclipse.swt.custom.SashForm;
+import org.eclipse.swt.custom.ScrolledComposite;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
@@ -35,6 +38,7 @@ import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.swt.widgets.ToolBar;
 import org.eclipse.swt.widgets.ToolItem;
@@ -951,24 +955,29 @@ public class SmartOutlineHook implements IStartup {
         ToolBar menuBar = resolveOutlineToolBar(dialog, filterControl);
         if (menuBar != null)
         {
-            Composite titleArea = findOutlineTitleArea(menuBar);
-            if (hasOutlineComfortToolBar(titleArea))
+            Composite headerRow = resolveOutlineHeaderRow(filterControl, menuBar);
+            if (headerRow == null)
+                return;
+            if (hasOutlineComfortToolBar(headerRow))
             {
                 filterControl.setData(CLEAR_INSTALLED_KEY, Boolean.TRUE);
                 return;
             }
-            installQuickOutlineHeaderComfortToolBar(filterControl, viewer, shell, dialog, dialogName, menuBar);
+            installQuickOutlineHeaderComfortToolBar(filterControl, viewer, shell, dialog, dialogName, menuBar,
+                    headerRow);
             return;
         }
 
-        installQuickOutlineHeaderButtonsFallback(filterControl, viewer, shell, dialog, dialogName, parent);
+        Composite headerRow = filterControl.getParent();
+        if (headerRow == null || headerRow.isDisposed() || !isOutlineHeaderRow(headerRow, filterControl))
+            return;
+        installQuickOutlineHeaderButtonsFallback(filterControl, viewer, shell, dialog, dialogName, headerRow);
     }
 
     /** Отдельный тулбар слева от штатного ▼ ({@link DebugInspectorHook} — не в menuBar: на нём MouseDown → showDialogMenu). */
     private static void installQuickOutlineHeaderComfortToolBar(Control filterControl, TreeViewer viewer, Shell shell,
-            Object dialog, String dialogName, ToolBar menuBar)
+            Object dialog, String dialogName, ToolBar menuBar, Composite titleArea)
     {
-        Composite titleArea = findOutlineTitleArea(menuBar);
         if (titleArea == null || titleArea.isDisposed())
             return;
 
@@ -1048,22 +1057,96 @@ public class SmartOutlineHook implements IStartup {
 
         applyOutlineMenuBarGridData(menuBar, menuBarLayout);
 
-        if (titleArea.getLayout() instanceof GridLayout gridLayout)
+        if (titleArea.getLayout() instanceof GridLayout gridLayout && gridLayout.numColumns > 1)
             gridLayout.numColumns = Math.max(gridLayout.numColumns, bslQuickOutline ? 4 : 3);
 
         titleArea.layout(true, true);
     }
 
-    private static Composite findOutlineTitleArea(ToolBar menuBar)
+    /**
+     * Строка заголовка: наименьший общий предок поля фильтра и ▼-toolbar, где оба — прямые дети.
+     * Не путать с телом диалога (SashForm / Tree / таблица в том же GridLayout).
+     */
+    private static Composite resolveOutlineHeaderRow(Control filterControl, ToolBar menuBar)
     {
-        if (menuBar == null || menuBar.isDisposed())
+        if (filterControl == null || filterControl.isDisposed()
+                || menuBar == null || menuBar.isDisposed())
             return null;
-        for (Composite parent = menuBar.getParent(); parent != null; parent = parent.getParent())
+
+        Composite lca = lowestCommonDirectParent(filterControl, menuBar);
+        if (lca != null && isOutlineHeaderRow(lca, filterControl))
+            return lca;
+
+        Composite menuParent = menuBar.getParent();
+        if (menuParent != null && !menuParent.isDisposed()
+                && containsControl(menuParent, filterControl)
+                && isOutlineHeaderRow(menuParent, filterControl))
+            return menuParent;
+
+        return null;
+    }
+
+    private static Composite lowestCommonDirectParent(Control first, Control second)
+    {
+        if (first == null || second == null || first.isDisposed() || second.isDisposed())
+            return null;
+        for (Composite parent = first.getParent(); parent != null && !parent.isDisposed(); parent = parent.getParent())
         {
-            if (parent.getLayout() instanceof GridLayout)
+            if (isDirectChild(parent, second))
                 return parent;
         }
-        return menuBar.getParent();
+        return null;
+    }
+
+    private static boolean isDirectChild(Composite parent, Control child)
+    {
+        if (parent == null || child == null || parent.isDisposed() || child.isDisposed())
+            return false;
+        for (Control candidate : parent.getChildren())
+        {
+            if (candidate == child)
+                return true;
+        }
+        return false;
+    }
+
+    private static boolean containsControl(Composite composite, Control control)
+    {
+        if (composite == null || control == null || composite.isDisposed() || control.isDisposed())
+            return false;
+        for (Composite parent = control.getParent(); parent != null && !parent.isDisposed(); parent = parent.getParent())
+        {
+            if (parent == composite)
+                return true;
+            if (parent instanceof Shell)
+                break;
+        }
+        return false;
+    }
+
+    private static boolean isOutlineHeaderRow(Composite row, Control filterControl)
+    {
+        if (row == null || row.isDisposed() || filterControl == null || filterControl.isDisposed())
+            return false;
+        if (!containsControl(row, filterControl))
+            return false;
+        for (Control child : row.getChildren())
+        {
+            if (isOutlineContentControl(child))
+                return false;
+        }
+        return true;
+    }
+
+    private static boolean isOutlineContentControl(Control control)
+    {
+        if (control == null || control.isDisposed())
+            return false;
+        if (control instanceof Tree || control instanceof SashForm || control instanceof Table)
+            return true;
+        if (control instanceof CTabFolder || control instanceof ScrolledComposite)
+            return true;
+        return control.getClass().getName().contains("DtTreeView"); //$NON-NLS-1$
     }
 
     private static boolean hasOutlineComfortToolBar(Composite titleArea)
@@ -1170,14 +1253,13 @@ public class SmartOutlineHook implements IStartup {
         }
 
         org.eclipse.swt.widgets.Layout layout = parent.getLayout();
-        if (layout instanceof GridLayout)
+        if (layout instanceof GridLayout gridLayout && gridLayout.numColumns > 1)
         {
-            GridLayout gl = (GridLayout) layout;
             Object ld = filterControl.getLayoutData();
             GridData filterGd = ld instanceof GridData ? (GridData) ld : null;
-            reserveHeaderColumns(filterGd, gl, 1 + extraButtons);
+            reserveHeaderColumns(filterGd, gridLayout, 1 + extraButtons);
         }
-        else if (!(layout instanceof RowLayout))
+        else if (!(layout instanceof RowLayout) && layout instanceof GridLayout)
         {
             parent.setLayout(new RowLayout(SWT.HORIZONTAL));
         }
@@ -1238,23 +1320,28 @@ public class SmartOutlineHook implements IStartup {
 
     private static ToolBar resolveOutlineToolBar(Object dialog, Control filterControl)
     {
+        ToolBar candidate = null;
         if (dialog != null)
         {
             Object bar = Global.getField(dialog, "toolBar"); //$NON-NLS-1$
             if (bar instanceof ToolBar toolBar && !toolBar.isDisposed())
-                return toolBar;
+                candidate = toolBar;
         }
-        if (filterControl != null && !filterControl.isDisposed())
+        if (candidate == null && filterControl != null && !filterControl.isDisposed())
         {
             Composite parent = filterControl.getParent();
             if (parent != null && !parent.isDisposed())
             {
                 Control found = findViewMenuControl(parent, filterControl);
                 if (found instanceof ToolBar toolBar && !toolBar.isDisposed())
-                    return toolBar;
+                    candidate = toolBar;
             }
         }
-        return null;
+        if (candidate == null)
+            return null;
+        if (resolveOutlineHeaderRow(filterControl, candidate) == null)
+            return null;
+        return candidate;
     }
 
     private static int computeToolBarContentWidth(ToolBar toolBar)
