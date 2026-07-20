@@ -1127,9 +1127,29 @@ public final class ContentAssistPopupSync
 
     // ---- logging ------------------------------------------------------------
 
+    /**
+     * JFace {@code CompletionProposalPopup} пересоздаёт свою {@code Table} асинхронно при смене
+     * контекста (например, при вводе точки для member-access) — попап (внешний объект) остаётся
+     * тем же, но поле с таблицей на короткое время {@code null}/disposed, пока не создастся новая.
+     * Подтверждено диагностикой (issue: подсветка не подключалась после точки): из 5 попыток
+     * подряд только одна попала на валидную таблицу. Короткий ограниченный повтор ловит момент
+     * готовности новой таблицы вместо однократной попытки, которая почти всегда промахивается
+     * мимо окна.
+     */
+    private static final int INSTALL_RETRY_MAX_ATTEMPTS = 20;
+    private static final int INSTALL_RETRY_DELAY_MS = 50;
+
     private static void installPopupScrollWatcher(Object popup, ContentAssistant assistant,
                                                   SourceViewer viewer,
                                                   SmartContentAssistProcessor processor)
+    {
+        installPopupScrollWatcherAttempt(popup, assistant, viewer, processor, 0);
+    }
+
+    private static void installPopupScrollWatcherAttempt(Object popup, ContentAssistant assistant,
+                                                  SourceViewer viewer,
+                                                  SmartContentAssistProcessor processor,
+                                                  int attempt)
     {
         if (popup == null || POPUP_SCROLL_LISTENERS.containsKey(popup))
             return;
@@ -1138,7 +1158,19 @@ public final class ContentAssistPopupSync
             initPopupReflection(popup);
             Table table = getProposalTable(popup);
             if (table == null || table.isDisposed())
+            {
+                if (attempt < INSTALL_RETRY_MAX_ATTEMPTS)
+                {
+                    Display display = Display.getDefault();
+                    if (display != null && !display.isDisposed())
+                    {
+                        display.timerExec(INSTALL_RETRY_DELAY_MS, () ->
+                            installPopupScrollWatcherAttempt(popup, assistant, viewer, processor,
+                                attempt + 1));
+                    }
+                }
                 return;
+            }
             Listener listener = event -> maybeLoadMoreOnScroll(popup, assistant, viewer,
                 processor, table);
             table.addListener(SWT.Selection, listener);

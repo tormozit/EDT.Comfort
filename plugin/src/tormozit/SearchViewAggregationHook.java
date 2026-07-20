@@ -1,6 +1,5 @@
 package tormozit;
 
-import java.lang.ref.WeakReference;
 import java.text.MessageFormat;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -8,20 +7,16 @@ import java.util.Comparator;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Collection;
 import java.util.Map;
 import java.util.Set;
-import java.util.WeakHashMap;
 
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.ILabelProviderListener;
-import org.eclipse.jface.viewers.IOpenListener;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.LabelProvider;
-import org.eclipse.jface.viewers.OpenEvent;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.jface.viewers.TableViewer;
@@ -30,15 +25,11 @@ import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.ViewerCell;
 import org.eclipse.search.ui.IQueryListener;
 import org.eclipse.search.ui.ISearchQuery;
-import org.eclipse.search.ui.ISearchResult;
-import org.eclipse.search.ui.ISearchResultListener;
 import org.eclipse.search.ui.ISearchResultPage;
 import org.eclipse.search.ui.ISearchResultViewPart;
 import org.eclipse.search.ui.NewSearchUI;
-import org.eclipse.search.ui.SearchResultEvent;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.graphics.Image;
-import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
@@ -88,9 +79,6 @@ import org.eclipse.ui.PlatformUI;
  * {@link Global#getField}/{@link Global#invoke} (см. журнал: Параметры → Комфорт → «Общее логирование»).
  *
  * <p>Включение: Параметры → Комфорт → «Улучшать списки» ({@link ComfortSettings#PREF_REPLACE_LIST_FILTERS}).
- *
- * <p>#165 (только диагностика в журнале «Комфорт»): Open / panelHealth / searchResultChanged /
- * queryRemoved — без изменения поведения агрегации и Open.
  */
 public final class SearchViewAggregationHook implements IStartup
 {
@@ -99,44 +87,8 @@ public final class SearchViewAggregationHook implements IStartup
 
     private static final String HOOKED_KEY = "tormozit.searchAggregationHooked"; //$NON-NLS-1$
     private static final String TREE_COUNT_LABEL_HOOKED_KEY = "tormozit.searchTreeCountLabelHooked"; //$NON-NLS-1$
-    private static final String OPEN_DIAG_HOOKED_KEY = "tormozit.searchAggregationOpenDiag"; //$NON-NLS-1$
-    private static final String WATCHDOG_HOOKED_KEY = "tormozit.searchAggregationWatchdog"; //$NON-NLS-1$
-    private static final String RESIZE_DIAG_HOOKED_KEY = "tormozit.searchAggregationResizeDiag"; //$NON-NLS-1$
-    /** Период опроса {@link #installPanelWatchdog} — раз в 1с, независимо от кликов/поисков. */
-    private static final int WATCHDOG_INTERVAL_MS = 1000;
-    /**
-     * #165: после Open deferred-{@code CTabFolder.onMouse} может скрыть content «Поиск» при
-     * визуально всё ещё выбранной вкладке. Короткое окно: filter мыши на PartStack + немедленный
-     * desync-heal. Не откатываем чужие вкладки (клик по «Журнал Комфорт» — штатно).
-     */
-    /**
-     * Clip_851980: race {@code onMouse} пришёл на +5с после open — при 3000ms окно уже
-     * истекло, filter не сработал. Держим запас под deferred mouse после открытия редактора.
-     */
-    private static final int OPEN_PROTECT_MS = 10000;
     /** Как {@code Messages.IMatchItem_Total_matches_count_pattern__0} в search.ui. */
     private static final String MATCH_COUNT_SUFFIX_PATTERN = " ({0} \u0441\u043E\u043E\u0442\u0432\u0435\u0442\u0441\u0442\u0432\u0438\u0439)"; //$NON-NLS-1$
-
-    /** Уже повешен диагностический {@link ISearchResultListener} (weak). */
-    private static final Set<ISearchResult> RESULT_LISTENERS_INSTALLED =
-            Collections.newSetFromMap(new WeakHashMap<>());
-
-    /**
-     * Счётчик открытий (двойных кликов) для диагностики #165: несколько кликов подряд (быстрее
-     * 1.5с) порождают перекрывающиеся цепочки {@code timerExec} у {@link #schedulePanelHealthDiag},
-     * и без этого счётчика их +0/+100/+500/+1500ms логи могли перемешиваться (что и видно было
-     * в присланном логе — "+1500ms" от предыдущего клика печатался после "open:" следующего).
-     * Каждый {@code open()} захватывает свой {@code seq}; устаревшие (перекрытые новым кликом)
-     * срабатывания молча пропускаются.
-     */
-    private static volatile int openSeq;
-    /** {@link System#currentTimeMillis()} до которого действует защита после Open. */
-    private static volatile long openProtectDeadlineMs;
-    /** Момент {@code open} для дельты в логах heal/block. */
-    private static volatile long openArmedAtMs;
-    private static volatile WeakReference<org.eclipse.swt.custom.CTabFolder> searchPartStackFolderRef;
-    private static volatile WeakReference<org.eclipse.swt.custom.CTabItem> searchPartStackItemRef;
-    private static volatile boolean partStackMouseGuardInstalled;
 
     // -----------------------------------------------------------------------
     // IStartup
@@ -149,7 +101,6 @@ public final class SearchViewAggregationHook implements IStartup
             IWorkbench wb = PlatformUI.getWorkbench();
             if (wb == null)
                 return;
-            installPartStackMouseGuard();
             for (IWorkbenchWindow window : wb.getWorkbenchWindows())
                 hookWindow(window);
             wb.addWindowListener(new org.eclipse.ui.IWindowListener()
@@ -224,6 +175,7 @@ public final class SearchViewAggregationHook implements IStartup
         searchGeneration++;
         SAVED_TABLE_SELECTION_BY_VIEWER.clear();
         log("onSearchStarting: watch first root, gen=" + searchGeneration); //$NON-NLS-1$
+        Global.tempLog("aggfilter", "onSearchStarting: guard=true gen=" + searchGeneration); //$NON-NLS-1$ //$NON-NLS-2$
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
@@ -301,11 +253,62 @@ public final class SearchViewAggregationHook implements IStartup
             if (!guardFirstRootSelection)
                 return;
             if (firstRoot.equals(viewers.tree.getStructuredSelection().getFirstElement()))
+            {
                 guardFirstRootSelection = false;
+                Global.tempLog("aggfilter", "guard OFF (matched) attempt=" + attempt); //$NON-NLS-1$ //$NON-NLS-2$
+                scheduleFinalAggregationReapply(viewers.tree, viewers.table, firstRoot);
+            }
             else if (attempt < 60)
                 startFirstRootWatch(attempt + 1);
             else
+            {
                 guardFirstRootSelection = false;
+                Global.tempLog("aggfilter", "guard OFF (attempts exhausted) attempt=" + attempt); //$NON-NLS-1$ //$NON-NLS-2$
+                scheduleFinalAggregationReapply(viewers.tree, viewers.table, firstRoot);
+            }
+        });
+    }
+
+    /**
+     * Временный фикс (баг: таблица иногда остаётся с узкими (нерекурсивными) результатами
+     * штатного {@code changeSource}, хотя наш {@code applyAggregationIfNeeded} логирует успешный
+     * вызов). Гипотеза: {@code changeSource} — асинхронная фоновая задача модели; штатный листенер
+     * реагирует на САМОЕ ПЕРВОЕ (настоящее) событие выбора и запускает СВОЙ {@code changeSource}
+     * (узкий) одновременно с нашим (широким, рекурсивным) — если штатная фоновая задача завершится
+     * позже наших (мы вызываем агрегацию до 7+ раз за то же окно из {@code startFirstRootWatch}),
+     * она может перезаписать таблицу узким результатом уже ПОСЛЕ того, как наш код отработал и
+     * залогировал успех. Лечим не причину (внутренняя модель EDT нам недоступна), а следствие:
+     * ещё один, финальный вызов агрегации с задержкой — чтобы наш результат гарантированно был
+     * последним, даже если штатная (асинхронная) задача была медленнее. Задержка обязательна:
+     * попытка убрать её через {@code asyncExec} (выполнение сразу после текущего цикла обработки
+     * событий) вызвала регресс — штатный {@code changeSource} успевает сработать ПОЗЖЕ нашего
+     * немедленного повтора и перебивает результат узким списком. 100мс — компромисс между 300мс
+     * (эмпирически подтверждённые 10/10, но заметнее мигание) и 50мс (заметно короче, но
+     * недостаточно — штатная задача иногда не успевает, гонка проигрывается); это подстраховка
+     * (fallback) на время, пока не появится точный сигнал завершения штатной асинхронной задачи
+     * (см. обсуждение — вариант с {@code IJobChangeListener}, требует согласования и проверки перед
+     * реализацией).
+     * Видимый побочный эффект (кратковременное мигание) остаётся, целенаправленно устранён не был
+     * — попытка условной проверки «уже верно» (без задержки убрать лишний повтор) тоже вызвала
+     * регресс (см. историю правок), а {@code setRedraw} для маскировки перерисовки запрещён.
+     */
+    private static void scheduleFinalAggregationReapply(TreeViewer treeViewer, TableViewer tableViewer,
+            Object node)
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.timerExec(100, () -> {
+            if (treeViewer.getTree() == null || treeViewer.getTree().isDisposed())
+                return;
+            if (tableViewer.getTable() == null || tableViewer.getTable().isDisposed())
+                return;
+            Object current = treeViewer.getStructuredSelection().getFirstElement();
+            if (!node.equals(current))
+                return; // пользователь уже кликнул на что-то другое — не мешаем
+            Global.tempLog("aggfilter", "final reapply +100ms for " + describeNodeForLog(node)); //$NON-NLS-1$ //$NON-NLS-2$
+            applyAggregationIfNeeded(treeViewer, tableViewer,
+                Collections.singletonList(node), copySavedSelection(tableViewer), "finalReapply"); //$NON-NLS-1$
         });
     }
 
@@ -403,18 +406,9 @@ public final class SearchViewAggregationHook implements IStartup
     // и может смениться, если пользователь переключил вид поиска)
     // -----------------------------------------------------------------------
 
-    /**
-     * Диагностика #165 (watchdog/resize/hide/panelHealth) должна работать независимо от
-     * «Улучшать списки» (ComfortSettings.isReplaceListFiltersEnabled): по факту репорта — баг
-     * опустошения панели воспроизводится и при ВЫКЛЮЧЕННОЙ этой настройке (значит дело не в
-     * агрегации/колонке «Путь»), но раньше schedulePatch/tryPatch целиком гейтились этим флагом —
-     * с выключенной настройкой ни один диагностический слушатель даже не устанавливался. Теперь
-     * гейт — «включена хотя бы агрегация ИЛИ общее логирование» (иначе диагностика молчала бы,
-     * даже если пользователь явно включил логирование, чтобы найти этот баг).
-     */
     private static void schedulePatch(IViewPart view, int attempt)
     {
-        if (!ComfortSettings.isReplaceListFiltersEnabled() && !Global.isLogEnabled())
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
             return;
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
@@ -423,8 +417,8 @@ public final class SearchViewAggregationHook implements IStartup
         display.timerExec(delay, () -> {
             if (display.isDisposed())
                 return;
-            if (!ComfortSettings.isReplaceListFiltersEnabled() && !Global.isLogEnabled())
-                return; // обе настройки могли выключить, пока ждали появления страницы
+            if (!ComfortSettings.isReplaceListFiltersEnabled())
+                return; // настройка выключена, пока ждали появления страницы
             if (!tryPatch(view) && attempt < 40)
                 schedulePatch(view, attempt + 1);
         });
@@ -454,10 +448,7 @@ public final class SearchViewAggregationHook implements IStartup
                 return false;
             }
             if (!activePage.getClass().getName().contains(PAGE_CLASS_MARKER))
-            {
-                // другой вид страницы результатов (не конфигурационный поиск) — не наш случай
-                return true;
-            }
+                return true; // другой вид страницы результатов (не конфигурационный поиск) — не наш случай
 
             Object treeLayout = Global.getField(activePage, "treeLayout"); //$NON-NLS-1$
             if (treeLayout == null)
@@ -484,17 +475,8 @@ public final class SearchViewAggregationHook implements IStartup
             }
             TableViewer tableViewer = (TableViewer) tableViewerObj;
 
-            // Диагностика #165 — своя, независимая от «Улучшать списки» (у каждого install*
-            // своя защита от повторной установки через *_HOOKED_KEY, поэтому вызывать безусловно
-            // безопасно): баг опустошения панели воспроизводится и с выключенной агрегацией,
-            // так что диагностика обязана работать сама по себе, без привязки к этой фиче.
-            installSearchResultDiagListener(activePage);
-            installOpenDiagMonitor(activePage, treeViewer, tableViewer);
-            installPanelWatchdog(activePage, treeViewer, tableViewer);
-            installResizeDiag(treeViewer, tableViewer);
-
             if (!ComfortSettings.isReplaceListFiltersEnabled())
-                return true; // диагностика уже установлена, сама фича — выключена, дальше не идём
+                return true; // фича выключена настройкой
 
             installTreeMatchCountLabelProvider(treeViewer);
 
@@ -599,6 +581,10 @@ public final class SearchViewAggregationHook implements IStartup
             {
                 IStructuredSelection selection = event.getStructuredSelection();
                 List<Object> selectedNodes = selection.toList();
+                // Временная диагностика (баг: таблица показывает терминальную ветку, хотя
+                // активна строка узла-проекта). Топик отдельный от issue165 — другой баг.
+                Global.tempLog("aggfilter", "postSelectionChanged: guard=" + guardFirstRootSelection //$NON-NLS-1$ //$NON-NLS-2$
+                    + " selectedNodes=" + describeNodesForLog(selectedNodes)); //$NON-NLS-1$
 
                 // EDT при появлении результатов спускается к первому терминальному узлу.
                 if (guardFirstRootSelection)
@@ -607,11 +593,23 @@ public final class SearchViewAggregationHook implements IStartup
                     if (firstRoot == null)
                         return;
                     Object current = selectedNodes.isEmpty() ? null : selectedNodes.get(0);
+                    Global.tempLog("aggfilter", "guard branch: firstRoot=" + describeNodeForLog(firstRoot) //$NON-NLS-1$ //$NON-NLS-2$
+                        + " current=" + describeNodeForLog(current) + " equal=" + firstRoot.equals(current)); //$NON-NLS-1$ //$NON-NLS-2$
                     if (!firstRoot.equals(current))
                     {
                         log("redirectToFirstRoot: " + current + " -> " + firstRoot); //$NON-NLS-1$ //$NON-NLS-2$
                         treeViewer.setSelection(new StructuredSelection(firstRoot), true);
                         showFirstTreeItem(treeViewer);
+                        // ВАЖНО: programmatic setSelection() не порождает новое post-selection
+                        // событие (JFace фича — post-selection реагирует только на реальные SWT.Selection
+                        // от мыши/клавиатуры), поэтому applyAggregationIfNeeded нужно вызвать явно здесь —
+                        // иначе таблица остаётся с тем, что штатный код успел наложить по терминальному
+                        // узлу ДО этого редиректа, при живом (уже правильном) выделении узла-проекта
+                        // в дереве. Раньше на это надеялся только параллельный таймер startFirstRootWatch,
+                        // который не всегда успевал/уже был выключен к этому моменту.
+                        applyAggregationIfNeeded(treeViewer, tableViewer,
+                            Collections.singletonList(firstRoot), copySavedSelection(tableViewer),
+                            "redirectToFirstRoot"); //$NON-NLS-1$
                         return;
                     }
                 }
@@ -648,6 +646,8 @@ public final class SearchViewAggregationHook implements IStartup
                 break;
             }
         }
+        Global.tempLog("aggfilter", "applyAggregationIfNeeded(" + source + "): nodes=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + describeNodesForLog(selectedNodes) + " needsAggregation=" + needsAggregation); //$NON-NLS-1$
         if (!needsAggregation)
             return false;
 
@@ -1384,6 +1384,29 @@ public final class SearchViewAggregationHook implements IStartup
         return ""; //$NON-NLS-1$
     }
 
+    /** Временная диагностика: краткое описание узла дерева для логов (метка + hasChildren). */
+    private static String describeNodeForLog(Object node)
+    {
+        if (node == null)
+            return "null"; //$NON-NLS-1$
+        return "'" + extractLabel(node) + "'@" + System.identityHashCode(node) //$NON-NLS-1$ //$NON-NLS-2$
+            + " hasChildren=" + hasChildren(node); //$NON-NLS-1$
+    }
+
+    private static String describeNodesForLog(List<Object> nodes)
+    {
+        if (nodes == null || nodes.isEmpty())
+            return "[]"; //$NON-NLS-1$
+        StringBuilder sb = new StringBuilder("["); //$NON-NLS-1$
+        for (int i = 0; i < nodes.size(); i++)
+        {
+            if (i > 0)
+                sb.append(", "); //$NON-NLS-1$
+            sb.append(describeNodeForLog(nodes.get(i)));
+        }
+        return sb.append(']').toString();
+    }
+
     // -----------------------------------------------------------------------
     // Колонка «Путь»
     // -----------------------------------------------------------------------
@@ -1920,554 +1943,6 @@ public final class SearchViewAggregationHook implements IStartup
         int swtSelCount = table == null || table.isDisposed() ? -1 : table.getSelectionCount();
         int viewerSelCount = tableViewer.getStructuredSelection().size();
         return "{tableItems=" + itemCount + " viewerSel=" + viewerSelCount + " swtSel=" + swtSelCount + "}"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-    }
-
-    // -----------------------------------------------------------------------
-    // Диагностика #165 (только журнал «Комфорт», без изменения поведения)
-    // -----------------------------------------------------------------------
-
-    /**
-     * Снимок состояния панели поиска для диагностики #165. Раньше проверялись только счётчики
-     * элементов нашего {@code treeViewer}/{@code tableViewer} — но по факту двух логов, где
-     * {@code panelHealth} рапортовал "здоров" (items не пусты), а пользователь тем не менее видел
-     * пустую панель с плейсхолдером "Поиск...", это оказалось недостаточно: наши виджеты — это
-     * КОНКРЕТНЫЕ объекты, захваченные при установке хука на страницу результатов; сами по себе
-     * они остаются живыми и полными данных, даже если {@code SearchView} в этот момент показывает
-     * СОВСЕМ ДРУГУЮ страницу (например, свежий фоновый поиск EDT переключил активную страницу через
-     * pagebook) — тогда то, что видит пользователь, вообще не наши дерево/таблица, а чужой пустой
-     * плейсхолдер поверх/вместо них. Поэтому дополнительно: {@code samePage}, {@code treeVisible},
-     * и {@code searchPartVisible} — иначе штатный клик на «Журнал Комфорт» (ради лога) даёт
-     * ложный {@code treeVisible=false} и выглядит как #165 (ошибка разбора Clip_851973).
-     */
-    private static final class PanelState
-    {
-        final int treeItems;
-        final boolean treeVisible;
-        final boolean samePage;
-        final boolean searchPartVisible;
-        final String activePageClass;
-        final String tableState;
-        final String inputState;
-
-        PanelState(int treeItems, boolean treeVisible, boolean samePage, boolean searchPartVisible,
-                String activePageClass, String tableState, String inputState)
-        {
-            this.treeItems = treeItems;
-            this.treeVisible = treeVisible;
-            this.samePage = samePage;
-            this.searchPartVisible = searchPartVisible;
-            this.activePageClass = activePageClass;
-            this.tableState = tableState;
-            this.inputState = inputState;
-        }
-
-        /**
-         * «Проблема» #165 — пользователь смотрит на Search ({@code searchPartVisible}), а дерево
-         * пусто/не видно/не та страница. Скрытость из‑за другой вкладки стека — не проблема.
-         */
-        boolean isProblem()
-        {
-            if (!searchPartVisible)
-                return false;
-            return !samePage || !treeVisible || treeItems == 0;
-        }
-
-        @Override
-        public String toString()
-        {
-            return "{treeItems=" + treeItems + " treeVisible=" + treeVisible //$NON-NLS-1$ //$NON-NLS-2$
-                + " searchPartVisible=" + searchPartVisible //$NON-NLS-1$
-                + " " + tableState + " " + inputState //$NON-NLS-1$ //$NON-NLS-2$
-                + " activePage=" + activePageClass + " samePage=" + samePage + "}"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        }
-    }
-
-    private static PanelState computePanelState(TreeViewer treeViewer, TableViewer tableViewer,
-            ISearchResultPage page)
-    {
-        Tree tree = treeViewer != null ? treeViewer.getTree() : null;
-        boolean treeDisposed = tree == null || tree.isDisposed();
-        int treeItems = treeDisposed ? -1 : tree.getItemCount();
-        boolean treeVisible = !treeDisposed && tree.isVisible();
-
-        boolean samePage = false;
-        boolean searchPartVisible = false;
-        String activePageClass = "?"; //$NON-NLS-1$
-        try
-        {
-            IViewPart view = findSearchViewPart();
-            if (!(view instanceof ISearchResultViewPart resultView))
-                activePageClass = "NO_SEARCH_VIEW"; //$NON-NLS-1$
-            else
-            {
-                ISearchResultPage currentActive = resultView.getActivePage();
-                samePage = currentActive == page;
-                activePageClass = currentActive != null ? currentActive.getClass().getSimpleName() : "null"; //$NON-NLS-1$
-                IWorkbenchPage wbPage = view.getSite() != null ? view.getSite().getPage() : null;
-                searchPartVisible = wbPage != null && wbPage.isPartVisible(view);
-            }
-        }
-        catch (Exception e)
-        {
-            activePageClass = "ERR:" + e.getClass().getSimpleName(); //$NON-NLS-1$
-        }
-
-        String inputState = "input=?"; //$NON-NLS-1$
-        try
-        {
-            Object input = page != null ? Global.invoke(page, "getInput") : null; //$NON-NLS-1$
-            if (input == null)
-                inputState = "input=null"; //$NON-NLS-1$
-            else
-            {
-                Object elements = Global.invoke(input, "getElements"); //$NON-NLS-1$
-                int elemCount = elements instanceof Collection<?> ? ((Collection<?>) elements).size() : -1;
-                inputState = "input=" + input.getClass().getSimpleName() + " elements=" + elemCount; //$NON-NLS-1$ //$NON-NLS-2$
-            }
-        }
-        catch (Exception e)
-        {
-            inputState = "input=ERR:" + e.getClass().getSimpleName(); //$NON-NLS-1$
-        }
-
-        return new PanelState(treeItems, treeVisible, samePage, searchPartVisible, activePageClass,
-            describeTableSelectionState(tableViewer), inputState);
-    }
-
-    private static String describePanelState(TreeViewer treeViewer, TableViewer tableViewer,
-            ISearchResultPage page)
-    {
-        return computePanelState(treeViewer, tableViewer, page).toString();
-    }
-
-    private static void installOpenDiagMonitor(ISearchResultPage page, TreeViewer treeViewer,
-            TableViewer tableViewer)
-    {
-        Table table = tableViewer.getTable();
-        if (table == null || table.isDisposed() || table.getData(OPEN_DIAG_HOOKED_KEY) != null)
-            return;
-        table.setData(OPEN_DIAG_HOOKED_KEY, Boolean.TRUE);
-
-        IOpenListener openListener = new IOpenListener()
-        {
-            @Override
-            public void open(OpenEvent event)
-            {
-                // Диагностика #165 — независимо от «Улучшать списки» (см. Javadoc tryPatch).
-                int seq = ++openSeq;
-                beginOpenPartStackProtect(treeViewer.getTree());
-                log("open: seq=" + seq + " " + describePanelState(treeViewer, tableViewer, page)); //$NON-NLS-1$ //$NON-NLS-2$
-                schedulePanelHealthDiag(page, treeViewer, tableViewer, 0, seq);
-                schedulePanelHealthDiag(page, treeViewer, tableViewer, 100, seq);
-                schedulePanelHealthDiag(page, treeViewer, tableViewer, 500, seq);
-                schedulePanelHealthDiag(page, treeViewer, tableViewer, 1500, seq);
-            }
-        };
-        tableViewer.addOpenListener(openListener);
-        treeViewer.addOpenListener(openListener);
-    }
-
-    /**
-     * Непрерывный опрос состояния панели раз в {@link #WATCHDOG_INTERVAL_MS} — в отличие от
-     * {@link #installOpenDiagMonitor} (который проверяет только 1.5с после клика), живёт всё время
-     * жизни страницы результатов. Нужен потому, что по факту двух присланных логов опустошение
-     * панели пользователь замечал не сразу после клика, а позже (когда просто смотрел на панель) —
-     * то есть вне 1.5-секундного окна `panelHealth`. Логируем только на ПЕРЕХОДЕ между
-     * здоровым/проблемным состоянием (не каждую секунду), чтобы не заспамить журнал «Комфорт».
-     */
-    private static void installPanelWatchdog(ISearchResultPage page, TreeViewer treeViewer,
-            TableViewer tableViewer)
-    {
-        Table table = tableViewer.getTable();
-        if (table == null || table.isDisposed() || table.getData(WATCHDOG_HOOKED_KEY) != null)
-            return;
-        table.setData(WATCHDOG_HOOKED_KEY, Boolean.TRUE);
-
-        boolean[] wasProblem = { false };
-        Display display = Display.getDefault();
-        if (display == null || display.isDisposed())
-            return;
-        Runnable[] tickHolder = new Runnable[1];
-        tickHolder[0] = () -> {
-            Tree tree = treeViewer.getTree();
-            Table tbl = tableViewer.getTable();
-            if (tree == null || tree.isDisposed() || tbl == null || tbl.isDisposed())
-                return; // страница закрыта/пересоздана — часы сами останавливаются, не перепланируем
-            // Диагностика #165 — независимо от «Улучшать списки» (см. Javadoc tryPatch).
-            {
-                PanelState state = computePanelState(treeViewer, tableViewer, page);
-                boolean isProblem = state.isProblem();
-                if (isProblem != wasProblem[0])
-                {
-                    log((isProblem ? "WATCHDOG_PROBLEM_START: " : "WATCHDOG_PROBLEM_END: ") + state); //$NON-NLS-1$ //$NON-NLS-2$
-                    if (isProblem && !state.treeVisible)
-                        log("WATCHDOG_ANCESTOR_CHAIN: " + describeAncestorChain(tree)); //$NON-NLS-1$
-                    wasProblem[0] = isProblem;
-                }
-                // Автофикс — только сразу из HIDE/onMouse (см. installResizeDiag), не раз в секунду.
-            }
-            display.timerExec(WATCHDOG_INTERVAL_MS, tickHolder[0]);
-        };
-        display.timerExec(WATCHDOG_INTERVAL_MS, tickHolder[0]);
-    }
-
-    /**
-     * Синхронный перехват {@code SWT.Resize}/{@code SWT.Show}/{@code SWT.Hide} на дерево/таблицу
-     * и ВСЮ цепочку родителей до {@code Shell}. По факту первого пойманного
-     * {@code WATCHDOG_PROBLEM_START} (treeItems=1, samePage=true, но treeVisible=false, и при
-     * этом ни одного {@code RESIZE} в логе) — размер не менялся, кто-то вызвал
-     * {@code setVisible(false)} на одном из родителей ({@code Control.isVisible()} учитывает всю
-     * цепочку, а {@code SWT.Resize} на {@code setVisible} не срабатывает — отсюда и молчание
-     * прежней версии этой диагностики). {@code SWT.Show}/{@code SWT.Hide} ловят именно это,
-     * синхронно, с указанием какого именно виджета в цепочке это коснулось.
-     */
-    private static void installResizeDiag(TreeViewer treeViewer, TableViewer tableViewer)
-    {
-        Table table = tableViewer.getTable();
-        if (table == null || table.isDisposed() || table.getData(RESIZE_DIAG_HOOKED_KEY) != null)
-            return;
-        table.setData(RESIZE_DIAG_HOOKED_KEY, Boolean.TRUE);
-
-        Control tree = treeViewer.getTree();
-        Listener listener = event -> {
-            // Диагностика #165 — независимо от «Улучшать списки» (см. Javadoc tryPatch),
-            // log() сам молчит, если выключено «Общее логирование».
-            Control src = event.widget instanceof Control ? (Control) event.widget : null;
-            String who = src == tree ? "tree" //$NON-NLS-1$
-                : src == table ? "table" //$NON-NLS-1$
-                : src != null ? src.getClass().getSimpleName() + "@" + System.identityHashCode(src) : "?"; //$NON-NLS-1$ //$NON-NLS-2$
-            String eventName = event.type == SWT.Resize ? "RESIZE" : event.type == SWT.Show ? "SHOW" : "HIDE"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            log(eventName + " " + who + ": " + describeBounds(src)); //$NON-NLS-1$ //$NON-NLS-2$
-            // HIDE синхронно из setVisible(false) — стек покажет вызывающий код.
-            // Штатный клик на другую вкладку стека (в т.ч. «Журнал Комфорт») тоже даёт HIDE —
-            // desync-heal сработает только если selection всё ещё «Поиск» (см. plan #165).
-            if (event.type != SWT.Hide)
-                return;
-            String stack = describeCurrentStackTrace();
-            log("HIDE stacktrace: " + stack); //$NON-NLS-1$
-            boolean fromCTab = stack.contains("CTabFolder.onMouse") //$NON-NLS-1$
-                || stack.contains("CTabFolder.setSelection"); //$NON-NLS-1$
-            if (!fromCTab)
-                return;
-            if (!isOpenProtectActive())
-            {
-                // Clip_851980: onMouse пришёл после истечения окна — filter уже не действует.
-                log("OPEN_PROTECT: HIDE/onMouse outside protect +" + msSinceOpenArmed() + "ms"); //$NON-NLS-1$ //$NON-NLS-2$
-                return;
-            }
-            Display display = event.display != null ? event.display : Display.getDefault();
-            if (display == null || display.isDisposed())
-                return;
-            display.asyncExec(() -> {
-                if (tree.isDisposed())
-                    return;
-                tryHealSearchPartStackDesync("HIDE/onMouse"); //$NON-NLS-1$
-            });
-        };
-        addAncestorListenerChain(tree, listener);
-        addAncestorListenerChain(table, listener);
-    }
-
-    /** Вешает Resize/Show/Hide-листенер на сам control и всех родителей до {@code Shell}. */
-    private static void addAncestorListenerChain(Control control, Listener listener)
-    {
-        Control cur = control;
-        for (int depth = 0; cur != null && !cur.isDisposed() && depth < 20; depth++)
-        {
-            cur.addListener(SWT.Resize, listener);
-            cur.addListener(SWT.Show, listener);
-            cur.addListener(SWT.Hide, listener);
-            if (cur instanceof org.eclipse.swt.widgets.Shell)
-                break;
-            cur = cur.getParent();
-        }
-    }
-
-    private static String describeBounds(Control control)
-    {
-        if (control == null || control.isDisposed())
-            return "disposed"; //$NON-NLS-1$
-        Rectangle b = control.getBounds();
-        // getVisible() — собственный флаг видимости этого виджета (без учёта родителей);
-        // isVisible() — с учётом всей цепочки. Расхождение между ними у РАЗНЫХ виджетов
-        // цепочки как раз укажет, на каком уровне видимость была снята.
-        return "bounds=" + b.width + "x" + b.height //$NON-NLS-1$ //$NON-NLS-2$
-            + " ownVisible=" + control.getVisible() + " chainVisible=" + control.isVisible(); //$NON-NLS-1$ //$NON-NLS-2$
-    }
-
-    /** Стек текущего потока (обычно UI-потока) — для HIDE-события, которое летит синхронно из места вызова {@code setVisible(false)}. */
-    private static String describeCurrentStackTrace()
-    {
-        StackTraceElement[] trace = Thread.currentThread().getStackTrace();
-        StringBuilder sb = new StringBuilder();
-        // Пропускаем верхние кадры самой диагностики (getStackTrace/эта лямбда/SWT dispatch) —
-        // начинаем с кадра, где реально начинается чужой код, пока не упрёмся в предсказуемый потолок.
-        int printed = 0;
-        for (StackTraceElement el : trace)
-        {
-            String cls = el.getClassName();
-            if (cls.equals(Thread.class.getName()) || cls.contains("SearchViewAggregationHook")) //$NON-NLS-1$
-                continue;
-            sb.append("\n    at ").append(el); //$NON-NLS-1$
-            if (++printed >= 40)
-                break;
-        }
-        return sb.toString();
-    }
-
-    /** Резервный дамп всей цепочки родителей — на случай, если SHOW/HIDE-событие не долетело до установки листенера. */
-    private static String describeAncestorChain(Control control)
-    {
-        StringBuilder sb = new StringBuilder();
-        Control cur = control;
-        for (int depth = 0; cur != null && !cur.isDisposed() && depth < 20; depth++)
-        {
-            if (depth > 0)
-                sb.append(" > "); //$NON-NLS-1$
-            sb.append(cur.getClass().getSimpleName()).append('@').append(System.identityHashCode(cur))
-                .append('(').append(describeBounds(cur)).append(')');
-            if (cur instanceof org.eclipse.swt.widgets.Shell)
-                break;
-            cur = cur.getParent();
-        }
-        return sb.toString();
-    }
-
-    private static boolean isOpenProtectActive()
-    {
-        return System.currentTimeMillis() < openProtectDeadlineMs;
-    }
-
-    private static long msSinceOpenArmed()
-    {
-        long armed = openArmedAtMs;
-        return armed <= 0 ? -1 : System.currentTimeMillis() - armed;
-    }
-
-    /** Запомнить PartStack «Поиск» и включить короткое окно защиты после Open. */
-    private static void beginOpenPartStackProtect(Control tree)
-    {
-        openArmedAtMs = System.currentTimeMillis();
-        openProtectDeadlineMs = openArmedAtMs + OPEN_PROTECT_MS;
-        PartStackTab stack = findSearchPartStackTab(tree);
-        if (stack == null)
-        {
-            searchPartStackFolderRef = null;
-            searchPartStackItemRef = null;
-            log("OPEN_PROTECT: PartStack не найден, protect +" + OPEN_PROTECT_MS + "ms"); //$NON-NLS-1$ //$NON-NLS-2$
-            return;
-        }
-        searchPartStackFolderRef = new WeakReference<>(stack.folder);
-        searchPartStackItemRef = new WeakReference<>(stack.item);
-        log("OPEN_PROTECT: armed +" + OPEN_PROTECT_MS + "ms tab=" + describeCTabItem(stack.item)); //$NON-NLS-1$ //$NON-NLS-2$
-    }
-
-    /**
-     * Блокирует MouseDown/Up на PartStack-{@code CTabFolder} только в {@link #OPEN_PROTECT_MS}
-     * после Open — чтобы deferred-{@code onMouse} не делал {@code setSelection}.
-     */
-    private static void installPartStackMouseGuard()
-    {
-        if (partStackMouseGuardInstalled)
-            return;
-        Display display = Display.getDefault();
-        if (display == null || display.isDisposed())
-            return;
-        partStackMouseGuardInstalled = true;
-        Listener guard = event -> {
-            if (!isOpenProtectActive())
-                return;
-            WeakReference<org.eclipse.swt.custom.CTabFolder> ref = searchPartStackFolderRef;
-            org.eclipse.swt.custom.CTabFolder folder = ref != null ? ref.get() : null;
-            if (folder == null || folder.isDisposed() || event.widget != folder)
-                return;
-            event.doit = false;
-            String kind = event.type == SWT.MouseDown ? "MouseDown" //$NON-NLS-1$
-                : event.type == SWT.MouseUp ? "MouseUp" : "Mouse"; //$NON-NLS-1$ //$NON-NLS-2$
-            log("OPEN_PROTECT: blocked " + kind + " on PartStack +" + msSinceOpenArmed() + "ms"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        };
-        display.addFilter(SWT.MouseDown, guard);
-        display.addFilter(SWT.MouseUp, guard);
-        log("OPEN_PROTECT: Display mouse filter installed"); //$NON-NLS-1$
-    }
-
-    /**
-     * Восстановление рассинхрона #165: вкладка «Поиск» выбрана ({@code getSelection()==item}),
-     * а её content скрыт. Чужую вкладку стека не трогаем.
-     */
-    private static void tryHealSearchPartStackDesync(String reason)
-    {
-        if (!isOpenProtectActive())
-            return;
-        WeakReference<org.eclipse.swt.custom.CTabFolder> folderRef = searchPartStackFolderRef;
-        WeakReference<org.eclipse.swt.custom.CTabItem> itemRef = searchPartStackItemRef;
-        org.eclipse.swt.custom.CTabFolder folder = folderRef != null ? folderRef.get() : null;
-        org.eclipse.swt.custom.CTabItem ourItem = itemRef != null ? itemRef.get() : null;
-        if (folder == null || folder.isDisposed() || ourItem == null || ourItem.isDisposed())
-            return;
-        org.eclipse.swt.custom.CTabItem selected = folder.getSelection();
-        if (selected != ourItem)
-        {
-            // Штатный уход на другую вкладку (в т.ч. «Журнал Комфорт») — не наш баг.
-            log("SELF_HEAL desync skip (" + reason + "): selection=" //$NON-NLS-1$ //$NON-NLS-2$
-                + describeCTabItem(selected) + " +" + msSinceOpenArmed() + "ms"); //$NON-NLS-1$ //$NON-NLS-2$
-            return;
-        }
-        Control content = ourItem.getControl();
-        if (content == null || content.isDisposed() || content.getVisible())
-            return;
-
-        log("SELF_HEAL desync (" + reason + "): content hidden while Поиск selected +" //$NON-NLS-1$ //$NON-NLS-2$
-            + msSinceOpenArmed() + "ms"); //$NON-NLS-1$
-        folder.setRedraw(false);
-        try
-        {
-            org.eclipse.swt.custom.CTabItem other = findOtherCTabItem(folder, ourItem);
-            if (other != null)
-            {
-                // early-return setSelection(index==selected) не вызывает setVisible(true).
-                folder.setSelection(other);
-                folder.setSelection(ourItem);
-            }
-            else
-            {
-                // Единственная вкладка — безопасный setVisible на уже выбранном content.
-                content.setVisible(true);
-            }
-        }
-        finally
-        {
-            if (!folder.isDisposed())
-                folder.setRedraw(true);
-        }
-        Control after = ourItem.isDisposed() ? null : ourItem.getControl();
-        log("SELF_HEAL desync done: contentOwnVisible=" //$NON-NLS-1$
-            + (after == null || after.isDisposed() ? "?" : Boolean.toString(after.getVisible())) //$NON-NLS-1$
-            + " +" + msSinceOpenArmed() + "ms"); //$NON-NLS-1$ //$NON-NLS-2$
-    }
-
-    private static final class PartStackTab
-    {
-        final org.eclipse.swt.custom.CTabFolder folder;
-        final org.eclipse.swt.custom.CTabItem item;
-
-        PartStackTab(org.eclipse.swt.custom.CTabFolder folder, org.eclipse.swt.custom.CTabItem item)
-        {
-            this.folder = folder;
-            this.item = item;
-        }
-    }
-
-    private static PartStackTab findSearchPartStackTab(Control tree)
-    {
-        if (tree == null || tree.isDisposed())
-            return null;
-        Control cur = tree;
-        for (int depth = 0; cur != null && !cur.isDisposed() && depth < 20; depth++)
-        {
-            Control parent = cur.getParent();
-            if (parent instanceof org.eclipse.swt.custom.CTabFolder)
-            {
-                org.eclipse.swt.custom.CTabFolder folder = (org.eclipse.swt.custom.CTabFolder) parent;
-                for (org.eclipse.swt.custom.CTabItem item : folder.getItems())
-                {
-                    if (item != null && !item.isDisposed() && item.getControl() == cur)
-                        return new PartStackTab(folder, item);
-                }
-                return null;
-            }
-            if (parent instanceof org.eclipse.swt.widgets.Shell || parent == null)
-                break;
-            cur = parent;
-        }
-        return null;
-    }
-
-    private static org.eclipse.swt.custom.CTabItem findOtherCTabItem(
-            org.eclipse.swt.custom.CTabFolder folder, org.eclipse.swt.custom.CTabItem ourItem)
-    {
-        for (org.eclipse.swt.custom.CTabItem item : folder.getItems())
-        {
-            if (item != null && !item.isDisposed() && item != ourItem)
-                return item;
-        }
-        return null;
-    }
-
-    private static String describeCTabItem(org.eclipse.swt.custom.CTabItem item)
-    {
-        if (item == null || item.isDisposed())
-            return "null"; //$NON-NLS-1$
-        Control c = item.getControl();
-        return "'" + item.getText() + "' ctrlVisible=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (c == null || c.isDisposed() ? "?" : Boolean.toString(c.getVisible())); //$NON-NLS-1$
-    }
-
-    private static void schedulePanelHealthDiag(ISearchResultPage page, TreeViewer treeViewer,
-            TableViewer tableViewer, int delayMs, int seq)
-    {
-        Display display = Display.getDefault();
-        if (display == null || display.isDisposed())
-            return;
-        display.timerExec(delayMs, () -> {
-            if (seq != openSeq)
-                return; // перекрыто более новым кликом — не мешаем логи разных открытий
-            if (treeViewer.getTree() == null || treeViewer.getTree().isDisposed())
-                return;
-            if (tableViewer.getTable() == null || tableViewer.getTable().isDisposed())
-                return;
-            PanelState state = computePanelState(treeViewer, tableViewer, page);
-            log("panelHealth seq=" + seq + " +" + delayMs + "ms: " + state); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            // Только диагностика — автофикс только из HIDE→asyncExec (desync), не отсюда.
-            if (state.isProblem())
-                log("TREE_EMPTIED seq=" + seq + " +" + delayMs + "ms: " + state); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        });
-    }
-
-    private static void installSearchResultDiagListener(ISearchResultPage page)
-    {
-        try
-        {
-            Object input = Global.invoke(page, "getInput"); //$NON-NLS-1$
-            if (!(input instanceof ISearchResult result))
-                return;
-            synchronized (RESULT_LISTENERS_INSTALLED)
-            {
-                if (!RESULT_LISTENERS_INSTALLED.add(result))
-                    return;
-            }
-            result.addListener(new ISearchResultListener()
-            {
-                @Override
-                public void searchResultChanged(SearchResultEvent event)
-                {
-                    if (event == null)
-                        return;
-                    String kind = event.getClass().getSimpleName();
-                    log("searchResultChanged: " + kind); //$NON-NLS-1$
-                    if (!kind.contains("Reset") && !kind.contains("Remove")) //$NON-NLS-1$ //$NON-NLS-2$
-                        return;
-                    Display display = Display.getDefault();
-                    if (display == null || display.isDisposed())
-                        return;
-                    display.asyncExec(() -> {
-                        SearchViewViewers viewers = resolveViewers(findSearchViewPart());
-                        if (viewers == null)
-                            return;
-                        IViewPart view = findSearchViewPart();
-                        ISearchResultPage active = view instanceof ISearchResultViewPart
-                            ? ((ISearchResultViewPart) view).getActivePage() : null;
-                        log("searchResultChanged after " + kind + ": " //$NON-NLS-1$ //$NON-NLS-2$
-                            + describePanelState(viewers.tree, viewers.table, active));
-                    });
-                }
-            });
-            log("installSearchResultDiagListener: OK"); //$NON-NLS-1$
-        }
-        catch (Exception e)
-        {
-            log("installSearchResultDiagListener EXCEPTION: " + e); //$NON-NLS-1$
-        }
     }
 
     // -----------------------------------------------------------------------

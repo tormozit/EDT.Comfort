@@ -27,7 +27,23 @@
     <startup class="tormozit.CtrlShiftFDiagHook"/>
     <startup class="tormozit.KeyBindingToastHook"/>
     <startup class="tormozit.SmartOutlineHook"/>
-    <startup class="tormozit.ListSelectionThemeHook"/>
+    <!-- ГЛОБАЛЬНЫЙ СКАН ОТКЛЮЧЁН ОКОНЧАТЕЛЬНО (issue #165), 2026-07-20. История фиксов: v1
+         (guard+debounce SWT.Show), v2 (исключить редакторы из partOpened/partVisible), v3
+         (debounce и для part-триггеров тоже), v4 (defer FocusIn/FocusOut через asyncExec —
+         гипотеза реентрантного redraw, НЕ подтвердилась логом), v5 (guardedScan стал глотать любое
+         исключение из scanAction — гипотеза, что наш скан бросает исключение и прерывает чужой
+         вложенный Display.readAndDispatch() внутри PartRenderingEngine.safeRemoveGui) — ни один не
+         устранил проблему, v5 включительно снова воспроизвёлся.
+
+         У класса ДВА независимых механизма. (1) Явный ListSelectionThemeHook.ensureControl(table)
+         из ContentAssistPopupSync — специально для таблицы попапа автодополнения (единственный
+         явный вызыватель в репо), АКТИВЕН и работает (не зависит от startup ниже, вызывается
+         напрямую). (2) Глобальный скан (этот startup: SWT.Show-фильтр + partOpened/partVisible +
+         walkControl по ВСЕМ шеллам) — добавлен позже, чтобы ловить ЛЮБЫЕ прочие таблицы
+         автоматически; именно он все пять версий подозревался в issue #165 и остаётся
+         ЗАКОММЕНТИРОВАННЫМ. Код класса (`walkControl`/`scanWorkbenchShells`/`SWT.Show`-фильтр)
+         оставлен в src нетронутым, просто нигде не регистрируется. -->
+    <!-- <startup class="tormozit.ListSelectionThemeHook"/> -->
     <startup class="tormozit.NavigatorFilterHook"/>
     <startup class="tormozit.NavigatorShowInExplorerMenuHook"/>
     <startup class="tormozit.InfobasesViewHook"/>
@@ -53,6 +69,9 @@
     <startup class="tormozit.FilterBySubsystemsDialogHook"/>
     <startup class="tormozit.GitChangedFileMenuHook"/>
     <startup class="tormozit.TextEditorFastSearchKeyBindingHook"/> 
+    <!-- issue #165: SearchViewAggregationHook полностью оправдан (строгий тест — отключение
+         не остановило баг) — восстановлен. SearchPanelIndependentDiag (отдельный дублирующий
+         диагностический класс) удалён 2026-07-20 по явной команде пользователя. -->
     <startup class="tormozit.SearchViewAggregationHook"/>
     <startup class="tormozit.FileSearchResultsHook"/>
     <startup class="tormozit.ConfigurationSearchDialogHook"/>
