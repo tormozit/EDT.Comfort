@@ -34,7 +34,6 @@ import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
 public final class QueryConstructorFilterHook implements IStartup
 {
     private static final String PATCHED_KEY = "tormozit.queryConstructorFilterPatched"; //$NON-NLS-1$
-    private static final String TAG = "QConstructorFilter"; //$NON-NLS-1$
     private static final String QUERY_WIZARD_CLASS = "QueryWizard"; //$NON-NLS-1$
 
     private static final Set<Shell> patchedShells =
@@ -81,7 +80,6 @@ public final class QueryConstructorFilterHook implements IStartup
     @Override
     public void earlyStartup()
     {
-        Global.tempLog(TAG, "earlyStartup enabled=" + ComfortSettings.isReplaceListFiltersEnabled()); //$NON-NLS-1$
         if (!ComfortSettings.isReplaceListFiltersEnabled())
             return;
         Display.getDefault().asyncExec(() -> install(Display.getDefault()));
@@ -91,7 +89,6 @@ public final class QueryConstructorFilterHook implements IStartup
     {
         if (display == null || display.isDisposed())
             return;
-        Global.tempLog(TAG, "install display=" + System.identityHashCode(display)); //$NON-NLS-1$
         display.addFilter(SWT.Show, QueryConstructorFilterHook::handleShow);
     }
 
@@ -101,17 +98,37 @@ public final class QueryConstructorFilterHook implements IStartup
             return;
         if (shell.isDisposed())
             return;
+        if (suppressShowKeysPopupIfRecentCtrlF(shell))
+            return;
         if (shell.getData(PATCHED_KEY) != null)
             return;
         if (patchedShells.contains(shell))
             return;
-        Object data = shell.getData();
-        String dataClass = data != null ? data.getClass().getName() : "null"; //$NON-NLS-1$
-        boolean match = isQueryWizardShell(shell);
-        Global.tempLog(TAG, "Show shell title=\"" + shell.getText() + "\" data=" + dataClass + " match=" + match); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        if (!match)
+        if (!isQueryWizardShell(shell))
             return;
         scheduleTryPatch(shell, 0);
+    }
+
+    /** Момент последнего перехваченного Ctrl+F в нашем дереве (см. {@link #wireCtrlF}) — используется
+     * ниже, чтобы отличить попап "подсказка по клавишам" Eclipse, вызванный именно этим нажатием. */
+    private static volatile long lastCtrlFTimeMs;
+
+    /**
+     * Сервис биндингов Eclipse обрабатывает Ctrl+F раньше нас (см. {@link #wireCtrlF} —
+     * {@code KeyDown}-фильтр опаздывает выставить {@code doit=false}) и сам решает показать
+     * {@code ShowKeysUI$ShowKeysPopup} ("подсказка по клавишам") — предотвратить его появление
+     * нельзя, но можно сразу скрыть, пока пользователь не успел его заметить (в пределах короткого
+     * окна после нашего Ctrl+F — не трогаем этот попап, если он появился по другой причине).
+     */
+    private static boolean suppressShowKeysPopupIfRecentCtrlF(Shell shell)
+    {
+        Object data = shell.getData();
+        if (data == null || !data.getClass().getName().contains("ShowKeysUI")) //$NON-NLS-1$
+            return false;
+        if (System.currentTimeMillis() - lastCtrlFTimeMs > 500)
+            return false;
+        shell.setVisible(false);
+        return true;
     }
 
     private static boolean isQueryWizardShell(Shell shell)
@@ -150,31 +167,19 @@ public final class QueryConstructorFilterHook implements IStartup
 
         Object qwc = getField(dialog, "queryWizardControl"); //$NON-NLS-1$
         if (qwc == null)
-        {
-            Global.tempLog(TAG, "try#" + attempt + " qwc=null dialog=" + dialog.getClass().getSimpleName()); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
-        }
 
         Object tabsObj = getField(qwc, "tablesAndFieldsTab"); //$NON-NLS-1$
         if (tabsObj == null)
-        {
-            Global.tempLog(TAG, "try#" + attempt + " tabsObj=null"); //$NON-NLS-1$
             return false;
-        }
 
         TreeViewer tree = getFieldAs(tabsObj, "availableTablesTree", TreeViewer.class); //$NON-NLS-1$
         if (tree == null)
-        {
-            Global.tempLog(TAG, "try#" + attempt + " tree=null tabsClass=" + tabsObj.getClass().getSimpleName()); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
-        }
 
         Composite parent = safeCast(tree.getControl().getParent(), Composite.class);
         if (parent == null)
-        {
-            Global.tempLog(TAG, "try#" + attempt + " parentNotComposite"); //$NON-NLS-1$
             return false;
-        }
 
         Composite qwcComp = safeCast(qwc, Composite.class);
         ToolBar searchToolBar = qwcComp != null ? findSearchToolBar(qwcComp) : null;
@@ -183,26 +188,15 @@ public final class QueryConstructorFilterHook implements IStartup
         if (searchBox != null)
         {
             stripFocusListeners(searchBox);
-            Global.tempLog(TAG, "try#" + attempt + " foundExistingSearchBox"); //$NON-NLS-1$
         }
         else
         {
-            Global.tempLog(TAG, "try#" + attempt + " qwcComp=" //$NON-NLS-1$
-                + (qwcComp != null ? qwcComp.getClass().getSimpleName() : "null") //$NON-NLS-1$
-                + " searchToolBar=" + (searchToolBar != null)); //$NON-NLS-1$
             if (searchToolBar == null)
-            {
-                Global.tempLog(TAG, "try#" + attempt + " noSearchToolBar"); //$NON-NLS-1$
                 return false;
-            }
             searchBox = createSearchBoxViaAction(searchToolBar);
             if (searchBox == null)
-            {
-                Global.tempLog(TAG, "try#" + attempt + " createActionSearchBox=null"); //$NON-NLS-1$
                 return false;
-            }
             stripFocusListeners(searchBox);
-            Global.tempLog(TAG, "try#" + attempt + " createdSearchBox"); //$NON-NLS-1$
         }
 
         shell.setData(PATCHED_KEY, Boolean.TRUE);
@@ -216,7 +210,6 @@ public final class QueryConstructorFilterHook implements IStartup
         }
         catch (Exception e)
         {
-            Global.tempLog(TAG, "try#" + attempt + " EXCEPTION: " + e); //$NON-NLS-1$ //$NON-NLS-2$
             Debug.problem("tryPatch exception: " + e); //$NON-NLS-1$
             Global.logError(Debug.TAG, "tryPatch", e); //$NON-NLS-1$
         }
@@ -299,29 +292,18 @@ public final class QueryConstructorFilterHook implements IStartup
     {
         ToolItem searchItem = findSearchToolItem(toolBar);
         if (searchItem == null)
-        {
-            Global.tempLog(TAG, "createSearchBoxViaAction searchItem=null items=" + toolBar.getItemCount()); //$NON-NLS-1$
             return null;
-        }
         Object action = searchItem.getData();
         if (action == null)
-        {
-            Global.tempLog(TAG, "createSearchBoxViaAction action=null"); //$NON-NLS-1$
             return null;
-        }
         if (action instanceof org.eclipse.jface.action.ActionContributionItem aci)
         {
             action = aci.getAction();
         }
         if (action == null)
-        {
-            Global.tempLog(TAG, "createSearchBoxViaAction ia=null"); //$NON-NLS-1$
             return null;
-        }
-        Global.tempLog(TAG, "createSearchBoxViaAction action=" + action.getClass().getSimpleName()); //$NON-NLS-1$
 
         Composite parent = safeCast(toolBar.getParent(), Composite.class);
-        int countBefore = parent != null ? countChildren(parent, SearchBox.class) : -1;
         try
         {
             if (action instanceof org.eclipse.jface.action.IAction ia)
@@ -334,72 +316,27 @@ public final class QueryConstructorFilterHook implements IStartup
         }
         catch (Exception e)
         {
-            Global.tempLog(TAG, "createSearchBoxViaAction invoke failed: " + e); //$NON-NLS-1$
+            Debug.problem("createSearchBoxViaAction invoke failed: " + e); //$NON-NLS-1$
             return null;
         }
 
         SearchBox sb = parent != null ? findSearchBox(parent) : null;
-        int countAfter = parent != null ? countChildren(parent, SearchBox.class) : -1;
-        Global.tempLog(TAG, "createSearchBoxViaAction before=" + countBefore + " after=" + countAfter); //$NON-NLS-1$ //$NON-NLS-2$
+
+        // TablesAndFieldsTab$6.run() (эта action) не идемпотентен — безусловно создаёт НОВЫЙ
+        // SearchBox через addSearchBox() при каждом вызове, не проверяя, есть ли уже один. Отключение
+        // самой action (setEnabled(false)) визуально красит её недоступной, но НЕ убирает исходный
+        // ToolItem "Поиск" из тулбара — он остаётся, просто "сжатым" разовым layout-хаком нативного
+        // кода при создании SearchBox; любой следующий relayout (потеря/восстановление фокуса,
+        // Ctrl+F) может снова показать его (уже недоступным, но занимающим место — отсюда прыжок).
+        // Реально убираем — dispose() самого ToolItem, а не только его action.
+        if (sb != null)
+        {
+            if (action instanceof org.eclipse.jface.action.IAction ia)
+                ia.setEnabled(false);
+            if (!searchItem.isDisposed())
+                searchItem.dispose();
+        }
         return sb;
-    }
-
-    private static ToolBar findToolBarInAncestors(Composite start)
-    {
-        for (Composite c = start; c != null; c = safeCast(c.getParent(), Composite.class))
-        {
-            ToolBar tb = findToolBar(c);
-            if (tb != null)
-                return tb;
-        }
-        return null;
-    }
-
-    private static String dumpHierarchy(Composite start)
-    {
-        StringBuilder sb = new StringBuilder(" hierarchy="); //$NON-NLS-1$
-        for (Composite c = start; c != null; c = safeCast(c.getParent(), Composite.class))
-        {
-            sb.append(c.getClass().getSimpleName()).append("["); //$NON-NLS-1$
-            for (Control ch : c.getChildren())
-            {
-                sb.append(ch.getClass().getSimpleName()).append(',');
-            }
-            sb.append("]"); //$NON-NLS-1$
-        }
-        return sb.toString();
-    }
-
-    private static ToolBar[] findAllToolBars(Composite start)
-    {
-        java.util.List<ToolBar> result = new java.util.ArrayList<>();
-        for (Composite c = start; c != null; c = safeCast(c.getParent(), Composite.class))
-        {
-            for (Control ch : c.getChildren())
-            {
-                if (ch instanceof ToolBar tb)
-                    result.add(tb);
-            }
-        }
-        return result.toArray(new ToolBar[0]);
-    }
-
-    private static String dumpToolBarTips(ToolBar[] toolBars)
-    {
-        StringBuilder sb = new StringBuilder(" ["); //$NON-NLS-1$
-        for (int i = 0; i < toolBars.length; i++)
-        {
-            ToolBar tb = toolBars[i];
-            sb.append("tb").append(i).append("(${$tb").append(System.identityHashCode(tb)) //$NON-NLS-1$ //$NON-NLS-2$
-                .append("}items=").append(tb.getItemCount()).append('['); //$NON-NLS-1$
-            for (ToolItem item : tb.getItems())
-            {
-                sb.append('"').append(item.getToolTipText()).append('"').append(','); //$NON-NLS-1$
-            }
-            sb.append("])"); //$NON-NLS-1$
-        }
-        sb.append(']');
-        return sb.toString();
     }
 
     private static ToolBar findToolBar(Composite parent)
@@ -408,28 +345,6 @@ public final class QueryConstructorFilterHook implements IStartup
         {
             if (child instanceof ToolBar tb)
                 return tb;
-        }
-        return null;
-    }
-
-    private static Composite getTabControl(Object tabsObj)
-    {
-        try
-        {
-            java.lang.reflect.Method m = tabsObj.getClass().getMethod("getControl"); //$NON-NLS-1$
-            Object result = m.invoke(tabsObj);
-            return safeCast(result, Composite.class);
-        }
-        catch (Exception e)
-        {
-            Global.tempLog(TAG, "getTabControl method failed: " + e); //$NON-NLS-1$
-        }
-        for (String name : new String[] { "composite", "tabComposite", "control" }) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        {
-            Object val = getField(tabsObj, name);
-            Composite c = safeCast(val, Composite.class);
-            if (c != null)
-                return c;
         }
         return null;
     }
@@ -455,9 +370,6 @@ public final class QueryConstructorFilterHook implements IStartup
         for (ToolItem item : toolBar.getItems())
         {
             String tip = item.getToolTipText();
-            Object data = item.getData();
-            String dataClass = data != null ? data.getClass().getSimpleName() : "null"; //$NON-NLS-1$
-            Global.tempLog(TAG, "findSearchToolItem tip=\"" + tip + "\" data=" + dataClass); //$NON-NLS-1$ //$NON-NLS-2$
             if (tip != null && (tip.contains("Поиск") || tip.toLowerCase().contains("search"))) //$NON-NLS-1$ //$NON-NLS-2$
                 return item;
         }
@@ -475,7 +387,6 @@ public final class QueryConstructorFilterHook implements IStartup
         try
         {
             Listener[] lost = searchBox.getListeners(SWT.FocusOut);
-            int removed = 0;
             for (Listener l : lost)
             {
                 Object real = l instanceof org.eclipse.swt.widgets.TypedListener typed
@@ -484,9 +395,7 @@ public final class QueryConstructorFilterHook implements IStartup
                 if (className.startsWith("com._1c.g5.v8.dt.common.ui.controls.search.SearchBox$")) //$NON-NLS-1$
                     continue;
                 searchBox.removeListener(SWT.FocusOut, l);
-                removed++;
             }
-            Global.tempLog(TAG, "stripFocusListeners removed=" + removed + " total=" + lost.length); //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (Exception e)
         {
@@ -494,20 +403,8 @@ public final class QueryConstructorFilterHook implements IStartup
         }
     }
 
-    private static <T> int countChildren(Composite parent, Class<T> type)
-    {
-        int count = 0;
-        for (Control child : parent.getChildren())
-        {
-            if (type.isInstance(child))
-                count++;
-        }
-        return count;
-    }
-
     private static void installFilter(TreeViewer tree, SearchBox searchBox, ToolBar searchToolBar)
     {
-        Global.tempLog(TAG, "installFilter treeFilters=" + tree.getFilters().length); //$NON-NLS-1$
         org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider baseStyled =
             resolveStyledLabelProvider(tree);
         if (baseStyled == null)
@@ -535,9 +432,110 @@ public final class QueryConstructorFilterHook implements IStartup
         installChangeTablesResetHook(tree, searchToolBar, filter);
 
         if (tree.getControl() instanceof Tree swtTree)
+        {
             wireTreeCopy(swtTree);
+            wireCtrlF(searchBox, swtTree);
+        }
 
         Debug.log("installFilter filters=" + tree.getFilters().length); //$NON-NLS-1$
+    }
+
+    /** Текущие {@code SearchBox}/дерево, для которых нужно перехватывать Ctrl+F (см. {@link #wireCtrlF}). */
+    private static volatile SearchBox ctrlFTargetSearchBox;
+    private static volatile Tree ctrlFTargetTree;
+    private static boolean ctrlFExecutionListenerInstalled;
+
+    /**
+     * Ctrl+F должен фокусировать наш {@code SearchBox} (штатная кнопка так и подписана —
+     * "Поиск (Ctrl+f)"). Тот же архитектурный потолок, что и у Ctrl+C (см. {@link #wireTreeCopy}):
+     * обычный {@code SWT.KeyDown} не долетает в модальном диалоге. Перехват — через
+     * {@code ICommandService} на {@code org.eclipse.ui.edit.findReplace} (штатный ID команды
+     * "Найти"), один слушатель на всё время работы плагина (не на каждое открытие окна).
+     */
+    private static void wireCtrlF(SearchBox searchBox, Tree tree)
+    {
+        ctrlFTargetSearchBox = searchBox;
+        ctrlFTargetTree = tree;
+        searchBox.addDisposeListener(e ->
+        {
+            if (ctrlFTargetSearchBox == searchBox)
+            {
+                ctrlFTargetSearchBox = null;
+                ctrlFTargetTree = null;
+            }
+        });
+        if (ctrlFExecutionListenerInstalled || PlatformUI.getWorkbench() == null)
+            return;
+        ICommandService commandService = PlatformUI.getWorkbench().getService(ICommandService.class);
+        if (commandService == null)
+            return;
+        commandService.addExecutionListener(new IExecutionListener()
+        {
+            @Override
+            public void preExecute(String commandId, ExecutionEvent event)
+            {
+                handlePossibleCtrlF(commandId);
+            }
+
+            @Override
+            public void postExecuteSuccess(String commandId, Object returnValue)
+            {
+            }
+
+            @Override
+            public void notHandled(String commandId, NotHandledException exception)
+            {
+                handlePossibleCtrlF(commandId);
+            }
+
+            @Override
+            public void postExecuteFailure(String commandId, ExecutionException exception)
+            {
+            }
+        });
+        ctrlFExecutionListenerInstalled = true;
+
+        // Дополнительно — сырой SWT.KeyDown фильтр раньше сервиса биндингов Eclipse: тот на
+        // Ctrl+F показывает свой попап "подсказка по клавишам" (ShowKeysUI$ShowKeysPopup) —
+        // не всегда действенно (порядок регистрации фильтров не гарантирован), но Ctrl+C оказался
+        // съеден нативным акселератором раньше SWT, а Ctrl+F может и не быть.
+        searchBox.getDisplay().addFilter(SWT.KeyDown, event ->
+        {
+            if ((event.stateMask & SWT.CTRL) == 0 || Character.toLowerCase((char) event.keyCode) != 'f') //$NON-NLS-1$
+                return;
+            SearchBox sb = ctrlFTargetSearchBox;
+            Tree t = ctrlFTargetTree;
+            if (sb == null || sb.isDisposed() || t == null || t.isDisposed())
+                return;
+            Control focus = sb.getDisplay().getFocusControl();
+            if (focus != t && focus != sb)
+                return;
+            lastCtrlFTimeMs = System.currentTimeMillis();
+            event.doit = false;
+            if (focus != sb)
+                sb.forceFocus();
+        });
+    }
+
+    private static void handlePossibleCtrlF(String commandId)
+    {
+        SearchBox searchBox = ctrlFTargetSearchBox;
+        Tree tree = ctrlFTargetTree;
+        if (searchBox == null || searchBox.isDisposed() || tree == null || tree.isDisposed())
+            return;
+        if (!"org.eclipse.ui.edit.findReplace".equals(commandId)) //$NON-NLS-1$
+            return;
+        Control focus = searchBox.getDisplay().getFocusControl();
+        // Фокус уже там — не дёргаем forceFocus() повторно: preExecute и notHandled оба
+        // срабатывают на одно нажатие (см. wireTreeCopy), второй вызов на уже сфокусированном
+        // поле вызывал видимый "прыжок" (SearchBox что-то пересчитывает в layout при повторном
+        // получении фокуса).
+        if (focus == searchBox)
+            return;
+        if (focus != tree)
+            return;
+        lastCtrlFTimeMs = System.currentTimeMillis();
+        searchBox.forceFocus();
     }
 
     /** Дерево, для которого сейчас нужно перехватывать команду Copy (см. {@link #wireTreeCopy}). */
@@ -631,18 +629,12 @@ public final class QueryConstructorFilterHook implements IStartup
         TreeViewer tree, ToolBar searchToolBar, AvailableTableSearchFilter filter)
     {
         if (searchToolBar == null)
-        {
-            Global.tempLog(TAG, "installChangeTablesResetHook: searchToolBar=null"); //$NON-NLS-1$
             return;
-        }
         ToolItem changeTablesItem = findToolItemByTip(searchToolBar, "Отображать таблицы изменений"); //$NON-NLS-1$
-        Global.tempLog(TAG, "installChangeTablesResetHook: item=" //$NON-NLS-1$
-            + (changeTablesItem != null ? changeTablesItem.getToolTipText() : "null")); //$NON-NLS-1$
         if (changeTablesItem == null)
             return;
         changeTablesItem.addListener(SWT.Selection, e ->
         {
-            Global.tempLog(TAG, "changeTablesItem Selection fired, filtering=" + filter.isFiltering()); //$NON-NLS-1$
             Object input = tree.getInput();
             tree.setInput(null);
             tree.setInput(input);
@@ -652,7 +644,6 @@ public final class QueryConstructorFilterHook implements IStartup
                 for (org.eclipse.jface.viewers.TreePath target : filter.drainExpandTargets())
                     tree.setExpandedState(target, true);
             }
-            Global.tempLog(TAG, "changeTablesItem Selection reset DONE"); //$NON-NLS-1$
         });
     }
 
@@ -878,8 +869,6 @@ public final class QueryConstructorFilterHook implements IStartup
         Object lp = tree.getLabelProvider();
         if (lp instanceof org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider delegating)
             return delegating.getStyledStringProvider();
-        Global.tempLog(TAG, "resolveStyledLabelProvider unsupported lp=" //$NON-NLS-1$
-            + (lp != null ? lp.getClass().getName() : "null")); //$NON-NLS-1$
         return null;
     }
 
@@ -910,7 +899,6 @@ public final class QueryConstructorFilterHook implements IStartup
     private static void onSearch(String text, TreeViewer tree, AvailableTableSearchFilter filter,
         SmartOutlineLabelProvider highlighter)
     {
-        Global.tempLog(TAG, "onSearch text=\"" + text + "\""); //$NON-NLS-1$ //$NON-NLS-2$
         filter.setPattern(text);
         highlighter.setHighlightPattern(text);
         if (text == null || text.isEmpty())
@@ -923,21 +911,15 @@ public final class QueryConstructorFilterHook implements IStartup
             return;
         }
         // collapseAll()+expandToLevel()+refresh() не заставляли JFace переспросить select() для
-        // уже materialized узлов "Таблица" (см. диагностику — их select() не вызывался вообще, в
-        // отличие от их полей). Полный сброс input — гарантированно сбрасывает все ассоциации
-        // на всех уровнях дерева, без гадания о конкретном месте кэширования в JFace.
+        // уже материализованных узлов "Таблица" — их select() не вызывался вообще, в отличие от их
+        // полей. Полный сброс input — гарантированно сбрасывает все ассоциации на всех уровнях
+        // дерева, без гадания о конкретном месте кэширования в JFace.
         Object input = tree.getInput();
         tree.setInput(null);
         tree.setInput(input);
         tree.expandToLevel(2);
-        java.util.Set<org.eclipse.jface.viewers.TreePath> targets = filter.drainExpandTargets();
-        Global.tempLog(TAG, "onSearch expandTargets count=" + targets.size()); //$NON-NLS-1$
-        for (org.eclipse.jface.viewers.TreePath target : targets)
-        {
+        for (org.eclipse.jface.viewers.TreePath target : filter.drainExpandTargets())
             tree.expandToLevel(target, 1);
-            Global.tempLog(TAG, "onSearch expandToLevel path=" + target //$NON-NLS-1$
-                + " nowExpanded=" + tree.getExpandedState(target)); //$NON-NLS-1$
-        }
     }
 
     private static final class Debug

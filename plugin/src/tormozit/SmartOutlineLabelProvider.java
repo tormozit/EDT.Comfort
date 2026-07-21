@@ -63,9 +63,6 @@ public class SmartOutlineLabelProvider extends LabelProvider implements IStyledL
     @Override
     public StyledString getStyledText(Object element) {
 
-        Global.tempLog("QConstructorFilter", "getStyledText element=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (element != null ? element.getClass().getSimpleName() : "null") //$NON-NLS-1$
-            + " highlightPattern=\"" + highlightMatcher.fullPattern + "\""); //$NON-NLS-1$ //$NON-NLS-2$
         StyledString styledString = obtainBaseStyledText(element);
         applyHighlightIfNeeded(element, styledString);
         return styledString;
@@ -91,31 +88,20 @@ public class SmartOutlineLabelProvider extends LabelProvider implements IStyledL
         // НЕ ТРОГАТЬ ГРУППЫ (навигатор): skipHighlight = NavigatorTreeElementLabels::isGroupNode
         if (styledString == null || highlightMatcher.isEmpty
                 || (skipHighlight != null && skipHighlight.test(element)))
-        {
-            Global.tempLog("QConstructorFilter", "applyHighlightIfNeeded SKIP styledNull=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (styledString == null) + " empty=" + highlightMatcher.isEmpty //$NON-NLS-1$
-                + " skip=" + (skipHighlight != null && skipHighlight.test(element))); //$NON-NLS-1$
             return;
-        }
         String plainText = styledString.getString();
         if (highlightMatcher.hasMultipleSections())
         {
             // Секционный фильтр: разные строки дерева несут разные секции (родитель/потомок) —
             // требовать совпадение ВСЕХ фрагментов на одной строке нельзя, красим то, что нашлось.
             java.util.List<SmartMatcher.HighlightRange> ranges = highlightMatcher.getHighlightRanges(plainText);
-            Global.tempLog("QConstructorFilter", "applyHighlightIfNeeded multiSection text=\"" + plainText //$NON-NLS-1$ //$NON-NLS-2$
-                + "\" ranges=" + ranges.size()); //$NON-NLS-1$
             if (!ranges.isEmpty())
                 SmartMatchHighlight.applyRanges(styledString, ranges);
             return;
         }
         String matchText = resolveMatchText(element, plainText);
-        boolean matches = highlightMatcher.matches(matchText);
-        java.util.List<SmartMatcher.HighlightRange> ranges = highlightMatcher.getHighlightRanges(plainText);
-        Global.tempLog("QConstructorFilter", "applyHighlightIfNeeded text=\"" + plainText + "\" matchText=\"" //$NON-NLS-1$ //$NON-NLS-2$
-            + matchText + "\" matches=" + matches + " ranges=" + ranges.size()); //$NON-NLS-1$ //$NON-NLS-2$
-        if (matches)
-            SmartMatchHighlight.applyRanges(styledString, ranges);
+        if (highlightMatcher.matches(matchText))
+            SmartMatchHighlight.applyRanges(styledString, highlightMatcher.getHighlightRanges(plainText));
     }
 
     protected String resolveMatchText(Object element, String plainText)

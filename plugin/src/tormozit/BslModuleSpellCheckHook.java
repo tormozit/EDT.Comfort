@@ -2327,7 +2327,6 @@ public final class BslModuleSpellCheckHook implements IStartup
             }
             catch (Exception e)
             {
-                Global.tempLog("issue176", "WordFoundInfoProposal: исключение " + e); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
 
@@ -2374,10 +2373,6 @@ public final class BslModuleSpellCheckHook implements IStartup
         }
         ICompletionProposal[] base = withoutIssue176Proposals(
             nonSpellingFallback != null ? nonSpellingFallback : new ICompletionProposal[0]);
-        Global.tempLog("issue176", "proposalsForAnnotation: annotationClass=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (annotation != null ? annotation.getClass().getName() : "null") + " type=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (annotation != null ? annotation.getType() : "null") + " isXtextAnnotation=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (annotation instanceof XtextAnnotation));
         // Свои "Заменить на '...'" визуально должны выглядеть как штатные исправления -
         // берём иконку у любого уже существующего предложения в этом же списке.
         Image fallbackIcon = null;
@@ -2419,7 +2414,6 @@ public final class BslModuleSpellCheckHook implements IStartup
         try
         {
             String message = marker.getAttribute(IMarker.MESSAGE, null);
-            Global.tempLog("issue176", "similarNameProposalForIrUnknownWord: message=" + message); //$NON-NLS-1$ //$NON-NLS-2$
             if (message == null || !message.contains("НеизвестноеСлово")) //$NON-NLS-1$
                 return null;
             int offset = marker.getAttribute(IMarker.CHAR_START, -1);
@@ -2432,7 +2426,6 @@ public final class BslModuleSpellCheckHook implements IStartup
         }
         catch (Exception e)
         {
-            Global.tempLog("issue176", "similarNameProposalForIrUnknownWord: исключение " + e); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
     }
@@ -2466,8 +2459,6 @@ public final class BslModuleSpellCheckHook implements IStartup
         {
             Issue issue = xa.getIssue();
             String code = issue != null ? issue.getCode() : null;
-            Global.tempLog("issue176", "similarNameProposalForUnresolvedReference: code=" + code //$NON-NLS-1$ //$NON-NLS-2$
-                + " message=" + (issue != null ? issue.getMessage() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
             boolean isLinking = Diagnostic.LINKING_DIAGNOSTIC.equals(code);
             boolean isDeclaredNameCode = DECLARED_NAME_ERROR_CODES.contains(code);
             if (issue == null || !(isLinking || isDeclaredNameCode))
@@ -2483,7 +2474,6 @@ public final class BslModuleSpellCheckHook implements IStartup
         }
         catch (Exception e)
         {
-            Global.tempLog("issue176", "similarNameProposalForUnresolvedReference: исключение " + e); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
     }
@@ -2503,7 +2493,6 @@ public final class BslModuleSpellCheckHook implements IStartup
             offset);
         if (leaf == null)
         {
-            Global.tempLog("issue176", "buildSimilarNameProposal: leaf==null offset=" + offset); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
         String typed = leaf.getText();
@@ -2515,8 +2504,6 @@ public final class BslModuleSpellCheckHook implements IStartup
             // фоновым пересчётом модели редактора, а не постоянно неверный офсет (тот же hover
             // чаще возвращает верное слово). Не подставлять случайный однобуквенный "вариант" -
             // честно ничего не предлагать, чем "Заменить на 'ф'".
-            Global.tempLog("issue176", "buildSimilarNameProposal: typed='" + typed //$NON-NLS-1$ //$NON-NLS-2$
-                + "' не похоже на идентификатор, offset=" + offset + " - пропуск"); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
         NameMatch match = matchFromScope(resource, leaf, typed);
@@ -2524,8 +2511,6 @@ public final class BslModuleSpellCheckHook implements IStartup
             match = matchFromTable(resource, typed);
         if (match == null)
             match = matchFromContentAssist(viewer, offset, typed);
-        Global.tempLog("issue176", "buildSimilarNameProposal: typed='" + typed + "' match=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + (match != null ? (match.exact ? "exact:" : "close:") + match.name : "null")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (match == null)
             return null;
         if (match.exact)
@@ -2601,7 +2586,6 @@ public final class BslModuleSpellCheckHook implements IStartup
                 }
                 catch (Exception e)
                 {
-                    Global.tempLog("issue176", "MarkerClearingReplaceProposal: замена исключение " + e); //$NON-NLS-1$ //$NON-NLS-2$
                 }
             }
             try
@@ -2613,7 +2597,6 @@ public final class BslModuleSpellCheckHook implements IStartup
             }
             catch (Exception e)
             {
-                Global.tempLog("issue176", "MarkerClearingReplaceProposal: исключение " + e); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
     }
@@ -2676,30 +2659,11 @@ public final class BslModuleSpellCheckHook implements IStartup
     {
         if (!(viewer instanceof SourceViewer sourceViewer))
         {
-            Global.tempLog("issue176", "closestNameFromContentAssist: viewer не SourceViewer"); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return null;
-        // issue #176 диагностика 2026-07-20: тот же typed/offset иногда даёт 12, иногда 0
-        // кандидатов при повторном вызове почти сразу подряд - логируем всё, что может объяснить
-        // разницу между вызовами (сам offset, текст документа вокруг него, идентичность viewer
-        // и processor, состояние document.get(offset-5, 15)).
-        try
-        {
-            IDocument doc = sourceViewer.getDocument();
-            int from = Math.max(0, offset - 5);
-            int len = doc != null ? Math.min(15, doc.getLength() - from) : 0;
-            String around = doc != null && len > 0 ? doc.get(from, len) : "?"; //$NON-NLS-1$
-            Global.tempLog("issue176", "closestNameFromContentAssist: offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
-                + " typed='" + typed + "' viewer=" + System.identityHashCode(sourceViewer) //$NON-NLS-1$ //$NON-NLS-2$
-                + " around='" + around + "'"); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        catch (Exception e)
-        {
-            Global.tempLog("issue176", "closestNameFromContentAssist: диагностика offset исключение " + e); //$NON-NLS-1$ //$NON-NLS-2$
-        }
         ICompletionProposal[][] holder = new ICompletionProposal[1][];
         display.syncExec(() ->
         {
@@ -2708,7 +2672,6 @@ public final class BslModuleSpellCheckHook implements IStartup
                 ContentAssistant contentAssist = ContentAssistPatcher.getContentAssistant(sourceViewer);
                 if (contentAssist == null)
                 {
-                    Global.tempLog("issue176", "closestNameFromContentAssist: contentAssist==null"); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
                 }
                 IContentAssistProcessor current =
@@ -2717,17 +2680,8 @@ public final class BslModuleSpellCheckHook implements IStartup
                     ? scp.getDelegate() : current;
                 if (xtextProcessor == null)
                 {
-                    Global.tempLog("issue176", "closestNameFromContentAssist: processor==null"); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
                 }
-                ITextSelection selBefore = viewer.getSelectionProvider() != null
-                    && viewer.getSelectionProvider().getSelection() instanceof ITextSelection ts ? ts : null;
-                Point selectedRange = viewer.getSelectedRange();
-                Global.tempLog("issue176", "closestNameFromContentAssist: processor=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + System.identityHashCode(xtextProcessor) + " selectionBefore=" //$NON-NLS-1$
-                    + (selBefore != null ? selBefore.getOffset() + "/" + selBefore.getLength() : "null") //$NON-NLS-1$ //$NON-NLS-2$
-                    + " viewerSelectedRange=" //$NON-NLS-1$
-                    + (selectedRange != null ? selectedRange.x + "/" + selectedRange.y : "null")); //$NON-NLS-1$ //$NON-NLS-2$
                 // offset - начало ещё не набранного слова, чтобы получить полный список
                 // кандидатов в этой позиции, без префиксной фильтрации по опечатке.
                 holder[0] = xtextProcessor.computeCompletionProposals(viewer, offset);
@@ -2739,19 +2693,14 @@ public final class BslModuleSpellCheckHook implements IStartup
                 // в рамках того же самого вычисления детерминированно возвращает верный список.
                 if (holder[0] == null || holder[0].length == 0)
                 {
-                    Global.tempLog("issue176", //$NON-NLS-1$
-                        "closestNameFromContentAssist: пустой результат, повтор"); //$NON-NLS-1$ //$NON-NLS-2$
                     holder[0] = xtextProcessor.computeCompletionProposals(viewer, offset);
                 }
             }
             catch (Exception e)
             {
-                Global.tempLog("issue176", "closestNameFromContentAssist: исключение " + e); //$NON-NLS-1$ //$NON-NLS-2$
             }
         });
         ICompletionProposal[] raw = holder[0];
-        Global.tempLog("issue176", "closestNameFromContentAssist: typed='" + typed + "' raw.length=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + (raw != null ? raw.length : -1));
         if (raw == null)
             return null;
         List<String> baseNames = new ArrayList<>(raw.length);
@@ -2763,8 +2712,6 @@ public final class BslModuleSpellCheckHook implements IStartup
             // по голому имени, до скобки параметров (как normalizeFilterKey в IrBslCompletionSupport).
             baseNames.add(baseNameOf(candidate));
         }
-        Global.tempLog("issue176", "closestNameFromContentAssist: raw names=" //$NON-NLS-1$ //$NON-NLS-2$
-            + String.join(", ", baseNames)); //$NON-NLS-1$
         return matchInNames(baseNames, typed);
     }
 
@@ -2832,7 +2779,6 @@ public final class BslModuleSpellCheckHook implements IStartup
         }
         names.addAll(platformApiNames());
         names.addAll(metadataObjectNames(resource));
-        Global.tempLog("issue176", "candidateNameTable: total=" + names.size()); //$NON-NLS-1$ //$NON-NLS-2$
         return names;
     }
 
@@ -2844,15 +2790,12 @@ public final class BslModuleSpellCheckHook implements IStartup
             IProject project = projectOf(resource);
             if (project == null)
             {
-                Global.tempLog("issue176", "metadataObjectNames: project==null uri=" + resource.getURI()); //$NON-NLS-1$ //$NON-NLS-2$
                 return Set.of();
             }
             IBmEmfIndexManager manager = Global.getOsgiService(IBmEmfIndexManager.class);
             IBmEmfIndexProvider indexProvider = manager != null ? manager.getEmfIndexProvider(project) : null;
             if (indexProvider == null)
             {
-                Global.tempLog("issue176", "metadataObjectNames: indexProvider==null manager=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + (manager != null));
                 return Set.of();
             }
             Iterable<IEObjectDescription> index =
@@ -2871,7 +2814,6 @@ public final class BslModuleSpellCheckHook implements IStartup
         }
         catch (Exception e)
         {
-            Global.tempLog("issue176", "metadataObjectNames: исключение " + e); //$NON-NLS-1$ //$NON-NLS-2$
             return Set.of();
         }
     }
@@ -2937,8 +2879,6 @@ public final class BslModuleSpellCheckHook implements IStartup
     static void installAnnotationNavigationActions(IToolBarManager manager,
         Collection<Annotation> annotations)
     {
-        Global.tempLog("issue176", "installAnnotationNavigationActions: annotations=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (annotations != null ? annotations.size() : -1));
         if (annotations == null || annotations.isEmpty())
             return;
         List<Annotation> list = new ArrayList<>(annotations);
@@ -3167,7 +3107,6 @@ public final class BslModuleSpellCheckHook implements IStartup
         IdentifierDocHoverOpen prepared = prepareIdentifierDocHover(viewer, useOffset);
         if (prepared == null)
         {
-            Global.tempLog("ann-doc", "prepare empty offset=" + useOffset); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         closeAnnotationHover(viewer);
@@ -3176,12 +3115,7 @@ public final class BslModuleSpellCheckHook implements IStartup
             display = Display.getDefault();
         if (display == null)
             return;
-        final int loggedOffset = useOffset;
-        display.asyncExec(() ->
-        {
-            Global.tempLog("ann-doc", "show offset=" + loggedOffset); //$NON-NLS-1$ //$NON-NLS-2$
-            showPreparedIdentifierDocHover(viewer, prepared);
-        });
+        display.asyncExec(() -> showPreparedIdentifierDocHover(viewer, prepared));
     }
 
     /** Offset из AnnotationInfo исходного popup, иначе из кнопки toolbar. */
@@ -3222,7 +3156,6 @@ public final class BslModuleSpellCheckHook implements IStartup
             Rectangle area = subjectAreaForRegion(viewer, prepared.region);
             if (area == null)
             {
-                Global.tempLog("ann-doc", "no subject area"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
             disposeIdentifierDocPresenter();
@@ -3235,12 +3168,10 @@ public final class BslModuleSpellCheckHook implements IStartup
             presenter.install(widget);
             presenter.show(prepared.info, area);
             identifierDocPresenter = presenter;
-            Global.tempLog("ann-doc", "presented via IdentifierDocHoverPresenter"); //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (Exception e)
         {
             restoreEditorTextHovers(viewer);
-            Global.tempLog("ann-doc", "show fail: " + e.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -3604,9 +3535,6 @@ public final class BslModuleSpellCheckHook implements IStartup
     private static int applyProposalFilterToInfo(Object info, ISourceViewer viewer,
         List<Annotation> atOffset)
     {
-        Global.tempLog("issue176", "applyProposalFilterToInfo: infoClass=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (info != null ? info.getClass().getName() : "null") + " isAnnotationInfo=" //$NON-NLS-1$ //$NON-NLS-2$
-            + isAnnotationInfo(info));
         if (!isAnnotationInfo(info))
             return -1;
         Object annObj = Global.getField(info, "annotation"); //$NON-NLS-1$
@@ -3967,8 +3895,6 @@ public final class BslModuleSpellCheckHook implements IStartup
         @Override
         public Object getHoverInfo2(ITextViewer textViewer, IRegion hoverRegion)
         {
-            Global.tempLog("issue176", "AnnotationHoverProposalFilter.getHoverInfo2: delegateExt2=" //$NON-NLS-1$ //$NON-NLS-2$
-                + delegateExt2);
             Object info = delegateExt2 != null
                 ? delegateExt2.getHoverInfo2(textViewer, hoverRegion)
                 : null;
