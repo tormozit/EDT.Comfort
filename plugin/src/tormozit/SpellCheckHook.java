@@ -92,7 +92,6 @@ public final class SpellCheckHook implements IStartup
     private static final Locale PLATFORM_LOCALE = new Locale("ru", "RU"); //$NON-NLS-1$ //$NON-NLS-2$
 
     private static final String COMFORT_DICT_ROW_KEY = "tormozit.spellCheck.comfortDictRow"; //$NON-NLS-1$
-    private static final String USER_DICT_CAPTION_KEY = "tormozit.spellCheck.userDictCaption"; //$NON-NLS-1$
     private static final String COMFORT_DICT_LABEL = "Словарь Комфорт:"; //$NON-NLS-1$
     private static final String COMFORT_DICT_OPEN_LINK = "Открыть"; //$NON-NLS-1$
     private static final String USER_DICT_CAPTION_EN =
@@ -904,17 +903,18 @@ public final class SpellCheckHook implements IStartup
         Label caption = findUserDictionaryCaptionLabel(shell);
         if (caption == null || caption.isDisposed())
             return;
-        if (!Boolean.TRUE.equals(shell.getData(USER_DICT_CAPTION_KEY)))
-        {
-            String tip = USER_DICT_CAPTION_RU + "\n\n" + USER_DICT_CAPTION_EN; //$NON-NLS-1$
-            Label userLabel = findUserDictionaryFieldLabel(shell);
-            if (userLabel != null && !userLabel.isDisposed())
-                applySpellingOriginalTooltip(userLabel, tip);
-            Text userText = findUserDictionaryPathText(shell);
-            if (userText != null && !userText.isDisposed())
-                userText.setToolTipText(tip);
-            shell.setData(USER_DICT_CAPTION_KEY, Boolean.TRUE);
-        }
+        // Раньше флаг shell.getData(...) ставился безусловно после первой же попытки —
+        // если на том проходе userLabel/userText ещё не нашлись (страница не успела
+        // дорендериться), тултип на этот shell больше никогда не выставлялся. Обе операции
+        // ниже идемпотентны (applySpellingOriginalTooltip не дублирует, setToolTipText просто
+        // перезаписывает тем же текстом) — можно звать на каждом проходе без флага.
+        String tip = USER_DICT_CAPTION_RU + "\n\n" + USER_DICT_CAPTION_EN; //$NON-NLS-1$
+        Label userLabel = findUserDictionaryFieldLabel(shell);
+        if (userLabel != null && !userLabel.isDisposed())
+            applySpellingOriginalTooltip(userLabel, tip);
+        Text userText = findUserDictionaryPathText(shell);
+        if (userText != null && !userText.isDisposed())
+            userText.setToolTipText(tip);
         excludeUserDictionaryDescriptionRow(caption);
     }
 
@@ -990,7 +990,7 @@ public final class SpellCheckHook implements IStartup
         {
             if (found[0] != null || !(control instanceof Label label) || label.isDisposed())
                 return;
-            String n = normalizeSpellingLabel(label.getText());
+            String n = normalizeSpellingLabel(label.getText()).toLowerCase(Locale.ROOT);
             if ("пользовательский словарь:".equals(n) //$NON-NLS-1$
                 || "user defined dictionary:".equals(n)) //$NON-NLS-1$
                 found[0] = label;
@@ -1065,6 +1065,7 @@ public final class SpellCheckHook implements IStartup
                 findComfortDictionaryActionsComposite(parent));
             ensureComfortPathTextSpan(findComfortDictionaryPathText(parent));
             updateComfortDictionaryRowVisibility(parent, platformCombo);
+            excludeEncodingSeparatorRow(parent);
             return true;
         }
         if (findComfortDictionaryPathText(parent) != null)
@@ -1102,18 +1103,31 @@ public final class SpellCheckHook implements IStartup
         if (userButtons != null && !userButtons.isDisposed()
             && userButtons.getLayout() instanceof GridLayout srcLayout)
         {
+            actionsLayout.marginWidth = srcLayout.marginWidth;
+            actionsLayout.marginHeight = srcLayout.marginHeight;
             actionsLayout.horizontalSpacing = srcLayout.horizontalSpacing;
             actionsLayout.verticalSpacing = srcLayout.verticalSpacing;
         }
         actions.setLayout(actionsLayout);
-        actions.setLayoutData(copyGridData(userButtons,
-            new GridData(SWT.FILL, SWT.CENTER, false, false)));
+        // Composite «Обзор.../Переменные...» у Eclipse — hAlign=END: при разной ширине composite
+        // (у нас одна кнопка+ссылка вместо двух кнопок) это сдвигает кнопку вправо от колонки.
+        // Ставим BEGINNING явно — левый край composite = левый край колонки, как у text-поля.
+        GridData actionsGd = copyGridData(userButtons, new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
+        actionsGd.horizontalAlignment = SWT.BEGINNING;
+        actions.setLayoutData(actionsGd);
 
         Button browse = new Button(actions, SWT.PUSH);
         browse.setText("Обзор..."); //$NON-NLS-1$
         Button userBrowse = firstButtonIn(userButtons);
-        browse.setLayoutData(copyGridData(userBrowse,
-            new GridData(SWT.FILL, SWT.CENTER, false, false)));
+        GridData browseGd = copyGridData(userBrowse,
+            new GridData(SWT.FILL, SWT.CENTER, false, false));
+        // GridData.widthHint у userBrowse не задан — его реальная ширина (шире, чем нужно
+        // самому "Обзор...") берётся из makeColumnsEqualWidth пары с более длинной
+        // "Переменные...". У нас соседняя ссылка "Открыть" короче — свой makeColumnsEqualWidth
+        // не даст той же ширины, поэтому фиксируем widthHint по факту.
+        if (userBrowse != null && !userBrowse.isDisposed() && userBrowse.getBounds().width > 0)
+            browseGd.widthHint = userBrowse.getBounds().width;
+        browse.setLayoutData(browseGd);
 
         Link open = new Link(actions, SWT.NONE);
         open.setText("<a>" + COMFORT_DICT_OPEN_LINK + "</a>"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -1144,8 +1158,34 @@ public final class SpellCheckHook implements IStartup
             e -> updateComfortDictionaryRowVisibility(rowParent, platformCombo));
 
         updateComfortDictionaryRowVisibility(parent, platformCombo);
+        excludeEncodingSeparatorRow(parent);
         parent.layout(true, true);
         return true;
+    }
+
+    /**
+     * Пустой Label (span на всю ширину) перед «Кодировка:» — штатный JDT-разделитель
+     * секций. С добавленной строкой «Словарь Комфорт» он смотрится как лишний зазор —
+     * убираем (идемпотентно, exclude из сетки).
+     */
+    private static void excludeEncodingSeparatorRow(Composite parent)
+    {
+        if (parent == null || parent.isDisposed())
+            return;
+        Control[] children = parent.getChildren();
+        String encodingLabel = normalizeSpellingLabel("Кодировка:"); //$NON-NLS-1$
+        for (int i = 1; i < children.length; i++)
+        {
+            if (!(children[i] instanceof Label label) || label.isDisposed())
+                continue;
+            if (!encodingLabel.equals(normalizeSpellingLabel(label.getText())))
+                continue;
+            Control prev = children[i - 1];
+            if (prev instanceof Label spacer && !spacer.isDisposed() && isBlankLabel(spacer)
+                && !isComfortDictionaryRowControl(spacer))
+                excludeFromGrid(spacer);
+            break;
+        }
     }
 
     /** Порядок детей: … caption/спейсер → Label → Text → actions (новая строка сетки с кол. 0). */
@@ -1275,74 +1315,48 @@ public final class SpellCheckHook implements IStartup
         }
     }
 
+    /**
+     * Composite с кнопками «Обзор.../Переменные...» у штатного «Пользовательский словарь».
+     * Ищем по содержимому (кнопка «Обзор...»), а не по позиции в массиве детей —
+     * порядок детей composite не обязан совпадать с визуальным порядком строк.
+     */
     private static Composite findUserDictionaryButtonsComposite(Composite parent)
     {
-        Text userText = findUserDictionaryPathText(parent);
-        if (userText == null)
+        if (parent == null || parent.isDisposed())
             return null;
-        Control[] children = parent.getChildren();
-        boolean after = false;
-        for (Control child : children)
+        String browseLabel = normalizeSpellingLabel("Обзор..."); //$NON-NLS-1$
+        for (Control child : parent.getChildren())
         {
-            if (child == userText)
+            if (!(child instanceof Composite composite) || composite.isDisposed())
+                continue;
+            if (isComfortDictionaryRowControl(composite))
+                continue;
+            for (Control nested : composite.getChildren())
             {
-                after = true;
-                continue;
+                if (nested instanceof Button button && !button.isDisposed()
+                    && browseLabel.equals(normalizeSpellingLabel(button.getText())))
+                    return composite;
             }
-            if (!after)
-                continue;
-            if (isComfortDictionaryRowControl(child))
-                continue;
-            if (child instanceof Composite composite && !composite.isDisposed())
-                return composite;
-            if (child instanceof Label)
-                break;
-            break;
         }
         return null;
     }
 
+    /**
+     * Якорь для вставки строки «Словарь Комфорт» — сразу после caption/спейсера
+     * пользовательского словаря (последняя строка блока «Пользовательский словарь»).
+     * Раньше здесь был перебор «идём вперёд, пока Label» — он не умел остановиться
+     * на границе блока и при рабочем {@link #findUserDictionaryPathText} доезжал до
+     * заголовка «Кодировка:», ломая секцию. Явные, ограниченные кандидаты надёжнее.
+     */
     private static Control findComfortDictionaryInsertAnchor(Composite parent)
     {
-        Text userText = findUserDictionaryPathText(parent);
-        if (userText == null)
-            return findUserDictionaryCaptionLabel(parent);
-        Control[] children = parent.getChildren();
-        Control lastOfRow = userText;
-        boolean afterText = false;
-        boolean seenButtons = false;
-        for (Control child : children)
-        {
-            if (child == userText)
-            {
-                afterText = true;
-                continue;
-            }
-            if (!afterText)
-                continue;
-            // Уже вставленный Comfort не якорь и не стоп — переставим после caption.
-            if (isComfortDictionaryRowControl(child))
-                continue;
-            if (!seenButtons && child instanceof Composite)
-            {
-                lastOfRow = child;
-                seenButtons = true;
-                continue;
-            }
-            // Пустой спейсер + caption; дальше — кодировка (Group/Composite) в той же группе.
-            if (seenButtons && child instanceof Label)
-            {
-                lastOfRow = child;
-                continue;
-            }
-            if (!seenButtons && child instanceof Button)
-            {
-                lastOfRow = child;
-                continue;
-            }
-            break;
-        }
-        return lastOfRow;
+        Label caption = findUserDictionaryCaptionLabel(parent);
+        if (caption != null && !caption.isDisposed())
+            return caption;
+        Composite userButtons = findUserDictionaryButtonsComposite(parent);
+        if (userButtons != null && !userButtons.isDisposed())
+            return userButtons;
+        return findUserDictionaryPathText(parent);
     }
 
     private static boolean isComfortDictionaryRowControl(Control control)
