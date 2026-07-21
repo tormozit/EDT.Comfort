@@ -429,9 +429,59 @@ public final class ComfortSpellingEngine
             if (isShortAllCapsWord(part) || isLocaleCode(part) || isUserWord(part))
                 continue;
             if (!isCorrect(dicts, part))
+            {
+                if (ComfortSettings.isSpellingIgnoreCamelCaseAbbreviations()
+                    && isCamelCaseAbbreviation(word, segments, dicts))
+                    return true;
                 return false;
+            }
         }
         return anyLetterSeg;
+    }
+
+    /**
+     * CamelCase-аббревиатура: каждый сегмент (кроме последнего) является префиксом
+     * слова из словаря, последний — полное слово. {@code ФизЛицо} → {@code ФизическоеЛицо}.
+     *
+     * @param segments сегменты всего {@code word} (вычислены вызывающим кодом)
+     */
+    private static boolean isCamelCaseAbbreviation(String word, List<int[]> segments,
+        List<HunspellDictionary> dicts)
+    {
+        if (segments.size() <= 1)
+            return false;
+        int lastIdx = segments.size() - 1;
+        boolean anyIncorrect = false;
+        for (int idx = 0; idx < segments.size(); idx++)
+        {
+            int[] seg = segments.get(idx);
+            int segStart = seg[0];
+            int segEnd = seg[1];
+            if (segEnd - segStart < 2)
+                continue;
+            String part = word.substring(segStart, segEnd);
+            if (!hasLetter(part))
+                continue;
+            if (isShortAllCapsWord(part) || isLocaleCode(part) || isUserWord(part))
+                continue;
+            if (isCorrect(dicts, part))
+                continue;
+            if (idx == lastIdx)
+                return false;
+            anyIncorrect = true;
+            boolean foundPrefix = false;
+            for (HunspellDictionary dict : dicts)
+            {
+                if (dict.hasWordStartingWith(part))
+                {
+                    foundPrefix = true;
+                    break;
+                }
+            }
+            if (!foundPrefix)
+                return false;
+        }
+        return anyIncorrect;
     }
 
     /** Слова только из заглавных букв длиной ≤ 3 (аббревиатуры вроде ИД, XML) не проверяем. */
@@ -876,7 +926,9 @@ public final class ComfortSpellingEngine
                     continue;
                 if (shouldSplitIdentifierToken(word, startsSentence))
                 {
-                    for (int[] seg : splitIdentifierSegments(text, begin, tokenEnd))
+                    List<int[]> segs = splitIdentifierSegments(text, begin, tokenEnd);
+                    boolean segMiss = false;
+                    for (int[] seg : segs)
                     {
                         int segStart = seg[0];
                         int segEnd = seg[1];
@@ -887,7 +939,29 @@ public final class ComfortSpellingEngine
                             continue;
                         if (isCorrect(part))
                             continue;
-                        result.add(new int[] { segStart, segEnd - segStart });
+                        segMiss = true;
+                        break;
+                    }
+                    if (segMiss)
+                    {
+                        boolean ignore = ComfortSettings.isSpellingIgnoreCamelCaseAbbreviations();
+                        List<HunspellDictionary> dicts = dictionariesForCheck();
+                        boolean abbrev = isCamelCaseAbbreviation(text, segs, dicts);
+                        if (ignore && abbrev)
+                            continue;
+                        for (int[] seg : segs)
+                        {
+                            int segStart = seg[0];
+                            int segEnd = seg[1];
+                            if (segEnd - segStart < 2)
+                                continue;
+                            String part = text.substring(segStart, segEnd);
+                            if (!hasLetter(part))
+                                continue;
+                            if (isCorrect(part))
+                                continue;
+                            result.add(new int[] { segStart, segEnd - segStart });
+                        }
                     }
                 }
                 else if (word.length() >= 2 && !isCorrect(word))
@@ -1029,6 +1103,9 @@ public final class ComfortSpellingEngine
                 continue;
             if (isCorrect(dicts, word))
                 continue;
+            if (ComfortSettings.isSpellingIgnoreCamelCaseAbbreviations()
+                && isCamelCaseAbbreviation(text, segments, dicts))
+                return;
             out.add(new int[] { segStart, segEnd - segStart });
         }
     }

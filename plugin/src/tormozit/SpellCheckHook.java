@@ -1136,6 +1136,24 @@ public final class SpellCheckHook implements IStartup
 
         placeComfortDictionaryRow(parent, label, pathText, actions);
 
+        Button abbrevCheck = new Button(parent, SWT.CHECK);
+        abbrevCheck.setText("Игнорировать сокращения в CamelCase"); //$NON-NLS-1$
+        abbrevCheck.setData(COMFORT_DICT_ROW_KEY, "abbrevCheck"); //$NON-NLS-1$
+        GridData abbrevGd = new GridData(SWT.BEGINNING, SWT.CENTER, false, false);
+        abbrevGd.horizontalSpan = 3;
+        abbrevGd.horizontalIndent = label.getLayoutData() instanceof GridData lgd
+            ? lgd.horizontalIndent : 0;
+        abbrevCheck.setLayoutData(abbrevGd);
+        abbrevCheck.setToolTipText(
+            "Не помечать как ошибку CamelCase-сокращения, если каждый сегмент\n"
+            + "(кроме последнего) является префиксом слова из словаря.\n"
+            + "Например «ФизЛицо» (сокращение от «ФизическоеЛицо») не будет\n"
+            + "подчёркнуто, если «Физическое» есть в словаре." + Global.pluginSignForTooltip()); //$NON-NLS-1$
+        abbrevCheck.setSelection(
+            ComfortSettings.isSpellingIgnoreCamelCaseAbbreviations());
+        abbrevCheck.addListener(SWT.Selection, e ->
+            ComfortSettings.setSpellingIgnoreCamelCaseAbbreviations(abbrevCheck.getSelection()));
+
         fillComfortDictionaryPathText(pathText);
         browse.addListener(SWT.Selection, e -> browseComfortDictionaryFile(pathText));
         open.addListener(SWT.Selection, e ->
@@ -1160,6 +1178,7 @@ public final class SpellCheckHook implements IStartup
         updateComfortDictionaryRowVisibility(parent, platformCombo);
         excludeEncodingSeparatorRow(parent);
         parent.layout(true, true);
+        parent.requestLayout();
         return true;
     }
 
@@ -1469,6 +1488,7 @@ public final class SpellCheckHook implements IStartup
                 gd.exclude = !visible;
         }
         parent.layout(true, true);
+        parent.requestLayout();
     }
 
     private static boolean isComfortPlatformDictionarySelected(Combo combo)

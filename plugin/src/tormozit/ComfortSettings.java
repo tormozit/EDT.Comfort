@@ -12,9 +12,10 @@ public final class ComfortSettings
 {
     /**
      * Ключ булевой настройки «Улучшать списки» (имя ключа исторически осталось прежним).
-     * Управляет заменой фильтров по подстроке в списках (навигатор, список баз и т.д.),
-     * а также доработками панели глобального поиска ({@link SearchViewAggregationHook}, issue #79)
-     * и поиска по файлам ({@link FileSearchResultsHook}).
+     * Управляет заменой фильтров по подстроке в списках (навигатор, список баз, панель
+     * «Индексирование Git» — {@link GitStagingFilterHook} — и т.д.), а также доработками панели
+     * глобального поиска ({@link SearchViewAggregationHook}, issue #79) и поиска по файлам
+     * ({@link FileSearchResultsHook}).
      */
     public static final String PREF_REPLACE_LIST_FILTERS = "comfort.replaceListFilters"; //$NON-NLS-1$
 
@@ -209,6 +210,16 @@ public final class ComfortSettings
 
     /** По умолчанию проверка идентификаторов выключена (меньше шума). */
     public static final boolean DEFAULT_SPELLING_CHECK_IDENTIFIERS_VISIBLE = false;
+
+    /**
+     * Ключ: не помечать как ошибку CamelCase-сокращения, если каждый сегмент
+     * является префиксом слова из словаря ({@code ФизЛицо} → {@code ФизическоеЛицо}).
+     */
+    public static final String PREF_SPELLING_IGNORE_CAMEL_CASE_ABBREVIATIONS =
+        "comfort.spelling.ignoreCamelCaseAbbreviations"; //$NON-NLS-1$
+
+    /** По умолчанию сокращения игнорируются. */
+    public static final boolean DEFAULT_SPELLING_IGNORE_CAMEL_CASE_ABBREVIATIONS = true;
 
     /**
      * Ключ: в диалоге «Добавить в словарь» писать в проектный morph-dic
@@ -726,6 +737,35 @@ public final class ComfortSettings
         if (settings == null)
             return DEFAULT_SPELLING_CHECK_IDENTIFIERS_VISIBLE;
         return settings.preferenceStore.getBoolean(PREF_SPELLING_CHECK_IDENTIFIERS_VISIBLE);
+    }
+
+    /**
+     * Не помечать как ошибку CamelCase-сокращения, если каждый сегмент
+     * (кроме последнего) является префиксом слова из словаря.
+     */
+    public static boolean isSpellingIgnoreCamelCaseAbbreviations()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_SPELLING_IGNORE_CAMEL_CASE_ABBREVIATIONS;
+        return settings.preferenceStore.getBoolean(PREF_SPELLING_IGNORE_CAMEL_CASE_ABBREVIATIONS);
+    }
+
+    /** Запомнить выбор флажка «Игнорировать сокращения в CamelCase». */
+    public static void setSpellingIgnoreCamelCaseAbbreviations(boolean ignore)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        settings.preferenceStore.setValue(PREF_SPELLING_IGNORE_CAMEL_CASE_ABBREVIATIONS, ignore);
+        try
+        {
+            settings.preferenceStore.save();
+        }
+        catch (Exception ex)
+        {
+            Global.log("ComfortSettings save error (ignoreCamelCaseAbbreviations): " + ex); //$NON-NLS-1$
+        }
     }
 
     /** Писать новые слова из UI в проектный словарь (запоминается в диалоге). */

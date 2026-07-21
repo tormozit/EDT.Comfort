@@ -399,13 +399,27 @@ public class GetRef extends AbstractHandler implements IElementUpdater
         return modulePath;
     }
 
-    private static String stripModuleSuffix(String modulePath)
+    /**
+     * Суффиксы вида модуля, которые ничего не добавляют к полному имени, потому что у владельца
+     * физически не может быть другого вида модуля (единственный файл): общий модуль, модуль формы,
+     * модуль общей команды. В отличие от {@code МодульОбъекта}/{@code МодульМенеджера}/
+     * {@code МодульНабораЗаписей}/{@code МодульМенеджераЗначения} (у справочника/документа/регистра
+     * реально может быть несколько разных файлов модуля — суффикс их различает) и 4 модулей
+     * конфигурации (управляемое/обычное приложение, внешнее соединение, сеанс — тоже разные файлы).
+     */
+    private static final java.util.Set<String> LOW_VALUE_MODULE_SUFFIXES =
+        java.util.Set.of("Модуль", "Форма", "МодульКоманды"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+
+    /** Срезает последний сегмент полного имени, если это малозначащий суффикс вида модуля (см. {@link #LOW_VALUE_MODULE_SUFFIXES}). */
+    private static String stripLowValueModuleSuffix(String fullName)
     {
-        int lastDot = modulePath.lastIndexOf('.');
-        if (lastDot < 0) return modulePath;
-        if (modulePath.indexOf('.') == lastDot) return modulePath;
-        String last = modulePath.substring(lastDot + 1);
-        return MdTypeMapping.isModuleTypeSuffix(last) ? modulePath.substring(0, lastDot) : modulePath;
+        if (fullName == null)
+            return null;
+        int lastDot = fullName.lastIndexOf('.');
+        if (lastDot < 0)
+            return fullName;
+        String last = fullName.substring(lastDot + 1);
+        return LOW_VALUE_MODULE_SUFFIXES.contains(last) ? fullName.substring(0, lastDot) : fullName;
     }
 
     // =========================================================================
@@ -792,6 +806,29 @@ public class GetRef extends AbstractHandler implements IElementUpdater
         String nested = pathToFullNameFromNestedFolders(p, base);
         if (nested != null) return nested;
         return base;
+    }
+
+    /**
+     * Полное имя объекта метаданных по пути в проекте (сначала {@link #pathToModuleRef} —
+     * для модулей форм/команд и т.п. даёт владеющий объект, не спускаясь до самого модуля;
+     * затем {@link #pathToFullName} как запасной вариант), или {@code null}, если не резолвится.
+     * Малозначащий суффикс вида модуля срезан — см. {@link #stripLowValueModuleSuffix}.
+     */
+    static String resolveFullNameOrNull(String projectRelativePath)
+    {
+        try
+        {
+            ModuleRef moduleRef = pathToModuleRef(projectRelativePath);
+            if (moduleRef != null && moduleRef.modulePath != null && !moduleRef.modulePath.isEmpty())
+                return stripLowValueModuleSuffix(moduleRef.modulePath);
+            String fullName = pathToFullName(projectRelativePath);
+            if (fullName != null && !fullName.isEmpty())
+                return stripLowValueModuleSuffix(fullName);
+        }
+        catch (Exception ignored)
+        {
+        }
+        return null;
     }
 
     /** Ищет Templates/Forms/… не только в p[2] (глубокий путь к файлу макета). */

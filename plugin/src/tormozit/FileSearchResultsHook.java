@@ -605,19 +605,8 @@ public final class FileSearchResultsHook implements IStartup
 
     private static String resolveMdPath(String projectRelativePath)
     {
-        try
-        {
-            GetRef.ModuleRef ref = GetRef.pathToModuleRef(projectRelativePath);
-            if (ref != null && ref.modulePath != null && !ref.modulePath.isEmpty())
-                return ref.modulePath;
-            String fullName = GetRef.pathToFullName(projectRelativePath);
-            if (fullName != null && !fullName.isEmpty())
-                return fullName;
-        }
-        catch (Exception ignored)
-        {
-        }
-        return projectRelativePath;
+        String fullName = GetRef.resolveFullNameOrNull(projectRelativePath);
+        return fullName != null ? fullName : projectRelativePath;
     }
 
     private static void registerCopyHandler(TableViewer tableViewer)

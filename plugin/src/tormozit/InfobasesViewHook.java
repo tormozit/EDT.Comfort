@@ -24,9 +24,6 @@ import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.navigator.CommonViewer;
-import org.eclipse.jface.viewers.ILabelProviderListener;
-import org.eclipse.jface.viewers.ViewerCell;
-import org.eclipse.swt.graphics.Image;
 import org.eclipse.jface.viewers.ViewerFilter;
 
 /**
@@ -701,91 +698,6 @@ public final class InfobasesViewHook implements IStartup
         }
         return sb.append('}').toString();
     }
-
-    /**
-     * Подсветка для {@link CellLabelProvider}/{@link org.eclipse.jface.viewers.ColumnLabelProvider}
-     * (панель «Информационные базы», диалоги без styled label provider).
-     */
-    private static final class CellLabelHighlightWrapper extends StyledCellLabelProvider
-            implements SmartLabelHighlight, ILabelProvider
-    {
-        private final CellLabelProvider base;
-        private SmartMatcher highlightMatcher = new SmartMatcher(""); //$NON-NLS-1$
-
-        public CellLabelHighlightWrapper(CellLabelProvider base)
-        {
-            this.base = base;
-        }
-
-        @Override
-        public void setHighlightPattern(String pattern)
-        {
-            highlightMatcher = new SmartMatcher(pattern != null ? pattern : ""); //$NON-NLS-1$
-        }
-
-        @Override
-        public void update(ViewerCell cell)
-        {
-            if (base != null)
-                base.update(cell);
-            if (cell == null || highlightMatcher.isEmpty)
-                return;
-            String text = cell.getText();
-            if (text == null || text.isEmpty())
-                return;
-            SmartMatchHighlight.appendMatchRanges(cell, highlightMatcher.getHighlightRanges(text));
-        }
-
-        @Override
-        public String getText(Object element)
-        {
-            if (base instanceof ILabelProvider)
-                return ((ILabelProvider) base).getText(element);
-            Object text = Global.invoke(base, "getText", element); //$NON-NLS-1$
-            return text instanceof String ? (String) text : ""; //$NON-NLS-1$
-        }
-
-        @Override
-        public Image getImage(Object element)
-        {
-            if (base instanceof ILabelProvider)
-                return ((ILabelProvider) base).getImage(element);
-            Object img = Global.invoke(base, "getImage", element); //$NON-NLS-1$
-            return img instanceof Image ? (Image) img : null;
-        }
-
-        @Override
-        public String getToolTipText(Object element)
-        {
-            Object tip = Global.invoke(base, "getToolTipText", element); //$NON-NLS-1$
-            return tip instanceof String ? (String) tip : null;
-        }
-
-        @Override
-        public void addListener(ILabelProviderListener listener)
-        {
-            base.addListener(listener);
-        }
-
-        @Override
-        public void removeListener(ILabelProviderListener listener)
-        {
-            base.removeListener(listener);
-        }
-
-        @Override
-        public boolean isLabelProperty(Object element, String property)
-        {
-            return base.isLabelProperty(element, property);
-        }
-
-        @Override
-        public void dispose()
-        {
-            base.dispose();
-        }
-    }
-
 
     /**
      * Логи хука «Информационные базы» через {@link Global}.

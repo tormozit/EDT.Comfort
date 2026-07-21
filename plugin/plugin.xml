@@ -69,6 +69,7 @@
     <startup class="tormozit.InfobaseSyncQuestionDialogHook"/>
     <startup class="tormozit.FilterBySubsystemsDialogHook"/>
     <startup class="tormozit.GitChangedFileMenuHook"/>
+    <startup class="tormozit.GitStagingFilterHook"/>
     <startup class="tormozit.TextEditorFastSearchKeyBindingHook"/> 
     <startup class="tormozit.SearchViewAggregationHook"/>
     <startup class="tormozit.FileSearchResultsHook"/>

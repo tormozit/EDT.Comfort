@@ -317,6 +317,21 @@ final class HunspellDictionary
         return resultCache.computeIfAbsent(word, this::checkForm);
     }
 
+    /** Есть ли хотя бы один корень, начинающийся с {@code prefix} (без учёта регистра). */
+    boolean hasWordStartingWith(String prefix)
+    {
+        if (prefix == null || prefix.length() < 2)
+            return false;
+        String lower = prefix.toLowerCase(Locale.ROOT);
+        for (String root : wordFlags.keySet())
+        {
+            if (root != null && root.length() >= 2
+                && root.toLowerCase(Locale.ROOT).startsWith(lower))
+                return true;
+        }
+        return false;
+    }
+
     /**
      * Превью словоформ по флагу AOT: основа + применение SFX с этим {@code flag}
      * (без приставок). Пустой/неизвестный flag — только лемма.

@@ -232,6 +232,7 @@ public final class BslModuleSpellCheckHook implements IStartup
                 || SpellingService.PREFERENCE_SPELLING_ENGINE.equals(prop)
                 || PreferenceConstants.SPELLING_LOCALE.equals(prop)
                 || ComfortSettings.PREF_SPELLING_CHECK_IDENTIFIERS_VISIBLE.equals(prop)
+                || ComfortSettings.PREF_SPELLING_IGNORE_CAMEL_CASE_ABBREVIATIONS.equals(prop)
                 || isSpellingIgnorePreference(prop))
             {
                 Display.getDefault().asyncExec(BslModuleSpellCheckHook::onSpellingPrefsChanged);
@@ -239,6 +240,7 @@ public final class BslModuleSpellCheckHook implements IStartup
         };
         EditorsUI.getPreferenceStore().addPropertyChangeListener(listener);
         PreferenceConstants.getPreferenceStore().addPropertyChangeListener(listener);
+        ComfortSettings.getInstance().getPreferenceStore().addPropertyChangeListener(listener);
         ContentAssistSettings cas = ContentAssistSettings.getInstance();
         if (cas != null)
             cas.getPreferenceStore().addPropertyChangeListener(listener);

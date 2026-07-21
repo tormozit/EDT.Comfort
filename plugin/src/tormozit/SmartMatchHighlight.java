@@ -130,28 +130,29 @@ public final class SmartMatchHighlight
         drawMatchFragments(gc, text, matcher, originX, originY, font, resolveMatchStyle(host), false);
     }
 
+    /**
+     * Заменяет (не дополняет!) диапазоны подсветки на ячейке. {@code base.update(cell)} у наших
+     * обёрток ({@code CellLabelHighlightWrapper}, {@code GitStagingLabelWrapper}) — обычный
+     * {@code ColumnLabelProvider}, свои {@code StyleRange} не ставит, так что «существующие»
+     * диапазоны на ячейке — это исключительно наши же диапазоны с ПРЕДЫДУЩЕГО вызова этого метода
+     * для той же ячейки. SWT переиспользует {@code TreeItem}/{@code TableItem} между refresh-ами
+     * (в т.ч. для другого элемента модели при перефильтрации), и офсеты старого текста могут
+     * случайно попасть на новый текст — раньше метод их ДОБАВЛЯЛ поверх новых, отчего подсветка
+     * «расползалась» на не относящиеся к текущему фильтру места.
+     */
     public static void appendMatchRanges(ViewerCell cell, Iterable<SmartMatcher.HighlightRange> ranges)
     {
-        if (cell == null || ranges == null)
+        if (cell == null)
             return;
         String text = cell.getText();
         if (text == null || text.isEmpty())
-            return;
-
-        StyleRange[] added = toStyleRanges(text, ranges, cell.getControl());
-        if (added.length == 0)
-            return;
-
-        StyleRange[] existing = cell.getStyleRanges();
-        if (existing == null || existing.length == 0)
         {
-            cell.setStyleRanges(added);
+            cell.setStyleRanges(null);
             return;
         }
-        StyleRange[] merged = new StyleRange[existing.length + added.length];
-        System.arraycopy(existing, 0, merged, 0, existing.length);
-        System.arraycopy(added, 0, merged, existing.length, added.length);
-        cell.setStyleRanges(merged);
+
+        StyleRange[] added = ranges != null ? toStyleRanges(text, ranges, cell.getControl()) : new StyleRange[0];
+        cell.setStyleRanges(added.length > 0 ? added : null);
     }
 
     static Color matchBackground(Color base)
