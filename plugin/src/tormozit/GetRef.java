@@ -818,6 +818,8 @@ public class GetRef extends AbstractHandler implements IElementUpdater
     {
         try
         {
+            if (isConfigurationRootPath(projectRelativePath))
+                return configurationRootDisplayName(projectRelativePath);
             ModuleRef moduleRef = pathToModuleRef(projectRelativePath);
             if (moduleRef != null && moduleRef.modulePath != null && !moduleRef.modulePath.isEmpty())
                 return stripLowValueModuleSuffix(moduleRef.modulePath);
@@ -829,6 +831,20 @@ public class GetRef extends AbstractHandler implements IElementUpdater
         {
         }
         return null;
+    }
+
+    /** Подпись колонки «Путь» для {@code src/Configuration/*} (и Configuration в расширении). */
+    private static String configurationRootDisplayName(String projectRelativePath)
+    {
+        String path = projectRelativePath.replace('\\', '/');
+        if (path.startsWith("src/ext/")) //$NON-NLS-1$
+        {
+            String rest = path.substring("src/ext/".length()); //$NON-NLS-1$
+            int slash = rest.indexOf('/');
+            if (slash > 0)
+                return withExt(rest.substring(0, slash), "Конфигурация"); //$NON-NLS-1$
+        }
+        return "Конфигурация"; //$NON-NLS-1$
     }
 
     /** Ищет Templates/Forms/… не только в p[2] (глубокий путь к файлу макета). */

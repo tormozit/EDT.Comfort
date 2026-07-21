@@ -129,6 +129,26 @@ public final class ComfortSettings
     /** Prefix for file search sash weights. */
     private static final String PREF_FILE_SEARCH_SASH_PREFIX = "comfort.fileSearch.sash."; //$NON-NLS-1$
 
+    /** Prefix for git history file table column widths. */
+    private static final String PREF_GIT_HISTORY_COLUMN_PREFIX = "comfort.gitHistory.columnWidth."; //$NON-NLS-1$
+
+    /** Prefix for git history file-list sash weights (graph | files). */
+    private static final String PREF_GIT_HISTORY_SASH_PREFIX = "comfort.gitHistory.sash."; //$NON-NLS-1$
+
+    /**
+     * Ключ: однократный bootstrap настроек списка коммитов EGit History
+     * (видимы Автор и Дата фиксации; скрыты Коммитер и Дата изменения автором;
+     * относительные даты выключены).
+     * После {@code true} плагин не перезаписывает выбор пользователя.
+     * Суффикс {@code v2} — повторный one-shot после смены колонки персоны
+     * (раньше скрывался Автор вместо Коммитера).
+     */
+    public static final String PREF_GIT_HISTORY_BOOTSTRAPPED =
+        "comfort.gitHistory.commitListBootstrapped.v2"; //$NON-NLS-1$
+
+    /** По умолчанию bootstrap списка коммитов ещё не выполнялся. */
+    public static final boolean DEFAULT_GIT_HISTORY_BOOTSTRAPPED = false;
+
     // ---- Select type: only marked ----
 
     /** Ключ: «Только помеченные» в диалоге «Редактирование типа данных». */
@@ -543,6 +563,89 @@ public final class ComfortSettings
         catch (Exception ex)
         {
             Global.log("ComfortSettings save error (sashWeights): " + ex); //$NON-NLS-1$
+        }
+    }
+
+    // ---- GitHistory file table column widths ----
+
+    public static int getGitHistoryColumnWidth(String columnId, int defaultWidth)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return defaultWidth;
+        String key = PREF_GIT_HISTORY_COLUMN_PREFIX + columnId;
+        if (!settings.preferenceStore.contains(key))
+            return defaultWidth;
+        return settings.preferenceStore.getInt(key);
+    }
+
+    public static void setGitHistoryColumnWidth(String columnId, int width)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        settings.preferenceStore.setValue(PREF_GIT_HISTORY_COLUMN_PREFIX + columnId, width);
+        try
+        {
+            settings.preferenceStore.save();
+        }
+        catch (Exception ex)
+        {
+            Global.log("ComfortSettings save error (gitHistoryColumn): " + ex); //$NON-NLS-1$
+        }
+    }
+
+    public static int getGitHistorySashWeight(String side, int defaultWeight)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return defaultWeight;
+        String key = PREF_GIT_HISTORY_SASH_PREFIX + side;
+        if (!settings.preferenceStore.contains(key))
+            return defaultWeight;
+        return settings.preferenceStore.getInt(key);
+    }
+
+    public static void setGitHistorySashWeights(int left, int right)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        settings.preferenceStore.setValue(PREF_GIT_HISTORY_SASH_PREFIX + "left", left); //$NON-NLS-1$
+        settings.preferenceStore.setValue(PREF_GIT_HISTORY_SASH_PREFIX + "right", right); //$NON-NLS-1$
+        try
+        {
+            settings.preferenceStore.save();
+        }
+        catch (Exception ex)
+        {
+            Global.log("ComfortSettings save error (gitHistorySash): " + ex); //$NON-NLS-1$
+        }
+    }
+
+    /** Bootstrap настроек списка коммитов EGit History уже выполнен. */
+    public static boolean isGitHistoryBootstrapped()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_GIT_HISTORY_BOOTSTRAPPED;
+        return settings.preferenceStore.getBoolean(PREF_GIT_HISTORY_BOOTSTRAPPED);
+    }
+
+    /** Отметить, что однократный bootstrap списка коммитов выполнен. */
+    public static void setGitHistoryBootstrapped(boolean bootstrapped)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        settings.preferenceStore.setValue(PREF_GIT_HISTORY_BOOTSTRAPPED, bootstrapped);
+        try
+        {
+            settings.preferenceStore.save();
+        }
+        catch (Exception ex)
+        {
+            Global.log("ComfortSettings save error (gitHistoryBootstrapped): " + ex); //$NON-NLS-1$
         }
     }
 

@@ -73,6 +73,7 @@
     <startup class="tormozit.TextEditorFastSearchKeyBindingHook"/> 
     <startup class="tormozit.SearchViewAggregationHook"/>
     <startup class="tormozit.FileSearchResultsHook"/>
+    <startup class="tormozit.GitHistoryFileColumnsHook"/>
     <startup class="tormozit.ConfigurationSearchDialogHook"/>
     <startup class="tormozit.PictureDialogHook"/>
     <startup class="tormozit.NewAttributeNameIdentifierHook"/>
