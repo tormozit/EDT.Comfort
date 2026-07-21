@@ -370,35 +370,59 @@ public final class GitHistoryFileColumnsHook implements IStartup
 
         // EDT SearchBox: лупа + clear + история (SWT.SEARCH на Win32 лупу не даёт).
         final FilterInputBox[] filterBoxRef = new FilterInputBox[1];
-        filterBoxRef[0] = FilterInputBox.forGitHistory(wrapper, () ->
+        // Последний реально применённый текст — для FocusOut-догона (SearchBox глотает delayed).
+        final String[] lastAppliedFilter = { "" }; //$NON-NLS-1$
+        final Runnable[] applyFilterRef = new Runnable[1];
+        applyFilterRef[0] = () ->
         {
             FilterInputBox box = filterBoxRef[0];
             if (box == null || box.isDisposed())
                 return;
             String text = box.getText();
+            if (text == null)
+                text = ""; //$NON-NLS-1$
             // Ключ = значение колонки «Файл» (col 0) текущей строки — до перезаполнения.
             String savedFile = captureFileColumnValue(table);
             Debug.log("filterApply savedFile=" + savedFile //$NON-NLS-1$
                 + " selIdxBefore=" + (table.isDisposed() ? -2 : table.getSelectionIndex()) //$NON-NLS-1$
-                + " filterText=[" + text + "]"); //$NON-NLS-1$ //$NON-NLS-2$
+                + " filterText=[" + text + "]" //$NON-NLS-1$ //$NON-NLS-2$
+                + " lastApplied=[" + lastAppliedFilter[0] + "]"); //$NON-NLS-1$ //$NON-NLS-2$
             filter.setPattern(text);
             labelProvider.setHighlightPattern(text);
+            lastAppliedFilter[0] = text;
             // Сброс до refresh: иначе SWT оставляет старый индекс → «другой» файл.
             table.deselectAll();
             fileViewer.setSelection(StructuredSelection.EMPTY);
             refreshWithRedrawOff(fileViewer);
+            Debug.log("filterApply afterRefresh itemCount=" //$NON-NLS-1$
+                + (table.isDisposed() ? -2 : table.getItemCount())); //$NON-NLS-1$
             // После перезаполнения — строка с тем же значением колонки «Файл».
             if (savedFile != null && !savedFile.isEmpty())
                 selectRowByFileColumnValue(table, savedFile);
-        });
+        };
+        filterBoxRef[0] = FilterInputBox.forGitHistory(wrapper, () -> applyFilterRef[0].run());
         FilterInputBox filterBox = filterBoxRef[0];
         filterBox.widget().addListener(SWT.Traverse, e ->
         {
             if (e.detail == SWT.TRAVERSE_ESCAPE)
             {
                 filterBox.setText(""); //$NON-NLS-1$
+                applyFilterRef[0].run();
                 e.doit = false;
             }
+        });
+        // SearchBox.focusLost снимает ValueChangeListener на время displayMessage —
+        // отложенный поиск после clear/X теряется. Догоняем расхождение поле ↔ фильтр.
+        filterBox.widget().addListener(SWT.FocusOut, e ->
+        {
+            String text = filterBox.getText();
+            if (text == null)
+                text = ""; //$NON-NLS-1$
+            if (text.equals(lastAppliedFilter[0]))
+                return;
+            Debug.log("filterFocusOut forceApply field=[" + text //$NON-NLS-1$
+                + "] lastApplied=[" + lastAppliedFilter[0] + "]"); //$NON-NLS-1$ //$NON-NLS-2$
+            applyFilterRef[0].run();
         });
 
         Control filterKeys = filterBox.inputControl();
