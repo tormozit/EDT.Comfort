@@ -550,6 +550,10 @@ public final class IRSession
             if (viewer == null)
                 return;
 
+            IDocument doc = viewer.getDocument();
+            if (doc == null)
+                return;
+
             boolean hasReplace = Boolean.TRUE.equals(executeOnComThread(this::hasReplaceableRange));
             if (hasReplace)
             {
@@ -557,48 +561,68 @@ public final class IRSession
                     readChangedTextRange();
                     return null;
                 });
-                IDocument doc = viewer.getDocument();
-                if (doc == null)
-                    return;
 
                 int offsetAdjust = TextEditor.saveSelectionBoundsForUndo(viewer);
                 final int replaceOffset = changedTextRange.getOffset() + offsetAdjust;
                 final int replaceLength = changedTextRange.getLength();
                 final String insertText = newTextOfRange;
 
-                if (doc instanceof IXtextDocument xtextDoc)
-                {
-                    xtextDoc.modify(resource -> {
-                        try
-                        {
-                            xtextDoc.replace(replaceOffset, replaceLength, insertText);
-                        }
-                        catch (BadLocationException e)
-                        {
-                            throw new RuntimeException("Ошибка позиционирования при вставке текста из ИР", e); //$NON-NLS-1$
-                        }
-                        return null;
-                    });
-                }
-                else
-                {
+                replaceDocumentRange(doc, replaceOffset, replaceLength, insertText);
+
+                changedTextRange = null;
+                newTextOfRange = ""; //$NON-NLS-1$
+            }
+            else
+            {
+                // Порт ветки «ЗаменяемыйДиапазон = Неопределено» из RDT
+                // ПередатьИзмененияИзПоляТекстаВОкноМодуля: без диапазона заменяем текст поля целиком.
+                String fullText = executeOnComThread(this::readFullFieldText);
+                if (fullText != null)
+                    replaceDocumentRange(doc, 0, doc.getLength(), fullText);
+            }
+            syncSelectionFromIR(viewer, endOffsetAdjustment);
+        }
+
+        /** Полный текст поля ИР ({@code ПолеТекста.ПолучитьТекст()}). COM-поток {@link #executor}. */
+        private String readFullFieldText()
+        {
+            ensureCodeEditor();
+            Object fieldText = ComBridge.getProperty(codeEditor, "ПолеТекста"); //$NON-NLS-1$
+            return Global.normalizeLineSeparators(
+                ComBridge.toString(ComBridge.invoke(fieldText, "ПолучитьТекст"))); //$NON-NLS-1$
+        }
+
+        private static void replaceDocumentRange(IDocument doc, int offset, int length, String text)
+        {
+            if (doc instanceof IXtextDocument xtextDoc)
+            {
+                xtextDoc.modify(resource -> {
                     try
                     {
-                        doc.replace(replaceOffset, replaceLength, insertText);
+                        xtextDoc.replace(offset, length, text);
                     }
                     catch (BadLocationException e)
                     {
                         throw new RuntimeException("Ошибка позиционирования при вставке текста из ИР", e); //$NON-NLS-1$
                     }
-                }
-
-                IDocumentUndoManager undoManager = DocumentUndoManagerRegistry.getDocumentUndoManager(doc);
-                if (undoManager != null)
-                    undoManager.commit();
-                changedTextRange = null;
-                newTextOfRange = ""; //$NON-NLS-1$
+                    return null;
+                });
             }
-            syncSelectionFromIR(viewer, endOffsetAdjustment);
+            else
+            {
+                try
+                {
+                    doc.replace(offset, length, text);
+                }
+                catch (BadLocationException e)
+                {
+                    throw new RuntimeException("Ошибка позиционирования при вставке текста из ИР", e); //$NON-NLS-1$
+                }
+            }
+
+            IDocumentUndoManager undoManager = DocumentUndoManagerRegistry.getDocumentUndoManager(doc);
+            if (undoManager != null)
+                undoManager.commit();
         }
 
         public void syncQueryEditorFromIR(ISourceViewer viewer)
@@ -705,7 +729,7 @@ public final class IRSession
         {
             ensureCodeEditor();
             Object comRange = ComBridge.getProperty(codeEditor, "мЗаменяемыйДиапазон"); //$NON-NLS-1$
-            return comRange != null;
+            return !ComBridge.isVariantUndefined(comRange);
         }
 
         /** [lfStart, lfEndExclusive] из {@code ПолеТекста.ВыделениеОдномерное()} или {@code null}. COM-поток. */
@@ -873,7 +897,7 @@ public final class IRSession
             try
             {
                 Object comRange = ComBridge.getProperty(codeEditor, "мЗаменяемыйДиапазон"); //$NON-NLS-1$
-                if (comRange != null)
+                if (!ComBridge.isVariantUndefined(comRange))
                 {
                     deleteFromLf = (int) ComBridge.toLong(
                         ComBridge.getProperty(comRange, "Начало")) - 1; //$NON-NLS-1$

@@ -26,6 +26,7 @@
     <startup class="tormozit.IrFormatTextKeyDiagHook"/>
     <startup class="tormozit.CtrlShiftFDiagHook"/>
     <startup class="tormozit.KeyBindingToastHook"/>
+    <startup class="tormozit.GlobalListCopyHook"/>
     <startup class="tormozit.SmartOutlineHook"/>
     <!-- ГЛОБАЛЬНЫЙ СКАН ОТКЛЮЧЁН ОКОНЧАТЕЛЬНО (issue #165), 2026-07-20. История фиксов: v1
          (guard+debounce SWT.Show), v2 (исключить редакторы из partOpened/partVisible), v3
@@ -372,6 +373,11 @@
         categoryId="tormozit.commands.global"
         description="Открыть строковый литерал BSL в редакторе текста ИР. Активно только при подключённом ИР. Настраивайте только «Редактирование источника Xtext». Остальные контексты не редактируйте. (Комфорт)"/>
     <command
+        id="tormozit.IrQueryConstructor"
+        name="Конструктор запроса ИР"
+        categoryId="tormozit.commands.global"
+        description="Открыть конструктор запроса приложения ИР для текста запроса во вложенном строковом литерале BSL. Активно только при подключённом ИР. Настраивайте только «Редактирование источника Xtext». Остальные контексты не редактируйте. (Комфорт)"/>
+    <command
         id="tormozit.IrFormatText"
         name="Форматировать текст ИР"
         categoryId="tormozit.commands.global"
@@ -595,6 +601,17 @@
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.EditEmbeddedTextCommandHandler"
         commandId="tormozit.IrEmbeddedText">
+      <activeWhen>
+        <with variable="activeContexts">
+          <iterate operator="or">
+            <equals value="org.eclipse.xtext.ui.XtextEditorScope"/>
+          </iterate>
+        </with>
+      </activeWhen>
+    </handler>
+    <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.IrQueryConstructorCommandHandler"
+        commandId="tormozit.IrQueryConstructor">
       <activeWhen>
         <with variable="activeContexts">
           <iterate operator="or">

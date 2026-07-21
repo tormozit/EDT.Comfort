@@ -68,6 +68,7 @@ public class BSLEditorMenuHook implements IStartup
 {
     private static final String ITEM_TEXT_DebugIR = "Отладить объект ИР";
     private static final String ITEM_TEXT_MethodConstructor = "Конструктор метода ИР";
+    private static final String ITEM_TEXT_QueryConstructor = IrQueryConstructorHandler.MENU_LABEL;
     private static final String ITEM_TEXT_FormatText = IrFormatTextHandler.MENU_LABEL;
     private static final String ITEM_TEXT_FindReferences = IrFindReferencesHandler.MENU_LABEL;
     private static final String ITEM_TEXT_ModuleCheck = IrModuleCheckHandler.MENU_LABEL;
@@ -419,6 +420,25 @@ public class BSLEditorMenuHook implements IStartup
                     });
                     addedItems.add(constructorItem);
 
+                    MenuItem queryConstructorItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
+                        ComfortSubmenuHelper.menuItemTextWithKeyBinding(
+                            ITEM_TEXT_QueryConstructor,
+                            IrQueryConstructorHandler.COMMAND_ID,
+                            EditEmbeddedTextCommandHandler.BINDING_CONTEXT_ID));
+                    queryConstructorItem.setToolTipText(
+                        "Открыть конструктор запроса приложения ИР для текста запроса под кареткой"
+                            + Global.pluginSignForTooltip());
+                    queryConstructorItem.setEnabled(IrQueryConstructorHandler.isApplicable(editor));
+                    queryConstructorItem.addSelectionListener(new SelectionAdapter()
+                    {
+                        @Override
+                        public void widgetSelected(SelectionEvent ev)
+                        {
+                            runQueryConstructorCommand(editor);
+                        }
+                    });
+                    addedItems.add(queryConstructorItem);
+
                     MenuItem findRefsItem =
                         ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH, ITEM_TEXT_FindReferences);
                     findRefsItem.setToolTipText(
@@ -612,6 +632,24 @@ public class BSLEditorMenuHook implements IStartup
             // fallback ниже
         }
         IrMethodConstructorHandler.openMethodConstructor(editor);
+    }
+
+    private static void runQueryConstructorCommand(BslXtextEditor editor)
+    {
+        try
+        {
+            IHandlerService handlerService = editor.getSite().getService(IHandlerService.class);
+            if (handlerService != null)
+            {
+                handlerService.executeCommand(IrQueryConstructorHandler.COMMAND_ID, null);
+                return;
+            }
+        }
+        catch (Exception ignored)
+        {
+            // fallback ниже
+        }
+        IrQueryConstructorHandler.openQueryConstructor(editor);
     }
 
     private static void runEmbeddedTextCommand(BslXtextEditor editor)

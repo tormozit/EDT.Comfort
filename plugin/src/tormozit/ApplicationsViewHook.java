@@ -11,6 +11,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.eclipse.core.commands.ExecutionEvent;
+import org.eclipse.core.commands.ExecutionException;
+import org.eclipse.core.commands.IExecutionListener;
+import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResourceChangeListener;
 import org.eclipse.core.resources.ResourcesPlugin;
@@ -31,6 +35,9 @@ import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.TreeViewerColumn;
 import org.eclipse.jface.viewers.ViewerCell;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.dnd.Clipboard;
+import org.eclipse.swt.dnd.TextTransfer;
+import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
 import org.eclipse.swt.events.MouseAdapter;
@@ -61,6 +68,7 @@ import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.commands.ICommandService;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.ServiceReference;
 
@@ -157,6 +165,14 @@ public class ApplicationsViewHook implements IStartup
         Collections.synchronizedMap(new IdentityHashMap<>());
 
     private static final String HOOKED_KEY = "tormozit.applicationsView.hooked"; //$NON-NLS-1$
+
+    private static final String ACTIVE_COLUMN_KEY = "tormozit.applicationsView.activeColumn"; //$NON-NLS-1$
+
+    private static final String ACTIVE_ITEM_KEY = "tormozit.applicationsView.activeItem"; //$NON-NLS-1$
+
+    private static final String COPY_COMMAND_ID = "org.eclipse.ui.edit.copy"; //$NON-NLS-1$
+
+    private static boolean copyExecutionListenerInstalled;
 
     private static final DateTimeFormatter DATE_FMT =
         DateTimeFormatter.ofPattern("dd'д'HH:mm:ss"); //$NON-NLS-1$
@@ -703,6 +719,7 @@ public class ApplicationsViewHook implements IStartup
             tree.setData(HOOKED_KEY, null);
             setupColumns(viewer, tree);
             addClickHandlers(viewer, tree);
+            installCopyExecutionListener();
             addToolbarButtons(view, viewer);
             addContextMenu(viewer, control);
             registerRedrawOnPoolChange(viewer);
@@ -999,6 +1016,8 @@ public class ApplicationsViewHook implements IStartup
                 Column col   = Column.forIndex(columnAt(tree, e.x, e.y));
                 TreeItem item = itemAt(tree, e.x, e.y);
                 if (col == null || item == null) return;
+                tree.setData(ACTIVE_COLUMN_KEY, col.index());
+                tree.setData(ACTIVE_ITEM_KEY, item);
                 handleColumnClick(col, item.getData(), viewer);
             }
         });
@@ -1053,6 +1072,88 @@ public class ApplicationsViewHook implements IStartup
             default: return;
         }
         if (!viewer.getControl().isDisposed()) viewer.update(element, null);
+    }
+
+    // =======================================================================
+    // 2а. Копирование активной ячейки (Ctrl+C)
+    // =======================================================================
+
+    /**
+     * Копирование ячейки таблицы «Приложения» по Ctrl+C. У дерева нет своего обработчика
+     * команды {@code org.eclipse.ui.edit.copy} — перехват через
+     * {@code ICommandService.addExecutionListener} (тот же обход известного ограничения SWT,
+     * что и {@link KeyBindingToastHook}/{@link PreferenceSearchFilterAugmenter#wireTreeCopy}:
+     * Ctrl+C не долетает до {@code SWT.KeyDown}, т.к. Win32 транслирует его в нативный
+     * акселератор меню раньше создания SWT-события). Реагируем только на {@code notHandled} —
+     * он вызывается ровно тогда, когда у команды нет активного обработчика, поэтому чужое
+     * (штатное) копирование не перекрывается. Активная ячейка — та, по которой был последний
+     * клик ({@link #ACTIVE_COLUMN_KEY}/{@link #ACTIVE_ITEM_KEY}, обновляются в
+     * {@link #addClickHandlers}); если клика ещё не было — берём первую колонку выделенной
+     * строки.
+     */
+    private static void installCopyExecutionListener()
+    {
+        if (copyExecutionListenerInstalled || PlatformUI.getWorkbench() == null)
+            return;
+        ICommandService commandService = PlatformUI.getWorkbench().getService(ICommandService.class);
+        if (commandService == null)
+            return;
+        commandService.addExecutionListener(new IExecutionListener()
+        {
+            @Override public void preExecute(String commandId, ExecutionEvent event) {}
+
+            @Override public void postExecuteSuccess(String commandId, Object returnValue) {}
+
+            @Override public void notHandled(String commandId, NotHandledException exception)
+            {
+                handlePossibleActiveCellCopy(commandId);
+            }
+
+            @Override public void postExecuteFailure(String commandId, ExecutionException exception) {}
+        });
+        copyExecutionListenerInstalled = true;
+    }
+
+    private static void handlePossibleActiveCellCopy(String commandId)
+    {
+        if (!COPY_COMMAND_ID.equals(commandId))
+            return;
+        Display display = Display.getCurrent();
+        Control focus = display == null ? null : display.getFocusControl();
+        if (!(focus instanceof Tree) || focus.isDisposed())
+            return;
+        Tree tree = (Tree) focus;
+        if (!isComfortHookApplied(tree))
+            return;
+
+        TreeItem item = (TreeItem) tree.getData(ACTIVE_ITEM_KEY);
+        if (item == null || item.isDisposed())
+        {
+            TreeItem[] selection = tree.getSelection();
+            if (selection.length == 0)
+                return;
+            item = selection[0];
+        }
+        Object columnData = tree.getData(ACTIVE_COLUMN_KEY);
+        int columnIndex = columnData instanceof Integer ? (Integer) columnData : 0;
+        if (columnIndex < 0 || columnIndex >= tree.getColumnCount())
+            columnIndex = 0;
+
+        String text = item.getText(columnIndex);
+        if (text == null || text.isBlank())
+            return;
+
+        Clipboard clipboard = new Clipboard(tree.getDisplay());
+        try
+        {
+            clipboard.setContents(new Object[] {text}, new Transfer[] {TextTransfer.getInstance()});
+            Global.tempLog("applicationsViewCopy", //$NON-NLS-1$
+                "clipboard set col=" + columnIndex + " text=[" + text + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+        finally
+        {
+            clipboard.dispose();
+        }
     }
 
     // =======================================================================

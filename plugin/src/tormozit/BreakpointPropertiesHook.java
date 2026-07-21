@@ -806,7 +806,7 @@ public final class BreakpointPropertiesHook implements IStartup
 
         Object fieldText = ComBridge.getProperty(irSession.codeEditor, "ПолеТекста"); //$NON-NLS-1$
         Object startLine = ComBridge.getProperty(irSession.codeEditor, "мНачальнаяСтрока"); //$NON-NLS-1$
-        if (fieldText != null && startLine != null)
+        if (!ComBridge.isVariantUndefined(fieldText) && !ComBridge.isVariantUndefined(startLine))
             return ComBridge.toString(ComBridge.invoke(fieldText, "ПолучитьСтроку", startLine)); //$NON-NLS-1$
         return ""; //$NON-NLS-1$
     }
