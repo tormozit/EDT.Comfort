@@ -54,7 +54,6 @@ public final class RightsDialogFilterHook implements IStartup
     private static final String DIALOG_MARKER = "RightsDialog"; //$NON-NLS-1$
     private static final String TITLE_RU = "Сравнение прав роли"; //$NON-NLS-1$
     private static final String TITLE_EN = "Role's rights comparison"; //$NON-NLS-1$
-    private static final String TEMP_LOG = "rights-dialog-filter"; //$NON-NLS-1$
     private static final String LAST_PAT_KEY = "tormozit.rightsDialogLastPattern"; //$NON-NLS-1$
     private static final String FILTER_SELECTION_KEY = "tormozit.rightsDialogFilterSelection"; //$NON-NLS-1$
     private static final String FILTER_SELECTION_PATH_KEY = "tormozit.rightsDialogFilterSelectionPath"; //$NON-NLS-1$
@@ -88,7 +87,6 @@ public final class RightsDialogFilterHook implements IStartup
 
         display.addFilter(SWT.Activate, listener);
         display.addFilter(SWT.Show, listener);
-        tempLog("install listener"); //$NON-NLS-1$
     }
 
     /**
@@ -155,7 +153,6 @@ public final class RightsDialogFilterHook implements IStartup
             return;
         if (!isRightsDialogShell(shell))
             return;
-        tempLog("shell event title=\"" + shell.getText() + "\""); //$NON-NLS-1$ //$NON-NLS-2$
         schedulePatchAttempt(display, shell, 0);
     }
 
@@ -238,10 +235,7 @@ public final class RightsDialogFilterHook implements IStartup
     private static void schedulePatchAttempt(Display display, Shell shell, int attempt)
     {
         if (!ComfortSettings.isReplaceListFiltersEnabled())
-        {
-            tempLog("skip: replaceListFilters off attempt=" + attempt); //$NON-NLS-1$
             return;
-        }
         if (shell.isDisposed() || shell.getData(PATCHED_KEY) != null)
             return;
 
@@ -249,12 +243,10 @@ public final class RightsDialogFilterHook implements IStartup
         display.timerExec(delay, () -> {
             if (shell.isDisposed() || shell.getData(PATCHED_KEY) != null)
                 return;
-            if (tryPatchDialog(shell, attempt))
+            if (tryPatchDialog(shell))
                 return;
             if (attempt < 25)
                 schedulePatchAttempt(display, shell, attempt + 1);
-            else
-                tempLog("GIVE UP title=\"" + shell.getText() + "\""); //$NON-NLS-1$ //$NON-NLS-2$
         });
     }
 
@@ -288,7 +280,7 @@ public final class RightsDialogFilterHook implements IStartup
         return null;
     }
 
-    private static boolean tryPatchDialog(Shell shell, int attempt)
+    private static boolean tryPatchDialog(Shell shell)
     {
         try
         {
@@ -299,17 +291,7 @@ public final class RightsDialogFilterHook implements IStartup
                     : null;
 
             if (dialog == null || searchListener == null || searchBox == null || searchBox.isDisposed())
-            {
-                if (attempt == 0 || attempt % 5 == 0)
-                {
-                    tempLog("WAIT #" + attempt //$NON-NLS-1$
-                            + " title=\"" + shell.getText() + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                            + " dialog=" + (dialog != null) //$NON-NLS-1$
-                            + " searchListener=" + (searchListener != null) //$NON-NLS-1$
-                            + " searchBox=" + (searchBox != null)); //$NON-NLS-1$
-                }
                 return false;
-            }
 
             synchronized (shell)
             {
@@ -349,14 +331,11 @@ public final class RightsDialogFilterHook implements IStartup
             if (initial != null && !initial.isEmpty())
                 applyPattern(dialogRef, searchListenerRef, initial);
 
-            tempLog("PATCH OK attempt=" + attempt //$NON-NLS-1$
-                    + " title=\"" + shell.getText() + "\""); //$NON-NLS-1$ //$NON-NLS-2$
             return true;
         }
         catch (Exception e)
         {
             shell.setData(PATCHED_KEY, null);
-            tempLog("EXCEPTION attempt=" + attempt + " " + e); //$NON-NLS-1$ //$NON-NLS-2$
             Global.logError("RightsDialogFilter", "patch", e); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
@@ -484,11 +463,6 @@ public final class RightsDialogFilterHook implements IStartup
                 tree.setData(FILTER_EXPANDED_KEY, null);
             }
         }
-        tempLog("apply pattern=\"" + pattern + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + " clearing=" + clearingFilter //$NON-NLS-1$
-                + " restore=" + describeSelection(savedSelection) //$NON-NLS-1$
-                + " path=" + (savedPathKey != null ? savedPathKey.length : 0) //$NON-NLS-1$
-                + " idx=" + (savedIndexKey != null ? savedIndexKey.length : 0)); //$NON-NLS-1$
     }
 
     private static void installSelectionTracker(TreeViewer viewer)
@@ -544,15 +518,6 @@ public final class RightsDialogFilterHook implements IStartup
         return data instanceof Object[] expanded ? expanded : null;
     }
 
-    private static String describeSelection(ISelection selection)
-    {
-        if (!(selection instanceof IStructuredSelection ss) || ss.isEmpty())
-            return "null"; //$NON-NLS-1$
-        Object element = ss.getFirstElement();
-        String kind = element != null ? element.getClass().getSimpleName() : "null"; //$NON-NLS-1$
-        return selection instanceof TreeSelection ? kind + "+path" : kind; //$NON-NLS-1$
-    }
-
     private static void scheduleRestoreAttempts(TreeViewer viewer, String[] pathKey, int[] indexKey,
             Object[] expandedElements)
     {
@@ -577,11 +542,7 @@ public final class RightsDialogFilterHook implements IStartup
             return;
         ResolvedTarget resolved = resolveRestoreTarget(viewer, pathKey, indexKey);
         if (resolved == null || resolved.element == null)
-        {
-            tempLog("restore MISS idx=" + describeIndices(indexKey) //$NON-NLS-1$
-                    + " path=" + describeLabels(pathKey)); //$NON-NLS-1$
             return;
-        }
         Tree tree = viewer.getTree();
         if (tree == null || tree.isDisposed())
             return;
@@ -628,26 +589,6 @@ public final class RightsDialogFilterHook implements IStartup
         {
             tree.setRedraw(true);
         }
-        logRestoreResult(viewer, resolved, indexKey, pathKey);
-    }
-
-    private static void logRestoreResult(TreeViewer viewer, ResolvedTarget resolved, int[] indexKey,
-            String[] pathKey)
-    {
-        Tree tree = viewer != null ? viewer.getTree() : null;
-        TreeItem item = tree != null ? findTreeItemForPath(tree, resolved) : null;
-        Object actual = null;
-        if (viewer != null && viewer.getSelection() instanceof IStructuredSelection ss && !ss.isEmpty())
-            actual = ss.getFirstElement();
-        boolean same = actual != null && resolved.element != null
-                && (actual == resolved.element || actual.equals(resolved.element));
-        tempLog("restore " + (same && item != null ? "OK" : "WEAK") //$NON-NLS-1$ //$NON-NLS-2$
-                + " item=" + (item != null) //$NON-NLS-1$
-                + " sel=" + same //$NON-NLS-1$
-                + " idx=" + describeIndices(indexKey) //$NON-NLS-1$
-                + " depth=" + (resolved.path != null ? resolved.path.size() : 1)); //$NON-NLS-1$
-        if (!same || item == null)
-            tempLog("restore detail path=" + describeLabels(pathKey)); //$NON-NLS-1$
     }
 
     private static void fireTreeSelection(Tree tree, TreeItem item)
@@ -927,34 +868,6 @@ public final class RightsDialogFilterHook implements IStartup
         return -1;
     }
 
-    private static String describeIndices(int[] indexKey)
-    {
-        if (indexKey == null || indexKey.length == 0)
-            return "-"; //$NON-NLS-1$
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < indexKey.length; i++)
-        {
-            if (i > 0)
-                sb.append(','); //$NON-NLS-1$
-            sb.append(indexKey[i]);
-        }
-        return sb.toString();
-    }
-
-    private static String describeLabels(String[] pathKey)
-    {
-        if (pathKey == null || pathKey.length == 0)
-            return "-"; //$NON-NLS-1$
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < pathKey.length; i++)
-        {
-            if (i > 0)
-                sb.append(" > "); //$NON-NLS-1$
-            sb.append(pathKey[i]);
-        }
-        return sb.toString();
-    }
-
     private static String[] captureSelectionPath(TreeViewer viewer, Object element)
     {
         List<Object> nodes = buildPathNodes(viewer, element);
@@ -1205,7 +1118,6 @@ public final class RightsDialogFilterHook implements IStartup
             wrapper.setTreeSectionHighlight(true);
             column.setLabelProvider(wrapper);
             result.add(wrapper);
-            tempLog("highlight column=" + i); //$NON-NLS-1$
         }
         return result;
     }
@@ -1244,12 +1156,6 @@ public final class RightsDialogFilterHook implements IStartup
             }
         }
         return null;
-    }
-
-    private static void tempLog(String text)
-    {
-        Global.tempLog(TEMP_LOG, text);
-        Global.flushTempLogs();
     }
 
     /**

@@ -77,8 +77,6 @@ public final class KeyBindingToastHook implements IStartup
             }
             catch (Exception e)
             {
-                Global.tempLog("keyBindingToast", "preExecute error cmd=" + commandId //$NON-NLS-1$ //$NON-NLS-2$
-                        + " " + e); //$NON-NLS-1$
             }
         }
 
@@ -107,13 +105,10 @@ public final class KeyBindingToastHook implements IStartup
             return;
         if (!isShowCommandKeysForKeyboardEnabled())
         {
-            Global.tempLog("keyBindingToast", "skip pref-off cmd=" + commandId); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         if (!isKeyboardTrigger(trigger))
         {
-            Global.tempLog("keyBindingToast", "skip not-keyboard-trigger cmd=" + commandId //$NON-NLS-1$ //$NON-NLS-2$
-                    + " trigger=" + (trigger == null ? "null" : "type=" + trigger.type)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
 
@@ -121,25 +116,20 @@ public final class KeyBindingToastHook implements IStartup
         long sinceLastToast = now - lastToastAt;
         if (sinceLastToast < TOAST_MIN_INTERVAL_MS)
         {
-            Global.tempLog("keyBindingToast", "skip rate-limited cmd=" + commandId //$NON-NLS-1$ //$NON-NLS-2$
-                    + " sinceLastToast=" + sinceLastToast); //$NON-NLS-1$
             return;
         }
 
         Command command = resolveCommand(commandId);
         if (command == null)
         {
-            Global.tempLog("keyBindingToast", "skip command-undefined cmd=" + commandId); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         String message = buildToastMessage(command);
         if (message == null)
         {
-            Global.tempLog("keyBindingToast", "skip message-null cmd=" + commandId); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
 
-        Global.tempLog("keyBindingToast", "showing cmd=" + commandId); //$NON-NLS-1$ //$NON-NLS-2$
         lastToastAt = now;
         String finalCommandId = commandId;
         ToastNotification.show(

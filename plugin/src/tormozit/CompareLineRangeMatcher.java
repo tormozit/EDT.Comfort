@@ -85,7 +85,6 @@ public final class CompareLineRangeMatcher
              * внутри LineRangeComparator могут разойтись с фактическим состоянием виджета и
              * бросить SWT-исключение «Index out of bounds». Не даём этому всплыть краше UI.
              */
-            Global.tempLogException("showInModule", "CompareLineRangeMatcher.findMatchedLine", e); //$NON-NLS-1$ //$NON-NLS-2$
             return -1;
         }
     }

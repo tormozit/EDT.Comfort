@@ -63,7 +63,6 @@ public class BslModulePositionMemoryHook implements IStartup
     @Override
     public void earlyStartup()
     {
-        Global.tempLog("bslModulePosition", "earlyStartup"); //$NON-NLS-1$ //$NON-NLS-2$
         Display.getDefault().asyncExec(() ->
         {
             for (IWorkbenchWindow window : PlatformUI.getWorkbench().getWorkbenchWindows())
@@ -121,7 +120,6 @@ public class BslModulePositionMemoryHook implements IStartup
 
     private void hookEditorIfNeeded(IEditorPart editor)
     {
-        Global.tempLog("bslModulePosition", "hookEditorIfNeeded: " + editor.getClass().getName()); //$NON-NLS-1$ //$NON-NLS-2$
         if (editor instanceof BslXtextEditor)
             hookBslEditor((BslXtextEditor) editor);
         else if (editor instanceof DtGranularEditor<?>)
@@ -130,7 +128,6 @@ public class BslModulePositionMemoryHook implements IStartup
 
     private void hookGranularEditor(DtGranularEditor<?> editor)
     {
-        Global.tempLog("bslModulePosition", "hookGranularEditor"); //$NON-NLS-1$ //$NON-NLS-2$
         hookGranularEditorActivePage(editor);
 
         if (hookedGranularEditors.add(editor))
@@ -141,7 +138,6 @@ public class BslModulePositionMemoryHook implements IStartup
                 public void pageChanged(PageChangedEvent event)
                 {
                     Object selectedPage = event.getSelectedPage();
-                    Global.tempLog("bslModulePosition", "pageChanged: " + selectedPage); //$NON-NLS-1$ //$NON-NLS-2$
                     if (selectedPage instanceof DtGranularEditorXtextEditorPage<?>)
                     {
                         IEditorPart embedded =
@@ -157,7 +153,6 @@ public class BslModulePositionMemoryHook implements IStartup
     private void hookGranularEditorActivePage(DtGranularEditor<?> editor)
     {
         IFormPage activePage = editor.getActivePageInstance();
-        Global.tempLog("bslModulePosition", "hookGranularEditorActivePage: " + activePage); //$NON-NLS-1$ //$NON-NLS-2$
         if (!(activePage instanceof DtGranularEditorXtextEditorPage<?>))
             return;
         IEditorPart embedded =
@@ -172,7 +167,6 @@ public class BslModulePositionMemoryHook implements IStartup
 
     private void hookBslEditor(BslXtextEditor editor)
     {
-        Global.tempLog("bslModulePosition", "hookBslEditor: " + editor); //$NON-NLS-1$ //$NON-NLS-2$
         Display.getDefault().asyncExec(() -> attachToBslEditor(editor, 0));
     }
 
@@ -180,7 +174,6 @@ public class BslModulePositionMemoryHook implements IStartup
     {
         if (editor.getSite() == null || isWorkbenchClosing())
         {
-            Global.tempLog("bslModulePosition", "attachToBslEditor: site=null или workbench закрывается, attempt=" + attempt); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
 
@@ -189,7 +182,6 @@ public class BslModulePositionMemoryHook implements IStartup
         {
             if (attempt >= MAX_ATTACH_ATTEMPTS)
             {
-                Global.tempLog("bslModulePosition", "attachToBslEditor: viewer не готов, лимит попыток исчерпан"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
             Display.getDefault().asyncExec(() -> attachToBslEditor(editor, attempt + 1));
@@ -199,14 +191,12 @@ public class BslModulePositionMemoryHook implements IStartup
         StyledText textWidget = ((SourceViewer) viewer).getTextWidget();
         if (textWidget == null || textWidget.isDisposed())
         {
-            Global.tempLog("bslModulePosition", "attachToBslEditor: textWidget=null/disposed"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
 
         if (!Boolean.TRUE.equals(textWidget.getData(RESTORE_MARKER)))
         {
             textWidget.setData(RESTORE_MARKER, Boolean.TRUE);
-            Global.tempLog("bslModulePosition", "attachToBslEditor: подключаюсь, moduleKey=" + moduleKey(editor)); //$NON-NLS-1$ //$NON-NLS-2$
             restorePosition(editor, viewer);
 
             // К моменту dispose/FocusOut документ у viewer часто уже отсоединён (особенно
@@ -217,15 +207,9 @@ public class BslModulePositionMemoryHook implements IStartup
             // сбрасывается уже известное значение на диск, не обращаясь к документу заново.
             if (viewer.getSelectionProvider() != null)
             {
-                Global.tempLog("bslModulePosition", "регистрирую selectionChangedListener, provider=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + viewer.getSelectionProvider().getClass().getName());
                 ISelectionChangedListener selListener = event -> updateLiveCache(editor, viewer);
                 viewer.getSelectionProvider().addSelectionChangedListener(selListener);
                 textWidget.addDisposeListener(e -> viewer.getSelectionProvider().removeSelectionChangedListener(selListener));
-            }
-            else
-            {
-                Global.tempLog("bslModulePosition", "selectionProvider=null при регистрации listener'а"); //$NON-NLS-1$ //$NON-NLS-2$
             }
             // Прокрутка колёсиком/скроллбаром без движения каретки не порождает
             // selectionChanged — отслеживаем её отдельно через вертикальный скроллбар.
@@ -241,7 +225,6 @@ public class BslModulePositionMemoryHook implements IStartup
                 // Не полагаемся только на прежде пойманные события — довзводим актуальную
                 // позицию непосредственно перед уходом (документ здесь ещё доступен).
                 updateLiveCache(editor, viewer);
-                Global.tempLog("bslModulePosition", "focusOut: сбрасываю позицию на диск, moduleKey=" + moduleKey(editor)); //$NON-NLS-1$ //$NON-NLS-2$
                 ModulePositionStore.flush();
             });
             textWidget.addDisposeListener(e ->
@@ -249,13 +232,8 @@ public class BslModulePositionMemoryHook implements IStartup
                 // На dispose документ уже может быть отсоединён — best-effort, ошибки внутри
                 // updateLiveCache проглатываются самим методом.
                 updateLiveCache(editor, viewer);
-                Global.tempLog("bslModulePosition", "dispose listener: сбрасываю позицию на диск, moduleKey=" + moduleKey(editor)); //$NON-NLS-1$ //$NON-NLS-2$
                 ModulePositionStore.flush();
             });
-        }
-        else
-        {
-            Global.tempLog("bslModulePosition", "attachToBslEditor: уже подключено (RESTORE_MARKER), пропускаю"); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -269,12 +247,9 @@ public class BslModulePositionMemoryHook implements IStartup
         String key = moduleKey(editor);
         if (key == null)
         {
-            Global.tempLog("bslModulePosition", "restorePosition: key=null"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         int[] pos = ModulePositionStore.load(key);
-        Global.tempLog("bslModulePosition", "restorePosition: key=" + key + ", pos=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + (pos != null ? (pos[0] + ":" + pos[1]) : "null")); //$NON-NLS-1$ //$NON-NLS-2$
         if (pos == null)
             return;
 
@@ -292,8 +267,6 @@ public class BslModulePositionMemoryHook implements IStartup
                     StyledText textWidget = ((SourceViewer) viewer).getTextWidget();
                     if (textWidget != null && !textWidget.isDisposed() && textWidget.getTopIndex() != 0)
                     {
-                        Global.tempLog("bslModulePosition", "restorePosition: пропущено, пользователь уже прокрутил (topIndex=" //$NON-NLS-1$ //$NON-NLS-2$
-                            + textWidget.getTopIndex() + "), key=" + key); //$NON-NLS-1$
                         return;
                     }
                 }
@@ -301,14 +274,11 @@ public class BslModulePositionMemoryHook implements IStartup
                     && viewer.getSelectionProvider().getSelection() instanceof ITextSelection currentSel
                     && currentSel.getOffset() != 0)
                 {
-                    Global.tempLog("bslModulePosition", "restorePosition: пропущено, каретка уже не на 0 (offset=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + currentSel.getOffset() + "), key=" + key); //$NON-NLS-1$
                     return;
                 }
                 IDocument doc = viewer.getDocument();
                 if (doc == null)
                 {
-                    Global.tempLog("bslModulePosition", "restorePosition: doc=null при asyncExec"); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
                 }
                 int offset = clampToDocument(doc, pos[0], pos[1]);
@@ -324,11 +294,9 @@ public class BslModulePositionMemoryHook implements IStartup
                         textWidget.setTopIndex(Math.max(0, Math.min(pos[2], lastLine)));
                     }
                 }
-                Global.tempLog("bslModulePosition", "restorePosition: selectAndReveal(" + offset + ") выполнен"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             }
             catch (Exception e)
             {
-                Global.tempLogException("bslModulePosition", "restorePosition: " + key, e); //$NON-NLS-1$
             }
         });
     }
@@ -345,24 +313,20 @@ public class BslModulePositionMemoryHook implements IStartup
             String key = moduleKey(editor);
             if (key == null)
             {
-                Global.tempLog("bslModulePosition", "updateLiveCache: key=null"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
             IDocument doc = viewer.getDocument();
             if (doc == null)
             {
-                Global.tempLog("bslModulePosition", "updateLiveCache: doc=null, key=" + key); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
             if (viewer.getSelectionProvider() == null)
             {
-                Global.tempLog("bslModulePosition", "updateLiveCache: selectionProvider=null, key=" + key); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
             Object selObj = viewer.getSelectionProvider().getSelection();
             if (!(selObj instanceof ITextSelection))
             {
-                Global.tempLog("bslModulePosition", "updateLiveCache: selection не ITextSelection: " + selObj + ", key=" + key); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 return;
             }
             ITextSelection textSel = (ITextSelection) selObj;
@@ -377,12 +341,9 @@ public class BslModulePositionMemoryHook implements IStartup
                     topIndex = textWidget.getTopIndex();
             }
             ModulePositionStore.updateMemory(key, line0, column, topIndex);
-            Global.tempLog("bslModulePosition", "updateLiveCache: key=" + key + ", offset=" + textSel.getOffset() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + ", line=" + line0 + ", col=" + column + ", topIndex=" + topIndex); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
         catch (Exception e)
         {
-            Global.tempLogException("bslModulePosition", "updateLiveCache", e); //$NON-NLS-1$
         }
     }
 

@@ -52,8 +52,6 @@ import org.eclipse.ui.dialogs.PatternFilter;
  */
 final class PreferenceSearchFilterAugmenter
 {
-    private static final String TEMP_LOG = "preference-search-wire"; //$NON-NLS-1$
-
     private static final String WIRED_KEY = "tormozit.PreferenceSearchFilterAugmenter.wired"; //$NON-NLS-1$
 
     private static final String[] FILTERED_TREE_FIELD_CANDIDATES =
@@ -70,18 +68,9 @@ final class PreferenceSearchFilterAugmenter
             Object value = Global.getField(dialog, candidate);
             if (value instanceof FilteredTree filteredTree)
             {
-                Global.tempLog(TEMP_LOG, "resolveDialogFilteredTree OK field=" + candidate //$NON-NLS-1$
-                        + " class=" + filteredTree.getClass().getSimpleName()); //$NON-NLS-1$
                 return filteredTree;
             }
-            if (value != null)
-            {
-                Global.tempLog(TEMP_LOG, "resolveDialogFilteredTree field=" + candidate //$NON-NLS-1$
-                        + " type=" + value.getClass().getName()); //$NON-NLS-1$
-            }
         }
-        Global.tempLog(TEMP_LOG, "resolveDialogFilteredTree MISS dialog=" //$NON-NLS-1$
-                + (dialog != null ? dialog.getClass().getSimpleName() : "null")); //$NON-NLS-1$
         return null;
     }
 
@@ -89,24 +78,20 @@ final class PreferenceSearchFilterAugmenter
     {
         if (filteredTree == null || filteredTree.isDisposed())
         {
-            Global.tempLog(TEMP_LOG, "wireInto SKIP filteredTree null/disposed"); //$NON-NLS-1$
             return;
         }
         TreeViewer viewer = filteredTree.getViewer();
         if (viewer == null)
         {
-            Global.tempLog(TEMP_LOG, "wireInto SKIP viewer=null"); //$NON-NLS-1$
             return;
         }
         Tree tree = viewer.getTree();
         if (tree == null || tree.isDisposed())
         {
-            Global.tempLog(TEMP_LOG, "wireInto SKIP tree null/disposed"); //$NON-NLS-1$
             return;
         }
         if (Boolean.TRUE.equals(tree.getData(WIRED_KEY)))
         {
-            Global.tempLog(TEMP_LOG, "wireInto SKIP already wired (WIRED_KEY)"); //$NON-NLS-1$
             return;
         }
         tree.setData(WIRED_KEY, Boolean.TRUE);
@@ -115,15 +100,10 @@ final class PreferenceSearchFilterAugmenter
 
         ViewerFilter[] existing = viewer.getFilters();
         PatternFilter original = findPatternFilter(existing);
-        PatternFilter fromTree = filteredTree.getPatternFilter();
         if (original == null)
         {
-            Global.tempLog(TEMP_LOG, "wireInto EXIT patternFilter=null filters=" + describeFilters(existing) //$NON-NLS-1$
-                    + " getPatternFilter=" + (fromTree != null ? fromTree.getClass().getSimpleName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
-        Global.tempLog(TEMP_LOG, "wireInto patternFilter OK class=" + original.getClass().getSimpleName() //$NON-NLS-1$
-                + " fromTreeMatch=" + (original == fromTree)); //$NON-NLS-1$
 
         PatternFilter augmented = new PatternFilter()
         {
@@ -135,12 +115,6 @@ final class PreferenceSearchFilterAugmenter
                 boolean originalMatch = isOriginalLeafMatch(original, v, element);
                 String nodeId = element instanceof IPreferenceNode node ? node.getId() : null;
                 boolean indexMatch = nodeId != null && PreferenceSearchIndex.getInstance().matches(nodeId, pattern);
-                if (nodeId != null && pattern != null && !pattern.isBlank())
-                {
-                    Global.tempLog("preferenceSearchFilter", //$NON-NLS-1$
-                            "pattern=[" + pattern + "] node=" + nodeId //$NON-NLS-1$ //$NON-NLS-2$
-                            + " originalMatch=" + originalMatch + " indexMatch=" + indexMatch); //$NON-NLS-1$ //$NON-NLS-2$
-                }
                 return originalMatch || indexMatch;
             }
         };
@@ -170,14 +144,7 @@ final class PreferenceSearchFilterAugmenter
             wireIndexButton(dialog, filterControl, tree.getDisplay(), buttonsRow);
             if (buttonsRow != null)
                 filterControl.getParent().layout(true, true);
-            Global.tempLog(TEMP_LOG, "wireInto buttons wired buttonsRow=" + (buttonsRow != null) //$NON-NLS-1$
-                    + " parentLayout=" + describeParentLayout(filterControl)); //$NON-NLS-1$
         }
-        else
-        {
-            Global.tempLog(TEMP_LOG, "wireInto EXIT filterControl null/disposed"); //$NON-NLS-1$
-        }
-
         wireHighlighting(viewer, filterControl);
 
         // Раскрашивает не только дерево категорий, но и сами контролы уже
@@ -200,35 +167,6 @@ final class PreferenceSearchFilterAugmenter
                     viewer.refresh();
             });
         });
-        Global.tempLog(TEMP_LOG, "wireInto DONE"); //$NON-NLS-1$
-    }
-
-    private static String describeFilters(ViewerFilter[] filters)
-    {
-        if (filters == null || filters.length == 0)
-            return "[]"; //$NON-NLS-1$
-        StringBuilder sb = new StringBuilder("["); //$NON-NLS-1$
-        for (int i = 0; i < filters.length; i++)
-        {
-            if (i > 0)
-                sb.append(", "); //$NON-NLS-1$
-            ViewerFilter f = filters[i];
-            sb.append(f != null ? f.getClass().getSimpleName() : "null"); //$NON-NLS-1$
-        }
-        sb.append(']');
-        return sb.toString();
-    }
-
-    private static String describeParentLayout(Text filterControl)
-    {
-        if (filterControl == null || filterControl.isDisposed())
-            return "<disposed>"; //$NON-NLS-1$
-        Composite parent = filterControl.getParent();
-        if (parent == null || parent.isDisposed())
-            return "parent=null"; //$NON-NLS-1$
-        if (parent.getLayout() instanceof GridLayout gl)
-            return "GridLayout cols=" + gl.numColumns + " children=" + parent.getChildren().length; //$NON-NLS-1$ //$NON-NLS-2$
-        return parent.getLayout() != null ? parent.getLayout().getClass().getSimpleName() : "layout=null"; //$NON-NLS-1$
     }
 
     /** scopeId для {@link FilterHistoryStore} — отдельный от фильтра страницы «Клавиши». */
@@ -751,7 +689,6 @@ final class PreferenceSearchFilterAugmenter
         Tree tree = copyTargetTree;
         if (tree == null || tree.isDisposed() || tree.getDisplay().getFocusControl() != tree)
             return;
-        Global.tempLog("preferenceTreeCopy", "cmd id=" + commandId + " while tree focused"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (!"org.eclipse.ui.edit.copy".equals(commandId)) //$NON-NLS-1$
             return;
         TreeItem[] selection = tree.getSelection();
@@ -765,7 +702,6 @@ final class PreferenceSearchFilterAugmenter
         try
         {
             clipboard.setContents(new Object[] {text}, new Transfer[] {TextTransfer.getInstance()});
-            Global.tempLog("preferenceTreeCopy", "clipboard set via command, text=[" + text + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
         finally
         {

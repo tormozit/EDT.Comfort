@@ -767,21 +767,10 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         String filter = SmartFilterTracker.getCurrentFilter();
         if (!isIrWordsResolvedForContext())
         {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H4", "computeIrOnlyProposals", "pending", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"caret\":" + caret + ",\"ctxKey\":" + fullListContextKey //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"irCtxKey\":" + irSnapshotContextKey + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return EMPTY;
+return EMPTY;
         }
         ICompletionProposal[] merged = mergeIrForDisplay(EMPTY);
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H4", "computeIrOnlyProposals", "ctx", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + caret + ",\"resolved\":" + isIrWordsResolvedForContext() //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"ctxKey\":" + fullListContextKey + ",\"irCtxKey\":" + irSnapshotContextKey //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"irN\":" + irProposals.length + ",\"filter\":\"" + filter + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        // #endregion
-        if (merged.length == 0)
+if (merged.length == 0)
             return EMPTY;
         ICompletionProposal[] result = applyLiteralSmartFilter(merged, filter);
         auditLiteralComputeReturn(viewer, resolveEditorForLiteralAudit(viewer),
@@ -980,10 +969,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                 ContentAssistSessionReloader.requestIrPopupRefresh();
             return;
         }
-        // #region agent log
-        debugSessionOrderSample("H4", "applyIrCompletion", "irSnapshot", irProposals, 12); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        // #endregion
-        String baseKind;
+String baseKind;
         ICompletionProposal[] delegateBase;
         boolean clearProbeOnEmptyBase = false;
         if (delegateListCache.length > 0)
@@ -1051,13 +1037,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     {
         if (gen != mergeGeneration.get() || ctxKeyAtSchedule != fullListContextKey)
         {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H50", "applyIrCompletion", "mergeStaleDiscarded", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"gen\":" + gen + ",\"currentGen\":" + mergeGeneration.get() //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"ctxKeyAtSchedule\":" + ctxKeyAtSchedule //$NON-NLS-1$
-                    + ",\"currentCtxKey\":" + fullListContextKey + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return;
+return;
         }
         adoptIrTypeForEdtOverlaps(merged, irProposals);
         fullListCache = merged;
@@ -1066,30 +1046,6 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         if (clearProbeOnEmptyBase)
             clearDelegateSyncProbe();
         IrCompletionDebug.logApplyIrCompletion(irProposals.length, baseKind);
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H50", "applyIrCompletion", "irApplied", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"irN\":" + irProposals.length //$NON-NLS-1$
-                + ",\"baseKind\":\"" + baseKind //$NON-NLS-1$
-                + "\",\"fullListReady\":" + fullListReady //$NON-NLS-1$
-                + ",\"fullListN\":" + fullListCache.length //$NON-NLS-1$
-                + ",\"delegateCacheN\":" + delegateListCache.length //$NON-NLS-1$
-                + ",\"interimN\":" + unwrapStableDelegateBase().length //$NON-NLS-1$
-                + ",\"delegateProbed\":" + isDelegateSyncProbedForContext() //$NON-NLS-1$
-                + ",\"ctxKey\":" + fullListContextKey //$NON-NLS-1$
-                + ",\"irCtxKey\":" + irSnapshotContextKey + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        if (beforeIrN > irProposals.length || (beforeFullN > fullListCache.length && beforeFullN > 0))
-        {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H54", "applyIrCompletion", "applyDowngrade", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"beforeIrN\":" + beforeIrN + ",\"afterIrN\":" + irProposals.length //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"incomingIrN\":" + incomingIrN //$NON-NLS-1$
-                    + ",\"beforeFullN\":" + beforeFullN + ",\"afterFullN\":" + fullListCache.length //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"baseKind\":\"" + baseKind //$NON-NLS-1$
-                    + "\",\"ctxKey\":" + fullListContextKey //$NON-NLS-1$
-                    + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-        }
         ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
         if (reloader != null && fullListReady && fullListCache.length > irProposals.length)
             reloader.notifyIrMergedFullList(fullListCache.length);
@@ -1148,15 +1104,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             fullListReady = true;
             markDelegateSyncProbed();
         }
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H70", "absorbStableFromPopup", "seed", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"rawN\":" + raw.length //$NON-NLS-1$
-                + ",\"stableN\":" + lastStableDelegateList.length //$NON-NLS-1$
-                + ",\"delegateCacheN\":" + delegateListCache.length //$NON-NLS-1$
-                + ",\"fullListN\":" + fullListCache.length //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     void rebindIrSnapshotContext()
     {
@@ -1243,17 +1191,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         if (merged.length == 0)
             return EMPTY;
         ICompletionProposal[] result = buildDelegateOrderedList(merged);
-        // #region agent log
-        debugMergeDedupAudit("popupListWithIr", unwrapped, irProposals, merged, baseIrN); //$NON-NLS-1$
-        debugSessionOrderSample("H3", "popupListWithIr", "popup", result, 12); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        MemberEdtPriorityProfile popupProfile = isIrAssistOrderingEnabled()
-            ? MemberEdtPriorityProfile.analyze(unwrapProposals(base != null ? base : EMPTY))
-            : MemberEdtPriorityProfile.NONE;
-        debugIrMergeOrderSample("H3", "popupListWithIr", "popupIr", result, //$NON-NLS-1$ //$NON-NLS-2$
-            hasIrProposalsForCurrentContext() ? buildIrPriorityByKey(irProposals) : null,
-            popupProfile);
-        // #endregion
-        return result;
+return result;
     }
 
     static void clearLastComputeCaret()
@@ -1339,12 +1277,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         boolean inLiteral = isStringLiteralAssistContext(doc, caret);
         boolean extractOk = ixtext && caret >= 0
             && EditEmbeddedTextHandler.isCaretInStringLiteral((IXtextDocument) doc, caret);
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H4", "isStringLiteralAssistContext", "probe", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + caret + ",\"ixtext\":" + ixtext //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"inLiteral\":" + inLiteral + ",\"extractOk\":" + extractOk + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     private static void updateFilterTracker(ITextViewer viewer, int caret)
     {
@@ -1443,13 +1376,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         int probeOffset = resolveDelegateProbeOffset(viewer, offset, caret);
         String filter = SmartFilterTracker.getCurrentFilter();
         boolean smart = SmartAssistFilterState.isSmartFilterEnabled();
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H-DIAG", "computeProposalsLight", "enter",
-            "{\"caret\":" + caret + ",\"probeOffset\":" + probeOffset
-                + ",\"smart\":" + smart
-                + ",\"filter\":\"" + ContentAssistDebug.jsonEscapeForLog(filter) + "\"}");
-        // #endregion
-        return resolveProposalList(viewer, probeOffset, caret, filter, smart);
+return resolveProposalList(viewer, probeOffset, caret, filter, smart);
     }
 
     private static void applyStockAssistImagesFromDelegate(
@@ -1481,13 +1408,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
                 ir.applyStockAssistImage(img);
         }
         long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H80", "applyStockAssistImagesFromDelegate", "exit",
-            "{\"irN\":" + irList.length + ",\"delegateN\":"
-                + (delegateList != null ? delegateList.length : 0)
-                + ",\"ms\":" + elapsedMs + "}");
-        // #endregion
-    }
+}
 
     /**
      * In-place фильтр уже показанного списка (member-access без stock recompute).
@@ -1597,15 +1518,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     private void markDelegateSyncProbed()
     {
         delegateSyncProbedContextKey = fullListContextKey;
-        // #region agent log
-        String filter = SmartFilterTracker.getCurrentFilter();
-        ContentAssistDebug.debugModeLog("H48a", "markDelegateSyncProbed", "delegateProbedSet", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"ctxKey\":" + fullListContextKey //$NON-NLS-1$
-                + ",\"filter\":\"" + ContentAssistDebug.jsonEscapeForLog(filter != null ? filter : "") //$NON-NLS-1$ //$NON-NLS-2$
-                + "\",\"irN\":" + irProposals.length //$NON-NLS-1$
-                + ",\"irResolved\":" + isIrWordsResolvedForContext() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     private void clearDelegateSyncProbe()
     {
@@ -1709,12 +1622,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         String prefix = SmartFilterTracker.getCurrentFilter();
         if (prefix != null && !prefix.isEmpty())
         {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H80", "scheduleEagerFullListLoad", "skippedPrefix", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"prefix\":\"" + ContentAssistDebug.jsonEscapeForLog(prefix) //$NON-NLS-1$
-                    + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return;
+return;
         }
         org.eclipse.swt.widgets.Control widget = viewer.getTextWidget()
             instanceof org.eclipse.swt.widgets.Control
@@ -1754,11 +1662,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             return;
         eagerLoadCancelGen++;
         pendingEagerLoadTask = null;
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H80", "cancelEagerFullListLoad", "eagerCancelled", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     /** Отложенная загрузка полного списка на UI-потоке (не в hot path ввода). */
     public void scheduleLoadFullListCache(ITextViewer viewer)
@@ -1776,99 +1680,36 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     {
         if (!ComfortSettings.isReplaceListFiltersEnabled())
         {
-            // #region agent log
-            ContentAssistDebug.agentLog("H3", "computeCompletionProposals", "comfortOff", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"offset\":" + offset + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return delegate.computeCompletionProposals(viewer, offset);
+return delegate.computeCompletionProposals(viewer, offset);
         }
 
         int literalCaret = resolveInvocationCaret(viewer, offset);
         boolean inLiteral = isStringLiteralAssistContext(viewer, literalCaret);
         String delegateName = delegate != null ? delegate.getClass().getSimpleName() : "null"; //$NON-NLS-1$
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H61", "computeCompletionProposals", "enter", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"offset\":" + offset + ",\"literalCaret\":" + literalCaret //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"inLiteral\":" + inLiteral //$NON-NLS-1$
-                + ",\"delegate\":\"" + ContentAssistDebug.jsonEscapeForLog(delegateName) //$NON-NLS-1$
-                + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        boolean repeatJFace = RepeatedInvocationDetect.isActive();
-        ContentAssistDebug.debugModeLog("H62", "computeCompletionProposals", //$NON-NLS-1$ //$NON-NLS-2$
-            repeatJFace ? "repeatProbe" : "repeatMiss", //$NON-NLS-1$ //$NON-NLS-2$
-            "{\"offset\":" + offset + ",\"inLiteral\":" + inLiteral //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"repeatJFace\":" + repeatJFace //$NON-NLS-1$
-                + ",\"stackHint\":\"" + ContentAssistDebug.jsonEscapeForLog(repeatInvocationStackHint()) //$NON-NLS-1$
-                + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        ContentAssistSessionReloader reloader = viewer instanceof SourceViewer sv
+ContentAssistSessionReloader reloader = viewer instanceof SourceViewer sv
             ? ContentAssistSessionReloader.forViewer(sv) : null;
         boolean manualDetect = ManualInvocationDetect.isActive();
         debugLiteralContext(viewer, literalCaret);
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H1", "computeCompletionProposals", "gate", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"offset\":" + offset + ",\"literalCaret\":" + literalCaret //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"inLiteral\":" + inLiteral + ",\"manualDetect\":" + manualDetect //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"reloaderNull\":" + (reloader == null) //$NON-NLS-1$
-                + ",\"pending\":" + (reloader != null && reloader.isManualIrAssistPending()) //$NON-NLS-1$
-                + ",\"irOnly\":" + irOnlyManualMode //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        if (manualDetect && reloader != null)
+if (manualDetect && reloader != null)
             reloader.tryBeginManualDualAssist(literalCaret);
         boolean diagIrPending = reloader != null && reloader.isManualIrAssistPending();
         boolean diagIrResolved = isIrWordsResolvedForContext();
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H-DIAG", "computeCompletionProposals", "afterTryBeginManualDualAssist",
-            "{\"caret\":" + literalCaret
-                + ",\"inLiteral\":" + inLiteral
-                + ",\"manualIrAssistPending\":" + diagIrPending
-                + ",\"irWordsResolved\":" + diagIrResolved
-                + ",\"willReturnEmpty\":" + (diagIrPending && !diagIrResolved) + "}");
-        // #endregion
-        if (reloader != null && reloader.isManualIrAssistPending()
+if (reloader != null && reloader.isManualIrAssistPending()
             && !isIrWordsResolvedForContext())
         {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H1", "computeCompletionProposals", "pendingEmpty", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"caret\":" + literalCaret + ",\"inLiteral\":" + inLiteral + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return EMPTY;
+return EMPTY;
         }
         if (reloader != null && reloader.isCompletionAutoOpenAwaitingWords())
         {
-            // #region agent log
-            ContentAssistDebug.logAutoOpen(reloader.peekCompletionAutoOpenActiveSeq(), "H70", //$NON-NLS-1$
-                "computeCompletionProposals", "autoOpenPendingEmpty", //$NON-NLS-1$ //$NON-NLS-2$
-                "{\"caret\":" + literalCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            ContentAssistDebug.debugModeLog("H70", "computeCompletionProposals", "autoOpenPendingEmpty", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"caret\":" + literalCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return EMPTY;
+return EMPTY;
         }
         if (irOnlyManualMode)
             return computeIrOnlyProposals(viewer, literalCaret);
         if (ContentAssistSessionReloader.consumeLiteralRepeatFromCommand() && inLiteral)
         {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H62", "computeCompletionProposals", "literalCommandBypass", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"offset\":" + offset + ",\"literalCaret\":" + literalCaret //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return computeLiteralRepeatWithoutDelegate(viewer, literalCaret);
+return computeLiteralRepeatWithoutDelegate(viewer, literalCaret);
         }
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H9", "computeCompletionProposals", "enter", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"offset\":" + offset + ",\"processor\":" + System.identityHashCode(this) //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"irOnly\":" + irOnlyManualMode + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H3", "computeCompletionProposals", "enter", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"offset\":" + offset + ",\"inLiteral\":" + inLiteral //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"irResolved\":" + isIrWordsResolvedForContext() //$NON-NLS-1$
-                + ",\"ctxKey\":" + fullListContextKey //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"irCtxKey\":" + irSnapshotContextKey + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        if (RepeatedInvocationDetect.isActive())
+if (RepeatedInvocationDetect.isActive())
         {
             int widgetCaret = resolveWidgetCaret(viewer);
             int caretProbe = resolveInvocationCaret(viewer, offset);
@@ -1879,16 +1720,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             boolean repeatLiteral = isStringLiteralAssistContext(viewer, caretProbe) && irConnected;
             if (repeatLiteral)
             {
-                // #region agent log
-                ContentAssistDebug.debugModeLog("H56", "computeCompletionProposals", "repeatBranch", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"branch\":\"literalRepeat\",\"offset\":" + offset //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"literalCaret\":" + caretProbe //$NON-NLS-1$
-                        + ",\"widgetCaret\":" + widgetCaret //$NON-NLS-1$
-                        + ",\"smartBefore\":" + SmartAssistFilterState.isSmartFilterEnabled() //$NON-NLS-1$
-                        + ",\"irConnected\":" + irConnected //$NON-NLS-1$
-                        + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
+ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
                 if (assistant != null)
                     ContentAssistPopupSync.captureSelectionBeforeFilterToggle(assistant);
                 SmartAssistFilterState.toggle();
@@ -1898,16 +1730,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             }
             if (!isStringLiteralAssistContext(viewer, caretProbe))
             {
-                // #region agent log
-                ContentAssistDebug.debugModeLog("H56", "computeCompletionProposals", "repeatBranch", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"branch\":\"memberRepeat\",\"offset\":" + offset //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"literalCaret\":" + caretProbe //$NON-NLS-1$
-                        + ",\"widgetCaret\":" + widgetCaret //$NON-NLS-1$
-                        + ",\"smartBefore\":" + SmartAssistFilterState.isSmartFilterEnabled() //$NON-NLS-1$
-                        + ",\"hasIr\":" + hasIrProposalsForCurrentContext() //$NON-NLS-1$
-                        + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
+ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
                 if (assistant != null)
                     ContentAssistPopupSync.captureSelectionBeforeFilterToggle(assistant);
                 final boolean wasSmart = SmartAssistFilterState.isSmartFilterEnabled();
@@ -1931,12 +1754,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         if (inLiteral)
         {
             ICompletionProposal[] passthrough = computeLiteralPassthrough(viewer, offset, literalCaret);
-            // #region agent log
-            ContentAssistDebug.agentLog("H2", "computeCompletionProposals", "literalBypass", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"runId\":\"post-fix\",\"offset\":" + offset + ",\"literalCaret\":" + literalCaret //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"n\":" + (passthrough != null ? passthrough.length : -1) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return passthrough;
+return passthrough;
         }
 
         return computeProposalsLight(viewer, offset);
@@ -1986,38 +1804,19 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         ensureFullListForContext(viewer, doc, caret, false);
         String filter = SmartFilterTracker.getCurrentFilter();
         boolean stockOnly = !hasIrProposalsForCurrentContext() && !isIrWordsResolvedForContext();
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H70", "computeLiteralRepeatWithoutDelegate", "enter", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"stockOnly\":" + stockOnly //$NON-NLS-1$
-                + ",\"stableN\":" + lastStableDelegateList.length //$NON-NLS-1$
-                + ",\"delegateCacheN\":" + delegateListCache.length //$NON-NLS-1$
-                + ",\"smart\":" + SmartAssistFilterState.isSmartFilterEnabled() //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        if (stockOnly)
+if (stockOnly)
         {
             ICompletionProposal[] stable = unwrapStableDelegateBase();
             if (stable.length > 0)
             {
-                // #region agent log
-                ContentAssistDebug.debugModeLog("H62", "computeLiteralRepeatWithoutDelegate", "stockRepeat", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"stableN\":" + stable.length //$NON-NLS-1$
-                        + ",\"smart\":" + SmartAssistFilterState.isSmartFilterEnabled() //$NON-NLS-1$
-                        + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                return applyLiteralSmartFilter(stable, filter);
+return applyLiteralSmartFilter(stable, filter);
             }
             if (delegateListCache.length > 0 && isDelegateSyncProbedForContext())
             {
                 return applyLiteralSmartFilter(
                     stripIrProposals(unwrapProposals(delegateListCache)), filter);
             }
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H62", "computeLiteralRepeatWithoutDelegate", "returnEmpty", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"stockOnly\":true,\"stableN\":0" //$NON-NLS-1$
-                    + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return EMPTY;
+return EMPTY;
         }
         if (SmartAssistFilterState.isSmartFilterEnabled())
         {
@@ -2033,12 +1832,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         ICompletionProposal[] fallback = unwrapStableDelegateBase();
         if (fallback.length > 0)
             return applyLiteralSmartFilter(fallback, filter);
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H62", "computeLiteralRepeatWithoutDelegate", "returnEmpty", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"stockOnly\":false,\"stableN\":0" //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        return EMPTY;
+return EMPTY;
     }
 
     private ICompletionProposal[] applyLiteralSmartFilter(ICompletionProposal[] merged, String filter)
@@ -2085,21 +1879,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             else
                 merged = mergeIrForDisplay(edtClean);
             ICompletionProposal[] result = applyLiteralSmartFilter(merged, filter);
-            // #region agent log
-            int edtLeak = countEdtConfigurableProposals(result);
-            if (edtLeak > 0)
-            {
-                ContentAssistDebug.debugModeLog("H64", "computeLiteralPassthrough", "edtLeak", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"edtConfigurableN\":" + edtLeak //$NON-NLS-1$
-                        + ",\"mergedN\":" + result.length //$NON-NLS-1$
-                        + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            ContentAssistDebug.debugModeLog("H2", "computeLiteralPassthrough", "merged", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"edtN\":" + edtN + ",\"irN\":" + irN //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"mergedN\":" + result.length //$NON-NLS-1$
-                    + ",\"cache\":\"" + cacheSource + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            auditLiteralComputeReturn(viewer, resolveEditorForLiteralAudit(viewer),
+auditLiteralComputeReturn(viewer, resolveEditorForLiteralAudit(viewer),
                 result.length, "computePassthrough", null); //$NON-NLS-1$
             return result;
         }
@@ -2108,26 +1888,12 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         if (reloader != null && reloader.isManualIrAssistPending() && edtN == 0
             && !isIrWordsResolvedForContext())
         {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H2", "computeLiteralPassthrough", "pendingEmpty", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"edtN\":" + edtN + ",\"irN\":" + irN + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return EMPTY;
+return EMPTY;
         }
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H2", "computeLiteralPassthrough", "edtOnly", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"edtN\":" + edtN + ",\"irN\":" + irN + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        ICompletionProposal[] result = edtN > 0 ? edtClean : best;
+ICompletionProposal[] result = edtN > 0 ? edtClean : best;
         if (result != null && result.length > 0)
             rememberInterimDelegateList(result);
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H70", "computeLiteralPassthrough", "edtOnlyStable", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"edtN\":" + edtN //$NON-NLS-1$
-                + ",\"lastStableN\":" + lastStableDelegateList.length //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        if (isIrWordsResolvedForContext() && irN > 0)
+if (isIrWordsResolvedForContext() && irN > 0)
         {
             auditLiteralComputeReturn(viewer, resolveEditorForLiteralAudit(viewer),
                 result != null ? result.length : 0, "computePassthrough", "edtOnlyDespiteIr"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -2283,12 +2049,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
         if (!smartEnabled)
         {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H-DIAG", "resolveProposalList", "alphabetical",
-                "{\"smartEnabled\":false,\"filter\":\"" + ContentAssistDebug.jsonEscapeForLog(filter)
-                    + "\",\"caret\":" + caret + "}");
-            // #endregion
-            return resolveAlphabeticalList(viewer, offset, caret);
+return resolveAlphabeticalList(viewer, offset, caret);
         }
         if (filter.isEmpty())
             return resolveDelegateOrderedList(viewer, offset, caret);
@@ -2410,13 +2171,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         ICompletionProposal[] built = buildDelegateOrderedList(unwrapProposals(raw));
         if (built.length > lastStableDelegateList.length)
             lastStableDelegateList = built;
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H70", "rememberInterimDelegateList", "remember", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"rawN\":" + raw.length //$NON-NLS-1$
-                + ",\"stableNAfter\":" + lastStableDelegateList.length //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     private boolean isCacheValidForCaret(IDocument doc, int caret)
     {
@@ -2544,53 +2299,22 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         ICompletionProposal raw = unwrapProposal(lastStripped);
         String display = raw != null ? raw.getDisplayString() : null;
         String cn = raw != null ? raw.getClass().getName() : ""; //$NON-NLS-1$
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H77", "stripEmptyPlaceholder", "stripped", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"beforeN\":" + beforeN //$NON-NLS-1$
-                + ",\"afterN\":" + afterN //$NON-NLS-1$
-                + ",\"strippedN\":" + (beforeN - afterN) //$NON-NLS-1$
-                + ",\"lastDisplay\":\"" + ContentAssistDebug.jsonEscapeForLog( //$NON-NLS-1$
-                    display != null ? display : "") //$NON-NLS-1$
-                + "\",\"lastClass\":\"" + ContentAssistDebug.jsonEscapeForLog(cn) //$NON-NLS-1$
-                + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     private ICompletionProposal[] mergeIrProposals(ICompletionProposal[] delegateList)
     {
         long t0 = System.nanoTime();
-        // #region agent log
-        ContentAssistDebug.sessionLog("H1", "mergeIrProposals", "enter", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"irCount\":" + irProposals.length //$NON-NLS-1$
-                + ",\"ctxMatch\":" + (irSnapshotContextKey == fullListContextKey) //$NON-NLS-1$
-                + ",\"ctxKey\":" + fullListContextKey //$NON-NLS-1$
-                + ",\"irCtxKey\":" + irSnapshotContextKey //$NON-NLS-1$
-                + ",\"delegateCount\":" + (delegateList != null ? delegateList.length : 0) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        if (irProposals.length == 0 || irSnapshotContextKey != fullListContextKey)
+if (irProposals.length == 0 || irSnapshotContextKey != fullListContextKey)
         {
             long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H82", "mergeIrProposals", "early", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"exit\":\"early\"" //$NON-NLS-1$
-                    + ",\"irCount\":" + irProposals.length //$NON-NLS-1$
-                    + ",\"delegateCount\":" + (delegateList != null ? delegateList.length : 0) //$NON-NLS-1$
-                    + ",\"ms\":" + elapsedMs + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return collapseOptionalEdtOverlapsArray(
+return collapseOptionalEdtOverlapsArray(
                 delegateList != null ? delegateList : EMPTY);
         }
         if (Arrays.equals(delegateList, lastMergeDelegateList) && irProposals == lastMergeIrProposalsRef
             && irSnapshotContextKey == lastMergeIrCtxKey && lastMergeResult != null)
         {
             long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H60", "mergeIrProposals", "memoHit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"irCount\":" + irProposals.length //$NON-NLS-1$
-                    + ",\"delegateCount\":" + (delegateList != null ? delegateList.length : 0) //$NON-NLS-1$
-                    + ",\"ms\":" + elapsedMs + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return lastMergeResult;
+return lastMergeResult;
         }
         ICompletionProposal[] delegateListKey = delegateList;
         ICompletionProposal[] irProposalsKey = irProposals;
@@ -2643,31 +2367,14 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         ICompletionProposal[] result = sortMergedList(
             merged.toArray(new ICompletionProposal[merged.size()]), irPriorityByKey,
             delegateProfile);
-        // #region agent log
-        debugSessionOrderSample("H2", "mergeIrProposals", "irOrderMerge", result, 12); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        debugIrMergeOrderSample("H3", "mergeIrProposals", "afterSort", result, irPriorityByKey, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            delegateProfile);
-        // #endregion
-        ICompletionProposal[] finalResult = stripEmptyPlaceholderProposals(result);
+ICompletionProposal[] finalResult = stripEmptyPlaceholderProposals(result);
         adoptIrTypeForEdtOverlaps(finalResult, irProposals);
-        // #region agent log
-        debugMergeDedupAudit("mergeIrProposals", delegateList, irProposals, finalResult, //$NON-NLS-1$
-            countIrProposals(delegateList));
-        // #endregion
-        lastMergeDelegateList = delegateListKey;
+lastMergeDelegateList = delegateListKey;
         lastMergeIrProposalsRef = irProposalsKey;
         lastMergeIrCtxKey = irCtxKeyForCache;
         lastMergeResult = finalResult;
         long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H82", "mergeIrProposals", "exit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"exit\":\"normal\"" //$NON-NLS-1$
-                + ",\"irCount\":" + irProposals.length //$NON-NLS-1$
-                + ",\"delegateCount\":" + (delegateListKey != null ? delegateListKey.length : 0) //$NON-NLS-1$
-                + ",\"resultN\":" + finalResult.length //$NON-NLS-1$
-                + ",\"ms\":" + elapsedMs + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        return finalResult;
+return finalResult;
     }
 
     /**
@@ -2719,14 +2426,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         ICompletionProposal[] result = sortMergedList(
             merged.toArray(new ICompletionProposal[merged.size()]), irPriorityByKey,
             delegateProfile);
-        // #region agent log
-        debugSessionOrderSample("H2", "mergeIrProposals", "irOrderMerge", result, 12); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        debugIrMergeOrderSample("H3", "mergeIrProposals", "afterSort", result, irPriorityByKey, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            delegateProfile);
-        debugMergeDedupAudit("mergeIrProposalsCore", delegateList, irProposalsSnap, //$NON-NLS-1$
-            stripEmptyPlaceholderProposals(result), countIrProposals(delegateList));
-        // #endregion
-        return stripEmptyPlaceholderProposals(result);
+return stripEmptyPlaceholderProposals(result);
     }
 
     private static Map<String, Deque<ICompletionProposal>> indexDelegateByKey(
@@ -3162,7 +2862,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
     /**
      * H90: аудит дублей merge ИР+EDT — только диагностика, без изменения списка.
-     * Пишет в журнал при «Общем логировании» и в NDJSON (debug-0ae881.log).
+     * Пишет в журнал при «Общем логировании».
      */
     private static void debugMergeDedupAudit(String phase, ICompletionProposal[] delegateList,
         ICompletionProposal[] irList, ICompletionProposal[] result, int delegateIrN)
@@ -3341,22 +3041,13 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
         int[] offsets = stockProbeOffsets(assistant, caret, dot, doc);
         ICompletionProposal[] raw = probeDelegateAtOffsets(viewer, offsets, dot);
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H-DIAG", "fetchStockDelegateList", "probeResult",
-            "{\"offsets\":" + java.util.Arrays.toString(offsets)
-                + ",\"dot\":" + dot + ",\"rawLen\":" + raw.length + "}");
-        // #endregion
-        int probe = -1;
+int probe = -1;
         if (raw.length == 0)
         {
             probe = resolveDelegateProbeOffset(viewer, offset, caret);
             ICompletionProposal[] fallback = delegate.computeCompletionProposals(viewer, probe);
             raw = unwrapProposals(fallback != null ? fallback : EMPTY);
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H-DIAG", "fetchStockDelegateList", "fallback",
-                "{\"probe\":" + probe + ",\"fallbackLen\":" + raw.length + "}");
-            // #endregion
-        }
+}
         if (dot >= 0)
         {
             if (memberStockFullListDot == dot && memberStockFullList.length > raw.length)
@@ -3374,11 +3065,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         else if (isCacheValidForCaret(doc, caret) && fullListCache.length > raw.length)
             raw = fullListCache;
         ICompletionProposal[] result = finalizeListForIrAssistDisplay(raw);
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H-DIAG", "fetchStockDelegateList", "exit",
-            "{\"resultLen\":" + result.length + "}");
-        // #endregion
-        return result;
+return result;
     }
 
     /** Probe для штатного списка: invocation / filter offset / начало слова / каретка. */
@@ -3411,13 +3098,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     {
         if (raw == null || raw.length == 0)
             return EMPTY;
-        // #region agent log
-        ContentAssistDebug.sessionLog("H4", "finalizeListForIrAssistDisplay", "path", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"irOrdering\":" + isIrAssistOrderingEnabled() //$NON-NLS-1$
-                + ",\"hasIrSnapshot\":" + hasIrProposalsForCurrentContext() //$NON-NLS-1$
-                + ",\"count\":" + raw.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        if (!isIrAssistOrderingEnabled())
+if (!isIrAssistOrderingEnabled())
         {
             if (hasIrProposalsForCurrentContext())
                 return popupListWithIr(raw);
@@ -3607,13 +3288,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     {
         int caret = resolveFilterCaret(document, offset, event);
         boolean inLiteralValidate = isStringLiteralAssistContext(document, caret);
-        // #region agent log
-        if (ContentAssistDebug.shouldLogValidateLiteral())
-            ContentAssistDebug.agentLog("H6", "proposalMatchesFilter", "enter", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"caret\":" + caret + ",\"offset\":" + offset + ",\"inLiteral\":" + inLiteralValidate //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"smart\":" + SmartAssistFilterState.isSmartFilterEnabled() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        if (!SmartAssistFilterState.isSmartFilterEnabled())
+if (!SmartAssistFilterState.isSmartFilterEnabled())
         {
             ICompletionProposal raw = unwrapProposal(proposal);
             if (raw instanceof IrCompletionProposal ir)
@@ -3787,14 +3462,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         ContentAssistDebug.log("loadFullList count=" + fullListCache.length //$NON-NLS-1$
             + " dot=" + dot + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$
             + (forceDelegateReadOnly ? " readOnly" : "") + " complete"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H80", "loadFullList", "done", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"loadMs\":" + (System.currentTimeMillis() - loadStarted) //$NON-NLS-1$
-                + ",\"cacheN\":" + fullListCache.length //$NON-NLS-1$
-                + ",\"caret\":" + caret //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
+if (dot >= 0 && fullListCache.length < MIN_STABLE_MEMBER_CACHE
             && shouldScheduleMemberReload(dot))
             scheduleMemberAccessReload(viewer, dot);
     }
@@ -3860,29 +3528,18 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         if (dot < 0)
         {
             ICompletionProposal[] best = EMPTY;
-            // #region agent log
-            StringBuilder diag = new StringBuilder();
-            // #endregion
-            for (int off : offsets)
+for (int off : offsets)
             {
                 if (off < 0)
                     continue;
                 ICompletionProposal[] raw = delegate.computeCompletionProposals(viewer, off);
                 int count = raw != null ? raw.length : 0;
-                // #region agent log
-                diag.append("{\"off\":" + off + ",\"count\":" + count + "},");
-                // #endregion
-                if (count == 0)
+if (count == 0)
                     continue;
                 if (count > best.length)
                     best = raw;
             }
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H-DIAG", "probeDelegateAtOffsets", "dotLt0",
-                "{\"probes\":[" + (diag.length() > 0 ? diag.substring(0, diag.length() - 1) : "")
-                    + "],\"bestLen\":" + best.length + "}");
-            // #endregion
-            return best;
+return best;
         }
         ICompletionProposal[] best = EMPTY;
         for (int off : offsets)
@@ -4182,11 +3839,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             return EMPTY;
         if (memberStockFullListDot == dot && memberStockFullList.length >= MIN_STABLE_MEMBER_CACHE)
         {
-            // #region agent log
-            ContentAssistDebug.sessionLog("H5", "resolveMemberAccess", "memberStock", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"dot\":" + dot + ",\"count\":" + memberStockFullList.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            // #endregion
-            return finalizeListForIrAssistDisplay(buildDelegateOrderedList(memberStockFullList));
+return finalizeListForIrAssistDisplay(buildDelegateOrderedList(memberStockFullList));
         }
 
         ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
@@ -4569,14 +4222,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
         if (filtered.isEmpty())
         {
-            // #region agent log
-            long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
-            debugFilterDroppedAll(raw, filter, matcher);
-            ContentAssistDebug.debugModeLog("H81", "filterAndSort", "droppedAll", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"rawN\":" + raw.length //$NON-NLS-1$
-                    + ",\"ms\":" + elapsedMs + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return EMPTY;
+return EMPTY;
         }
 
         Integer[] idx = new Integer[filtered.size()];
@@ -4595,18 +4241,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         }
         long elapsedMs = (System.nanoTime() - t0) / 1_000_000;
         logFilterAndSortExitThrottled(result, elapsedMs);
-        // #region agent log
-        String trigger = ContentAssistPopupSync.peekRecomputeTrigger();
-        if (!"sessionOpen".equals(trigger) && trigger != null && result.length > 0) //$NON-NLS-1$
-        {
-            ContentAssistDebug.debugModeLog("H81", "filterAndSort", "exit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"trigger\":\"" + ContentAssistDebug.jsonEscapeForLog(trigger) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"resultN\":" + result.length //$NON-NLS-1$
-                    + ",\"firstKey\":\"" + ContentAssistDebug.firstProposalKey(result) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"ms\":" + elapsedMs + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        // #endregion
-        return result;
+return result;
     }
 
     private static int filterAndSortLoggedOpenGen = -1;
@@ -4621,19 +4256,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         filterAndSortLoggedOpenGen = openGen;
         String firstKey = result.length > 0
             ? ContentAssistDebug.firstProposalKey(result) : ""; //$NON-NLS-1$
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H75", "filterAndSort", "exit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"trigger\":\"sessionOpen\"" //$NON-NLS-1$
-                + ",\"resultN\":" + result.length //$NON-NLS-1$
-                + ",\"firstKey\":\"" + firstKey + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"smartWrapped\":true" //$NON-NLS-1$
-                + ",\"openGen\":" + openGen //$NON-NLS-1$
-                + ",\"ms\":" + elapsedMs //$NON-NLS-1$
-                + ",\"msSinceSessionStart\":" //$NON-NLS-1$
-                    + ContentAssistSessionReloader.msSinceLiteralSessionStartForLog()
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     static int computeScore(SmartCodeMatcher matcher, ICompletionProposal proposal)
     {
@@ -4711,162 +4334,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         return Integer.MIN_VALUE;
     }
 
-    // #region agent log
-    private static void debugSessionOrderSample(String hypothesisId, String location, String message,
-                                                ICompletionProposal[] list, int max)
-    {
-        if (list == null || list.length == 0)
-        {
-            ContentAssistDebug.sessionLog(hypothesisId, location, message, "{\"count\":0}"); //$NON-NLS-1$
-            return;
-        }
-        int n = Math.min(max, list.length);
-        StringBuilder sb = new StringBuilder(256);
-        sb.append("{\"count\":").append(list.length).append(",\"items\":["); //$NON-NLS-1$ //$NON-NLS-2$
-        for (int i = 0; i < n; i++)
-        {
-            if (i > 0)
-                sb.append(',');
-            ICompletionProposal raw = unwrapProposal(list[i]);
-            String name = displayString(raw);
-            if (name == null)
-                name = ""; //$NON-NLS-1$
-            if (name.length() > 40)
-                name = name.substring(0, 40);
-            sb.append("{\"i\":").append(i) //$NON-NLS-1$
-                .append(",\"name\":\"").append(escapeJson(name)).append('"') //$NON-NLS-1$
-                .append(",\"pri\":").append(resolveNativePriority(raw)) //$NON-NLS-1$
-                .append(",\"ir\":").append(raw instanceof IrCompletionProposal) //$NON-NLS-1$
-                .append('}');
-        }
-        sb.append("]}"); //$NON-NLS-1$
-        ContentAssistDebug.sessionLog(hypothesisId, location, message, sb.toString());
-    }
-
-    private static String escapeJson(String value)
-    {
-        return value.replace("\\", "\\\\").replace("\"", "\\\""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-    }
-
-    private static boolean isIrMergeDebugKey(String key)
-    {
-        if (key == null || key.isEmpty())
-            return false;
-        String lower = key.toLowerCase();
-        return "наименование".equals(lower) //$NON-NLS-1$
-            || "наименованиеполное".equals(lower) //$NON-NLS-1$
-            || "ссылка".equals(lower) //$NON-NLS-1$
-            || "найтиследующий".equals(lower) //$NON-NLS-1$
-            || "количество".equals(lower); //$NON-NLS-1$
-    }
-
-    private static void debugIrMergeOrderSample(String hypothesisId, String location, String phase,
-                                                ICompletionProposal[] list,
-                                                Map<String, Integer> irPriorityByKey,
-                                                MemberEdtPriorityProfile profile)
-    {
-        if (list == null || list.length == 0)
-            return;
-        if (profile == null)
-            profile = MemberEdtPriorityProfile.NONE;
-        Map<String, Integer> irMap = irPriorityByKey != null
-            ? irPriorityByKey
-            : java.util.Collections.emptyMap();
-        StringBuilder sb = new StringBuilder(512);
-        sb.append("{\"phase\":\"").append(escapeJson(phase)).append("\",\"remap\":") //$NON-NLS-1$ //$NON-NLS-2$
-            .append(profile.isRemapActive())
-            .append(",\"edtSortOn\":").append(useEdtSortKey(irMap)) //$NON-NLS-1$
-            .append(",\"methDom\":").append(profile.methodDominantValue()) //$NON-NLS-1$
-            .append(",\"propDom\":").append(profile.propertyDominantValue()) //$NON-NLS-1$
-            .append(",\"items\":["); //$NON-NLS-1$
-        boolean any = false;
-        for (int i = 0; i < list.length; i++)
-        {
-            String key = dedupKey(list[i]);
-            if (!isIrMergeDebugKey(key))
-                continue;
-            if (any)
-                sb.append(',');
-            any = true;
-            ICompletionProposal raw = unwrapProposal(list[i]);
-            sb.append("{\"i\":").append(i) //$NON-NLS-1$
-                .append(",\"key\":\"").append(escapeJson(key)).append('"') //$NON-NLS-1$
-                .append(",\"cls\":\"").append(raw.getClass().getSimpleName()).append('"') //$NON-NLS-1$
-                .append(",\"irMerge\":").append(resolveIrPriorityForMerge(list[i], irMap)) //$NON-NLS-1$
-                .append(",\"edtSort\":").append(profile.effectiveEdtForIrSort(list[i])) //$NON-NLS-1$
-                .append(",\"mapPri\":").append(irMap.getOrDefault(key, -99999)).append('}'); //$NON-NLS-1$
-        }
-        sb.append("]}"); //$NON-NLS-1$
-        ContentAssistDebug.sessionLog(hypothesisId, location, phase, sb.toString());
-    }
-
-    private void debugResolveExit(IDocument doc, int caret, String filter, int interimN,
-        boolean cacheValid, String exit, ICompletionProposal[] result)
-    {
-        String prefix = doc != null && caret >= 0 ? computeIdentifierFilter(doc, caret) : ""; //$NON-NLS-1$
-        ContentAssistDebug.debugModeLog("H48", "resolveProposalList", "resolveExit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"filter\":\"" + ContentAssistDebug.jsonEscapeForLog(filter != null ? filter : "") //$NON-NLS-1$ //$NON-NLS-2$
-                + "\",\"prefix\":\"" + ContentAssistDebug.jsonEscapeForLog(prefix) //$NON-NLS-1$
-                + "\",\"cacheValid\":" + cacheValid //$NON-NLS-1$
-                + ",\"cacheN\":" + fullListCache.length //$NON-NLS-1$
-                + ",\"interimN\":" + interimN //$NON-NLS-1$
-                + ",\"delegateProbed\":" + isDelegateSyncProbedForContext() //$NON-NLS-1$
-                + ",\"irResolved\":" + isIrWordsResolvedForContext() //$NON-NLS-1$
-                + ",\"irN\":" + irProposals.length //$NON-NLS-1$
-                + ",\"ctxKey\":" + fullListContextKey //$NON-NLS-1$
-                + ",\"irCtxKey\":" + irSnapshotContextKey //$NON-NLS-1$
-                + ",\"terminalEmpty\":" + terminalEmptyMemberAccess //$NON-NLS-1$
-                + ",\"resultN\":" + (result != null ? result.length : 0) //$NON-NLS-1$
-                + ",\"exit\":\"" + exit + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-    }
-
-    private void debugFilterCachedExit(ITextViewer viewer, int caret, String filter, IDocument doc,
-        int interimN, String path, ICompletionProposal[] result)
-    {
-        String prefix = doc != null && caret >= 0 ? computeIdentifierFilter(doc, caret) : ""; //$NON-NLS-1$
-        ContentAssistDebug.debugModeLog("H49", "filterCachedProposalsForPopup", "filterCachedExit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"filter\":\"" + ContentAssistDebug.jsonEscapeForLog(filter != null ? filter : "") //$NON-NLS-1$ //$NON-NLS-2$
-                + "\",\"prefix\":\"" + ContentAssistDebug.jsonEscapeForLog(prefix) //$NON-NLS-1$
-                + "\",\"cacheValid\":" + isCacheValidForCaret(doc, caret) //$NON-NLS-1$
-                + ",\"cacheN\":" + fullListCache.length //$NON-NLS-1$
-                + ",\"interimN\":" + interimN //$NON-NLS-1$
-                + ",\"delegateProbed\":" + isDelegateSyncProbedForContext() //$NON-NLS-1$
-                + ",\"irResolved\":" + isIrWordsResolvedForContext() //$NON-NLS-1$
-                + ",\"irN\":" + irProposals.length //$NON-NLS-1$
-                + ",\"ctxKey\":" + fullListContextKey //$NON-NLS-1$
-                + ",\"irCtxKey\":" + irSnapshotContextKey //$NON-NLS-1$
-                + ",\"terminalEmpty\":" + terminalEmptyMemberAccess //$NON-NLS-1$
-                + ",\"resultN\":" + (result != null ? result.length : 0) //$NON-NLS-1$
-                + ",\"path\":\"" + path + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-    }
-
-    private static void debugFilterDroppedAll(ICompletionProposal[] raw, String filter,
-        SmartCodeMatcher matcher)
-    {
-        StringBuilder sb = new StringBuilder(384);
-        sb.append("{\"filter\":\"").append(ContentAssistDebug.jsonEscapeForLog(filter != null ? filter : "")) //$NON-NLS-1$ //$NON-NLS-2$
-            .append("\",\"rawN\":").append(raw.length).append(",\"samples\":["); //$NON-NLS-1$ //$NON-NLS-2$
-        int n = Math.min(3, raw.length);
-        for (int i = 0; i < n; i++)
-        {
-            if (i > 0)
-                sb.append(',');
-            ICompletionProposal p = unwrapProposal(raw[i]);
-            String display = displayString(p);
-            if (display == null)
-                display = ""; //$NON-NLS-1$
-            if (display.length() > 48)
-                display = display.substring(0, 48);
-            sb.append("{\"display\":\"").append(escapeJson(display)).append('"') //$NON-NLS-1$
-                .append(",\"score\":").append(computeScore(matcher, raw[i])) //$NON-NLS-1$
-                .append(",\"isIr\":").append(p instanceof IrCompletionProposal).append('}'); //$NON-NLS-1$
-        }
-        sb.append("]}"); //$NON-NLS-1$
-        ContentAssistDebug.debugModeLog("H51", "filterAndSort", "filterDroppedAll", sb.toString()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-    }
-    // #endregion
-
-    private static int compareDelegateOrder(ICompletionProposal p1, ICompletionProposal p2)
+private static int compareDelegateOrder(ICompletionProposal p1, ICompletionProposal p2)
     {
         int o1 = delegateOrderOf(p1);
         int o2 = delegateOrderOf(p2);

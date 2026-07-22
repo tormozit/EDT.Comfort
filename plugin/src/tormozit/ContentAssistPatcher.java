@@ -80,16 +80,7 @@ public final class ContentAssistPatcher
         ContentAssistSessionReloader.install(sourceViewer, contentAssist, wrapper, facade);
 
         ContentAssistDebug.log("applyPatch OK delegate=" + xtext.getClass().getSimpleName()); //$NON-NLS-1$
-        // #region agent log
-        ContentAssistSettings settings = ContentAssistSettings.getInstance();
-        boolean autoOpenEnabled = settings != null && settings.isEnabled();
-        ContentAssistDebug.debugModeLog("H79", "ContentAssistPatcher.applyPatch", "autoOpenReady", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"comfortFiltersOn\":" + ComfortSettings.isReplaceListFiltersEnabled() //$NON-NLS-1$
-                + ",\"autoOpenEnabled\":" + autoOpenEnabled //$NON-NLS-1$
-                + ",\"nativeCharsetEmpty\":" + (autoOpenEnabled && ComfortSettings.isReplaceListFiltersEnabled()) //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        return true;
+return true;
     }
 
     private static String resolveAutoActivationCharset(String charset)

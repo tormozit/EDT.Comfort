@@ -1181,7 +1181,6 @@ public class GoToDefinition extends AbstractHandler
         }
         catch (Exception e)
         {
-            Global.tempLogException("showInModule", "openFileAtLine: " + file.getFullPath() + ", line=" + line, e); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return false;
         }
     }
@@ -1216,7 +1215,6 @@ public class GoToDefinition extends AbstractHandler
         }
         catch (Exception e)
         {
-            Global.tempLogException("showInModule", "revealLine: line=" + lineNumber, e); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -1241,13 +1239,11 @@ public class GoToDefinition extends AbstractHandler
             IEditorPart editorPart = new OpenHelper().openEditor(moduleUri, (ISelection) null);
             if (editorPart == null)
             {
-                Global.tempLog("showInModule", "openBslModuleAtLine: openEditor вернул null для " + moduleUri); //$NON-NLS-1$ //$NON-NLS-2$
                 return false;
             }
             XtextEditor xtextEditor = BslHandlerUtil.extractXtextEditor(editorPart);
             if (xtextEditor == null)
             {
-                Global.tempLog("showInModule", "openBslModuleAtLine: extractXtextEditor вернул null"); //$NON-NLS-1$ //$NON-NLS-2$
                 return false;
             }
             IXtextDocument document = (IXtextDocument) xtextEditor.getDocument();
@@ -1259,7 +1255,6 @@ public class GoToDefinition extends AbstractHandler
         }
         catch (Exception e)
         {
-            Global.tempLogException("showInModule", "openBslModuleAtLine: " + file.getFullPath(), e); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
     }
@@ -1273,7 +1268,6 @@ public class GoToDefinition extends AbstractHandler
         }
         catch (Exception e)
         {
-            Global.tempLogException("showInModule", "revealXtextLine: line=" + line1Based, e); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 

@@ -222,12 +222,7 @@ public final class BslCompletionSideHintResolver
         }
         catch (Exception e)
         {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H26", "traceAssistBrowserCreatorResolution", "error", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"msg\":\"" + ContentAssistDebug.jsonEscapeForLog(e.getMessage()) //$NON-NLS-1$
-                    + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            trace.creator = resolveAssistBrowserCreatorChain(assistant, viewer, reloader);
+trace.creator = resolveAssistBrowserCreatorChain(assistant, viewer, reloader);
             if (trace.creator != null)
                 trace.winner = "fallback"; //$NON-NLS-1$
         }
@@ -324,18 +319,7 @@ public final class BslCompletionSideHintResolver
     {
         ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
         int gen = reloader != null ? reloader.getLiteralOpenGen() : -1;
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H35", "coldCreatorBootstrap", step, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"gen\":" + gen //$NON-NLS-1$
-                + ",\"ok\":" + ok //$NON-NLS-1$
-                + ",\"probeOffset\":" + probeOffset //$NON-NLS-1$
-                + ",\"delegateCount\":" + delegateCount //$NON-NLS-1$
-                + ",\"ext3Count\":" + ext3Count //$NON-NLS-1$
-                + ",\"hoverClass\":" + (hoverClass != null //$NON-NLS-1$
-                    ? "\"" + ContentAssistDebug.jsonEscapeForLog(hoverClass) + "\"" : "null") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     private static String hoverClassName(SourceViewer viewer)
     {

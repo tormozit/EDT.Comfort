@@ -86,7 +86,6 @@ public final class TwoSideCurrentLinesSync
         catch (Exception e)
         {
             // Виджет мог измениться во время пересчёта (см. CompareLineRangeMatcher.findMatchedLine) — не крашим UI.
-            Global.tempLogException("showInModule", "TwoSideCurrentLinesSync.sync", e); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 }

@@ -868,34 +868,7 @@ final class PropertySheetControlInterop
                             && section.sectionTopDisplay > best.sectionTopDisplay))
                 best = section;
         }
-        // #region agent log
-        {
-            java.util.Map<String, Object> d = new java.util.LinkedHashMap<>();
-            d.put("clickY", displayY); //$NON-NLS-1$
-            d.put("sectionCount", sections.size()); //$NON-NLS-1$
-            d.put("matchCount", matchCount); //$NON-NLS-1$
-            if (best != null)
-            {
-                d.put("title", best.titleHint != null ? best.titleHint : ""); //$NON-NLS-1$ //$NON-NLS-2$
-                d.put("sectionTop", best.sectionTopDisplay); //$NON-NLS-1$
-                d.put("bodyTop", best.bodyTopDisplay); //$NON-NLS-1$
-                d.put("bodyBottom", best.bodyBottomDisplay); //$NON-NLS-1$
-            }
-            if (sections.size() <= 8)
-            {
-                java.util.List<String> frames = new java.util.ArrayList<>();
-                for (LwtPropertySection s : sections)
-                {
-                    frames.add((s.titleHint != null ? s.titleHint : "?") //$NON-NLS-1$
-                            + "@" + s.bodyTopDisplay + ".." + s.bodyBottomDisplay); //$NON-NLS-1$ //$NON-NLS-2$
-                }
-                d.put("frames", String.join("|", frames)); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            agentHitLog(best != null ? "H1ok" : "H1", "ControlInterop.findActiveSectionAtClick", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    best != null ? "found" : "miss", d); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        // #endregion
-        return best;
+return best;
     }
 
     /** Строка свойства внутри body (leaf ~33px или многострочная). */
@@ -1251,23 +1224,7 @@ final class PropertySheetControlInterop
             section.body.setData(PS_SECTION_ROW_LABELS_KEY,
                     rowLabels.isEmpty() ? null : new ArrayList<>(rowLabels));
         }
-        // #region agent log
-        StringBuilder areaRanges = new StringBuilder();
-        for (int i = 0; i < areas.size() && i < 10; i++)
-        {
-            if (i > 0)
-                areaRanges.append(',');
-            PropertyArea a = areas.get(i);
-            areaRanges.append(a.topCanvas).append('-').append(a.bottomCanvas);
-        }
-        agentHitLog("H19", "ControlInterop.buildPropertyAreasFromPropertyRows", "rowAreas", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                java.util.Map.of("title", section.titleHint != null ? section.titleHint : "", //$NON-NLS-1$ //$NON-NLS-2$
-                        "rowCount", areas.size(), "areas", areas.size(), //$NON-NLS-1$ //$NON-NLS-2$
-                        "rowSource", rowSource, "labelCount", rowLabels.size(), //$NON-NLS-1$ //$NON-NLS-2$
-                        "ctxRowsInSection", ctxRowsInSection, //$NON-NLS-1$
-                        "areaRanges", areaRanges.toString())); //$NON-NLS-1$
-        // #endregion
-        return areas;
+return areas;
     }
 
     /** Обход body без {@link #containsNestedFieldRow} — leaf DtLayoutComposite ~18–120px. */
@@ -1581,11 +1538,7 @@ final class PropertySheetControlInterop
             {
                 if (sections.get(i) == section)
                 {
-                    // #region agent log
-                    agentHitLog("H13", "ControlInterop.resolveGroupIndex", "fallbackIndex", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                            java.util.Map.of("lwtIndex", i, "title", title, "modelSections", modelSections.size())); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    // #endregion
-                    return i;
+return i;
                 }
             }
         }
@@ -1652,28 +1605,16 @@ final class PropertySheetControlInterop
             {
                 PropertySheetDebug.problem("canvasCapture print=false size=" + size.x + "x" //$NON-NLS-1$ //$NON-NLS-2$
                         + size.y);
-                // #region agent log
-                agentHitLog("H10", "ControlInterop.captureCanvasImageData", "printFail", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        java.util.Map.of("w", size.x, "h", size.y)); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                return null;
+return null;
             }
             ImageData data = image.getImageData();
             if (!captureImageLooksValid(data, bg != null ? bg.getRGB() : null))
             {
                 PropertySheetDebug.problem("canvasCapture print blank size=" + size.x + "x" //$NON-NLS-1$ //$NON-NLS-2$
                         + size.y);
-                // #region agent log
-                agentHitLog("H10", "ControlInterop.captureCanvasImageData", "printBlank", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        java.util.Map.of("w", size.x, "h", size.y)); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                return null;
+return null;
             }
-            // #region agent log
-            agentHitLog("H10", "ControlInterop.captureCanvasImageData", "printOk", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    java.util.Map.of("w", size.x, "h", size.y)); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return data;
+return data;
         }
         catch (Exception ex)
         {
@@ -1937,18 +1878,6 @@ final class PropertySheetControlInterop
             return;
         }
         int runH = runEnd - runStart;
-        if (runH > MAX_FIELD_END_SEPARATOR_RUN)
-        {
-            // #region agent log
-            java.util.Map<String, Object> data = new java.util.LinkedHashMap<>();
-            data.put("runStart", runStart); //$NON-NLS-1$
-            data.put("runH", runH); //$NON-NLS-1$
-            if (tail)
-                data.put("tail", true); //$NON-NLS-1$
-            agentHitLog("H12", "ControlInterop.mergeSeparatorRunsCanvas", "runTooTall", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    data);
-            // #endregion
-        }
     }
 
     private static List<BackColorBand> mergeSeparatorRunsCanvas(int sliceTop, int sliceBottom,
@@ -2119,12 +2048,7 @@ final class PropertySheetControlInterop
         }
         if (unresolved > 0 || tops.size() != expectedCount)
         {
-            // #region agent log
-            agentHitLog("H30", "ControlInterop.buildPropertyAreasForSectionGeometry", "unresolvedFields", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    java.util.Map.of("title", title, "expected", expectedCount, //$NON-NLS-1$ //$NON-NLS-2$
-                            "found", tops.size(), "unresolved", unresolved)); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return null;
+return null;
         }
         java.util.Collections.sort(tops);
 
@@ -2161,12 +2085,7 @@ final class PropertySheetControlInterop
                 boolean tooLarge = median > 0 && h > 80 && h > median * 3;
                 if (tooSmall || tooLarge)
                 {
-                    // #region agent log
-                    agentHitLog("H30", "ControlInterop.buildPropertyAreasForSectionGeometry", //$NON-NLS-1$ //$NON-NLS-2$
-                            "implausibleArea", java.util.Map.of("title", title, "index", i, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                                    "height", h, "median", median, "expected", expectedCount)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    // #endregion
-                    return null;
+return null;
                 }
             }
         }
@@ -2175,11 +2094,7 @@ final class PropertySheetControlInterop
 
     private static List<PropertyArea> geometryBail(String title, String reason, int found, int expected)
     {
-        // #region agent log
-        agentHitLog("H30", "ControlInterop.buildPropertyAreasForSectionGeometry", reason, //$NON-NLS-1$ //$NON-NLS-2$
-                java.util.Map.of("title", title, "found", found, "expected", expected)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        // #endregion
-        return null;
+return null;
     }
 
     static List<PropertyArea> buildPropertyAreasForSectionCanvas(Composite content,
@@ -2199,13 +2114,7 @@ final class PropertySheetControlInterop
                 page, knownGroupIndex);
         if (geometryAreas != null)
         {
-            // #region agent log
-            agentHitLog("H10", "ControlInterop.buildPropertyAreasForSectionCanvas", "scanAreasGeometry", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    java.util.Map.of("title", section.titleHint != null ? section.titleHint : "", //$NON-NLS-1$ //$NON-NLS-2$
-                            "areas", geometryAreas.size(), "bodyTop", section.bodyTopCanvas, //$NON-NLS-1$ //$NON-NLS-2$
-                            "bodyBottom", section.bodyBottomCanvas)); //$NON-NLS-1$
-            // #endregion
-            return geometryAreas;
+return geometryAreas;
         }
 
         // Fallback: пиксельный скан фона — только если геометрию меток получить не удалось.
@@ -2246,31 +2155,7 @@ final class PropertySheetControlInterop
             section.body.setData(PS_SECTION_AREAS_CAPTURE_KEY,
                     content.getData(PS_CANVAS_CAPTURE_KEY));
         }
-        // #region agent log
-        StringBuilder bandTops = new StringBuilder();
-        for (int i = 0; i < bands.size() && i < 24; i++)
-        {
-            if (i > 0)
-                bandTops.append(',');
-            bandTops.append(bands.get(i).topCanvas);
-        }
-        StringBuilder areaRanges = new StringBuilder();
-        for (int i = 0; i < areas.size() && i < 8; i++)
-        {
-            if (i > 0)
-                areaRanges.append(',');
-            PropertyArea a = areas.get(i);
-            areaRanges.append(a.topCanvas).append('-').append(a.bottomCanvas);
-        }
-        agentHitLog("H10", "ControlInterop.buildPropertyAreasForSectionCanvas", "scanAreas", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                java.util.Map.of("title", section.titleHint != null ? section.titleHint : "", //$NON-NLS-1$ //$NON-NLS-2$
-                        "bands", bands.size(), "areas", areas.size(), //$NON-NLS-1$ //$NON-NLS-2$
-                        "bodyTop", section.bodyTopCanvas, "bodyBottom", section.bodyBottomCanvas, //$NON-NLS-1$ //$NON-NLS-2$
-                        "scanTop", scanTop, "captureH", capture.height, "bandTops", bandTops.toString(), //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        "firstAreaH", areas.isEmpty() ? 0 : areas.get(0).bottomCanvas - areas.get(0).topCanvas, //$NON-NLS-1$
-                        "areaRanges", areaRanges.toString())); //$NON-NLS-1$
-        // #endregion
-        return areas;
+return areas;
     }
 
     static PropertyArea findPropertyAreaAtCanvas(Object page, int canvasY)
@@ -2407,12 +2292,7 @@ final class PropertySheetControlInterop
                 continue;
             out.add(row);
         }
-        // #region agent log
-        agentHitLog("H23", "ControlInterop.ctxRowsForSection", "filtered", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                java.util.Map.of("title", section.titleHint != null ? section.titleHint : "", //$NON-NLS-1$ //$NON-NLS-2$
-                        "visibleNames", visibleNames.size(), "ctxRows", out.size())); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        return out;
+return out;
     }
 
     static boolean labelCenterInSectionBounds(Object view, Composite sectionBody)
@@ -2514,13 +2394,7 @@ final class PropertySheetControlInterop
             };
             Composite host = rowHostForPaletteRow(paletteRow);
             int hostH = host != null ? host.getSize().y : bottomCanvas - topCanvas;
-            // #region agent log
-            agentHitLog("H22", "ControlInterop.resolvePropertyAtClickFromCtxRows", "ctxHit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    java.util.Map.of("prop", displayName, "propertyIndex", i, //$NON-NLS-1$ //$NON-NLS-2$
-                            "sectionRows", sectionRows.size(), "hostH", hostH, //$NON-NLS-1$ //$NON-NLS-2$
-                            "topCanvas", topCanvas, "bottomCanvas", bottomCanvas)); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return new PropertyClickHit(displayName, lwtView, band[0], band[1], topCanvas,
+return new PropertyClickHit(displayName, lwtView, band[0], band[1], topCanvas,
                     bottomCanvas, i, "ctxRow"); //$NON-NLS-1$
         }
         return null;
@@ -2535,21 +2409,13 @@ final class PropertySheetControlInterop
     {
         if (display == null || page == null)
         {
-            // #region agent log
-            agentHitLog("H5", "ControlInterop.resolvePropertyAtClick", "earlyNull", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    java.util.Map.of("displayNull", display == null, "pageNull", page == null)); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return null;
+return null;
         }
         PropertySheetUiContext.PaletteCanvasSpace space =
                 PropertySheetUiContext.PaletteCanvasSpace.forPage(page);
         if (space == null)
         {
-            // #region agent log
-            agentHitLog("H5", "ControlInterop.resolvePropertyAtClick", "noCanvas", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    java.util.Collections.emptyMap());
-            // #endregion
-            return null;
+return null;
         }
         Composite content = space.content;
         if (scene == null)
@@ -2567,31 +2433,17 @@ final class PropertySheetControlInterop
         LwtPropertySection section = findActiveSectionAtCanvasY(sections, canvasY);
         if (section == null)
         {
-            // #region agent log
-            agentHitLog("H1", "ControlInterop.resolvePropertyAtClick", "noSection", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    java.util.Map.of("canvasY", canvasY, "sectionCount", sections.size())); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return null;
+return null;
         }
         int groupIndex = resolveGroupIndex(page, section, sections);
         if (canvasY < section.headerBottomCanvas)
         {
-            // #region agent log
-            agentHitLog("H1h", "ControlInterop.resolvePropertyAtClick", "headerClick", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    java.util.Map.of("canvasY", canvasY, "groupIndex", groupIndex, //$NON-NLS-1$ //$NON-NLS-2$
-                            "title", section.titleHint != null ? section.titleHint : "")); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return null;
+return null;
         }
         if (!section.expanded || canvasY < section.bodyTopCanvas
                 || canvasY >= section.bodyBottomCanvas)
         {
-            // #region agent log
-            agentHitLog("H1c", "ControlInterop.resolvePropertyAtClick", "collapsedOrOutsideBody", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    java.util.Map.of("canvasY", canvasY, "groupIndex", groupIndex, //$NON-NLS-1$ //$NON-NLS-2$
-                            "expanded", section.expanded)); //$NON-NLS-1$
-            // #endregion
-            return null;
+return null;
         }
         java.util.List<PropertyArea> areas = buildPropertyAreasForSectionCanvas(content, section,
                 scene, page, groupIndex);
@@ -2608,13 +2460,7 @@ final class PropertySheetControlInterop
         }
         if (area == null || propertyIndex < 0)
         {
-            // #region agent log
-            agentHitLog("H2", "ControlInterop.resolvePropertyAtClick", "noArea", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    java.util.Map.of("canvasY", canvasY, "groupIndex", groupIndex, //$NON-NLS-1$ //$NON-NLS-2$
-                            "areaCount", areas.size(), "bodyTop", section.bodyTopCanvas, //$NON-NLS-1$ //$NON-NLS-2$
-                            "bodyBottom", section.bodyBottomCanvas)); //$NON-NLS-1$
-            // #endregion
-            return null;
+return null;
         }
         Object fieldDef = null;
         Object rowLabelsObj = section.body != null ? section.body.getData(PS_SECTION_ROW_LABELS_KEY)
@@ -2679,49 +2525,11 @@ final class PropertySheetControlInterop
             }
             else
             {
-                // #region agent log
-                java.util.List<Object> modelSecs = modelSectionDefinitions(page);
-                int fieldsCount = groupIndex >= 0 && groupIndex < modelSecs.size()
-                        ? modelFieldDefinitions(modelSecs.get(groupIndex)).size() : -1;
-                agentHitLog("H6", "ControlInterop.resolvePropertyAtClick", "modelMiss", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        java.util.Map.of("groupIndex", groupIndex, "propertyIndex", propertyIndex, //$NON-NLS-1$ //$NON-NLS-2$
-                                "fieldsCount", fieldsCount, "areasCount", areas.size(), //$NON-NLS-1$ //$NON-NLS-2$
-                                "sectionTitle", section.titleHint != null ? section.titleHint : "")); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                displayName = "scan#" + propertyIndex; //$NON-NLS-1$
+displayName = "scan#" + propertyIndex; //$NON-NLS-1$
             }
         }
         int[] band = area.toDisplayBand(content);
-        // #region agent log
-        java.util.List<Object> modelSecs = modelSectionDefinitions(page);
-        int fieldsCount = groupIndex >= 0 && groupIndex < modelSecs.size()
-                ? modelFieldDefinitions(modelSecs.get(groupIndex)).size() : -1;
-        if (areas.size() != fieldsCount)
-        {
-            StringBuilder fieldLabels = new StringBuilder();
-            if (groupIndex >= 0 && groupIndex < modelSecs.size())
-            {
-                java.util.List<Object> fields = visibleFields.isEmpty()
-                        ? modelFieldDefinitions(modelSecs.get(groupIndex)) : visibleFields;
-                for (int i = 0; i < fields.size() && i < 12; i++)
-                {
-                    if (i > 0)
-                        fieldLabels.append('|');
-                    fieldLabels.append(labeledDefinitionText(fields.get(i)));
-                }
-            }
-            agentHitLog("H18", "ControlInterop.resolvePropertyAtClick", "areasFieldsMismatch", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    java.util.Map.of("areasCount", areas.size(), "fieldsCount", fieldsCount, //$NON-NLS-1$ //$NON-NLS-2$
-                            "visibleCount", visibleFields.size(), "propertyIndex", propertyIndex, //$NON-NLS-1$ //$NON-NLS-2$
-                            "prop", displayName, "fieldLabels", fieldLabels.toString())); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        agentHitLog("OK", "ControlInterop.resolvePropertyAtClick", "hit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                java.util.Map.of("prop", displayName, "groupIndex", groupIndex, //$NON-NLS-1$ //$NON-NLS-2$
-                        "propertyIndex", propertyIndex, "areaTop", band[0], "areaBottom", band[1], //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        "areaTopCanvas", area.topCanvas, "areaBottomCanvas", area.bottomCanvas, //$NON-NLS-1$ //$NON-NLS-2$
-                        "canvasY", canvasY, "fieldsCount", fieldsCount, "areasCount", areas.size())); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        // #endregion
-        PropertySheetDebug.feature("resolve via=scan g=" + groupIndex //$NON-NLS-1$
+PropertySheetDebug.feature("resolve via=scan g=" + groupIndex //$NON-NLS-1$
                 + " p=" + propertyIndex + " " + PropertySheetDebug.quote(displayName)); //$NON-NLS-1$ //$NON-NLS-2$
         return new PropertyClickHit(displayName, lwtView, band[0], band[1], area.topCanvas,
                 area.bottomCanvas, propertyIndex, "scan"); //$NON-NLS-1$

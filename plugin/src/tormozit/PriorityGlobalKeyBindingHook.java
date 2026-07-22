@@ -216,8 +216,6 @@ public class PriorityGlobalKeyBindingHook implements IStartup
             if (!irActive)
                 ensureFormatActionDefaults(Set.of());
 
-            Set<KeySequence> globalSequences = collectAllGlobalCommandSequences();
-            tempDumpGlobalCommandBindings(globalSequences);
             // реактивно — переустановит persisted USER-оверрайд, если «Восстановить команду» её сняла;
             // readRegistryAndPreferences() внутри пересобирает живую модель и сбрасывает наши
             // непersist-нутые LOCAL_OVERRIDE_CONTEXT_IDS-привязки — форсируем их пересборку ниже.
@@ -520,50 +518,6 @@ public class PriorityGlobalKeyBindingHook implements IStartup
     // =========================================================================
 
     /**
-     * ВРЕМЕННАЯ диагностика (снять после подтверждения фикса): безусловный дамп ВСЕХ
-     * привязок на сочетания {@link #GLOBAL_COMMAND_IDS} — без фильтров по схеме/контексту,
-     * чтобы увидеть реальный (не предполагаемый) contextId/schemeId/type конкурирующих
-     * команд, например {@code org.eclipse.debug.ui.commands.RunLast} на Ctrl+F11.
-     * Пишет в {@code .tmp/temp-logs/PriorityGlobalKeyBinding.log} через {@link Global#tempLog}.
-     */
-    private static void tempDumpGlobalCommandBindings(Set<KeySequence> sequences)
-    {
-        if (bindingServiceInternal == null)
-        {
-            Global.tempLog(TAG, "dump: bindingServiceInternal=null"); //$NON-NLS-1$
-            return;
-        }
-        Global.tempLog(TAG, "dump BEGIN activeScheme=" + activeSchemeId() //$NON-NLS-1$
-                + " ourSequences=" + sequences); //$NON-NLS-1$
-        for (Binding binding : bindingServiceInternal.getBindings())
-        {
-            if (binding == null)
-                continue;
-            TriggerSequence trigger = binding.getTriggerSequence();
-            if (!(trigger instanceof KeySequence keySequence) || !sequences.contains(keySequence))
-                continue;
-            ParameterizedCommand pc = binding.getParameterizedCommand();
-            Global.tempLog(TAG, "dump   cmd=" + (pc != null ? pc.getId() : "null") //$NON-NLS-1$ //$NON-NLS-2$
-                    + " ctx=" + binding.getContextId() //$NON-NLS-1$
-                    + " scheme=" + binding.getSchemeId() //$NON-NLS-1$
-                    + " type=" + (binding.getType() == Binding.USER ? "USER" : "SYSTEM") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " platform=" + binding.getPlatform() //$NON-NLS-1$
-                    + " locale=" + binding.getLocale() //$NON-NLS-1$
-                    + " seq=" + keySequence.format()); //$NON-NLS-1$
-        }
-        Global.tempLog(TAG, "dump END"); //$NON-NLS-1$
-    }
-
-    /** Все effective-сочетания {@link #GLOBAL_COMMAND_IDS} (объединённо, для поиска конфликтов). */
-    private static Set<KeySequence> collectAllGlobalCommandSequences()
-    {
-        Set<KeySequence> result = new LinkedHashSet<>();
-        for (String commandId : GLOBAL_COMMAND_IDS)
-            result.addAll(collectGlobalKeySequences(commandId));
-        return result;
-    }
-
-    /**
      * Сохраняет USER-привязку {@link #GLOBAL_COMMAND_IDS} в {@link #GLOBAL_CONTEXT_ID} через
      * {@link IBindingService#savePreferences} (+ tombstone на SYSTEM-схеме, см. ниже) и сразу
      * пересобирает живую модель через {@link IBindingService#readRegistryAndPreferences}.
@@ -654,15 +608,11 @@ public class PriorityGlobalKeyBindingHook implements IStartup
         try
         {
             bindingServiceInternal.savePreferences(activeScheme, combined.toArray(new Binding[0]));
-            Global.tempLog(TAG, "persisted USER override via savePreferences: scheme=" + schemeId //$NON-NLS-1$
-                    + " total=" + combined.size() //$NON-NLS-1$
-                    + " added=" + desiredUserBindings.size()); //$NON-NLS-1$
 
             // Пересобрать живую модель из реестра+preferences заново — иначе то, чем пользуется
             // диалог «Клавиши»/«Восстановить команду», может остаться в устаревшем состоянии
             // относительно того, что мы только что записали через savePreferences.
             bindingServiceInternal.readRegistryAndPreferences(commandService);
-            Global.tempLog(TAG, "readRegistryAndPreferences done"); //$NON-NLS-1$
             return true;
         }
         catch (java.io.IOException e)

@@ -385,35 +385,19 @@ final class PropertySheetUiCoordinator
     {
         if (page == null || row == null)
         {
-            // #region agent log
-            PropertySheetControlInterop.agentHitLog("H8", "PropertySheetUiCoordinator.handleRowClick", "earlyNull", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    java.util.Map.of("pageNull", page == null, "rowNull", row == null)); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return;
+return;
         }
         PageSession session = SESSIONS.get(page);
         if (session == null || session.rowSelection == null)
         {
-            // #region agent log
-            PropertySheetControlInterop.agentHitLog("H8", "PropertySheetUiCoordinator.handleRowClick", "noSession", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    java.util.Map.of("sessionNull", session == null)); //$NON-NLS-1$
-            // #endregion
-            return;
+return;
         }
         PropertySheetUiContext ctx = session.lastContext;
         if (ctx == null)
         {
-            // #region agent log
-            PropertySheetControlInterop.agentHitLog("H8", "PropertySheetUiCoordinator.handleRowClick", "noCtx", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    java.util.Collections.emptyMap());
-            // #endregion
-            return;
+return;
         }
-        // #region agent log
-        PropertySheetControlInterop.agentHitLog("H8", "PropertySheetUiCoordinator.handleRowClick", "selectRow", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                java.util.Map.of("prop", row.propertyName)); //$NON-NLS-1$
-        // #endregion
-        session.rowSelection.selectRow(ctx, row);
+session.rowSelection.selectRow(ctx, row);
     }
 
     static void showRowContextMenu(Object page, PropertySheetPaletteRow row,

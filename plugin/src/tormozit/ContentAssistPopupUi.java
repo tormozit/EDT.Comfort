@@ -307,14 +307,7 @@ public final class ContentAssistPopupUi
         }
         toggle.setEnabled(true);
         toggle.setToolTipText(null);
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H57", "applyFilterToggleAvailability", "state", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"inLiteral\":" + inLiteral //$NON-NLS-1$
-                + ",\"irConnected\":" + irConnected //$NON-NLS-1$
-                + ",\"enabled\":true" //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     private static int resolveViewerCaret(SourceViewer viewer)
     {

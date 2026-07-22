@@ -175,7 +175,6 @@ public final class SearchViewAggregationHook implements IStartup
         searchGeneration++;
         SAVED_TABLE_SELECTION_BY_VIEWER.clear();
         log("onSearchStarting: watch first root, gen=" + searchGeneration); //$NON-NLS-1$
-        Global.tempLog("aggfilter", "onSearchStarting: guard=true gen=" + searchGeneration); //$NON-NLS-1$ //$NON-NLS-2$
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
@@ -255,7 +254,6 @@ public final class SearchViewAggregationHook implements IStartup
             if (firstRoot.equals(viewers.tree.getStructuredSelection().getFirstElement()))
             {
                 guardFirstRootSelection = false;
-                Global.tempLog("aggfilter", "guard OFF (matched) attempt=" + attempt); //$NON-NLS-1$ //$NON-NLS-2$
                 scheduleFinalAggregationReapply(viewers.tree, viewers.table, firstRoot);
             }
             else if (attempt < 60)
@@ -263,7 +261,6 @@ public final class SearchViewAggregationHook implements IStartup
             else
             {
                 guardFirstRootSelection = false;
-                Global.tempLog("aggfilter", "guard OFF (attempts exhausted) attempt=" + attempt); //$NON-NLS-1$ //$NON-NLS-2$
                 scheduleFinalAggregationReapply(viewers.tree, viewers.table, firstRoot);
             }
         });
@@ -306,7 +303,6 @@ public final class SearchViewAggregationHook implements IStartup
             Object current = treeViewer.getStructuredSelection().getFirstElement();
             if (!node.equals(current))
                 return; // пользователь уже кликнул на что-то другое — не мешаем
-            Global.tempLog("aggfilter", "final reapply +100ms for " + describeNodeForLog(node)); //$NON-NLS-1$ //$NON-NLS-2$
             applyAggregationIfNeeded(treeViewer, tableViewer,
                 Collections.singletonList(node), copySavedSelection(tableViewer), "finalReapply"); //$NON-NLS-1$
         });
@@ -583,8 +579,6 @@ public final class SearchViewAggregationHook implements IStartup
                 List<Object> selectedNodes = selection.toList();
                 // Временная диагностика (баг: таблица показывает терминальную ветку, хотя
                 // активна строка узла-проекта). Топик отдельный от issue165 — другой баг.
-                Global.tempLog("aggfilter", "postSelectionChanged: guard=" + guardFirstRootSelection //$NON-NLS-1$ //$NON-NLS-2$
-                    + " selectedNodes=" + describeNodesForLog(selectedNodes)); //$NON-NLS-1$
 
                 // EDT при появлении результатов спускается к первому терминальному узлу.
                 if (guardFirstRootSelection)
@@ -593,8 +587,6 @@ public final class SearchViewAggregationHook implements IStartup
                     if (firstRoot == null)
                         return;
                     Object current = selectedNodes.isEmpty() ? null : selectedNodes.get(0);
-                    Global.tempLog("aggfilter", "guard branch: firstRoot=" + describeNodeForLog(firstRoot) //$NON-NLS-1$ //$NON-NLS-2$
-                        + " current=" + describeNodeForLog(current) + " equal=" + firstRoot.equals(current)); //$NON-NLS-1$ //$NON-NLS-2$
                     if (!firstRoot.equals(current))
                     {
                         log("redirectToFirstRoot: " + current + " -> " + firstRoot); //$NON-NLS-1$ //$NON-NLS-2$
@@ -646,8 +638,6 @@ public final class SearchViewAggregationHook implements IStartup
                 break;
             }
         }
-        Global.tempLog("aggfilter", "applyAggregationIfNeeded(" + source + "): nodes=" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + describeNodesForLog(selectedNodes) + " needsAggregation=" + needsAggregation); //$NON-NLS-1$
         if (!needsAggregation)
             return false;
 

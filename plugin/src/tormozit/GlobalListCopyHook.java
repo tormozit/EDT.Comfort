@@ -82,14 +82,11 @@ public final class GlobalListCopyHook implements IStartup
         Control focus = Display.getCurrent().getFocusControl();
         if (!(focus instanceof List list) || list.isDisposed())
         {
-            Global.tempLog("globalListCopy", "notHandled cmd=" + commandId //$NON-NLS-1$ //$NON-NLS-2$
-                    + " focus=" + (focus == null ? "null" : focus.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         String[] selection = list.getSelection();
         if (selection.length == 0)
         {
-            Global.tempLog("globalListCopy", "skip empty-selection list=" + list); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         String text = String.join("\n", selection); //$NON-NLS-1$
@@ -97,7 +94,6 @@ public final class GlobalListCopyHook implements IStartup
         try
         {
             clipboard.setContents(new Object[] {text}, new Transfer[] {TextTransfer.getInstance()});
-            Global.tempLog("globalListCopy", "clipboard set, text=[" + text + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
         finally
         {

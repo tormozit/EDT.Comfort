@@ -153,16 +153,12 @@ final class FilterHistoryUi
     private static void showMenu(Control anchor, Text filterControl, List<String> items)
     {
         Menu menu = new Menu(anchor);
-        Global.tempLog("filterHistoryUi", "showMenu: items=" + items); //$NON-NLS-1$ //$NON-NLS-2$
         for (String item : items)
         {
             MenuItem menuItem = new MenuItem(menu, SWT.PUSH);
             menuItem.setText(item);
             menuItem.addListener(SWT.Selection, e ->
             {
-                Global.tempLog("filterHistoryUi", //$NON-NLS-1$
-                        "selection item=[" + item + "] before=[" //$NON-NLS-1$ //$NON-NLS-2$
-                        + (filterControl.isDisposed() ? "<disposed>" : filterControl.getText()) + "]"); //$NON-NLS-1$ //$NON-NLS-2$
                 // Не ставим текст здесь: Selection приходит внутри nested loop
                 // Menu.setVisible (на Windows Hide часто раньше Selection), и
                 // Modify/textChanged/refreshJob FilteredTree плавают до Activate
@@ -173,7 +169,6 @@ final class FilterHistoryUi
         }
         menu.addListener(SWT.Hide, e ->
         {
-            Global.tempLog("filterHistoryUi", "menu Hide"); //$NON-NLS-1$ //$NON-NLS-2$
             menu.getDisplay().asyncExec(() ->
             {
                 if (!menu.isDisposed())
@@ -181,9 +176,7 @@ final class FilterHistoryUi
             });
         });
         menu.setLocation(anchor.toDisplay(0, anchor.getSize().y));
-        Global.tempLog("filterHistoryUi", "menu.setVisible(true)"); //$NON-NLS-1$ //$NON-NLS-2$
         menu.setVisible(true);
-        Global.tempLog("filterHistoryUi", "menu.setVisible returned"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /**
@@ -194,11 +187,8 @@ final class FilterHistoryUi
     {
         if (filterControl == null || filterControl.isDisposed())
         {
-            Global.tempLog("filterHistoryUi", "applyAsync: filterControl disposed"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
-        Global.tempLog("filterHistoryUi", "applyAsync: item=[" + item + "] before=[" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + filterControl.getText() + "]"); //$NON-NLS-1$
         filterControl.setText(item);
         filterControl.setSelection(item.length());
         filterControl.setFocus();
@@ -207,10 +197,8 @@ final class FilterHistoryUi
             forceTextChanged(tree);
         else
         {
-            Global.tempLog("filterHistoryUi", "applyAsync: no FilteredTree, notify Modify"); //$NON-NLS-1$ //$NON-NLS-2$
             filterControl.notifyListeners(SWT.Modify, new Event());
         }
-        Global.tempLog("filterHistoryUi", "applyAsync: after=[" + filterControl.getText() + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     private static FilteredTree findFilteredTree(Control start)
@@ -230,11 +218,9 @@ final class FilterHistoryUi
             Method textChanged = FilteredTree.class.getDeclaredMethod("textChanged"); //$NON-NLS-1$
             textChanged.setAccessible(true);
             textChanged.invoke(tree);
-            Global.tempLog("filterHistoryUi", "textChanged ok"); //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (Exception ex)
         {
-            Global.tempLog("filterHistoryUi", "textChanged fail: " + ex); //$NON-NLS-1$ //$NON-NLS-2$
             Text filterControl = tree.getFilterControl();
             if (filterControl != null && !filterControl.isDisposed())
                 filterControl.notifyListeners(SWT.Modify, new Event());

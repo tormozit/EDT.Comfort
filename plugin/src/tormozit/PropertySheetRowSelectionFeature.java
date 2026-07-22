@@ -217,11 +217,7 @@ final class PropertySheetRowSelectionFeature implements PropertySheetUiFeature
         ScrolledComposite scroll = PropertySheetUiContext.findPaletteScrolledComposite(page);
         if (scroll == null || scroll.isDisposed())
         {
-            // #region agent log
-            PropertySheetControlInterop.agentHitLog("H25", "PropertySheetRowSelectionFeature.ensureScanOverlay", //$NON-NLS-1$ //$NON-NLS-2$
-                    "noScroll", java.util.Map.of("pageNull", page == null)); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return null;
+return null;
         }
         Canvas overlay = (Canvas) scroll.getData(SCAN_OVERLAY_KEY);
         if (overlay == null || overlay.isDisposed())
@@ -436,11 +432,7 @@ final class PropertySheetRowSelectionFeature implements PropertySheetUiFeature
         {
             log("activate skip noHost " + PropertySheetDebug.quote(row.propertyName) //$NON-NLS-1$
                     + " " + describeInteractionTarget(row, page)); //$NON-NLS-1$
-            // #region agent log
-            PropertySheetControlInterop.agentHitLog("H9", "PropertySheetRowSelectionFeature.activate", "noHost", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    java.util.Map.of("prop", row.propertyName)); //$NON-NLS-1$
-            // #endregion
-            return;
+return;
         }
         if (row.lwtView != null && !row.selectionBandIsCanvas)
             PropertySheetControlInterop.refreshLwtRowGeometry(host, row.lwtView, row.propertyName);
@@ -462,26 +454,7 @@ final class PropertySheetRowSelectionFeature implements PropertySheetUiFeature
             layoutScanOverlayForRow(scroll, (Canvas) host, page, row);
         }
         Rectangle band = resolveRowBand(host, row, page);
-        // #region agent log
-        java.util.Map<String, Object> h9 = new java.util.LinkedHashMap<>();
-        h9.put("prop", row.propertyName); //$NON-NLS-1$
-        h9.put("host", host.getClass().getSimpleName()); //$NON-NLS-1$
-        h9.put("rectW", band != null ? band.width : -1); //$NON-NLS-1$
-        h9.put("rectH", band != null ? band.height : -1); //$NON-NLS-1$
-        if (row.selectionBandIsCanvas)
-        {
-            h9.put("topCanvas", row.selectionBandTopCanvas); //$NON-NLS-1$
-            h9.put("bottomCanvas", row.selectionBandBottomCanvas); //$NON-NLS-1$
-            h9.put("overlay", host instanceof Canvas); //$NON-NLS-1$
-        }
-        else
-        {
-            h9.put("bandTop", row.selectionBandTopDisplay); //$NON-NLS-1$
-            h9.put("bandBottom", row.selectionBandBottomDisplay); //$NON-NLS-1$
-        }
-        PropertySheetControlInterop.agentHitLog("H9", "PropertySheetRowSelectionFeature.activate", "draw", h9); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        // #endregion
-        host.redraw();
+host.redraw();
     }
 
     private static void deactivate(PropertySheetPaletteRow row, Object page)
@@ -527,27 +500,7 @@ final class PropertySheetRowSelectionFeature implements PropertySheetUiFeature
         gc.setForeground(selColor);
         gc.setLineWidth(1);
         gc.drawRectangle(x, y, Math.max(0, w - 1), Math.max(0, h - 1));
-        // #region agent log
-        java.util.Map<String, Object> h24 = new java.util.LinkedHashMap<>();
-        h24.put("prop", row.propertyName); //$NON-NLS-1$
-        h24.put("host", host.getClass().getSimpleName()); //$NON-NLS-1$
-        h24.put("x", x); //$NON-NLS-1$
-        h24.put("y", y); //$NON-NLS-1$
-        h24.put("w", w); //$NON-NLS-1$
-        h24.put("h", h); //$NON-NLS-1$
-        h24.put("hostH", host.getSize().y); //$NON-NLS-1$
-        if (row.selectionBandIsCanvas)
-        {
-            h24.put("topCanvas", row.selectionBandTopCanvas); //$NON-NLS-1$
-            h24.put("bottomCanvas", row.selectionBandBottomCanvas); //$NON-NLS-1$
-        }
-        PropertySheetControlInterop.agentHitLog("H24", "PropertySheetRowSelectionFeature.drawSelectionBand", //$NON-NLS-1$ //$NON-NLS-2$
-                "scanFrame", h24); //$NON-NLS-1$
-        PropertySheetControlInterop.agentHitLog("H9d", "PropertySheetRowSelectionFeature.drawSelectionBand", //$NON-NLS-1$ //$NON-NLS-2$
-                "paint", java.util.Map.of("prop", row.propertyName, "host", host.getClass().getSimpleName(), //$NON-NLS-1$ //$NON-NLS-2$
-                        "x", x, "y", y, "w", w, "h", h)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        // #endregion
-    }
+}
 
     private static Rectangle resolveRowBand(Control host, PropertySheetPaletteRow row, Object page)
     {

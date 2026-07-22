@@ -706,10 +706,6 @@ public final class ComfortKeysPreferences
             }
         }
 
-        Global.tempLog("userPriorityToggle", "cmd=" + commandId + " makeUser=" + makeUser //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " targetKey=" + targetKey + " tombstoneKey=" + tombstoneKey //$NON-NLS-1$ //$NON-NLS-2$
-                + " beforeTotal=" + before.length + " excluded=" + excludedCount //$NON-NLS-1$ //$NON-NLS-2$
-                + " combinedSize=" + combined.size()); //$NON-NLS-1$
 
         try
         {
@@ -727,8 +723,6 @@ public final class ComfortKeysPreferences
                 if (key.equals(targetKey))
                     stillPresentAfter = true;
             }
-            Global.tempLog("userPriorityToggle", "cmd=" + commandId + " saved+reread ok" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " targetStillPresentAfterReread=" + stillPresentAfter); //$NON-NLS-1$
 
             syncDialogPrivateBindingManager(controller, targetKey, tombstoneKey, sequence,
                     parameterized, activeSchemeId, contextId, makeUser);
@@ -738,7 +732,6 @@ public final class ComfortKeysPreferences
         catch (java.io.IOException e)
         {
             Global.logError("ComfortKeys", "applyUserPriority savePreferences: " + commandId, e); //$NON-NLS-1$ //$NON-NLS-2$
-            Global.tempLog("userPriorityToggle", "cmd=" + commandId + " savePreferences IOException " + e); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return false;
         }
     }
@@ -761,7 +754,6 @@ public final class ComfortKeysPreferences
         Object rawManager = Global.getField(controller, "fBindingManager"); //$NON-NLS-1$
         if (!(rawManager instanceof BindingManager dialogManager))
         {
-            Global.tempLog("userPriorityToggle", "fBindingManager not found via reflection"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
 
@@ -791,8 +783,6 @@ public final class ComfortKeysPreferences
             }
         }
 
-        Global.tempLog("userPriorityToggle", "synced dialog fBindingManager removed=" + removed //$NON-NLS-1$ //$NON-NLS-2$
-                + " makeUser=" + makeUser); //$NON-NLS-1$
     }
 
     private static final String DEFAULT_SCHEME_ID_FOR_TOGGLE =

@@ -71,7 +71,6 @@ public final class IrFormatTextDebug
     private static final String[] COMFORT_KEYDOWN_HOOKS = {
         "ContentAssistSessionReloader.CtrlSpaceFilter (Display)", //$NON-NLS-1$
         "DebugInspectorTreeEnhancement (Display)", //$NON-NLS-1$
-        "IrFormatTextKeyDiagHook (Display)", //$NON-NLS-1$
         "BSLEditorMenuHook (StyledText per editor)", //$NON-NLS-1$
         "EmbeddedBslXtextContextHook (StyledText per editor)", //$NON-NLS-1$
     };

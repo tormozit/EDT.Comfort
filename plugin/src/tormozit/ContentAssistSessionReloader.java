@@ -283,11 +283,7 @@ public final class ContentAssistSessionReloader
             if (bslEditor != null)
                 BslCompletionSideHintResolver.rememberEditorBrowserCreator(bslEditor, installBrowserCreator);
         }
-        // #region agent log
-        logInstallCreatorDiagnostics(viewer, installBrowserCreator != null);
-        // #endregion
-
-        this.completionListener = new CompletionListenerAdapter() {
+this.completionListener = new CompletionListenerAdapter() {
             @Override
             public void assistSessionStarted(ContentAssistEvent event)
             {
@@ -307,12 +303,7 @@ public final class ContentAssistSessionReloader
                     && ComfortSettings.isReplaceListFiltersEnabled()
                     && IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer) != null)
                 {
-                    // #region agent log
-                    ContentAssistDebug.debugModeLog("H1", "assistSessionStarted", "tryBeginLiteral", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        "{\"caret\":" + caret + ",\"build\":\"" //$NON-NLS-1$ //$NON-NLS-2$
-                            + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$
-                    // #endregion
-                    tryBeginManualDualAssist(caret);
+tryBeginManualDualAssist(caret);
                 }
                 boolean inMember = false;
                 if (caret >= 0 && !inLiteral && viewer.getDocument() != null)
@@ -325,12 +316,7 @@ public final class ContentAssistSessionReloader
                     && IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer) != null)
                 {
                     ContentAssistPopupSync.ensureEmptyListAllowed(assistant, true);
-                    // #region agent log
-                    ContentAssistDebug.debugModeLog("H55", "assistSessionStarted", "memberEmptyAllowed", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        "{\"caret\":" + caret + ",\"build\":\"" //$NON-NLS-1$ //$NON-NLS-2$
-                            + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-                    // #endregion
-                }
+}
                 boolean literalManualSession = manualIrAssistPending && caret >= 0 && inLiteral;
                 boolean manualDualSession = !event.isAutoActivated && caret >= 0
                     && caret == manualIrAssistCaret;
@@ -359,74 +345,7 @@ public final class ContentAssistSessionReloader
                     else
                         openGen = literalOpenGen;
                 }
-                // #region agent log
-                ContentAssistDebug.debugModeLog("H9", "assistSessionStarted", "session", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"auto\":" + event.isAutoActivated + ",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"inLiteral\":" + inLiteral //$NON-NLS-1$
-                        + ",\"pending\":" + manualIrAssistPending //$NON-NLS-1$
-                        + ",\"completionAutoOpenPending\":" + completionAutoOpenPending //$NON-NLS-1$
-                        + ",\"completionAutoOpenEdtOpened\":" + completionAutoOpenEdtOpened //$NON-NLS-1$
-                        + ",\"irOnly\":" + processor.isIrOnlyManualMode() //$NON-NLS-1$
-                        + ",\"preserveWordsTable\":" + preserveWordsTable //$NON-NLS-1$
-                        + ",\"preserveAutoOpen\":" + preserveAutoOpen //$NON-NLS-1$
-                        + ",\"openGen\":" + openGen //$NON-NLS-1$
-                        + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                // #region agent log
-                ContentAssistDebug.logAutoOpen(completionAutoOpenActiveSeq, "H75", //$NON-NLS-1$
-                    "assistSessionStarted", "sessionStarted", //$NON-NLS-1$ //$NON-NLS-2$
-                    "{\"auto\":" + event.isAutoActivated //$NON-NLS-1$
-                        + ",\"completionAutoOpenPending\":" + completionAutoOpenPending //$NON-NLS-1$
-                        + ",\"invalidateCache\":" + (!manualDualSession && !preserveLiteralIr && !preserveAutoOpen) //$NON-NLS-1$
-                        + ",\"preserveWordsTable\":" + preserveWordsTable + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                if (!preserveWordsTable)
-                {
-                    wordsTableReady = false;
-                    // Важно: если запрос слов ещё в полёте, то сброс `wordsTableCaret` ломает guard
-                    // `isWordsTableFetchInFlightForCaret(caret)` и может приводить к дублю fetch.
-                    if (!wordsTableFetchInFlight)
-                        wordsTableCaret = -1;
-                    else
-                    {
-                        ContentAssistDebug.debugModeLog("H10", "assistSessionStarted", //$NON-NLS-1$ //$NON-NLS-2$
-                            "preserveCaretDuringInFlight", //$NON-NLS-1$
-                            "{\"preserveWordsTable\":false,\"wordsTableFetchInFlight\":true,\"caret\":"
-                                + caret + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-                    }
-                }
-                pendingPopupRefresh = false;
-                pendingPopupRefreshIsIr = false;
-                clearIrSelectionResetState();
-                if (!preserveWordsTable)
-                {
-                    irAssistCommandOpen = false;
-                    activeIrDisplayKey = null;
-                    irCompletionSnapshot = null;
-                    clearIrSideHintCaches();
-                }
-                IInformationControlCreator fresh = resolveFreshAssistBrowserCreator(caret);
-                boolean sessionCreatorOk = fresh != null;
-                boolean cachedBeforeFresh = assistBrowserCreator != null;
-                if (fresh != null)
-                    assistBrowserCreator = fresh;
-                // #region agent log
-                String resourceSuffix = "null"; //$NON-NLS-1$
-                if (viewer.getDocument() instanceof org.eclipse.xtext.ui.editor.model.IXtextDocument xtextDoc)
-                {
-                    org.eclipse.emf.common.util.URI resourceUri = xtextDoc.getResourceURI();
-                    if (resourceUri != null)
-                        resourceSuffix = resourceUri.toString();
-                }
-                ContentAssistDebug.debugModeLog("H21", "assistSessionStarted", "creator", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"viewerHash\":" + System.identityHashCode(viewer) //$NON-NLS-1$
-                        + ",\"inLiteral\":" + inLiteral //$NON-NLS-1$
-                        + ",\"sessionCreatorOk\":" + sessionCreatorOk //$NON-NLS-1$
-                        + ",\"cachedBeforeFresh\":" + cachedBeforeFresh //$NON-NLS-1$
-                        + ",\"cachedAfterFresh\":" + (assistBrowserCreator != null) //$NON-NLS-1$
-                        + ",\"resourceUri\":\"" + ContentAssistDebug.jsonEscapeForLog(resourceSuffix) //$NON-NLS-1$
-                        + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                lastCaretDocumentStamp = -1;
+lastCaretDocumentStamp = -1;
                 synchronized (pendingAfterWordsTable)
                 {
                     pendingAfterWordsTable.clear();
@@ -488,16 +407,7 @@ public final class ContentAssistSessionReloader
                 boolean popupVisible = ContentAssistPopupSync.isPopupVisible(assistant);
                 boolean irConnected = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(
                     facade, viewer) != null;
-                // #region agent log
-                ContentAssistDebug.debugModeLog("H63", "assistSessionRestarted", "session", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"auto\":" + event.isAutoActivated + ",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"inLiteral\":" + inLiteral //$NON-NLS-1$
-                        + ",\"popupVisible\":" + popupVisible //$NON-NLS-1$
-                        + ",\"irConnected\":" + irConnected //$NON-NLS-1$
-                        + ",\"commandHandled\":" + Boolean.TRUE.equals(LITERAL_REPEAT_FROM_COMMAND.get()) //$NON-NLS-1$
-                        + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                if (Boolean.TRUE.equals(LITERAL_REPEAT_FROM_COMMAND.get()))
+if (Boolean.TRUE.equals(LITERAL_REPEAT_FROM_COMMAND.get()))
                     return;
                 if (!ComfortSettings.isReplaceListFiltersEnabled() || !popupVisible
                     || !inLiteral)
@@ -519,18 +429,7 @@ public final class ContentAssistSessionReloader
                 boolean preserveOnEnd = manualAwait || isCompletionAutoOpenAwaitingIr();
                 boolean popupVisible = ContentAssistPopupSync.isPopupVisible(assistant);
                 int endCaret = ContentAssistPopupSync.syncSessionOffsets(assistant, viewer);
-                // #region agent log
-                ContentAssistDebug.traceAssist("H6", "assistSessionEnded", "lifecycle", //$NON-NLS-1$ //$NON-NLS-2$
-                    "{\"preserveOnEnd\":" + preserveOnEnd //$NON-NLS-1$
-                        + ",\"manualAwait\":" + manualAwait //$NON-NLS-1$
-                        + ",\"autoOpenPending\":" + completionAutoOpenPending //$NON-NLS-1$
-                        + ",\"inFlight\":" + wordsTableFetchInFlight //$NON-NLS-1$
-                        + ",\"wordsCaret\":" + wordsTableCaret //$NON-NLS-1$
-                        + ",\"autoOpenCaret\":" + completionAutoOpenCaret //$NON-NLS-1$
-                        + ",\"popupVisible\":" + popupVisible //$NON-NLS-1$
-                        + ",\"endCaret\":" + endCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                boolean inLiteral = endCaret >= 0
+boolean inLiteral = endCaret >= 0
                     && SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, endCaret);
                 if (!inLiteral && !preserveOnEnd
                     && ContentAssistPopupSync.hasAssistBrowserSidePanel(assistant))
@@ -561,10 +460,7 @@ public final class ContentAssistSessionReloader
                     Display suppressDisplay = suppressWidget.getDisplay();
                     if (suppressDisplay != null && !suppressDisplay.isDisposed())
                     {
-                        // #region agent log
-                        scheduleInsertCaretProbe(suppressDisplay, "sessionEnd"); //$NON-NLS-1$
-                        // #endregion
-                        suppressDisplay.asyncExec(
+suppressDisplay.asyncExec(
                             () -> suppressDocumentAutoOpenAfterSession = false);
                     }
                 }
@@ -651,28 +547,11 @@ public final class ContentAssistSessionReloader
     private void logInstallDiagnostics(SourceViewer sourceViewer)
     {
         Widget textWidget = viewer.getTextWidget();
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H0", "ContentAssistSessionReloader.install", "build", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD //$NON-NLS-1$
-                + "\",\"viewerHash\":" + System.identityHashCode(sourceViewer) //$NON-NLS-1$
-                + ",\"textWidgetHash\":" + (textWidget != null //$NON-NLS-1$
-                    ? System.identityHashCode(textWidget) : -1) //$NON-NLS-1$
-                + ",\"comfortOn\":" + ComfortSettings.isReplaceListFiltersEnabled() //$NON-NLS-1$
-                + ",\"filterInstalled\":" + ctrlSpaceFilterInstalled //$NON-NLS-1$
-                + ",\"textKeyListenerInstalled\":" + styledTextKeyListenerInstalled + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     private void logInstallCreatorDiagnostics(SourceViewer sourceViewer, boolean installCreatorOk)
     {
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H21", "ContentAssistSessionReloader.install", "creator", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"viewerHash\":" + System.identityHashCode(sourceViewer) //$NON-NLS-1$
-                + ",\"installCreatorOk\":" + installCreatorOk //$NON-NLS-1$
-                + ",\"cachedCreatorOk\":" + (assistBrowserCreator != null) //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     private void detach()
     {
@@ -817,12 +696,7 @@ public final class ContentAssistSessionReloader
         display.addFilter(SWT.KeyDown, ctrlSpaceFilter);
         display.setData(displayFilterKey, ctrlSpaceFilter);
         ctrlSpaceFilterInstalled = true;
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H59", "installCtrlSpaceFilter", "installed", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"viewerHash\":" + System.identityHashCode(viewer) //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     private void uninstallCtrlSpaceFilter()
     {
@@ -930,12 +804,7 @@ public final class ContentAssistSessionReloader
         IDocumentListener bslListener = findBslDocumentListener(doc);
         if (bslListener == null)
         {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H-INSERT", "prepareStockLinkedMode", "noBslListener", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(
-                    text.length() > 80 ? text.substring(0, 80) : text) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return;
+return;
         }
         pendingBslDocumentListener = bslListener;
         DataEventDiag before = readDataEventDiag(bslListener, text);
@@ -951,24 +820,7 @@ public final class ContentAssistSessionReloader
             pendingShowParamHintAfterInsert = true;
             pendingParamHintDesiredCaret = desiredCaret;
         }
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H-INSERT", "prepareStockLinkedMode", "sanitize", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"filtered\":" + filtered //$NON-NLS-1$
-                + ",\"clearedChoices\":" + clearedChoices //$NON-NLS-1$
-                + ",\"pendingParamHint\":" + pendingShowParamHintAfterInsert //$NON-NLS-1$
-                + ",\"offset\":" + event.getOffset() //$NON-NLS-1$
-                + ",\"mapSize\":" + before.mapSize //$NON-NLS-1$
-                + ",\"hasKey\":" + before.hasKey //$NON-NLS-1$
-                + ",\"posStart\":" + before.posStart //$NON-NLS-1$
-                + ",\"length\":" + before.length //$NON-NLS-1$
-                + ",\"stopPos\":" + before.stopPos //$NON-NLS-1$
-                + ",\"allInfo\":" + before.allInfoSize //$NON-NLS-1$
-                + ",\"objectsBefore\":" + before.objectsSize //$NON-NLS-1$
-                + ",\"objectsAfter\":" + after.objectsSize //$NON-NLS-1$
-                + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(
-                    text.length() > 80 ? text.substring(0, 80) : text) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        schedulePostDoItLinkedModeDiag(doc, event.getOffset(), text);
+schedulePostDoItLinkedModeDiag(doc, event.getOffset(), text);
     }
 
     /**
@@ -1060,21 +912,13 @@ public final class ContentAssistSessionReloader
         pendingParamHintDesiredCaret = -1;
         if (desired < 0 || caret != desired)
         {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"caret\":" + caret + ",\"desired\":" + desired + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            // #endregion
-            return;
+return;
         }
         StyledText widget = viewer != null ? viewer.getTextWidget() : null;
         Display display = widget != null && !widget.isDisposed() ? widget.getDisplay() : null;
         if (display == null || display.isDisposed())
             return;
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "scheduled", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + caret + ",\"desired\":" + desired + ",\"mode\":\"waitAst\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        // #endregion
-        final int desiredCaret = desired;
+final int desiredCaret = desired;
         final int gen = paramHintPostGen.incrementAndGet();
         final long startedMs = System.currentTimeMillis();
         display.timerExec(0, () -> pollAstReadyThenShowParamHint(desiredCaret, gen, 0, startedMs));
@@ -1100,47 +944,22 @@ public final class ContentAssistSessionReloader
         int caret = st.getCaretOffset();
         if (caret != desiredCaret)
         {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "skipAttempt", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"gen\":" + gen + ",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"caret\":" + caret + ",\"desired\":" + desiredCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            // #endregion
-            return;
+return;
         }
         if (isParamHoverShellVisible())
         {
             paramHintPostGen.incrementAndGet();
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "alreadyShown", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"gen\":" + gen + ",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"waitMs\":" + (System.currentTimeMillis() - startedMs) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return;
+return;
         }
         boolean astReady = isInvocationAstReadyAt(desiredCaret);
         long waitMs = System.currentTimeMillis() - startedMs;
         if (!astReady && waitMs < PARAM_HINT_AST_TIMEOUT_MS)
         {
-            // #region agent log
-            if (attempt == 0 || attempt % 5 == 0)
-            {
-                ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "astWait", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"gen\":" + gen + ",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"waitMs\":" + waitMs + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            // #endregion
-            display.timerExec(PARAM_HINT_AST_POLL_MS,
+display.timerExec(PARAM_HINT_AST_POLL_MS,
                 () -> pollAstReadyThenShowParamHint(desiredCaret, gen, attempt + 1, startedMs));
             return;
         }
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "astReady", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"gen\":" + gen + ",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"astReady\":" + astReady //$NON-NLS-1$
-                + ",\"waitMs\":" + waitMs //$NON-NLS-1$
-                + ",\"timeout\":" + (!astReady) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        runInvocationParametersHoverCommand(desiredCaret, gen, attempt);
+runInvocationParametersHoverCommand(desiredCaret, gen, attempt);
     }
 
     /**
@@ -1173,11 +992,7 @@ public final class ContentAssistSessionReloader
         }
         catch (Exception ex)
         {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "astError", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"ex\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return false;
+return false;
         }
     }
 
@@ -1243,22 +1058,12 @@ public final class ContentAssistSessionReloader
         int caret = st.getCaretOffset();
         if (caret != desiredCaret)
         {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "skipAttempt", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"gen\":" + gen + ",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"caret\":" + caret + ",\"desired\":" + desiredCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            // #endregion
-            return;
+return;
         }
         if (isParamHoverShellVisible() || isParamHoverInfoControlVisible())
         {
             paramHintPostGen.incrementAndGet();
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "alreadyShown", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"gen\":" + gen + ",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return;
+return;
         }
         ParamHoverProbe probe = new ParamHoverProbe();
         try
@@ -1285,23 +1090,7 @@ public final class ContentAssistSessionReloader
             probe.execOk = false;
             probe.err = String.valueOf(ex);
         }
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H-INSERT", "paramHint", "probe", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"gen\":" + gen //$NON-NLS-1$
-                + ",\"attempt\":" + attempt //$NON-NLS-1$
-                + ",\"caret\":" + caret //$NON-NLS-1$
-                + ",\"desired\":" + desiredCaret //$NON-NLS-1$
-                + ",\"execOk\":" + probe.execOk //$NON-NLS-1$
-                + ",\"popupShown\":" + probe.popupShown //$NON-NLS-1$
-                + ",\"shellVisible\":" + isParamHoverShellVisible() //$NON-NLS-1$
-                + ",\"handlerClass\":\"" + ContentAssistDebug.jsonEscapeForLog(
-                    probe.handlerClass != null ? probe.handlerClass : "") + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"infoControl\":\"" + ContentAssistDebug.jsonEscapeForLog(
-                    probe.infoControlState != null ? probe.infoControlState : "") + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"err\":\"" + ContentAssistDebug.jsonEscapeForLog(
-                    probe.err != null ? probe.err : "") + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     /** Штатная команда BSL: Ctrl+Shift+Space — подсказка параметров вызова. */
     private static final String INVOCATION_PARAMETERS_HOVER_COMMAND =
@@ -1585,16 +1374,7 @@ public final class ContentAssistSessionReloader
         int caret = st != null && !st.isDisposed() ? st.getCaretOffset() : -1;
         IDocumentListener bslNow = findBslDocumentListener(doc);
         DataEventDiag mapDiag = readDataEventDiag(bslNow != null ? bslNow : remembered, text);
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H-INSERT", "ensureBslListener", "done", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"wasPresent\":" + present + ",\"readded\":" + readded //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"hasModel\":" + hasModel //$NON-NLS-1$
-                + ",\"caret\":" + caret //$NON-NLS-1$
-                + ",\"mapSize\":" + mapDiag.mapSize //$NON-NLS-1$
-                + ",\"hasKey\":" + mapDiag.hasKey //$NON-NLS-1$
-                + ",\"insertOffset\":" + insertOffset + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        logLinkedModeDiagPhase("async0", doc, insertOffset, text); //$NON-NLS-1$
+logLinkedModeDiagPhase("async0", doc, insertOffset, text); //$NON-NLS-1$
         maybeShowParamHintAfterInsert(caret);
     }
 
@@ -1808,14 +1588,7 @@ public final class ContentAssistSessionReloader
                 idx++;
             }
             objectsDiag.append(']');
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H-INSERT", "sanitizeDataEvent", "objects", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(
-                    replacementText.length() > 80 ? replacementText.substring(0, 80) : replacementText)
-                    + "\",\"filtered\":" + filtered //$NON-NLS-1$
-                    + ",\"objects\":" + objectsDiag + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            if (filtered == 0)
+if (filtered == 0)
                 return 0;
             objectsField.set(dataEvent, kept);
             return filtered;
@@ -2024,17 +1797,7 @@ public final class ContentAssistSessionReloader
         ContentAssistSettings settings = ContentAssistSettings.getInstance();
         boolean autoOpenEnabled = settings != null && settings.isEnabled();
         boolean nativeEmpty = autoOpenEnabled && ComfortSettings.isReplaceListFiltersEnabled();
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H79", "ContentAssistSessionReloader.install", //$NON-NLS-1$ //$NON-NLS-2$
-            "autoOpenReady", //$NON-NLS-1$
-            "{\"verifyListenerInstalled\":" + (completionAutoOpenVerifyListener != null) //$NON-NLS-1$
-                + ",\"documentListenerInstalled\":" + (completionAutoOpenDocumentListener != null) //$NON-NLS-1$
-                + ",\"nativeCharsetEmpty\":" + nativeEmpty //$NON-NLS-1$
-                + ",\"autoOpenEnabled\":" + autoOpenEnabled //$NON-NLS-1$
-                + ",\"comfortFiltersOn\":" + ComfortSettings.isReplaceListFiltersEnabled() //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     private void onVerifyKeyForCompletionAutoOpen(VerifyEvent event)
     {
@@ -2061,18 +1824,7 @@ public final class ContentAssistSessionReloader
             doc, inserted, startOffset, caretAfter, popupWasOpen, event.stateMask);
         int seq = completionAutoOpenActiveSeq > 0
             ? completionAutoOpenActiveSeq : completionAutoOpenSeq.get();
-        // #region agent log
-        if (branch != null)
-        {
-            pendingAutoOpen = true;
-            ContentAssistDebug.logAutoOpen(seq, "H72", "onVerifyKeyForCompletionAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
-                "verifyKey", "{\"char\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(inserted)) //$NON-NLS-1$ //$NON-NLS-2$
-                    + "\",\"caretBefore\":" + startOffset + ",\"caretAfter\":" + caretAfter //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"popupWasOpen\":" + popupWasOpen //$NON-NLS-1$
-                    + ",\"shouldFetch\":true,\"triggerBranch\":\"" + branch + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        // #endregion
-        if ((inserted == '(' || inserted == ',') && !popupWasOpen)
+if ((inserted == '(' || inserted == ',') && !popupWasOpen)
         {
             String linePrefix = BslAssistSourceHeuristics.linePrefixToCaret(
                 doc, caretAfter, inserted, startOffset);
@@ -2153,10 +1905,7 @@ public final class ContentAssistSessionReloader
 
     private void onDocumentChangedForCompletionAutoOpenImpl(DocumentEvent event)
     {
-        // #region agent log
-        logProposalDocumentInsert(event);
-        // #endregion
-        if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
+if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
             return;
         pendingAutoOpen = false;
         ContentAssistSettings settings = ContentAssistSettings.getInstance();
@@ -2195,52 +1944,19 @@ public final class ContentAssistSessionReloader
         completionAutoOpenAwaitingLogged = false;
         if (branch == null)
         {
-            // #region agent log
-            ContentAssistDebug.logAutoOpen(seq, "H72", "onDocumentChangedForCompletionAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
-                "documentSkip", "{\"char\":\"" //$NON-NLS-1$ //$NON-NLS-2$
-                    + ContentAssistDebug.jsonEscapeForLog(String.valueOf(inserted)) //$NON-NLS-1$
-                    + "\",\"offset\":" + insertOffset + ",\"caretAfter\":" + caretAfter + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return;
+return;
         }
-        // #region agent log
-        ContentAssistDebug.logAutoOpen(seq, "H72", "onDocumentChangedForCompletionAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
-            "documentChanged", "{\"char\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(inserted)) //$NON-NLS-1$ //$NON-NLS-2$
-                + "\",\"offset\":" + insertOffset + ",\"caretAfter\":" + caretAfter //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"shouldFetch\":true,\"triggerBranch\":\"" + branch + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        if ("space".equals(branch) || "symbol".equals(branch))
+if ("space".equals(branch) || "symbol".equals(branch))
         {
             // Пробел и &~#: не открываем EDT-попап, ИР решает через ЗаполнитьТаблицуСлов
-            if (isWordsTableFetchInFlightForCaret(caretAfter))
-            {
-                // #region agent log
-                ContentAssistDebug.traceAssist("H4", "onDocumentChangedForCompletionAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
-                    "symbolSkipInFlight", "{\"branch\":\"" + branch + "\",\"caretAfter\":" //$NON-NLS-1$ //$NON-NLS-2$
-                        + caretAfter + ",\"seq\":" + seq + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-            }
-            else if (!scheduleWordsTablePreparation(caretAfter, true))
-            {
-                // #region agent log
-                ContentAssistDebug.traceAssist("H4", "onDocumentChangedForCompletionAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
-                    "symbolScheduleFailed", "{\"branch\":\"" + branch + "\",\"caretAfter\":" //$NON-NLS-1$ //$NON-NLS-2$
-                        + caretAfter + ",\"seq\":" + seq + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-            }
-            else
+            else            else
             {
                 completionAutoOpenPending = true;
                 completionAutoOpenCaret = caretAfter;
                 completionAutoOpenIrScheduled = true;
                 completionAutoOpenEdtOpened = false;
                 completionAutoOpenActiveSeq = seq;
-                // #region agent log
-                ContentAssistDebug.traceAssist("H4", "onDocumentChangedForCompletionAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
-                    "symbolIrScheduled", "{\"branch\":\"" + branch + "\",\"caretAfter\":" //$NON-NLS-1$ //$NON-NLS-2$
-                        + caretAfter + ",\"seq\":" + seq + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-            }
+}
         }
         else
         {
@@ -2259,18 +1975,7 @@ public final class ContentAssistSessionReloader
         Display display = c.getDisplay();
         if (display == null || display.isDisposed())
             return;
-        // #region agent log
-        ContentAssistDebug.logAutoOpen(autoOpenSeq, "H72", "scheduleCompletionAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
-            "triggerScheduled", "{\"expectedCaret\":" + expectedCaretAfter //$NON-NLS-1$
-                + ",\"delay\":" + delay + ",\"gen\":" + gen //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"genGlobal\":" + completionAutoOpenScheduleGen.get() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        ContentAssistDebug.debugModeLog("H71", "scheduleCompletionAutoOpen", "scheduled", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + expectedCaretAfter + ",\"delay\":" + delay //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"gen\":" + gen //$NON-NLS-1$
-                + ",\"autoOpenSeq\":" + autoOpenSeq //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        display.timerExec(delay, () -> fireCompletionAutoOpenTimer(expectedCaretAfter, autoOpenSeq, gen));
+display.timerExec(delay, () -> fireCompletionAutoOpenTimer(expectedCaretAfter, autoOpenSeq, gen));
     }
 
     private void fireCompletionAutoOpenTimer(int expectedCaretAfter, int autoOpenSeq, int gen)
@@ -2311,13 +2016,7 @@ public final class ContentAssistSessionReloader
     private void logTimerAbort(int autoOpenSeq, String reason, int gen, int genGlobal,
                                int expectedCaret, int liveCaret)
     {
-        // #region agent log
-        ContentAssistDebug.logAutoOpen(autoOpenSeq, "H72", "fireCompletionAutoOpenTimer", //$NON-NLS-1$ //$NON-NLS-2$
-            "timerAbort", "{\"reason\":\"" + reason + "\",\"gen\":" + gen //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"genGlobal\":" + genGlobal //$NON-NLS-1$
-                + ",\"expectedCaret\":" + expectedCaret + ",\"liveCaret\":" + liveCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     private void beginCompletionAutoOpen(int caret, int autoOpenSeq)
     {
@@ -2355,31 +2054,19 @@ public final class ContentAssistSessionReloader
                 completionAutoOpenIrScheduled = true;
                 // Ждём ИР: открытие только при autoOpenSuggested (ЗаполнитьТаблицуСлов).
                 // Browser warmup — в openCompletionAutoIrPopup (preShowLiteralBrowserPatch).
-                // #region agent log
-                ContentAssistDebug.logAutoOpen(autoOpenSeq, "H73", "beginCompletionAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
-                    "irOnlyWait", "{\"caret\":" + caret + ",\"irScheduled\":true}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                return;
+return;
             }
         }
         warmupAssistBrowserCreator(caret);
         completionAutoOpenEdtOpened = true;
-        // #region agent log
-        ContentAssistDebug.logAutoOpen(autoOpenSeq, "H73", "beginCompletionAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
-            "edtOpenBeforeShow", "{\"edtOpenedFlag\":true}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        openCompletionAutoEdtPopup(caret, autoOpenSeq);
+openCompletionAutoEdtPopup(caret, autoOpenSeq);
         if (!irScheduled)
             completionAutoOpenPending = false;
     }
 
     private void logBeginEarlyReturn(int autoOpenSeq, String reason, int caret)
     {
-        // #region agent log
-        ContentAssistDebug.logAutoOpen(autoOpenSeq, "H72", "beginCompletionAutoOpen", //$NON-NLS-1$ //$NON-NLS-2$
-            "beginEarlyReturn", "{\"reason\":\"" + reason + "\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        // #endregion
-    }
+}
 
     private void openCompletionAutoEdtPopup(int expectedCaret, int autoOpenSeq)
     {
@@ -2411,20 +2098,7 @@ public final class ContentAssistSessionReloader
         }
         if (popupVisible && assistant != null && viewer != null && processor != null)
             syncLiteralPopupAfterShow(assistant, viewer, irCompletionSnapshot);
-        // #region agent log
-        ContentAssistDebug.logAutoOpen(autoOpenSeq, "H75", "openCompletionAutoEdtPopup", "showCall", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + expectedCaret + ",\"shown\":" + shown //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"popupVisible\":" + popupVisible //$NON-NLS-1$
-                + ",\"tableRows\":" + ContentAssistPopupSync.tableItemCountForAssistant(assistant) //$NON-NLS-1$
-                + ",\"filteredN\":" + ContentAssistPopupSync.filteredProposalCountForAssistant(assistant) //$NON-NLS-1$
-                + "}"); //$NON-NLS-1$
-        ContentAssistDebug.debugModeLog("H71", "openCompletionAutoEdtPopup", "show", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + expectedCaret + ",\"shown\":" + shown //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"popupVisible\":" + popupVisible //$NON-NLS-1$
-                + ",\"autoOpenSeq\":" + autoOpenSeq //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     private void openCompletionAutoIrPopup(IrBslCompletionSupport.Snapshot snapshot, int caret,
                                            int autoOpenSeq)
@@ -2521,20 +2195,7 @@ public final class ContentAssistSessionReloader
                                               int autoOpenSeq, String route)
     {
         int irN = snapshot != null && snapshot.proposals != null ? snapshot.proposals.length : 0;
-        // #region agent log
-        ContentAssistDebug.traceAssist("H5", "openCompletionAutoIrPopup", "result", //$NON-NLS-1$ //$NON-NLS-2$
-            "{\"caret\":" + liveCaret + ",\"shown\":" + shown //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"popupVisible\":" + popupVisible //$NON-NLS-1$
-                + ",\"irN\":" + irN //$NON-NLS-1$
-                + ",\"route\":\"" + route + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"autoOpenSeq\":" + autoOpenSeq + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        ContentAssistDebug.logAutoOpen(autoOpenSeq, "H77", "openCompletionAutoIrPopup", "irOpen", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + liveCaret //$NON-NLS-1$
-                + ",\"irN\":" + irN //$NON-NLS-1$
-                + ",\"popupVisible\":" + popupVisible //$NON-NLS-1$
-                + ",\"route\":\"" + route + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     private void clearCompletionAutoOpenState(String reason, int autoOpenSeq)
     {
@@ -2543,23 +2204,12 @@ public final class ContentAssistSessionReloader
         completionAutoOpenEdtOpened = false;
         completionAutoOpenIrScheduled = false;
         completionAutoOpenAwaitingLogged = false;
-        if (reason != null)
-        {
-            // #region agent log
-            ContentAssistDebug.logAutoOpen(autoOpenSeq, "H72", "clearCompletionAutoOpenState", //$NON-NLS-1$ //$NON-NLS-2$
-                "triggerCancelled", "{\"reason\":\"" + reason + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-        }
     }
 
     private void cancelCompletionAutoOpenTimers(int autoOpenSeq, String reason)
     {
         completionAutoOpenScheduleGen.incrementAndGet();
-        // #region agent log
-        ContentAssistDebug.logAutoOpen(autoOpenSeq, "H72", "cancelCompletionAutoOpenTimers", //$NON-NLS-1$ //$NON-NLS-2$
-            "triggerCancelled", "{\"reason\":\"" + reason + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     private boolean isCompletionAutoOpenCaretMatch(int caret)
     {
@@ -2616,15 +2266,7 @@ public final class ContentAssistSessionReloader
         }
         if (reject != null)
         {
-            // #region agent log
-            ContentAssistDebug.traceAssist("H3", "shouldIrAutoOpenPopup", "reject", //$NON-NLS-1$ //$NON-NLS-2$
-                "{\"caret\":" + caret + ",\"reason\":\"" + reject //$NON-NLS-1$ //$NON-NLS-2$
-                    + "\",\"irN\":" + (snapshot != null && snapshot.proposals != null //$NON-NLS-1$
-                        ? snapshot.proposals.length : 0) //$NON-NLS-1$
-                    + ",\"autoOpenSuggested\":" + (snapshot != null && snapshot.autoOpenSuggested) //$NON-NLS-1$
-                    + ",\"rawNull\":" + (snapshot == null) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return false;
+return false;
         }
         return true;
     }
@@ -2646,18 +2288,7 @@ public final class ContentAssistSessionReloader
         int caret = text.getCaretOffset();
         boolean inLiteral = caret >= 0
             && SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret);
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H59", "StyledTextKeyDown", "keyDown", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + caret + ",\"inLiteral\":" + inLiteral //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"popupVisible\":" + ContentAssistPopupSync.isPopupVisible(assistant) //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H11", "StyledTextKeyDown", "keyDown", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + caret + ",\"inLiteral\":" + inLiteral //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        if (!inLiteral)
+if (!inLiteral)
             return;
         if (ContentAssistPopupSync.isPopupVisible(assistant))
             return;
@@ -2669,12 +2300,7 @@ public final class ContentAssistSessionReloader
             return;
         tryBeginManualDualAssist(caret);
         event.doit = false;
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H13", "StyledTextKeyDown", "consumed", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"consumed\":true,\"caret\":" + caret + ",\"build\":\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     static boolean isCtrlSpaceKeyEvent(Event event)
     {
@@ -3092,16 +2718,7 @@ public final class ContentAssistSessionReloader
         int tableRows = ContentAssistPopupSync.tableItemCountForAssistant(ca);
         boolean hasBrowser = ca != null
             && ContentAssistPopupSync.hasAssistBrowserSidePanel(ca);
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H30", "literalOpenPhase", phase, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"gen\":" + literalOpenGen //$NON-NLS-1$
-                + ",\"msSinceOpen\":" + ms //$NON-NLS-1$
-                + ",\"tableRows\":" + tableRows //$NON-NLS-1$
-                + ",\"irN\":" + irN //$NON-NLS-1$
-                + ",\"hasBrowser\":" + hasBrowser //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     private void clearLiteralOpenState()
     {
@@ -3118,30 +2735,12 @@ public final class ContentAssistSessionReloader
         boolean irResolved = processor != null && processor.isIrWordsResolvedForContext();
         boolean firstIr = ContentAssistPopupSync.firstProposalIsIr(ca);
         boolean listReady = irN > 0 && tableRows == irN && irResolved && firstIr;
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H31", "literalListState", phase, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"gen\":" + literalOpenGen //$NON-NLS-1$
-                + ",\"irN\":" + irN //$NON-NLS-1$
-                + ",\"tableRows\":" + tableRows //$NON-NLS-1$
-                + ",\"irResolved\":" + irResolved //$NON-NLS-1$
-                + ",\"firstIr\":" + firstIr //$NON-NLS-1$
-                + ",\"listReady\":" + listReady //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     private void logLiteralOpenFlash(ContentAssistant ca, int irN, int tableRows,
         String recomputeReason)
     {
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H36", "literalOpenFlash", recomputeReason, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"gen\":" + literalOpenGen //$NON-NLS-1$
-                + ",\"irN\":" + irN //$NON-NLS-1$
-                + ",\"tableRows\":" + tableRows //$NON-NLS-1$
-                + ",\"msSinceOpen\":" + msSinceLiteralOpen() //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     private void reprimeLiteralSnapshot(IrBslCompletionSupport.Snapshot snapshot, SourceViewer sv)
     {
@@ -3229,14 +2828,7 @@ public final class ContentAssistSessionReloader
             ContentAssistPopupSync.invalidateSyncSnapshot();
             ContentAssistPopupSync.recomputePopupList(ca, sv, processor);
             auditLiteralList(ca, sv, irN, "recoveryAfter"); //$NON-NLS-1$
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H31", "emptyListRecovery", "retry", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"gen\":" + gen //$NON-NLS-1$
-                    + ",\"irN\":" + irN //$NON-NLS-1$
-                    + ",\"tableRows\":" + ContentAssistPopupSync.tableItemCountForAssistant(ca) //$NON-NLS-1$
-                    + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-        });
+});
     }
 
     public void clearIrSideHintPublishedKey()
@@ -3303,13 +2895,7 @@ public final class ContentAssistSessionReloader
         boolean popupVisible = shown && ContentAssistPopupSync.isPopupVisible(assistant);
         if (popupVisible && assistant != null && viewer != null && processor != null)
             ContentAssistPopupSync.recomputePopupList(assistant, viewer, processor);
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H55", "openMemberAssistRecoveryPopup", "memberRecoveryShow", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + caret + ",\"shown\":" + shown //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"popupVisible\":" + popupVisible //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     private void clearManualIrAssistState()
     {
@@ -3343,40 +2929,21 @@ public final class ContentAssistSessionReloader
     {
         if (caret < 0)
         {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H1", "tryBeginManualDualAssist", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"skipReason\":\"badCaret\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return;
+return;
         }
         if (!ComfortSettings.isReplaceListFiltersEnabled())
         {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H1", "tryBeginManualDualAssist", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"skipReason\":\"comfortOff\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return;
+return;
         }
         if (ContentAssistPopupSync.isPopupVisible(assistant))
         {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H1", "tryBeginManualDualAssist", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"skipReason\":\"popupVisible\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return;
+return;
         }
         IRSession session = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer);
         if (session == null)
         {
             IDtProject dtProject = facade != null ? facade.getDtProject() : null;
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H5", "tryBeginManualDualAssist", "noSession", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"caret\":" + caret + ",\"editorNull\":" + (bslEditor == null) //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"dtProjectNull\":" + (dtProject == null) //$NON-NLS-1$
-                    + ",\"hasKeys\":" + (dtProject != null //$NON-NLS-1$
-                        && IRApplication.hasConnectedSessionForKeys(dtProject)) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return;
+return;
         }
         manualIrAssistCaret = caret;
         manualIrAssistPending = true;
@@ -3384,13 +2951,7 @@ public final class ContentAssistSessionReloader
         irWordsResolvedForCaret = -1;
         ContentAssistPopupSync.ensureEmptyListAllowed(assistant, true);
         warmupAssistBrowserCreator(caret);
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H1", "tryBeginManualDualAssist", "started", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + caret + ",\"inFlight\":" + isWordsTableFetchInFlightForCaret(caret) //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"inLiteral\":" + SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret) //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        boolean irCachedForCaret = wordsTableReady && wordsTableCaret == caret
+boolean irCachedForCaret = wordsTableReady && wordsTableCaret == caret
             && irCompletionSnapshot != null;
         if (irCachedForCaret)
         {
@@ -3405,22 +2966,11 @@ public final class ContentAssistSessionReloader
         boolean literal = SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret);
         if (!irCachedForCaret)
         {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H14", "tryBeginManualDualAssist", //$NON-NLS-1$ //$NON-NLS-2$
-                literal ? "deferLiteralOpen" : "deferManualOpen", //$NON-NLS-1$ //$NON-NLS-2$
-                "{\"caret\":" + caret + ",\"inFlight\":" + isWordsTableFetchInFlightForCaret(caret) //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"literal\":" + literal + ",\"irCached\":" + irCachedForCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            IrCompletionDebug.log("manualDualAssist defer caret=" + caret); //$NON-NLS-1$
+IrCompletionDebug.log("manualDualAssist defer caret=" + caret); //$NON-NLS-1$
             return;
         }
         processor.enterIrOnlyManualMode(caret);
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H14", "tryBeginManualDualAssist", "openNow", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + caret + ",\"inFlight\":" + isWordsTableFetchInFlightForCaret(caret) //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"literal\":" + literal + ",\"irCached\":" + irCachedForCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        openManualDualAssistPopupOnce(caret);
+openManualDualAssistPopupOnce(caret);
         IrCompletionDebug.log("manualDualAssist caret=" + caret); //$NON-NLS-1$
     }
 
@@ -3456,11 +3006,7 @@ public final class ContentAssistSessionReloader
         int liveCaret = widget instanceof StyledText st ? st.getCaretOffset() : -1;
         if (liveCaret >= 0 && expectedCaret >= 0 && liveCaret != expectedCaret)
         {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H14", "openManualDualAssistPopupOnce", "caretMoved", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"liveCaret\":" + liveCaret + ",\"expectedCaret\":" + expectedCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return;
+return;
         }
         SmartFilterTracker.setCurrentFilter(""); //$NON-NLS-1$
         ContentAssistPopupSync.ensureEmptyListAllowed(assistant, true);
@@ -3483,13 +3029,7 @@ public final class ContentAssistSessionReloader
             syncLiteralPopupAfterShow(assistant, viewer, snap);
             widget.getDisplay().asyncExec(() -> finishDeferredLiteralPopupSetup(assistant, viewer));
         }
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H15", "openManualDualAssistPopupOnce", "show", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + expectedCaret + ",\"shown\":" + shown //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"popupVisible\":" + popupVisible //$NON-NLS-1$
-                + ",\"pendingKept\":" + manualIrAssistPending + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     private boolean isManualCaretMatch(int snapshotCaret)
     {
@@ -3532,35 +3072,11 @@ public final class ContentAssistSessionReloader
             manualDualPopupOpened = true;
         if (popupVisible && assistant != null && viewer != null && processor != null)
             syncLiteralPopupAfterShow(assistant, viewer, snapshot);
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H10", "openDeferredIrAssistPopupNow", "show", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"liveCaret\":" + liveCaret + ",\"snapshotCaret\":" + snapshotCaret //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"empty\":" + (irN == 0) + ",\"irN\":" + irN + ",\"shown\":" + shown //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"popupVisible\":" + popupVisible //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        ContentAssistDebug.debugModeLog("H3", "openDeferredIrAssistPopup", "show", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"empty\":" + (irN == 0) + ",\"irN\":" + irN + ",\"shown\":" + shown //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"popupVisible\":" + popupVisible //$NON-NLS-1$
-                + ",\"tableRows\":" + ContentAssistPopupSync.tableItemCountForAssistant(assistant) //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        ContentAssistDebug.debugModeLog("H16", "openDeferredIrAssistPopup", "show", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"irOnly\":" + processor.isIrOnlyManualMode() //$NON-NLS-1$
-                + ",\"popupVisible\":" + popupVisible //$NON-NLS-1$
-                + ",\"manualDualPopupOpened\":" + manualDualPopupOpened //$NON-NLS-1$
-                + ",\"pending\":" + manualIrAssistPending //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        widget.getDisplay().asyncExec(() -> {
+widget.getDisplay().asyncExec(() -> {
             if (assistant == null || viewer == null || processor == null)
                 return;
             boolean stillVisible = ContentAssistPopupSync.isPopupVisible(assistant);
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H16", "openDeferredIrAssistPopup", "asyncCleanup", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"stillVisible\":" + stillVisible //$NON-NLS-1$
-                    + ",\"irOnly\":" + processor.isIrOnlyManualMode() //$NON-NLS-1$
-                    + ",\"pending\":" + manualIrAssistPending + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            if (stillVisible)
+if (stillVisible)
             {
                 finishDeferredLiteralPopupSetup(assistant, viewer);
             }
@@ -3582,15 +3098,7 @@ public final class ContentAssistSessionReloader
         boolean pendingBefore = manualIrAssistPending;
         boolean popupVisible = ContentAssistPopupSync.isPopupVisible(assistant);
         int irN = snapshot.proposals != null ? snapshot.proposals.length : 0;
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H44", "adoptEarlyPopup", "start", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + snapshotCaret + ",\"liveCaret\":" + liveCaret //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"popupVisible\":" + popupVisible //$NON-NLS-1$
-                + ",\"pendingBefore\":" + pendingBefore //$NON-NLS-1$
-                + ",\"irN\":" + irN //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        processor.enterIrOnlyManualMode(liveCaret);
+processor.enterIrOnlyManualMode(liveCaret);
         processor.primeIrSnapshotForDualAssist(snapshot);
         SmartFilterTracker.setCurrentFilter(""); //$NON-NLS-1$
         ContentAssistPopupSync.ensureEmptyListAllowed(assistant, true);
@@ -3609,13 +3117,7 @@ public final class ContentAssistSessionReloader
             if (assistant == null || viewer == null || processor == null)
                 return;
             boolean stillVisible = ContentAssistPopupSync.isPopupVisible(assistant);
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H44", "adoptEarlyPopup", "asyncFinish", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"stillVisible\":" + stillVisible //$NON-NLS-1$
-                    + ",\"pending\":" + manualIrAssistPending //$NON-NLS-1$
-                    + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            if (stillVisible)
+if (stillVisible)
                 finishDeferredLiteralPopupSetup(assistant, viewer);
         });
     }
@@ -3702,21 +3204,11 @@ public final class ContentAssistSessionReloader
         if (session == null)
         {
             IDtProject dtProject = facade.getDtProject();
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H5", "scheduleWordsTablePreparation", "noSession", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"caret\":" + caret + ",\"dtProjectNull\":" + (dtProject == null) //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"hasKeys\":" + (dtProject != null //$NON-NLS-1$
-                        && IRApplication.hasConnectedSessionForKeys(dtProject)) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return false;
+return false;
         }
         if (isWordsTableFetchInFlightForCaret(caret))
         {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H5", "scheduleWordsTablePreparation", "skipInFlight", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return false;
+return false;
         }
         irWordsRequestStartedAtMs = System.currentTimeMillis();
         wordsTableReady = false;
@@ -3728,19 +3220,7 @@ public final class ContentAssistSessionReloader
         irCompletionSnapshot = null;
         boolean closePrevious = irAssistCommandOpen;
         final int fetchDiagSeq = ++wordsTableFetchDiagSeq;
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H54", "scheduleWordsTablePreparation", "fetchScheduled", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + caret + ",\"fetchSeq\":" + fetchDiagSeq //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"latestSeq\":" + wordsTableFetchDiagSeq //$NON-NLS-1$
-                + ",\"autoInvoke\":" + autoInvoke //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        ContentAssistDebug.logAutoOpen(completionAutoOpenActiveSeq, "H77", //$NON-NLS-1$
-            "scheduleWordsTablePreparation", "irFetchScheduled", //$NON-NLS-1$ //$NON-NLS-2$
-            "{\"caret\":" + caret + ",\"autoInvoke\":" + autoInvoke //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"syncCaret\":" + (autoInvoke ? caret : IrBslCompletionSupport.SYNC_USE_EDITOR_SELECTION) //$NON-NLS-1$
-                + ",\"fetchSeq\":" + fetchDiagSeq + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        int syncCaretOffset = autoInvoke
+int syncCaretOffset = autoInvoke
             ? caret : IrBslCompletionSupport.SYNC_USE_EDITOR_SELECTION;
         IrBslCompletionSupport.prepareAssistContextAsync(session, facade, syncCaretOffset, autoInvoke,
             closePrevious, raw -> onWordsTablePrepared(caret, raw, fetchDiagSeq));
@@ -3752,12 +3232,7 @@ public final class ContentAssistSessionReloader
         boolean staleFetch = fetchDiagSeq < wordsTableFetchDiagSeq;
         if (staleFetch)
         {
-            // #region agent log
-            ContentAssistDebug.traceAssist("H1", "onWordsTablePrepared", "staleDiscarded", //$NON-NLS-1$ //$NON-NLS-2$
-                "{\"caret\":" + caret + ",\"fetchSeq\":" + fetchDiagSeq //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"latestSeq\":" + wordsTableFetchDiagSeq + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            runPendingAfterWordsTable();
+runPendingAfterWordsTable();
             return;
         }
         wordsTableFetchInFlight = false;
@@ -3774,31 +3249,13 @@ public final class ContentAssistSessionReloader
         boolean wouldDowngradeProc = procIrN > irCount && processor.isIrWordsResolvedForContext();
         long sinceRequestMs = irWordsRequestStartedAtMs > 0
             ? System.currentTimeMillis() - irWordsRequestStartedAtMs : -1;
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H54", "onWordsTablePrepared", "snapshotArrival", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + caret + ",\"fetchSeq\":" + fetchDiagSeq //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"latestSeq\":" + wordsTableFetchDiagSeq //$NON-NLS-1$
-                + ",\"staleFetch\":" + staleFetch //$NON-NLS-1$
-                + ",\"irN\":" + irCount //$NON-NLS-1$
-                + ",\"prevAppliedN\":" + prevAppliedN //$NON-NLS-1$
-                + ",\"procIrN\":" + procIrN + ",\"procFullN\":" + procFullN //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"popupVisible\":" + popupNow //$NON-NLS-1$
-                + ",\"wouldDowngradeApplied\":" + wouldDowngradeApplied //$NON-NLS-1$
-                + ",\"wouldDowngradeProc\":" + wouldDowngradeProc //$NON-NLS-1$
-                + ",\"sinceRequestMs\":" + sinceRequestMs //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        boolean duplicateSnapshot = irSnapshotAppliedCaret == caret
+boolean duplicateSnapshot = irSnapshotAppliedCaret == caret
             && irSnapshotAppliedIrCount == irCount
             && processor.isIrWordsResolvedForContext();
         if (duplicateSnapshot)
         {
             logLiteralMergeTimeline("wordsTableDuplicate", irCount, true); //$NON-NLS-1$
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H7", "onWordsTablePrepared", "skipDuplicate", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"caret\":" + caret + ",\"irN\":" + irCount + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            runPendingAfterWordsTable();
+runPendingAfterWordsTable();
             return;
         }
         logLiteralMergeTimeline("wordsTable", irCount, false); //$NON-NLS-1$
@@ -3824,12 +3281,7 @@ public final class ContentAssistSessionReloader
         if (shouldIrAutoOpenPopup(snapshot, caret, popupVisible))
         {
             int autoOpenSeq = completionAutoOpenActiveSeq;
-            // #region agent log
-            ContentAssistDebug.traceAssist("H3", "onWordsTablePrepared", "irAutoOpenAttempt", //$NON-NLS-1$ //$NON-NLS-2$
-                "{\"caret\":" + caret + ",\"irN\":" + irCount //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"rawNull\":" + (raw == null) + ",\"seq\":" + autoOpenSeq + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            openCompletionAutoIrPopup(snapshot, caret, autoOpenSeq);
+openCompletionAutoIrPopup(snapshot, caret, autoOpenSeq);
             clearCompletionAutoOpenState("irAutoOpen", autoOpenSeq); //$NON-NLS-1$
             ContentAssistDebug.logAutoOpenDecision("irAutoOpen", caret, irCount); //$NON-NLS-1$
             irSnapshotAppliedCaret = caret;
@@ -3837,16 +3289,7 @@ public final class ContentAssistSessionReloader
             runPendingAfterWordsTable();
             return;
         }
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H2", "onWordsTablePrepared", "branch", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + caret + ",\"irN\":" + snapshot.proposals.length //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"pending\":" + manualIrAssistPending + ",\"popupVisible\":" + popupVisible //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"rawNull\":" + (raw == null) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        ContentAssistDebug.debugModeLog("H15", "onWordsTablePrepared", "merge", //$NON-NLS-1$ //$NON-NLS-2$
-            "{\"caret\":" + caret + ",\"manualCaret\":" + manualIrAssistCaret //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"popupVisible\":" + popupVisible + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        if (isCompletionAutoOpenCaretMatch(caret)
+if (isCompletionAutoOpenCaretMatch(caret)
             && (completionAutoOpenPending || completionAutoOpenEdtOpened
                 || completionAutoOpenIrScheduled))
         {
@@ -3899,43 +3342,21 @@ public final class ContentAssistSessionReloader
         {
             if (popupVisible)
             {
-                // #region agent log
-                ContentAssistDebug.debugModeLog("H7", "onWordsTablePrepared", "adoptEarly", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"caret\":" + caret + ",\"manualCaret\":" + manualIrAssistCaret //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"irN\":" + snapshot.proposals.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                adoptEarlyVisibleLiteralPopup(snapshot, caret);
+adoptEarlyVisibleLiteralPopup(snapshot, caret);
             }
             else
             {
-                // #region agent log
-                ContentAssistDebug.debugModeLog("H7", "onWordsTablePrepared", "deferred", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"caret\":" + caret + ",\"manualCaret\":" + manualIrAssistCaret //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"irN\":" + snapshot.proposals.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                openDeferredIrAssistPopup(snapshot, caret);
+openDeferredIrAssistPopup(snapshot, caret);
             }
         }
         else if (popupVisible)
         {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H7", "onWordsTablePrepared", "apply", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"caret\":" + caret + ",\"manualCaret\":" + manualIrAssistCaret //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"irN\":" + snapshot.proposals.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            manualIrAssistPending = false;
+manualIrAssistPending = false;
             processor.applyIrCompletion(snapshot);
         }
         else
         {
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H7", "onWordsTablePrepared", "else", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"caret\":" + caret + ",\"manualCaret\":" + manualIrAssistCaret //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"pending\":" + manualIrAssistPending //$NON-NLS-1$
-                    + ",\"caretMatch\":" + isManualCaretMatch(caret) //$NON-NLS-1$
-                    + ",\"irN\":" + snapshot.proposals.length + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            processor.applyIrCompletion(snapshot);
+processor.applyIrCompletion(snapshot);
             if (irCount > 0 && isMemberAccessAtCaret(caret) && !manualIrAssistPending)
                 openMemberAssistRecoveryPopup(caret);
         }
@@ -4060,10 +3481,7 @@ public final class ContentAssistSessionReloader
             return;
         if (irOnly && !processor.shouldRefreshIrPopup())
         {
-            // #region agent log
-            ContentAssistDebug.sessionLog("H3", "requestPopupRefresh", "skipNoIr", "{}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-            // #endregion
-            return;
+return;
         }
         if (irOnly && (reloader.isLiteralOpenSetupPhase()
             || reloader.isManualIrAssistPending()
@@ -4079,11 +3497,7 @@ public final class ContentAssistSessionReloader
         {
             if (irOnly)
                 logLiteralMergeTimeline("skipNotVisible"); //$NON-NLS-1$
-            // #region agent log
-            ContentAssistDebug.sessionLog("H2", "requestPopupRefresh", "skipNotVisible", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"irOnly\":" + irOnly + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return;
+return;
         }
         if (ContentAssistPopupSync.isRecomputeInProgress())
         {
@@ -4149,20 +3563,7 @@ public final class ContentAssistSessionReloader
     {
         boolean hadFlag = Boolean.TRUE.equals(LITERAL_REPEAT_FROM_COMMAND.get());
         SmartContentAssistProcessor processor = ACTIVE_PROCESSOR.get();
-        // #region agent log
-        String dataJson = "{\"consumed\":" + hadFlag; //$NON-NLS-1$
-        if (processor != null)
-        {
-            dataJson += ",\"stableN\":" + processor.literalStableDelegateCount() //$NON-NLS-1$
-                + ",\"fullListN\":" + processor.diagFullListCacheCount(); //$NON-NLS-1$
-        }
-        else
-            dataJson += ",\"processorNull\":true"; //$NON-NLS-1$
-        dataJson += ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"; //$NON-NLS-1$ //$NON-NLS-2$
-        ContentAssistDebug.debugModeLog("H66", "consumeLiteralRepeatFromCommand", //$NON-NLS-1$ //$NON-NLS-2$
-            hadFlag ? "consumed" : "miss", dataJson); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        if (!hadFlag)
+if (!hadFlag)
             return false;
         LITERAL_REPEAT_FROM_COMMAND.remove();
         return true;
@@ -4239,14 +3640,7 @@ public final class ContentAssistSessionReloader
             && SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret);
         boolean irConnected = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(
             facade, viewer) != null;
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H60", "contentAssistCommand", "preExecute", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"popupVisible\":" + popupVisible + ",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"inLiteral\":" + inLiteral //$NON-NLS-1$
-                + ",\"irConnected\":" + irConnected //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        if (!popupVisible)
+if (!popupVisible)
             return;
         tryLiteralRepeatFilterToggle("command"); //$NON-NLS-1$
     }
@@ -4265,27 +3659,12 @@ public final class ContentAssistSessionReloader
         boolean irConnected = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(
             facade, viewer) != null;
         int tableRowsBefore = ContentAssistPopupSync.tableItemCountForAssistant(assistant);
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H56", "literalRepeatToggle", source, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"caret\":" + caret //$NON-NLS-1$
-                + ",\"irConnected\":" + irConnected //$NON-NLS-1$
-                + ",\"smartBefore\":" + SmartAssistFilterState.isSmartFilterEnabled() //$NON-NLS-1$
-                + ",\"tableRowsBefore\":" + tableRowsBefore //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        LITERAL_REPEAT_FROM_COMMAND.set(Boolean.TRUE);
+LITERAL_REPEAT_FROM_COMMAND.set(Boolean.TRUE);
         lastLiteralToggleMs = System.currentTimeMillis();
         ContentAssistPopupSync.seedStableDelegateFromVisiblePopup(assistant, processor);
         ContentAssistPopupSync.captureSelectionBeforeFilterToggle(assistant);
         SmartAssistFilterState.toggle();
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H65", "literalRepeatToggle", "flagSet", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"source\":\"" + ContentAssistDebug.jsonEscapeForLog(source) //$NON-NLS-1$
-                + "\",\"flagSet\":true" //$NON-NLS-1$
-                + ",\"stableN\":" + processor.literalStableDelegateCount() //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        scheduleFilterToggleUiSync();
+scheduleFilterToggleUiSync();
         return true;
     }
 
@@ -4305,21 +3684,7 @@ public final class ContentAssistSessionReloader
         String returnClass = returnValue != null ? returnValue.getClass().getSimpleName() : "null"; //$NON-NLS-1$
         String err = exception != null && exception.getMessage() != null
             ? ContentAssistDebug.jsonEscapeForLog(exception.getMessage()) : ""; //$NON-NLS-1$
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H65", "contentAssistCommand", outcome, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"popupVisible\":" + (ca != null && ContentAssistPopupSync.isPopupVisible(ca)) //$NON-NLS-1$
-                + ",\"inLiteral\":" + inLiteral //$NON-NLS-1$
-                + ",\"caret\":" + caret //$NON-NLS-1$
-                + ",\"irConnected\":" + irConnected //$NON-NLS-1$
-                + ",\"smartEnabled\":" + SmartAssistFilterState.isSmartFilterEnabled() //$NON-NLS-1$
-                + ",\"commandFlag\":" + Boolean.TRUE.equals(LITERAL_REPEAT_FROM_COMMAND.get()) //$NON-NLS-1$
-                + ",\"tableRows\":" + ContentAssistPopupSync.tableItemCountForAssistant(ca) //$NON-NLS-1$
-                + ",\"filteredN\":" + ContentAssistPopupSync.filteredProposalCountForAssistant(ca) //$NON-NLS-1$
-                + ",\"returnClass\":\"" + returnClass + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + (err.isEmpty() ? "" : ",\"error\":\"" + err + "\"") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     static CtrlSpaceFilter ctrlSpaceFilter(ContentAssistant assistant)
     {
@@ -4361,22 +3726,9 @@ public final class ContentAssistSessionReloader
             boolean popupVisible = ContentAssistPopupSync.isPopupVisible(assistant);
             boolean inLiteralProbe = probeCaret >= 0
                 && SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, probeCaret);
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H59", "CtrlSpaceFilter", "keyDown", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"caret\":" + probeCaret + ",\"inLiteral\":" + inLiteralProbe //$NON-NLS-1$ //$NON-NLS-2$
-                    + ",\"popupVisible\":" + popupVisible //$NON-NLS-1$
-                    + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            if (popupVisible)
+if (popupVisible)
             {
-                // #region agent log
-                ContentAssistDebug.debugModeLog("H8", "CtrlSpaceFilter", "popupVisible", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"caret\":" + probeCaret //$NON-NLS-1$
-                        + ",\"inLiteral\":" + (probeCaret >= 0 //$NON-NLS-1$
-                            && SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, probeCaret)) //$NON-NLS-1$
-                        + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                event.doit = false;
+event.doit = false;
                 return;
             }
             if (probeCaret >= 0
@@ -4391,78 +3743,29 @@ public final class ContentAssistSessionReloader
                 int caret = text.getCaretOffset();
                 if (caret < 0)
                     return;
-                // #region agent log
-                ContentAssistDebug.debugModeLog("H1", "CtrlSpaceFilter", "literalManualAssist", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"caret\":" + caret + ",\"build\":\"" //$NON-NLS-1$ //$NON-NLS-2$
-                        + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                beginManualDualAssist(caret);
+beginManualDualAssist(caret);
                 event.doit = false;
-                // #region agent log
-                ContentAssistDebug.debugModeLog("H13", "CtrlSpaceFilter", "consumed", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"consumed\":true,\"caret\":" + caret + ",\"literal\":true}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                return;
+return;
             }
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H11", "CtrlSpaceFilter", "keyDown", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"caret\":" + probeCaret //$NON-NLS-1$
-                    + ",\"inLiteral\":" + (probeCaret >= 0 //$NON-NLS-1$
-                        && SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, probeCaret)) //$NON-NLS-1$
-                    + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            if (!ComfortSettings.isReplaceListFiltersEnabled())
+if (!ComfortSettings.isReplaceListFiltersEnabled())
             {
-                // #region agent log
-                ContentAssistDebug.debugModeLog("H11", "CtrlSpaceFilter", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"skipReason\":\"comfortOff\",\"caret\":" + probeCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                return;
+return;
             }
             if (IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer) == null)
             {
-                // #region agent log
-                ContentAssistDebug.debugModeLog("H11", "CtrlSpaceFilter", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"skipReason\":\"noIrSession\",\"caret\":" + probeCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                // #region agent log
-                ContentAssistDebug.debugModeLog("H5", "CtrlSpaceFilter", "noIrSession", "{}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-                // #endregion
-                return;
+return;
             }
             if (text == null || text.isDisposed())
             {
-                // #region agent log
-                ContentAssistDebug.debugModeLog("H11", "CtrlSpaceFilter", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"skipReason\":\"noText\",\"caret\":" + probeCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                return;
+return;
             }
             int caret = text.getCaretOffset();
             if (caret < 0)
             {
-                // #region agent log
-                ContentAssistDebug.debugModeLog("H11", "CtrlSpaceFilter", "skip", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"skipReason\":\"badCaret\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                // #region agent log
-                ContentAssistDebug.debugModeLog("H8", "CtrlSpaceFilter", "badCaret", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                return;
+return;
             }
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H1", "CtrlSpaceFilter", "manualAssist", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"caret\":" + caret + ",\"inLiteral\":" //$NON-NLS-1$ //$NON-NLS-2$
-                    + SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret)
-                    + "}"); //$NON-NLS-1$
-            // #endregion
-            beginManualDualAssist(caret);
+beginManualDualAssist(caret);
             event.doit = false;
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H13", "CtrlSpaceFilter", "consumed", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"consumed\":true,\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-        }
+}
     }
 }

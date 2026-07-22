@@ -1147,8 +1147,6 @@ public class ApplicationsViewHook implements IStartup
         try
         {
             clipboard.setContents(new Object[] {text}, new Transfer[] {TextTransfer.getInstance()});
-            Global.tempLog("applicationsViewCopy", //$NON-NLS-1$
-                "clipboard set col=" + columnIndex + " text=[" + text + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
         finally
         {

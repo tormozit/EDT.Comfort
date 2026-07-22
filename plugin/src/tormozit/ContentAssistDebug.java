@@ -1,120 +1,50 @@
 package tormozit;
 
-import java.io.BufferedWriter;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
-import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
 
 /**
- * Логи Content Assist в общем журнале {@link GlobalLogView}.
+ * Логи Content Assist в общем журнале {@link GlobalLogView} (при «Общем логировании»).
+ * Файловый NDJSON / temp-logs для отладки сняты перед релизом.
  */
 public final class ContentAssistDebug
 {
     private static final AtomicInteger validateCalls = new AtomicInteger();
     private static final AtomicInteger agentValidateLogs = new AtomicInteger();
-    private static final Path DEBUG_SESSION_LOG = Path.of("C:\\VC\\EDT.Comfort\\debug-0ae881.log"); //$NON-NLS-1$
-    private static final String DEBUG_SESSION_ID = "0ae881"; //$NON-NLS-1$
-    private static final Path DEBUG_MODE_LOG = Path.of("C:\\VC\\EDT.Comfort\\debug-267a94.log"); //$NON-NLS-1$
-    private static final String DEBUG_MODE_SESSION_ID = "267a94"; //$NON-NLS-1$
+
     /** Маркер сборки для literal assist. */
     public static final String LITERAL_ASSIST_BUILD = "20260708-sync-selection"; //$NON-NLS-1$
-    /** NDJSON в debug-267a94.log — временная отладка; выкл. после фикса. */
-    private static final boolean NDJSON_ENABLED = false;
-    /** Доп. шум только с {@code -Dtormozit.contentAssistVerbose=true}. */
-    private static final boolean VERBOSE =
-        Boolean.getBoolean("tormozit.contentAssistVerbose"); //$NON-NLS-1$
-
-    /**
-     * Асинхронная очередь для disk-write логов — никакого I/O на UI-потоке.
-     * Ёмкость 50 000 строк (~5 МБ); при переполнении строки отбрасываются без исключения.
-     */
-    private static final BlockingQueue<String> DEBUG_MODE_QUEUE = new LinkedBlockingQueue<>(50_000);
-    private static final BlockingQueue<String> SESSION_QUEUE = new LinkedBlockingQueue<>(10_000);
-
-    static
-    {
-        if (NDJSON_ENABLED)
-        {
-            try { Files.deleteIfExists(DEBUG_MODE_LOG); } catch (IOException e) { /* best-effort */ }
-            startAsyncWriter("ContentAssistDebugModeWriter", DEBUG_MODE_LOG, DEBUG_MODE_QUEUE); //$NON-NLS-1$
-        }
-        if (VERBOSE)
-        {
-            try { Files.deleteIfExists(DEBUG_SESSION_LOG); } catch (IOException e) { /* best-effort */ }
-            startAsyncWriter("ContentAssistSessionWriter", DEBUG_SESSION_LOG, SESSION_QUEUE); //$NON-NLS-1$
-        }
-    }
-
-    private static void startAsyncWriter(String threadName, Path logPath, BlockingQueue<String> queue)
-    {
-        Thread t = new Thread(() ->
-        {
-            try (BufferedWriter bw = Files.newBufferedWriter(logPath, StandardCharsets.UTF_8,
-                    StandardOpenOption.CREATE, StandardOpenOption.APPEND))
-            {
-                while (!Thread.currentThread().isInterrupted())
-                {
-                    String line = queue.take(); // blocks until available
-                    bw.write(line);
-                    // drain the rest of the batch to reduce flush calls
-                    String next;
-                    while ((next = queue.poll()) != null)
-                        bw.write(next);
-                    bw.flush();
-                }
-            }
-            catch (InterruptedException ignored)
-            {
-                Thread.currentThread().interrupt();
-            }
-            catch (IOException e)
-            {
-                // best-effort logging — ignore write failures
-            }
-        }, threadName);
-        t.setDaemon(true);
-        t.start();
-    }
 
     private ContentAssistDebug() {}
 
-    // #region agent log
-    /** H00 при старте EDT — однозначная версия bytecode в debug-c201d2.log. */
-    public static void logLiteralAssistBuildStamp()
+    /** No-op: раньше NDJSON на диск; вызовы оставлены в коде без I/O. */
+    public static void debugModeLog(String hypothesisId, String location, String message, String dataJson)
     {
-        debugModeLog("H00", "ContentAssistDebug", "buildStamp", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"build\":\"" + LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
-    /** NDJSON автооткрытия — в файл; в журнал при «Общем логировании». */
+    /** No-op: раньше session NDJSON. */
+    public static void sessionLog(String hypothesisId, String location, String message, String dataJson)
+    {
+    }
+
+    public static void logLiteralAssistBuildStamp()
+    {
+    }
+
     public static void logAutoOpen(int autoOpenSeq, String hypothesisId, String location,
         String message, String dataJson)
     {
-        String inner = dataJson != null && !dataJson.isEmpty() ? dataJson : "{}"; //$NON-NLS-1$
-        String trimmed = inner.endsWith("}") ? inner.substring(0, inner.length() - 1) : inner; //$NON-NLS-1$
-        String data = trimmed + ",\"autoOpenSeq\":" + autoOpenSeq //$NON-NLS-1$
-            + ",\"build\":\"" + LITERAL_ASSIST_BUILD + "\"}"; //$NON-NLS-1$ //$NON-NLS-2$
-        debugModeLog(hypothesisId, location, message, data);
-        agentLog(hypothesisId, location, message, data);
-    }
-
-    /** Трассировка решений popup — NDJSON + журнал «Комфорт». */
-    public static void traceAssist(String hypothesisId, String location, String message,
-                                   String dataJson)
-    {
-        debugModeLog(hypothesisId, location, message, dataJson);
         agentLog(hypothesisId, location, message, dataJson);
     }
 
-    /** Decision-point автооткрытия в журнал «Комфорт». */
+    public static void traceAssist(String hypothesisId, String location, String message,
+        String dataJson)
+    {
+        agentLog(hypothesisId, location, message, dataJson);
+    }
+
     public static void logAutoOpenDecision(String decision, int caret, int irN)
     {
         agentLog("H78", "onWordsTablePrepared", "autoOpenDecision", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
@@ -122,92 +52,9 @@ public final class ContentAssistDebug
                 + ",\"irN\":" + irN + "}"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
-    /** NDJSON в debug-267a94.log. */
-    public static void debugModeLog(String hypothesisId, String location, String message,
-                                    String dataJson)
+    static String jsonEscapeForLog(String value)
     {
-        if (!NDJSON_ENABLED)
-            return;
-        if (!VERBOSE && isNoisyNdjsonLocation(location, message))
-            return;
-        try
-        {
-            String data = dataJson != null && !dataJson.isEmpty() ? dataJson : "{}"; //$NON-NLS-1$
-            String line = "{\"sessionId\":\"" + DEBUG_MODE_SESSION_ID //$NON-NLS-1$
-                + "\",\"hypothesisId\":\"" + hypothesisId //$NON-NLS-1$
-                + "\",\"location\":\"" + location //$NON-NLS-1$
-                + "\",\"message\":\"" + jsonEscape(message) //$NON-NLS-1$
-                + "\",\"data\":" + data //$NON-NLS-1$
-                + ",\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
-            DEBUG_MODE_QUEUE.offer(line); // non-blocking; drops if queue full
-        }
-        catch (Exception ignored)
-        {
-        }
-    }
-
-    /** Hot-path шум на каждое `.` / recompute — только с -Dtormozit.contentAssistVerbose=true. */
-    private static boolean isNoisyNdjsonLocation(String location, String message)
-    {
-        if (location == null)
-            return false;
-        switch (location)
-        {
-            case "applyStockAssistImagesFromDelegate": //$NON-NLS-1$
-            case "mergeIrProposals": //$NON-NLS-1$
-            case "browserContentLoad": //$NON-NLS-1$
-            case "sidePanelRefresh": //$NON-NLS-1$
-            case "literalOpenPhase": //$NON-NLS-1$
-            case "literalBrowserPhase": //$NON-NLS-1$
-            case "literalCreatorResolve": //$NON-NLS-1$
-            case "literalListState": //$NON-NLS-1$
-            case "literalMergeTimeline": //$NON-NLS-1$
-            case "literalOpenFlash": //$NON-NLS-1$
-            case "htmlApplyPoll": //$NON-NLS-1$
-            case "irActivationWarmup": //$NON-NLS-1$
-            case "isStringLiteralAssistContext": //$NON-NLS-1$
-            case "computeCompletionProposals": //$NON-NLS-1$
-            case "computeProposalsLight": //$NON-NLS-1$
-            case "filterCachedProposalsForPopup": //$NON-NLS-1$
-            case "applyPopupListSync": //$NON-NLS-1$
-            case "mergeDedupAudit": //$NON-NLS-1$
-            case "recomputePopupList": //$NON-NLS-1$
-            case "isCompletionAutoOpenAwaitingWords": //$NON-NLS-1$
-            case "coldCreatorBootstrap": //$NON-NLS-1$
-            case "ContentAssistSessionReloader.install": //$NON-NLS-1$
-            case "ContentAssistPatcher.applyPatch": //$NON-NLS-1$
-            case "installCtrlSpaceFilter": //$NON-NLS-1$
-            case "prepareAssistContextAsync": //$NON-NLS-1$
-            case "fetchCompletionSnapshot": //$NON-NLS-1$
-            case "applyIrCompletion": //$NON-NLS-1$
-                return true;
-            case "assistSessionStarted": //$NON-NLS-1$
-                return !"session".equals(message) && !"sessionStarted".equals(message); //$NON-NLS-1$ //$NON-NLS-2$
-            case "onWordsTablePrepared": //$NON-NLS-1$
-                return "branch".equals(message) || "merge".equals(message) //$NON-NLS-1$ //$NON-NLS-2$
-                    || "skipDuplicate".equals(message); //$NON-NLS-1$
-            default:
-                return false;
-        }
-    }
-
-    /** NDJSON в debug-0ae881.log — без флажка «Общее логирование». */
-    public static void sessionLog(String hypothesisId, String location, String message, String dataJson)
-    {
-        try
-        {
-//            String data = dataJson != null && !dataJson.isEmpty() ? dataJson : "{}"; //$NON-NLS-1$
-//            String line = "{\"sessionId\":\"" + DEBUG_SESSION_ID //$NON-NLS-1$
-//                + "\",\"hypothesisId\":\"" + hypothesisId //$NON-NLS-1$
-//                + "\",\"location\":\"" + location //$NON-NLS-1$
-//                + "\",\"message\":\"" + jsonEscape(message) //$NON-NLS-1$
-//                + "\",\"data\":" + data //$NON-NLS-1$
-//                + ",\"timestamp\":" + System.currentTimeMillis() + "}\n"; //$NON-NLS-1$
-//            SESSION_QUEUE.offer(line); // non-blocking; drops if queue full
-        }
-        catch (Exception ignored)
-        {
-        }
+        return jsonEscape(value);
     }
 
     private static String jsonEscape(String value)
@@ -215,12 +62,6 @@ public final class ContentAssistDebug
         if (value == null)
             return ""; //$NON-NLS-1$
         return value.replace("\\", "\\\\").replace("\"", "\\\""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-    }
-
-    /** Экранирование для NDJSON data (package для reloader). */
-    static String jsonEscapeForLog(String value)
-    {
-        return jsonEscape(value);
     }
 
     public static String firstProposalKey(ICompletionProposal[] proposals)
@@ -234,9 +75,8 @@ public final class ContentAssistDebug
         String key = colon > 0 ? d.substring(0, colon).trim() : d.trim();
         return jsonEscape(key.length() > 40 ? key.substring(0, 40) : key);
     }
-    // #endregion
 
-    /** Диагностика assist (H1/H2/…) — только в «Журнал Комфорт» при «Общем логировании». */
+    /** Диагностика assist — только в «Журнал Комфорт» при «Общем логировании». */
     public static void agentLog(String hypothesisId, String location, String message, String dataJson)
     {
         if (!Global.isLogEnabled())
@@ -246,7 +86,6 @@ public final class ContentAssistDebug
             "[" + hypothesisId + "] " + location + " " + message + " " + data); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
     }
 
-    // Отключено для релиза — временный лог удалён.
     public static void perfLog(String location, long elapsedMs, int thresholdMs, String extraJson)
     {
     }
@@ -276,15 +115,17 @@ public final class ContentAssistDebug
     public static String sampleTypes(ICompletionProposal[] arr, int max)
     {
         if (arr == null || arr.length == 0)
-            return " types=[]";
-        StringBuilder sb = new StringBuilder(" types=[");
+            return " types=[]"; //$NON-NLS-1$
+        StringBuilder sb = new StringBuilder(" types=["); //$NON-NLS-1$
         int n = Math.min(max, arr.length);
         for (int i = 0; i < n; i++)
         {
-            if (i > 0) sb.append(',');
-            sb.append(arr[i] == null ? "null" : arr[i].getClass().getSimpleName());
+            if (i > 0)
+                sb.append(',');
+            sb.append(arr[i] == null ? "null" : arr[i].getClass().getSimpleName()); //$NON-NLS-1$
         }
-        if (arr.length > n) sb.append("…");
+        if (arr.length > n)
+            sb.append("…"); //$NON-NLS-1$
         return sb.append(']').toString();
     }
 
@@ -296,21 +137,21 @@ public final class ContentAssistDebug
     public static String proposalLabel(ICompletionProposal p)
     {
         if (p == null)
-            return "null";
+            return "null"; //$NON-NLS-1$
         String d = p.getDisplayString();
         String type = p.getClass().getSimpleName();
         if (p instanceof SmartCompletionProposal)
-            type += "→" + ((SmartCompletionProposal) p).getDelegate().getClass().getSimpleName();
-        String text = d == null ? "" : d;
+            type += "→" + ((SmartCompletionProposal) p).getDelegate().getClass().getSimpleName(); //$NON-NLS-1$
+        String text = d == null ? "" : d; //$NON-NLS-1$
         if (text.length() > 48)
-            text = text.substring(0, 48) + "…";
-        return type + ":" + text;
+            text = text.substring(0, 48) + "…"; //$NON-NLS-1$
+        return type + ":" + text; //$NON-NLS-1$
     }
 
     public static String eventSummary(DocumentEvent e)
     {
         if (e == null)
-            return "null";
+            return "null"; //$NON-NLS-1$
         String t = e.getText();
         return "off=" + e.getOffset() + " len=" + (t == null ? 0 : t.length()) //$NON-NLS-1$ //$NON-NLS-2$
             + " text=\"" + (t == null ? "" : t.replace('\n', ' ')) + "\""; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$

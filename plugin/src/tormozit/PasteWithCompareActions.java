@@ -350,7 +350,6 @@ public final class PasteWithCompareActions
             }
             catch (Exception e)
             {
-                Global.tempLogException("showInModule", "PasteWithCompareActions", e); //$NON-NLS-1$ //$NON-NLS-2$
                 ToastNotification.show(ShowInModuleHandler.MENU_LABEL,
                     "Ошибка перехода в модуль: " + e, 6000); //$NON-NLS-1$
             }

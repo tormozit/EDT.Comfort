@@ -147,16 +147,7 @@ public final class PropertySheetHook implements IStartup
 
         PropertySheetControlInterop.installPaletteCanvasListeners(page);
 
-        // #region agent log
-        Composite paletteContent = PropertySheetUiContext.findPaletteContent(page);
-        PropertySheetControlInterop.agentHitLog("H0", "PropertySheetHook.tryPatch", "patched", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                java.util.Map.of("attempt", attempt, //$NON-NLS-1$
-                        "contentClass", paletteContent != null ? paletteContent.getClass().getSimpleName() : "null", //$NON-NLS-1$ //$NON-NLS-2$
-                        "contentH", paletteContent != null ? paletteContent.getSize().y : -1, //$NON-NLS-1$
-                        "sessionCount", PropertySheetUiCoordinator.sessionCountForDebug())); //$NON-NLS-1$
-        // #endregion
-
-        PropertySheetDebug.uiVerbose("tryPatch #" + attempt + " OK page=" //$NON-NLS-1$ //$NON-NLS-2$
+PropertySheetDebug.uiVerbose("tryPatch #" + attempt + " OK page=" //$NON-NLS-1$ //$NON-NLS-2$
                 + page.getClass().getSimpleName());
         return true;
     }
@@ -198,11 +189,7 @@ public final class PropertySheetHook implements IStartup
             display.addFilter(SWT.MenuDetect, PropertySheetMouseBridge::handleMenuDetect);
             installed = true;
             PropertySheetDebug.uiVerbose("mouseBridge installed"); //$NON-NLS-1$
-            // #region agent log
-            PropertySheetControlInterop.agentHitLog("H0", "PropertySheetHook.ensureInstalled", "bridgeOk", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    java.util.Collections.emptyMap());
-            // #endregion
-        }
+}
 
         private static void handleMouseDown(Event event)
         {
@@ -213,39 +200,20 @@ public final class PropertySheetHook implements IStartup
                 return;
             if (PropertySheetUiContext.isFilterAreaControl(widget))
             {
-                // #region agent log
-                PropertySheetControlInterop.agentHitLog("H4", "PropertySheetHook.mouseDown", "filterArea", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        java.util.Map.of("widget", widget.getClass().getSimpleName())); //$NON-NLS-1$
-                // #endregion
-                return;
+return;
             }
 
             Point display = widget.toDisplay(event.x, event.y);
             Object page = PropertySheetUiCoordinator.pageForControl(widget);
             if (page == null)
             {
-                // #region agent log
-                PropertySheetControlInterop.agentHitLog("H4", "PropertySheetHook.mouseDown", "noPage", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        java.util.Map.of("widget", widget.getClass().getSimpleName(), //$NON-NLS-1$
-                                "clickY", display.y, //$NON-NLS-1$
-                                "diag", PropertySheetUiCoordinator.pageLookupDiag(widget))); //$NON-NLS-1$
-                // #endregion
-                return;
+return;
             }
 
-            // #region agent log
-            PropertySheetControlInterop.agentHitLog("H4", "PropertySheetHook.mouseDown", "entry", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    java.util.Map.of("clickX", display.x, "clickY", display.y, //$NON-NLS-1$ //$NON-NLS-2$
-                            "widget", widget.getClass().getSimpleName())); //$NON-NLS-1$
-            // #endregion
-            PropertySheetPaletteRow row = resolveRowAt(page, widget, display);
+PropertySheetPaletteRow row = resolveRowAt(page, widget, display);
             if (row == null)
             {
-                // #region agent log
-                PropertySheetControlInterop.agentHitLog("H5", "PropertySheetHook.mouseDown", "miss", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        java.util.Map.of("clickY", display.y, "ctxRows", contextRowCount(page))); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                PropertySheetDebug.problem("mouseDown MISS at=(" + display.x + "," + display.y + ") " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+PropertySheetDebug.problem("mouseDown MISS at=(" + display.x + "," + display.y + ") " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                         + "widget=" + PropertySheetDebug.controlBrief(widget) //$NON-NLS-1$
                         + " ctx.rows=" + contextRowCount(page)); //$NON-NLS-1$
                 return;
@@ -275,11 +243,7 @@ public final class PropertySheetHook implements IStartup
 
             Point display = event.x > 0 || event.y > 0
                     ? new Point(event.x, event.y) : widget.getDisplay().getCursorLocation();
-            // #region agent log
-            PropertySheetControlInterop.agentHitLog("H4", "PropertySheetHook.menuDetect", "entry", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    java.util.Map.of("clickY", display.y)); //$NON-NLS-1$
-            // #endregion
-            PropertySheetPaletteRow row = resolveRowAt(page, widget, display);
+PropertySheetPaletteRow row = resolveRowAt(page, widget, display);
             if (row == null)
             {
                 PropertySheetDebug.feature("menuDetect miss widget=" + PropertySheetDebug.controlBrief(widget)); //$NON-NLS-1$
@@ -309,11 +273,7 @@ public final class PropertySheetHook implements IStartup
                 PropertySheetPaletteRow row = buildRowFromHit(page, scene, root, hit, display);
                 if (row != null)
                     return row;
-                // #region agent log
-                PropertySheetControlInterop.agentHitLog("H7", "PropertySheetHook.resolveRowAt", "buildRowNull", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        java.util.Map.of("prop", hit.displayName, "via", hit.via)); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-            }
+}
             return null;
         }
 
@@ -352,12 +312,7 @@ public final class PropertySheetHook implements IStartup
                         modelName);
                 row.setHitDisplayY(display.y);
                 row.setSelectionDisplayBand(hit.areaTopDisplay, hit.areaBottomDisplay);
-                // #region agent log
-                PropertySheetControlInterop.agentHitLog("H21", "PropertySheetHook.scannerRowForHit", //$NON-NLS-1$ //$NON-NLS-2$
-                        "ctxByName", java.util.Map.of("prop", hit.displayName, //$NON-NLS-1$ //$NON-NLS-2$
-                                "hostH", host.getSize().y)); //$NON-NLS-1$
-                // #endregion
-                return row;
+return row;
             }
             return null;
         }
@@ -372,12 +327,7 @@ public final class PropertySheetHook implements IStartup
         {
             if (hit == null || hit.displayName.isEmpty() || display == null)
             {
-                // #region agent log
-                PropertySheetControlInterop.agentHitLog("H7", "PropertySheetHook.buildRowFromHit", "earlyNull", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        java.util.Map.of("hitNull", hit == null, //$NON-NLS-1$
-                                "nameEmpty", hit == null || hit.displayName.isEmpty())); //$NON-NLS-1$
-                // #endregion
-                return null;
+return null;
             }
             if (!"scan".equals(hit.via)) //$NON-NLS-1$
                 return null;
@@ -386,11 +336,7 @@ public final class PropertySheetHook implements IStartup
             Composite content = space != null ? space.content : root;
             if (content == null || content.isDisposed())
             {
-                // #region agent log
-                PropertySheetControlInterop.agentHitLog("H7", "PropertySheetHook.buildRowFromHit", "noContent", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        java.util.Map.of("prop", hit.displayName)); //$NON-NLS-1$
-                // #endregion
-                return null;
+return null;
             }
             if (hit.areaBottomCanvas <= hit.areaTopCanvas)
                 return null;
@@ -399,17 +345,7 @@ public final class PropertySheetHook implements IStartup
                     hit.lwtView, null);
             row.setHitDisplayY(display.y);
             row.setSelectionCanvasBand(hit.areaTopCanvas, hit.areaBottomCanvas);
-            // #region agent log
-            PropertySheetControlInterop.agentHitLog("H20", "PropertySheetHook.buildRowFromHit", "paintHost", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    java.util.Map.of("prop", hit.displayName, //$NON-NLS-1$
-                            "host", content.getClass().getSimpleName(), //$NON-NLS-1$
-                            "hostH", content.getSize().y, //$NON-NLS-1$
-                            "topCanvas", hit.areaTopCanvas, //$NON-NLS-1$
-                            "bottomCanvas", hit.areaBottomCanvas, //$NON-NLS-1$
-                            "propertyIndex", hit.propertyIndex, //$NON-NLS-1$
-                            "leaf", false)); //$NON-NLS-1$
-            // #endregion
-            return row;
+return row;
         }
 
         private static PropertySheetPaletteRow hitTestContextRows(Object page, Point display)

@@ -252,23 +252,7 @@ public final class ContentAssistPopupSync
                                             boolean shouldRecompute, boolean forceSmartOpen,
                                             String recomputeRoute)
     {
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H73", "sessionPopupSync", phase, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"inLiteral\":" + inLiteral //$NON-NLS-1$
-                + ",\"irExpected\":" + irExpected //$NON-NLS-1$
-                + ",\"stableNAfterSeed\":" + stableNAfterSeed //$NON-NLS-1$
-                + ",\"filter\":\"" + ContentAssistDebug.jsonEscapeForLog( //$NON-NLS-1$
-                    filter != null ? filter : "") //$NON-NLS-1$
-                + "\",\"shouldRecompute\":" + shouldRecompute //$NON-NLS-1$
-                + ",\"forceSmartOpen\":" + forceSmartOpen //$NON-NLS-1$
-                + (recomputeRoute != null
-                    ? ",\"recomputeRoute\":\"" + recomputeRoute + "\"" : "") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + ",\"openGen\":" + ContentAssistSessionReloader.literalOpenGenForLog() //$NON-NLS-1$
-                + ",\"msSinceSessionStart\":" //$NON-NLS-1$
-                    + ContentAssistSessionReloader.msSinceLiteralSessionStartForLog()
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     /** H78: literal auto/debounce — fullSmart vs literalStockOnly (throttled). */
     private static void logLiteralAutoSmartRoute(boolean inLiteral, String filter, int proposalN,
@@ -278,17 +262,7 @@ public final class ContentAssistPopupSync
             return;
         String filterEsc = filter != null
             ? ContentAssistDebug.jsonEscapeForLog(filter) : ""; //$NON-NLS-1$
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H78", "recomputePopupList", "autoLiteralSmart", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"autoLiteralSmart\":true" //$NON-NLS-1$
-                + ",\"smartEnabled\":" + SmartAssistFilterState.isSmartFilterEnabled() //$NON-NLS-1$
-                + ",\"route\":\"" + route //$NON-NLS-1$
-                + "\",\"filter\":\"" + filterEsc //$NON-NLS-1$
-                + "\",\"proposalN\":" + proposalN //$NON-NLS-1$
-                + ",\"trigger\":\"" + peekRecomputeTrigger() //$NON-NLS-1$
-                + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     private static void logSmartApplyMarker(List<ICompletionProposal> displayList, int fullCount)
     {
@@ -310,19 +284,7 @@ public final class ContentAssistPopupSync
                     firstKey = firstKey.substring(0, 40);
             }
         }
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H74", "applyPopupListSync", "smartApply", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"trigger\":\"" + ContentAssistDebug.jsonEscapeForLog(peekRecomputeTrigger()) //$NON-NLS-1$
-                + "\",\"firstIsSmartProposal\":" + smart //$NON-NLS-1$
-                + ",\"firstDelegateClass\":\"" + ContentAssistDebug.jsonEscapeForLog(delegateClass) //$NON-NLS-1$
-                + "\",\"proposalCount\":" + fullCount //$NON-NLS-1$
-                + ",\"firstKey\":\"" + ContentAssistDebug.jsonEscapeForLog(firstKey) //$NON-NLS-1$
-                + "\",\"openGen\":" + ContentAssistSessionReloader.literalOpenGenForLog() //$NON-NLS-1$
-                + ",\"msSinceSessionStart\":" //$NON-NLS-1$
-                    + ContentAssistSessionReloader.msSinceLiteralSessionStartForLog()
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     /**
      * Синхронизация offset'ов popup, prepend filterRunnable и пересчёт списка.
@@ -513,13 +475,7 @@ public final class ContentAssistPopupSync
                     String contextLabel = ContentAssistPopupUi.peekContextTypeLabel(viewer);
                     String contextEsc = contextLabel != null
                         ? contextLabel.replace("\\", "\\\\").replace("\"", "\\\"") : ""; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    // #region agent log
-                    ContentAssistDebug.debugModeLog("H17", "scheduleFilterBarSetup", "applied", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        "{\"barCreated\":" + barCreated //$NON-NLS-1$
-                            + ",\"contextLabel\":\"" + contextEsc + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                            + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-                    // #endregion
-                }
+}
                 catch (Exception e)
                 {
                     ContentAssistDebug.log("filterBarSetup ERROR: " + e.getMessage()); //$NON-NLS-1$
@@ -663,32 +619,11 @@ public final class ContentAssistPopupSync
                     "literalStockOnly"); //$NON-NLS-1$
                 int tableRowsBefore = tableItemCount(popup);
                 int filteredBefore = filteredProposalCount(popup);
-                // #region agent log
-                ContentAssistDebug.debugModeLog("H56", "recomputePopupList", "toggleRecompute", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"stockOnly\":true,\"restoreAfterFilterToggle\":" + restoreAfterFilterToggle //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"literalIrMerge\":false" //$NON-NLS-1$
-                        + ",\"smartEnabled\":" + SmartAssistFilterState.isSmartFilterEnabled() //$NON-NLS-1$
-                        + ",\"hasIr\":" + processor.hasIrProposalsForCurrentContext() //$NON-NLS-1$
-                        + ",\"tableRowsBefore\":" + tableRowsBefore //$NON-NLS-1$
-                        + ",\"filteredNBefore\":" + filteredBefore //$NON-NLS-1$
-                        + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                runStockFilterRunnable(assistant);
+runStockFilterRunnable(assistant);
                 finishSyncCycle(popup);
                 int tableRowsAfter = tableItemCount(popup);
                 int filteredAfter = filteredProposalCount(popup);
-                // #region agent log
-                ContentAssistDebug.debugModeLog("H68", "recomputePopupList", "literalStockOnly", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"tableRowsBefore\":" + tableRowsBefore //$NON-NLS-1$
-                        + ",\"tableRowsAfter\":" + tableRowsAfter //$NON-NLS-1$
-                        + ",\"filteredNBefore\":" + filteredBefore //$NON-NLS-1$
-                        + ",\"filteredNAfter\":" + filteredAfter //$NON-NLS-1$
-                        + ",\"popupVisible\":" + isPopupVisible(assistant) //$NON-NLS-1$
-                        + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-                ContentAssistDebug.agentLog("H2", "recomputePopupList", "literalStockOnly", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"runId\":\"post-fix\",\"tableRows\":" + tableRowsAfter + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                // #endregion
-                return true;
+return true;
             }
 
             String filter = SmartFilterTracker.getCurrentFilter();
@@ -696,13 +631,7 @@ public final class ContentAssistPopupSync
                 filter);
             if (proposals == null)
             {
-                // #region agent log
-                ContentAssistDebug.debugModeLog("H84", "recomputePopupList", "fallbackToCompute", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"filter\":\"" + ContentAssistDebug.jsonEscapeForLog(filter) //$NON-NLS-1$
-                        + "\",\"inLiteral\":" + inLiteralRecompute //$NON-NLS-1$
-                        + ",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                proposals = processor.computeForPopupRefresh(viewer, caret);
+proposals = processor.computeForPopupRefresh(viewer, caret);
             }
             if (proposals == null)
                 proposals = new ICompletionProposal[0];
@@ -712,27 +641,7 @@ public final class ContentAssistPopupSync
                 logLiteralAutoSmartRoute(inLiteralRecompute, filter, proposals.length,
                     "fullSmart"); //$NON-NLS-1$
             }
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H52", "recomputePopupList", "recomputeResult", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"filter\":\"" + ContentAssistDebug.jsonEscapeForLog(filter) //$NON-NLS-1$
-                    + "\",\"proposalN\":" + proposals.length //$NON-NLS-1$
-                    + ",\"inLiteral\":" + inLiteralRecompute //$NON-NLS-1$
-                    + ",\"literalIrMerge\":" + literalIrMerge //$NON-NLS-1$
-                    + ",\"firstKey\":\"" + ContentAssistDebug.firstProposalKey(proposals) //$NON-NLS-1$
-                    + "\"}"); //$NON-NLS-1$
-            if (restoreAfterFilterToggle)
-            {
-                ContentAssistDebug.debugModeLog("H56", "recomputePopupList", "toggleRecompute", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"stockOnly\":false,\"restoreAfterFilterToggle\":true" //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"literalIrMerge\":" + literalIrMerge //$NON-NLS-1$
-                        + ",\"smartEnabled\":" + SmartAssistFilterState.isSmartFilterEnabled() //$NON-NLS-1$
-                        + ",\"filter\":\"" + ContentAssistDebug.jsonEscapeForLog(filter) //$NON-NLS-1$
-                        + "\",\"proposalN\":" + proposals.length //$NON-NLS-1$
-                        + ",\"hasIr\":" + processor.hasIrProposalsForCurrentContext() //$NON-NLS-1$
-                        + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            // #endregion
-            final int fullProposalCount = proposals.length;
+final int fullProposalCount = proposals.length;
 
             final boolean fastIrMergeReset =
                 ContentAssistSessionReloader.shouldResetSelectionAfterIrMerge(
@@ -757,12 +666,7 @@ public final class ContentAssistPopupSync
                 && mergeGen == lastSyncedIrMergeGen
                 && !forceIrMergeReplace)
             {
-                // #region agent log
-                ContentAssistDebug.sessionLog("H1", "recomputePopupList", "skipSameCount", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"count\":" + proposals.length + ",\"display\":" + displayCount //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"first\":\"" + ContentAssistDebug.firstProposalKey(proposals) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                // #endregion
-                if (fastIrMergeReset)
+if (fastIrMergeReset)
                 {
                     try
                     {
@@ -849,36 +753,7 @@ public final class ContentAssistPopupSync
                 }
             }
 
-            // #region agent log
-            {
-                String filterEsc = filter != null
-                    ? filter.replace("\\", "\\\\").replace("\"", "\\\"") : ""; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-                ContentAssistDebug.debugModeLog("H12", "recomputePopupList", "applied", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"inLiteral\":" + inLiteralRecompute //$NON-NLS-1$
-                        + ",\"literalManualIr\":" + processor.isIrOnlyManualMode() //$NON-NLS-1$
-                        + ",\"irOnly\":" + processor.isIrOnlyManualMode() //$NON-NLS-1$
-                        + ",\"filter\":\"" + filterEsc + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"proposalCount\":" + fullProposalCount //$NON-NLS-1$
-                        + ",\"tableRows\":" + tableItemCount(popup) //$NON-NLS-1$
-                        + ",\"trigger\":\"" + ContentAssistDebug.jsonEscapeForLog( //$NON-NLS-1$
-                            peekRecomputeTrigger()) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"openGen\":" + ContentAssistSessionReloader.literalOpenGenForLog() //$NON-NLS-1$
-                        + ",\"msSinceSessionStart\":" //$NON-NLS-1$
-                            + ContentAssistSessionReloader.msSinceLiteralSessionStartForLog()
-                        + ",\"forceSmartOpen\":" + forceSmartLiteralOpen + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-                if (inLiteralRecompute)
-                {
-                    ContentAssistSessionReloader auditReloader =
-                        ContentAssistSessionReloader.getActiveReloader();
-                    ContentAssistPopupSync.auditLiteralPopupList(assistant, viewer, processor,
-                        auditReloader != null ? auditReloader.getFacade() : null,
-                        auditReloader != null ? auditReloader.getExpectedLiteralIrCount() : -1,
-                        "recomputeApplied"); //$NON-NLS-1$
-                }
-            }
-            // #endregion
-
-            if (inLiteralRecompute && literalIrMerge)
+if (inLiteralRecompute && literalIrMerge)
                 ContentAssistPopupUi.ensureFilterToggle(assistant, viewer, processor);
 
             finishSyncCycle(popup);
@@ -892,11 +767,7 @@ public final class ContentAssistPopupSync
         finally
         {
             long elapsedMs = (System.nanoTime() - _t0) / 1_000_000;
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H83", "recomputePopupList", "exit", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"ms\":" + elapsedMs + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            if (viewer != null && isPopupVisible(assistant))
+if (viewer != null && isPopupVisible(assistant))
                 ContentAssistPopupUi.updateContextTypeLabel(viewer);
             RECOMPUTE_GUARD.set(Boolean.FALSE);
             clearRecomputeContext();
@@ -930,12 +801,7 @@ public final class ContentAssistPopupSync
             fFilteredProposalsField.get(popup);
         if (fComputedProposalsField != null && applied != null)
             fComputedProposalsField.set(popup, applied);
-        // #region agent log
-        SmartContentAssistProcessor.logPopupListCaretProbe("afterSetProposals", //$NON-NLS-1$
-            applied != null ? applied : listToApply);
-        // #endregion
-
-        installPopupScrollWatcher(popup, assistant, viewer, processor);
+installPopupScrollWatcher(popup, assistant, viewer, processor);
 
         int tableRows = tableItemCount(popup);
         logSyncResult(fullCount, listToApply.size(), tableRows,
@@ -948,18 +814,7 @@ public final class ContentAssistPopupSync
         if (runStockFilterAfter)
         {
             runStockFilterRunnable(assistant);
-            // #region agent log
-            try
-            {
-                List<ICompletionProposal> afterStock =
-                    (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
-                SmartContentAssistProcessor.logPopupListCaretProbe("afterStockFilter", afterStock); //$NON-NLS-1$
-            }
-            catch (Exception ignored)
-            {
-            }
-            // #endregion
-            if (processor != null && processor.isIrWordsResolvedForContext()
+if (processor != null && processor.isIrWordsResolvedForContext()
                 && processor.resolvedIrProposalCount() > 0)
                 purgeEmptyPlaceholderFromPopup(popup, listToApply, saved, resetToFirst, restoreNow);
         }
@@ -1392,27 +1247,14 @@ public final class ContentAssistPopupSync
     {
         ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
         int gen = reloader != null ? reloader.getLiteralOpenGen() : -1;
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H30", "sidePanelRefresh", op, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"gen\":" + gen //$NON-NLS-1$
-                + ",\"op\":\"" + ContentAssistDebug.jsonEscapeForLog(op) //$NON-NLS-1$
-                + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     static void logBrowserContentLoad(String op, boolean skippedDuplicate)
     {
         ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
         int gen = reloader != null ? reloader.getLiteralOpenGen() : -1;
         long ms = reloader != null ? reloader.msSinceLiteralOpen() : -1;
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H30", "browserContentLoad", op, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"gen\":" + gen //$NON-NLS-1$
-                + ",\"msSinceOpen\":" + ms //$NON-NLS-1$
-                + ",\"skippedDuplicate\":" + skippedDuplicate //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     static void logLiteralBrowserPhase(String phase, boolean creatorPatched, boolean hasBrowser,
         boolean pinOk, boolean htmlApplyScheduled)
@@ -1422,32 +1264,14 @@ public final class ContentAssistPopupSync
         ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
         String controlClass = assistant != null
             ? jsonEscapeControlClass(describeSideInformationControlClass(assistant)) : "null"; //$NON-NLS-1$
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H32", "literalBrowserPhase", phase, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"gen\":" + gen //$NON-NLS-1$
-                + ",\"controlClass\":\"" + controlClass //$NON-NLS-1$
-                + "\",\"creatorPatched\":" + creatorPatched //$NON-NLS-1$
-                + ",\"hasBrowser\":" + hasBrowser //$NON-NLS-1$
-                + ",\"pinOk\":" + pinOk //$NON-NLS-1$
-                + ",\"htmlApplyScheduled\":" + htmlApplyScheduled //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     public static void logLiteralSideHintSuppressed(boolean fromSelectedActivation, String reason)
     {
         ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
         int gen = reloader != null ? reloader.getLiteralOpenGen() : -1;
         long ms = reloader != null ? reloader.msSinceLiteralOpen() : -1;
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H33", "literalSideHintSuppressed", reason, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"gen\":" + gen //$NON-NLS-1$
-                + ",\"msSinceOpen\":" + ms //$NON-NLS-1$
-                + ",\"fromSelectedActivation\":" + fromSelectedActivation //$NON-NLS-1$
-                + ",\"reason\":\"" + ContentAssistDebug.jsonEscapeForLog(reason) //$NON-NLS-1$
-                + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     private static void logHtmlApplyPollAttempt(int attempt, boolean applied, boolean skippedDuplicate)
     {
@@ -1461,19 +1285,7 @@ public final class ContentAssistPopupSync
             && IrBslHoverHtml.findControlBrowser(anyControl) != null;
         boolean browserApply = applied && hasBrowser;
         boolean textControlApply = applied && !hasBrowser;
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H33", "htmlApplyPoll", "attempt", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"gen\":" + gen //$NON-NLS-1$
-                + ",\"msSinceOpen\":" + ms //$NON-NLS-1$
-                + ",\"attempt\":" + attempt //$NON-NLS-1$
-                + ",\"applied\":" + applied //$NON-NLS-1$
-                + ",\"browserApply\":" + browserApply //$NON-NLS-1$
-                + ",\"textControlApply\":" + textControlApply //$NON-NLS-1$
-                + ",\"hasBrowser\":" + hasBrowser //$NON-NLS-1$
-                + ",\"skippedDuplicate\":" + skippedDuplicate //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     /** H39: состояние side panel сразу после merge-recompute. */
     private static void logPostRecomputeSidePanelIfLiteralIr(Object popup,
@@ -1534,29 +1346,7 @@ public final class ContentAssistPopupSync
             sideShellVisible = ext5.isVisible();
         boolean pendingRefresh = reloader != null && reloader.isPendingPopupRefresh();
         int irMergeGen = reloader != null ? reloader.getIrMergeGeneration() : -1;
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H39", "postRecomputeSidePanel", "afterApply", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"gen\":" + gen //$NON-NLS-1$
-                + ",\"msSinceOpen\":" + ms //$NON-NLS-1$
-                + ",\"proposalCount\":" + proposalCount //$NON-NLS-1$
-                + ",\"tableRows\":" + tableRows //$NON-NLS-1$
-                + ",\"selectedIndex\":" + selectedIndex //$NON-NLS-1$
-                + ",\"selectedDisplayKey\":\"" //$NON-NLS-1$
-                + ContentAssistDebug.jsonEscapeForLog(selectedDisplayKey) //$NON-NLS-1$
-                + "\",\"delegateClass\":\"" + ContentAssistDebug.jsonEscapeForLog(delegateClass) //$NON-NLS-1$
-                + "\",\"isIr\":" + isIr //$NON-NLS-1$
-                + ",\"isOverlap\":" + isOverlap //$NON-NLS-1$
-                + ",\"controlClass\":\"" + ContentAssistDebug.jsonEscapeForLog( //$NON-NLS-1$
-                    controlClass != null ? controlClass : "none") //$NON-NLS-1$
-                + "\",\"hasBrowser\":" + hasBrowser //$NON-NLS-1$
-                + ",\"sideShellVisible\":" + sideShellVisible //$NON-NLS-1$
-                + ",\"sideShellWidth\":" + sideShellWidth //$NON-NLS-1$
-                + ",\"selectionNotifyCalled\":" + selectionNotifyCalled //$NON-NLS-1$
-                + ",\"pendingRefreshQueued\":" + pendingRefresh //$NON-NLS-1$
-                + ",\"irMergeGen\":" + irMergeGen //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     /**
      * Repin боковой подсказки после merge-recompute (fix10i / H39).
@@ -1593,15 +1383,7 @@ public final class ContentAssistPopupSync
     private static void logCreatorGate(String path, boolean hasBrowser,
         boolean creatorOk, String decision)
     {
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H43", "creatorGate", decision, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"path\":\"" + ContentAssistDebug.jsonEscapeForLog(path) //$NON-NLS-1$
-                + "\",\"hasBrowser\":" + hasBrowser //$NON-NLS-1$
-                + ",\"creatorOk\":" + creatorOk //$NON-NLS-1$
-                + ",\"decision\":\"" + ContentAssistDebug.jsonEscapeForLog(decision) //$NON-NLS-1$
-                + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     /** H42: геометрия shell боковой подсказки после configure/recreate. */
     static void logSidePanelGeometry(String op)
@@ -1624,18 +1406,7 @@ public final class ContentAssistPopupSync
             if (control instanceof IInformationControlExtension5 ext5)
                 visible = ext5.isVisible();
         }
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H42", "sidePanelGeometry", op, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"gen\":" + gen //$NON-NLS-1$
-                + ",\"shellX\":" + x + ",\"shellY\":" + y //$NON-NLS-1$
-                + ",\"shellW\":" + w + ",\"shellH\":" + h //$NON-NLS-1$
-                + ",\"sideShellVisible\":" + visible //$NON-NLS-1$
-                + ",\"controlClass\":\"" + ContentAssistDebug.jsonEscapeForLog( //$NON-NLS-1$
-                    controlClass != null ? controlClass : "none") //$NON-NLS-1$
-                + "\",\"hasBrowser\":" + hasBrowser //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     private static int[] resolveSideShellBounds(ContentAssistant assistant)
     {
@@ -1830,22 +1601,7 @@ public final class ContentAssistPopupSync
             ? filter.replace("\\", "\\\\").replace("\"", "\\\"") : ""; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
         int gen = reloader != null ? reloader.getLiteralOpenGen() : -1;
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H37", "literalListAudit", audit.phase, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"gen\":" + gen //$NON-NLS-1$
-                + ",\"ok\":" + audit.ok //$NON-NLS-1$
-                + ",\"reasons\":" + reasonsJson(audit.reasons) //$NON-NLS-1$
-                + ",\"expectedIrN\":" + audit.expectedIrN //$NON-NLS-1$
-                + ",\"tableRows\":" + audit.tableRows //$NON-NLS-1$
-                + ",\"popupIr\":" + audit.popupIr //$NON-NLS-1$
-                + ",\"popupEdt\":" + audit.popupEdt //$NON-NLS-1$
-                + ",\"proposalCount\":" + audit.proposalCount //$NON-NLS-1$
-                + ",\"irOnly\":" + irOnly //$NON-NLS-1$
-                + ",\"irResolved\":" + irResolved //$NON-NLS-1$
-                + ",\"filter\":\"" + filterEsc + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     private static String reasonsJson(List<String> reasons)
     {
@@ -2105,18 +1861,7 @@ public final class ContentAssistPopupSync
         String delegateClass = raw != null ? raw.getClass().getSimpleName() : "null"; //$NON-NLS-1$
         String controlClass = describeSideInformationControlClass(
             ContentAssistSessionReloader.getActiveAssistant());
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H38", "overlapSideHint", "selection", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"delegateClass\":\"" + ContentAssistDebug.jsonEscapeForLog(delegateClass) //$NON-NLS-1$
-                + "\",\"isIr\":false" //$NON-NLS-1$
-                + ",\"hasMergedHtml\":" + hasMergedHtml //$NON-NLS-1$
-                + ",\"hasBrowser\":" + hasBrowser //$NON-NLS-1$
-                + ",\"pinInvoked\":" + pinInvoked //$NON-NLS-1$
-                + ",\"controlClass\":\"" + ContentAssistDebug.jsonEscapeForLog( //$NON-NLS-1$
-                    controlClass != null ? controlClass : "none") //$NON-NLS-1$
-                + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     /**
      * Один fallback через 80 ms: migrate + pin без htmlApply poll (fix10c).
@@ -2189,14 +1934,7 @@ public final class ContentAssistPopupSync
         {
             ContentAssistDebug.log("ensureInitialIrRowActivation: " + e.getMessage()); //$NON-NLS-1$
         }
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H19", "ensureInitialIrRowActivation", "done", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"selectedCalled\":" + selectedCalled //$NON-NLS-1$
-                + ",\"cacheKey\":" + (cacheKey != null ? "\"" + cacheKey + "\"" : "null") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + ",\"htmlLenAfter\":" + htmlLenAfter //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        return selectedCalled;
+return selectedCalled;
     }
 
     /**
@@ -2329,17 +2067,7 @@ public final class ContentAssistPopupSync
         ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
         int gen = reloader != null ? reloader.getLiteralOpenGen() : -1;
         long ms = reloader != null ? reloader.msSinceLiteralOpen() : -1;
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H34", "literalCreatorResolve", winner != null ? winner : "none", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"gen\":" + gen //$NON-NLS-1$
-                + ",\"msSinceOpen\":" + ms //$NON-NLS-1$
-                + ",\"cold\":" + cold //$NON-NLS-1$
-                + ",\"creatorOk\":" + creatorOk //$NON-NLS-1$
-                + ",\"winner\":\"" + ContentAssistDebug.jsonEscapeForLog( //$NON-NLS-1$
-                    winner != null ? winner : "none") //$NON-NLS-1$
-                + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     private static boolean applyBrowserCreatorPatch(ContentAssistant assistant,
         SourceViewer viewer)
@@ -2425,28 +2153,7 @@ public final class ContentAssistPopupSync
         trace.viewerHash = viewer != null ? System.identityHashCode(viewer) : -1;
         trace.reloaderHash = reloader != null ? System.identityHashCode(reloader) : -1;
         String controlBefore = null;
-        // #region agent log
-        try
-        {
-            trace = BslCompletionSideHintResolver.traceAssistBrowserCreatorResolution(
-                assistant, viewer, reloader);
-            ContentAssistDebug.debugModeLog("H20", "resolveCreatorChain", "trace", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                trace.toDebugJson());
-            controlBefore = describeSideInformationControlClass(assistant);
-        }
-        catch (Exception e)
-        {
-            ContentAssistDebug.debugModeLog("H26", "ensureAssistBrowserCreatorOnController", "traceError", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"msg\":\"" + ContentAssistDebug.jsonEscapeForLog(e.getMessage()) //$NON-NLS-1$
-                    + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-            trace.creator = BslCompletionSideHintResolver.resolveAssistBrowserCreatorChain(
-                assistant, viewer, reloader);
-            if (trace.creator != null)
-                trace.winner = "fallback"; //$NON-NLS-1$
-            controlBefore = describeSideInformationControlClass(assistant);
-        }
-        // #endregion
-        IInformationControlCreator creator = trace.creator;
+IInformationControlCreator creator = trace.creator;
         boolean creatorResolved = creator != null;
         if (!creatorResolved && reloader != null)
         {
@@ -2510,22 +2217,7 @@ public final class ContentAssistPopupSync
             if (creatorPatched && !hasBrowserAfterRefresh)
                 hasBrowserAfterRefresh = recreateAssistBrowserSidePanelIfNeeded(assistant, viewer);
         }
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H22", "ensureAssistBrowserCreatorOnController", "control", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"controlBefore\":\"" + jsonEscapeControlClass(controlBefore) //$NON-NLS-1$
-                + "\",\"controlAfter\":\"" + jsonEscapeControlClass( //$NON-NLS-1$
-                    describeSideInformationControlClass(assistant))
-                + "\",\"creatorPatched\":" + creatorPatched //$NON-NLS-1$
-                + ",\"hasBrowserAfterRefresh\":" + hasBrowserAfterRefresh //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        ContentAssistDebug.debugModeLog("H18", "ensureAssistBrowserCreatorOnController", "refresh", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"creatorResolved\":" + creatorResolved //$NON-NLS-1$
-                + ",\"creatorPatched\":" + creatorPatched //$NON-NLS-1$
-                + ",\"hasBrowserAfterRefresh\":" + hasBrowserAfterRefresh //$NON-NLS-1$
-                + ",\"winner\":\"" + trace.winner //$NON-NLS-1$
-                + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        return creatorResolved && creatorPatched;
+return creatorResolved && creatorPatched;
     }
 
     /** H20/H22: FQN side control или {@code null}. */
@@ -2629,13 +2321,7 @@ public final class ContentAssistPopupSync
         {
             ContentAssistDebug.log("recreateAssistBrowserSidePanelIfNeeded: " + e.getMessage()); //$NON-NLS-1$
         }
-        // #region agent log
-        boolean hasBrowser = hasAssistBrowserControl(assistant);
-        ContentAssistDebug.debugModeLog("H18", "recreateAssistBrowserSidePanelIfNeeded", "recreate", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"hasBrowser\":" + hasBrowser //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        return hasBrowser;
+return hasBrowser;
     }
 
     private static boolean hasAssistBrowserControl(ContentAssistant assistant)
@@ -2964,17 +2650,7 @@ public final class ContentAssistPopupSync
                 applyMemberAccessFilteredProposals(popup, baseList, list, saved);
                 List<ICompletionProposal> applied =
                     (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
-                // #region agent log
-                SmartContentAssistProcessor.logPopupListCaretProbe("inplaceFilterCache", //$NON-NLS-1$
-                    applied != null ? applied : list);
-                ContentAssistDebug.debugModeLog("H73", "inplaceCollapse", "filterCache", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"filter\":\"" + ContentAssistDebug.jsonEscapeForLog(filter) //$NON-NLS-1$
-                        + "\",\"path\":\"" + path + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-                        + ",\"baseN\":" + baseList.size() //$NON-NLS-1$
-                        + ",\"n\":" + (applied != null ? applied.size() : list.size()) //$NON-NLS-1$
-                        + "}"); //$NON-NLS-1$
-                // #endregion
-                finishSyncCycleLight(popup);
+finishSyncCycleLight(popup);
                 return true;
             }
             return restoreMemberAccessFullListThenCollapse(assistant);
@@ -3017,14 +2693,7 @@ public final class ContentAssistPopupSync
                     (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
                 if (fComputedProposalsField != null && applied != null)
                     fComputedProposalsField.set(popup, applied);
-                // #region agent log
-                ContentAssistDebug.debugModeLog("H73", "inplaceCollapse", "restoreBase", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"baseN\":" + base.size() //$NON-NLS-1$
-                        + ",\"wasN\":" + currentN //$NON-NLS-1$
-                        + ",\"after\":" + (applied != null ? applied.size() : collapsed.size()) //$NON-NLS-1$
-                        + "}"); //$NON-NLS-1$
-                // #endregion
-                finishSyncCycleLight(popup);
+finishSyncCycleLight(popup);
                 return true;
             }
             return collapseOptionalOverlapsInVisiblePopup(assistant);
@@ -3111,14 +2780,7 @@ public final class ContentAssistPopupSync
                     new ArrayList<>(current));
             if (collapsed.size() == current.size())
             {
-                // #region agent log
-                String curFilter = SmartFilterTracker.getCurrentFilter();
-                ContentAssistDebug.debugModeLog("H73", "inplaceCollapse", "unchanged", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    "{\"size\":" + current.size() //$NON-NLS-1$
-                        + ",\"filter\":\"" + ContentAssistDebug.jsonEscapeForLog( //$NON-NLS-1$
-                            curFilter != null ? curFilter : "") + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-                // #endregion
-                // Не cancelDebouncedNativeFilter: иначе набор префикса после «.» теряет
+// Не cancelDebouncedNativeFilter: иначе набор префикса после «.» теряет
                 // уже запланированный filter debounce.
                 finishSyncCycleLight(popup);
                 return true;
@@ -3128,15 +2790,7 @@ public final class ContentAssistPopupSync
                 (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
             if (fComputedProposalsField != null && applied != null)
                 fComputedProposalsField.set(popup, applied);
-            // #region agent log
-            SmartContentAssistProcessor.logPopupListCaretProbe("inplaceCollapse", //$NON-NLS-1$
-                applied != null ? applied : collapsed);
-            ContentAssistDebug.debugModeLog("H73", "inplaceCollapse", "applied", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"before\":" + current.size() //$NON-NLS-1$
-                    + ",\"after\":" + (applied != null ? applied.size() : collapsed.size()) //$NON-NLS-1$
-                    + "}"); //$NON-NLS-1$
-            // #endregion
-            finishSyncCycle(popup);
+finishSyncCycle(popup);
             return true;
         }
         catch (Exception e)
@@ -3167,38 +2821,11 @@ public final class ContentAssistPopupSync
             int tableBefore = tableItemCount(popup);
             int filteredBefore = filteredProposalCount(popup);
             boolean popupVisibleBefore = isPopupVisible(assistant);
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H67", "runStockFilterRunnable", "before", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"tableRows\":" + tableBefore //$NON-NLS-1$
-                    + ",\"filteredN\":" + filteredBefore //$NON-NLS-1$
-                    + ",\"popupVisible\":" + popupVisibleBefore //$NON-NLS-1$
-                    + ",\"smartEnabled\":" + SmartAssistFilterState.isSmartFilterEnabled() //$NON-NLS-1$
-                    + ",\"filterPrefix\":\"" + ContentAssistDebug.jsonEscapeForLog( //$NON-NLS-1$
-                        filterPrefix != null ? filterPrefix : "") //$NON-NLS-1$
-                    + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            ensureFilterPending(popup);
+ensureFilterPending(popup);
             original.run();
             if (!SmartAssistFilterState.isSmartFilterEnabled())
                 applyPrefixSelectionIfNeeded(assistant);
-            // #region agent log
-            ContentAssistDebug.debugModeLog("H67", "runStockFilterRunnable", "after", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"tableRows\":" + tableItemCount(popup) //$NON-NLS-1$
-                    + ",\"filteredN\":" + filteredProposalCount(popup) //$NON-NLS-1$
-                    + ",\"popupVisible\":" + isPopupVisible(assistant) //$NON-NLS-1$
-                    + ",\"smartEnabled\":" + SmartAssistFilterState.isSmartFilterEnabled() //$NON-NLS-1$
-                    + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-            try
-            {
-                List<ICompletionProposal> stockList =
-                    (List<ICompletionProposal>) fFilteredProposalsField.get(popup);
-                SmartContentAssistProcessor.logPopupListCaretProbe("stockFilterRunnable", stockList); //$NON-NLS-1$
-            }
-            catch (Exception ignored)
-            {
-            }
-            // #endregion
-        }
+}
         catch (Exception e)
         {
             ContentAssistDebug.log("stockFilter ERROR: " + e.getMessage()); //$NON-NLS-1$
@@ -3826,25 +3453,7 @@ public final class ContentAssistPopupSync
                 {
                     logSidePanelRefresh("htmlApplyDone"); //$NON-NLS-1$
                     String controlClass = describeSideInformationControlClass(assistant);
-                    // #region agent log
-                    ContentAssistDebug.debugModeLog("H17", "scheduleAssistBrowserHtmlApply", "done", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        "{\"applied\":" + applied //$NON-NLS-1$
-                            + ",\"attempts\":" + attempts[0] //$NON-NLS-1$
-                            + ",\"hasBrowser\":" + hasBrowser //$NON-NLS-1$
-                            + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-                    boolean browserApply = applied && hasBrowser;
-                    boolean textControlApply = applied && !hasBrowser;
-                    ContentAssistDebug.debugModeLog("H38", "overlapSideHint", "htmlApply", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                        "{\"htmlApplyApplied\":" + applied //$NON-NLS-1$
-                            + ",\"browserApply\":" + browserApply //$NON-NLS-1$
-                            + ",\"textControlApply\":" + textControlApply //$NON-NLS-1$
-                            + ",\"hasBrowser\":" + hasBrowser //$NON-NLS-1$
-                            + ",\"attempts\":" + attempts[0] //$NON-NLS-1$
-                            + ",\"controlClass\":\"" + ContentAssistDebug.jsonEscapeForLog( //$NON-NLS-1$
-                                controlClass != null ? controlClass : "none") //$NON-NLS-1$
-                            + "\",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-                    // #endregion
-                }
+}
             }
         };
         display.asyncExec(task);

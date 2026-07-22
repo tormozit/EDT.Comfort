@@ -126,7 +126,6 @@ public final class IrModuleCheckHandler
             // состояние файла (mtime/размер) и по нему определить, когда ИР допишет новые результаты.
             Object ixdRaw = ComBridge.invoke(irSession.codeEditor, "ИмяФайлаМодуляИзИмениМодуля", moduleName, "ixd"); //$NON-NLS-1$ //$NON-NLS-2$
             String ixdPath = ComBridge.toString(ixdRaw);
-            Global.tempLog("irModuleCheck", "ixdPath (до запуска проверки)=" + ixdPath); //$NON-NLS-1$ //$NON-NLS-2$
             Path ixdFile = ixdPath != null && !ixdPath.isBlank() ? Path.of(ixdPath) : null;
             long baselineMtime = ixdFile != null ? readMtimeOrZero(ixdFile) : 0;
             long baselineSize = ixdFile != null ? readSizeOrMinusOne(ixdFile) : -1;
@@ -137,8 +136,6 @@ public final class IrModuleCheckHandler
             long sleepStart = System.currentTimeMillis();
             Thread.sleep(PRE_WAIT_DELAY_MS);
             long sleepActualMs = System.currentTimeMillis() - sleepStart;
-            Global.tempLog("irModuleCheck", "PRE_WAIT_DELAY_MS запрошено=" + PRE_WAIT_DELAY_MS //$NON-NLS-1$ //$NON-NLS-2$
-                + " фактически=" + sleepActualMs); //$NON-NLS-1$
 
             // ТекущаяДатаЛкс() эмпирически НЕ дожидается завершения проверки модуля в ИР (замерено
             // waitMs~0-2мс при любой длительности проверки) — вместо блокирующего вызова опрашиваем
@@ -210,15 +207,12 @@ public final class IrModuleCheckHandler
             {
                 if (exists && size == lastSizeAfterChange)
                 {
-                    Global.tempLog("irModuleCheck", "waitForIxdFileReady: стабилизировался, size=" + size); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
                 }
                 lastSizeAfterChange = size;
             }
             else if (System.currentTimeMillis() > unchangedGraceDeadline)
             {
-                Global.tempLog("irModuleCheck", //$NON-NLS-1$
-                    "waitForIxdFileReady: файл не менялся — считаем, что ИР переиспользовал кэш"); //$NON-NLS-1$
                 return;
             }
 
@@ -232,7 +226,6 @@ public final class IrModuleCheckHandler
                 return;
             }
         }
-        Global.tempLog("irModuleCheck", "waitForIxdFileReady: истёк таймаут опроса"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /** Ждёт результат в фоновой {@link Job} (не на UI-потоке — ожидание может занять до {@link #RESULT_WAIT_MINUTES} минут). */
@@ -284,7 +277,6 @@ public final class IrModuleCheckHandler
             }
 
             IrModuleCheckDebug.log("parsed errors=" + errors.size()); //$NON-NLS-1$
-            Global.tempLog("irModuleCheck", "parsed errors=" + errors.size()); //$NON-NLS-1$ //$NON-NLS-2$
             String rawText = irSession.lastSyncedRawText;
             Display.getDefault().asyncExec(() -> applyMarkers(project, file, moduleName, rawText, errors));
             return Status.OK_STATUS;
@@ -296,7 +288,6 @@ public final class IrModuleCheckHandler
     {
         if (ixdPath == null || ixdPath.isBlank())
         {
-            Global.tempLog("irModuleCheck", point + ": ixdPath пуст"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         try
@@ -304,16 +295,13 @@ public final class IrModuleCheckHandler
             Path p = Path.of(ixdPath);
             if (!Files.exists(p))
             {
-                Global.tempLog("irModuleCheck", point + ": файл не существует: " + ixdPath); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
             long size = Files.size(p);
             Object mtime = Files.getLastModifiedTime(p);
-            Global.tempLog("irModuleCheck", point + ": size=" + size + " lastModified=" + mtime); //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (Exception e)
         {
-            Global.tempLog("irModuleCheck", point + ": ошибка чтения атрибутов файла: " + e); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -417,9 +405,6 @@ public final class IrModuleCheckHandler
                 {
                     actualSubstring = "<из диапазона>"; //$NON-NLS-1$
                 }
-                Global.tempLog("irModuleCheck", "marker word=" + err.word + " pos=" + err.position //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " lfOffset=" + lfOffset + " rawOffset=" + rawOffset + " length=" + length //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " line=" + lineNumber + " docSubstring=[" + actualSubstring + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 IrModuleCheckDebug.log("marker pos=" + err.position + " rawOffset=" + rawOffset //$NON-NLS-1$ //$NON-NLS-2$
                     + " line=" + lineNumber + " length=" + length); //$NON-NLS-1$ //$NON-NLS-2$
 
@@ -478,10 +463,6 @@ public final class IrModuleCheckHandler
                     removedCount += oldN - newN;
             }
 
-            Global.tempLog("irModuleCheck", "applyMarkers sourceKey=" + sourceKey //$NON-NLS-1$ //$NON-NLS-2$
-                + " old=" + oldCounts.values().stream().mapToInt(Integer::intValue).sum() //$NON-NLS-1$
-                + " new=" + newCounts.values().stream().mapToInt(Integer::intValue).sum() //$NON-NLS-1$
-                + " added=" + addedCount + " removed=" + removedCount); //$NON-NLS-1$ //$NON-NLS-2$
 
             // Полное удаление всех старых маркеров этого файла перед загрузкой новых — без частичной
             // замены, чтобы не оставалось «осиротевших» записей, даже если сопоставление выше неточное.
@@ -492,8 +473,6 @@ public final class IrModuleCheckHandler
             Collection<Marker> afterAdd = markerManager.getMarkers(project, Set.of(CHECK_ID));
             long afterAddForFile = afterAdd == null ? -1
                 : afterAdd.stream().filter(m -> sourceKey.equals(m.getSourceObjectId())).count();
-            Global.tempLog("irModuleCheck", "applyMarkers after setMarkers countForFile=" + afterAddForFile //$NON-NLS-1$ //$NON-NLS-2$
-                + " totalOurMarkersInProject=" + (afterAdd != null ? afterAdd.size() : -1)); //$NON-NLS-1$
 
             ToastNotification.show(MENU_LABEL,
                 "Модуль " + moduleName + ": добавлено " + addedCount //$NON-NLS-1$ //$NON-NLS-2$
@@ -502,7 +481,6 @@ public final class IrModuleCheckHandler
         catch (Exception e)
         {
             IrModuleCheckDebug.problem("applyMarkers: " + e); //$NON-NLS-1$
-            Global.tempLogException("irModuleCheck", "applyMarkers", e); //$NON-NLS-1$ //$NON-NLS-2$
             ToastNotification.show(MENU_LABEL, "Ошибка применения маркеров: " + e.getMessage(), 5_000); //$NON-NLS-1$
         }
     }

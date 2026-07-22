@@ -3604,10 +3604,6 @@ public final class ParamHintHtmlModifier
                     {
                     }
                 }
-                else
-                {
-                }
-
                 // 2) platformId → MethodLike view → getHoverPages() = реальные CA
                 Object platformId = Global.invoke(page, "getPlatformId"); //$NON-NLS-1$
                 if (platformId == null)
@@ -3659,9 +3655,6 @@ public final class ParamHintHtmlModifier
                     if (cls != null && cls.indexOf("ErrorBslDocumentationPage") >= 0) //$NON-NLS-1$
                         continue;
                     collectCaFromViewOrHoverPage(page, out);
-                }
-                if (out.size() > before)
-                {
                 }
             }
             catch (Exception ex)

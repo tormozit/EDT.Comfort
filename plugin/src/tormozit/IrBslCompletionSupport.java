@@ -295,32 +295,7 @@ public final class IrBslCompletionSupport
                 payload = session.prepareCodeEditorSyncForAssist(editor, _caretOffset, _caretOffset);
             else
                 payload = session.prepareCodeEditorSyncFromEditor(editor);
-            // #region agent log
-            if (payload != null)
-            {
-                int selOffset = -1;
-                int selLen = -1;
-                ISourceViewer viewer = editor.getInternalSourceViewer();
-                if (viewer != null)
-                {
-                    Object sel = viewer.getSelectionProvider().getSelection();
-                    if (sel instanceof ITextSelection textSelection)
-                    {
-                        selOffset = textSelection.getOffset();
-                        selLen = textSelection.getLength();
-                    }
-                }
-                ContentAssistDebug.traceAssist("H11", "prepareAssistContextAsync", "syncCaret", //$NON-NLS-1$ //$NON-NLS-2$
-                    "{\"requestedCaret\":" + _caretOffset //$NON-NLS-1$
-                        + ",\"useEditorSelection\":" + (_caretOffset < 0) //$NON-NLS-1$
-                        + ",\"payloadOffset\":" + payload.offset //$NON-NLS-1$
-                        + ",\"payloadEndOffset\":" + payload.endOffset //$NON-NLS-1$
-                        + ",\"editorSelOffset\":" + selOffset //$NON-NLS-1$
-                        + ",\"editorSelLen\":" + selLen //$NON-NLS-1$
-                        + ",\"autoInvoke\":" + autoInvoke + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            // #endregion
-        }
+}
         catch (Exception e)
         {
             IrCompletionDebug.problem("sync: " + e.getMessage()); //$NON-NLS-1$
@@ -445,19 +420,10 @@ public final class IrBslCompletionSupport
         boolean autoOpenSuggested = ComBridge.toBoolean(session.invokeCodeEditorQuiet(
             "ЗаполнитьТаблицуСлов", typesTable, true, false, false, false, !autoInvoke, true)); //$NON-NLS-1$
         IrCompletionDebug.timing("Заполнение слов контекста", started); //$NON-NLS-1$
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H77", "fetchCompletionSnapshot", "irFill", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"fillOk\":" + autoOpenSuggested + ",\"autoInvoke\":" + autoInvoke //$NON-NLS-1$ //$NON-NLS-2$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-        if (!autoOpenSuggested)
+if (!autoOpenSuggested)
         {
             IrCompletionDebug.log("ЗаполнитьТаблицуСлов autoOpen=false autoInvoke=" + autoInvoke); //$NON-NLS-1$
-            // #region agent log
-            ContentAssistDebug.traceAssist("H2", "fetchCompletionSnapshot", "irFillRejected", //$NON-NLS-1$ //$NON-NLS-2$
-                "{\"autoInvoke\":" + autoInvoke + "}"); //$NON-NLS-1$ //$NON-NLS-2$
-            // #endregion
-            return null;
+return null;
         }
 
         String contextType = ComBridge.toString(
@@ -601,12 +567,7 @@ public final class IrBslCompletionSupport
             if (!root.isArray())
                 return result;
             boolean hasPriority = root.size() > 0 && root.get(0).has("Приоритет"); //$NON-NLS-1$
-            // #region agent log
-            ContentAssistDebug.sessionLog("H4", "parseWordsJson", "hasPriority", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"rows\":" + root.size() + ",\"hasPriority\":" + hasPriority //$NON-NLS-1$
-                    + ",\"dict\":\"" + (dictionaryKey != null ? dictionaryKey : "") + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            // #endregion
-            String dictKey = dictionaryKey != null ? dictionaryKey : ""; //$NON-NLS-1$
+String dictKey = dictionaryKey != null ? dictionaryKey : ""; //$NON-NLS-1$
             for (JsonNode row : root)
             {
                 WordEntry entry = parseWordRow(row, contextSeparator, hasPriority, dictKey);

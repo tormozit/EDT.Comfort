@@ -644,18 +644,7 @@ public class SmartCompletionProposal implements
         boolean literalFinishPinPending = reloader.isLiteralFinishPinPending();
         int gen = reloader.getLiteralOpenGen();
         long ms = reloader.msSinceLiteralOpen();
-        // #region agent log
-        ContentAssistDebug.debugModeLog("H41", "proposalAtSelection", "selected", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            "{\"gen\":" + gen //$NON-NLS-1$
-                + ",\"msSinceOpen\":" + ms //$NON-NLS-1$
-                + ",\"displayKey\":\"" + ContentAssistDebug.jsonEscapeForLog(displayKey) //$NON-NLS-1$
-                + "\",\"delegateClass\":\"" + ContentAssistDebug.jsonEscapeForLog(delegateClass) //$NON-NLS-1$
-                + "\",\"hasIrMergedHtml\":" + hasIrMergedHtml //$NON-NLS-1$
-                + ",\"setupPhase\":" + setupPhase //$NON-NLS-1$
-                + ",\"literalFinishPinPending\":" + literalFinishPinPending //$NON-NLS-1$
-                + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        // #endregion
-    }
+}
 
     private static boolean hasIrMergedHtmlForSelection(ContentAssistSessionReloader reloader,
         ICompletionProposal raw)
@@ -1187,21 +1176,7 @@ public class SmartCompletionProposal implements
             reloader.markIrSideHintPublished(cacheKey);
         else if (!reloader.isIrSideHintPublishedForKey(cacheKey))
             ContentAssistPopupSync.publishIrActivationSideHint(assistant, html, cacheKey);
-        // #region agent log
-        if (fromSelectedActivation && !inLiteral)
-        {
-            ContentAssistDebug.debugModeLog("H25", "irActivationWarmup", "done", //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                "{\"inLiteral\":false" //$NON-NLS-1$
-                    + ",\"cacheKey\":\"" + ContentAssistDebug.jsonEscapeForLog(cacheKey) //$NON-NLS-1$
-                    + "\",\"cachedCreatorBefore\":" + cachedCreatorBefore //$NON-NLS-1$
-                    + ",\"cachedCreatorAfter\":" + (reloader.getAssistBrowserCreator() != null) //$NON-NLS-1$
-                    + ",\"hasBrowserAfter\":" + ContentAssistPopupSync.hasAssistBrowserSidePanel(assistant) //$NON-NLS-1$
-                    + ",\"pinOk\":" + pinned //$NON-NLS-1$
-                    + ",\"viewerHash\":" + (viewer != null ? System.identityHashCode(viewer) : -1) //$NON-NLS-1$
-                    + ",\"build\":\"" + ContentAssistDebug.LITERAL_ASSIST_BUILD + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        // #endregion
-        return pinned;
+return pinned;
     }
 
     private static void applyCachedEdtActivation(

@@ -317,7 +317,6 @@ final class PreferenceSearchIndex
         catch (Throwable t)
         {
             stateByNodeId.put(id, IndexState.FAILED);
-            Global.tempLog("preferenceSearchIndex", "indexOneNode " + id + ": " + describe(t)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
         finally
         {
@@ -363,16 +362,11 @@ final class PreferenceSearchIndex
 
             textsByNodeId.put(id, texts);
             stateByNodeId.put(id, IndexState.DONE);
-            Global.tempLog("preferenceSearchIndex", //$NON-NLS-1$
-                    (live ? "indexLive " : "indexOffscreen ") + id //$NON-NLS-1$ //$NON-NLS-2$
-                    + " texts=" + texts.size()); //$NON-NLS-1$
             fireNodeIndexed(id);
         }
         catch (Throwable t)
         {
             stateByNodeId.put(id, IndexState.FAILED);
-            Global.tempLog("preferenceSearchIndex", //$NON-NLS-1$
-                    "indexExistingPage " + id + ": " + describe(t)); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 

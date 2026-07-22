@@ -23,8 +23,6 @@
     <startup class="tormozit.PriorityGlobalKeyBindingHook"/>
     <startup class="tormozit.ComfortKeysPageHook"/>
     <startup class="tormozit.PreferenceSearchIndexHook"/>
-    <startup class="tormozit.IrFormatTextKeyDiagHook"/>
-    <startup class="tormozit.CtrlShiftFDiagHook"/>
     <startup class="tormozit.KeyBindingToastHook"/>
     <startup class="tormozit.GlobalListCopyHook"/>
     <startup class="tormozit.SmartOutlineHook"/>

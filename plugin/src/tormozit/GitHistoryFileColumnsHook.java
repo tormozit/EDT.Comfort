@@ -926,7 +926,8 @@ public final class GitHistoryFileColumnsHook implements IStartup
 
         static void log(String msg)
         {
-            Global.tempLog(TAG, msg);
+            if (Global.isLogEnabled())
+                Global.log(TAG, msg);
         }
     }
 }

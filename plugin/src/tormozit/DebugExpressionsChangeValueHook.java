@@ -677,10 +677,6 @@ public final class DebugExpressionsChangeValueHook implements IStartup
                 return;
             }
         }
-        else
-        {
-        }
-
         Object contentProvider = stockTreeModelContentProvider(viewer);
         int previousModelDeltaMask = DEFAULT_MODEL_DELTA_MASK;
         if (contentProvider != null)
