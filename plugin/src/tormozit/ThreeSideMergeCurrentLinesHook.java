@@ -364,6 +364,22 @@ public final class ThreeSideMergeCurrentLinesHook
 
         IContributionItem[] existingItems = toolBarManager.getItems();
         toolBarManager.removeAll();
+
+        if (isMxlxViewerInput(viewer))
+        {
+            Action tabularAction = new Action(CompareTabularDocumentsInIr.MENU_LABEL)
+            {
+                @Override
+                public void run()
+                {
+                    runTabularDocumentsCompare(provider, viewer);
+                }
+            };
+            tabularAction.setToolTipText(
+                CompareTabularDocumentsInIr.TOOLTIP + Global.pluginSignForTooltip());
+            toolBarManager.add(tabularAction);
+        }
+
         Action compareInIrAction = new Action(IrCompareValuesHandler.MENU_LABEL)
         {
             @Override
@@ -399,6 +415,47 @@ public final class ThreeSideMergeCurrentLinesHook
             toolBarManager.add(item);
 
         toolBarManager.update(true);
+    }
+
+    private static boolean isMxlxViewerInput(ThreeSideTextMergeViewer viewer)
+    {
+        if (!(viewer.getInput() instanceof IThreeSideTextMergeInput mergeInput))
+            return false;
+        return CompareTabularDocumentsInIr.isMxlxTypedElement(mergeInput.getLeft())
+            || CompareTabularDocumentsInIr.isMxlxTypedElement(mergeInput.getRight())
+            || CompareTabularDocumentsInIr.isMxlxTypedElement(mergeInput.getAncestor());
+    }
+
+    private static void runTabularDocumentsCompare(IThreeSideTextMergeViewerProvider provider,
+        ThreeSideTextMergeViewer viewer)
+    {
+        if (!(viewer.getInput() instanceof IThreeSideTextMergeInput mergeInput))
+            return;
+        Path pathMain = CompareTabularDocumentsInIr.resolveSideFile(mergeInput.getLeft(), "main"); //$NON-NLS-1$
+        Path pathOther = CompareTabularDocumentsInIr.resolveSideFile(mergeInput.getRight(), "other"); //$NON-NLS-1$
+        Path pathAncestor = CompareTabularDocumentsInIr.resolveSideFile(mergeInput.getAncestor(), "ancestor"); //$NON-NLS-1$
+        IDtProject dtProject = resolveDtProjectForMerge(provider, viewer);
+        CompareTabularDocumentsInIr.runCompare(dtProject, pathMain, pathOther, pathAncestor, true);
+    }
+
+    private static IDtProject resolveDtProjectForMerge(IThreeSideTextMergeViewerProvider provider,
+        ThreeSideTextMergeViewer viewer)
+    {
+        IFile file = resolveModuleFile(provider, viewer, ComparisonSide.MAIN);
+        if (file == null)
+            file = resolveModuleFile(provider, viewer, ComparisonSide.OTHER);
+        if (file != null)
+        {
+            IDtProject fromFile = Global.getDtProjectFromWorkspaceProject(file.getProject());
+            if (fromFile != null)
+                return fromFile;
+        }
+        IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+        IWorkbenchPage page = window != null ? window.getActivePage() : null;
+        if (page == null)
+            return null;
+        IProject project = Global.getActiveProject(page, true);
+        return project != null ? Global.getDtProjectFromWorkspaceProject(project) : null;
     }
 
     /**
@@ -601,10 +658,13 @@ public final class ThreeSideMergeCurrentLinesHook
         String rightFromDialog = asNonBlankString(Global.getField(dialog, "otherComparisonSideName")); //$NON-NLS-1$
 
         String leftLabel = leftFromDialog != null ? leftFromDialog
-            : extractInsideParentheses(MergeViewerReflection.extractLabelText(viewer, "leftLabel")); //$NON-NLS-1$
+            : CompareCurrentLinesPanel.sideLabelForCurrentLines(
+                MergeViewerReflection.extractLabelText(viewer, "leftLabel")); //$NON-NLS-1$
         String rightLabel = rightFromDialog != null ? rightFromDialog
-            : extractInsideParentheses(MergeViewerReflection.extractLabelText(viewer, "rightLabel")); //$NON-NLS-1$
-        String resultLabel = extractInsideParentheses(MergeViewerReflection.extractLabelText(viewer, "resultLabel")); //$NON-NLS-1$
+            : CompareCurrentLinesPanel.sideLabelForCurrentLines(
+                MergeViewerReflection.extractLabelText(viewer, "rightLabel")); //$NON-NLS-1$
+        String resultLabel = CompareCurrentLinesPanel.sideLabelForCurrentLines(
+            MergeViewerReflection.extractLabelText(viewer, "resultLabel")); //$NON-NLS-1$
 
         panel.setLabelText(LEFT, labelOrDefault(withColon(leftLabel), DEFAULT_LEFT_LABEL));
         panel.setLabelText(RIGHT, labelOrDefault(withColon(rightLabel), DEFAULT_RIGHT_LABEL));
@@ -614,16 +674,6 @@ public final class ThreeSideMergeCurrentLinesHook
     private static String asNonBlankString(Object value)
     {
         return value instanceof String s && !s.isBlank() ? s : null;
-    }
-
-    /** {@code "Модуль.Модуль1 (Конфигурация)"} → {@code "Конфигурация"}; без скобок — текст как есть. */
-    private static String extractInsideParentheses(String text)
-    {
-        if (text == null)
-            return null;
-        int open = text.indexOf('(');
-        int close = open >= 0 ? text.indexOf(')', open + 1) : -1;
-        return close > open ? text.substring(open + 1, close).trim() : text;
     }
 
     private static String withColon(String text)

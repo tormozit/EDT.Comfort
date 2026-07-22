@@ -239,7 +239,11 @@ public final class PasteWithCompareActions
             leftEditorText = MergeViewerReflection.extractStyledText(mergeViewer, "fLeft"); //$NON-NLS-1$
             rightEditorText = MergeViewerReflection.extractStyledText(mergeViewer, "fRight"); //$NON-NLS-1$
 
-            TwoSideCurrentLinesSync.hook(currentLinesPanel, leftEditorText, rightEditorText);
+            CompareConfiguration config = getCompareConfiguration();
+            String semanticLeft = config != null ? config.getLeftLabel(null) : null;
+            String semanticRight = config != null ? config.getRightLabel(null) : null;
+            TwoSideCurrentLinesSync.hook(currentLinesPanel, leftEditorText, rightEditorText,
+                mergeViewer, config, semanticLeft, semanticRight);
             addCompareInIrToolbarActionOnce();
         }
 
@@ -361,11 +365,15 @@ public final class PasteWithCompareActions
             if (leftEditorText == null || leftEditorText.isDisposed()
                 || rightEditorText == null || rightEditorText.isDisposed())
                 return null;
-            String leftLabel = getCompareConfiguration().getLeftLabel(null);
-            String rightLabel = getCompareConfiguration().getRightLabel(null);
-            String title = leftLabel + " / " + rightLabel; //$NON-NLS-1$
+            CompareConfiguration config = getCompareConfiguration();
+            String leftLabel = config != null ? config.getLeftLabel(null) : null;
+            String rightLabel = config != null ? config.getRightLabel(null) : null;
+            boolean mirrored = config != null && config.isMirrored();
+            String liveLeft = TwoSideCurrentLinesSync.visualSideLabel(leftLabel, rightLabel, mirrored, true);
+            String liveRight = TwoSideCurrentLinesSync.visualSideLabel(leftLabel, rightLabel, mirrored, false);
+            String title = liveLeft + " / " + liveRight; //$NON-NLS-1$
             return new CompareCurrentLinesPanel.FullTextPair(
-                leftEditorText.getText(), rightEditorText.getText(), title, leftLabel, rightLabel,
+                leftEditorText.getText(), rightEditorText.getText(), title, liveLeft, liveRight,
                 IrCompareValuesHandler.syntaxVariantFor(compareViewerType),
                 CompareLineRangeMatcher.lineAtCaret(leftEditorText),
                 CompareLineRangeMatcher.lineAtCaret(rightEditorText));

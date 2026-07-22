@@ -9,6 +9,7 @@ import org.eclipse.compare.ITypedElement;
 import org.eclipse.compare.contentmergeviewer.TextMergeViewer;
 import org.eclipse.compare.structuremergeviewer.ICompareInput;
 import org.eclipse.core.resources.IFile;
+import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.IContributionItem;
@@ -33,6 +34,10 @@ import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+
+import com._1c.g5.v8.dt.core.platform.IDtProject;
+
+import java.nio.file.Path;
 
 /**
  * Панель «Текущая строка» (см. {@link CompareCurrentLinesPanel}) в редакторах сравнения EGit:
@@ -322,8 +327,12 @@ public final class GitCompareCurrentLinesHook
         viewerControl.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
 
         CompareConfiguration config = editorInput.getCompareConfiguration();
-        String rawLeftLabel = resolveSideLabel(viewer, config, true);
-        String rawRightLabel = resolveSideLabel(viewer, config, false);
+        /*
+         * Семантические подписи (левый/правый input). CLabel при attach часто ещё
+         * до применения запомненного MIRRORED — не считать их визуальными.
+         */
+        String rawLeftLabel = resolveSemanticSideLabel(viewer, config, true);
+        String rawRightLabel = resolveSemanticSideLabel(viewer, config, false);
         boolean twoCommitRev = isTwoCommitRevisionCompare(editorInput, rawLeftLabel, rawRightLabel);
         String leftLabel = markSideLabel(rawLeftLabel, twoCommitRev, true);
         String rightLabel = markSideLabel(rawRightLabel, twoCommitRev, false);
@@ -331,7 +340,8 @@ public final class GitCompareCurrentLinesHook
          * Сразу и после layout/async: штатный updateHeader (и EDT при смене варианта
          * сравнения) перечитывает подписи из CompareConfiguration / LabelProvider и
          * затирает наш CLabel.setText — поэтому пишем и в config, и в CLabel, и
-         * повторяем после отложенных обновлений шапки.
+         * повторяем после отложенных обновлений шапки. CLabel — в визуальном порядке
+         * (см. isMirrored в applyHeaderLabels).
          */
         applyHeaderLabels(config, viewer, leftLabel, rightLabel);
 
@@ -347,11 +357,18 @@ public final class GitCompareCurrentLinesHook
         StyledText leftText = MergeViewerReflection.extractStyledText(viewer, "fLeft"); //$NON-NLS-1$
         StyledText rightText = MergeViewerReflection.extractStyledText(viewer, "fRight"); //$NON-NLS-1$
 
-
-        String irTitle = labelOrDefault(leftLabel, "Слева") + " / " + labelOrDefault(rightLabel, "Справа"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         String irSyntaxVariant = IrCompareValuesHandler.syntaxVariantFor(resolveCompareType(editorInput));
+        final String semLeft = leftLabel;
+        final String semRight = rightLabel;
         panel.setCompareInIrSupplier(() ->
-            supplyFullTextsForIr(leftText, rightText, irTitle, leftLabel, rightLabel, irSyntaxVariant));
+        {
+            boolean mirrored = config != null && config.isMirrored();
+            String liveLeft = TwoSideCurrentLinesSync.visualSideLabel(semLeft, semRight, mirrored, true);
+            String liveRight = TwoSideCurrentLinesSync.visualSideLabel(semLeft, semRight, mirrored, false);
+            String title = labelOrDefault(liveLeft, "Слева") + " / " //$NON-NLS-1$ //$NON-NLS-2$
+                + labelOrDefault(liveRight, "Справа"); //$NON-NLS-1$
+            return supplyFullTextsForIr(leftText, rightText, title, liveLeft, liveRight, irSyntaxVariant);
+        });
 
         /*
          * «Показать в модуле» ведёт только в рабочую копию (реальный файл в workspace) —
@@ -365,9 +382,10 @@ public final class GitCompareCurrentLinesHook
             : rightIsWorkingCopy ? resolveTypedElementFile(editorInput, false)
             : null;
 
-        addCompareInIrToolbarAction(pane, panel, workingCopyFile, workingCopyText, editor);
+        addCompareInIrToolbarAction(pane, panel, editorInput, workingCopyFile, workingCopyText, editor,
+            viewer, config, rawLeftLabel, leftLabel, rightLabel);
 
-        TwoSideCurrentLinesSync.hook(panel, leftText, rightText);
+        TwoSideCurrentLinesSync.hook(panel, leftText, rightText, viewer, config, leftLabel, rightLabel);
 
         /*
          * Переключатель варианта сравнения («Сравнение текста»/«с учётом семантики»/
@@ -386,18 +404,21 @@ public final class GitCompareCurrentLinesHook
     }
 
     /**
-     * Заголовок стороны: сначала живой {@code CLabel} (уже заполнен {@code updateHeader}
-     * через {@code GitCompareLabelProvider}), иначе fallback {@code CompareConfiguration}.
+     * Семантическая подпись стороны (левый/правый input), без учёта визуального
+     * {@code MIRRORED}. Сначала {@link CompareConfiguration}, иначе CLabel
+     * (на раннем attach шапка ещё не зеркалена).
      */
-    private static String resolveSideLabel(TextMergeViewer viewer, CompareConfiguration config, boolean left)
+    private static String resolveSemanticSideLabel(TextMergeViewer viewer, CompareConfiguration config,
+        boolean left)
     {
-        String fromHeader = MergeViewerReflection.extractLabelText(viewer,
+        if (config != null)
+        {
+            String fromConfig = left ? config.getLeftLabel(null) : config.getRightLabel(null);
+            if (fromConfig != null && !fromConfig.isBlank())
+                return fromConfig;
+        }
+        return MergeViewerReflection.extractLabelText(viewer,
             left ? "fLeftLabel" : "fRightLabel"); //$NON-NLS-1$ //$NON-NLS-2$
-        if (fromHeader != null && !fromHeader.isBlank())
-            return fromHeader;
-        if (config == null)
-            return null;
-        return left ? config.getLeftLabel(null) : config.getRightLabel(null);
     }
 
     private static String markSideLabel(String label, boolean twoCommitRevision, boolean left)
@@ -461,8 +482,16 @@ public final class GitCompareCurrentLinesHook
             if (rightLabel != null)
                 config.setRightLabel(rightLabel);
         }
-        MergeViewerReflection.setLabelText(viewer, "fLeftLabel", leftLabel); //$NON-NLS-1$
-        MergeViewerReflection.setLabelText(viewer, "fRightLabel", rightLabel); //$NON-NLS-1$
+        /*
+         * Config хранит семантические стороны; при MIRRORED ContentMergeViewer показывает
+         * их через MirroredMergeViewerContentProvider. Прямая запись в CLabel должна
+         * учитывать зеркало, иначе отложенный refresh после swap откатит шапку.
+         */
+        boolean mirrored = config != null && config.isMirrored();
+        String visualLeft = mirrored ? rightLabel : leftLabel;
+        String visualRight = mirrored ? leftLabel : rightLabel;
+        MergeViewerReflection.setLabelText(viewer, "fLeftLabel", visualLeft); //$NON-NLS-1$
+        MergeViewerReflection.setLabelText(viewer, "fRightLabel", visualRight); //$NON-NLS-1$
     }
 
     /**
@@ -481,7 +510,8 @@ public final class GitCompareCurrentLinesHook
     }
 
     /**
-     * Добавляет «Сравнить ИР» в левый край верхней командной панели просмотрщика сравнения —
+     * Добавляет «Сравнить таблично ИР» (для {@code .mxlx}), «Сравнить ИР» и прочие кнопки
+     * в левый край верхней командной панели просмотрщика сравнения —
      * тот же {@link IToolBarManager}, что уже содержит штатные кнопки навигации по различиям
      * ({@code CompareViewerPane.getToolBarManager}), а не в свою панель снизу.
      *
@@ -490,7 +520,9 @@ public final class GitCompareCurrentLinesHook
      * наш пункт первым, затем то, что уже было.
      */
     private static void addCompareInIrToolbarAction(CompareViewerPane pane, CompareCurrentLinesPanel panel,
-        IFile workingCopyFile, StyledText workingCopyText, IEditorPart editor)
+        CompareEditorInput editorInput, IFile workingCopyFile, StyledText workingCopyText, IEditorPart editor,
+        TextMergeViewer viewer, CompareConfiguration config, String rawLeftLabel, String leftLabel,
+        String rightLabel)
     {
         IToolBarManager toolBarManager = CompareViewerPane.getToolBarManager(pane);
         if (toolBarManager == null)
@@ -498,6 +530,39 @@ public final class GitCompareCurrentLinesHook
 
         IContributionItem[] existingItems = toolBarManager.getItems();
         toolBarManager.removeAll();
+
+        ITypedElement left = resolveTypedElement(editorInput, true);
+        ITypedElement right = resolveTypedElement(editorInput, false);
+        if (CompareTabularDocumentsInIr.isMxlxTypedElement(left)
+            || CompareTabularDocumentsInIr.isMxlxTypedElement(right)
+            || isMxlxFile(workingCopyFile)
+            || isMxlxFile(resolveTypedElementFile(editorInput, false)))
+        {
+            boolean leftIsWorking = isLocalWorkingCopyLabel(rawLeftLabel);
+            boolean rightIsWorking = isLocalWorkingCopyLabel(rightLabel);
+            // Git: рабочая копия новее; иначе слева новее (основной коммит / Local vs HEAD).
+            final boolean semanticLeftIsNewer = leftIsWorking || !rightIsWorking;
+            Action tabularAction = new Action(CompareTabularDocumentsInIr.MENU_LABEL)
+            {
+                @Override
+                public void run()
+                {
+                    boolean mirrored = config != null && config.isMirrored();
+                    ITypedElement uiLeft = mirrored ? right : left;
+                    ITypedElement uiRight = mirrored ? left : right;
+                    String liveLeft = TwoSideCurrentLinesSync.visualSideLabel(leftLabel, rightLabel, mirrored,
+                        true);
+                    String liveRight = TwoSideCurrentLinesSync.visualSideLabel(leftLabel, rightLabel, mirrored,
+                        false);
+                    boolean uiLeftIsNewer = mirrored ? !semanticLeftIsNewer : semanticLeftIsNewer;
+                    runTabularCompare(editorInput, uiLeft, uiRight, liveLeft, liveRight, uiLeftIsNewer);
+                }
+            };
+            tabularAction.setToolTipText(
+                CompareTabularDocumentsInIr.TOOLTIP + Global.pluginSignForTooltip());
+            toolBarManager.add(tabularAction);
+        }
+
         Action compareInIrAction = new Action(IrCompareValuesHandler.MENU_LABEL)
         {
             @Override
@@ -534,6 +599,43 @@ public final class GitCompareCurrentLinesHook
             toolBarManager.add(item);
 
         toolBarManager.update(true);
+    }
+
+    private static boolean isMxlxFile(IFile file)
+    {
+        return file != null && CompareTabularDocumentsInIr.isMxlxFileName(file.getName());
+    }
+
+    private static void runTabularCompare(CompareEditorInput editorInput, ITypedElement left,
+        ITypedElement right, String leftLabel, String rightLabel, boolean uiLeftIsNewer)
+    {
+        Path pathLeft = CompareTabularDocumentsInIr.resolveSideFile(left, "left"); //$NON-NLS-1$
+        Path pathRight = CompareTabularDocumentsInIr.resolveSideFile(right, "right"); //$NON-NLS-1$
+        IFile leftFile = resolveTypedElementFile(editorInput, true);
+        IFile projectFile = leftFile != null ? leftFile : resolveTypedElementFile(editorInput, false);
+        IDtProject dtProject = projectFile != null
+            ? Global.getDtProjectFromWorkspaceProject(projectFile.getProject())
+            : resolveActiveDtProject();
+        CompareTabularDocumentsInIr.runCompareTwoSide(dtProject, pathLeft, pathRight,
+            leftLabel, rightLabel, uiLeftIsNewer, true);
+    }
+
+    private static IDtProject resolveActiveDtProject()
+    {
+        IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+        IWorkbenchPage page = window != null ? window.getActivePage() : null;
+        if (page == null)
+            return null;
+        IProject project = Global.getActiveProject(page, true);
+        return project != null ? Global.getDtProjectFromWorkspaceProject(project) : null;
+    }
+
+    private static ITypedElement resolveTypedElement(CompareEditorInput editorInput, boolean left)
+    {
+        Object result = editorInput.getCompareResult();
+        if (!(result instanceof ICompareInput compareInput))
+            return null;
+        return left ? compareInput.getLeft() : compareInput.getRight();
     }
 
     /**

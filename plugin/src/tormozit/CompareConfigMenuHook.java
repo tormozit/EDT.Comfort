@@ -135,6 +135,7 @@ public class CompareConfigMenuHook implements IStartup
             RightsDialogFilterHook.install(Display.getDefault());
             ThreeSideMergeCurrentLinesHook.install(Display.getDefault());
             GitCompareCurrentLinesHook.install();
+            CompareDialogCurrentLinesHook.install(Display.getDefault());
 
             IWorkbench wb = PlatformUI.getWorkbench();
             for (IWorkbenchWindow w : wb.getWorkbenchWindows())
@@ -399,18 +400,24 @@ public class CompareConfigMenuHook implements IStartup
                     }
                 });
                 addedItems.add(item2);
-                
-                MenuItem item3 = new MenuItem(menu, SWT.PUSH);
-                item3.setText(ITEM_TEXT_compareInIR);
-                item3.addSelectionListener(new SelectionAdapter()
+
+                ISelection selection = CompareConfigCompareInIRHandler.getSelection(editor);
+                Object selectedElement = selection instanceof IStructuredSelection
+                    ? ((IStructuredSelection) selection).getFirstElement() : null;
+                if (CompareConfigCompareInIRHandler.isMxlxNode(editor, selectedElement))
                 {
-                    @Override
-                    public void widgetSelected(SelectionEvent e)
+                    MenuItem item3 = new MenuItem(menu, SWT.PUSH);
+                    item3.setText(ITEM_TEXT_compareInIR);
+                    item3.addSelectionListener(new SelectionAdapter()
                     {
-                        CompareConfigCompareInIRHandler.runCompare(editor, tree.getShell());
-                    }
-                });
-                addedItems.add(item2);
+                        @Override
+                        public void widgetSelected(SelectionEvent e)
+                        {
+                            CompareConfigCompareInIRHandler.runCompare(editor, tree.getShell());
+                        }
+                    });
+                    addedItems.add(item3);
+                }
             }
 
             @Override
@@ -517,39 +524,60 @@ public class CompareConfigMenuHook implements IStartup
             Path pathAncestor = getPropertySideFile(editor, element, ComparisonSide.COMMON_ANCESTOR); // mxlx
             IComparisonSession compSession = CompareConfigSelectionListener.getSession(editor);
             IDtProject dtProject = compSession.getDataSource(ComparisonSide.MAIN).getDtProject();
-            IRSession irSession = IRApplication.getSession(dtProject, connectIfAbsent);
-            if (irSession == null || irSession.executor == null) {
-                return;
-            }
-            String ancestor = pathAncestor != null ?pathAncestor.toString() : null;
-            irSession.executor.submit(() -> {
-                try 
-                {
-                    // Здесь мы находимся в родном потоке для этого COM-объекта. 
-                    Object irClient = irSession.getModule("ирКлиент");
-                    irSession.showWindow();
-                    ComBridge.invoke(irClient, "СравнитьТабличныеДокументыИмпортЛкс", pathMain.toString(), pathOther.toString(), ancestor);
-                } 
-                catch (Exception e) 
-                {
-                    Global.log("Ошибка вызова ИР: " + e.getMessage());
-                }
-            });
+            CompareTabularDocumentsInIr.runCompare(dtProject, pathMain, pathOther, pathAncestor, connectIfAbsent);
         }
 
-        public static boolean isTabularDocumentTemplate(IEditorPart editor, Object element)
+        /**
+         * Узел внешнего свойства с файлом {@code .mxlx} (без записи временных файлов).
+         */
+        public static boolean isMxlxNode(IEditorPart editor, Object element)
         {
             if (element == null)
                 return false;
             try
             {
-                return getPropertySideFile(editor, element, ComparisonSide.MAIN) != null
-                    || getPropertySideFile(editor, element, ComparisonSide.OTHER) != null;
+                String name = resolvePropertyFileName(editor, element, ComparisonSide.MAIN);
+                if (CompareTabularDocumentsInIr.isMxlxFileName(name))
+                    return true;
+                name = resolvePropertyFileName(editor, element, ComparisonSide.OTHER);
+                return CompareTabularDocumentsInIr.isMxlxFileName(name);
             }
             catch (Exception e)
             {
                 return false;
             }
+        }
+
+        public static boolean isTabularDocumentTemplate(IEditorPart editor, Object element)
+        {
+            return isMxlxNode(editor, element);
+        }
+
+        /**
+         * Имя файла стороны внешнего свойства (без копирования содержимого).
+         */
+        public static String resolvePropertyFileName(IEditorPart editor, Object element, ComparisonSide side)
+        {
+            IComparisonSession session = CompareConfigSelectionListener.getSession(editor);
+            if (session == null)
+                return null;
+            MatchedObjectsComparisonNode matchedNode = CompareConfigSelectionListener.resolveMatchedNode(element);
+            if (!(matchedNode instanceof ExternalPropertyComparisonNode))
+                return null;
+            ExternalPropertyComparisonNode properyNode = (ExternalPropertyComparisonNode) matchedNode;
+            BundleContext ctx = Global.ourContext();
+            ServiceReference<?> ref = ctx.getServiceReference(IComparisonManager.class);
+            Object manager = ctx.getService(ref);
+            IQualifiedNameFilePathConverter filePathConverter =
+                (IQualifiedNameFilePathConverter) Global.getField(manager, "qualifiedNameFilePathConverter");
+            String symlink = properyNode.getSymlink(side);
+            if (symlink == null)
+                return null;
+            String qualifyingType = ((SolidResourceComparisonNode) properyNode).getQualifyingType(side);
+            Path relativePath = (Path) ComparisonUtils.getFilePathBySymlink(symlink, qualifyingType, filePathConverter);
+            if (relativePath == null || relativePath.getFileName() == null)
+                return null;
+            return relativePath.getFileName().toString();
         }
 
         /**
@@ -578,6 +606,11 @@ public class CompareConfigMenuHook implements IStartup
             String qualifyingType = ((SolidResourceComparisonNode) properyNode).getQualifyingType(side);
             Path relativePath = (Path) ComparisonUtils.getFilePathBySymlink(symlink, qualifyingType, filePathConverter);
             String fileName = relativePath != null ? relativePath.getFileName().toString() : "content.xmxl"; //$NON-NLS-1$
+            if (!CompareTabularDocumentsInIr.isMxlxFileName(fileName))
+            {
+                try { stream.close(); } catch (IOException ignored) {}
+                return null;
+            }
             String prefix = "tormozit_" + side.name().toLowerCase() + "_"; //$NON-NLS-1$ //$NON-NLS-2$
             String suffix = "_" + fileName; //$NON-NLS-1$
             try {

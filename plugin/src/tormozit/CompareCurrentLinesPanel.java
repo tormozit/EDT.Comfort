@@ -106,7 +106,7 @@ public final class CompareCurrentLinesPanel
         for (int i = 0; i < labels.length; i++)
         {
             Label label = new Label(composite, SWT.NONE);
-            label.setText(labels[i]);
+            label.setText(sideLabelForCurrentLines(labels[i]));
             panel.labelWidgets[i] = label;
             boolean isLastRow = i == labels.length - 1;
             panel.rows[i] = createRowWidget(composite, isLastRow);
@@ -274,14 +274,35 @@ public final class CompareCurrentLinesPanel
         return rows.length;
     }
 
+    /**
+     * Подпись стороны для панели текущих строк: общий заголовок объекта отбрасываем —
+     * {@code "ОбщийМакет.ТаблДок1 (Конфигурация)"} → {@code "Конфигурация"};
+     * без скобок — текст как есть. Единое правило для всех окон сравнения.
+     */
+    public static String sideLabelForCurrentLines(String text)
+    {
+        if (text == null)
+            return ""; //$NON-NLS-1$
+        int open = text.indexOf('(');
+        int close = open >= 0 ? text.indexOf(')', open + 1) : -1;
+        if (close > open)
+        {
+            String inside = text.substring(open + 1, close).trim();
+            if (!inside.isEmpty())
+                return inside;
+        }
+        return text;
+    }
+
     /** Меняет подпись строки — например, при обновлении заголовков сторон в редакторе слияния. */
     public void setLabelText(int rowIndex, String text)
     {
         Label label = labelWidgets[rowIndex];
         if (label == null || label.isDisposed() || text == null)
             return;
-        if (!text.equals(label.getText()))
-            label.setText(text);
+        String shortLabel = sideLabelForCurrentLines(text);
+        if (!shortLabel.equals(label.getText()))
+            label.setText(shortLabel);
     }
 
     /** Раскрашивает пару строк через посимвольное выравнивание и возвращает результат выравнивания. */
