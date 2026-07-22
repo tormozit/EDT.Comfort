@@ -54,12 +54,26 @@ public final class CompareCurrentLinesPanel
     /** Поставщик полных текстов для кнопки «Сравнить ИР» — {@code null}, пока не задан вызывающей стороной. */
     private Supplier<FullTextPair> compareInIrSupplier;
 
-    private Color deleteBackground;
-    private Color deleteForeground;
-    private Color insertBackground;
-    private Color insertForeground;
+    /**
+     * Цвета различий — как у двухстороннего {@code TextMergeViewer} в режимах EGit
+     * (Local/Index, коммит/предыдущий): слева зелёное, справа красное.
+     * {@code SPACE} — отдельный синий (заполнитель напротив символа другой стороны).
+     */
+    private Color leftDiffBackground;
+    private Color leftDiffForeground;
+    private Color rightDiffBackground;
+    private Color rightDiffForeground;
     private Color spaceBackground;
     private Color spaceForeground;
+
+    /**
+     * {@code true} (по умолчанию) — как 2-way EGit TextMergeViewer: уникальность слева
+     * (DELETE) зелёная, справа (INSERT) красная.
+     * {@code false} — классика добавление/удаление: INSERT зелёный, DELETE красный
+     * (трёхстороннее слияние: добавления в результат зелёные, см.
+     * {@link ThreeSideMergeCurrentLinesHook}).
+     */
+    private boolean sideAlignedDiffColors = true;
 
     private CompareCurrentLinesPanel(Composite composite, StyledText[] rows, Label[] labelWidgets)
     {
@@ -110,6 +124,17 @@ public final class CompareCurrentLinesPanel
     public void setCompareInIrSupplier(Supplier<FullTextPair> supplier)
     {
         this.compareInIrSupplier = supplier;
+    }
+
+    /**
+     * Режим раскраски различий.
+     *
+     * @param sideAligned {@code true} — слева зелёное / справа красное (2-way EGit);
+     *                    {@code false} — INSERT зелёный / DELETE красный (3-way слияние)
+     */
+    public void setSideAlignedDiffColors(boolean sideAligned)
+    {
+        this.sideAlignedDiffColors = sideAligned;
     }
 
     public String getLabelText(int rowIndex)
@@ -368,18 +393,19 @@ public final class CompareCurrentLinesPanel
 
     private void createDiffColors(Display display)
     {
-        deleteBackground = new Color(display, 255, 224, 224);
-        deleteForeground = new Color(display, ThemeAwareColors.toEffectiveRgb(new RGB(198, 40, 40)));
-        insertBackground = new Color(display, 216, 255, 216);
-        insertForeground = new Color(display, ThemeAwareColors.toEffectiveRgb(new RGB(46, 125, 50)));
+        // Слева — зелёное (как ADDITION в TextMergeViewer), справа — красное (DELETION).
+        leftDiffBackground = new Color(display, 216, 255, 216);
+        leftDiffForeground = new Color(display, ThemeAwareColors.toEffectiveRgb(new RGB(46, 125, 50)));
+        rightDiffBackground = new Color(display, 255, 224, 224);
+        rightDiffForeground = new Color(display, ThemeAwareColors.toEffectiveRgb(new RGB(198, 40, 40)));
         spaceBackground = new Color(display, 224, 224, 255);
         spaceForeground = new Color(display, ThemeAwareColors.toEffectiveRgb(new RGB(21, 101, 192)));
     }
 
     private void disposeDiffColors()
     {
-        for (Color color : new Color[] { deleteBackground, deleteForeground,
-            insertBackground, insertForeground, spaceBackground, spaceForeground })
+        for (Color color : new Color[] { leftDiffBackground, leftDiffForeground,
+            rightDiffBackground, rightDiffForeground, spaceBackground, spaceForeground })
         {
             if (color != null && !color.isDisposed())
                 color.dispose();
@@ -413,13 +439,29 @@ public final class CompareCurrentLinesPanel
         range.length = length;
         switch (type)
         {
-        case DELETE:
-            range.background = deleteBackground;
-            range.foreground = deleteForeground;
+        case DELETE: // символ только в первой строке пары (align left)
+            if (sideAlignedDiffColors)
+            {
+                range.background = leftDiffBackground;
+                range.foreground = leftDiffForeground;
+            }
+            else
+            {
+                range.background = rightDiffBackground;
+                range.foreground = rightDiffForeground;
+            }
             break;
-        case INSERT:
-            range.background = insertBackground;
-            range.foreground = insertForeground;
+        case INSERT: // символ только во второй строке пары (align right)
+            if (sideAlignedDiffColors)
+            {
+                range.background = rightDiffBackground;
+                range.foreground = rightDiffForeground;
+            }
+            else
+            {
+                range.background = leftDiffBackground;
+                range.foreground = leftDiffForeground;
+            }
             break;
         case SPACE:
             range.background = spaceBackground;

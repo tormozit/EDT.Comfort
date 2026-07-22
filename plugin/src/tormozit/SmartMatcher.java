@@ -356,6 +356,69 @@ public class SmartMatcher {
         return ranges;
     }
 
+    /**
+     * Подсветка для {@link #matchesTree}: фрагменты ищутся только в тех секциях текста
+     * (по {@code .}), которые выравниваются с секциями фильтра с конца. Родительские секции
+     * без пары в фильтре не красятся.
+     */
+    public List<HighlightRange> getTreeHighlightRanges(String text)
+    {
+        List<HighlightRange> ranges = new ArrayList<>();
+        if (isEmpty || text == null || text.isEmpty())
+            return ranges;
+
+        if (sections.size() <= 1)
+        {
+            int lastDot = text.lastIndexOf('.');
+            String section = lastDot >= 0 ? text.substring(lastDot + 1) : text;
+            int sectionStart = lastDot >= 0 ? lastDot + 1 : 0;
+            appendFragmentRanges(ranges, section, sectionStart, fragments);
+            return ranges;
+        }
+
+        String[] segments = text.split("\\.", -1); //$NON-NLS-1$
+        int filterCount = sections.size();
+        int segCount = segments.length;
+        if (filterCount > segCount)
+            return ranges;
+
+        int[] segmentStart = new int[segCount];
+        int pos = 0;
+        for (int i = 0; i < segCount; i++)
+        {
+            segmentStart[i] = pos;
+            pos += segments[i].length();
+            if (i < segCount - 1)
+                pos++;
+        }
+
+        int offset = segCount - filterCount;
+        for (int i = 0; i < filterCount; i++)
+        {
+            String segment = segments[offset + i];
+            appendFragmentRanges(ranges, segment, segmentStart[offset + i],
+                    sections.get(i).toArray(new String[0]));
+        }
+        return ranges;
+    }
+
+    private static void appendFragmentRanges(List<HighlightRange> ranges, String segment,
+            int segmentStart, String[] frags)
+    {
+        if (segment == null || frags == null)
+            return;
+        String lowerSegment = segment.toLowerCase();
+        for (String frag : frags)
+        {
+            int idx = lowerSegment.indexOf(frag);
+            while (idx >= 0)
+            {
+                ranges.add(new HighlightRange(segmentStart + idx, frag.length()));
+                idx = lowerSegment.indexOf(frag, idx + frag.length());
+            }
+        }
+    }
+
     public boolean isWordBoundary(String originalText, int index) {
         if (index <= 0) return true;
         char prev = originalText.charAt(index - 1);

@@ -2,11 +2,18 @@ package tormozit;
 
 import java.util.List;
 
+import org.eclipse.core.commands.ExecutionEvent;
+import org.eclipse.core.commands.ExecutionException;
+import org.eclipse.core.commands.IExecutionListener;
+import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.core.runtime.preferences.InstanceScope;
+import org.eclipse.jface.layout.TableColumnLayout;
 import org.eclipse.jface.preference.IPreferenceStore;
 import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
+import org.eclipse.jface.viewers.ColumnPixelData;
 import org.eclipse.jface.viewers.ColumnViewer;
+import org.eclipse.jface.viewers.ColumnWeightData;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.jface.viewers.ILabelProviderListener;
@@ -18,6 +25,9 @@ import org.eclipse.jface.viewers.ViewerColumn;
 import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.SashForm;
+import org.eclipse.swt.dnd.Clipboard;
+import org.eclipse.swt.dnd.TextTransfer;
+import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.layout.GridData;
@@ -40,6 +50,7 @@ import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.ui.preferences.ScopedPreferenceStore;
 
 /**
@@ -56,8 +67,10 @@ import org.eclipse.ui.preferences.ScopedPreferenceStore;
  * <ul>
  *   <li>Заголовки + 2 колонки: «Файл» (repo-путь, штатная иконка) и «Путь»
  *       (полное имя метаданных через {@link GetRef#resolveFullNameOrNull}).</li>
+ *   <li>{@link FormTableInteraction}: выбор ячейки, подсветка активной колонки,
+ *       копирование текста ячейки (Ctrl+C / меню).</li>
  *   <li>Поле фильтра {@link FilterInputBox} ({@code SearchBox} с лупой) над таблицей
- *       (re-parent через wrapper-Composite)
+ *       (re-parent через wrapper → tableStack → columnHost)
  *       с подсказкой {@link FilterInputBox#FLAT_FILTER_TOOLTIP} и историей
  *       (штатный EDT {@code SearchBox}).</li>
  *   <li>Фильтр по склейке {@code resolveFullNameOrNull(path) + ";" + FileDiff.getPath()}
@@ -73,9 +86,14 @@ public final class GitHistoryFileColumnsHook implements IStartup
 {
     private static final String TEAM_HISTORY_VIEW_ID = "org.eclipse.team.ui.GenericHistoryView"; //$NON-NLS-1$
     private static final String PATCHED_KEY = "tormozit.gitHistoryFileColumnsPatched"; //$NON-NLS-1$
-    private static final String PATH_AUTO_WIDTH_KEY = "tormozit.gitHistoryPathAutoWidth"; //$NON-NLS-1$
+    private static final String COPY_CMD = "org.eclipse.ui.edit.copy"; //$NON-NLS-1$
 
     private static final String EGIT_UI_PLUGIN_ID = "org.eclipse.egit.ui"; //$NON-NLS-1$
+
+    /** Активная таблица файлов для перехвата Ctrl+C (Win32 не шлёт букву в KeyDown). */
+    private static volatile Table copyTargetTable;
+    private static volatile FormTableInteraction copyTargetInteraction;
+    private static boolean copyExecutionListenerInstalled;
     private static final String EGIT_PREF_COLUMN_AUTHOR = "HistoryView_ColumnAuthorShow"; //$NON-NLS-1$
     private static final String EGIT_PREF_COLUMN_AUTHOR_DATE = "HistoryView_ColumnAuthorDateShow"; //$NON-NLS-1$
     private static final String EGIT_PREF_COLUMN_COMMITTER = "HistoryView_ColumnCommitterShow"; //$NON-NLS-1$
@@ -236,8 +254,8 @@ public final class GitHistoryFileColumnsHook implements IStartup
             if (currentLp instanceof CellLabelProvider clp)
                 origLabelProvider = clp;
 
-            installColumns(fileViewer, table);
-            installFilterComposite(fileViewer, table, origLabelProvider);
+            TableColumn[] cols = installColumns(table);
+            installFilterComposite(fileViewer, table, origLabelProvider, cols[0], cols[1]);
 
             Debug.log("tryPatch: OK"); //$NON-NLS-1$
             return true;
@@ -258,7 +276,8 @@ public final class GitHistoryFileColumnsHook implements IStartup
     // Колонки
     // -----------------------------------------------------------------------
 
-    private static void installColumns(TableViewer fileViewer, Table table)
+    /** @return [0]=«Файл», [1]=«Путь» */
+    private static TableColumn[] installColumns(Table table)
     {
         TableColumn fileCol = new TableColumn(table, SWT.LEFT, 0);
         fileCol.setText("Файл"); //$NON-NLS-1$
@@ -267,8 +286,6 @@ public final class GitHistoryFileColumnsHook implements IStartup
         fileCol.setWidth(ComfortSettings.getGitHistoryColumnWidth("file", 300)); //$NON-NLS-1$
         fileCol.addListener(SWT.Resize, e ->
         {
-            if (Boolean.TRUE.equals(table.getData(PATH_AUTO_WIDTH_KEY)))
-                return;
             int w = fileCol.getWidth();
             if (w > 0)
                 ComfortSettings.setGitHistoryColumnWidth("file", w); //$NON-NLS-1$
@@ -282,40 +299,7 @@ public final class GitHistoryFileColumnsHook implements IStartup
 
         table.setHeaderVisible(true);
         table.setLinesVisible(true);
-        installPathColumnAutoWidth(table, fileCol, pathCol);
-    }
-
-    /** Колонка «Путь» занимает всю оставшуюся ширину клиентской области таблицы. */
-    private static void installPathColumnAutoWidth(Table table, TableColumn fileCol, TableColumn pathCol)
-    {
-        Listener resize = e ->
-        {
-            if (Boolean.TRUE.equals(table.getData(PATH_AUTO_WIDTH_KEY)))
-                return;
-            if (table.isDisposed() || fileCol.isDisposed() || pathCol.isDisposed())
-                return;
-            int remaining = table.getClientArea().width - fileCol.getWidth();
-            if (remaining < 50)
-                remaining = 50;
-            if (Math.abs(pathCol.getWidth() - remaining) <= 1)
-                return;
-            table.setData(PATH_AUTO_WIDTH_KEY, Boolean.TRUE);
-            try
-            {
-                pathCol.setWidth(remaining);
-            }
-            finally
-            {
-                table.setData(PATH_AUTO_WIDTH_KEY, Boolean.FALSE);
-            }
-        };
-        table.addListener(SWT.Resize, resize);
-        fileCol.addListener(SWT.Resize, resize);
-        Display.getDefault().asyncExec(() ->
-        {
-            if (!table.isDisposed())
-                resize.handleEvent(null);
-        });
+        return new TableColumn[] { fileCol, pathCol };
     }
 
     // -----------------------------------------------------------------------
@@ -323,7 +307,7 @@ public final class GitHistoryFileColumnsHook implements IStartup
     // -----------------------------------------------------------------------
 
     private static void installFilterComposite(TableViewer fileViewer, Table table,
-        CellLabelProvider origLabelProvider)
+        CellLabelProvider origLabelProvider, TableColumn fileCol, TableColumn pathCol)
     {
         Composite revInfoSplit = table.getParent();
         if (revInfoSplit == null || revInfoSplit.isDisposed())
@@ -356,7 +340,7 @@ public final class GitHistoryFileColumnsHook implements IStartup
         Debug.log("after graphDetailSplit reparent: historyControl children="
             + childrenStr(historyControl) + " hSplit children=" + childrenStr(horizontalSplit));
 
-        // Wrapper (фильтр + таблица) — вправо, на всю высоту панели.
+        // Wrapper (фильтр + tableStack) — вправо, на всю высоту панели.
         Composite wrapper = new Composite(horizontalSplit, SWT.NONE);
         wrapper.setLayout(new GridLayout(1, false));
 
@@ -367,6 +351,8 @@ public final class GitHistoryFileColumnsHook implements IStartup
         GitHistoryFileLabelProvider labelProvider =
             new GitHistoryFileLabelProvider(origLabelProvider);
         fileViewer.setLabelProvider(labelProvider);
+
+        final FormTableInteraction[] interactionRef = new FormTableInteraction[1];
 
         // EDT SearchBox: лупа + clear + история (SWT.SEARCH на Win32 лупу не даёт).
         final FilterInputBox[] filterBoxRef = new FilterInputBox[1];
@@ -399,6 +385,9 @@ public final class GitHistoryFileColumnsHook implements IStartup
             // После перезаполнения — строка с тем же значением колонки «Файл».
             if (savedFile != null && !savedFile.isEmpty())
                 selectRowByFileColumnValue(table, savedFile);
+            FormTableInteraction interaction = interactionRef[0];
+            if (interaction != null)
+                interaction.resyncSelectionTheme();
         };
         filterBoxRef[0] = FilterInputBox.forGitHistory(wrapper, () -> applyFilterRef[0].run());
         FilterInputBox filterBox = filterBoxRef[0];
@@ -430,9 +419,35 @@ public final class GitHistoryFileColumnsHook implements IStartup
             filterKeys = filterBox.widget();
         FilterInputBoxListNavigation.installTableNavigation(filterKeys, table, null);
 
-        // Re-parent: таблица из revInfoSplit → wrapper.
-        table.setParent(wrapper);
-        table.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+        // Эталон: tableStack (null) → columnHost (TableColumnLayout) → table.
+        Composite tableStack = new Composite(wrapper, SWT.NONE);
+        tableStack.setLayout(null);
+        tableStack.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+
+        Composite columnHost = new Composite(tableStack, SWT.NONE);
+        TableColumnLayout columnLayout = new TableColumnLayout(true);
+        columnHost.setLayout(columnLayout);
+
+        table.setParent(columnHost);
+        table.setLayoutData(null);
+
+        int fileWidth = ComfortSettings.getGitHistoryColumnWidth("file", 300); //$NON-NLS-1$
+        columnLayout.setColumnData(fileCol, new ColumnPixelData(fileWidth, true, true));
+        columnLayout.setColumnData(pathCol, new ColumnWeightData(1, 50, true));
+
+        FormTableInteraction interaction =
+            new FormTableInteraction(table, fileViewer, (item, col) ->
+            {
+                if (item == null || item.isDisposed() || col < 0)
+                    return ""; //$NON-NLS-1$
+                String text = item.getText(col);
+                return text != null ? text : ""; //$NON-NLS-1$
+            });
+        interaction.setOwnerDrawColumns(fileCol, pathCol);
+        interaction.setColumnReorderEnabled(true);
+        interaction.install();
+        interactionRef[0] = interaction;
+        wireCellCopyCommand(table, interaction);
 
         horizontalSplit.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
         int leftW = ComfortSettings.getGitHistorySashWeight("left", 50); //$NON-NLS-1$
@@ -465,6 +480,97 @@ public final class GitHistoryFileColumnsHook implements IStartup
             + " children=" + childrenStr(historyControl));
 
         table.setData(PATCHED_KEY, Boolean.TRUE);
+    }
+
+    /**
+     * Win32: Ctrl+C не доходит до {@code SWT.KeyDown} (акселератор Edit→Copy).
+     * Перехват {@code org.eclipse.ui.edit.copy} — как в {@code PreferenceSearchFilterAugmenter}.
+     */
+    private static void wireCellCopyCommand(Table table, FormTableInteraction interaction)
+    {
+        copyTargetTable = table;
+        copyTargetInteraction = interaction;
+        table.addDisposeListener(e ->
+        {
+            if (copyTargetTable == table)
+            {
+                copyTargetTable = null;
+                copyTargetInteraction = null;
+            }
+        });
+        installCopyExecutionListener();
+    }
+
+    private static void installCopyExecutionListener()
+    {
+        if (copyExecutionListenerInstalled || PlatformUI.getWorkbench() == null)
+            return;
+        ICommandService commandService = PlatformUI.getWorkbench().getService(ICommandService.class);
+        if (commandService == null)
+            return;
+        copyExecutionListenerInstalled = true;
+        commandService.addExecutionListener(new IExecutionListener()
+        {
+            @Override
+            public void preExecute(String commandId, ExecutionEvent event)
+            {
+            }
+
+            @Override
+            public void postExecuteSuccess(String commandId, Object returnValue)
+            {
+                // После штатного Copy EGit перезаписываем буфер текстом активной ячейки.
+                handlePossibleCellCopy(commandId);
+            }
+
+            @Override
+            public void notHandled(String commandId, NotHandledException exception)
+            {
+                handlePossibleCellCopy(commandId);
+            }
+
+            @Override
+            public void postExecuteFailure(String commandId, ExecutionException exception)
+            {
+            }
+        });
+    }
+
+    private static void handlePossibleCellCopy(String commandId)
+    {
+        if (!COPY_CMD.equals(commandId))
+            return;
+        Table table = copyTargetTable;
+        FormTableInteraction interaction = copyTargetInteraction;
+        if (table == null || table.isDisposed() || interaction == null || !table.isFocusControl())
+            return;
+        TableItem item = interaction.selectedItem();
+        if (item == null || item.isDisposed())
+        {
+            int idx = table.getSelectionIndex();
+            if (idx < 0)
+                return;
+            item = table.getItem(idx);
+        }
+        if (item == null || item.isDisposed())
+            return;
+        int col = interaction.activeColumn();
+        if (col < 0)
+            col = 0;
+        String text = item.getText(col);
+        if (text == null)
+            text = ""; //$NON-NLS-1$
+        Clipboard clipboard = new Clipboard(table.getDisplay());
+        try
+        {
+            clipboard.setContents(new Object[] { text },
+                new Transfer[] { TextTransfer.getInstance() });
+            Debug.log("cellCopy via command col=" + col + " len=" + text.length()); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        finally
+        {
+            clipboard.dispose();
+        }
     }
 
     /**

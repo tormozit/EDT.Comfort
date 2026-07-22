@@ -35,29 +35,46 @@ import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 
 /**
- * Панель «Текущая строка» (см. {@link CompareCurrentLinesPanel}) в редакторе сравнения
- * файла из индекса Git — {@code org.eclipse.egit.ui.internal.revision.GitCompareFileRevisionEditorInput}
- * (открывается, например, командой EGit «Сравнить файл в индексе с ревизией HEAD» из
- * списка застейдженных/индексированных файлов в панели Staging).
+ * Панель «Текущая строка» (см. {@link CompareCurrentLinesPanel}) в редакторах сравнения EGit:
+ * <ul>
+ *   <li>{@code GitCompareFileRevisionEditorInput} — рабочая копия/индекс с ревизией
+ *   (Staging, «Сравнить с HEAD» и т.п.);</li>
+ *   <li>{@code GitCompareEditorInput} — две ревизии / рабочее дерево с коммитом
+ *   (список файлов коммита, «Сравнить с предыдущей»).</li>
+ * </ul>
  *
  * <p>Это не наш редактор — встраиваем панель в уже существующее дерево виджетов после
  * открытия, а не через переопределение {@code createContents} (как в
- * {@link PasteWithCompareActions}). Класс {@code GitCompareFileRevisionEditorInput} лежит
- * во внутреннем пакете бандла {@code org.eclipse.egit.ui} — детектируем по имени класса,
- * без компилируемой зависимости.
+ * {@link PasteWithCompareActions}). Классы лежат во внутренних пакетах
+ * {@code org.eclipse.egit.ui} — детектируем по имени класса, без компилируемой зависимости.
  *
  * <p>Внутри — стандартный {@link TextMergeViewer} (те же {@code fLeft}/{@code fRight}, что
  * и в «Вставить со сравнением»), поэтому синхронизация — тот же {@link TwoSideCurrentLinesSync}.
  */
 public final class GitCompareCurrentLinesHook
 {
-    private static final String TAG = "GitCompareCurrentLines"; //$NON-NLS-1$
-    private static final String EDITOR_INPUT_CLASS_SNIPPET = "GitCompareFileRevisionEditorInput"; //$NON-NLS-1$
+    private static final String INPUT_FILE_REVISION = "GitCompareFileRevisionEditorInput"; //$NON-NLS-1$
+    /** Точное окончание FQCN — не путать с {@code GitCompareFileRevisionEditorInput}. */
+    private static final String INPUT_GIT_COMPARE_SUFFIX = ".GitCompareEditorInput"; //$NON-NLS-1$
 
     private static final String PANEL_ATTACHED_KEY = "tormozit.gitCompareCurrentLinesAttached"; //$NON-NLS-1$
 
-    private static final int MAX_ATTEMPTS = 40;
-    private static final int RETRY_DELAY_MS = 50;
+    private static final String SUFFIX_WORKING = " (рабочий)"; //$NON-NLS-1$
+    private static final String SUFFIX_MAIN = " (основной)"; //$NON-NLS-1$
+    private static final String SUFFIX_PREVIOUS = " (предыдущий)"; //$NON-NLS-1$
+    /**
+     * Подпись пустой стороны при add/delete в сравнении коммитов
+     * (у EGit CLabel пустой — иначе суффикс некуда повесить).
+     */
+    private static final String EMPTY_SIDE_LABEL = "<Отсутствует>"; //$NON-NLS-1$
+
+    private static final int MAX_FAST_ATTEMPTS = 40;
+    private static final int FAST_RETRY_DELAY_MS = 50;
+    private static final int MAX_SLOW_ATTEMPTS = 120;
+    private static final int SLOW_RETRY_DELAY_MS = 500;
+
+    private static final int ATTACH_WAIT = 0;
+    private static final int ATTACH_DONE = 1;
 
     /**
      * Ожидающие восстановления каретки после {@link #showInModule} — ключ: редактор сравнения,
@@ -119,8 +136,15 @@ public final class GitCompareCurrentLinesHook
                 if (!(ref instanceof IEditorReference))
                     return;
                 IEditorPart ed = ((IEditorReference) ref).getEditor(false);
-                if (ed != null)
-                    restorePendingCaret(ed);
+                if (ed == null)
+                    return;
+                restorePendingCaret(ed);
+                /*
+                 * Повторная попытка: при partOpened редактор/вьюер ещё могут быть не готовы;
+                 * у GitCompareEditorInput сначала дерево структуры, TextMergeViewer — после
+                 * выбора файла. PANEL_ATTACHED_KEY делает повтор идемпотентным.
+                 */
+                tryHandleEditor(ed);
             }
             @Override public void partBroughtToTop(IWorkbenchPartReference r) {}
             @Override public void partClosed(IWorkbenchPartReference r)       {}
@@ -134,55 +158,143 @@ public final class GitCompareCurrentLinesHook
     private static void tryHandleEditor(IEditorPart editor)
     {
         Object input = editor.getEditorInput();
-        if (input == null || !input.getClass().getName().contains(EDITOR_INPUT_CLASS_SNIPPET))
-            return;
         if (!(input instanceof CompareEditorInput editorInput))
             return;
-        scheduleAttach(editorInput, editor, 0);
+        if (!isSupportedGitCompareInput(input))
+            return;
+        scheduleAttach(editorInput, editor, 0, false);
     }
 
-    private static void scheduleAttach(CompareEditorInput editorInput, IEditorPart editor, int attempt)
+    private static boolean isSupportedGitCompareInput(Object input)
+    {
+        if (input == null)
+            return false;
+        String name = input.getClass().getName();
+        return name.contains(INPUT_FILE_REVISION) || name.endsWith(INPUT_GIT_COMPARE_SUFFIX);
+    }
+
+    /**
+     * Сравнение коммита с предыдущим (не Local/Index):
+     * <ul>
+     *   <li>{@code GitCompareEditorInput} с обеими {@code leftVersion}/{@code rightVersion};</li>
+     *   <li>{@code GitCompareFileRevisionEditorInput} с двумя {@code FileRevisionTypedElement};</li>
+     *   <li>то же input, но одна сторона пустая (файл добавлен/удалён в коммите) —
+     *   ровно один {@code getLeftRevision}/{@code getRightRevision} не null;
+     *   в заголовке EGit тогда «… и Текущая».</li>
+     * </ul>
+     */
+    private static boolean isTwoCommitRevisionCompare(CompareEditorInput input, String leftLabel,
+        String rightLabel)
+    {
+        if (input == null)
+            return false;
+
+        String name = input.getClass().getName();
+        if (name.endsWith(INPUT_GIT_COMPARE_SUFFIX))
+        {
+            Object left = Global.getField(input, "leftVersion"); //$NON-NLS-1$
+            Object right = Global.getField(input, "rightVersion"); //$NON-NLS-1$
+            return left instanceof String ls && !ls.isBlank()
+                && right instanceof String rs && !rs.isBlank();
+        }
+
+        if (!name.contains(INPUT_FILE_REVISION))
+            return false;
+
+        Object leftRev = Global.invoke(input, "getLeftRevision"); //$NON-NLS-1$
+        Object rightRev = Global.invoke(input, "getRightRevision"); //$NON-NLS-1$
+        if (leftRev == null && rightRev == null)
+            return false;
+
+        /*
+         * Index тоже FileRevisionTypedElement — отсекаем по подписи стороны
+         * («Index: …», «Локальный: …»). Пустая подпись у отсутствующей стороны
+         * (add/delete) — норма, не Local/Index.
+         */
+        if (isLocalOrIndexLabel(leftLabel) || isLocalOrIndexLabel(rightLabel))
+            return false;
+
+        if (leftRev != null && rightRev != null)
+            return true;
+
+        /*
+         * Add/delete: ровно одна ревизия. Присутствующая сторона должна иметь
+         * ревизионную подпись (не Local/Index — уже проверено), отсутствующая — пустая.
+         */
+        String presentLabel = leftRev != null ? leftLabel : rightLabel;
+        String absentLabel = leftRev != null ? rightLabel : leftLabel;
+        if (presentLabel == null || presentLabel.isBlank())
+            return false;
+        return absentLabel == null || absentLabel.isBlank();
+    }
+
+    private static boolean isLocalOrIndexLabel(String label)
+    {
+        if (label == null || label.isBlank())
+            return false;
+        return label.startsWith("Локальный") //$NON-NLS-1$
+            || label.startsWith("Local:") //$NON-NLS-1$
+            || label.startsWith("Index:") //$NON-NLS-1$
+            || label.startsWith("Индекс:"); //$NON-NLS-1$
+    }
+
+    private static void scheduleAttach(CompareEditorInput editorInput, IEditorPart editor, int attempt,
+        boolean slow)
     {
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
-        if (attempt >= MAX_ATTEMPTS)
+        int max = slow ? MAX_SLOW_ATTEMPTS : MAX_FAST_ATTEMPTS;
+        int delay = slow ? SLOW_RETRY_DELAY_MS : (attempt == 0 ? 100 : FAST_RETRY_DELAY_MS);
+        if (attempt >= max)
         {
-            log("attach: не удалось найти TextMergeViewer после " + MAX_ATTEMPTS + " попыток"); //$NON-NLS-1$ //$NON-NLS-2$
+            if (!slow)
+                scheduleAttach(editorInput, editor, 0, true);
             return;
         }
-        display.timerExec(attempt == 0 ? 100 : RETRY_DELAY_MS, () ->
+        display.timerExec(delay, () ->
         {
-            if (!tryAttach(editorInput, editor))
-                scheduleAttach(editorInput, editor, attempt + 1);
+            if (editor.getSite() == null || editor.getSite().getPage() == null)
+                return;
+            int result = tryAttach(editorInput, editor);
+            if (result == ATTACH_WAIT)
+                scheduleAttach(editorInput, editor, attempt + 1, slow);
         });
     }
 
     /**
-     * @return {@code true} — попытки прекращены (успех либо окончательно не подходит),
-     *         {@code false} — контролы ещё не готовы, нужна повторная попытка.
+     * @return {@link #ATTACH_DONE} — успех/уже прикреплено;
+     *         {@link #ATTACH_WAIT} — ещё не готово, нужна повторная попытка.
      */
-    private static boolean tryAttach(CompareEditorInput editorInput, IEditorPart editor)
+    private static int tryAttach(CompareEditorInput editorInput, IEditorPart editor)
     {
         Object paneObj = Global.getField(editorInput, "fContentInputPane"); //$NON-NLS-1$
         if (!(paneObj instanceof CompareViewerSwitchingPane pane) || pane.isDisposed())
-            return false;
+            return ATTACH_WAIT;
+
+        if (Boolean.TRUE.equals(pane.getData(PANEL_ATTACHED_KEY)))
+            return ATTACH_DONE;
 
         Viewer viewer = pane.getViewer();
         if (viewer == null)
-            return false;
+            return ATTACH_WAIT;
         if (!(viewer instanceof TextMergeViewer mergeViewer))
         {
-            log("attach: содержимое не текстовое (viewer=" + viewer.getClass().getName() + ")"); //$NON-NLS-1$ //$NON-NLS-2$
-            return true;
+            /*
+             * GitCompareEditorInput часто сначала показывает DiffTreeViewer (структура),
+             * TextMergeViewer появляется после выбора файла — не сдаёмся.
+             */
+            return ATTACH_WAIT;
         }
 
         Control viewerControl = viewer.getControl();
-        if (viewerControl == null || viewerControl.isDisposed() || viewerControl.getParent() != pane)
-            return false;
+        if (viewerControl == null || viewerControl.isDisposed())
+            return ATTACH_WAIT;
+        if (viewerControl.getParent() != pane)
+            return ATTACH_WAIT;
 
         attach(pane, viewerControl, editorInput, mergeViewer, editor);
-        return true;
+        return ATTACH_DONE;
     }
 
     private static void attach(CompareViewerSwitchingPane pane, Control viewerControl,
@@ -210,10 +322,18 @@ public final class GitCompareCurrentLinesHook
         viewerControl.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
 
         CompareConfiguration config = editorInput.getCompareConfiguration();
-        String rawLeftLabel = config != null ? config.getLeftLabel(null) : null;
-        String rawRightLabel = config != null ? config.getRightLabel(null) : null;
-        String leftLabel = markWorkingCopyLabel(rawLeftLabel);
-        String rightLabel = markWorkingCopyLabel(rawRightLabel);
+        String rawLeftLabel = resolveSideLabel(viewer, config, true);
+        String rawRightLabel = resolveSideLabel(viewer, config, false);
+        boolean twoCommitRev = isTwoCommitRevisionCompare(editorInput, rawLeftLabel, rawRightLabel);
+        String leftLabel = markSideLabel(rawLeftLabel, twoCommitRev, true);
+        String rightLabel = markSideLabel(rawRightLabel, twoCommitRev, false);
+        /*
+         * Сразу и после layout/async: штатный updateHeader (и EDT при смене варианта
+         * сравнения) перечитывает подписи из CompareConfiguration / LabelProvider и
+         * затирает наш CLabel.setText — поэтому пишем и в config, и в CLabel, и
+         * повторяем после отложенных обновлений шапки.
+         */
+        applyHeaderLabels(config, viewer, leftLabel, rightLabel);
 
         CompareCurrentLinesPanel panel = CompareCurrentLinesPanel.create(wrapper,
             labelOrDefault(leftLabel, "Слева:"), labelOrDefault(rightLabel, "Справа:")); //$NON-NLS-1$ //$NON-NLS-2$
@@ -221,13 +341,12 @@ public final class GitCompareCurrentLinesHook
 
         pane.setContent(wrapper);
         pane.layout(true, true);
+        applyHeaderLabels(config, viewer, leftLabel, rightLabel);
+        scheduleHeaderLabelRefresh(config, viewer, leftLabel, rightLabel);
 
         StyledText leftText = MergeViewerReflection.extractStyledText(viewer, "fLeft"); //$NON-NLS-1$
         StyledText rightText = MergeViewerReflection.extractStyledText(viewer, "fRight"); //$NON-NLS-1$
 
-        if (leftText == null || rightText == null)
-            log("attach: не удалось извлечь StyledText (left=" + (leftText != null) //$NON-NLS-1$
-                + " right=" + (rightText != null) + ")"); //$NON-NLS-1$ //$NON-NLS-2$
 
         String irTitle = labelOrDefault(leftLabel, "Слева") + " / " + labelOrDefault(rightLabel, "Справа"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         String irSyntaxVariant = IrCompareValuesHandler.syntaxVariantFor(resolveCompareType(editorInput));
@@ -236,12 +355,11 @@ public final class GitCompareCurrentLinesHook
 
         /*
          * «Показать в модуле» ведёт только в рабочую копию (реальный файл в workspace) —
-         * определяем сторону по исходной подписи EGit («Локальный: ...», см. markWorkingCopyLabel)
-         * ДО добавления суффикса, и резолвим её IFile через IResourceProvider (публичный API
-         * org.eclipse.compare, не reflection — LocalResourceTypedElement его реализует).
+         * определяем сторону по исходной подписи EGit («Локальный: ...») ДО добавления суффикса,
+         * и резолвим её IFile через IResourceProvider (публичный API org.eclipse.compare).
          */
-        boolean leftIsWorkingCopy = rawLeftLabel != null && rawLeftLabel.startsWith("Локальный"); //$NON-NLS-1$
-        boolean rightIsWorkingCopy = rawRightLabel != null && rawRightLabel.startsWith("Локальный"); //$NON-NLS-1$
+        boolean leftIsWorkingCopy = isLocalWorkingCopyLabel(rawLeftLabel);
+        boolean rightIsWorkingCopy = isLocalWorkingCopyLabel(rawRightLabel);
         StyledText workingCopyText = leftIsWorkingCopy ? leftText : rightIsWorkingCopy ? rightText : null;
         IFile workingCopyFile = leftIsWorkingCopy ? resolveTypedElementFile(editorInput, true)
             : rightIsWorkingCopy ? resolveTypedElementFile(editorInput, false)
@@ -263,8 +381,103 @@ public final class GitCompareCurrentLinesHook
         {
             if (!pane.isDisposed())
                 pane.setData(PANEL_ATTACHED_KEY, null);
-            scheduleAttach(editorInput, editor, 0);
+            scheduleAttach(editorInput, editor, 0, false);
         });
+    }
+
+    /**
+     * Заголовок стороны: сначала живой {@code CLabel} (уже заполнен {@code updateHeader}
+     * через {@code GitCompareLabelProvider}), иначе fallback {@code CompareConfiguration}.
+     */
+    private static String resolveSideLabel(TextMergeViewer viewer, CompareConfiguration config, boolean left)
+    {
+        String fromHeader = MergeViewerReflection.extractLabelText(viewer,
+            left ? "fLeftLabel" : "fRightLabel"); //$NON-NLS-1$ //$NON-NLS-2$
+        if (fromHeader != null && !fromHeader.isBlank())
+            return fromHeader;
+        if (config == null)
+            return null;
+        return left ? config.getLeftLabel(null) : config.getRightLabel(null);
+    }
+
+    private static String markSideLabel(String label, boolean twoCommitRevision, boolean left)
+    {
+        if (twoCommitRevision)
+        {
+            /*
+             * Add/delete: у отсутствующей стороны CLabel пустой — подставляем
+             * {@link #EMPTY_SIDE_LABEL}, иначе суффикс некуда повесить и панель
+             * показывает просто «Справа:» / «Слева:».
+             */
+            String base = label != null && !label.isBlank() ? label : EMPTY_SIDE_LABEL;
+            return appendSuffixOnce(base, left ? SUFFIX_MAIN : SUFFIX_PREVIOUS);
+        }
+        return markWorkingCopyLabel(label);
+    }
+
+    private static boolean isLocalWorkingCopyLabel(String label)
+    {
+        return label != null && label.startsWith("Локальный"); //$NON-NLS-1$
+    }
+
+    /**
+     * EGit подписывает сторону сравнения с копией рабочего каталога как «Локальный: ИмяФайла» —
+     * добавляем суффикс, чтобы было явно видно, какая сторона рабочая.
+     */
+    private static String markWorkingCopyLabel(String label)
+    {
+        if (!isLocalWorkingCopyLabel(label))
+            return label;
+        return appendSuffixOnce(label, SUFFIX_WORKING);
+    }
+
+    private static String appendSuffixOnce(String label, String suffix)
+    {
+        if (label == null)
+            return null;
+        if (label.endsWith(suffix))
+            return label;
+        return label + suffix;
+    }
+
+    /**
+     * Пишет помеченные подписи в {@link CompareConfiguration} и прямо в
+     * {@code ContentMergeViewer.fLeftLabel}/{@code fRightLabel}.
+     * <p>
+     * Только config недостаточно при {@code GitCompareLabelProvider} (он перекрывает
+     * fallback в {@code updateHeader}). Только CLabel недостаточно, если позже
+     * вызывается {@code updateHeader} без наших значений в config — шапка откатывается
+     * (типичный случай «Локальный: …» без «(рабочий)» после attach).
+     */
+    private static void applyHeaderLabels(CompareConfiguration config, TextMergeViewer viewer,
+        String leftLabel, String rightLabel)
+    {
+        if (viewer == null || viewer.getControl() == null || viewer.getControl().isDisposed())
+            return;
+        if (config != null)
+        {
+            if (leftLabel != null)
+                config.setLeftLabel(leftLabel);
+            if (rightLabel != null)
+                config.setRightLabel(rightLabel);
+        }
+        MergeViewerReflection.setLabelText(viewer, "fLeftLabel", leftLabel); //$NON-NLS-1$
+        MergeViewerReflection.setLabelText(viewer, "fRightLabel", rightLabel); //$NON-NLS-1$
+    }
+
+    /**
+     * Повторная установка шапки после отложенного {@code updateHeader} Eclipse/EDT
+     * (layout, смена input, пересчёт вкладок сравнения).
+     */
+    private static void scheduleHeaderLabelRefresh(CompareConfiguration config, TextMergeViewer viewer,
+        String leftLabel, String rightLabel)
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() -> applyHeaderLabels(config, viewer, leftLabel, rightLabel));
+        display.timerExec(100, () -> applyHeaderLabels(config, viewer, leftLabel, rightLabel));
+        display.timerExec(500, () -> applyHeaderLabels(config, viewer, leftLabel, rightLabel));
     }
 
     /**
@@ -363,7 +576,6 @@ public final class GitCompareCurrentLinesHook
         }
         catch (Exception e)
         {
-            Global.tempLogException("showInModule", "GitCompareCurrentLinesHook: " + workingCopyFile.getFullPath(), e); //$NON-NLS-1$ //$NON-NLS-2$
             ToastNotification.show(ShowInModuleHandler.MENU_LABEL,
                 "Ошибка перехода в модуль: " + e, 6000); //$NON-NLS-1$
         }
@@ -446,21 +658,4 @@ public final class GitCompareCurrentLinesHook
         return text != null && !text.isBlank() ? text : fallback;
     }
 
-    /**
-     * EGit подписывает сторону сравнения с копией рабочего каталога как «Локальный: ИмяФайла» —
-     * добавляем суффикс, чтобы было явно видно, какая сторона рабочая (левая/правая — зависит
-     * от команды сравнения, «Локальный» не всегда одна и та же сторона).
-     */
-    private static String markWorkingCopyLabel(String label)
-    {
-        if (label != null && label.startsWith("Локальный")) //$NON-NLS-1$
-            return label + " (рабочий)"; //$NON-NLS-1$
-        return label;
-    }
-
-    private static void log(String msg)
-    {
-        if (Global.isLogEnabled())
-            Global.log(TAG, msg);
-    }
 }

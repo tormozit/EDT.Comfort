@@ -48,4 +48,28 @@ public final class MergeViewerReflection
             return label.getText();
         return null;
     }
+
+    /**
+     * Запись текста в заголовок панели ({@link CLabel}/{@link Label}), например
+     * {@code ContentMergeViewer.fLeftLabel}/{@code fRightLabel}.
+     *
+     * @return {@code true}, если виджет найден и текст записан
+     */
+    public static boolean setLabelText(Object owner, String fieldName, String text)
+    {
+        if (text == null)
+            return false;
+        Object field = Global.getField(owner, fieldName);
+        if (field instanceof CLabel label && !label.isDisposed())
+        {
+            label.setText(text);
+            return true;
+        }
+        if (field instanceof Label label && !label.isDisposed())
+        {
+            label.setText(text);
+            return true;
+        }
+        return false;
+    }
 }

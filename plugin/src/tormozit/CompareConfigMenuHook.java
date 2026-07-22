@@ -41,6 +41,7 @@ import com._1c.g5.v8.dt.bsl.compare.BslModuleComparisonNode;
 import com._1c.g5.v8.dt.bsl.compare.BslModuleSectionComparisonNode;
 import com._1c.g5.v8.dt.compare.model.MatchedObjectsComparisonNode;
 import com._1c.g5.v8.dt.compare.ui.editor.ISelectionProviderDelegate;
+import com._1c.g5.v8.dt.compare.ui.partialmodel.CustomMergeSettingsStatus;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.IPartialModel;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.PartialModelController;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.ExternalPropertyPartialModelNode;
@@ -131,6 +132,7 @@ public class CompareConfigMenuHook implements IStartup
 //          Activator.getDefault().getInjector().injectMembers(this); // Слишком рано?
             CompareConfigSearchDialogHook.install(Display.getDefault());
             CompareConfigOpenModuleMergeHandler.install(Display.getDefault());
+            RightsDialogFilterHook.install(Display.getDefault());
             ThreeSideMergeCurrentLinesHook.install(Display.getDefault());
             GitCompareCurrentLinesHook.install();
 
@@ -608,7 +610,9 @@ public class CompareConfigMenuHook implements IStartup
     }
 
     /**
-     * Двойной клик в дереве сравнения: секция или узел BSL-модуля — сравнение модуля;
+     * Двойной клик в дереве сравнения: то же, что клик по шестерёнке настроек
+     * объединения ({@code CustomMergeSettingsStatus} ≠ {@code UNAVAILABLE});
+     * секция BSL-модуля — диалог модуля с выбором секции;
      * макет табличного документа — «Сравнить в приложении ИР».
      */
     private static final class CompareConfigOpenModuleMergeHandler
@@ -680,6 +684,7 @@ public class CompareConfigMenuHook implements IStartup
             if (Boolean.TRUE.equals(tree.getData(DBL_CLICK_HOOKED)))
                 return;
             tree.setData(DBL_CLICK_HOOKED, Boolean.TRUE);
+            RightsDialogFilterHook.attachCompareTreeWatch(tree);
             tree.addListener(SWT.MouseDoubleClick, event ->
             {
                 if (event.button != 1)
@@ -696,28 +701,22 @@ public class CompareConfigMenuHook implements IStartup
                 return;
             try
             {
-                ExternalPropertyPartialModelNode moduleNode = null;
-                BslModuleSectionComparisonNode section = null;
-
                 BslModuleSectionComparisonNode sectionNode = resolveSectionComparisonNode(element);
                 if (sectionNode != null)
                 {
-                    section = sectionNode;
-                    moduleNode = findParentModuleNode(element);
+                    ExternalPropertyPartialModelNode moduleNode = findParentModuleNode(element);
                     if (moduleNode == null)
                     {
                         log("doubleClick: родительский узел модуля не найден"); //$NON-NLS-1$
                         return;
                     }
-                }
-                else
-                {
-                    moduleNode = resolveModuleNode(element);
+                    openModuleMergeForNode(editor, moduleNode, sectionNode, tree.getShell());
+                    return;
                 }
 
-                if (moduleNode != null)
+                if (element instanceof IPartialModelNode node && hasMergeSettings(node))
                 {
-                    openModuleMergeForNode(editor, moduleNode, section, tree.getShell());
+                    openMergeSettings(editor, node, tree.getShell());
                     return;
                 }
 
@@ -731,6 +730,13 @@ public class CompareConfigMenuHook implements IStartup
             {
                 Global.logError(TAG, "doubleClick", e); //$NON-NLS-1$
             }
+        }
+
+        /** Как колонка шестерёнки: иконка есть при статусе ≠ {@code UNAVAILABLE}. */
+        private static boolean hasMergeSettings(IPartialModelNode node)
+        {
+            CustomMergeSettingsStatus status = node.getCustomMergeSettingsStatus();
+            return status != null && status != CustomMergeSettingsStatus.UNAVAILABLE;
         }
 
         private static Object selectionElement(IEditorPart editor)
@@ -796,21 +802,12 @@ public class CompareConfigMenuHook implements IStartup
             pendingSection = selectSection ? section : null;
             try
             {
-                openModuleMergeSettings(editor, moduleNode, shell);
+                openMergeSettings(editor, moduleNode, shell);
             }
             finally
             {
                 pendingSection = null;
             }
-        }
-
-        private static ExternalPropertyPartialModelNode resolveModuleNode(Object element)
-        {
-            if (!(element instanceof ExternalPropertyPartialModelNode))
-                return null;
-            ComparisonNode cn = ((ExternalPropertyPartialModelNode) element).retrieveComparisonNode();
-            return cn instanceof BslModuleComparisonNode
-                ? (ExternalPropertyPartialModelNode) element : null;
         }
 
         private static BslModuleSectionComparisonNode resolveSectionComparisonNode(Object element)
@@ -839,10 +836,13 @@ public class CompareConfigMenuHook implements IStartup
             return null;
         }
 
-        private static void openModuleMergeSettings(IEditorPart editor,
-                ExternalPropertyPartialModelNode moduleNode, Shell shell)
+        /**
+         * То же, что клик по шестерёнке: {@link PartialModelController#editMergeSettings}
+         * (как {@code DtComparisonEditor} → {@code mergeSettingsClicked}).
+         */
+        private static void openMergeSettings(IEditorPart editor, IPartialModelNode node, Shell shell)
         {
-            Object artifacts = resolveComparisonArtifacts(editor, moduleNode);
+            Object artifacts = resolveComparisonArtifacts(editor, node);
             if (artifacts == null)
                 return;
 
@@ -854,7 +854,7 @@ public class CompareConfigMenuHook implements IStartup
 
             if (partialModel == null || session == null || pmc == null || view == null)
             {
-                log("openModuleMerge: не хватает partialModel/session/controller/view"); //$NON-NLS-1$
+                log("openMergeSettings: не хватает partialModel/session/controller/view"); //$NON-NLS-1$
                 return;
             }
 
@@ -876,9 +876,9 @@ public class CompareConfigMenuHook implements IStartup
             Color colorOnlyMain = view.getColorOnlyMain();
             Color colorOnlyOther = view.getColorOnlyOther();
 
-            pmc.editMergeSettings(
+            RightsDialogFilterHook.runWhileBlocking(() -> pmc.editMergeSettings(
                 (IPartialModel) partialModel,
-                moduleNode,
+                node,
                 session,
                 shell,
                 readOnly,
@@ -889,17 +889,16 @@ public class CompareConfigMenuHook implements IStartup
                 otherSideName,
                 view,
                 selectionDelegate,
-                resourceManager);
+                resourceManager));
         }
 
         /**
          * Находит {@code ComparisonArtifacts} редактора для узла partial model
          * (как {@code DtComparisonEditor.getComparisonArtifacts}, без двусмысленного {@link Global#invoke}).
          */
-        private static Object resolveComparisonArtifacts(IEditorPart editor,
-                ExternalPropertyPartialModelNode moduleNode)
+        private static Object resolveComparisonArtifacts(IEditorPart editor, IPartialModelNode node)
         {
-            IPartialModelNode nodeForSession = normalizeNodeForSessionLookup(moduleNode);
+            IPartialModelNode nodeForSession = normalizeNodeForSessionLookup(node);
             IComparisonSession session = nodeForSession != null
                 ? nodeForSession.getComparisonSession() : null;
             int sessionId = session != null ? session.getId() : -1;
@@ -907,7 +906,7 @@ public class CompareConfigMenuHook implements IStartup
             Object listObj = Global.getField(editor, "comparisonArtifactsList"); //$NON-NLS-1$
             if (!(listObj instanceof List))
             {
-                logArtifactsNotFound(moduleNode, session, 0);
+                logArtifactsNotFound(node, session, 0);
                 return null;
             }
             List<?> artifactsList = (List<?>) listObj;
@@ -927,7 +926,7 @@ public class CompareConfigMenuHook implements IStartup
                 }
             }
 
-            long nodeId = moduleNode.getNodeId();
+            long nodeId = node.getNodeId();
             for (Object artifact : artifactsList)
             {
                 ensurePartialModelForArtifact(editor, artifact);
@@ -938,7 +937,7 @@ public class CompareConfigMenuHook implements IStartup
                     return artifact;
             }
 
-            logArtifactsNotFound(moduleNode, session, artifactsCount);
+            logArtifactsNotFound(node, session, artifactsCount);
             return null;
         }
 
@@ -962,15 +961,15 @@ public class CompareConfigMenuHook implements IStartup
             Global.invokeVoid(editor, "createPartialModelForArtifact", artifact); //$NON-NLS-1$
         }
 
-        private static void logArtifactsNotFound(ExternalPropertyPartialModelNode moduleNode,
+        private static void logArtifactsNotFound(IPartialModelNode node,
                 IComparisonSession session, int artifactsCount)
         {
             if (!Global.isLogEnabled())
                 return;
-            long nodeId = moduleNode != null ? moduleNode.getNodeId() : -1L;
+            long nodeId = node != null ? node.getNodeId() : -1L;
             int sessionId = session != null ? session.getId() : -1;
-            String nodeClass = moduleNode != null ? moduleNode.getClass().getSimpleName() : "null"; //$NON-NLS-1$
-            Global.log(TAG, "openModuleMerge: артефакт не найден" //$NON-NLS-1$
+            String nodeClass = node != null ? node.getClass().getSimpleName() : "null"; //$NON-NLS-1$
+            Global.log(TAG, "openMergeSettings: артефакт не найден" //$NON-NLS-1$
                 + " artifactsCount=" + artifactsCount //$NON-NLS-1$
                 + " sessionId=" + sessionId //$NON-NLS-1$
                 + " nodeId=" + nodeId //$NON-NLS-1$

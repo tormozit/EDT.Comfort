@@ -77,7 +77,10 @@ final class FilterInputBox
             "comfort.pictureDialog.filter.history."), //$NON-NLS-1$
         GIT_HISTORY(
             "comfort.gitHistory.filter.history.count", //$NON-NLS-1$
-            "comfort.gitHistory.filter.history."); //$NON-NLS-1$
+            "comfort.gitHistory.filter.history."), //$NON-NLS-1$
+        RIGHTS_DIALOG(
+            "comfort.rightsDialog.filter.history.count", //$NON-NLS-1$
+            "comfort.rightsDialog.filter.history."); //$NON-NLS-1$
 
         final String prefCountKey;
         final String prefItemPrefix;
@@ -257,6 +260,7 @@ final class FilterInputBox
             case SELECT_TYPE -> forSelectType(parent, onSearch);
             case PICTURE_DIALOG -> forPictureDialog(parent, onSearch);
             case GIT_HISTORY -> forGitHistory(parent, onSearch);
+            case RIGHTS_DIALOG -> throw new IllegalStateException("RIGHTS_DIALOG: use attachHistory(SearchBox, Scope.RIGHTS_DIALOG)"); //$NON-NLS-1$
         };
     }
 

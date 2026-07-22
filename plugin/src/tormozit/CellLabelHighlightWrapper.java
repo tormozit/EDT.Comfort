@@ -19,10 +19,16 @@ final class CellLabelHighlightWrapper extends StyledCellLabelProvider
 {
     private final CellLabelProvider base;
     private SmartMatcher highlightMatcher = new SmartMatcher(""); //$NON-NLS-1$
+    private boolean treeSectionHighlight;
 
     CellLabelHighlightWrapper(CellLabelProvider base)
     {
         this.base = base;
+    }
+
+    void setTreeSectionHighlight(boolean enabled)
+    {
+        treeSectionHighlight = enabled;
     }
 
     @Override
@@ -43,7 +49,10 @@ final class CellLabelHighlightWrapper extends StyledCellLabelProvider
         // appendMatchRanges сам корректно очищает ячейку при пустом списке диапазонов.
         String text = cell.getText();
         List<SmartMatcher.HighlightRange> ranges = !highlightMatcher.isEmpty && text != null && !text.isEmpty()
-            ? highlightMatcher.getHighlightRanges(text) : List.of();
+            ? (treeSectionHighlight
+                ? highlightMatcher.getTreeHighlightRanges(text)
+                : highlightMatcher.getHighlightRanges(text))
+            : List.of();
         SmartMatchHighlight.appendMatchRanges(cell, ranges);
     }
 

@@ -284,6 +284,12 @@ public final class ThreeSideMergeCurrentLinesHook
 
         CompareCurrentLinesPanel panel = CompareCurrentLinesPanel.create(mergeViewerComposite,
             DEFAULT_LEFT_LABEL, DEFAULT_RIGHT_LABEL, DEFAULT_RESULT_LABEL);
+        /*
+         * Итоговая сторона в паре всегда «новая» (INSERT) — добавления должны быть зелёными,
+         * удаления из источника — красными. Режим «слева зелёное / справа красное» нужен
+         * только 2-way EGit (см. GitCompareCurrentLinesHook).
+         */
+        panel.setSideAlignedDiffColors(false);
         refreshLabels(panel, provider, viewer);
         Composite panelControl = panel.getControl();
         panelControl.moveBelow(viewFormControl);
