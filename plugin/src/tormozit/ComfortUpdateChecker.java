@@ -72,8 +72,7 @@ public final class ComfortUpdateChecker
         ComfortVersionInfo latest = getCachedLatestVersion();
         if (latest == null || latest.getVersion().isBlank())
             return false;
-        return ComfortVersionInfo.compareVersionNumbers(
-            installed.getVersion(), latest.getVersion()) < 0;
+        return ComfortVersionInfo.compare(installed, latest) < 0;
     }
 
     /**
@@ -196,12 +195,13 @@ public final class ComfortUpdateChecker
 
         var store = ComfortSettings.getInstance().getPreferenceStore();
         String notified = store.getString(ComfortSettings.PREF_LAST_NOTIFIED_VERSION);
-        if (latest.getVersion().equals(notified))
+        String latestKey = latest.getDisplayVersion();
+        if (latestKey.equals(notified))
             return;
 
-        store.setValue(ComfortSettings.PREF_LAST_NOTIFIED_VERSION, latest.getVersion());
+        store.setValue(ComfortSettings.PREF_LAST_NOTIFIED_VERSION, latestKey);
 
-        String message = "Обнаружена новая версия " + latest.getVersion(); //$NON-NLS-1$
+        String message = "Обнаружена новая версия " + latestKey; //$NON-NLS-1$
         runOnDisplayThread(() -> ToastNotification.show(
             "EDT Comfort", //$NON-NLS-1$
             message,
@@ -213,8 +213,7 @@ public final class ComfortUpdateChecker
     private static boolean isUpdateAvailableFor(ComfortVersionInfo latest)
     {
         ComfortVersionInfo installed = getInstalledVersion();
-        return ComfortVersionInfo.compareVersionNumbers(
-            installed.getVersion(), latest.getVersion()) < 0;
+        return ComfortVersionInfo.compare(installed, latest) < 0;
     }
 
     private static boolean isInternetAvailable()

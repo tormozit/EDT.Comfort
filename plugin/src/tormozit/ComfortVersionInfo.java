@@ -47,7 +47,7 @@ public final class ComfortVersionInfo
         this.changesUrl = changesUrl != null ? changesUrl : ""; //$NON-NLS-1$
     }
 
-    /** Номер версии без квалификатора сборки (для сравнения). */
+    /** Номер версии без квалификатора сборки. */
     public String getVersion()
     {
         return baseVersion;
@@ -97,13 +97,7 @@ public final class ComfortVersionInfo
 
     private static ComfortVersionInfo newerOf(ComfortVersionInfo left, ComfortVersionInfo right)
     {
-        int cmp = compareVersionNumbers(left.getVersion(), right.getVersion());
-        if (cmp < 0)
-            return right;
-        if (cmp > 0)
-            return left;
-        return left.getDisplayVersion().compareTo(right.getDisplayVersion()) >= 0
-                ? left : right;
+        return compare(left, right) >= 0 ? left : right;
     }
 
     /** Версия установленной feature-IU из p2-профиля EDT. */
@@ -217,6 +211,25 @@ public final class ComfortVersionInfo
         return RELEASES_BASE_URL + baseVersion;
     }
 
+    /**
+     * Полное сравнение версий: сначала числовые сегменты базы, при равенстве —
+     * квалификатор сборки ({@code yyyyMMddHHmm} после {@code -}).
+     */
+    public static int compare(ComfortVersionInfo left, ComfortVersionInfo right)
+    {
+        if (left == null && right == null)
+            return 0;
+        if (left == null)
+            return -1;
+        if (right == null)
+            return 1;
+
+        int cmp = compareVersionNumbers(left.getVersion(), right.getVersion());
+        if (cmp != 0)
+            return cmp;
+        return compareBuildQualifiers(left.getDisplayVersion(), right.getDisplayVersion());
+    }
+
     /** Сравнение номеров версий (без квалификатора сборки). */
     public static int compareVersionNumbers(String left, String right)
     {
@@ -236,6 +249,36 @@ public final class ComfortVersionInfo
                 return Integer.compare(lv, rv);
         }
         return 0;
+    }
+
+    /**
+     * Сравнение timestamp-квалификаторов полной OSGi-версии.
+     * Без квалификатора считается старше версии с квалификатором; при равной базе
+     * {@code yyyyMMddHHmm} сравнивается лексикографически (совпадает с хронологией).
+     */
+    static int compareBuildQualifiers(String leftFull, String rightFull)
+    {
+        String leftQ = extractBuildQualifier(leftFull);
+        String rightQ = extractBuildQualifier(rightFull);
+        if (leftQ.isEmpty() && rightQ.isEmpty())
+        {
+            String left = leftFull != null ? leftFull : ""; //$NON-NLS-1$
+            String right = rightFull != null ? rightFull : ""; //$NON-NLS-1$
+            return left.compareTo(right);
+        }
+        if (leftQ.isEmpty())
+            return -1;
+        if (rightQ.isEmpty())
+            return 1;
+        return leftQ.compareTo(rightQ);
+    }
+
+    private static String extractBuildQualifier(String osgiVersion)
+    {
+        if (osgiVersion == null || osgiVersion.isBlank())
+            return ""; //$NON-NLS-1$
+        Matcher m = QUALIFIER_TIMESTAMP.matcher(osgiVersion);
+        return m.find() ? m.group(1) : ""; //$NON-NLS-1$
     }
 
     private static ComfortVersionInfo empty()
