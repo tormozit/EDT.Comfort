@@ -1943,20 +1943,19 @@ if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
         completionAutoOpenActiveSeq = seq;
         completionAutoOpenAwaitingLogged = false;
         if (branch == null)
-        {
-return;
-        }
-if ("space".equals(branch) || "symbol".equals(branch))
+            return;
+        if ("space".equals(branch) || "symbol".equals(branch))
         {
             // Пробел и &~#: не открываем EDT-попап, ИР решает через ЗаполнитьТаблицуСлов
-            else            else
+            if (!isWordsTableFetchInFlightForCaret(caretAfter)
+                    && scheduleWordsTablePreparation(caretAfter, true))
             {
                 completionAutoOpenPending = true;
                 completionAutoOpenCaret = caretAfter;
                 completionAutoOpenIrScheduled = true;
                 completionAutoOpenEdtOpened = false;
                 completionAutoOpenActiveSeq = seq;
-}
+            }
         }
         else
         {
@@ -2066,7 +2065,7 @@ openCompletionAutoEdtPopup(caret, autoOpenSeq);
 
     private void logBeginEarlyReturn(int autoOpenSeq, String reason, int caret)
     {
-}
+    }
 
     private void openCompletionAutoEdtPopup(int expectedCaret, int autoOpenSeq)
     {

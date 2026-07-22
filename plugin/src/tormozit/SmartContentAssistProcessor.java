@@ -1269,15 +1269,10 @@ return result;
         return false;
     }
 
-    /** H4: детали определения literal-контекста для debug-c201d2.log. */
+    /** Бывший NDJSON-диагностический выход literal-контекста — no-op. */
     static void debugLiteralContext(ITextViewer viewer, int caret)
     {
-        IDocument doc = viewer != null ? viewer.getDocument() : null;
-        boolean ixtext = doc instanceof IXtextDocument;
-        boolean inLiteral = isStringLiteralAssistContext(doc, caret);
-        boolean extractOk = ixtext && caret >= 0
-            && EditEmbeddedTextHandler.isCaretInStringLiteral((IXtextDocument) doc, caret);
-}
+    }
 
     private static void updateFilterTracker(ITextViewer viewer, int caret)
     {
@@ -2858,6 +2853,18 @@ return stripEmptyPlaceholderProposals(result);
                 n++;
         }
         return n;
+    }
+
+    /** Бывший NDJSON-диагностический выход filterCached — no-op. */
+    private void debugFilterCachedExit(ITextViewer viewer, int caret, String filter, IDocument doc,
+        int interimN, String path, ICompletionProposal[] result)
+    {
+    }
+
+    /** Бывший NDJSON-диагностический выход resolveProposalList — no-op. */
+    private void debugResolveExit(IDocument doc, int caret, String filter, int interimN,
+        boolean cacheValid, String exit, ICompletionProposal[] result)
+    {
     }
 
     /**

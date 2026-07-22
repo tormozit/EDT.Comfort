@@ -2321,7 +2321,7 @@ return creatorResolved && creatorPatched;
         {
             ContentAssistDebug.log("recreateAssistBrowserSidePanelIfNeeded: " + e.getMessage()); //$NON-NLS-1$
         }
-return hasBrowser;
+        return hasAssistBrowserControl(assistant);
     }
 
     private static boolean hasAssistBrowserControl(ContentAssistant assistant)
