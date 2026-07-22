@@ -1,7 +1,9 @@
 package tormozit;
 
+import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 
 import org.eclipse.jface.viewers.AbstractTreeViewer;
@@ -17,6 +19,7 @@ import org.eclipse.swt.events.TreeAdapter;
 import org.eclipse.swt.events.TreeEvent;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Tree;
+import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
@@ -80,7 +83,7 @@ public final class TreeSoleChildAutoExpand implements IStartup
     }
 
     @FunctionalInterface
-    interface VisibleChildFilter
+    public interface VisibleChildFilter
     {
         boolean isVisible(AbstractTreeViewer viewer, Object parent, Object child);
     }
@@ -228,6 +231,33 @@ public final class TreeSoleChildAutoExpand implements IStartup
         }
     }
 
+    /**
+     * Программный sole-child разворот от {@code root} (после фильтра и т.п.).
+     * Для lazy-деревьев догружает детей через {@code loadAndGetChildren}.
+     */
+    public static void expandSoleChildChainFrom(AbstractTreeViewer viewer, Object root)
+    {
+        expandSoleChildChainFrom(viewer, root, TreeSoleChildAutoExpand::defaultVisible);
+    }
+
+    public static void expandSoleChildChainFrom(AbstractTreeViewer viewer, Object root, VisibleChildFilter filter)
+    {
+        if (viewer == null || root == null || filter == null)
+            return;
+        Tree tree = resolveTree(viewer);
+        if (tree == null || tree.isDisposed())
+            return;
+        IN_AUTO_EXPAND.set(Boolean.TRUE);
+        try
+        {
+            expandSoleChildChain(viewer, root, filter);
+        }
+        finally
+        {
+            IN_AUTO_EXPAND.set(Boolean.FALSE);
+        }
+    }
+
     // ---- Резолверы деревьев из белого списка ----
 
     private static AbstractTreeViewer resolveProblemViewTree(IViewPart view)
@@ -331,15 +361,21 @@ public final class TreeSoleChildAutoExpand implements IStartup
                 if (element == null)
                     return;
 
-                IN_AUTO_EXPAND.set(Boolean.TRUE);
-                try
-                {
-                    expandSoleChildChain(viewer, element, filter);
-                }
-                finally
-                {
-                    IN_AUTO_EXPAND.set(Boolean.FALSE);
-                }
+                Display display = tree.getDisplay();
+                display.timerExec(150, () -> {
+                    if (tree.isDisposed() || Boolean.TRUE.equals(SUPPRESSED.get())
+                            || Boolean.TRUE.equals(IN_AUTO_EXPAND.get()))
+                        return;
+                    IN_AUTO_EXPAND.set(Boolean.TRUE);
+                    try
+                    {
+                        expandSoleChildChain(viewer, element, filter);
+                    }
+                    finally
+                    {
+                        IN_AUTO_EXPAND.set(Boolean.FALSE);
+                    }
+                });
             }
         });
     }
@@ -369,16 +405,17 @@ public final class TreeSoleChildAutoExpand implements IStartup
             return;
 
         Object cpObj = viewer.getContentProvider();
-        if (!(cpObj instanceof ITreeContentProvider cp))
-            return;
+        ITreeContentProvider cp = cpObj instanceof ITreeContentProvider tcp ? tcp : null;
 
         Set<String> labelsInChain = new HashSet<>();
         rememberLabel(labelsInChain, nodeLabel(viewer, element));
 
+        Tree tree = resolveTree(viewer);
         Object current = element;
-        while (cp.hasChildren(current))
+        int safety = 0;
+        while (safety++ < 64)
         {
-            Object[] raw = cp.getChildren(current);
+            Object[] raw = getVisibleChildren(viewer, cp, tree, current, filter);
             if (raw == null || raw.length == 0)
                 break;
 
@@ -387,8 +424,6 @@ public final class TreeSoleChildAutoExpand implements IStartup
             for (Object child : raw)
             {
                 if (child == null)
-                    continue;
-                if (!filter.isVisible(viewer, current, child))
                     continue;
                 visibleCount++;
                 onlyChild = child;
@@ -401,20 +436,116 @@ public final class TreeSoleChildAutoExpand implements IStartup
             if (isLabelCycle(viewer, current, onlyChild, labelsInChain))
                 break;
 
-            if (!cp.hasChildren(onlyChild))
+            boolean hasKids = nodeHasChildren(viewer, cp, tree, onlyChild);
+            if (!hasKids)
                 break;
 
-            if (viewer.getExpandedState(onlyChild))
-            {
-                rememberLabel(labelsInChain, nodeLabel(viewer, onlyChild));
-                current = onlyChild;
-                continue;
-            }
-
-            viewer.setExpandedState(onlyChild, true);
+            if (!viewer.getExpandedState(onlyChild))
+                viewer.setExpandedState(onlyChild, true);
             rememberLabel(labelsInChain, nodeLabel(viewer, onlyChild));
             current = onlyChild;
         }
+    }
+
+    private static boolean nodeHasChildren(AbstractTreeViewer viewer, ITreeContentProvider cp, Tree tree, Object node)
+    {
+        if (cp != null)
+            return cp.hasChildren(node);
+        Object hasChildren = Global.invoke(node, "hasChildren"); //$NON-NLS-1$
+        if (hasChildren instanceof Boolean b)
+            return b.booleanValue();
+        return hasTreeItems(tree, node);
+    }
+
+    private static Object[] getVisibleChildren(AbstractTreeViewer viewer, ITreeContentProvider cp,
+            Tree tree, Object parent, VisibleChildFilter filter)
+    {
+        List<Object> visible = new ArrayList<>();
+        if (cp != null)
+        {
+            Object[] raw = cp.getChildren(parent);
+            if (raw != null)
+            {
+                for (Object child : raw)
+                {
+                    if (child != null && filter.isVisible(viewer, parent, child))
+                        visible.add(child);
+                }
+                return visible.toArray();
+            }
+        }
+
+        // LazyTreeNode: сначала уже загруженные, иначе синхронная догрузка (без getChildren у ILazy*).
+        List<?> loaded = resolveLazyChildren(parent);
+        if (loaded != null)
+        {
+            for (Object child : loaded)
+            {
+                if (child != null && filter.isVisible(viewer, parent, child))
+                    visible.add(child);
+            }
+            if (!visible.isEmpty() || loaded.isEmpty())
+                return visible.toArray();
+        }
+
+        TreeItem parentItem = findTreeItem(tree, parent);
+        if (parentItem == null)
+            return new Object[0];
+        for (TreeItem ti : parentItem.getItems())
+        {
+            Object data = ti.getData();
+            if (data != null && filter.isVisible(viewer, parent, data))
+                visible.add(data);
+        }
+        return visible.toArray();
+    }
+
+    private static List<?> resolveLazyChildren(Object parent)
+    {
+        if (parent == null)
+            return null;
+        Object without = Global.invoke(parent, "getChildrenWithoutLoading"); //$NON-NLS-1$
+        if (without instanceof List<?> list && !list.isEmpty())
+            return list;
+        Object hasChildren = Global.invoke(parent, "hasChildren"); //$NON-NLS-1$
+        if (!(hasChildren instanceof Boolean b) || !b.booleanValue())
+            return without instanceof List<?> empty ? empty : null;
+        Object loaded = Global.invoke(parent, "loadAndGetChildren"); //$NON-NLS-1$
+        return loaded instanceof List<?> list ? list : null;
+    }
+
+    private static TreeItem findTreeItem(Tree tree, Object element)
+    {
+        if (tree == null || element == null)
+            return null;
+        for (TreeItem item : tree.getItems())
+        {
+            TreeItem found = findTreeItemRecursive(item, element);
+            if (found != null)
+                return found;
+        }
+        return null;
+    }
+
+    private static TreeItem findTreeItemRecursive(TreeItem item, Object element)
+    {
+        if (item == null)
+            return null;
+        if (element.equals(item.getData()))
+            return item;
+        for (TreeItem child : item.getItems())
+        {
+            TreeItem found = findTreeItemRecursive(child, element);
+            if (found != null)
+                return found;
+        }
+        return null;
+    }
+
+    private static boolean hasTreeItems(Tree tree, Object element)
+    {
+        TreeItem item = findTreeItem(tree, element);
+        return item != null && item.getItemCount() > 0;
     }
 
     /**

@@ -76,6 +76,7 @@
     <startup class="tormozit.GitHistoryFileColumnsHook"/>
     <startup class="tormozit.ConfigurationSearchDialogHook"/>
     <startup class="tormozit.PictureDialogHook"/>
+    <startup class="tormozit.RightsDialogFilterHook"/>
     <startup class="tormozit.NewAttributeNameIdentifierHook"/>
     <startup class="tormozit.PropertyNameIdentifierHook"/>
     <startup class="tormozit.BslServerCallHighlightingHook"/>
