@@ -64,8 +64,8 @@
 
 | Команда | Клавиши | Где |
 |---------|---------|-----|
-| Открыть в Навигаторе | Ctrl+T | Staging, Repository Explorer, History |
-| Открыть объект | F2 | Staging, Repository Explorer, History |
+| Открыть в Навигаторе | Ctrl+T | «Индексирование Git», «История» |
+| Открыть объект | F2 | «Индексирование Git», «История» |
 
 См. [Git: изменённые файлы](git-izmeneniya.md).
 
