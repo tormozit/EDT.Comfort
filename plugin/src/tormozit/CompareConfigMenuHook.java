@@ -2,20 +2,36 @@ package tormozit;
 
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
+import org.eclipse.compare.CompareConfiguration;
+import org.eclipse.compare.CompareEditorInput;
+import org.eclipse.compare.CompareUI;
+import org.eclipse.compare.IEncodedStreamContentAccessor;
+import org.eclipse.compare.IStreamContentAccessor;
+import org.eclipse.compare.ITypedElement;
+import org.eclipse.compare.structuremergeviewer.DiffNode;
+import org.eclipse.compare.structuremergeviewer.Differencer;
 import org.eclipse.jface.action.ContributionItem;
 import org.eclipse.jface.action.IToolBarManager;
 import org.eclipse.jface.action.Separator;
+import org.eclipse.jface.dialogs.IDialogConstants;
+import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.viewers.AbstractTreeViewer;
 import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.LabelProvider;
 import org.eclipse.jface.viewers.StructuredSelection;
+import org.eclipse.jface.window.Window;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
 import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.events.SelectionEvent;
 import org.eclipse.swt.graphics.Color;
+import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.widgets.Display;
@@ -36,6 +52,8 @@ import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.contexts.IContextService;
+import org.eclipse.ui.dialogs.ElementListSelectionDialog;
+import org.eclipse.ui.plugin.AbstractUIPlugin;
 
 import com._1c.g5.v8.dt.bsl.compare.BslModuleComparisonNode;
 import com._1c.g5.v8.dt.bsl.compare.BslModuleSectionComparisonNode;
@@ -60,6 +78,7 @@ import com._1c.g5.v8.dt.compare.model.ComparisonNode;
 import com._1c.g5.v8.dt.compare.model.ComparisonSide;
 import com._1c.g5.v8.dt.compare.model.ExternalPropertyComparisonNode;
 import com._1c.g5.v8.dt.compare.model.SolidResourceComparisonNode;
+import com._1c.g5.v8.dt.compare.model.UnsupportedObjectComparisonNode;
 import com._1c.g5.v8.dt.compare.ui.editor.ComparisonTreeControl;
 import com._1c.g5.v8.dt.compare.ui.util.MergeUiUtils;
 import com._1c.g5.v8.dt.core.filesystem.IQualifiedNameFilePathConverter;
@@ -69,6 +88,7 @@ import com._1c.g5.v8.dt.export.IExportOperationFactory;
 import com._1c.g5.v8.dt.export.IExportStrategy;
 import com.google.common.net.HttpHeaders.ReferrerPolicyValues;
 import com.google.inject.Inject;
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
@@ -76,6 +96,7 @@ import java.io.IOException;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Set;
@@ -747,6 +768,9 @@ public class CompareConfigMenuHook implements IStartup
                     return;
                 }
 
+                if (ProjectSettingsFilesHandler.tryHandle(editor, element, tree.getShell()))
+                    return;
+
                 if (element instanceof IPartialModelNode node && hasMergeSettings(node))
                 {
                     openMergeSettings(editor, node, tree.getShell());
@@ -1321,6 +1345,363 @@ public class CompareConfigMenuHook implements IStartup
             catch (Exception ignored)
             {
                 return null;
+            }
+        }
+    }
+
+    /**
+     * Dblclick по «Настройки проекта» (symlink Settings / папка {@code .settings}):
+     * список изменившихся файлов → текстовое сравнение сторон MAIN/OTHER.
+     */
+    private static final class ProjectSettingsFilesHandler
+    {
+        private static final String SETTINGS_SYMLINK = "Settings"; //$NON-NLS-1$
+        private static final Path SETTINGS_FOLDER = Path.of(".settings"); //$NON-NLS-1$
+        private static final String TOAST_TITLE = "Настройки проекта"; //$NON-NLS-1$
+
+        private enum ChangeKind
+        {
+            ADDED, DELETED, CHANGED
+        }
+
+        private static final class FileEntry
+        {
+            final Path path;
+            final String relativeName;
+            final ChangeKind kind;
+
+            FileEntry(Path path, ChangeKind kind)
+            {
+                this.path = path;
+                this.relativeName = path.toString().replace('\\', '/');
+                this.kind = kind;
+            }
+        }
+
+        static boolean tryHandle(IEditorPart editor, Object element, Shell shell)
+        {
+            if (!(element instanceof IPartialModelNode node))
+                return false;
+            IComparisonSession session = CompareConfigSelectionListener.getSession(editor);
+            if (session == null)
+                return false;
+            ComparisonNode comparisonNode = session.getNode(node.getNodeId());
+            if (!(comparisonNode instanceof UnsupportedObjectComparisonNode unsupported))
+                return false;
+            String symlink = unsupported.getMainSymlink();
+            if (symlink == null)
+                symlink = unsupported.getOtherSymlink();
+            if (!SETTINGS_SYMLINK.equals(symlink))
+                return false;
+
+            List<FileEntry> changed = collectChangedFiles(session);
+            if (changed.isEmpty())
+            {
+                ToastNotification.show(TOAST_TITLE, "Нет изменившихся файлов настроек", 4000); //$NON-NLS-1$
+                return true;
+            }
+
+            FileEntry selected = changed.size() == 1
+                ? changed.get(0)
+                : pickFile(shell, changed);
+            if (selected == null)
+                return true;
+
+            openTextCompare(editor, session, selected, shell);
+            return true;
+        }
+
+        private static List<FileEntry> collectChangedFiles(IComparisonSession session)
+        {
+            IComparisonDataSource mainDs = session.getDataSource(ComparisonSide.MAIN);
+            IComparisonDataSource otherDs = session.getDataSource(ComparisonSide.OTHER);
+            List<Path> mainFiles = fileList(mainDs);
+            List<Path> otherFiles = fileList(otherDs);
+            Set<Path> all = new HashSet<>();
+            all.addAll(mainFiles);
+            all.addAll(otherFiles);
+
+            List<FileEntry> result = new ArrayList<>();
+            for (Path path : all)
+            {
+                boolean inMain = containsPath(mainFiles, path);
+                boolean inOther = containsPath(otherFiles, path);
+                if (inMain && !inOther)
+                    result.add(new FileEntry(path, ChangeKind.DELETED));
+                else if (!inMain && inOther)
+                    result.add(new FileEntry(path, ChangeKind.ADDED));
+                else if (inMain && inOther && !sameContent(mainDs, otherDs, path))
+                    result.add(new FileEntry(path, ChangeKind.CHANGED));
+            }
+            result.sort((a, b) -> String.CASE_INSENSITIVE_ORDER.compare(a.relativeName, b.relativeName));
+            return result;
+        }
+
+        private static List<Path> fileList(IComparisonDataSource ds)
+        {
+            if (ds == null)
+                return List.of();
+            List<Path> list = ds.getFileListRecursively(SETTINGS_FOLDER);
+            return list != null ? list : List.of();
+        }
+
+        private static boolean containsPath(List<Path> files, Path path)
+        {
+            for (Path f : files)
+            {
+                if (f.equals(path))
+                    return true;
+            }
+            return false;
+        }
+
+        private static boolean sameContent(IComparisonDataSource mainDs, IComparisonDataSource otherDs, Path path)
+        {
+            byte[] main = readBytes(mainDs, path);
+            byte[] other = readBytes(otherDs, path);
+            if (main == null && other == null)
+                return true;
+            if (main == null || other == null)
+                return false;
+            return Arrays.equals(main, other);
+        }
+
+        private static byte[] readBytes(IComparisonDataSource ds, Path path)
+        {
+            if (ds == null || path == null)
+                return null;
+            try
+            {
+                if (!ds.fileExists(path))
+                    return null;
+                try (InputStream in = ds.getFileStream(path))
+                {
+                    return in != null ? in.readAllBytes() : null;
+                }
+            }
+            catch (IOException e)
+            {
+                Global.logError(TAG, "settings readBytes " + path, e); //$NON-NLS-1$
+                return null;
+            }
+        }
+
+        private static String readText(IComparisonDataSource ds, Path path)
+        {
+            byte[] bytes = readBytes(ds, path);
+            if (bytes == null)
+                return ""; //$NON-NLS-1$
+            return new String(bytes, StandardCharsets.UTF_8);
+        }
+
+        private static FileEntry pickFile(Shell shell, List<FileEntry> entries)
+        {
+            StatusImageCache images = new StatusImageCache();
+            try
+            {
+                ElementListSelectionDialog dialog = new ElementListSelectionDialog(shell,
+                    new LabelProvider()
+                    {
+                        @Override
+                        public String getText(Object element)
+                        {
+                            return element instanceof FileEntry e ? e.relativeName : super.getText(element);
+                        }
+
+                        @Override
+                        public Image getImage(Object element)
+                        {
+                            return element instanceof FileEntry e ? images.image(e.kind) : null;
+                        }
+                    });
+                dialog.setTitle(Global.withPluginWindowTitle(TOAST_TITLE));
+                dialog.setMessage("Выберите файл для сравнения текстов версий:"); //$NON-NLS-1$
+                dialog.setElements(entries.toArray());
+                dialog.setMultipleSelection(false);
+                dialog.setHelpAvailable(false);
+                if (dialog.open() != Window.OK)
+                    return null;
+                Object result = dialog.getFirstResult();
+                return result instanceof FileEntry e ? e : null;
+            }
+            finally
+            {
+                images.dispose();
+            }
+        }
+
+        private static void openTextCompare(IEditorPart editor, IComparisonSession session, FileEntry entry,
+            Shell shell)
+        {
+            IComparisonDataSource mainDs = session.getDataSource(ComparisonSide.MAIN);
+            IComparisonDataSource otherDs = session.getDataSource(ComparisonSide.OTHER);
+            String leftText = readText(mainDs, entry.path);
+            String rightText = readText(otherDs, entry.path);
+            String leftLabel = sideLabel(editor, true);
+            String rightLabel = sideLabel(editor, false);
+            String fileName = entry.path.getFileName() != null
+                ? entry.path.getFileName().toString()
+                : entry.relativeName;
+            try
+            {
+                SettingsFileCompareInput input = new SettingsFileCompareInput(
+                    leftText, rightText, leftLabel, rightLabel, fileName);
+                CompareUI.openCompareDialog(input);
+            }
+            catch (Exception e)
+            {
+                Global.logError(TAG, "settings openTextCompare", e); //$NON-NLS-1$
+                ToastNotification.show(TOAST_TITLE,
+                    "Не удалось открыть сравнение: " + e.getMessage(), 5000); //$NON-NLS-1$
+            }
+        }
+
+        private static String sideLabel(IEditorPart editor, boolean main)
+        {
+            Object editorInput = Global.getField(editor, "dtComparisonEditorInput"); //$NON-NLS-1$
+            if (editorInput != null)
+            {
+                String name = (String) Global.call(editorInput,
+                    main ? "getMainComparisonSideName" : "getOtherComparisonSideName"); //$NON-NLS-1$ //$NON-NLS-2$
+                if (name != null && !name.isBlank())
+                    return name;
+            }
+            return main ? "Основная" : "Другая"; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        /** Иконки add/del/chg из {@code org.eclipse.compare} (ovr16). */
+        private static final class StatusImageCache
+        {
+            private Image added;
+            private Image deleted;
+            private Image changed;
+
+            Image image(ChangeKind kind)
+            {
+                return switch (kind)
+                {
+                    case ADDED -> added != null ? added : (added = load("icons/full/ovr16/add_ov.png")); //$NON-NLS-1$
+                    case DELETED -> deleted != null ? deleted : (deleted = load("icons/full/ovr16/del_ov.png")); //$NON-NLS-1$
+                    case CHANGED -> changed != null ? changed : (changed = load("icons/full/ovr16/chg_ov.png")); //$NON-NLS-1$
+                };
+            }
+
+            private static Image load(String path)
+            {
+                ImageDescriptor desc = AbstractUIPlugin.imageDescriptorFromPlugin(CompareUI.PLUGIN_ID, path);
+                return desc != null ? desc.createImage() : null;
+            }
+
+            void dispose()
+            {
+                if (added != null && !added.isDisposed())
+                    added.dispose();
+                if (deleted != null && !deleted.isDisposed())
+                    deleted.dispose();
+                if (changed != null && !changed.isDisposed())
+                    changed.dispose();
+                added = null;
+                deleted = null;
+                changed = null;
+            }
+        }
+
+        private static final class SettingsFileCompareInput extends CompareEditorInput
+        {
+            private final StringCompareElement leftElement;
+            private final StringCompareElement rightElement;
+
+            SettingsFileCompareInput(String leftText, String rightText, String leftLabel, String rightLabel,
+                String fileName)
+            {
+                super(createConfiguration(leftLabel, rightLabel));
+                String type = viewerType(fileName);
+                leftElement = new StringCompareElement(fileName, leftText, type);
+                rightElement = new StringCompareElement(fileName, rightText, type);
+                setTitle(fileName);
+            }
+
+            private static CompareConfiguration createConfiguration(String leftLabel, String rightLabel)
+            {
+                CompareConfiguration config = new CompareConfiguration();
+                config.setLeftEditable(false);
+                config.setRightEditable(false);
+                config.setLeftLabel(leftLabel != null ? leftLabel : "Основная"); //$NON-NLS-1$
+                config.setRightLabel(rightLabel != null ? rightLabel : "Другая"); //$NON-NLS-1$
+                return config;
+            }
+
+            private static String viewerType(String fileName)
+            {
+                if (fileName == null)
+                    return "txt"; //$NON-NLS-1$
+                int dot = fileName.lastIndexOf('.');
+                if (dot < 0 || dot == fileName.length() - 1)
+                    return "txt"; //$NON-NLS-1$
+                return fileName.substring(dot + 1);
+            }
+
+            @Override
+            protected Object prepareInput(IProgressMonitor monitor)
+            {
+                return new DiffNode(null, Differencer.CHANGE, null, leftElement, rightElement);
+            }
+
+            @Override
+            public String getOKButtonLabel()
+            {
+                return IDialogConstants.CLOSE_LABEL;
+            }
+
+            @Override
+            public boolean isSaveNeeded()
+            {
+                return true;
+            }
+
+            private static final class StringCompareElement
+                implements ITypedElement, IStreamContentAccessor, IEncodedStreamContentAccessor
+            {
+                private final String name;
+                private final String content;
+                private final String type;
+
+                StringCompareElement(String name, String content, String type)
+                {
+                    this.name = name != null ? name : ""; //$NON-NLS-1$
+                    this.content = content != null ? content : ""; //$NON-NLS-1$
+                    this.type = type != null ? type : "txt"; //$NON-NLS-1$
+                }
+
+                @Override
+                public String getName()
+                {
+                    return name;
+                }
+
+                @Override
+                public Image getImage()
+                {
+                    return null;
+                }
+
+                @Override
+                public String getType()
+                {
+                    return type;
+                }
+
+                @Override
+                public InputStream getContents()
+                {
+                    return new ByteArrayInputStream(content.getBytes(StandardCharsets.UTF_8));
+                }
+
+                @Override
+                public String getCharset()
+                {
+                    return StandardCharsets.UTF_8.name();
+                }
             }
         }
     }
