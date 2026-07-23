@@ -81,9 +81,9 @@
     <startup class="tormozit.BracketContentHintHook"/>
     <startup class="tormozit.GotoDefinitionFieldMenuHook"/>
     <startup class="tormozit.TypeComboOverlayHook"/>
-    <startup class="tormozit.SpellCheckHook"/>
+    <startup class="tormozit.SpellCheckStartup"/>
     <startup class="tormozit.PropertySheetSpellCheckHook"/>
-    <startup class="tormozit.BslModuleSpellCheckHook"/>
+    <startup class="tormozit.BslModuleSpellCheckStartup"/>
     <startup class="tormozit.CommitMessageSpellCheckHook"/>
   </extension>
 

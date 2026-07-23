@@ -59,6 +59,11 @@ public final class ComfortPreferences
             display.asyncExec(open);
     }
 
+    private static final String NICKNAME_ECLIPSE_RELEASES = "Eclipse Releases"; //$NON-NLS-1$
+    private static final String JDT_FEATURE_IU_ID = "org.eclipse.jdt.feature.group"; //$NON-NLS-1$
+    private static final String ECLIPSE_RELEASES_LATEST =
+        "https://download.eclipse.org/releases/latest/"; //$NON-NLS-1$
+
     /**
      * Открывает «Справка → Установить новое ПО…» с сайтом
      * {@link ComfortUpdateChecker#UPDATE_SITE_URL}.
@@ -67,6 +72,48 @@ public final class ComfortPreferences
     {
 
         openInstallNewSoftware(ComfortUpdateChecker.UPDATE_SITE_URL);
+    }
+
+    /**
+     * Мастер установки Eclipse JDT (модуль орфографии Comfort) с сайта releases,
+     * подобранного по версии платформы EDT. После установки нужен перезапуск.
+     */
+    public static void openInstallJdtForSpelling()
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        Runnable open = () ->
+        {
+            if (ComfortJdtAvailability.isJdtUiAvailable())
+            {
+                ToastNotification.show("Орфография", //$NON-NLS-1$
+                    "Модуль JDT уже установлен. Перезапустите EDT, если орфография не активна.", //$NON-NLS-1$
+                    8_000);
+                return;
+            }
+            String siteUrl = resolveEclipseReleasesSiteUrl();
+            Global.log("install", "openInstallJdtForSpelling site=" + siteUrl); //$NON-NLS-1$ //$NON-NLS-2$
+            try
+            {
+                openInstallWizardForJdt(siteUrl);
+                ToastNotification.show("Орфография", //$NON-NLS-1$
+                    "После установки Eclipse Java Development Tools перезапустите EDT.", //$NON-NLS-1$
+                    10_000);
+            }
+            catch (Exception e)
+            {
+                logError("Установка JDT (орфография)", e); //$NON-NLS-1$
+                String message = isP2SelfUpdateAvailable()
+                    ? "Не удалось открыть установку JDT. Попробуйте Справка → Установить новое ПО…" //$NON-NLS-1$
+                    : "Установщик недоступен в этой среде (нет p2-профиля)."; //$NON-NLS-1$
+                ToastNotification.show("Орфография", message, 8_000); //$NON-NLS-1$
+            }
+        };
+        if (display.getThread() == Thread.currentThread())
+            open.run();
+        else
+            display.asyncExec(open);
     }
 
     private static void openInstallNewSoftware(String siteUrl)
@@ -95,6 +142,290 @@ public final class ComfortPreferences
             open.run();
         else
             display.asyncExec(open);
+    }
+
+    /**
+     * URL simrel releases по версии {@code org.eclipse.platform} / {@code org.eclipse.ui}.
+     * Eclipse 4.30 ≈ 2023-12, далее +3 месяца на каждый minor.
+     */
+    static String resolveEclipseReleasesSiteUrl()
+    {
+        try
+        {
+            Bundle platform = Platform.getBundle("org.eclipse.platform"); //$NON-NLS-1$
+            if (platform == null)
+                platform = Platform.getBundle("org.eclipse.ui"); //$NON-NLS-1$
+            if (platform == null)
+                return ECLIPSE_RELEASES_LATEST;
+            org.osgi.framework.Version v = platform.getVersion();
+            if (v.getMajor() != 4 || v.getMinor() < 20)
+                return ECLIPSE_RELEASES_LATEST;
+            int delta = v.getMinor() - 30;
+            int totalMonths = 2023 * 12 + 11 + delta * 3; // 2023-12 = month index 11
+            int year = totalMonths / 12;
+            int month = totalMonths % 12 + 1;
+            if (year < 2020 || year > 2030)
+                return ECLIPSE_RELEASES_LATEST;
+            return String.format(
+                "https://download.eclipse.org/releases/%04d-%02d/", //$NON-NLS-1$
+                Integer.valueOf(year), Integer.valueOf(month));
+        }
+        catch (Exception e)
+        {
+            Global.logError("install", "resolveEclipseReleasesSiteUrl", e); //$NON-NLS-1$ //$NON-NLS-2$
+            return ECLIPSE_RELEASES_LATEST;
+        }
+    }
+
+    private static void openInstallWizardForJdt(String siteUrl) throws Exception
+    {
+        URI siteUri = URI.create(normalizeSiteUrl(siteUrl));
+        Class<?> uiClass = loadBundleClass(BUNDLE_P2_UI,
+            "org.eclipse.equinox.p2.ui.ProvisioningUI"); //$NON-NLS-1$
+        Object ui = uiClass.getMethod("getDefaultUI").invoke(null); //$NON-NLS-1$
+        if (!ensureP2ProfileAvailable(ui, uiClass))
+            throw new IllegalStateException("no p2 profile"); //$NON-NLS-1$
+        registerEclipseReleasesSite(ui, uiClass, siteUri);
+        Class<?> jobClass = loadBundleClass(BUNDLE_P2_UI,
+            "org.eclipse.equinox.p2.ui.LoadMetadataRepositoryJob"); //$NON-NLS-1$
+        Object job = jobClass.getConstructor(uiClass).newInstance(ui);
+        configureLoadJob(job, jobClass);
+        runLoadJobModal(job, jobClass);
+        logLoadJobStatus(job, jobClass);
+
+        java.util.List<Object> jdtIus = queryJdtFeatureIus(ui, uiClass, siteUri);
+        if (jdtIus == null || jdtIus.isEmpty())
+        {
+            Global.log("install", "JDT IU not found, browse wizard + filter"); //$NON-NLS-1$ //$NON-NLS-2$
+            openBrowseInstallWizardWithJdtFilter(ui, uiClass, siteUri, job, jobClass);
+            return;
+        }
+
+        Object latest = pickLatestInstallableUnit(jdtIus);
+        java.util.Collection<Object> selected = java.util.Collections.singletonList(latest);
+        Global.log("install", "JDT preselected " + describeIu(latest)); //$NON-NLS-1$ //$NON-NLS-2$
+
+        Class<?> installOpClass = loadBundleClass(BUNDLE_P2_OPERATIONS,
+            "org.eclipse.equinox.p2.operations.InstallOperation"); //$NON-NLS-1$
+        Object installOp = uiClass.getMethod(
+            "getInstallOperation", java.util.Collection.class, URI[].class) //$NON-NLS-1$
+            .invoke(ui, selected, new URI[] { siteUri });
+        installOpClass.getMethod("resolveModal", IProgressMonitor.class) //$NON-NLS-1$
+            .invoke(installOp, new NullProgressMonitor());
+
+        // operation != null → PreselectedIUInstallWizard (только JDT, без дерева категорий)
+        uiClass.getMethod("openInstallWizard", //$NON-NLS-1$
+            java.util.Collection.class, installOpClass, jobClass)
+            .invoke(ui, selected, installOp, job);
+    }
+
+    /**
+     * Fallback: browse-мастер + фильтр «Java Development Tools», если IU не нашли запросом.
+     */
+    private static void openBrowseInstallWizardWithJdtFilter(
+            Object ui, Class<?> uiClass, URI siteUri, Object job, Class<?> jobClass)
+            throws Exception
+    {
+        Class<?> installOpClass = loadBundleClass(BUNDLE_P2_OPERATIONS,
+            "org.eclipse.equinox.p2.operations.InstallOperation"); //$NON-NLS-1$
+        Class<?> installWizardClass = loadBundleClass(BUNDLE_P2_UI,
+            "org.eclipse.equinox.internal.p2.ui.dialogs.InstallWizard"); //$NON-NLS-1$
+        Object wizard = installWizardClass.getConstructor(
+            uiClass, installOpClass, java.util.Collection.class, jobClass)
+            .newInstance(ui, null, null, job);
+        Class<?> dialogClass = loadBundleClass(BUNDLE_P2_UI,
+            "org.eclipse.equinox.internal.p2.ui.dialogs.ProvisioningWizardDialog"); //$NON-NLS-1$
+        Class<?> provUIClass = loadBundleClass(BUNDLE_P2_UI,
+            "org.eclipse.equinox.internal.p2.ui.ProvUI"); //$NON-NLS-1$
+        Shell parent = (Shell) provUIClass.getMethod("getDefaultParentShell").invoke(null); //$NON-NLS-1$
+        Object dialog = newProvisioningWizardDialog(dialogClass, parent, wizard);
+        dialogClass.getMethod("create").invoke(dialog); //$NON-NLS-1$
+        selectInstallSiteInDialog(wizard, siteUri);
+        setAvailableSoftwareFilter(wizard, "Java Development Tools"); //$NON-NLS-1$
+        dialogClass.getMethod("open").invoke(dialog); //$NON-NLS-1$
+    }
+
+    private static void setAvailableSoftwareFilter(Object wizard, String filterText)
+    {
+        try
+        {
+            Object[] pages = (Object[]) wizard.getClass().getMethod("getPages").invoke(wizard); //$NON-NLS-1$
+            if (pages == null)
+                return;
+            Class<?> availablePageClass = loadBundleClass(BUNDLE_P2_UI,
+                "org.eclipse.equinox.internal.p2.ui.dialogs.AvailableIUsPage"); //$NON-NLS-1$
+            for (Object page : pages)
+            {
+                if (!availablePageClass.isInstance(page))
+                    continue;
+                Field groupField = availablePageClass.getDeclaredField("availableIUGroup"); //$NON-NLS-1$
+                groupField.setAccessible(true);
+                Object group = groupField.get(page);
+                if (group == null)
+                    return;
+                // AvailableIUGroup.setPattern / getPatternFilter
+                try
+                {
+                    group.getClass().getMethod("setPattern", String.class) //$NON-NLS-1$
+                        .invoke(group, filterText);
+                }
+                catch (NoSuchMethodException e)
+                {
+                    Field patternField = findField(group.getClass(), "patternFilter", "filterText", //$NON-NLS-1$ //$NON-NLS-2$
+                        "filter"); //$NON-NLS-1$
+                    if (patternField != null)
+                    {
+                        patternField.setAccessible(true);
+                        Object filter = patternField.get(group);
+                        if (filter != null)
+                        {
+                            Method set = findMethod(filter.getClass(), "setPattern", String.class); //$NON-NLS-1$
+                            if (set == null)
+                                set = findMethod(filter.getClass(), "setText", String.class); //$NON-NLS-1$
+                            if (set != null)
+                                set.invoke(filter, filterText);
+                        }
+                    }
+                }
+                Global.log("install", "setAvailableSoftwareFilter=" + filterText); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+        }
+        catch (Exception e)
+        {
+            Global.logError("install", "setAvailableSoftwareFilter", e); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    private static Field findField(Class<?> type, String... names)
+    {
+        for (String name : names)
+        {
+            Class<?> c = type;
+            while (c != null)
+            {
+                try
+                {
+                    return c.getDeclaredField(name);
+                }
+                catch (NoSuchFieldException e)
+                {
+                    c = c.getSuperclass();
+                }
+            }
+        }
+        return null;
+    }
+
+    private static Method findMethod(Class<?> type, String name, Class<?>... params)
+    {
+        Class<?> c = type;
+        while (c != null)
+        {
+            try
+            {
+                return c.getDeclaredMethod(name, params);
+            }
+            catch (NoSuchMethodException e)
+            {
+                try
+                {
+                    return c.getMethod(name, params);
+                }
+                catch (NoSuchMethodException e2)
+                {
+                    c = c.getSuperclass();
+                }
+            }
+        }
+        return null;
+    }
+
+    private static Object pickLatestInstallableUnit(java.util.List<Object> ius) throws Exception
+    {
+        Object best = null;
+        Comparable<Object> bestVer = null;
+        for (Object iu : ius)
+        {
+            @SuppressWarnings("unchecked")
+            Comparable<Object> ver = (Comparable<Object>) iu.getClass()
+                .getMethod("getVersion").invoke(iu); //$NON-NLS-1$
+            if (best == null || ver.compareTo(bestVer) > 0)
+            {
+                best = iu;
+                bestVer = ver;
+            }
+        }
+        return best;
+    }
+
+    private static String describeIu(Object iu)
+    {
+        try
+        {
+            Object id = iu.getClass().getMethod("getId").invoke(iu); //$NON-NLS-1$
+            Object ver = iu.getClass().getMethod("getVersion").invoke(iu); //$NON-NLS-1$
+            return String.valueOf(id) + " " + String.valueOf(ver); //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+            return String.valueOf(iu);
+        }
+    }
+
+    private static void registerEclipseReleasesSite(Object ui, Class<?> uiClass, URI siteUri)
+            throws Exception
+    {
+        IProgressMonitor monitor = new NullProgressMonitor();
+        cancelRepositoryLoadJobs();
+        forceRemoveRepository(ui, uiClass, siteUri);
+        uiClass.getMethod("loadMetadataRepository", //$NON-NLS-1$
+            URI.class, boolean.class, IProgressMonitor.class)
+            .invoke(ui, siteUri, Boolean.TRUE, monitor);
+        uiClass.getMethod("loadArtifactRepository", //$NON-NLS-1$
+            URI.class, boolean.class, IProgressMonitor.class)
+            .invoke(ui, siteUri, Boolean.TRUE, monitor);
+        setRepositoryNickname(ui, uiClass, siteUri, NICKNAME_ECLIPSE_RELEASES);
+        Global.log("install", "registerEclipseReleasesSite OK uri=" + siteUri); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static java.util.List<Object> queryJdtFeatureIus(
+            Object ui, Class<?> uiClass, URI siteUri)
+    {
+        try
+        {
+            Object session = uiClass.getMethod("getSession").invoke(ui); //$NON-NLS-1$
+            Class<?> provUIClass = loadBundleClass(BUNDLE_P2_UI,
+                "org.eclipse.equinox.internal.p2.ui.ProvUI"); //$NON-NLS-1$
+            Object metaManager = provUIClass.getMethod(
+                "getMetadataRepositoryManager", session.getClass()) //$NON-NLS-1$
+                .invoke(null, session);
+            Object repo = metaManager.getClass()
+                .getMethod("loadRepository", URI.class, IProgressMonitor.class) //$NON-NLS-1$
+                .invoke(metaManager, siteUri, new NullProgressMonitor());
+            if (repo == null)
+                return null;
+            Class<?> queryUtil = loadQueryUtilClass();
+            Object query = queryUtil.getMethod("createIUQuery", String.class) //$NON-NLS-1$
+                .invoke(null, JDT_FEATURE_IU_ID);
+            Class<?> queryClass = queryUtil.getClassLoader()
+                .loadClass("org.eclipse.equinox.p2.query.IQuery"); //$NON-NLS-1$
+            Object result = repo.getClass()
+                .getMethod("query", queryClass, IProgressMonitor.class) //$NON-NLS-1$
+                .invoke(repo, query, new NullProgressMonitor());
+            Object[] array = (Object[]) result.getClass().getMethod("toArray").invoke(result); //$NON-NLS-1$
+            if (array == null || array.length == 0)
+                return java.util.Collections.emptyList();
+            java.util.List<Object> list = new java.util.ArrayList<>(array.length);
+            for (Object iu : array)
+                list.add(iu);
+            return list;
+        }
+        catch (Exception e)
+        {
+            Global.logError("install", "queryJdtFeatureIus", e); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
     }
 
     /** Открывает страницу описания релиза во внешнем браузере. */
@@ -246,6 +577,12 @@ public final class ComfortPreferences
 
     private static void setRepositoryNickname(Object ui, Class<?> uiClass, URI siteUri)
     {
+        setRepositoryNickname(ui, uiClass, siteUri, NICKNAME_EDT_COMFORT);
+    }
+
+    private static void setRepositoryNickname(
+            Object ui, Class<?> uiClass, URI siteUri, String nickname)
+    {
 
         try
         {
@@ -258,7 +595,7 @@ public final class ComfortPreferences
                 .invoke(null, session);
             metaManager.getClass().getMethod( //$NON-NLS-1$
                 "setRepositoryProperty", URI.class, String.class, String.class) //$NON-NLS-1$
-                .invoke(metaManager, siteUri, REPO_NICKNAME_PROPERTY, NICKNAME_EDT_COMFORT);
+                .invoke(metaManager, siteUri, REPO_NICKNAME_PROPERTY, nickname);
         }
 
         catch (Exception e)
@@ -459,6 +796,20 @@ public final class ComfortPreferences
             return false;
         }
 
+    }
+
+    private static Class<?> loadQueryUtilClass() throws ClassNotFoundException
+    {
+        try
+        {
+            return loadBundleClass("org.eclipse.equinox.p2.metadata", //$NON-NLS-1$
+                "org.eclipse.equinox.p2.query.QueryUtil"); //$NON-NLS-1$
+        }
+        catch (ClassNotFoundException e)
+        {
+            return loadBundleClass(BUNDLE_P2_ENGINE,
+                "org.eclipse.equinox.p2.query.QueryUtil"); //$NON-NLS-1$
+        }
     }
 
     /**

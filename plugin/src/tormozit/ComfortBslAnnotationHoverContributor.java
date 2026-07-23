@@ -16,6 +16,8 @@ public final class ComfortBslAnnotationHoverContributor implements IBslHoverCont
     @Override
     public void fillToolBar(IToolBarManager manager, Collection<Annotation> annotations)
     {
+        if (!ComfortJdtAvailability.isJdtUiAvailable())
+            return;
         BslModuleSpellCheckHook.installAnnotationNavigationActions(manager, annotations);
     }
 }

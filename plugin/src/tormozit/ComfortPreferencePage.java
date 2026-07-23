@@ -281,27 +281,53 @@ public class ComfortPreferencePage
 
         // BooleanFieldEditor.createControl() подменяет layout родителя на GridLayout —
         // отдельный host, иначе ломается сетка группы «Редактор кода».
-        Composite spellingIdentsHost = new Composite(codeEditorGroup, SWT.NONE);
-        GridData spellingIdentsHostData = new GridData(SWT.FILL, SWT.CENTER, true, false);
-        spellingIdentsHostData.horizontalSpan = 2;
-        spellingIdentsHost.setLayoutData(spellingIdentsHostData);
-        BooleanFieldEditor spellingIdentsField = new BooleanFieldEditor(
-            ComfortSettings.PREF_SPELLING_CHECK_IDENTIFIERS_VISIBLE,
-            "Проверять орфографию в идентификаторах в видимой области", //$NON-NLS-1$
-            spellingIdentsHost);
-        addField(spellingIdentsField);
-        setFieldTooltip(spellingIdentsField,
-            "При включённой орфографии Comfort (словарь «Русский/Английский (Комфорт-HUNSPELL)»)\n"
-            + "проверять в видимой области модуля имена (идентификаторы) и строковые литералы.\n"
-            + "Если выключено — проверяются только обычные слова в комментариях;\n"
-            + "слова с заглавной буквой не на первой позиции (как в CamelCase) пропускаются.", //$NON-NLS-1$
-            spellingIdentsHost);
+        if (ComfortJdtAvailability.isJdtUiAvailable())
+        {
+            Composite spellingIdentsHost = new Composite(codeEditorGroup, SWT.NONE);
+            GridData spellingIdentsHostData = new GridData(SWT.FILL, SWT.CENTER, true, false);
+            spellingIdentsHostData.horizontalSpan = 2;
+            spellingIdentsHost.setLayoutData(spellingIdentsHostData);
+            BooleanFieldEditor spellingIdentsField = new BooleanFieldEditor(
+                ComfortSettings.PREF_SPELLING_CHECK_IDENTIFIERS_VISIBLE,
+                "Проверять орфографию в идентификаторах в видимой области", //$NON-NLS-1$
+                spellingIdentsHost);
+            addField(spellingIdentsField);
+            setFieldTooltip(spellingIdentsField,
+                "При включённой орфографии Comfort (словарь «Русский/Английский (Комфорт-HUNSPELL)»)\n"
+                + "проверять в видимой области модуля имена (идентификаторы) и строковые литералы.\n"
+                + "Если выключено — проверяются только обычные слова в комментариях;\n"
+                + "слова с заглавной буквой не на первой позиции (как в CamelCase) пропускаются.", //$NON-NLS-1$
+                spellingIdentsHost);
+            createCommonDictionaryLink();
+        }
+        else
+            createInstallJdtSpellingLink(codeEditorGroup);
 
-        createCommonDictionaryLink();
         createLoggingGroup();
 
         // Поле «Символы» намеренно не добавляется:
         // значение задано константой ContentAssistSettings.CHARSET_VALUE
+    }
+
+    /** Ссылка установки Eclipse JDT — без него орфография Comfort недоступна. */
+    private void createInstallJdtSpellingLink(Composite parent)
+    {
+        Link link = new Link(parent, SWT.NONE);
+        link.setText("<a>Установить модуль орфографии (JDT)</a>"); //$NON-NLS-1$
+        GridData gd = new GridData(SWT.FILL, SWT.CENTER, true, false);
+        gd.horizontalSpan = 2;
+        gd.verticalIndent = 8;
+        link.setLayoutData(gd);
+        link.setToolTipText(
+            "Орфография Comfort использует Eclipse JDT UI.\n"
+            + "В этой EDT модуль не установлен — откроется мастер установки с сайта Eclipse.\n"
+            + "После установки перезапустите EDT."); //$NON-NLS-1$
+        link.addListener(SWT.Selection, e ->
+        {
+            if (!"Установить модуль орфографии (JDT)".equals(e.text)) //$NON-NLS-1$
+                return;
+            ComfortPreferences.openInstallJdtForSpelling();
+        });
     }
 
     /** Ссылка на общий morph-словарь (workspace). */
@@ -321,6 +347,11 @@ public class ComfortPreferencePage
         {
             if (!"Общий пользовательский словарь".equals(e.text)) //$NON-NLS-1$
                 return;
+            if (!ComfortJdtAvailability.isJdtUiAvailable())
+            {
+                ComfortPreferences.openInstallJdtForSpelling();
+                return;
+            }
             SpellCheckHook.openCommonUserMorphDictionaryInEclipseEditor();
         });
     }
@@ -328,6 +359,20 @@ public class ComfortPreferencePage
     /** Режим «По проекту»: только ссылка на словарь проекта. */
     private void createProjectDictionarySection(Composite parent)
     {
+        if (!ComfortJdtAvailability.isJdtUiAvailable())
+        {
+            Label hint = new Label(parent, SWT.WRAP);
+            hint.setText(
+                "Орфография Comfort требует Eclipse JDT UI. "
+                + "Установите модуль, перезапустите EDT — затем здесь появится "
+                + "пользовательский словарь проекта."); //$NON-NLS-1$
+            GridData hintGd = new GridData(SWT.FILL, SWT.TOP, true, false);
+            hintGd.widthHint = 420;
+            hint.setLayoutData(hintGd);
+            createInstallJdtSpellingLink(parent);
+            return;
+        }
+
         Label hint = new Label(parent, SWT.WRAP);
         hint.setText(
             "Пользовательский словарь орфографии этого проекта "

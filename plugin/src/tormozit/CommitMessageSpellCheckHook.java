@@ -67,6 +67,8 @@ public final class CommitMessageSpellCheckHook implements IStartup
     @Override
     public void earlyStartup()
     {
+        if (!ComfortJdtAvailability.isJdtUiAvailable())
+            return;
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;

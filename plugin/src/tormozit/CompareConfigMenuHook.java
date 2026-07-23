@@ -1355,6 +1355,7 @@ public class CompareConfigMenuHook implements IStartup
      */
     private static final class ProjectSettingsFilesHandler
     {
+        private static final String TAG = "CompareConfig"; //$NON-NLS-1$
         private static final String SETTINGS_SYMLINK = "Settings"; //$NON-NLS-1$
         private static final Path SETTINGS_FOLDER = Path.of(".settings"); //$NON-NLS-1$
         private static final String TOAST_TITLE = "Настройки проекта"; //$NON-NLS-1$
