@@ -1,0 +1,2470 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<?metadataRepository version='1.2.0'?>
+<repository name='Update Site' type='org.eclipse.equinox.internal.p2.metadata.repository.LocalMetadataRepository' version='1'>
+  <properties size='2'>
+    <property name='p2.timestamp' value='1784788999073'/>
+    <property name='p2.compressed' value='true'/>
+  </properties>
+<units size='56'>
+    <unit id='tormozit.comfort.feature.feature.group' version='1.0.0.23-202607230935' singleton='false'>
+      <update id='tormozit.comfort.feature.feature.group' range='[0.0.0,1.0.0.23-202607230935)' severity='0'/>
+      <properties size='5'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+        <property name='org.eclipse.equinox.p2.type.group' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' version='1.0.0.23-202607230935'/>
+      </provides>
+      <requires size='2'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' range='[1.0.0.23-202607230935,1.0.0.23-202607230935]'/>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' range='[1.0.0.23-202607230935,1.0.0.23-202607230935]'>
+          <filter>
+            (org.eclipse.update.install.features=true)
+          </filter>
+        </required>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='Comfort' version='1.0.0.2--cvewvE7791737E3G793K9C'>
+      <properties size='2'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.type.category' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='Comfort' version='1.0.0.2--cvewvE7791737E3G793K9C'/>
+      </provides>
+      <requires size='1'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' range='[1.0.0.23-202607230935,1.0.0.23-202607230935]'/>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+    </unit>
+    <unit id='tormozit.comfort' version='1.0.0.23-202607230935' generation='2'>
+      <update id='tormozit.comfort' range='[0.0.0,1.0.0.23-202607230935)' severity='0'/>
+      <properties size='3'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.provider' value='Tormozit'/>
+        <property name='org.eclipse.equinox.p2.bundle.localization' value='plugin'/>
+      </properties>
+      <provides size='4'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' version='1.0.0.23-202607230935'/>
+        <provided namespace='osgi.bundle' name='tormozit.comfort' version='1.0.0.23-202607230935'/>
+        <provided namespace='osgi.identity' name='tormozit.comfort' version='1.0.0.23-202607230935'>
+          <properties size='1'>
+            <property name='type' value='osgi.bundle'/>
+          </properties>
+        </provided>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='bundle' version='1.0.0'/>
+      </provides>
+      <requires size='85'>
+        <required namespace='osgi.bundle' name='org.eclipse.ui' range='[3.201.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.runtime' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.resources' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.filesystem' range='[1.7.0,2.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.commands' range='[3.10.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.compare' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.ecore' range='[2.20.0,3.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.workbench.texteditor' range='[3.17.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.editors' range='[3.16.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jdt.ui' range='[3.18.0,4.0.0)' optional='true' greedy='false'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface.text' range='[3.17.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.handly' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.text' range='[3.13.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.ide' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.integration' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md.ui.shared' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.compare' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.objectweb.asm' range='[9.0.0,10.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.mcore' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.core.api' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.export' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.model.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.di' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.contexts' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.swt' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.forms' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jgit' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.wiring' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.team.git.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.xml' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.search.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-databind' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.workspace' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.model' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.qw' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.debug.core' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.debug.ui' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.model' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna' range='[5.13.0,6.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna.platform' range='[5.13.0,6.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.expressions' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.search' range='[3.10.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.validation' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.qw.ui' range='0.0.0'/>
+        <required namespace='java.package' name='org.osgi.framework' range='[1.8.0,2.0.0)'/>
+        <required namespace='java.package' name='org.osgi.framework.hooks.weaving' range='[1.1.0,2.0.0)'/>
+        <required namespace='java.package' name='com.google.inject' range='0.0.0' optional='true' greedy='false'/>
+        <required namespace='java.package' name='javax.inject' range='0.0.0' optional='true' greedy='false'/>
+        <requiredProperties namespace='osgi.ee' match='(&amp;(osgi.ee=JavaSE)(version=17))'>
+          <description>
+            tormozit.comfort
+          </description>
+        </requiredProperties>
+      </requires>
+      <artifacts size='1'>
+        <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.23-202607230935'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='manifest'>
+            Bundle-SymbolicName: tormozit.comfort;singleton:=true&#xA;Bundle-Version: 1.0.0.23-202607230935
+          </instruction>
+        </instructions>
+      </touchpointData>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.jar' version='1.0.0.23-202607230935'>
+      <properties size='4'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+      </properties>
+      <provides size='3'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' version='1.0.0.23-202607230935'/>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='feature' version='1.0.0'/>
+        <provided namespace='org.eclipse.update.feature' name='tormozit.comfort.feature' version='1.0.0.23-202607230935'/>
+      </provides>
+      <filter>
+        (org.eclipse.update.install.features=true)
+      </filter>
+      <artifacts size='1'>
+        <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.23-202607230935'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='zipped'>
+            true
+          </instruction>
+        </instructions>
+      </touchpointData>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.group' version='1.0.0.22-202607161709' singleton='false'>
+      <update id='tormozit.comfort.feature.feature.group' range='[0.0.0,1.0.0.22-202607161709)' severity='0'/>
+      <properties size='5'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+        <property name='org.eclipse.equinox.p2.type.group' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' version='1.0.0.22-202607161709'/>
+      </provides>
+      <requires size='2'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' range='[1.0.0.22-202607161709,1.0.0.22-202607161709]'/>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' range='[1.0.0.22-202607161709,1.0.0.22-202607161709]'>
+          <filter>
+            (org.eclipse.update.install.features=true)
+          </filter>
+        </required>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.jar' version='1.0.0.22-202607161709'>
+      <properties size='4'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+      </properties>
+      <provides size='3'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' version='1.0.0.22-202607161709'/>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='feature' version='1.0.0'/>
+        <provided namespace='org.eclipse.update.feature' name='tormozit.comfort.feature' version='1.0.0.22-202607161709'/>
+      </provides>
+      <filter>
+        (org.eclipse.update.install.features=true)
+      </filter>
+      <artifacts size='1'>
+        <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.22-202607161709'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='zipped'>
+            true
+          </instruction>
+        </instructions>
+      </touchpointData>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='tormozit.comfort' version='1.0.0.22-202607161709' generation='2'>
+      <update id='tormozit.comfort' range='[0.0.0,1.0.0.22-202607161709)' severity='0'/>
+      <properties size='3'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.provider' value='Tormozit'/>
+        <property name='org.eclipse.equinox.p2.bundle.localization' value='plugin'/>
+      </properties>
+      <provides size='4'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' version='1.0.0.22-202607161709'/>
+        <provided namespace='osgi.bundle' name='tormozit.comfort' version='1.0.0.22-202607161709'/>
+        <provided namespace='osgi.identity' name='tormozit.comfort' version='1.0.0.22-202607161709'>
+          <properties size='1'>
+            <property name='type' value='osgi.bundle'/>
+          </properties>
+        </provided>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='bundle' version='1.0.0'/>
+      </provides>
+      <requires size='80'>
+        <required namespace='osgi.bundle' name='org.eclipse.ui' range='[3.201.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.runtime' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.resources' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.commands' range='[3.10.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.compare' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.ecore' range='[2.20.0,3.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.workbench.texteditor' range='[3.17.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface.text' range='[3.17.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.handly' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.text' range='[3.13.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.ide' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.integration' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md.ui.shared' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.compare' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.objectweb.asm' range='[9.0.0,10.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.mcore' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.core.api' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.export' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.model.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.di' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.contexts' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.swt' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.forms' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jgit' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.wiring' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.team.git.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.xml' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.search.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-databind' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.workspace' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.model' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.qw' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.debug.core' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.debug.ui' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.model' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna' range='[5.13.0,6.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna.platform' range='[5.13.0,6.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.expressions' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.search' range='[3.10.0,4.0.0)'/>
+        <required namespace='java.package' name='org.osgi.framework' range='[1.8.0,2.0.0)'/>
+        <required namespace='java.package' name='org.osgi.framework.hooks.weaving' range='[1.1.0,2.0.0)'/>
+        <required namespace='java.package' name='com.google.inject' range='0.0.0' optional='true' greedy='false'/>
+        <required namespace='java.package' name='javax.inject' range='0.0.0' optional='true' greedy='false'/>
+        <requiredProperties namespace='osgi.ee' match='(&amp;(osgi.ee=JavaSE)(version=17))'>
+          <description>
+            tormozit.comfort
+          </description>
+        </requiredProperties>
+      </requires>
+      <artifacts size='1'>
+        <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.22-202607161709'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='manifest'>
+            Bundle-SymbolicName: tormozit.comfort;singleton:=true&#xA;Bundle-Version: 1.0.0.22-202607161709
+          </instruction>
+        </instructions>
+      </touchpointData>
+    </unit>
+    <unit id='Comfort' version='1.0.0.2--cvewvE7771737E3G5E5G3K'>
+      <properties size='2'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.type.category' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='Comfort' version='1.0.0.2--cvewvE7771737E3G5E5G3K'/>
+      </provides>
+      <requires size='1'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' range='[1.0.0.22-202607161709,1.0.0.22-202607161709]'/>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+    </unit>
+    <unit id='Comfort' version='1.0.0.2--cvewvE7751737E3G5C5A7C'>
+      <properties size='2'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.type.category' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='Comfort' version='1.0.0.2--cvewvE7751737E3G5C5A7C'/>
+      </provides>
+      <requires size='1'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' range='[1.0.0.21-202607151425,1.0.0.21-202607151425]'/>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+    </unit>
+    <unit id='tormozit.comfort' version='1.0.0.21-202607151425' generation='2'>
+      <update id='tormozit.comfort' range='[0.0.0,1.0.0.21-202607151425)' severity='0'/>
+      <properties size='3'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.provider' value='Tormozit'/>
+        <property name='org.eclipse.equinox.p2.bundle.localization' value='plugin'/>
+      </properties>
+      <provides size='4'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' version='1.0.0.21-202607151425'/>
+        <provided namespace='osgi.bundle' name='tormozit.comfort' version='1.0.0.21-202607151425'/>
+        <provided namespace='osgi.identity' name='tormozit.comfort' version='1.0.0.21-202607151425'>
+          <properties size='1'>
+            <property name='type' value='osgi.bundle'/>
+          </properties>
+        </provided>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='bundle' version='1.0.0'/>
+      </provides>
+      <requires size='80'>
+        <required namespace='osgi.bundle' name='org.eclipse.ui' range='[3.201.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.runtime' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.resources' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.commands' range='[3.10.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.compare' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.ecore' range='[2.20.0,3.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.workbench.texteditor' range='[3.17.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface.text' range='[3.17.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.handly' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.text' range='[3.13.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.ide' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.integration' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md.ui.shared' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.compare' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.objectweb.asm' range='[9.0.0,10.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.mcore' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.core.api' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.export' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.model.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.di' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.contexts' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.swt' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.forms' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jgit' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.wiring' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.team.git.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.xml' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.search.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-databind' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.workspace' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.model' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.qw' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.debug.core' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.debug.ui' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.model' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna' range='[5.13.0,6.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna.platform' range='[5.13.0,6.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.expressions' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.search' range='[3.10.0,4.0.0)'/>
+        <required namespace='java.package' name='org.osgi.framework' range='[1.8.0,2.0.0)'/>
+        <required namespace='java.package' name='org.osgi.framework.hooks.weaving' range='[1.1.0,2.0.0)'/>
+        <required namespace='java.package' name='com.google.inject' range='0.0.0' optional='true' greedy='false'/>
+        <required namespace='java.package' name='javax.inject' range='0.0.0' optional='true' greedy='false'/>
+        <requiredProperties namespace='osgi.ee' match='(&amp;(osgi.ee=JavaSE)(version=17))'>
+          <description>
+            tormozit.comfort
+          </description>
+        </requiredProperties>
+      </requires>
+      <artifacts size='1'>
+        <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.21-202607151425'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='manifest'>
+            Bundle-SymbolicName: tormozit.comfort;singleton:=true&#xA;Bundle-Version: 1.0.0.21-202607151425
+          </instruction>
+        </instructions>
+      </touchpointData>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.jar' version='1.0.0.21-202607151425'>
+      <properties size='4'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+      </properties>
+      <provides size='3'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' version='1.0.0.21-202607151425'/>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='feature' version='1.0.0'/>
+        <provided namespace='org.eclipse.update.feature' name='tormozit.comfort.feature' version='1.0.0.21-202607151425'/>
+      </provides>
+      <filter>
+        (org.eclipse.update.install.features=true)
+      </filter>
+      <artifacts size='1'>
+        <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.21-202607151425'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='zipped'>
+            true
+          </instruction>
+        </instructions>
+      </touchpointData>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.group' version='1.0.0.21-202607151425' singleton='false'>
+      <update id='tormozit.comfort.feature.feature.group' range='[0.0.0,1.0.0.21-202607151425)' severity='0'/>
+      <properties size='5'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+        <property name='org.eclipse.equinox.p2.type.group' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' version='1.0.0.21-202607151425'/>
+      </provides>
+      <requires size='2'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' range='[1.0.0.21-202607151425,1.0.0.21-202607151425]'/>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' range='[1.0.0.21-202607151425,1.0.0.21-202607151425]'>
+          <filter>
+            (org.eclipse.update.install.features=true)
+          </filter>
+        </required>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.group' version='1.0.0.20-202607080943' singleton='false'>
+      <update id='tormozit.comfort.feature.feature.group' range='[0.0.0,1.0.0.20-202607080943)' severity='0'/>
+      <properties size='5'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+        <property name='org.eclipse.equinox.p2.type.group' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' version='1.0.0.20-202607080943'/>
+      </provides>
+      <requires size='2'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' range='[1.0.0.20-202607080943,1.0.0.20-202607080943]'/>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' range='[1.0.0.20-202607080943,1.0.0.20-202607080943]'>
+          <filter>
+            (org.eclipse.update.install.features=true)
+          </filter>
+        </required>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='Comfort' version='1.0.0.2--cvewvE7731737E3G3I3KA9'>
+      <properties size='2'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.type.category' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='Comfort' version='1.0.0.2--cvewvE7731737E3G3I3KA9'/>
+      </provides>
+      <requires size='1'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' range='[1.0.0.20-202607080943,1.0.0.20-202607080943]'/>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.jar' version='1.0.0.20-202607080943'>
+      <properties size='4'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+      </properties>
+      <provides size='3'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' version='1.0.0.20-202607080943'/>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='feature' version='1.0.0'/>
+        <provided namespace='org.eclipse.update.feature' name='tormozit.comfort.feature' version='1.0.0.20-202607080943'/>
+      </provides>
+      <filter>
+        (org.eclipse.update.install.features=true)
+      </filter>
+      <artifacts size='1'>
+        <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.20-202607080943'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='zipped'>
+            true
+          </instruction>
+        </instructions>
+      </touchpointData>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='tormozit.comfort' version='1.0.0.20-202607080943' generation='2'>
+      <update id='tormozit.comfort' range='[0.0.0,1.0.0.20-202607080943)' severity='0'/>
+      <properties size='3'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.provider' value='Tormozit'/>
+        <property name='org.eclipse.equinox.p2.bundle.localization' value='plugin'/>
+      </properties>
+      <provides size='4'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' version='1.0.0.20-202607080943'/>
+        <provided namespace='osgi.bundle' name='tormozit.comfort' version='1.0.0.20-202607080943'/>
+        <provided namespace='osgi.identity' name='tormozit.comfort' version='1.0.0.20-202607080943'>
+          <properties size='1'>
+            <property name='type' value='osgi.bundle'/>
+          </properties>
+        </provided>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='bundle' version='1.0.0'/>
+      </provides>
+      <requires size='78'>
+        <required namespace='osgi.bundle' name='org.eclipse.ui' range='[3.201.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.runtime' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.resources' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.commands' range='[3.10.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.compare' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.ecore' range='[2.20.0,3.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.workbench.texteditor' range='[3.17.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface.text' range='[3.17.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.handly' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.text' range='[3.13.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.ide' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.integration' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md.ui.shared' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.compare' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.mcore' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.core.api' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.export' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.model.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.di' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.contexts' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.swt' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.forms' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jgit' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.wiring' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.team.git.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.xml' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.search.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-databind' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.workspace' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.model' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.qw' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.debug.core' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.debug.ui' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.model' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna' range='[5.13.0,6.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna.platform' range='[5.13.0,6.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.expressions' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.search' range='[3.10.0,4.0.0)'/>
+        <required namespace='java.package' name='org.osgi.framework' range='[1.8.0,2.0.0)'/>
+        <required namespace='java.package' name='com.google.inject' range='0.0.0' optional='true' greedy='false'/>
+        <required namespace='java.package' name='javax.inject' range='0.0.0' optional='true' greedy='false'/>
+        <requiredProperties namespace='osgi.ee' match='(&amp;(osgi.ee=JavaSE)(version=17))'>
+          <description>
+            tormozit.comfort
+          </description>
+        </requiredProperties>
+      </requires>
+      <artifacts size='1'>
+        <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.20-202607080943'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='manifest'>
+            Bundle-SymbolicName: tormozit.comfort;singleton:=true&#xA;Bundle-Version: 1.0.0.20-202607080943
+          </instruction>
+        </instructions>
+      </touchpointData>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.group' version='1.0.0.19-202607020920' singleton='false'>
+      <update id='tormozit.comfort.feature.feature.group' range='[0.0.0,1.0.0.19-202607020920)' severity='0'/>
+<properties size='5'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+        <property name='org.eclipse.equinox.p2.type.group' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' version='1.0.0.19-202607020920'/>
+      </provides>
+      <requires size='2'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' range='[1.0.0.19-202607020920,1.0.0.19-202607020920]'/>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' range='[1.0.0.19-202607020920,1.0.0.19-202607020920]'>
+          <filter>
+            (org.eclipse.update.install.features=true)
+          </filter>
+        </required>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.jar' version='1.0.0.19-202607020920'>
+      <properties size='4'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+      </properties>
+      <provides size='3'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' version='1.0.0.19-202607020920'/>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='feature' version='1.0.0'/>
+        <provided namespace='org.eclipse.update.feature' name='tormozit.comfort.feature' version='1.0.0.19-202607020920'/>
+      </provides>
+      <filter>
+        (org.eclipse.update.install.features=true)
+      </filter>
+      <artifacts size='1'>
+        <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.19-202607020920'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='zipped'>
+            true
+          </instruction>
+        </instructions>
+      </touchpointData>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='tormozit.comfort' version='1.0.0.19-202607020920' generation='2'>
+      <update id='tormozit.comfort' range='[0.0.0,1.0.0.19-202607020920)' severity='0'/>
+<properties size='3'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.provider' value='Tormozit'/>
+        <property name='org.eclipse.equinox.p2.bundle.localization' value='plugin'/>
+      </properties>
+      <provides size='4'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' version='1.0.0.19-202607020920'/>
+        <provided namespace='osgi.bundle' name='tormozit.comfort' version='1.0.0.19-202607020920'/>
+        <provided namespace='osgi.identity' name='tormozit.comfort' version='1.0.0.19-202607020920'>
+          <properties size='1'>
+            <property name='type' value='osgi.bundle'/>
+          </properties>
+        </provided>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='bundle' version='1.0.0'/>
+      </provides>
+      <requires size='75'>
+        <required namespace='osgi.bundle' name='org.eclipse.ui' range='[3.201.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.runtime' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.resources' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.commands' range='[3.10.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.compare' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.ecore' range='[2.20.0,3.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.workbench.texteditor' range='[3.17.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface.text' range='[3.17.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.handly' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.text' range='[3.13.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.ide' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.integration' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md.ui.shared' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.compare' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.mcore' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.core.api' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.export' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.model.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.di' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.contexts' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.swt' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.forms' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jgit' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.wiring' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.team.git.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.xml' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.search.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-databind' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.workspace' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.model' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.qw' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.debug.core' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.debug.ui' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.model' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna' range='[5.13.0,6.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna.platform' range='[5.13.0,6.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.expressions' range='0.0.0'/>
+        <required namespace='java.package' name='org.osgi.framework' range='[1.8.0,2.0.0)'/>
+        <requiredProperties namespace='osgi.ee' match='(&amp;(osgi.ee=JavaSE)(version=17))'>
+          <description>
+            tormozit.comfort
+          </description>
+        </requiredProperties>
+      </requires>
+      <artifacts size='1'>
+        <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.19-202607020920'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='manifest'>
+            Bundle-SymbolicName: tormozit.comfort;singleton:=true&#xA;Bundle-Version: 1.0.0.19-202607020920
+          </instruction>
+        </instructions>
+      </touchpointData>
+    </unit>
+    <unit id='Comfort' version='1.0.0.2--cvewvE5K1737E3G373K73'>
+      <properties size='2'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.type.category' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='Comfort' version='1.0.0.2--cvewvE5K1737E3G373K73'/>
+      </provides>
+      <requires size='1'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' range='[1.0.0.19-202607020920,1.0.0.19-202607020920]'/>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+    </unit>
+    <unit id='Comfort' version='1.0.0.2--cvewvE5I1737E3E933I77'>
+      <properties size='2'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.type.category' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='Comfort' version='1.0.0.2--cvewvE5I1737E3E933I77'/>
+      </provides>
+      <requires size='1'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' range='[1.0.0.18-202606300822,1.0.0.18-202606300822]'/>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.group' version='1.0.0.18-202606300822' singleton='false'>
+      <update id='tormozit.comfort.feature.feature.group' range='[0.0.0,1.0.0.18-202606300822)' severity='0'/>
+<properties size='5'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+        <property name='org.eclipse.equinox.p2.type.group' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' version='1.0.0.18-202606300822'/>
+      </provides>
+      <requires size='2'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' range='[1.0.0.18-202606300822,1.0.0.18-202606300822]'/>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' range='[1.0.0.18-202606300822,1.0.0.18-202606300822]'>
+          <filter>
+            (org.eclipse.update.install.features=true)
+          </filter>
+        </required>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.jar' version='1.0.0.18-202606300822'>
+      <properties size='4'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+      </properties>
+      <provides size='3'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' version='1.0.0.18-202606300822'/>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='feature' version='1.0.0'/>
+        <provided namespace='org.eclipse.update.feature' name='tormozit.comfort.feature' version='1.0.0.18-202606300822'/>
+      </provides>
+      <filter>
+        (org.eclipse.update.install.features=true)
+      </filter>
+      <artifacts size='1'>
+        <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.18-202606300822'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='zipped'>
+            true
+          </instruction>
+        </instructions>
+      </touchpointData>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='tormozit.comfort' version='1.0.0.18-202606300822' generation='2'>
+      <update id='tormozit.comfort' range='[0.0.0,1.0.0.18-202606300822)' severity='0'/>
+<properties size='3'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.provider' value='Tormozit'/>
+        <property name='org.eclipse.equinox.p2.bundle.localization' value='plugin'/>
+      </properties>
+      <provides size='4'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' version='1.0.0.18-202606300822'/>
+        <provided namespace='osgi.bundle' name='tormozit.comfort' version='1.0.0.18-202606300822'/>
+        <provided namespace='osgi.identity' name='tormozit.comfort' version='1.0.0.18-202606300822'>
+          <properties size='1'>
+            <property name='type' value='osgi.bundle'/>
+          </properties>
+        </provided>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='bundle' version='1.0.0'/>
+      </provides>
+      <requires size='75'>
+        <required namespace='osgi.bundle' name='org.eclipse.ui' range='[3.201.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.runtime' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.resources' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.commands' range='[3.10.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.compare' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.ecore' range='[2.20.0,3.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.workbench.texteditor' range='[3.17.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface.text' range='[3.17.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.handly' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.text' range='[3.13.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.ide' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.integration' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md.ui.shared' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.compare' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.mcore' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.core.api' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.export' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.model.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.di' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.contexts' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.swt' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.forms' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jgit' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.wiring' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.team.git.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.xml' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.search.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-databind' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.workspace' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.model' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.qw' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.debug.core' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.debug.ui' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.model' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna' range='[5.13.0,6.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna.platform' range='[5.13.0,6.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.expressions' range='0.0.0'/>
+        <required namespace='java.package' name='org.osgi.framework' range='[1.8.0,2.0.0)'/>
+        <requiredProperties namespace='osgi.ee' match='(&amp;(osgi.ee=JavaSE)(version=17))'>
+          <description>
+            tormozit.comfort
+          </description>
+        </requiredProperties>
+      </requires>
+      <artifacts size='1'>
+        <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.18-202606300822'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='manifest'>
+            Bundle-SymbolicName: tormozit.comfort;singleton:=true&#xA;Bundle-Version: 1.0.0.18-202606300822
+          </instruction>
+        </instructions>
+      </touchpointData>
+    </unit>
+    <unit id='tormozit.comfort' version='1.0.0.17-202606290903' generation='2'>
+      <update id='tormozit.comfort' range='[0.0.0,1.0.0.17-202606290903)' severity='0'/>
+<properties size='3'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.provider' value='Tormozit'/>
+        <property name='org.eclipse.equinox.p2.bundle.localization' value='plugin'/>
+      </properties>
+      <provides size='4'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' version='1.0.0.17-202606290903'/>
+        <provided namespace='osgi.bundle' name='tormozit.comfort' version='1.0.0.17-202606290903'/>
+        <provided namespace='osgi.identity' name='tormozit.comfort' version='1.0.0.17-202606290903'>
+          <properties size='1'>
+            <property name='type' value='osgi.bundle'/>
+          </properties>
+        </provided>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='bundle' version='1.0.0'/>
+      </provides>
+      <requires size='75'>
+        <required namespace='osgi.bundle' name='org.eclipse.ui' range='[3.201.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.runtime' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.resources' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.commands' range='[3.10.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.compare' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.ecore' range='[2.20.0,3.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.workbench.texteditor' range='[3.17.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface.text' range='[3.17.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.handly' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.text' range='[3.13.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.ide' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.integration' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md.ui.shared' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.compare' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.mcore' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.core.api' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.export' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.model.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.di' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.contexts' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.swt' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.forms' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jgit' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.wiring' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.team.git.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.xml' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.search.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-databind' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.workspace' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.model' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.qw' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.debug.core' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.debug.ui' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.model' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna' range='[5.13.0,6.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna.platform' range='[5.13.0,6.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.expressions' range='0.0.0'/>
+        <required namespace='java.package' name='org.osgi.framework' range='[1.8.0,2.0.0)'/>
+        <requiredProperties namespace='osgi.ee' match='(&amp;(osgi.ee=JavaSE)(version=17))'>
+          <description>
+            tormozit.comfort
+          </description>
+        </requiredProperties>
+      </requires>
+      <artifacts size='1'>
+        <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.17-202606290903'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='manifest'>
+            Bundle-SymbolicName: tormozit.comfort;singleton:=true&#xA;Bundle-Version: 1.0.0.17-202606290903
+          </instruction>
+        </instructions>
+      </touchpointData>
+    </unit>
+    <unit id='Comfort' version='1.0.0.2--cvewvE5G1737E3E7K3K39'>
+      <properties size='2'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.type.category' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='Comfort' version='1.0.0.2--cvewvE5G1737E3E7K3K39'/>
+      </provides>
+      <requires size='1'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' range='[1.0.0.17-202606290903,1.0.0.17-202606290903]'/>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.jar' version='1.0.0.17-202606290903'>
+      <properties size='4'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+      </properties>
+      <provides size='3'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' version='1.0.0.17-202606290903'/>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='feature' version='1.0.0'/>
+        <provided namespace='org.eclipse.update.feature' name='tormozit.comfort.feature' version='1.0.0.17-202606290903'/>
+      </provides>
+      <filter>
+        (org.eclipse.update.install.features=true)
+      </filter>
+      <artifacts size='1'>
+        <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.17-202606290903'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='zipped'>
+            true
+          </instruction>
+        </instructions>
+      </touchpointData>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.group' version='1.0.0.17-202606290903' singleton='false'>
+      <update id='tormozit.comfort.feature.feature.group' range='[0.0.0,1.0.0.17-202606290903)' severity='0'/>
+<properties size='5'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+        <property name='org.eclipse.equinox.p2.type.group' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' version='1.0.0.17-202606290903'/>
+      </provides>
+      <requires size='2'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' range='[1.0.0.17-202606290903,1.0.0.17-202606290903]'/>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' range='[1.0.0.17-202606290903,1.0.0.17-202606290903]'>
+          <filter>
+            (org.eclipse.update.install.features=true)
+          </filter>
+        </required>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='Comfort' version='1.0.0.2--cvewvE5E1737E3E7A3I35'>
+      <properties size='2'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.type.category' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='Comfort' version='1.0.0.2--cvewvE5E1737E3E7A3I35'/>
+      </provides>
+      <requires size='1'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' range='[1.0.0.16-202606240801,1.0.0.16-202606240801]'/>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.group' version='1.0.0.16-202606240801' singleton='false'>
+      <update id='tormozit.comfort.feature.feature.group' range='[0.0.0,1.0.0.16-202606240801)' severity='0'/>
+<properties size='5'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+        <property name='org.eclipse.equinox.p2.type.group' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' version='1.0.0.16-202606240801'/>
+      </provides>
+      <requires size='2'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' range='[1.0.0.16-202606240801,1.0.0.16-202606240801]'/>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' range='[1.0.0.16-202606240801,1.0.0.16-202606240801]'>
+          <filter>
+            (org.eclipse.update.install.features=true)
+          </filter>
+        </required>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.jar' version='1.0.0.16-202606240801'>
+      <properties size='4'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+      </properties>
+      <provides size='3'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' version='1.0.0.16-202606240801'/>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='feature' version='1.0.0'/>
+        <provided namespace='org.eclipse.update.feature' name='tormozit.comfort.feature' version='1.0.0.16-202606240801'/>
+      </provides>
+      <filter>
+        (org.eclipse.update.install.features=true)
+      </filter>
+      <artifacts size='1'>
+        <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.16-202606240801'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='zipped'>
+            true
+          </instruction>
+        </instructions>
+      </touchpointData>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='tormozit.comfort' version='1.0.0.16-202606240801' generation='2'>
+      <update id='tormozit.comfort' range='[0.0.0,1.0.0.16-202606240801)' severity='0'/>
+<properties size='3'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.provider' value='Tormozit'/>
+        <property name='org.eclipse.equinox.p2.bundle.localization' value='plugin'/>
+      </properties>
+      <provides size='4'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' version='1.0.0.16-202606240801'/>
+        <provided namespace='osgi.bundle' name='tormozit.comfort' version='1.0.0.16-202606240801'/>
+        <provided namespace='osgi.identity' name='tormozit.comfort' version='1.0.0.16-202606240801'>
+          <properties size='1'>
+            <property name='type' value='osgi.bundle'/>
+          </properties>
+        </provided>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='bundle' version='1.0.0'/>
+      </provides>
+      <requires size='75'>
+        <required namespace='osgi.bundle' name='org.eclipse.ui' range='[3.201.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.runtime' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.resources' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.commands' range='[3.10.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.compare' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.ecore' range='[2.20.0,3.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.workbench.texteditor' range='[3.17.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface.text' range='[3.17.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.handly' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.text' range='[3.13.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.ide' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.integration' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md.ui.shared' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.compare' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.mcore' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.core.api' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.export' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.model.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.di' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.contexts' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.swt' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.forms' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jgit' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.wiring' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.team.git.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.xml' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.search.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-databind' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.workspace' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.model' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.qw' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.debug.core' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.debug.ui' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.model' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna' range='[5.13.0,6.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna.platform' range='[5.13.0,6.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.expressions' range='0.0.0'/>
+        <required namespace='java.package' name='org.osgi.framework' range='[1.8.0,2.0.0)'/>
+        <requiredProperties namespace='osgi.ee' match='(&amp;(osgi.ee=JavaSE)(version=17))'>
+          <description>
+            tormozit.comfort
+          </description>
+        </requiredProperties>
+      </requires>
+      <artifacts size='1'>
+        <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.16-202606240801'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='manifest'>
+            Bundle-SymbolicName: tormozit.comfort;singleton:=true&#xA;Bundle-Version: 1.0.0.16-202606240801
+          </instruction>
+        </instructions>
+      </touchpointData>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.group' version='1.0.0.15-202606230927' singleton='false'>
+      <update id='tormozit.comfort.feature.feature.group' range='[0.0.0,1.0.0.15-202606230927)' severity='0'/>
+<properties size='5'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+        <property name='org.eclipse.equinox.p2.type.group' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' version='1.0.0.15-202606230927'/>
+      </provides>
+      <requires size='2'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' range='[1.0.0.15-202606230927,1.0.0.15-202606230927]'/>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' range='[1.0.0.15-202606230927,1.0.0.15-202606230927]'>
+          <filter>
+            (org.eclipse.update.install.features=true)
+          </filter>
+        </required>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='Comfort' version='1.0.0.2--cvewvE5C1737E3E793K7G'>
+      <properties size='2'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.type.category' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='Comfort' version='1.0.0.2--cvewvE5C1737E3E793K7G'/>
+      </provides>
+      <requires size='1'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' range='[1.0.0.15-202606230927,1.0.0.15-202606230927]'/>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.jar' version='1.0.0.15-202606230927'>
+      <properties size='4'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+      </properties>
+      <provides size='3'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' version='1.0.0.15-202606230927'/>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='feature' version='1.0.0'/>
+        <provided namespace='org.eclipse.update.feature' name='tormozit.comfort.feature' version='1.0.0.15-202606230927'/>
+      </provides>
+      <filter>
+        (org.eclipse.update.install.features=true)
+      </filter>
+      <artifacts size='1'>
+        <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.15-202606230927'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='zipped'>
+            true
+          </instruction>
+        </instructions>
+      </touchpointData>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='tormozit.comfort' version='1.0.0.15-202606230927' generation='2'>
+      <update id='tormozit.comfort' range='[0.0.0,1.0.0.15-202606230927)' severity='0'/>
+<properties size='3'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.provider' value='Tormozit'/>
+        <property name='org.eclipse.equinox.p2.bundle.localization' value='plugin'/>
+      </properties>
+      <provides size='4'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' version='1.0.0.15-202606230927'/>
+        <provided namespace='osgi.bundle' name='tormozit.comfort' version='1.0.0.15-202606230927'/>
+        <provided namespace='osgi.identity' name='tormozit.comfort' version='1.0.0.15-202606230927'>
+          <properties size='1'>
+            <property name='type' value='osgi.bundle'/>
+          </properties>
+        </provided>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='bundle' version='1.0.0'/>
+      </provides>
+      <requires size='75'>
+        <required namespace='osgi.bundle' name='org.eclipse.ui' range='[3.201.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.runtime' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.resources' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.commands' range='[3.10.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.compare' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.ecore' range='[2.20.0,3.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.workbench.texteditor' range='[3.17.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface.text' range='[3.17.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.handly' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.text' range='[3.13.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.ide' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.integration' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md.ui.shared' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.compare' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.mcore' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.core.api' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.export' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.model.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.di' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.contexts' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.swt' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.forms' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jgit' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.wiring' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.team.git.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.xml' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.search.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-databind' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.workspace' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.model' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.qw' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.debug.core' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.debug.ui' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.model' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna' range='[5.13.0,6.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna.platform' range='[5.13.0,6.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.expressions' range='0.0.0'/>
+        <required namespace='java.package' name='org.osgi.framework' range='[1.8.0,2.0.0)'/>
+        <requiredProperties namespace='osgi.ee' match='(&amp;(osgi.ee=JavaSE)(version=17))'>
+          <description>
+            tormozit.comfort
+          </description>
+        </requiredProperties>
+      </requires>
+      <artifacts size='1'>
+        <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.15-202606230927'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='manifest'>
+            Bundle-SymbolicName: tormozit.comfort;singleton:=true&#xA;Bundle-Version: 1.0.0.15-202606230927
+          </instruction>
+        </instructions>
+      </touchpointData>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.jar' version='1.0.0.14-202606220825'>
+      <properties size='4'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+      </properties>
+      <provides size='3'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' version='1.0.0.14-202606220825'/>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='feature' version='1.0.0'/>
+        <provided namespace='org.eclipse.update.feature' name='tormozit.comfort.feature' version='1.0.0.14-202606220825'/>
+      </provides>
+      <filter>
+        (org.eclipse.update.install.features=true)
+      </filter>
+      <artifacts size='1'>
+        <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.14-202606220825'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='zipped'>
+            true
+          </instruction>
+        </instructions>
+      </touchpointData>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='tormozit.comfort' version='1.0.0.14-202606220825' generation='2'>
+      <update id='tormozit.comfort' range='[0.0.0,1.0.0.14-202606220825)' severity='0'/>
+<properties size='3'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.provider' value='Tormozit'/>
+        <property name='org.eclipse.equinox.p2.bundle.localization' value='plugin'/>
+      </properties>
+      <provides size='4'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' version='1.0.0.14-202606220825'/>
+        <provided namespace='osgi.bundle' name='tormozit.comfort' version='1.0.0.14-202606220825'/>
+        <provided namespace='osgi.identity' name='tormozit.comfort' version='1.0.0.14-202606220825'>
+          <properties size='1'>
+            <property name='type' value='osgi.bundle'/>
+          </properties>
+        </provided>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='bundle' version='1.0.0'/>
+      </provides>
+      <requires size='75'>
+        <required namespace='osgi.bundle' name='org.eclipse.ui' range='[3.201.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.runtime' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.resources' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.commands' range='[3.10.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.compare' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.ecore' range='[2.20.0,3.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.workbench.texteditor' range='[3.17.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface.text' range='[3.17.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.handly' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.text' range='[3.13.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.ide' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.integration' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md.ui.shared' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.compare' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.mcore' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.core.api' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.export' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.model.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.di' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.contexts' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.swt' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.forms' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jgit' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.wiring' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.team.git.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.xml' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.search.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-databind' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.workspace' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.model' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.qw' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.debug.core' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.debug.ui' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.model' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna' range='[5.13.0,6.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna.platform' range='[5.13.0,6.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.expressions' range='0.0.0'/>
+        <required namespace='java.package' name='org.osgi.framework' range='[1.8.0,2.0.0)'/>
+        <requiredProperties namespace='osgi.ee' match='(&amp;(osgi.ee=JavaSE)(version=17))'>
+          <description>
+            tormozit.comfort
+          </description>
+        </requiredProperties>
+      </requires>
+      <artifacts size='1'>
+        <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.14-202606220825'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='manifest'>
+            Bundle-SymbolicName: tormozit.comfort;singleton:=true&#xA;Bundle-Version: 1.0.0.14-202606220825
+          </instruction>
+        </instructions>
+      </touchpointData>
+    </unit>
+    <unit id='Comfort' version='1.0.0.2--cvewvE5A1737E3E773I7C'>
+      <properties size='2'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.type.category' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='Comfort' version='1.0.0.2--cvewvE5A1737E3E773I7C'/>
+      </provides>
+      <requires size='1'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' range='[1.0.0.14-202606220825,1.0.0.14-202606220825]'/>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.group' version='1.0.0.14-202606220825' singleton='false'>
+      <update id='tormozit.comfort.feature.feature.group' range='[0.0.0,1.0.0.14-202606220825)' severity='0'/>
+<properties size='5'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+        <property name='org.eclipse.equinox.p2.type.group' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' version='1.0.0.14-202606220825'/>
+      </provides>
+      <requires size='2'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' range='[1.0.0.14-202606220825,1.0.0.14-202606220825]'/>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' range='[1.0.0.14-202606220825,1.0.0.14-202606220825]'>
+          <filter>
+            (org.eclipse.update.install.features=true)
+          </filter>
+        </required>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.group' version='1.0.0.13-202606110950' singleton='false'>
+      <update id='tormozit.comfort.feature.feature.group' range='[0.0.0,1.0.0.13-202606110950)' severity='0'/>
+<properties size='5'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+        <property name='org.eclipse.equinox.p2.type.group' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' version='1.0.0.13-202606110950'/>
+      </provides>
+      <requires size='2'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' range='[1.0.0.13-202606110950,1.0.0.13-202606110950]'/>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' range='[1.0.0.13-202606110950,1.0.0.13-202606110950]'>
+          <filter>
+            (org.eclipse.update.install.features=true)
+          </filter>
+        </required>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='Comfort' version='1.0.0.2--cvewvE591737E3E553KC3'>
+      <properties size='2'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.type.category' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='Comfort' version='1.0.0.2--cvewvE591737E3E553KC3'/>
+      </provides>
+      <requires size='1'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' range='[1.0.0.13-202606110950,1.0.0.13-202606110950]'/>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.jar' version='1.0.0.13-202606110950'>
+      <properties size='4'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+      </properties>
+      <provides size='3'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' version='1.0.0.13-202606110950'/>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='feature' version='1.0.0'/>
+        <provided namespace='org.eclipse.update.feature' name='tormozit.comfort.feature' version='1.0.0.13-202606110950'/>
+      </provides>
+      <filter>
+        (org.eclipse.update.install.features=true)
+      </filter>
+      <artifacts size='1'>
+        <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.13-202606110950'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='zipped'>
+            true
+          </instruction>
+        </instructions>
+      </touchpointData>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='tormozit.comfort' version='1.0.0.13-202606110950' generation='2'>
+      <update id='tormozit.comfort' range='[0.0.0,1.0.0.13-202606110950)' severity='0'/>
+<properties size='3'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.provider' value='Tormozit'/>
+        <property name='org.eclipse.equinox.p2.bundle.localization' value='plugin'/>
+      </properties>
+      <provides size='4'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' version='1.0.0.13-202606110950'/>
+        <provided namespace='osgi.bundle' name='tormozit.comfort' version='1.0.0.13-202606110950'/>
+        <provided namespace='osgi.identity' name='tormozit.comfort' version='1.0.0.13-202606110950'>
+          <properties size='1'>
+            <property name='type' value='osgi.bundle'/>
+          </properties>
+        </provided>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='bundle' version='1.0.0'/>
+      </provides>
+      <requires size='64'>
+        <required namespace='osgi.bundle' name='org.eclipse.ui' range='[3.201.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.runtime' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.resources' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.commands' range='[3.10.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.compare' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.ecore' range='[2.20.0,3.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.ide' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.integration' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.mcore' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.export' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.model.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.di' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.contexts' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.swt' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.forms' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jdt.annotation' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jgit' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.wiring' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.team.git.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.xml' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.search.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-databind' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.workspace' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.qw' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.debug.core' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.debug.model' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna' range='[5.13.0,6.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna.platform' range='[5.13.0,6.0.0)'/>
+        <required namespace='java.package' name='org.osgi.framework' range='[1.8.0,2.0.0)'/>
+        <requiredProperties namespace='osgi.ee' match='(&amp;(osgi.ee=JavaSE)(version=17))'>
+          <description>
+            tormozit.comfort
+          </description>
+        </requiredProperties>
+      </requires>
+      <artifacts size='1'>
+        <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.13-202606110950'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='manifest'>
+            Bundle-SymbolicName: tormozit.comfort;singleton:=true&#xA;Bundle-Version: 1.0.0.13-202606110950
+          </instruction>
+        </instructions>
+      </touchpointData>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.jar' version='1.0.0.12-202606100959'>
+      <properties size='4'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+      </properties>
+      <provides size='3'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' version='1.0.0.12-202606100959'/>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='feature' version='1.0.0'/>
+        <provided namespace='org.eclipse.update.feature' name='tormozit.comfort.feature' version='1.0.0.12-202606100959'/>
+      </provides>
+      <filter>
+        (org.eclipse.update.install.features=true)
+      </filter>
+      <artifacts size='1'>
+        <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.12-202606100959'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='zipped'>
+            true
+          </instruction>
+        </instructions>
+      </touchpointData>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='tormozit.comfort' version='1.0.0.12-202606100959' generation='2'>
+      <update id='tormozit.comfort' range='[0.0.0,1.0.0.12-202606100959)' severity='0'/>
+<properties size='3'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.provider' value='Tormozit'/>
+        <property name='org.eclipse.equinox.p2.bundle.localization' value='plugin'/>
+      </properties>
+      <provides size='4'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' version='1.0.0.12-202606100959'/>
+        <provided namespace='osgi.bundle' name='tormozit.comfort' version='1.0.0.12-202606100959'/>
+        <provided namespace='osgi.identity' name='tormozit.comfort' version='1.0.0.12-202606100959'>
+          <properties size='1'>
+            <property name='type' value='osgi.bundle'/>
+          </properties>
+        </provided>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='bundle' version='1.0.0'/>
+      </provides>
+      <requires size='61'>
+        <required namespace='osgi.bundle' name='org.eclipse.ui' range='[3.201.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.runtime' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.resources' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.commands' range='[3.10.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.compare' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.ecore' range='[2.20.0,3.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.ide' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.integration' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.mcore' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.export' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.model.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.di' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.contexts' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.swt' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.forms' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jdt.annotation' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jgit' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.wiring' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.team.git.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.xml' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.search.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-databind' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.workspace' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.qw' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.sun.jna' range='[5.13.0,6.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna.platform' range='[5.13.0,6.0.0)'/>
+        <required namespace='java.package' name='org.osgi.framework' range='[1.8.0,2.0.0)'/>
+        <requiredProperties namespace='osgi.ee' match='(&amp;(osgi.ee=JavaSE)(version=17))'>
+          <description>
+            tormozit.comfort
+          </description>
+        </requiredProperties>
+      </requires>
+      <artifacts size='1'>
+        <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.12-202606100959'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='manifest'>
+            Bundle-SymbolicName: tormozit.comfort;singleton:=true&#xA;Bundle-Version: 1.0.0.12-202606100959
+          </instruction>
+        </instructions>
+      </touchpointData>
+    </unit>
+    <unit id='Comfort' version='1.0.0.2--cvewvE571737E3E533KCK'>
+      <properties size='2'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.type.category' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='Comfort' version='1.0.0.2--cvewvE571737E3E533KCK'/>
+      </provides>
+      <requires size='1'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' range='[1.0.0.12-202606100959,1.0.0.12-202606100959]'/>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.group' version='1.0.0.12-202606100959' singleton='false'>
+      <update id='tormozit.comfort.feature.feature.group' range='[0.0.0,1.0.0.12-202606100959)' severity='0'/>
+<properties size='5'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+        <property name='org.eclipse.equinox.p2.type.group' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' version='1.0.0.12-202606100959'/>
+      </provides>
+      <requires size='2'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' range='[1.0.0.12-202606100959,1.0.0.12-202606100959]'/>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' range='[1.0.0.12-202606100959,1.0.0.12-202606100959]'>
+          <filter>
+            (org.eclipse.update.install.features=true)
+          </filter>
+        </required>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='tormozit.comfort' version='1.0.0.11-202606090924' generation='2'>
+      <update id='tormozit.comfort' range='[0.0.0,1.0.0.11-202606090924)' severity='0'/>
+<properties size='3'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.provider' value='Tormozit'/>
+        <property name='org.eclipse.equinox.p2.bundle.localization' value='plugin'/>
+      </properties>
+      <provides size='4'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' version='1.0.0.11-202606090924'/>
+        <provided namespace='osgi.bundle' name='tormozit.comfort' version='1.0.0.11-202606090924'/>
+        <provided namespace='osgi.identity' name='tormozit.comfort' version='1.0.0.11-202606090924'>
+          <properties size='1'>
+            <property name='type' value='osgi.bundle'/>
+          </properties>
+        </provided>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='bundle' version='1.0.0'/>
+      </provides>
+      <requires size='61'>
+        <required namespace='osgi.bundle' name='org.eclipse.ui' range='[3.201.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.runtime' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.resources' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.commands' range='[3.10.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.compare' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.ecore' range='[2.20.0,3.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.ide' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.integration' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.mcore' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.export' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.model.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.di' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.contexts' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.swt' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.forms' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jdt.annotation' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jgit' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.wiring' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.team.git.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.xml' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.search.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-databind' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.workspace' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.qw' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.sun.jna' range='[5.13.0,6.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna.platform' range='[5.13.0,6.0.0)'/>
+        <required namespace='java.package' name='org.osgi.framework' range='[1.8.0,2.0.0)'/>
+        <requiredProperties namespace='osgi.ee' match='(&amp;(osgi.ee=JavaSE)(version=17))'>
+          <description>
+            tormozit.comfort
+          </description>
+        </requiredProperties>
+      </requires>
+      <artifacts size='1'>
+        <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.11-202606090924'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='manifest'>
+            Bundle-SymbolicName: tormozit.comfort;singleton:=true&#xA;Bundle-Version: 1.0.0.11-202606090924
+          </instruction>
+        </instructions>
+      </touchpointData>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.group' version='1.0.0.11-202606090924' singleton='false'>
+      <update id='tormozit.comfort.feature.feature.group' range='[0.0.0,1.0.0.11-202606090924)' severity='0'/>
+<properties size='5'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+        <property name='org.eclipse.equinox.p2.type.group' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' version='1.0.0.11-202606090924'/>
+      </provides>
+      <requires size='2'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' range='[1.0.0.11-202606090924,1.0.0.11-202606090924]'/>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' range='[1.0.0.11-202606090924,1.0.0.11-202606090924]'>
+          <filter>
+            (org.eclipse.update.install.features=true)
+          </filter>
+        </required>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.jar' version='1.0.0.11-202606090924'>
+      <properties size='4'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+      </properties>
+      <provides size='3'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' version='1.0.0.11-202606090924'/>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='feature' version='1.0.0'/>
+        <provided namespace='org.eclipse.update.feature' name='tormozit.comfort.feature' version='1.0.0.11-202606090924'/>
+      </provides>
+      <filter>
+        (org.eclipse.update.install.features=true)
+      </filter>
+      <artifacts size='1'>
+        <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.11-202606090924'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='zipped'>
+            true
+          </instruction>
+        </instructions>
+      </touchpointData>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='Comfort' version='1.0.0.2--cvewvE551737E3E3K3K7A'>
+      <properties size='2'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.type.category' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='Comfort' version='1.0.0.2--cvewvE551737E3E3K3K7A'/>
+      </provides>
+      <requires size='1'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' range='[1.0.0.11-202606090924,1.0.0.11-202606090924]'/>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+    </unit>
+    <unit id='tormozit.comfort' version='1.0.0.10-202606072004' generation='2'>
+      <update id='tormozit.comfort' range='[0.0.0,1.0.0.10-202606072004)' severity='0'/>
+<properties size='3'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.provider' value='Tormozit'/>
+        <property name='org.eclipse.equinox.p2.bundle.localization' value='plugin'/>
+      </properties>
+      <provides size='4'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' version='1.0.0.10-202606072004'/>
+        <provided namespace='osgi.bundle' name='tormozit.comfort' version='1.0.0.10-202606072004'/>
+        <provided namespace='osgi.identity' name='tormozit.comfort' version='1.0.0.10-202606072004'>
+          <properties size='1'>
+            <property name='type' value='osgi.bundle'/>
+          </properties>
+        </provided>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='bundle' version='1.0.0'/>
+      </provides>
+      <requires size='59'>
+        <required namespace='osgi.bundle' name='org.eclipse.ui' range='[3.201.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.runtime' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.resources' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.core.commands' range='[3.10.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.compare' range='[3.8.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.ecore' range='[2.20.0,3.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jface' range='[3.26.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.ide' range='[3.18.0,4.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.integration' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.bm.core' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.md' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.mcore' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.compare.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform.services.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.platform' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.export' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.ui.model.workbench' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.di' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.e4.core.contexts' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.swt' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.xtext.ui' range='[0.0.0,100.0.0)'/>
+        <required namespace='osgi.bundle' name='org.eclipse.ui.forms' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jdt.annotation' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.jgit' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.wiring' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.team.git.infobases' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.e1c.g5.dt.applications' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.dcs' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.xml' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.common' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.navigator' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-databind' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.fasterxml.jackson.core.jackson-core' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='org.eclipse.emf.workspace' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bm.index.emf' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.form.ui' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.qw' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.moxel' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com._1c.g5.v8.dt.bsl.model' range='0.0.0'/>
+        <required namespace='osgi.bundle' name='com.sun.jna' range='[5.13.0,6.0.0)'/>
+        <required namespace='osgi.bundle' name='com.sun.jna.platform' range='[5.13.0,6.0.0)'/>
+        <required namespace='java.package' name='org.osgi.framework' range='[1.8.0,2.0.0)'/>
+        <requiredProperties namespace='osgi.ee' match='(&amp;(osgi.ee=JavaSE)(version=17))'>
+          <description>
+            tormozit.comfort
+          </description>
+        </requiredProperties>
+      </requires>
+      <artifacts size='1'>
+        <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.10-202606072004'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='manifest'>
+            Bundle-SymbolicName: tormozit.comfort;singleton:=true&#xA;Bundle-Version: 1.0.0.10-202606072004
+          </instruction>
+        </instructions>
+      </touchpointData>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.jar' version='1.0.0.10-202606072004'>
+      <properties size='4'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+      </properties>
+      <provides size='3'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' version='1.0.0.10-202606072004'/>
+        <provided namespace='org.eclipse.equinox.p2.eclipse.type' name='feature' version='1.0.0'/>
+        <provided namespace='org.eclipse.update.feature' name='tormozit.comfort.feature' version='1.0.0.10-202606072004'/>
+      </provides>
+      <filter>
+        (org.eclipse.update.install.features=true)
+      </filter>
+      <artifacts size='1'>
+        <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.10-202606072004'/>
+      </artifacts>
+      <touchpoint id='org.eclipse.equinox.p2.osgi' version='1.0.0'/>
+      <touchpointData size='1'>
+        <instructions size='1'>
+          <instruction key='zipped'>
+            true
+          </instruction>
+        </instructions>
+      </touchpointData>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+    <unit id='Comfort' version='1.0.0.2--cvewvE531737E3E3G733A'>
+      <properties size='2'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.type.category' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='Comfort' version='1.0.0.2--cvewvE531737E3E3G733A'/>
+      </provides>
+      <requires size='1'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' range='[1.0.0.10-202606072004,1.0.0.10-202606072004]'/>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+    </unit>
+    <unit id='tormozit.comfort.feature.feature.group' version='1.0.0.10-202606072004' singleton='false'>
+      <update id='tormozit.comfort.feature.feature.group' range='[0.0.0,1.0.0.10-202606072004)' severity='0'/>
+<properties size='5'>
+        <property name='org.eclipse.equinox.p2.name' value='EDT Comfort'/>
+        <property name='org.eclipse.equinox.p2.description' value='Удобства и интеграция традиционных редакторов для EDT 1С'/>
+        <property name='org.eclipse.equinox.p2.description.url' value=''/>
+        <property name='org.eclipse.equinox.p2.provider' value='tormozit'/>
+        <property name='org.eclipse.equinox.p2.type.group' value='true'/>
+      </properties>
+      <provides size='1'>
+        <provided namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.group' version='1.0.0.10-202606072004'/>
+      </provides>
+      <requires size='2'>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort' range='[1.0.0.10-202606072004,1.0.0.10-202606072004]'/>
+        <required namespace='org.eclipse.equinox.p2.iu' name='tormozit.comfort.feature.feature.jar' range='[1.0.0.10-202606072004,1.0.0.10-202606072004]'>
+          <filter>
+            (org.eclipse.update.install.features=true)
+          </filter>
+        </required>
+      </requires>
+      <touchpoint id='null' version='0.0.0'/>
+      <copyright uri='' url=''>
+        (c) tormozit
+      </copyright>
+    </unit>
+  </units>
+</repository>

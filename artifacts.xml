@@ -1,0 +1,169 @@
+<?xml version='1.0' encoding='UTF-8'?>
+<?artifactRepository version='1.1.0'?>
+<repository name='Update Site' type='org.eclipse.equinox.p2.artifact.repository.simpleRepository' version='1'>
+  <properties size='2'>
+    <property name='p2.timestamp' value='1784788999073'/>
+    <property name='p2.compressed' value='true'/>
+  </properties>
+  <mappings size='3'>
+    <rule filter='(&amp; (classifier=osgi.bundle))' output='${repoUrl}/plugins/${id}_${version}.jar'/>
+    <rule filter='(&amp; (classifier=binary))' output='${repoUrl}/binary/${id}_${version}'/>
+    <rule filter='(&amp; (classifier=org.eclipse.update.feature))' output='${repoUrl}/features/${id}_${version}.jar'/>
+  </mappings>
+  <artifacts size='28'>
+    <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.23-202607230935'>
+      <properties size='2'>
+        <property name='download.contentType' value='application/zip'/>
+        <property name='download.size' value='493'/>
+      </properties>
+    </artifact>
+    <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.23-202607230935'>
+      <properties size='1'>
+        <property name='download.size' value='4440951'/>
+      </properties>
+    </artifact>
+    <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.22-202607161709'>
+      <properties size='1'>
+        <property name='download.size' value='2483101'/>
+      </properties>
+    </artifact>
+    <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.22-202607161709'>
+      <properties size='2'>
+        <property name='download.contentType' value='application/zip'/>
+        <property name='download.size' value='493'/>
+      </properties>
+    </artifact>
+    <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.21-202607151425'>
+      <properties size='2'>
+        <property name='download.contentType' value='application/zip'/>
+        <property name='download.size' value='493'/>
+      </properties>
+    </artifact>
+    <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.21-202607151425'>
+      <properties size='1'>
+        <property name='download.size' value='2450066'/>
+      </properties>
+    </artifact>
+    <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.20-202607080943'>
+      <properties size='1'>
+        <property name='download.size' value='2155984'/>
+      </properties>
+    </artifact>
+    <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.20-202607080943'>
+      <properties size='2'>
+        <property name='download.contentType' value='application/zip'/>
+        <property name='download.size' value='494'/>
+      </properties>
+    </artifact>
+    <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.19-202607020920'>
+      <properties size='1'>
+        <property name='download.size' value='1990699'/>
+      </properties>
+    </artifact>
+    <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.19-202607020920'>
+      <properties size='2'>
+        <property name='download.contentType' value='application/zip'/>
+        <property name='download.size' value='493'/>
+      </properties>
+    </artifact>
+    <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.18-202606300822'>
+      <properties size='2'>
+        <property name='download.contentType' value='application/zip'/>
+        <property name='download.size' value='493'/>
+      </properties>
+    </artifact>
+    <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.18-202606300822'>
+      <properties size='1'>
+        <property name='download.size' value='1972524'/>
+      </properties>
+    </artifact>
+    <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.17-202606290903'>
+      <properties size='1'>
+        <property name='download.size' value='1971800'/>
+      </properties>
+    </artifact>
+    <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.17-202606290903'>
+      <properties size='2'>
+        <property name='download.contentType' value='application/zip'/>
+        <property name='download.size' value='494'/>
+      </properties>
+    </artifact>
+    <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.16-202606240801'>
+      <properties size='1'>
+        <property name='download.size' value='1819790'/>
+      </properties>
+    </artifact>
+    <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.16-202606240801'>
+      <properties size='2'>
+        <property name='download.contentType' value='application/zip'/>
+        <property name='download.size' value='496'/>
+      </properties>
+    </artifact>
+    <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.15-202606230927'>
+      <properties size='2'>
+        <property name='download.contentType' value='application/zip'/>
+        <property name='download.size' value='497'/>
+      </properties>
+    </artifact>
+    <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.15-202606230927'>
+      <properties size='1'>
+        <property name='download.size' value='1808873'/>
+      </properties>
+    </artifact>
+    <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.14-202606220825'>
+      <properties size='2'>
+        <property name='download.contentType' value='application/zip'/>
+        <property name='download.size' value='496'/>
+      </properties>
+    </artifact>
+    <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.14-202606220825'>
+      <properties size='1'>
+        <property name='download.size' value='1754087'/>
+      </properties>
+    </artifact>
+    <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.13-202606110950'>
+      <properties size='2'>
+        <property name='download.contentType' value='application/zip'/>
+        <property name='download.size' value='496'/>
+      </properties>
+    </artifact>
+    <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.13-202606110950'>
+      <properties size='1'>
+        <property name='download.size' value='707447'/>
+      </properties>
+    </artifact>
+    <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.12-202606100959'>
+      <properties size='2'>
+        <property name='download.contentType' value='application/zip'/>
+        <property name='download.size' value='496'/>
+      </properties>
+    </artifact>
+    <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.12-202606100959'>
+      <properties size='1'>
+        <property name='download.size' value='685664'/>
+      </properties>
+    </artifact>
+    <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.11-202606090924'>
+      <properties size='2'>
+        <property name='download.contentType' value='application/zip'/>
+        <property name='download.size' value='496'/>
+      </properties>
+    </artifact>
+    <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.11-202606090924'>
+      <properties size='1'>
+        <property name='download.size' value='636887'/>
+      </properties>
+    </artifact>
+    <artifact classifier='org.eclipse.update.feature' id='tormozit.comfort.feature' version='1.0.0.10-202606072004'>
+      <properties size='2'>
+        <property name='download.contentType' value='application/zip'/>
+        <property name='download.size' value='496'/>
+      </properties>
+    </artifact>
+    <artifact classifier='osgi.bundle' id='tormozit.comfort' version='1.0.0.10-202606072004'>
+      <properties size='1'>
+        <property name='download.size' value='745880'/>
+      </properties>
+    </artifact>
+  </artifacts>
+</repository>
