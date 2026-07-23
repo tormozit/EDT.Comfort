@@ -23,9 +23,6 @@ import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Shell;
-import org.eclipse.ui.IWorkbenchPage;
-import org.eclipse.ui.IWorkbenchWindow;
-import org.eclipse.ui.PlatformUI;
 
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 
@@ -190,7 +187,9 @@ public final class CompareDialogCurrentLinesHook
             String liveRight = TwoSideCurrentLinesSync.visualSideLabel(semLeft, semRight, mirrored, false);
             String title = labelOrDefault(liveLeft, "Слева") + " / " //$NON-NLS-1$ //$NON-NLS-2$
                 + labelOrDefault(liveRight, "Справа"); //$NON-NLS-1$
-            return supplyFullTextsForIr(leftText, rightText, title, liveLeft, liveRight, irSyntaxVariant);
+            return supplyFullTextsForIr(leftText, rightText, title, liveLeft, liveRight, irSyntaxVariant,
+                CompareTabularDocumentsInIr.resolveWorkspaceFile(resolveLeft(editorInput)),
+                CompareTabularDocumentsInIr.resolveWorkspaceFile(resolveRight(editorInput)));
         });
 
         addToolbarActions(pane, panel, editorInput, viewer, semanticLeft, semanticRight);
@@ -289,19 +288,11 @@ public final class CompareDialogCurrentLinesHook
     {
         Path pathLeft = CompareTabularDocumentsInIr.resolveSideFile(left, "left"); //$NON-NLS-1$
         Path pathRight = CompareTabularDocumentsInIr.resolveSideFile(right, "right"); //$NON-NLS-1$
-        IDtProject dtProject = resolveActiveDtProject();
+        IDtProject dtProject = IrCompareValuesHandler.resolveDtProjectForCompare(
+            CompareTabularDocumentsInIr.resolveWorkspaceFile(left),
+            CompareTabularDocumentsInIr.resolveWorkspaceFile(right));
         CompareTabularDocumentsInIr.runCompareTwoSide(dtProject, pathLeft, pathRight,
             leftLabel, rightLabel, uiLeftIsNewer, true);
-    }
-
-    private static IDtProject resolveActiveDtProject()
-    {
-        IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
-        IWorkbenchPage page = window != null ? window.getActivePage() : null;
-        if (page == null)
-            return null;
-        org.eclipse.core.resources.IProject project = Global.getActiveProject(page, true);
-        return project != null ? Global.getDtProjectFromWorkspaceProject(project) : null;
     }
 
     private static ITypedElement resolveLeft(CompareEditorInput editorInput)
@@ -328,13 +319,15 @@ public final class CompareDialogCurrentLinesHook
 
     private static CompareCurrentLinesPanel.FullTextPair supplyFullTextsForIr(
         StyledText leftText, StyledText rightText, String title, String leftLabel, String rightLabel,
-        String syntaxVariant)
+        String syntaxVariant, org.eclipse.core.resources.IFile leftFile,
+        org.eclipse.core.resources.IFile rightFile)
     {
         if (leftText == null || leftText.isDisposed() || rightText == null || rightText.isDisposed())
             return null;
         return new CompareCurrentLinesPanel.FullTextPair(leftText.getText(), rightText.getText(), title,
             leftLabel, rightLabel, syntaxVariant,
-            CompareLineRangeMatcher.lineAtCaret(leftText), CompareLineRangeMatcher.lineAtCaret(rightText));
+            CompareLineRangeMatcher.lineAtCaret(leftText), CompareLineRangeMatcher.lineAtCaret(rightText),
+            leftFile, rightFile);
     }
 
     private static String resolveCompareType(CompareEditorInput editorInput)

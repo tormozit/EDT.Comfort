@@ -6,6 +6,7 @@ import java.util.function.Supplier;
 
 import java.net.URL;
 
+import org.eclipse.core.resources.IFile;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.IAction;
 import org.eclipse.jface.resource.ImageDescriptor;
@@ -160,9 +161,21 @@ public final class CompareCurrentLinesPanel
         public final String syntaxVariant;
         public final int leftLine;
         public final int rightLine;
+        /**
+         * Файлы сторон для выбора проекта ИР ({@link IrCompareValuesHandler#resolveDtProjectForCompare});
+         * {@code null}, если стороны не из workspace.
+         */
+        public final IFile leftFile;
+        public final IFile rightFile;
 
         public FullTextPair(String left, String right, String title, String leftLabel, String rightLabel,
             String syntaxVariant, int leftLine, int rightLine)
+        {
+            this(left, right, title, leftLabel, rightLabel, syntaxVariant, leftLine, rightLine, null, null);
+        }
+
+        public FullTextPair(String left, String right, String title, String leftLabel, String rightLabel,
+            String syntaxVariant, int leftLine, int rightLine, IFile leftFile, IFile rightFile)
         {
             this.left = left;
             this.right = right;
@@ -172,6 +185,8 @@ public final class CompareCurrentLinesPanel
             this.syntaxVariant = syntaxVariant;
             this.leftLine = leftLine;
             this.rightLine = rightLine;
+            this.leftFile = leftFile;
+            this.rightFile = rightFile;
         }
     }
 
@@ -191,7 +206,7 @@ public final class CompareCurrentLinesPanel
             return;
         IrCompareValuesHandler.compare(
             pair.left, pair.right, pair.title, pair.leftLabel, pair.rightLabel,
-            pair.syntaxVariant, pair.leftLine, pair.rightLine);
+            pair.syntaxVariant, pair.leftLine, pair.rightLine, pair.leftFile, pair.rightFile);
     }
 
     public Composite getControl()

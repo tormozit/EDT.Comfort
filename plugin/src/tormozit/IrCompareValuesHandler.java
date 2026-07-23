@@ -1,5 +1,6 @@
 package tormozit;
 
+import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.ui.IWorkbenchPage;
@@ -56,7 +57,19 @@ public final class IrCompareValuesHandler
     public static void compare(String leftText, String rightText, String windowTitle,
         String leftLabel, String rightLabel, String syntaxVariant, int leftLine, int rightLine)
     {
-        IDtProject dtProject = resolveActiveDtProject();
+        compare(leftText, rightText, windowTitle, leftLabel, rightLabel, syntaxVariant,
+            leftLine, rightLine, null, null);
+    }
+
+    /**
+     * Как {@link #compare(String, String, String, String, String, String, int, int)}, но проект ИР
+     * выбирается по {@link #resolveDtProjectForCompare(IFile, IFile)}.
+     */
+    public static void compare(String leftText, String rightText, String windowTitle,
+        String leftLabel, String rightLabel, String syntaxVariant, int leftLine, int rightLine,
+        IFile leftFile, IFile rightFile)
+    {
+        IDtProject dtProject = resolveDtProjectForCompare(leftFile, rightFile);
         if (dtProject == null)
         {
             ToastNotification.show(MENU_LABEL, "Не удалось определить активный проект EDT", 4_000); //$NON-NLS-1$
@@ -77,6 +90,39 @@ public final class IrCompareValuesHandler
         irSession.executor.submit(() ->
             compareOnComThread(irSession, leftText, rightText, title, name1, name2, variant,
                 leftLine1Based, rightLine1Based));
+    }
+
+    /**
+     * Проект для сессии ИР при двухстороннем сравнении:
+     * оба файла в одном workspace-проекте — он; только один файл резолвится
+     * (типично rename/delete в списке коммита) — проект этой стороны; иначе активный.
+     */
+    public static IDtProject resolveDtProjectForCompare(IFile leftFile, IFile rightFile)
+    {
+        if (leftFile != null && rightFile != null)
+        {
+            IProject leftProject = leftFile.getProject();
+            IProject rightProject = rightFile.getProject();
+            if (leftProject != null && leftProject.equals(rightProject))
+            {
+                IDtProject fromFiles = Global.getDtProjectFromWorkspaceProject(leftProject);
+                if (fromFiles != null)
+                    return fromFiles;
+            }
+            return resolveActiveDtProject();
+        }
+        IFile one = leftFile != null ? leftFile : rightFile;
+        if (one != null)
+        {
+            IProject project = one.getProject();
+            if (project != null)
+            {
+                IDtProject fromFile = Global.getDtProjectFromWorkspaceProject(project);
+                if (fromFile != null)
+                    return fromFile;
+            }
+        }
+        return resolveActiveDtProject();
     }
 
     /**

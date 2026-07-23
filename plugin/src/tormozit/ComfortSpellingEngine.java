@@ -68,7 +68,8 @@ import org.osgi.framework.FrameworkUtil;
  * Загрузчик словарей Hunspell/MySpell и единые правила токенизации Comfort.
  * Единственный источник диапазонов ошибок — {@link #findMisspelledRanges}
  * (BSL, свойства, сообщение коммита): {@link SpellCheckIterator} + при необходимости
- * {@link #splitIdentifierSegments} (CamelCase / цифры) по флагам «Орфография».
+ * {@link #splitIdentifierSegments} (CamelCase / цифры) по флагам «Орфография»;
+ * «Игнорировать слова ЗАГЛАВНЫМИ» — и к сегментам после дробления.
  * {@link #isCorrect} — boolean для штатного DefaultSpellChecker (Java-комментарии и т.п.):
  * те же сегменты, без своих аннотаций.
  * Пути словарей — {@link ComfortSettings#getSpellingDictionaryBasePaths()}.
@@ -426,7 +427,8 @@ public final class ComfortSpellingEngine
             if (!hasLetter(part))
                 continue;
             anyLetterSeg = true;
-            if (isShortAllCapsWord(part) || isLocaleCode(part) || isUserWord(part))
+            if (shouldIgnoreUpperSegment(part) || isShortAllCapsWord(part) || isLocaleCode(part)
+                || isUserWord(part))
                 continue;
             if (!isCorrect(dicts, part))
             {
@@ -462,7 +464,8 @@ public final class ComfortSpellingEngine
             String part = word.substring(segStart, segEnd);
             if (!hasLetter(part))
                 continue;
-            if (isShortAllCapsWord(part) || isLocaleCode(part) || isUserWord(part))
+            if (shouldIgnoreUpperSegment(part) || isShortAllCapsWord(part) || isLocaleCode(part)
+                || isUserWord(part))
                 continue;
             if (isCorrect(dicts, part))
                 continue;
@@ -937,7 +940,7 @@ public final class ComfortSpellingEngine
                         String part = text.substring(segStart, segEnd);
                         if (!hasLetter(part))
                             continue;
-                        if (isCorrect(part))
+                        if (shouldIgnoreUpperSegment(part) || isCorrect(part))
                             continue;
                         segMiss = true;
                         break;
@@ -958,7 +961,7 @@ public final class ComfortSpellingEngine
                             String part = text.substring(segStart, segEnd);
                             if (!hasLetter(part))
                                 continue;
-                            if (isCorrect(part))
+                            if (shouldIgnoreUpperSegment(part) || isCorrect(part))
                                 continue;
                             result.add(new int[] { segStart, segEnd - segStart });
                         }
@@ -1037,6 +1040,15 @@ public final class ComfortSpellingEngine
         return any;
     }
 
+    /** Сегмент CamelCase: флаг «Игнорировать слова ЗАГЛАВНЫМИ» (к целому токену не применялся). */
+    private static boolean shouldIgnoreUpperSegment(String part)
+    {
+        if (part == null || part.isEmpty())
+            return false;
+        IPreferenceStore prefs = PreferenceConstants.getPreferenceStore();
+        return prefs.getBoolean(PreferenceConstants.SPELLING_IGNORE_UPPER) && isAllUpperLetters(part);
+    }
+
     private static boolean containsDigit(String word)
     {
         for (int i = 0; i < word.length(); i++)
@@ -1101,7 +1113,7 @@ public final class ComfortSpellingEngine
             String word = text.substring(segStart, segEnd);
             if (!hasLetter(word))
                 continue;
-            if (isCorrect(dicts, word))
+            if (shouldIgnoreUpperSegment(word) || isCorrect(dicts, word))
                 continue;
             if (ComfortSettings.isSpellingIgnoreCamelCaseAbbreviations()
                 && isCamelCaseAbbreviation(text, segments, dicts))

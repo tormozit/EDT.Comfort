@@ -4,13 +4,10 @@ import org.eclipse.compare.CompareEditorInput;
 import org.eclipse.compare.CompareConfiguration;
 import org.eclipse.compare.CompareViewerPane;
 import org.eclipse.compare.CompareViewerSwitchingPane;
-import org.eclipse.compare.IResourceProvider;
 import org.eclipse.compare.ITypedElement;
 import org.eclipse.compare.contentmergeviewer.TextMergeViewer;
 import org.eclipse.compare.structuremergeviewer.ICompareInput;
 import org.eclipse.core.resources.IFile;
-import org.eclipse.core.resources.IProject;
-import org.eclipse.core.resources.IResource;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.IContributionItem;
 import org.eclipse.jface.action.IToolBarManager;
@@ -367,13 +364,15 @@ public final class GitCompareCurrentLinesHook
             String liveRight = TwoSideCurrentLinesSync.visualSideLabel(semLeft, semRight, mirrored, false);
             String title = labelOrDefault(liveLeft, "Слева") + " / " //$NON-NLS-1$ //$NON-NLS-2$
                 + labelOrDefault(liveRight, "Справа"); //$NON-NLS-1$
-            return supplyFullTextsForIr(leftText, rightText, title, liveLeft, liveRight, irSyntaxVariant);
+            return supplyFullTextsForIr(leftText, rightText, title, liveLeft, liveRight, irSyntaxVariant,
+                resolveTypedElementFile(editorInput, true),
+                resolveTypedElementFile(editorInput, false));
         });
 
         /*
          * «Показать в модуле» ведёт только в рабочую копию (реальный файл в workspace) —
          * определяем сторону по исходной подписи EGit («Локальный: ...») ДО добавления суффикса,
-         * и резолвим её IFile через IResourceProvider (публичный API org.eclipse.compare).
+         * и резолвим её IFile через workspace-резолв стороны сравнения.
          */
         boolean leftIsWorkingCopy = isLocalWorkingCopyLabel(rawLeftLabel);
         boolean rightIsWorkingCopy = isLocalWorkingCopyLabel(rawRightLabel);
@@ -611,23 +610,15 @@ public final class GitCompareCurrentLinesHook
     {
         Path pathLeft = CompareTabularDocumentsInIr.resolveSideFile(left, "left"); //$NON-NLS-1$
         Path pathRight = CompareTabularDocumentsInIr.resolveSideFile(right, "right"); //$NON-NLS-1$
-        IFile leftFile = resolveTypedElementFile(editorInput, true);
-        IFile projectFile = leftFile != null ? leftFile : resolveTypedElementFile(editorInput, false);
-        IDtProject dtProject = projectFile != null
-            ? Global.getDtProjectFromWorkspaceProject(projectFile.getProject())
-            : resolveActiveDtProject();
+        IFile fileLeft = CompareTabularDocumentsInIr.resolveWorkspaceFile(left);
+        IFile fileRight = CompareTabularDocumentsInIr.resolveWorkspaceFile(right);
+        if (fileLeft == null)
+            fileLeft = resolveTypedElementFile(editorInput, true);
+        if (fileRight == null)
+            fileRight = resolveTypedElementFile(editorInput, false);
+        IDtProject dtProject = IrCompareValuesHandler.resolveDtProjectForCompare(fileLeft, fileRight);
         CompareTabularDocumentsInIr.runCompareTwoSide(dtProject, pathLeft, pathRight,
             leftLabel, rightLabel, uiLeftIsNewer, true);
-    }
-
-    private static IDtProject resolveActiveDtProject()
-    {
-        IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
-        IWorkbenchPage page = window != null ? window.getActivePage() : null;
-        if (page == null)
-            return null;
-        IProject project = Global.getActiveProject(page, true);
-        return project != null ? Global.getDtProjectFromWorkspaceProject(project) : null;
     }
 
     private static ITypedElement resolveTypedElement(CompareEditorInput editorInput, boolean left)
@@ -709,32 +700,75 @@ public final class GitCompareCurrentLinesHook
     }
 
     /**
-     * {@code IResourceProvider} — публичный интерфейс {@code org.eclipse.compare}
-     * (не reflection): реализуется, в частности, EGit-овским
-     * {@code LocalResourceTypedElement} для стороны, которая является рабочей копией.
+     * Файл стороны сравнения в workspace: {@link IResourceProvider} / EGit-ревизия
+     * ({@code getGitPath}+work tree), иначе {@code locations}/{@code getAdapter(IFile)}
+     * у {@code GitCompareEditorInput} (список файлов коммита через CompareUtils).
      */
     private static IFile resolveTypedElementFile(CompareEditorInput editorInput, boolean left)
     {
-        Object result = editorInput.getCompareResult();
-        if (!(result instanceof ICompareInput compareInput))
+        Object result = editorInput != null ? editorInput.getCompareResult() : null;
+        ITypedElement element = null;
+        if (result instanceof ICompareInput compareInput)
+            element = left ? compareInput.getLeft() : compareInput.getRight();
+        IFile fromElement = CompareTabularDocumentsInIr.resolveWorkspaceFile(element);
+        if (fromElement != null)
+            return fromElement;
+        return resolveWorkspaceFileFromCompareEditorInput(editorInput);
+    }
+
+    /**
+     * {@code GitCompareEditorInput}/{@code AbstractGitCompareEditorInput}: поле {@code locations}
+     * или {@code getAdapter(IFile)} — абсолютный путь рабочей копии того же файла.
+     */
+    private static IFile resolveWorkspaceFileFromCompareEditorInput(CompareEditorInput editorInput)
+    {
+        if (editorInput == null)
             return null;
-        ITypedElement element = left ? compareInput.getLeft() : compareInput.getRight();
-        if (!(element instanceof IResourceProvider resourceProvider))
-            return null;
-        IResource resource = resourceProvider.getResource();
-        return resource instanceof IFile file ? file : null;
+        IFile adapted = editorInput.getAdapter(IFile.class);
+        if (adapted != null)
+            return adapted;
+        Object locations = Global.getField(editorInput, "locations"); //$NON-NLS-1$
+        if (locations instanceof Object[] arr)
+        {
+            for (Object loc : arr)
+            {
+                if (!(loc instanceof org.eclipse.core.runtime.IPath eclipsePath))
+                    continue;
+                IFile file = CompareTabularDocumentsInIr.findWorkspaceFileByAbsolutePath(
+                    eclipsePath.toFile().toPath());
+                if (file != null)
+                    return file;
+            }
+        }
+        Object gitPaths = Global.getField(editorInput, "gitPaths"); //$NON-NLS-1$
+        Object repository = Global.call(editorInput, "getRepository"); //$NON-NLS-1$
+        Object workTreeObj = repository != null ? Global.call(repository, "getWorkTree") : null; //$NON-NLS-1$
+        if (workTreeObj instanceof java.io.File workTree && gitPaths instanceof Iterable<?> paths)
+        {
+            for (Object gp : paths)
+            {
+                if (!(gp instanceof String gitPath) || gitPath.isBlank())
+                    continue;
+                Path abs = workTree.toPath().resolve(gitPath.replace('/', java.io.File.separatorChar));
+                IFile file = CompareTabularDocumentsInIr.findWorkspaceFileByAbsolutePath(abs);
+                if (file != null)
+                    return file;
+            }
+        }
+        return null;
     }
 
     /** Полные тексты обеих сторон (не текущей строки) — для кнопки «Сравнить ИР». */
     private static CompareCurrentLinesPanel.FullTextPair supplyFullTextsForIr(
         StyledText leftText, StyledText rightText, String title, String leftLabel, String rightLabel,
-        String syntaxVariant)
+        String syntaxVariant, IFile leftFile, IFile rightFile)
     {
         if (leftText == null || leftText.isDisposed() || rightText == null || rightText.isDisposed())
             return null;
         return new CompareCurrentLinesPanel.FullTextPair(leftText.getText(), rightText.getText(), title,
             leftLabel, rightLabel, syntaxVariant,
-            CompareLineRangeMatcher.lineAtCaret(leftText), CompareLineRangeMatcher.lineAtCaret(rightText));
+            CompareLineRangeMatcher.lineAtCaret(leftText), CompareLineRangeMatcher.lineAtCaret(rightText),
+            leftFile, rightFile);
     }
 
     /**

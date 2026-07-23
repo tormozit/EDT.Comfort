@@ -372,11 +372,15 @@ public final class PasteWithCompareActions
             String liveLeft = TwoSideCurrentLinesSync.visualSideLabel(leftLabel, rightLabel, mirrored, true);
             String liveRight = TwoSideCurrentLinesSync.visualSideLabel(leftLabel, rightLabel, mirrored, false);
             String title = liveLeft + " / " + liveRight; //$NON-NLS-1$
+            IFile editorFile = null;
+            if (ctx != null && ctx.editor != null && ctx.editor.getEditorInput() != null)
+                editorFile = ctx.editor.getEditorInput().getAdapter(IFile.class);
             return new CompareCurrentLinesPanel.FullTextPair(
                 leftEditorText.getText(), rightEditorText.getText(), title, liveLeft, liveRight,
                 IrCompareValuesHandler.syntaxVariantFor(compareViewerType),
                 CompareLineRangeMatcher.lineAtCaret(leftEditorText),
-                CompareLineRangeMatcher.lineAtCaret(rightEditorText));
+                CompareLineRangeMatcher.lineAtCaret(rightEditorText),
+                editorFile, editorFile);
         }
 
         /**
