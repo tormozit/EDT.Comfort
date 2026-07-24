@@ -322,7 +322,7 @@ public final class ComBridge
     /** Результат COM: Dispatch из Variant; boolean — не структура. */
     public static Object unwrapComResult(Object raw)
     {
-        if (raw == null || raw instanceof Boolean)
+        if (raw == null || isComBoolean(raw))
             return null;
         try
         {
@@ -337,12 +337,36 @@ public final class ComBridge
     /** Значение поля COM-структуры / dispatch для чтения в Java. */
     public static String comFieldAsString(Object val)
     {
-        if (val == null || val instanceof Boolean)
+        if (val == null || isComBoolean(val))
             return null;
         if (val instanceof String s)
             return s.isEmpty() ? null : s;
         String s = toString(val);
         return s != null && !s.isEmpty() ? s : null;
+    }
+
+    /**
+     * Java {@link Boolean} или Jacob {@code Variant} с {@code VT_BOOL}.
+     * Одноаргументный {@code Структура.Свойство(Ключ)} возвращает именно это
+     * («ключ есть»), а не значение поля — такие значения нельзя читать как текст.
+     */
+    private static boolean isComBoolean(Object val)
+    {
+        if (val instanceof Boolean)
+            return true;
+        if (!available || classVariant == null || methodVariantGetVt == null)
+            return false;
+        try
+        {
+            if (!classVariant.isInstance(val))
+                return false;
+            short vt = (short) methodVariantGetVt.invoke(val);
+            return vt == 11; // VT_BOOL
+        }
+        catch (Exception ignored)
+        {
+            return false;
+        }
     }
   
     static Object invoke(Object dispatch, String method, Object... args)
@@ -505,51 +529,26 @@ public final class ComBridge
     }
 
     /**
-     * Поле 1С:Структура / Соответствие — через {@code Свойство()}, не {@link #getProperty}.
+     * Поле 1С:Структура / Соответствие — через {@link #getProperty} (как RDT).
      * Без исключений: при ошибке возвращает {@code null}.
+     *
+     * <p>Не использовать одноаргументный {@code Свойство(Ключ)}: он возвращает
+     * булево «ключ есть», и Jacob {@code VT_BOOL} превращается в строку {@code "true"}.
      */
     public static String structureField(Object structure, String key)
     {
         if (structure == null || key == null || key.isEmpty())
             return null;
-        if (structure instanceof Boolean)
+        if (isComBoolean(structure))
             return null;
-
         try
         {
-            Object val = invoke(structure, "Свойство", key); //$NON-NLS-1$
-            String s = structureFieldValueToString(val);
-            if (s != null)
-                return s;
+            return comFieldAsString(getProperty(structure, key));
         }
-        catch (Exception ignored)
-        {
-            // 1С:Структура — читаем через Свойство(); fallback ниже
-        }
-        return structureFieldViaProperty(structure, key);
-    }
-
-    private static String structureFieldViaProperty(Object structure, String key)
-    {
-        try
-        {
-            Object val = methodDispatchGet.invoke(null, getRealDispatch(structure), key);
-            return structureFieldValueToString(val);
-        }
-        catch (Exception ignored)
+        catch (RuntimeException ignored)
         {
             return null;
         }
-    }
-
-    private static String structureFieldValueToString(Object val)
-    {
-        if (val == null)
-            return null;
-        if (val instanceof Boolean)
-            return null;
-        String s = toString(val);
-        return s != null && !s.isEmpty() ? s : null;
     }
     
     public static long toLong(Object variant)
