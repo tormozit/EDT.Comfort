@@ -95,8 +95,8 @@ final class FilterInputBox
     static final class Options
     {
         Scope scope = Scope.COLLECTION;
-        String message = "Поиск..."; //$NON-NLS-1$
-        String tooltip = "Smart-фильтр (пробел = AND)"; //$NON-NLS-1$
+        String message = "Фильтр..."; //$NON-NLS-1$
+        String tooltip = FLAT_FILTER_TOOLTIP; //$NON-NLS-1$
         GridData layoutData;
         int searchDelay = 150;
     }
@@ -136,8 +136,8 @@ final class FilterInputBox
         Options opts = new Options();
         opts.scope = Scope.COLLECTION;
         opts.layoutData = compactLayoutData();
-        opts.message = "Поиск..."; //$NON-NLS-1$
-        opts.tooltip = "Smart-фильтр (пробел = AND)"; //$NON-NLS-1$
+        opts.message = "Фильтр..."; //$NON-NLS-1$
+        opts.tooltip = FLAT_FILTER_TOOLTIP; //$NON-NLS-1$
         return create(parent, opts, onSearch);
     }
 
@@ -146,8 +146,8 @@ final class FilterInputBox
         Options opts = new Options();
         opts.scope = Scope.RECENT_PLACES;
         opts.layoutData = recentPlacesLayoutData();
-        opts.message = "Поиск..."; //$NON-NLS-1$
-        opts.tooltip = "Фильтр по колонке «Имя» (smart-фильтр, пробел = AND)"; //$NON-NLS-1$
+        opts.message = "Фильтр..."; //$NON-NLS-1$
+        opts.tooltip = FLAT_FILTER_TOOLTIP; //$NON-NLS-1$
         return create(parent, opts, onSearch);
     }
 
@@ -156,8 +156,8 @@ final class FilterInputBox
         Options opts = new Options();
         opts.scope = Scope.OBJECT_SETS;
         opts.layoutData = objectSetsLayoutData();
-        opts.message = "Поиск..."; //$NON-NLS-1$
-        opts.tooltip = "Фильтр по колонке «Имя» (smart-фильтр, пробел = AND)"; //$NON-NLS-1$
+        opts.message = "Фильтр..."; //$NON-NLS-1$
+        opts.tooltip = FLAT_FILTER_TOOLTIP; //$NON-NLS-1$
         return create(parent, opts, onSearch);
     }
 
@@ -166,7 +166,7 @@ final class FilterInputBox
         Options opts = new Options();
         opts.scope = Scope.OPEN_MD_OBJECT;
         opts.layoutData = compactLayoutData();
-        opts.message = "Поиск..."; //$NON-NLS-1$
+        opts.message = "Фильтр..."; //$NON-NLS-1$
         opts.tooltip = HIERARCHICAL_FILTER_TOOLTIP;
         return create(parent, opts, onSearch);
     }
@@ -176,7 +176,7 @@ final class FilterInputBox
         Options opts = new Options();
         opts.scope = Scope.SELECT_TYPE;
         opts.layoutData = compactLayoutData();
-        opts.message = "Поиск..."; //$NON-NLS-1$
+        opts.message = "Фильтр..."; //$NON-NLS-1$
         opts.tooltip = HIERARCHICAL_FILTER_TOOLTIP;
         return create(parent, opts, onSearch);
     }
@@ -186,8 +186,8 @@ final class FilterInputBox
         Options opts = new Options();
         opts.scope = Scope.PICTURE_DIALOG;
         opts.layoutData = compactLayoutData();
-        opts.message = "Поиск..."; //$NON-NLS-1$
-        opts.tooltip = "Smart-фильтр (пробел = AND)"; //$NON-NLS-1$
+        opts.message = "Фильтр..."; //$NON-NLS-1$
+        opts.tooltip = FLAT_FILTER_TOOLTIP; //$NON-NLS-1$
         return create(parent, opts, onSearch);
     }
 
@@ -197,7 +197,7 @@ final class FilterInputBox
         Options opts = new Options();
         opts.scope = Scope.GIT_HISTORY;
         opts.layoutData = new GridData(SWT.FILL, SWT.CENTER, true, false);
-        opts.message = "Поиск..."; //$NON-NLS-1$
+        opts.message = "Фильтр..."; //$NON-NLS-1$
         opts.tooltip = FLAT_FILTER_TOOLTIP;
         return create(parent, opts, onSearch);
     }
