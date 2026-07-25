@@ -606,7 +606,14 @@ final class FormTableInteraction
                 continue;
             boolean isSel = isRowSelected(item);
             for (int c = 0; c < cols; c++)
+            {
+                // Owner-draw колонки (напр. "Текст" с DelegatingStyledCellLabelProvider) красят себя
+                // сами через StyledString/StyleRange — единый foreground здесь затирал бы их
+                // собственную (в т.ч. подсветку вхождения) раскраску текста.
+                if (isOwnerDrawColumn(c))
+                    continue;
                 item.setForeground(c, isSel ? selFg : null);
+            }
         }
     }
 
@@ -1162,7 +1169,7 @@ final class FormTableInteraction
         Color base = table.getBackground();
         if (base == null || base.isDisposed())
             base = table.getDisplay().getSystemColor(SWT.COLOR_LIST_BACKGROUND);
-        double factor = table.isFocusControl() ? 0.12 : 0.08;
+        double factor = table.isFocusControl() ? 0.06 : 0.04;
         ownedRowBg = slightlyDarker(base, factor);
         return ownedRowBg;
     }
@@ -1197,7 +1204,7 @@ final class FormTableInteraction
             ownedActiveCellBg = ListSelectionThemeColors.activeCellBackground(table, rowBg);
             return ownedActiveCellBg;
         }
-        ownedActiveCellBg = slightlyDarker(rowBg, table.isFocusControl() ? 0.08 : 0.06);
+        ownedActiveCellBg = slightlyDarker(rowBg, table.isFocusControl() ? 0.045 : 0.03);
         return ownedActiveCellBg;
     }
 

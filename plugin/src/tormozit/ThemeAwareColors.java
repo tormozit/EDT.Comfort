@@ -22,26 +22,7 @@ public final class ThemeAwareColors
     private static final Map<Integer, Color> cachedEffectiveSystemColors = new HashMap<>();
     private static Boolean cachedEffectiveSystemDark;
 
-    private static org.eclipse.jface.viewers.StyledString.Styler cachedSearchMatchStyler;
-
     private ThemeAwareColors() {}
-
-    /** Единый стиль подсветки вхождения в результатах поиска (панель "Результаты поиска"). */
-    public static org.eclipse.jface.viewers.StyledString.Styler searchMatchStyler()
-    {
-        if (cachedSearchMatchStyler == null)
-        {
-            cachedSearchMatchStyler = new org.eclipse.jface.viewers.StyledString.Styler()
-            {
-                @Override
-                public void applyStyles(org.eclipse.swt.graphics.TextStyle textStyle)
-                {
-                    textStyle.foreground = effectiveSystemColor(Display.getCurrent(), SWT.COLOR_DARK_BLUE);
-                }
-            };
-        }
-        return cachedSearchMatchStyler;
-    }
 
     /**
      * Эффективный цвет для текущей темы. Store всегда в координатах светлой темы;

@@ -53,6 +53,24 @@ public final class SmartMatchHighlight
         return stylerFrom(resolveMatchStyle(context));
     }
 
+    /**
+     * Только цвет (без bold/фона) — для подсветки вхождения результата поиска в панели
+     * "Результаты поиска" (текстовый и по конфигурации): тот же цвет фильтра из настроек плагина
+     * ({@link ComfortSettings#getFilterMatchLightRgb()}), что и остальная подсветка совпадений,
+     * без жирного начертания (здесь это отдельное смысловое выделение "вхождение", не "фильтр").
+     */
+    public static Styler textOnlyStyler(Control context)
+    {
+        return new Styler()
+        {
+            @Override
+            public void applyStyles(TextStyle textStyle)
+            {
+                textStyle.foreground = textOnlyForeground(context);
+            }
+        };
+    }
+
     /** Только жирный шрифт — для совпадений на выбранной строке (без fg/bg). */
     public static Styler boldOnlyStyler()
     {
@@ -94,15 +112,28 @@ public final class SmartMatchHighlight
      */
     public static void paintTableCellMatchOverlayFlat(Event e, Table table, TableItem item, SmartMatcher matcher)
     {
+        paintTableCellMatchOverlayFlat(e, table, item, matcher, null);
+    }
+
+    /**
+     * Как {@link #paintTableCellMatchOverlayFlat(Event, Table, TableItem, SmartMatcher)}, но с явно
+     * заданным текстом ячейки вместо {@code item.getText(e.index)} — для virtual-таблиц (напр.
+     * "Коллекция"), где текст ячейки известен хосту, но не всегда актуален в самом {@code TableItem}
+     * на момент {@code PaintItem}.
+     */
+    public static void paintTableCellMatchOverlayFlat(Event e, Table table, TableItem item, SmartMatcher matcher,
+            String textOverride)
+    {
         if (e == null || e.gc == null || table == null || table.isDisposed() || item == null
                 || item.isDisposed() || matcher == null || matcher.isEmpty)
             return;
-        String text = item.getText(e.index);
+        String text = textOverride != null ? textOverride : item.getText(e.index);
         if (text == null || text.isEmpty() || !matcher.matches(text))
             return;
-        Point origin = tableCellTextOrigin(e.gc, table, item, e.index, e, text);
+        CellTextOrigin origin = tableCellTextOrigin(e.gc, table, item, e.index, e, text);
         MatchStyle style = resolveMatchStyle(table);
-        drawMatchFragments(e.gc, text, matcher, origin.x, origin.y, table.getFont(), style, false);
+        drawMatchFragments(e.gc, text, matcher, origin.x, origin.y, origin.availableWidth, table.getFont(), style,
+            false);
     }
 
     /** @param backgroundOnly {@code true} — только фон совпадений (текст уже нарисован). */
@@ -120,9 +151,10 @@ public final class SmartMatchHighlight
         // однословном фильтре, plain matches() по всей строке матчил бы и нелистовую часть.
         if (!matcher.matchesTree(text))
             return;
-        Point origin = tableCellTextOrigin(e.gc, table, item, e.index, e, text);
+        CellTextOrigin origin = tableCellTextOrigin(e.gc, table, item, e.index, e, text);
         MatchStyle style = resolveMatchStyle(table);
-        drawMatchFragments(e.gc, text, matcher, origin.x, origin.y, table.getFont(), style, backgroundOnly);
+        drawMatchFragments(e.gc, text, matcher, origin.x, origin.y, origin.availableWidth, table.getFont(), style,
+            backgroundOnly);
     }
 
     /** Жирный синий overlay поверх уже отрисованного SWT-текста (Label и др.). */
@@ -283,28 +315,74 @@ public final class SmartMatchHighlight
         };
     }
 
-    private static Point tableCellTextOrigin(GC gc, Table table, TableItem item, int column, Event e, String text)
+    /** Точка отрисовки текста ячейки + доступная под текст ширина (для отсечения по обрезке "..."). */
+    private static final class CellTextOrigin
+    {
+        final int x;
+        final int y;
+        final int availableWidth;
+
+        CellTextOrigin(int x, int y, int availableWidth)
+        {
+            this.x = x;
+            this.y = y;
+            this.availableWidth = availableWidth;
+        }
+    }
+
+    private static CellTextOrigin tableCellTextOrigin(GC gc, Table table, TableItem item, int column, Event e,
+            String text)
     {
         Font font = table.getFont();
         if (font != null && !font.isDisposed())
             gc.setFont(font);
         Point ext = gc.textExtent(text, SWT.DRAW_TRANSPARENT | SWT.DRAW_DELIMITER);
         Rectangle textBounds = item.getTextBounds(column);
+        int x;
+        int y;
+        int availableWidth;
         if (textBounds != null && !textBounds.isEmpty())
         {
-            int y = textBounds.y + Math.max(0, (textBounds.height - ext.y) / 2);
-            return new Point(textBounds.x, y);
+            y = textBounds.y + Math.max(0, (textBounds.height - ext.y) / 2);
+            x = textBounds.x;
+            availableWidth = textBounds.width;
         }
-        int y = e.y + Math.max(0, (e.height - ext.y) / 2);
-        int x = e.x + 6;
-        Rectangle imageBounds = item.getImageBounds(column);
-        if (imageBounds != null && !imageBounds.isEmpty())
-            x = imageBounds.x + imageBounds.width + 2;
-        return new Point(x, y);
+        else
+        {
+            y = e.y + Math.max(0, (e.height - ext.y) / 2);
+            x = e.x + 6;
+            Rectangle imageBounds = item.getImageBounds(column);
+            if (imageBounds != null && !imageBounds.isEmpty())
+                x = imageBounds.x + imageBounds.width + 2;
+            availableWidth = e.x + e.width - x;
+        }
+        // С видимой сеткой (setLinesVisible(true)) нативная отрисовка текста в Table на Windows
+        // ложится на 1px левее/ниже того, что возвращает item.getTextBounds() — без сетки (см.
+        // FilteredListDialogFilterHook, TypeComboOverlayHook) расхождения нет. Подтверждено
+        // диагностикой на DebugCollectionWindow (issue: подсветка "плыла" вправо-вверх на 1px
+        // только при setLinesVisible(true)).
+        if (table.getLinesVisible())
+        {
+            x -= 1;
+            y += 1;
+        }
+        return new CellTextOrigin(x, y, availableWidth);
     }
 
     private static void drawMatchFragments(GC gc, String text, SmartMatcher matcher,
             int baseX, int baseY, Font baseFont, MatchStyle style, boolean backgroundOnly)
+    {
+        drawMatchFragments(gc, text, matcher, baseX, baseY, -1, baseFont, style, backgroundOnly);
+    }
+
+    /**
+     * @param maxWidth доступная под текст ширина в px ({@code -1} — без ограничения) — ячейка
+     * таблицы обрезает лишний текст многоточием силами платформы, а мы рисуем поверх уже
+     * нарисованного, поэтому вхождение, попавшее в обрезанную часть, надо не дорисовывать (иначе
+     * оно будет видно поверх "...", хотя реально уже не отображается).
+     */
+    private static void drawMatchFragments(GC gc, String text, SmartMatcher matcher,
+            int baseX, int baseY, int maxWidth, Font baseFont, MatchStyle style, boolean backgroundOnly)
     {
         List<SmartMatcher.HighlightRange> ranges = matcher.getHighlightRanges(text);
         if (ranges.isEmpty())
@@ -315,6 +393,21 @@ public final class SmartMatchHighlight
         Color prevBg = gc.getBackground();
         Font measureFont = baseFont != null && !baseFont.isDisposed() ? baseFont : prevFont;
         Font bold = boldFontFrom(measureFont);
+        Font matchFont = style.font != null && !style.font.isDisposed() ? style.font : bold;
+        int effectiveMaxWidth = maxWidth;
+        if (maxWidth >= 0)
+        {
+            gc.setFont(measureFont);
+            int fullWidth = gc.textExtent(text, SWT.DRAW_TRANSPARENT | SWT.DRAW_DELIMITER).x;
+            if (fullWidth > maxWidth)
+            {
+                // Платформа обрежет реальный текст короче maxWidth, чтобы освободить место под
+                // "...", иначе она не рисовала бы многоточие вовсе — не резервировать это место
+                // означало бы считать видимыми символы, которые на самом деле уже скрыты под "...".
+                int ellipsisWidth = gc.textExtent("...", SWT.DRAW_TRANSPARENT | SWT.DRAW_DELIMITER).x; //$NON-NLS-1$
+                effectiveMaxWidth = Math.max(0, maxWidth - ellipsisWidth);
+            }
+        }
         try
         {
             for (SmartMatcher.HighlightRange range : ranges)
@@ -325,8 +418,21 @@ public final class SmartMatchHighlight
                 String match = text.substring(range.offset, range.offset + range.length);
                 gc.setFont(measureFont);
                 int x = baseX + gc.textExtent(prefix, SWT.DRAW_TRANSPARENT | SWT.DRAW_DELIMITER).x;
+                if (effectiveMaxWidth >= 0 && x - baseX >= effectiveMaxWidth)
+                    continue; // вхождение целиком в обрезанной части текста
+                gc.setFont(matchFont);
                 int w = gc.textExtent(match, SWT.DRAW_TRANSPARENT | SWT.DRAW_DELIMITER).x;
                 int h = gc.textExtent(match, SWT.DRAW_TRANSPARENT | SWT.DRAW_DELIMITER).y;
+                if (effectiveMaxWidth >= 0 && x - baseX + w > effectiveMaxWidth)
+                {
+                    int fitWidth = effectiveMaxWidth - (x - baseX);
+                    while (match.length() > 1
+                        && gc.textExtent(match, SWT.DRAW_TRANSPARENT | SWT.DRAW_DELIMITER).x > fitWidth)
+                        match = match.substring(0, match.length() - 1);
+                    w = gc.textExtent(match, SWT.DRAW_TRANSPARENT | SWT.DRAW_DELIMITER).x;
+                    if (w > fitWidth)
+                        continue; // не влезает даже один символ
+                }
                 if (style.background != null)
                 {
                     gc.setBackground(style.background);
@@ -334,7 +440,7 @@ public final class SmartMatchHighlight
                 }
                 if (!backgroundOnly)
                 {
-                    gc.setFont(measureFont);
+                    gc.setFont(matchFont);
                     gc.setForeground(style.foreground);
                     gc.drawText(match, x, baseY, true);
                 }

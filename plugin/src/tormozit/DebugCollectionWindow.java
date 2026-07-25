@@ -106,8 +106,8 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
     private static volatile boolean shellBorderResizeActive;
     private int rowsReadyClearFirst = -1;
     private int rowsReadyClearLast = -1;
-    private Listener filterEraseListenerIndex;
-    private Listener filterEraseListenerData;
+    private Listener filterPaintListenerIndex;
+    private Listener filterPaintListenerData;
     private IContextActivation keyContextActivation;
     private Listener collectionKeyFilter;
     private long lastInspectEnterMs;
@@ -806,18 +806,6 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             }
         });
         updateColumnSettingsButton();
-
-        ToolItem skeleton = new ToolItem(bar, SWT.PUSH);
-        skeleton.setText("Скелет"); //$NON-NLS-1$
-        skeleton.setToolTipText("Открыть тестовую таблицу 1000×100 без отладки"); //$NON-NLS-1$
-        skeleton.addSelectionListener(new SelectionAdapter()
-        {
-            @Override
-            public void widgetSelected(SelectionEvent e)
-            {
-                DebugCollectionSkeletonWindow.open();
-            }
-        });
     }
 
     private static void installReadOnlyTextCopySupport(Text text)
@@ -1248,55 +1236,42 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         Table index = indexTable();
         if (index != null)
         {
-            filterEraseListenerIndex = e -> {
-                if (e.type != SWT.EraseItem || !(e.item instanceof TableItem item))
+            filterPaintListenerIndex = e -> {
+                if (e.type != SWT.PaintItem || !(e.item instanceof TableItem item))
                     return;
                 if (isFilterByPresentationSelected() && e.index != 1)
                     return;
                 SmartMatcher matcher = activeFilterMatcher();
                 if (matcher == null)
                     return;
-                DebugCollectionFilterEraseSupport.handleEraseItem(
+                DebugCollectionFilterHighlightSupport.handlePaintItem(
                     index,
                     item,
                     e,
                     matcher,
-                    filterSkipItem(item),
                     this,
                     0);
             };
-            index.addListener(SWT.EraseItem, filterEraseListenerIndex);
+            index.addListener(SWT.PaintItem, filterPaintListenerIndex);
         }
         Table data = dataTable();
         if (data != null)
         {
-            filterEraseListenerData = e -> {
-                if (e.type != SWT.EraseItem || !(e.item instanceof TableItem item))
+            filterPaintListenerData = e -> {
+                if (e.type != SWT.PaintItem || !(e.item instanceof TableItem item))
                     return;
                 if (isFilterByPresentationSelected())
                     return;
-                DebugCollectionFilterEraseSupport.handleEraseItem(
+                DebugCollectionFilterHighlightSupport.handlePaintItem(
                     data,
                     item,
                     e,
                     activeFilterMatcher(),
-                    filterSkipItem(item),
                     this,
                     firstVisibleColumnIndex(data));
             };
-            data.addListener(SWT.EraseItem, filterEraseListenerData);
+            data.addListener(SWT.PaintItem, filterPaintListenerData);
         }
-    }
-
-    private TableItem filterSkipItem(TableItem item)
-    {
-        if (item == null)
-            return null;
-        if (indexInteraction != null && item == indexInteraction.selectedItem())
-            return item;
-        if (dataInteraction != null && item == dataInteraction.selectedItem())
-            return item;
-        return null;
     }
 
     private void hookContextMenu()

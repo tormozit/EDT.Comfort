@@ -365,7 +365,7 @@ public final class ConfigSearchResultsHook implements IStartup
             int w = textCol.getColumn().getWidth();
             if (w > 0) ComfortSettings.setConfigSearchMatchColumnWidth("text", w); //$NON-NLS-1$
         });
-        textCol.setLabelProvider(new DelegatingStyledCellLabelProvider(new IStyledLabelProvider()
+        textCol.setLabelProvider(new SelectionAwareStyledCellLabelProvider(new IStyledLabelProvider()
         {
             @Override
             public StyledString getStyledText(Object element)
@@ -471,8 +471,6 @@ public final class ConfigSearchResultsHook implements IStartup
         if (matchViewer.getTable() == null || matchViewer.getTable().isDisposed())
             return -1;
         List<Object> selectedNodes = treeViewer.getStructuredSelection().toList();
-        Global.tempLog("guardFirstRoot", "refreshMatchTable: ENTER selectedNodes=" //$NON-NLS-1$ //$NON-NLS-2$
-            + describeNodesForLog(selectedNodes) + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
         List<Object> tableItems = new ArrayList<>();
         for (Object node : selectedNodes)
             collectTableItemsRecursively(node, tableItems);
@@ -497,9 +495,6 @@ public final class ConfigSearchResultsHook implements IStartup
                 extractMatchStyledText(tableItem), file, tableItem));
         }
         matchViewer.setInput(rows);
-        Global.tempLog("guardFirstRoot", "refreshMatchTable: EXIT selectedNodes=" //$NON-NLS-1$ //$NON-NLS-2$
-            + describeNodesForLog(selectedNodes) + " tableItems=" + tableItems.size() //$NON-NLS-1$
-            + " rows=" + rows.size()); //$NON-NLS-1$
 
         // При терминальном узле путь у всех строк одинаковый (сам узел и есть этот путь) — как и
         // у штатной таблицы (см. hidePathColumn/showPathColumn), колонку тогда прячем.
@@ -661,7 +656,6 @@ public final class ConfigSearchResultsHook implements IStartup
         searchGeneration++;
         SAVED_TABLE_SELECTION_BY_VIEWER.clear();
         log("onSearchStarting: watch first root, gen=" + searchGeneration); //$NON-NLS-1$
-        Global.tempLog("guardFirstRoot", "onSearchStarting: searchQueryRunning=true guard=true gen=" + searchGeneration); //$NON-NLS-1$
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
@@ -677,7 +671,6 @@ public final class ConfigSearchResultsHook implements IStartup
     {
         searchQueryRunning = false;
         log("onSearchFinished: continue first root watch"); //$NON-NLS-1$
-        Global.tempLog("guardFirstRoot", "onSearchFinished: searchQueryRunning=false guard=" + guardFirstRootSelection); //$NON-NLS-1$
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
@@ -705,28 +698,20 @@ public final class ConfigSearchResultsHook implements IStartup
                 return;
             if (!searchQueryRunning && !guardFirstRootSelection)
                 return;
-            Global.tempLog("guardFirstRoot", "watch: attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                + " searchQueryRunning=" + searchQueryRunning + " guard=" + guardFirstRootSelection); //$NON-NLS-1$ //$NON-NLS-2$
 
             SearchViewViewers viewers = resolveViewers(findSearchViewPart());
             if (viewers == null)
             {
-                Global.tempLog("guardFirstRoot", "watch: attempt=" + attempt + " viewers=null"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 if (searchQueryRunning || attempt < 300)
                     startFirstRootWatch(attempt + 1);
-                else
-                    Global.tempLog("guardFirstRoot", "watch: GIVE UP (viewers=null, attempt cap) guard STILL=" + guardFirstRootSelection); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
 
             Object firstRoot = getFirstRootTreeElement(viewers.tree);
             if (firstRoot == null)
             {
-                Global.tempLog("guardFirstRoot", "watch: attempt=" + attempt + " firstRoot=null"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 if (searchQueryRunning || attempt < 300)
                     startFirstRootWatch(attempt + 1);
-                else
-                    Global.tempLog("guardFirstRoot", "watch: GIVE UP (firstRoot=null, attempt cap) guard STILL=" + guardFirstRootSelection); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
 
@@ -734,8 +719,6 @@ public final class ConfigSearchResultsHook implements IStartup
             if (!firstRoot.equals(current))
             {
                 log("watchFirstRoot: " + current + " -> " + firstRoot); //$NON-NLS-1$ //$NON-NLS-2$
-                Global.tempLog("guardFirstRoot", "watch: attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                    + " forcing selection " + current + " -> " + firstRoot); //$NON-NLS-1$ //$NON-NLS-2$
                 viewers.tree.setSelection(new StructuredSelection(firstRoot), true);
                 showFirstTreeItem(viewers.tree);
             }
@@ -745,19 +728,14 @@ public final class ConfigSearchResultsHook implements IStartup
 
             if (searchQueryRunning)
             {
-                Global.tempLog("guardFirstRoot", "watch: attempt=" + attempt + " searchQueryRunning still true -> loop again (NO CAP)"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 startFirstRootWatch(attempt + 1);
                 return;
             }
             if (!guardFirstRootSelection)
-            {
-                Global.tempLog("guardFirstRoot", "watch: attempt=" + attempt + " guard already false, exit"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
-            }
             if (firstRoot.equals(viewers.tree.getStructuredSelection().getFirstElement()))
             {
                 guardFirstRootSelection = false;
-                Global.tempLog("guardFirstRoot", "watch: attempt=" + attempt + " CLEARED guard (stable on firstRoot)"); //$NON-NLS-1$ //$NON-NLS-2$
                 scheduleFinalAggregationReapply(viewers.tree, viewers.table, firstRoot);
             }
             else if (attempt < 60)
@@ -765,7 +743,6 @@ public final class ConfigSearchResultsHook implements IStartup
             else
             {
                 guardFirstRootSelection = false;
-                Global.tempLog("guardFirstRoot", "watch: attempt=" + attempt + " CLEARED guard (attempt cap 60)"); //$NON-NLS-1$ //$NON-NLS-2$
                 scheduleFinalAggregationReapply(viewers.tree, viewers.table, firstRoot);
             }
         });
@@ -864,19 +841,12 @@ public final class ConfigSearchResultsHook implements IStartup
     {
         SearchViewViewers viewers = resolveViewers(view); // также проверяет, что эта страница активна
         if (viewers == null)
-        {
-            Global.tempLog("createBreakpoints", "configSearch.currentBreakpointTargets: viewers=null (страница не активна)"); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
-        }
 
         TableViewer matchViewer = cachedMatchTableViewer;
         Table matchTable = matchViewer != null ? matchViewer.getTable() : null;
         if (matchTable == null || matchTable.isDisposed())
-        {
-            Global.tempLog("createBreakpoints", "configSearch.currentBreakpointTargets: matchTable=null/disposed " //$NON-NLS-1$ //$NON-NLS-2$
-                + "(matchViewer=" + matchViewer + ")"); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
-        }
 
         // Явно выбранные строки — если нет, берём все строки текущего выбора дерева
         // (таблица уже отфильтрована/синхронизирована с ним через refreshMatchTable).
@@ -889,8 +859,6 @@ public final class ConfigSearchResultsHook implements IStartup
                 && row.file != null && row.lineNumber > 0)
                 targets.add(new CreateDebuggerBreakpoints.Target(row.file, (int) row.lineNumber));
         }
-        Global.tempLog("createBreakpoints", "configSearch.currentBreakpointTargets: selectionCount=" //$NON-NLS-1$ //$NON-NLS-2$
-            + matchTable.getSelectionCount() + " itemsScanned=" + items.length + " targets=" + targets.size()); //$NON-NLS-1$ //$NON-NLS-2$
         return targets;
     }
 
@@ -1163,14 +1131,10 @@ public final class ConfigSearchResultsHook implements IStartup
             {
                 IStructuredSelection selection = event.getStructuredSelection();
                 List<Object> selectedNodes = selection.toList();
-                // Временная диагностика (баг: таблица показывает терминальную ветку, хотя
-                // активна строка узла-проекта). Топик отдельный от issue165 — другой баг.
 
                 // EDT при появлении результатов спускается к первому терминальному узлу.
                 if (guardFirstRootSelection)
                 {
-                    Global.tempLog("guardFirstRoot", "postSelectionListener: guard=true, selectedNodes=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + describeNodesForLog(selectedNodes));
                     Object firstRoot = getFirstRootTreeElement(treeViewer);
                     if (firstRoot == null)
                         return;
@@ -1178,8 +1142,6 @@ public final class ConfigSearchResultsHook implements IStartup
                     if (!firstRoot.equals(current))
                     {
                         log("redirectToFirstRoot: " + current + " -> " + firstRoot); //$NON-NLS-1$ //$NON-NLS-2$
-                        Global.tempLog("guardFirstRoot", "REDIRECT (user click hijacked): " + current + " -> " + firstRoot //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                            + " guard=" + guardFirstRootSelection + " searchQueryRunning=" + searchQueryRunning); //$NON-NLS-1$ //$NON-NLS-2$
                         treeViewer.setSelection(new StructuredSelection(firstRoot), true);
                         showFirstTreeItem(treeViewer);
                         // ВАЖНО: programmatic setSelection() не порождает новое post-selection
@@ -2176,11 +2138,11 @@ public final class ConfigSearchResultsHook implements IStartup
 
     /**
      * Как {@link #extractMatchText}, но с подсветкой вхождения — тем же стилем, что и в панели
-     * текстового поиска ({@link ThemeAwareColors#searchMatchStyler()}, не штатные стили 1С — для
-     * единообразия подсветки между обоими режимами поиска). {@code TextSearchFileMatch} и
-     * {@code TextSearchModelMatch} имеют одинаковые по сигнатуре {@code getText()}/
-     * {@code getTextOffset()}/{@code getTextLength()} (смещение/длина вхождения в тексте) —
-     * читаются рефлексией единообразно для обоих типов. Для типов без текста вхождения
+     * текстового поиска ({@link SmartMatchHighlight#textOnlyStyler}, цвет фильтра из настроек
+     * плагина — не штатные стили 1С — для единообразия подсветки между обоими режимами поиска).
+     * {@code TextSearchFileMatch} и {@code TextSearchModelMatch} имеют одинаковые по сигнатуре
+     * {@code getText()}/{@code getTextOffset()}/{@code getTextLength()} (смещение/длина вхождения
+     * в тексте) — читаются рефлексией единообразно для обоих типов. Для типов без текста вхождения
      * (напр. {@code BmObjectMatch}) — обычный текст без подсветки (штатный {@code getDecoratedText()}/
      * {@code getStyledText()}, но без его стилей).
      */
@@ -2197,12 +2159,14 @@ public final class ConfigSearchResultsHook implements IStartup
             || len <= 0 || off < 0 || off > text.length())
             return new StyledString(text);
 
+        TableViewer matchViewer = cachedMatchTableViewer;
+        Control styleContext = matchViewer != null ? matchViewer.getTable() : null;
         int end = Math.min(off + len, text.length());
         StyledString ss = new StyledString();
         if (off > 0)
             ss.append(text.substring(0, off));
         if (end > off)
-            ss.append(text.substring(off, end), ThemeAwareColors.searchMatchStyler());
+            ss.append(text.substring(off, end), SmartMatchHighlight.textOnlyStyler(styleContext));
         if (end < text.length())
             ss.append(text.substring(end));
         return ss;

@@ -432,7 +432,7 @@ public final class FileSearchResultsHook implements IStartup
             int w = textCol.getColumn().getWidth();
             if (w > 0) ComfortSettings.setFileSearchColumnWidth("text", w);
         });
-        textCol.setLabelProvider(new DelegatingStyledCellLabelProvider(new IStyledLabelProvider()
+        textCol.setLabelProvider(new SelectionAwareStyledCellLabelProvider(new IStyledLabelProvider()
         {
             @Override
             public StyledString getStyledText(Object element)
@@ -453,7 +453,7 @@ public final class FileSearchResultsHook implements IStartup
                     int end = off + len;
                     if (end > text.length()) end = text.length();
                     if (end > off)
-                        ss.append(text.substring(off, end), ThemeAwareColors.searchMatchStyler());
+                        ss.append(text.substring(off, end), SmartMatchHighlight.textOnlyStyler(table));
                     pos = end;
                 }
                 if (pos < text.length())

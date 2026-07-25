@@ -179,12 +179,6 @@
           sequence="M3+M2+F">
     </key>
     <key
-          commandId="tormozit.CollectionSkeleton"
-          contextId="org.eclipse.ui.contexts.window"
-          schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
-          sequence="M1+M2+M3+K">
-    </key>
-    <key
           commandId="tormozit.showCollection"
           contextId="com._1c.g5.v8.dt.debug.ui.debugging"
           schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
@@ -265,11 +259,6 @@
         name="Копировать ссылку"
         categoryId="tormozit.commands.global"
         description="Копировать ссылку на объект или строку модуля. Приоритет над EDT. Настраивайте только «В окнах». Остальные контексты не редактируйте. (Комфорт)"/>
-    <command
-        id="tormozit.CollectionSkeleton"
-        name="Открыть скелет коллекции"
-        categoryId="tormozit.commands.global"
-        description="Тестовая таблица 1000×50 без сервера отладки (Комфорт)"/>
     <command
         id="tormozit.RecentPlaces"
         name="Последние места"
@@ -662,10 +651,6 @@
           </iterate>
         </with>
       </activeWhen>
-    </handler>
-    <handler
-        class="tormozit.ExecutableExtensionFactory:tormozit.DebugCollectionSkeletonHandler"
-        commandId="tormozit.CollectionSkeleton">
     </handler>
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.DebugCollectionShowHandler"

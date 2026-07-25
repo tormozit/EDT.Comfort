@@ -129,13 +129,9 @@ final class CreateDebuggerBreakpoints
                 List<Target> fileSearchTargets = FileSearchResultsHook.currentBreakpointTargets(view);
                 List<Target> configSearchTargets = fileSearchTargets == null
                     ? ConfigSearchResultsHook.currentBreakpointTargets(view) : null;
-                Global.tempLog("createBreakpoints", "toolbar click: fileSearchTargets=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + describeTargets(fileSearchTargets) + " configSearchTargets=" //$NON-NLS-1$
-                    + describeTargets(configSearchTargets));
                 List<Target> targets = fileSearchTargets != null ? fileSearchTargets : configSearchTargets;
                 if (targets == null || targets.isEmpty())
                 {
-                    Global.tempLog("createBreakpoints", "toolbar click: no targets, aborting"); //$NON-NLS-1$ //$NON-NLS-2$
                     ToastNotification.show("Точки останова", //$NON-NLS-1$
                         "Среди выделенного нет строк модулей (с номером строки) — нечего добавлять."); //$NON-NLS-1$
                     return;
@@ -153,18 +149,9 @@ final class CreateDebuggerBreakpoints
         bars.updateActionBars();
     }
 
-    private static String describeTargets(List<Target> targets)
-    {
-        if (targets == null)
-            return "null"; //$NON-NLS-1$
-        return targets.size() + " " + targets; //$NON-NLS-1$
-    }
-
     static void createForTargets(List<Target> targets, Shell shell)
     {
         List<Target> valid = dedupe(targets);
-        Global.tempLog("createBreakpoints", "createForTargets: input=" + describeTargets(targets) //$NON-NLS-1$ //$NON-NLS-2$
-            + " valid=" + describeTargets(valid)); //$NON-NLS-1$
         if (valid.isEmpty())
         {
             ToastNotification.show("Точки останова", //$NON-NLS-1$
@@ -174,7 +161,6 @@ final class CreateDebuggerBreakpoints
         }
 
         IBslBreakpointFactory factory = resolveFactory();
-        Global.tempLog("createBreakpoints", "createForTargets: factory=" + factory); //$NON-NLS-1$ //$NON-NLS-2$
         if (factory == null)
             return;
 
@@ -187,12 +173,10 @@ final class CreateDebuggerBreakpoints
             sample = createOrReuse(factory, sampleTarget, sampleCreated);
             sampleIsNew = !sampleCreated.isEmpty();
             registerNewlyCreated(sampleCreated);
-            Global.tempLog("createBreakpoints", "createForTargets: sample created for " + sampleTarget); //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (Exception e)
         {
             log("createForTargets: sample create failed: " + e);
-            Global.tempLogException("createBreakpoints", "createForTargets: sample create failed for " + sampleTarget, e); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
 
@@ -200,14 +184,12 @@ final class CreateDebuggerBreakpoints
         // на "Отмена" (или если страницу вообще не удалось открыть) её нужно убрать, если она была
         // только что создана нами (переиспользованную существующую точку — не трогать).
         PreferenceDialog dialog = PreferencesUtil.createPropertyDialogOn(shell, sample, null, null, null);
-        Global.tempLog("createBreakpoints", "createForTargets: dialog=" + dialog); //$NON-NLS-1$ //$NON-NLS-2$
         if (dialog == null)
         {
             deleteIfNew(sample, sampleIsNew);
             return;
         }
         int result = dialog.open();
-        Global.tempLog("createBreakpoints", "createForTargets: dialog.open()=" + result + " (OK=" + Window.OK + ")"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         if (result != Window.OK)
         {
             deleteIfNew(sample, sampleIsNew);
@@ -252,7 +234,6 @@ final class CreateDebuggerBreakpoints
         catch (CoreException e)
         {
             log("registerNewlyCreated: " + e);
-            Global.tempLogException("createBreakpoints", "registerNewlyCreated failed for " + newlyCreated, e); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 
@@ -264,12 +245,10 @@ final class CreateDebuggerBreakpoints
         try
         {
             breakpoint.delete();
-            Global.tempLog("createBreakpoints", "deleteIfNew: удалена отменённая точка " + breakpoint); //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (CoreException e)
         {
             log("deleteIfNew: " + e);
-            Global.tempLogException("createBreakpoints", "deleteIfNew failed for " + breakpoint, e); //$NON-NLS-1$ //$NON-NLS-2$
         }
     }
 

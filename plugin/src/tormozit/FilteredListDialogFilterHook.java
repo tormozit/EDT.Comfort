@@ -3,7 +3,6 @@ package tormozit;
 import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
-import org.eclipse.swt.events.ModifyEvent;
 import org.eclipse.swt.events.ModifyListener;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.widgets.Composite;
@@ -160,14 +159,6 @@ public final class FilteredListDialogFilterHook implements IStartup
         return true;
     }
 
-    private static String itemText(org.eclipse.swt.widgets.Event e, Table table)
-    {
-        if (!(e.item instanceof TableItem item) || item.isDisposed())
-            return "?"; //$NON-NLS-1$
-        String text = item.getText(e.index);
-        return text != null ? text : ""; //$NON-NLS-1$
-    }
-
     private static String getFilterPattern(Control filterControl)
     {
         if (filterControl == null || filterControl.isDisposed())
@@ -273,7 +264,7 @@ public final class FilteredListDialogFilterHook implements IStartup
         public void setFilter(String pattern, boolean ignoreCase, boolean matchEmptyString)
         {
             matcher = new SmartMatcher(pattern);
-         }
+        }
 
         @Override
         public boolean match(Object element)
@@ -281,8 +272,7 @@ public final class FilteredListDialogFilterHook implements IStartup
             if (matcher.isEmpty)
                 return true;
             String text = labelProvider != null ? labelProvider.getText(element) : String.valueOf(element);
-            boolean result = matcher.matches(text != null ? text : ""); //$NON-NLS-1$
-             return result;
+            return matcher.matches(text != null ? text : ""); //$NON-NLS-1$
         }
 
         SmartMatcher current()
