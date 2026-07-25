@@ -612,4 +612,43 @@ public final class SmartMatchHighlight
         cachedMatchBaseRgb = null;
         // cachedLightRgb сбрасывает clearColorCache / lightForeground при смене pref
     }
+
+    private static boolean colorsOnSelectionFieldWarned;
+
+    /**
+     * Включает {@link org.eclipse.jface.viewers.StyledCellLabelProvider#COLORS_ON_SELECTION} на
+     * УЖЕ созданном чужом {@code DelegatingStyledCellLabelProvider} (нативный EDT, мы туда только
+     * инжектируем свой {@code IStyledLabelProvider} через reflection, см. {@code injectStyledStringProvider}
+     * в {@code NavigatorFilterHook}/{@code SmartOutlineHook}/{@code InfobasesViewHook}) — без этого
+     * JFace игнорирует цвет {@link StyleRange} на ВЫДЕЛЕННОЙ строке (см. {@link SelectionAwareStyledCellLabelProvider}
+     * — тот же фикс, но для provider'а, который мы создаём сами). Флаг хранится в приватном
+     * {@code int style} — недокументированное, но стабильное (простой битовой маской) поле;
+     * при недоступности (другая версия JFace) тихо отключается — просто не будет цвета на выделении,
+     * как было прежде.
+     */
+    static void enableColorsOnSelection(org.eclipse.jface.viewers.StyledCellLabelProvider provider)
+    {
+        if (provider == null)
+            return;
+        try
+        {
+            java.lang.reflect.Field styleField =
+                org.eclipse.jface.viewers.StyledCellLabelProvider.class.getDeclaredField("style"); //$NON-NLS-1$
+            styleField.setAccessible(true);
+            int current = styleField.getInt(provider);
+            int withColors = current | org.eclipse.jface.viewers.StyledCellLabelProvider.COLORS_ON_SELECTION;
+            if (withColors != current)
+                styleField.setInt(provider, withColors);
+        }
+        catch (ReflectiveOperationException | SecurityException | IllegalArgumentException ex)
+        {
+            if (!colorsOnSelectionFieldWarned)
+            {
+                colorsOnSelectionFieldWarned = true;
+                Global.tempLogException("enableColorsOnSelection", //$NON-NLS-1$
+                    "не удалось включить COLORS_ON_SELECTION рефлексией (провайдер=" + provider.getClass() + ")", //$NON-NLS-1$ //$NON-NLS-2$
+                    ex);
+            }
+        }
+    }
 }

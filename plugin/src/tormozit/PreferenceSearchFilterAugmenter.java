@@ -9,7 +9,6 @@ import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.jface.preference.IPreferenceNode;
 import org.eclipse.jface.preference.IPreferencePage;
 import org.eclipse.jface.preference.PreferenceDialog;
-import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.jface.viewers.LabelProvider;
 import org.eclipse.jface.viewers.StyledString;
@@ -522,7 +521,7 @@ final class PreferenceSearchFilterAugmenter
         // Элементы дерева — всегда IPreferenceNode, у которого есть тот же
         // самый getLabelText()/getLabelImage(), что использовал бы стоковый
         // provider — используем их напрямую, без обёртки над чужим provider.
-        viewer.setLabelProvider(new DelegatingStyledCellLabelProvider(
+        viewer.setLabelProvider(new SelectionAwareStyledCellLabelProvider(
                 new PreferenceSearchLabelDecorator(filterControl)));
     }
 

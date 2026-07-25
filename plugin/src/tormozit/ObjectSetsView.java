@@ -18,7 +18,6 @@ import org.eclipse.jface.util.LocalSelectionTransfer;
 import org.eclipse.jface.viewers.ArrayContentProvider;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.ColumnPixelData;
-import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.LabelProvider;
@@ -350,7 +349,7 @@ public final class ObjectSetsView extends ViewPart
         nameColumn = colName.getColumn();
         nameColumn.setText("Имя"); //$NON-NLS-1$
         nameLabelProvider = new NameLabelProvider();
-        colName.setLabelProvider(new DelegatingStyledCellLabelProvider(nameLabelProvider));
+        colName.setLabelProvider(new SelectionAwareStyledCellLabelProvider(nameLabelProvider));
         layout.setColumnData(nameColumn, new ColumnPixelData(nameWidth, true, true));
 
         TableViewerColumn colPath = new TableViewerColumn(itemsViewer, SWT.NONE);
@@ -1196,31 +1195,14 @@ public final class ObjectSetsView extends ViewPart
             StyledString styled = new StyledString();
             Table table = itemsViewer != null && !itemsViewer.getControl().isDisposed()
                 ? itemsViewer.getTable() : null;
-            boolean selected = isItemsRowSelected(element);
             for (NameSegment seg : buildNameSegments(name, matcher))
             {
                 if (seg.highlight)
-                    styled.append(seg.text, selected ? SmartMatchHighlight.boldOnlyStyler()
-                        : SmartMatchHighlight.styler(table));
+                    styled.append(seg.text, SmartMatchHighlight.styler(table));
                 else
                     styled.append(seg.text);
             }
             return styled;
-        }
-
-        private boolean isItemsRowSelected(Object element)
-        {
-            if (itemsViewer == null || itemsViewer.getControl().isDisposed())
-                return false;
-            IStructuredSelection sel = itemsViewer.getStructuredSelection();
-            if (sel == null || sel.isEmpty())
-                return false;
-            for (Object o : sel.toArray())
-            {
-                if (element == o || element.equals(o))
-                    return true;
-            }
-            return false;
         }
     }
 

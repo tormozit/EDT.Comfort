@@ -25,6 +25,7 @@ public final class SmartStyledCellLabelWrapper extends StyledCellLabelProvider
 
     public SmartStyledCellLabelWrapper(StyledCellLabelProvider base)
     {
+        super(COLORS_ON_SELECTION);
         this.base = base;
     }
 

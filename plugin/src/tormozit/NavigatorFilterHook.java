@@ -398,6 +398,7 @@ public final class NavigatorFilterHook implements IStartup
                             labelSource, matchTextFn, searchCache);
             smartLp.setHighlightPattern(initialPattern);
             injectStyledStringProvider(delegating, smartLp);
+            SmartMatchHighlight.enableColorsOnSelection(delegating);
             return smartLp;
         }
 
@@ -415,7 +416,7 @@ public final class NavigatorFilterHook implements IStartup
                 ? new SmartOutlineLabelProvider(innerStyled, filterLabels, NavigatorTreeElementLabels::isGroupNode)
                 : new SmartOutlineLabelProvider(null, filterLabels, NavigatorTreeElementLabels::isGroupNode);
         smartLp.setHighlightPattern(initialPattern);
-        viewer.setLabelProvider(new DelegatingStyledCellLabelProvider(smartLp));
+        viewer.setLabelProvider(new SelectionAwareStyledCellLabelProvider(smartLp));
         return smartLp;
     }
 
@@ -432,6 +433,7 @@ public final class NavigatorFilterHook implements IStartup
         if (inject instanceof IStyledLabelProvider && raw instanceof DelegatingStyledCellLabelProvider delegating)
         {
             injectStyledStringProvider(delegating, (IStyledLabelProvider) inject);
+            SmartMatchHighlight.enableColorsOnSelection(delegating);
             if (viewer.getLabelProvider() != raw)
                 viewer.setLabelProvider(raw);
             tree.setData(VIEWER_LABEL_PROVIDER_KEY, raw);

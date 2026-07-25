@@ -1677,6 +1677,7 @@ public class SmartOutlineHook implements IStartup {
             SmartOutlineLabelProvider smartLabelProvider = new SmartOutlineLabelProvider(styledForTree, baseLp);
             smartLabelProvider.setHighlightPattern(initialPattern);
             injectStyledStringProvider((DelegatingStyledCellLabelProvider) rawLp, smartLabelProvider);
+            SmartMatchHighlight.enableColorsOnSelection((DelegatingStyledCellLabelProvider) rawLp);
             return smartLabelProvider;
         }
         if (bslQuickOutline && dialog != null)
@@ -1714,9 +1715,12 @@ public class SmartOutlineHook implements IStartup {
         smartLabelProvider.setHighlightPattern(initialPattern);
 
         if (innerStyledLp != null && rawLp instanceof DelegatingStyledCellLabelProvider)
+        {
             injectStyledStringProvider((DelegatingStyledCellLabelProvider) rawLp, smartLabelProvider);
+            SmartMatchHighlight.enableColorsOnSelection((DelegatingStyledCellLabelProvider) rawLp);
+        }
         else
-            viewer.setLabelProvider(new DelegatingStyledCellLabelProvider(smartLabelProvider));
+            viewer.setLabelProvider(new SelectionAwareStyledCellLabelProvider(smartLabelProvider));
         return smartLabelProvider;
     }
 

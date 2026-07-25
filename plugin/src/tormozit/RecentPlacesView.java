@@ -15,7 +15,6 @@ import org.eclipse.jface.layout.TableColumnLayout;
 import org.eclipse.jface.viewers.ArrayContentProvider;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.ColumnPixelData;
-import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.ui.handlers.IHandlerService;
@@ -240,7 +239,7 @@ public final class RecentPlacesView extends ViewPart
         nameColumn = colName.getColumn();
         nameColumn.setText("Имя"); //$NON-NLS-1$
         nameLabelProvider = new NameLabelProvider();
-        colName.setLabelProvider(new DelegatingStyledCellLabelProvider(nameLabelProvider));
+        colName.setLabelProvider(new SelectionAwareStyledCellLabelProvider(nameLabelProvider));
 
         TableViewerColumn colPlace = new TableViewerColumn(listViewer, SWT.NONE);
         placeColumn = colPlace.getColumn();

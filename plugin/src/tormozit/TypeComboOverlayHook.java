@@ -1303,7 +1303,19 @@ public class TypeComboOverlayHook implements IStartup
                     // и не закрываем попап в обоих Shell-случаях.
                     if (focusControl != state.table && focusControl != state.popup
                         && focusControl != state.hostShell)
+                    {
                         hidePopup(state, "focusLost(text): focusControl!=table"); //$NON-NLS-1$
+
+                        // Фокус реально ушёл из поля без коммита выбора (клик по строке попапа
+                        // или Enter коммитят раньше и меняют state.lastCommittedText — см.
+                        // commitSelection). Если пользователь просто печатал текст фильтра и
+                        // увёл фокус, не выбрав элемент, откатываем поле к последнему
+                        // зафиксированному значению — иначе в нём остаётся недооформленный текст
+                        // редактирования вместо реального значения типа.
+                        String committed = state.lastCommittedText != null ? state.lastCommittedText : ""; //$NON-NLS-1$
+                        if (!text.isDisposed() && !committed.equals(text.getText()))
+                            text.setText(committed);
+                    }
                 });
             }
         });

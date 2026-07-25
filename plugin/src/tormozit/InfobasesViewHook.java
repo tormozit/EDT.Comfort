@@ -565,10 +565,11 @@ public final class InfobasesViewHook implements IStartup
         {
             InfobasesViewDebug.log("installHighlight: inject into existing DelegatingStyledCellLabelProvider"); //$NON-NLS-1$
             injectStyledStringProvider((DelegatingStyledCellLabelProvider) rawLp, smartLp);
+            SmartMatchHighlight.enableColorsOnSelection((DelegatingStyledCellLabelProvider) rawLp);
             return smartLp;
         }
         InfobasesViewDebug.log("installHighlight: wrap in new DelegatingStyledCellLabelProvider"); //$NON-NLS-1$
-        viewer.setLabelProvider(new DelegatingStyledCellLabelProvider(smartLp));
+        viewer.setLabelProvider(new SelectionAwareStyledCellLabelProvider(smartLp));
         return smartLp;
     }
 

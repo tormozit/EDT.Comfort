@@ -38,6 +38,7 @@ public final class NavigatorStyledCellLabelWrapper extends StyledCellLabelProvid
     public NavigatorStyledCellLabelWrapper(StyledCellLabelProvider base, NavigatorSearchTextCache searchCache,
             Object labelSource)
     {
+        super(COLORS_ON_SELECTION);
         this.base = base;
         this.searchCache = searchCache;
         this.labelSource = labelSource;
