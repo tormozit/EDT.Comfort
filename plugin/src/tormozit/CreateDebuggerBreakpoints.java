@@ -310,7 +310,7 @@ final class CreateDebuggerBreakpoints
         return result;
     }
 
-    private static IBslBreakpointFactory resolveFactory()
+    static IBslBreakpointFactory resolveFactory()
     {
         try
         {

@@ -64,6 +64,9 @@
     <startup class="tormozit.DebugVariablePresentationHook"/>
     <startup class="tormozit.DebugExpressionsChangeValueHook"/>
     <startup class="tormozit.BreakpointPropertiesHook"/>
+    <startup class="tormozit.BreakpointListHook"/>
+    <startup class="tormozit.ExceptionSelectionDialogHook"/>
+    <startup class="tormozit.StacktracesViewInteractionHook"/>
     <startup class="tormozit.InfobaseSyncQuestionDialogHook"/>
     <startup class="tormozit.FilterBySubsystemsDialogHook"/>
     <startup class="tormozit.GitChangedFileMenuHook"/>
@@ -423,6 +426,11 @@
         name="История ИР"
         categoryId="tormozit.commands.global"
         description="Открыть историю выделенного коммита в приложении ИР (Комфорт)"/>
+    <command
+        id="tormozit.stacktraces.stopOnException"
+        name="Остановка по исключению"
+        categoryId="tormozit.commands.global"
+        description="Создать точку останова по исключению с причиной из выбранной трассировки стека (Комфорт)"/>
   </extension>
 
   <extension point="org.eclipse.ui.handlers">
@@ -688,6 +696,10 @@
         </with>
       </activeWhen>
     </handler>
+    <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.StacktraceStopOnExceptionHandler"
+        commandId="tormozit.stacktraces.stopOnException">
+    </handler>
   </extension>
 
   <extension point="org.eclipse.ui.menus">
@@ -722,6 +734,22 @@
             label="Фильтр по набору"
             style="toggle"
             tooltip="Показать только объекты активного набора; вытесняет фильтр подсистем (Комфорт)"/>
+      </menuContribution>
+      <menuContribution
+          locationURI="popup:com._1c.g5.v8.dt.stacktraces.ui.StacktracesView">
+        <command
+            commandId="tormozit.stacktraces.stopOnException"
+            label="Остановка по исключению"
+            tooltip="Создать точку останова по исключению с причиной из выбранной трассировки стека (Комфорт)"
+            style="push">
+          <visibleWhen checkEnabled="false">
+            <with variable="selection">
+              <iterate ifEmpty="false" operator="or">
+                <instanceof value="com._1c.g5.v8.dt.stacktraces.model.IStacktraceElement"/>
+              </iterate>
+            </with>
+          </visibleWhen>
+        </command>
       </menuContribution>
     </extension>
 
