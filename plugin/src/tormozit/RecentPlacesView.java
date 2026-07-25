@@ -52,6 +52,7 @@ import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Label;
+import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
@@ -114,6 +115,7 @@ public final class RecentPlacesView extends ViewPart
 
     private IMemento workbenchState;
 
+    private Composite viewRoot;
     private Composite columnHost;
 
     private FilterInputBox filterInput;
@@ -134,6 +136,13 @@ public final class RecentPlacesView extends ViewPart
     private IContextActivation keyContextActivation;
 
     private ActiveProjectTracker.ContextProjectListener contextProjectListener;
+
+    /**
+     * Куда вернуть фокус из {@link #setFocus()}: клик по строке не должен
+     * уводить в SearchBox (раньше каждый setFocus звал scheduleFocusWhenReady).
+     */
+    private enum RememberedFocus { FILTER, TABLE }
+    private RememberedFocus rememberedFocus = RememberedFocus.FILTER;
 
     private int columnSaveGeneration;
 
@@ -171,6 +180,7 @@ public final class RecentPlacesView extends ViewPart
         parent.setLayout(new FillLayout());
 
         Composite root = new Composite(parent, SWT.NONE);
+        viewRoot = root;
         root.setLayout(new GridLayout(1, false));
 
         IDialogSettings settings = viewSettings();
@@ -302,6 +312,7 @@ public final class RecentPlacesView extends ViewPart
         installDoubleClick(table);
         installTableContextMenu(table);
         installDragSource(table);
+        installRememberFocus(table);
 
         RecentPlaces.getInstance().addChangeListener(storeChangeListener);
         refreshFromStore();
@@ -311,9 +322,56 @@ public final class RecentPlacesView extends ViewPart
     public void setFocus()
     {
         activateKeyContext();
-        refreshFromStore();
-        if (filterInput != null && !filterInput.isDisposed())
-            filterInput.scheduleFocusWhenReady();
+        // Не refreshFromStore здесь: клик по view → setFocus → лишний rebuild списка.
+        restoreRememberedFocus();
+    }
+
+    private void installRememberFocus(Table table)
+    {
+        Listener toTable = e -> rememberedFocus = RememberedFocus.TABLE;
+        table.addListener(SWT.MouseDown, toTable);
+        table.addListener(SWT.FocusIn, toTable);
+        if (filterInput == null || filterInput.isDisposed())
+            return;
+        Control filterWidget = filterInput.widget();
+        if (filterWidget == null || filterWidget.isDisposed())
+            return;
+        Listener toFilter = e -> rememberedFocus = RememberedFocus.FILTER;
+        filterWidget.addListener(SWT.FocusIn, toFilter);
+        Control filterInputCtrl = filterInput.inputControl();
+        if (filterInputCtrl != null && filterInputCtrl != filterWidget && !filterInputCtrl.isDisposed())
+            filterInputCtrl.addListener(SWT.FocusIn, toFilter);
+    }
+
+    private void restoreRememberedFocus()
+    {
+        if (rememberedFocus == RememberedFocus.TABLE
+            && listViewer != null && !listViewer.getControl().isDisposed())
+        {
+            listViewer.getTable().setFocus();
+            return;
+        }
+        if (filterInput == null || filterInput.isDisposed())
+        {
+            if (listViewer != null && !listViewer.getControl().isDisposed())
+                listViewer.getTable().setFocus();
+            return;
+        }
+        // async: к моменту callback клик по таблице мог уже выставить rememberedFocus=TABLE
+        Display display = filterInput.widget().getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() ->
+        {
+            if (rememberedFocus == RememberedFocus.TABLE
+                && listViewer != null && !listViewer.getControl().isDisposed())
+            {
+                listViewer.getTable().setFocus();
+                return;
+            }
+            if (filterInput != null && !filterInput.isDisposed())
+                filterInput.setFocus();
+        });
     }
 
     @Override
@@ -402,7 +460,65 @@ public final class RecentPlacesView extends ViewPart
         if (entryIconResolver != null)
             entryIconResolver.clearCache();
         allEntries = RecentPlaces.getInstance().getAll();
-        applyFilterFromField();
+        boolean preserve = shouldPreserveViewport();
+        Table table = listViewer.getTable();
+        Global.tempLog("recent-places-scroll", //$NON-NLS-1$
+            "refreshFromStore preserve=" + preserve //$NON-NLS-1$
+                + " top=" + (!table.isDisposed() ? table.getTopIndex() : -1) //$NON-NLS-1$
+                + " sel=" + (!table.isDisposed() ? table.getSelectionIndex() : -1) //$NON-NLS-1$
+                + " items=" + (!table.isDisposed() ? table.getItemCount() : -1) //$NON-NLS-1$
+                + " all=" + allEntries.size() //$NON-NLS-1$
+                + " focusCtrl=" + describeFocusControl(table, viewRoot)); //$NON-NLS-1$
+        // При фокусе в панели (таблица или фильтр) не сдвигать viewport и текущую строку.
+        applyFilterFromField(preserve);
+    }
+
+    /**
+     * Фокус в панели «Последние места»: таблица или поле фильтра ({@code SearchBox}/StyledText).
+     * Раньше проверяли только {@code table.isFocusControl()} — при фокусе в фильтре
+     * preserve не включался, и новая запись сверху сдвигала список.
+     */
+    private boolean shouldPreserveViewport()
+    {
+        if (listViewer == null || listViewer.getControl().isDisposed())
+            return false;
+        Table table = listViewer.getTable();
+        if (table.isDisposed())
+            return false;
+        if (table.isFocusControl())
+            return true;
+        Display display = table.getDisplay();
+        if (display == null || display.isDisposed())
+            return false;
+        Control focus = display.getFocusControl();
+        return isUnder(focus, viewRoot);
+    }
+
+    private static boolean isUnder(Control child, Composite ancestor)
+    {
+        if (child == null || child.isDisposed() || ancestor == null || ancestor.isDisposed())
+            return false;
+        for (Control c = child; c != null; c = c.getParent())
+        {
+            if (c == ancestor)
+                return true;
+        }
+        return false;
+    }
+
+    private static String describeFocusControl(Table table, Composite viewRoot)
+    {
+        if (table == null || table.isDisposed())
+            return "tableDisposed"; //$NON-NLS-1$
+        Display display = table.getDisplay();
+        if (display == null || display.isDisposed())
+            return "noDisplay"; //$NON-NLS-1$
+        Control focus = display.getFocusControl();
+        if (focus == null)
+            return "null"; //$NON-NLS-1$
+        return focus.getClass().getName()
+            + " isTable=" + (focus == table) //$NON-NLS-1$
+            + " underView=" + isUnder(focus, viewRoot); //$NON-NLS-1$
     }
 
     private void activateKeyContext()
@@ -775,18 +891,48 @@ public final class RecentPlacesView extends ViewPart
 
     private void applyFilterFromField()
     {
+        applyFilterFromField(false);
+    }
+
+    private void applyFilterFromField(boolean preserveViewport)
+    {
         if (filterInput == null || filterInput.isDisposed())
             return;
-        applyFilter(filterInput.getText());
+        applyFilter(filterInput.getText(), preserveViewport);
     }
 
     private void applyFilter(String pattern)
+    {
+        applyFilter(pattern, false);
+    }
+
+    private void applyFilter(String pattern, boolean preserveViewport)
     {
         if (listViewer == null || listViewer.getControl().isDisposed())
             return;
         RecentPlaces.Entry selected = getSelectedEntry();
         String selectedKey = selected != null ? selected.key : null;
         int savedActiveColumn = tableInteraction != null ? tableInteraction.activeColumn() : -1;
+        String viewportAnchorKey = null;
+        Integer selectionOffsetFromTop = null;
+        Table table = listViewer.getTable();
+        int topBefore = !table.isDisposed() ? table.getTopIndex() : -1;
+        int selBefore = !table.isDisposed() ? table.getSelectionIndex() : -1;
+        int itemsBefore = !table.isDisposed() ? table.getItemCount() : -1;
+        if (preserveViewport)
+        {
+            viewportAnchorKey = captureViewportAnchorKey();
+            selectionOffsetFromTop = captureSelectionOffsetFromTop();
+        }
+        Global.tempLog("recent-places-scroll", //$NON-NLS-1$
+            "applyFilter START preserve=" + preserveViewport //$NON-NLS-1$
+                + " topBefore=" + topBefore //$NON-NLS-1$
+                + " selBefore=" + selBefore //$NON-NLS-1$
+                + " itemsBefore=" + itemsBefore //$NON-NLS-1$
+                + " selectedKey=" + selectedKey //$NON-NLS-1$
+                + " anchorKey=" + viewportAnchorKey //$NON-NLS-1$
+                + " selOffset=" + selectionOffsetFromTop //$NON-NLS-1$
+                + " patternLen=" + (pattern != null ? pattern.length() : -1)); //$NON-NLS-1$
         SmartMatcher m = new SmartMatcher(pattern);
         nameLabelProvider.setMatcher(m);
         boolean filterByProject = filterByProjectCheckbox != null
@@ -808,22 +954,178 @@ public final class RecentPlacesView extends ViewPart
             filtered.add(e);
         }
 
-        Table table = listViewer.getTable();
         table.setRedraw(false);
         try
         {
             listViewer.setInput(filtered);
             listViewer.refresh();
-            if (!restoreSelectionByKey(selectedKey, savedActiveColumn))
+            int topAfterInput = !table.isDisposed() ? table.getTopIndex() : -1;
+            Global.tempLog("recent-places-scroll", //$NON-NLS-1$
+                "after setInput/refresh top=" + topAfterInput //$NON-NLS-1$
+                    + " items=" + filtered.size() //$NON-NLS-1$
+                    + " sel=" + (!table.isDisposed() ? table.getSelectionIndex() : -1)); //$NON-NLS-1$
+            if (preserveViewport)
+            {
+                if (viewportAnchorKey != null)
+                    restoreTopIndexByKey(viewportAnchorKey);
+                int topAfterAnchor = !table.isDisposed() ? table.getTopIndex() : -1;
+                Global.tempLog("recent-places-scroll", //$NON-NLS-1$
+                    "after restoreTopIndexByKey anchor=" + viewportAnchorKey //$NON-NLS-1$
+                        + " top=" + topAfterAnchor); //$NON-NLS-1$
+                restoreSelectionByScreenOffset(selectionOffsetFromTop, savedActiveColumn);
+                int topAfterSel = !table.isDisposed() ? table.getTopIndex() : -1;
+                Global.tempLog("recent-places-scroll", //$NON-NLS-1$
+                    "after restoreSelectionByScreenOffset top=" + topAfterSel //$NON-NLS-1$
+                        + " sel=" + (!table.isDisposed() ? table.getSelectionIndex() : -1) //$NON-NLS-1$
+                        + " offset=" + selectionOffsetFromTop); //$NON-NLS-1$
+            }
+            else if (!restoreSelectionByKey(selectedKey, savedActiveColumn, true))
+            {
                 selectFirst();
+                Global.tempLog("recent-places-scroll", //$NON-NLS-1$
+                    "noPreserve selectFirst/restoreKey top=" //$NON-NLS-1$
+                        + (!table.isDisposed() ? table.getTopIndex() : -1) //$NON-NLS-1$
+                        + " sel=" + (!table.isDisposed() ? table.getSelectionIndex() : -1)); //$NON-NLS-1$
+            }
+            else
+            {
+                Global.tempLog("recent-places-scroll", //$NON-NLS-1$
+                    "noPreserve restoreSelectionByKey top=" //$NON-NLS-1$
+                        + (!table.isDisposed() ? table.getTopIndex() : -1) //$NON-NLS-1$
+                        + " sel=" + (!table.isDisposed() ? table.getSelectionIndex() : -1)); //$NON-NLS-1$
+            }
         }
         finally
         {
             table.setRedraw(true);
+            int topFinally = !table.isDisposed() ? table.getTopIndex() : -1;
+            Global.tempLog("recent-places-scroll", //$NON-NLS-1$
+                "applyFilter FINALLY(after redraw) top=" + topFinally //$NON-NLS-1$
+                    + " sel=" + (!table.isDisposed() ? table.getSelectionIndex() : -1) //$NON-NLS-1$
+                    + " topBefore=" + topBefore //$NON-NLS-1$
+                    + " shifted=" + (topFinally != topBefore)); //$NON-NLS-1$
+            if (!table.isDisposed() && preserveViewport)
+            {
+                Display display = table.getDisplay();
+                if (display != null && !display.isDisposed())
+                {
+                    final int expectedTop = topFinally;
+                    final String anchor = viewportAnchorKey;
+                    display.asyncExec(() ->
+                    {
+                        if (listViewer == null || listViewer.getControl().isDisposed())
+                            return;
+                        Table t = listViewer.getTable();
+                        if (t.isDisposed())
+                            return;
+                        Global.tempLog("recent-places-scroll", //$NON-NLS-1$
+                            "async+1 top=" + t.getTopIndex() //$NON-NLS-1$
+                                + " expected=" + expectedTop //$NON-NLS-1$
+                                + " sel=" + t.getSelectionIndex() //$NON-NLS-1$
+                                + " drifted=" + (t.getTopIndex() != expectedTop) //$NON-NLS-1$
+                                + " anchor=" + anchor); //$NON-NLS-1$
+                    });
+                }
+            }
         }
     }
 
-    private boolean restoreSelectionByKey(String key, int savedActiveColumn)
+    /** Ключ записи, которая сейчас вверху видимой области (для сохранения scroll). */
+    private String captureViewportAnchorKey()
+    {
+        if (filtered == null || filtered.isEmpty())
+            return null;
+        Table table = listViewer.getTable();
+        if (table.isDisposed())
+            return null;
+        int top = table.getTopIndex();
+        if (top < 0 || top >= filtered.size())
+            return null;
+        return filtered.get(top).key;
+    }
+
+    /**
+     * Смещение текущей (сфокусированной) строки от {@code topIndex},
+     * чтобы после вставки сверху подсветка осталась в тех же экранных координатах.
+     */
+    private Integer captureSelectionOffsetFromTop()
+    {
+        Table table = listViewer.getTable();
+        if (table.isDisposed())
+            return null;
+        int top = table.getTopIndex();
+        int sel = table.getSelectionIndex();
+        if (sel < 0 && tableInteraction != null)
+        {
+            TableItem item = tableInteraction.selectedItem();
+            if (item != null && !item.isDisposed())
+                sel = table.indexOf(item);
+        }
+        if (sel < 0 || top < 0)
+            return null;
+        return Integer.valueOf(sel - top);
+    }
+
+    private void restoreTopIndexByKey(String key)
+    {
+        if (key == null || key.isBlank() || filtered == null || filtered.isEmpty())
+            return;
+        Table table = listViewer.getTable();
+        if (table.isDisposed())
+            return;
+        for (int i = 0; i < filtered.size(); i++)
+        {
+            if (key.equals(filtered.get(i).key))
+            {
+                int before = table.getTopIndex();
+                table.setTopIndex(i);
+                Global.tempLog("recent-places-scroll", //$NON-NLS-1$
+                    "setTopIndex key=" + key + " idx=" + i //$NON-NLS-1$ //$NON-NLS-2$
+                        + " before=" + before + " after=" + table.getTopIndex()); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+        }
+        Global.tempLog("recent-places-scroll", //$NON-NLS-1$
+            "restoreTopIndexByKey MISS key=" + key); //$NON-NLS-1$
+    }
+
+    private void restoreSelectionByScreenOffset(Integer offsetFromTop, int savedActiveColumn)
+    {
+        if (offsetFromTop == null || filtered == null || filtered.isEmpty())
+            return;
+        Table table = listViewer.getTable();
+        if (table.isDisposed())
+            return;
+        int index = table.getTopIndex() + offsetFromTop.intValue();
+        if (index < 0 || index >= filtered.size() || index >= table.getItemCount())
+        {
+            Global.tempLog("recent-places-scroll", //$NON-NLS-1$
+                "restoreSelectionByScreenOffset OUT_OF_RANGE index=" + index //$NON-NLS-1$
+                    + " top=" + table.getTopIndex() + " offset=" + offsetFromTop); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        RecentPlaces.Entry entry = filtered.get(index);
+        int topBeforeSel = table.getTopIndex();
+        listViewer.setSelection(new StructuredSelection(entry), false);
+        int topAfterSetSel = table.getTopIndex();
+        if (tableInteraction == null)
+            return;
+        TableItem item = table.getItem(index);
+        if (item == null)
+            return;
+        int col = savedActiveColumn;
+        if (col < 0)
+            col = visualColumnIndex(table, placeColumn);
+        tableInteraction.selectCell(item, col);
+        Global.tempLog("recent-places-scroll", //$NON-NLS-1$
+            "restoreSelectionByScreenOffset index=" + index //$NON-NLS-1$
+                + " key=" + entry.key //$NON-NLS-1$
+                + " topBeforeSel=" + topBeforeSel //$NON-NLS-1$
+                + " topAfterSetSel=" + topAfterSetSel //$NON-NLS-1$
+                + " topAfterSelectCell=" + table.getTopIndex()); //$NON-NLS-1$
+    }
+
+    private boolean restoreSelectionByKey(String key, int savedActiveColumn, boolean revealItem)
     {
         if (key == null || key.isBlank() || filtered.isEmpty())
             return false;
@@ -840,7 +1142,7 @@ public final class RecentPlacesView extends ViewPart
         }
         if (entry == null)
             return false;
-        listViewer.setSelection(new StructuredSelection(entry));
+        listViewer.setSelection(new StructuredSelection(entry), revealItem);
         if (tableInteraction == null)
             return true;
         Table table = listViewer.getTable();
@@ -849,7 +1151,8 @@ public final class RecentPlacesView extends ViewPart
         TableItem item = table.getItem(index);
         if (item == null)
             return true;
-        table.showItem(item);
+        if (revealItem)
+            table.showItem(item);
         int col = savedActiveColumn;
         if (col < 0)
             col = visualColumnIndex(table, placeColumn);

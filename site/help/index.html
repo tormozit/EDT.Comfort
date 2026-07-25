@@ -65,6 +65,14 @@
         placeholder: 'Поиск',
         noData: 'Ничего не найдено',
       },
+      // VuePress `{#id}` → Docsify `:id=id` (чистые заголовки + рабочие якоря)
+      plugins: [
+        function (hook) {
+          hook.beforeEach(function (content) {
+            return content.replace(/[ \t]*\{#([\w-]+)\}/g, ' :id=$1');
+          });
+        },
+      ],
     };
   </script>
   <script src="//cdn.jsdelivr.net/npm/docsify@4"></script>
