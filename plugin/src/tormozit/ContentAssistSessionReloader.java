@@ -742,13 +742,9 @@ suppressDisplay.asyncExec(
             return;
         StyledText text = viewer.getTextWidget() instanceof StyledText st ? st : null;
         if (text == null || text.isDisposed())
-        {
-            Global.tempLog("autoopen", "installVerifyListener: text null/disposed, NOT installed"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         completionAutoOpenVerifyListener = this::onVerifyKeyForCompletionAutoOpen;
         text.addVerifyKeyListener(completionAutoOpenVerifyListener);
-        Global.tempLog("autoopen", "installVerifyListener: installed"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private void uninstallCompletionAutoOpenVerifyListener()
@@ -767,11 +763,7 @@ suppressDisplay.asyncExec(
             return;
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         if (doc == null)
-        {
-            Global.tempLog("autoopen", "installDocListener: doc null, NOT installed"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
-        Global.tempLog("autoopen", "installDocListener: installed"); //$NON-NLS-1$ //$NON-NLS-2$
         completionAutoOpenDocumentListener = new IDocumentListener() {
             @Override
             public void documentAboutToBeChanged(DocumentEvent event)
@@ -1805,10 +1797,6 @@ if (filtered == 0)
         ContentAssistSettings settings = ContentAssistSettings.getInstance();
         boolean autoOpenEnabled = settings != null && settings.isEnabled();
         boolean nativeEmpty = autoOpenEnabled && ComfortSettings.isReplaceListFiltersEnabled();
-        Global.tempLog("autoopen", "attach: autoOpenEnabled=" + autoOpenEnabled //$NON-NLS-1$ //$NON-NLS-2$
-            + " replaceListFilters=" + ComfortSettings.isReplaceListFiltersEnabled() //$NON-NLS-1$
-            + " verifyListenerInstalled=" + (completionAutoOpenVerifyListener != null) //$NON-NLS-1$
-            + " docListenerInstalled=" + (completionAutoOpenDocumentListener != null)); //$NON-NLS-1$
 }
 
     private void onVerifyKeyForCompletionAutoOpen(VerifyEvent event)
@@ -1820,22 +1808,13 @@ if (filtered == 0)
     {
         pendingAutoOpen = false;
         if (!ComfortSettings.isReplaceListFiltersEnabled())
-        {
-            Global.tempLog("autoopen", "onVerifyKey: replaceListFilters disabled, return"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         ContentAssistSettings settings = ContentAssistSettings.getInstance();
         if (settings == null || !settings.isEnabled())
-        {
-            Global.tempLog("autoopen", "onVerifyKey: settings null or disabled, return"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         char inserted = event.character == 0 ? 0 : (char)event.character;
         if (inserted == 0)
-        {
-            Global.tempLog("autoopen", "onVerifyKey: inserted char == 0, return"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
 //        int startOffset = event.start; // У клавиатурного слушателя тут 0 всегда
         int startOffset = viewer.getTextWidget().getCaretOffset();
         int caretAfter = startOffset + 1;
@@ -1845,8 +1824,6 @@ if (filtered == 0)
             doc, inserted, startOffset, caretAfter, popupWasOpen, event.stateMask);
         if (branch != null)
             pendingAutoOpen = true;
-        Global.tempLog("autoopen", "onVerifyKey: char='" + inserted + "' caretAfter=" + caretAfter //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " popupWasOpen=" + popupWasOpen + " branch=" + branch + " pendingAutoOpen=" + pendingAutoOpen); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         int seq = completionAutoOpenActiveSeq > 0
             ? completionAutoOpenActiveSeq : completionAutoOpenSeq.get();
 if ((inserted == '(' || inserted == ',') && !popupWasOpen)
@@ -1931,47 +1908,25 @@ if ((inserted == '(' || inserted == ',') && !popupWasOpen)
     private void onDocumentChangedForCompletionAutoOpenImpl(DocumentEvent event)
     {
 if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
-        {
-            Global.tempLog("autoopen", "onDocChanged: pendingAutoOpen=" + pendingAutoOpen //$NON-NLS-1$ //$NON-NLS-2$
-                + " replaceListFilters=" + ComfortSettings.isReplaceListFiltersEnabled() + ", return"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         pendingAutoOpen = false;
         ContentAssistSettings settings = ContentAssistSettings.getInstance();
         if (settings == null || !settings.isEnabled())
-        {
-            Global.tempLog("autoopen", "onDocChanged: settings null or disabled, return"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         if (event == null || event.getText() == null)
-        {
-            Global.tempLog("autoopen", "onDocChanged: event or text null, return"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         String text = event.getText();
         if (text.isEmpty())
-        {
-            Global.tempLog("autoopen", "onDocChanged: text empty, return"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         char inserted = text.charAt(0);
         if (inserted == '\r' || inserted == '\n' || inserted == '\t')
-        {
-            Global.tempLog("autoopen", "onDocChanged: inserted is newline/tab, return"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         // Вставка proposal через SmartCompletionProposal.apply() — игнорируем.
         if (Boolean.TRUE.equals(SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get()))
-        {
-            Global.tempLog("autoopen", "onDocChanged: PROPOSAL_APPLY_IN_PROGRESS, return"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         // Вставка необёрнутого proposal (пустой префикс — делегат не подключён).
         if (suppressDocumentAutoOpenAfterSession)
-        {
-            Global.tempLog("autoopen", "onDocChanged: suppressDocumentAutoOpenAfterSession, return"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         int insertOffset = event.getOffset();
         int caretAfter;
         if ("\"\"".equals(text)) // вставлена пара двойных кавычек — каретка между ними
@@ -1989,17 +1944,13 @@ if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
         int seq = completionAutoOpenSeq.incrementAndGet();
         completionAutoOpenActiveSeq = seq;
         completionAutoOpenAwaitingLogged = false;
-        Global.tempLog("autoopen", "onDocChanged: char='" + inserted + "' caretAfter=" + caretAfter //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " popupWasOpen=" + popupWasOpen + " branch=" + branch + " seq=" + seq); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (branch == null)
             return;
         if ("space".equals(branch) || "symbol".equals(branch))
         {
             // Пробел и &~#: не открываем EDT-попап, ИР решает через ЗаполнитьТаблицуСлов
-            boolean scheduled = !isWordsTableFetchInFlightForCaret(caretAfter)
-                    && scheduleWordsTablePreparation(caretAfter, true);
-            Global.tempLog("autoopen", "onDocChanged: seq=" + seq + " space/symbol branch, scheduled=" + scheduled); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            if (scheduled)
+            if (!isWordsTableFetchInFlightForCaret(caretAfter)
+                    && scheduleWordsTablePreparation(caretAfter, true))
             {
                 completionAutoOpenPending = true;
                 completionAutoOpenCaret = caretAfter;
@@ -2010,7 +1961,6 @@ if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
         }
         else
         {
-            Global.tempLog("autoopen", "onDocChanged: seq=" + seq + " scheduling auto-open timer"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             scheduleCompletionAutoOpen(caretAfter, seq);
         }
     }
@@ -2022,17 +1972,10 @@ if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
         int delay = settings != null ? settings.getTimeout() : 0;
         Control c = (Control)viewer.getTextWidget();
         if (c == null || c.isDisposed())
-        {
-            Global.tempLog("autoopen", "scheduleTimer: seq=" + autoOpenSeq + " widget null/disposed, return"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
-        }
         Display display = c.getDisplay();
         if (display == null || display.isDisposed())
-        {
-            Global.tempLog("autoopen", "scheduleTimer: seq=" + autoOpenSeq + " display null/disposed, return"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
-        }
-        Global.tempLog("autoopen", "scheduleTimer: seq=" + autoOpenSeq + " delay=" + delay + " gen=" + gen); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
 display.timerExec(delay, () -> fireCompletionAutoOpenTimer(expectedCaretAfter, autoOpenSeq, gen));
     }
 
@@ -2068,17 +2011,13 @@ display.timerExec(delay, () -> fireCompletionAutoOpenTimer(expectedCaretAfter, a
             logTimerAbort(autoOpenSeq, "displayDisposed", gen, genGlobal, expectedCaretAfter, liveCaret); //$NON-NLS-1$
             return;
         }
-        Global.tempLog("autoopen", "timer fired: seq=" + autoOpenSeq + " liveCaret=" + liveCaret + " -> beginCompletionAutoOpen"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         display.asyncExec(() -> beginCompletionAutoOpen(liveCaret, autoOpenSeq));
     }
 
     private void logTimerAbort(int autoOpenSeq, String reason, int gen, int genGlobal,
                                int expectedCaret, int liveCaret)
     {
-        Global.tempLog("autoopen", "timerAbort: seq=" + autoOpenSeq + " reason=" + reason //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " gen=" + gen + " genGlobal=" + genGlobal //$NON-NLS-1$ //$NON-NLS-2$
-            + " expectedCaret=" + expectedCaret + " liveCaret=" + liveCaret); //$NON-NLS-1$ //$NON-NLS-2$
-    }
+}
 
     private void beginCompletionAutoOpen(int caret, int autoOpenSeq)
     {
@@ -2114,15 +2053,11 @@ display.timerExec(delay, () -> fireCompletionAutoOpenTimer(expectedCaretAfter, a
             if (irScheduled)
             {
                 completionAutoOpenIrScheduled = true;
-                Global.tempLog("autoopen", "beginAutoOpen: seq=" + autoOpenSeq + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + " irScheduled, waiting for words table"); //$NON-NLS-1$
                 // Ждём ИР: открытие только при autoOpenSuggested (ЗаполнитьТаблицуСлов).
                 // Browser warmup — в openCompletionAutoIrPopup (preShowLiteralBrowserPatch).
 return;
             }
         }
-        Global.tempLog("autoopen", "beginAutoOpen: seq=" + autoOpenSeq + " caret=" + caret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " session=" + (session != null) + " -> openCompletionAutoEdtPopup"); //$NON-NLS-1$ //$NON-NLS-2$
         warmupAssistBrowserCreator(caret);
         completionAutoOpenEdtOpened = true;
 openCompletionAutoEdtPopup(caret, autoOpenSeq);
@@ -2132,8 +2067,6 @@ openCompletionAutoEdtPopup(caret, autoOpenSeq);
 
     private void logBeginEarlyReturn(int autoOpenSeq, String reason, int caret)
     {
-        Global.tempLog("autoopen", "beginAutoOpen: seq=" + autoOpenSeq + " reason=" + reason //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " caret=" + caret + ", return"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private void openCompletionAutoEdtPopup(int expectedCaret, int autoOpenSeq)
@@ -2156,15 +2089,8 @@ openCompletionAutoEdtPopup(caret, autoOpenSeq);
         
         IDtProject dtProject = facade.getDtProject();
         if (dtProject == null || !IRApplication.hasConnectedSessionForKeys(dtProject))
-        {
-            Global.tempLog("autoopen", "openEdtPopup: seq=" + autoOpenSeq + " dtProject=" + (dtProject != null) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " connectedSession=" + (dtProject != null && IRApplication.hasConnectedSessionForKeys(dtProject)) //$NON-NLS-1$
-                + ", return"); //$NON-NLS-1$
-            return; // Иначе непустой список затирается пустым вероятно после фиктивного слияния с ИР
-        }
+            return; // Иначе непустой список затирается пустым вероятно после фиктивного слияния с ИР 
         boolean popupVisible = shown && ContentAssistPopupSync.isPopupVisible(assistant);
-        Global.tempLog("autoopen", "openEdtPopup: seq=" + autoOpenSeq + " expectedCaret=" + expectedCaret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " shown=" + shown + " popupVisible=" + popupVisible); //$NON-NLS-1$ //$NON-NLS-2$
         if (popupVisible && assistBrowserCreator == null)
         {
             IInformationControlCreator fresh = resolveFreshAssistBrowserCreator(expectedCaret);
@@ -2270,8 +2196,6 @@ openCompletionAutoEdtPopup(caret, autoOpenSeq);
                                               int autoOpenSeq, String route)
     {
         int irN = snapshot != null && snapshot.proposals != null ? snapshot.proposals.length : 0;
-        Global.tempLog("autoopen", "openIrPopup: seq=" + autoOpenSeq + " route=" + route + " caret=" + liveCaret //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-            + " shown=" + shown + " popupVisible=" + popupVisible + " irN=" + irN); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 }
 
     private void clearCompletionAutoOpenState(String reason, int autoOpenSeq)
@@ -3281,17 +3205,12 @@ if (stillVisible)
         if (session == null)
         {
             IDtProject dtProject = facade.getDtProject();
-            Global.tempLog("autoopen", "scheduleWordsTable: caret=" + caret + " autoInvoke=" + autoInvoke //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " no IR session (dtProject=" + (dtProject != null) + "), return false"); //$NON-NLS-1$ //$NON-NLS-2$
 return false;
         }
         if (isWordsTableFetchInFlightForCaret(caret))
         {
-            Global.tempLog("autoopen", "scheduleWordsTable: caret=" + caret + " autoInvoke=" + autoInvoke //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " fetch already in flight, return false"); //$NON-NLS-1$
 return false;
         }
-        Global.tempLog("autoopen", "scheduleWordsTable: caret=" + caret + " autoInvoke=" + autoInvoke + " -> prepareAssistContextAsync"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
         irWordsRequestStartedAtMs = System.currentTimeMillis();
         wordsTableReady = false;
         wordsTableCaret = caret;
@@ -3360,13 +3279,7 @@ runPendingAfterWordsTable();
         }
         BslSideHintDebug.log("wordsTable ready caret=" + caret); //$NON-NLS-1$
         boolean popupVisible = ContentAssistPopupSync.isPopupVisible(assistant);
-        boolean irAutoOpen = shouldIrAutoOpenPopup(snapshot, caret, popupVisible);
-        Global.tempLog("autoopen", "onWordsTablePrepared: caret=" + caret + " irCount=" + irCount //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " popupVisible=" + popupVisible + " autoOpenSuggested=" + snapshot.autoOpenSuggested //$NON-NLS-1$ //$NON-NLS-2$
-            + " irAutoOpen=" + irAutoOpen //$NON-NLS-1$
-            + " pending=" + completionAutoOpenPending + " edtOpened=" + completionAutoOpenEdtOpened //$NON-NLS-1$ //$NON-NLS-2$
-            + " irScheduled=" + completionAutoOpenIrScheduled); //$NON-NLS-1$
-        if (irAutoOpen)
+        if (shouldIrAutoOpenPopup(snapshot, caret, popupVisible))
         {
             int autoOpenSeq = completionAutoOpenActiveSeq;
 openCompletionAutoIrPopup(snapshot, caret, autoOpenSeq);
@@ -3414,7 +3327,6 @@ if (isCompletionAutoOpenCaretMatch(caret)
                 clearCompletionAutoOpenState(decision, autoOpenSeq);
             }
             ContentAssistDebug.logAutoOpenDecision(decision, caret, irCount);
-            Global.tempLog("autoopen", "onWordsTablePrepared: caret=" + caret + " decision=" + decision); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             irSnapshotAppliedCaret = caret;
             irSnapshotAppliedIrCount = irCount;
             runPendingAfterWordsTable();
