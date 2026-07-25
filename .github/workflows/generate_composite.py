@@ -1,4 +1,5 @@
 import io
+import json
 import os
 import re
 import shutil
@@ -398,6 +399,17 @@ def docs_cache_bust(repo_root: str) -> str:
         return str(int(time.time()))
 
 
+def docs_search_paths(repo_root: str) -> list:
+    """Docsify search paths from docs/*.md (excludes _*.md templates)."""
+    docs_src = os.path.join(repo_root, "docs")
+    paths = []
+    for name in sorted(os.listdir(docs_src)):
+        if not name.endswith(".md") or name.startswith("_"):
+            continue
+        paths.append("/" if name == "README.md" else "/" + name[:-3])
+    return paths
+
+
 def publish_help_site(repo_root: str) -> None:
     docs_src = os.path.join(repo_root, "docs")
     help_dst = os.path.join(deploy_dir, "help")
@@ -420,6 +432,13 @@ def publish_help_site(repo_root: str) -> None:
         with open(site_help_index, encoding="utf-8") as f:
             index_html = f.read()
         index_html = index_html.replace("{{DOCS_CACHE_BUST}}", cache_bust)
+        paths_json = json.dumps(docs_search_paths(repo_root), ensure_ascii=False)
+        marker = "window.__DOCS_SEARCH_PATHS__ = null;"
+        replacement = f"window.__DOCS_SEARCH_PATHS__ = {paths_json};"
+        if marker not in index_html:
+            print("WARN: __DOCS_SEARCH_PATHS__ marker not found in help index.html")
+        else:
+            index_html = index_html.replace(marker, replacement, 1)
         with open(dest_index, "w", encoding="utf-8", newline="\n") as f:
             f.write(index_html)
     else:

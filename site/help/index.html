@@ -16,6 +16,8 @@
   <div id="app">Загрузка справки…</div>
   <script>
     window.__DOCS_CACHE_BUST__ = '{{DOCS_CACHE_BUST}}';
+    // Список путей поиска подставляет publish_help_site из docs/*.md
+    window.__DOCS_SEARCH_PATHS__ = null;
     (function () {
       var bust = window.__DOCS_CACHE_BUST__;
       if (!bust) return;
@@ -64,6 +66,9 @@
       search: {
         placeholder: 'Поиск',
         noData: 'Ничего не найдено',
+        paths: window.__DOCS_SEARCH_PATHS__ || [],
+        depth: 6,
+        namespace: 'comfort-help',
       },
     };
   </script>
