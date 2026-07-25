@@ -10,7 +10,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.eclipse.core.resources.IFile;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
@@ -28,11 +30,14 @@ import org.eclipse.search.ui.ISearchQuery;
 import org.eclipse.search.ui.ISearchResultPage;
 import org.eclipse.search.ui.ISearchResultViewPart;
 import org.eclipse.search.ui.NewSearchUI;
+import com._1c.g5.v8.dt.search.core.text.TextSearchFileMatch;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.custom.SashForm;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
+import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Listener;
@@ -80,10 +85,20 @@ import org.eclipse.ui.PlatformUI;
  *
  * <p>Включение: Параметры → Комфорт → «Улучшать списки» ({@link ComfortSettings#PREF_REPLACE_LIST_FILTERS}).
  */
-public final class SearchViewAggregationHook implements IStartup
+public final class ConfigSearchResultsHook implements IStartup
 {
     private static final String SEARCH_VIEW_ID = "org.eclipse.search.ui.views.SearchView"; //$NON-NLS-1$
     private static final String PAGE_CLASS_MARKER = "ConfigurationSearchViewPage"; //$NON-NLS-1$
+
+    /**
+     * Временно (по просьбе пользователя, на время тестирования нашей таблицы вхождений
+     * {@link #cachedMatchTableViewer}) — штатная таблица {@code treeLayout.tableViewer} не
+     * патчится (агрегация/колонка "Путь"/копирование) и визуально скрыта
+     * ({@code outer.setMaximizedControl}), чтобы не расходовать память на её ({@code changeSource})
+     * дублирующее заполнение при больших выборках. Дерево и наша таблица работают как обычно.
+     * Включить обратно — {@code true}.
+     */
+    private static final boolean NATIVE_TABLE_ENABLED = false;
 
     private static final String HOOKED_KEY = "tormozit.searchAggregationHooked"; //$NON-NLS-1$
     private static final String TREE_COUNT_LABEL_HOOKED_KEY = "tormozit.searchTreeCountLabelHooked"; //$NON-NLS-1$
@@ -168,6 +183,477 @@ public final class SearchViewAggregationHook implements IStartup
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Таблица мультивыбора вхождений (открытие + "Создать остановки отладчика")
+    // -----------------------------------------------------------------------
+
+    /**
+     * Штатная правая таблица ({@code treeLayout.tableViewer}) создаётся 1С со стилем
+     * {@code SWT.SINGLE} (декомпиляция {@code TreeSearchViewPageLayout.createViewer()}: маска стиля
+     * {@code 268503808} — VIRTUAL|FULL_SELECTION|BORDER|V_SCROLL|H_SCROLL, бита MULTI нет), а стиль
+     * SWT-виджета нельзя сменить после создания. Дерево слева, наоборот, создано с MULTI
+     * (маска {@code 2818} = BORDER|V_SCROLL|H_SCROLL|MULTI) — мультивыбор УЗЛОВ уже работает,
+     * но нужен мультивыбор конкретных СТРОК (нескольких вхождений внутри одного узла или из разных
+     * узлов). Поэтому — третья (своя, SWT.MULTI) панель справа: {@code pageContainer}
+     * (FillLayout, единственный штатный потомок — внутренний SashForm{@code treePart|tablePart})
+     * оборачивается в новый внешний SashForm, где старый (нетронутый, без единой правки) внутренний
+     * SashForm — слева, наша таблица — справа. Штатная агрегация/восстановление выделения/сортировка
+     * (см. {@link #installAggregationListener}) не затрагиваются — работают как раньше со своей
+     * (штатной, однострочно-выбираемой) таблицей; наша — полноценная ДОПОЛНИТЕЛЬНАЯ таблица вхождений
+     * (показ + открытие двойным кликом/Enter + копирование), а не только источник для точек останова —
+     * это лишь одна из команд над этим списком.
+     */
+    private static final String MATCH_PANE_HOOKED_KEY = "tormozit.searchAggregationMatchPaneHooked"; //$NON-NLS-1$
+
+    private static TableViewer cachedMatchTableViewer;
+    private static TableColumn cachedMatchPathColumn;
+    private static FormTableInteraction cachedMatchTableInteraction;
+    private static final int MATCH_PATH_COLUMN_WIDTH = 220;
+
+    private static final class MatchRow
+    {
+        final String path;
+        final String property;
+        final long lineNumber;
+        final String text;
+        /** С подсветкой вхождения (стили штатного {@code getDecoratedText()}/{@code getStyledText()}). */
+        final StyledString styledText;
+        final IFile file;
+        /** Исходный элемент таблицы (IMatchItem) — нужен для открытия через {@code handleOpen}. */
+        final Object tableItem;
+
+        MatchRow(String path, String property, long lineNumber, StyledString styledText, IFile file,
+                Object tableItem)
+        {
+            this.path = path;
+            this.property = property;
+            this.lineNumber = lineNumber;
+            this.styledText = styledText;
+            this.text = styledText != null ? styledText.getString() : ""; //$NON-NLS-1$
+            this.file = file;
+            this.tableItem = tableItem;
+        }
+    }
+
+    private static void installMatchTableSplitPane(IViewPart view, Object activePage, Object treeLayout,
+            TreeViewer treeViewer)
+    {
+        Object pageContainerObj = Global.invoke(treeLayout, "getPageContainer"); //$NON-NLS-1$
+        if (!(pageContainerObj instanceof Composite pageContainer) || pageContainer.isDisposed())
+        {
+            log("installMatchTableSplitPane: pageContainer недоступен"); //$NON-NLS-1$
+            return;
+        }
+        if (pageContainer.getData(MATCH_PANE_HOOKED_KEY) != null)
+            return; // уже установлена для этого экземпляра страницы
+
+        Control[] children = pageContainer.getChildren();
+        if (children.length != 1)
+        {
+            log("installMatchTableSplitPane: неожиданное число потомков pageContainer=" + children.length); //$NON-NLS-1$
+            return;
+        }
+        Control nativeSplit = children[0];
+
+        SashForm outer = new SashForm(pageContainer, SWT.HORIZONTAL);
+        nativeSplit.setParent(outer);
+
+        // FormTableInteraction (подсветка заголовка колонки) требует, чтобы прямой родитель Table
+        // либо использовал TableColumnLayout, либо не имел layout вообще (resolveOverlayRoot()) —
+        // SashForm со своим layout не подходит (см. эталон "tableStack" в RecentPlacesView.java).
+        Composite matchTableStack = new Composite(outer, SWT.NONE);
+        matchTableStack.setLayout(null);
+
+        TableViewer matchViewer = new TableViewer(matchTableStack,
+            SWT.MULTI | SWT.FULL_SELECTION | SWT.V_SCROLL | SWT.H_SCROLL | SWT.BORDER);
+        Table matchTable = matchViewer.getTable();
+        matchTable.setHeaderVisible(true);
+        matchTable.setLinesVisible(true);
+        matchTableStack.addControlListener(new org.eclipse.swt.events.ControlAdapter()
+        {
+            // Раздвижка между деревом и нашей таблицей меняет размеры ДЕТЕЙ SashForm (в т.ч.
+            // matchTableStack), а не самого outer — слушать нужно здесь, не на outer.
+            private Runnable pendingSaveWeights;
+
+            @Override
+            public void controlResized(org.eclipse.swt.events.ControlEvent e)
+            {
+                if (!matchTable.isDisposed())
+                    matchTable.setBounds(matchTableStack.getClientArea());
+
+                if (outer.isDisposed())
+                    return;
+                Display display = Display.getDefault();
+                if (display == null || display.isDisposed())
+                    return;
+                if (pendingSaveWeights != null)
+                    display.timerExec(-1, pendingSaveWeights);
+                pendingSaveWeights = () -> {
+                    if (!outer.isDisposed())
+                    {
+                        int[] w = outer.getWeights();
+                        if (w.length == 2)
+                            ComfortSettings.setConfigSearchMatchSashWeights(w[0], w[1]);
+                    }
+                    pendingSaveWeights = null;
+                };
+                display.timerExec(300, pendingSaveWeights);
+            }
+        });
+        matchViewer.setContentProvider(org.eclipse.jface.viewers.ArrayContentProvider.getInstance());
+
+        TableViewerColumn pathCol = new TableViewerColumn(matchViewer, SWT.LEFT);
+        pathCol.getColumn().setText("Путь"); //$NON-NLS-1$
+        pathCol.getColumn().setToolTipText("Путь" + Global.pluginSignForTooltip());
+        pathCol.getColumn().setWidth(ComfortSettings.getConfigSearchMatchColumnWidth("path", MATCH_PATH_COLUMN_WIDTH)); //$NON-NLS-1$
+        pathCol.getColumn().addListener(SWT.Resize, e -> {
+            int w = pathCol.getColumn().getWidth();
+            if (w > 0) ComfortSettings.setConfigSearchMatchColumnWidth("path", w); //$NON-NLS-1$
+        });
+        cachedMatchPathColumn = pathCol.getColumn();
+        pathCol.setLabelProvider(new CellLabelProvider()
+        {
+            @Override
+            public void update(ViewerCell cell)
+            {
+                if (cell.getElement() instanceof MatchRow row)
+                    cell.setText(row.path != null ? row.path : ""); //$NON-NLS-1$
+            }
+        });
+
+        TableViewerColumn propertyCol = new TableViewerColumn(matchViewer, SWT.LEFT);
+        propertyCol.getColumn().setText("Свойство"); //$NON-NLS-1$
+        propertyCol.getColumn().setToolTipText("Свойство" + Global.pluginSignForTooltip());
+        propertyCol.getColumn().setWidth(ComfortSettings.getConfigSearchMatchColumnWidth("property", 140)); //$NON-NLS-1$
+        propertyCol.getColumn().addListener(SWT.Resize, e -> {
+            int w = propertyCol.getColumn().getWidth();
+            if (w > 0) ComfortSettings.setConfigSearchMatchColumnWidth("property", w); //$NON-NLS-1$
+        });
+        propertyCol.setLabelProvider(new CellLabelProvider()
+        {
+            @Override
+            public void update(ViewerCell cell)
+            {
+                if (cell.getElement() instanceof MatchRow row)
+                    cell.setText(row.property != null ? row.property : ""); //$NON-NLS-1$
+            }
+        });
+
+        TableViewerColumn lineCol = new TableViewerColumn(matchViewer, SWT.RIGHT);
+        lineCol.getColumn().setText("Строка"); //$NON-NLS-1$
+        lineCol.getColumn().setToolTipText("Номер строки" + Global.pluginSignForTooltip());
+        lineCol.getColumn().setWidth(ComfortSettings.getConfigSearchMatchColumnWidth("line", 60)); //$NON-NLS-1$
+        lineCol.getColumn().addListener(SWT.Resize, e -> {
+            int w = lineCol.getColumn().getWidth();
+            if (w > 0) ComfortSettings.setConfigSearchMatchColumnWidth("line", w); //$NON-NLS-1$
+        });
+        lineCol.setLabelProvider(new CellLabelProvider()
+        {
+            @Override
+            public void update(ViewerCell cell)
+            {
+                if (cell.getElement() instanceof MatchRow row)
+                    cell.setText(row.lineNumber > 0 ? String.valueOf(row.lineNumber) : ""); //$NON-NLS-1$
+            }
+        });
+
+        TableViewerColumn textCol = new TableViewerColumn(matchViewer, SWT.LEFT);
+        textCol.getColumn().setText("Текст"); //$NON-NLS-1$
+        textCol.getColumn().setToolTipText("Текст" + Global.pluginSignForTooltip());
+        textCol.getColumn().setWidth(ComfortSettings.getConfigSearchMatchColumnWidth("text", 280)); //$NON-NLS-1$
+        textCol.getColumn().addListener(SWT.Resize, e -> {
+            int w = textCol.getColumn().getWidth();
+            if (w > 0) ComfortSettings.setConfigSearchMatchColumnWidth("text", w); //$NON-NLS-1$
+        });
+        textCol.setLabelProvider(new DelegatingStyledCellLabelProvider(new IStyledLabelProvider()
+        {
+            @Override
+            public StyledString getStyledText(Object element)
+            {
+                if (element instanceof MatchRow row && row.styledText != null)
+                    return row.styledText;
+                return new StyledString(""); //$NON-NLS-1$
+            }
+
+            @Override
+            public Image getImage(Object element) { return null; }
+
+            @Override
+            public void addListener(ILabelProviderListener listener) {}
+
+            @Override
+            public void dispose() {}
+
+            @Override
+            public boolean isLabelProperty(Object element, String property) { return false; }
+
+            @Override
+            public void removeListener(ILabelProviderListener listener) {}
+        }));
+
+        matchViewer.setComparator(new org.eclipse.jface.viewers.ViewerComparator()
+        {
+            @Override
+            public int compare(org.eclipse.jface.viewers.Viewer viewer, Object e1, Object e2)
+            {
+                if (!(e1 instanceof MatchRow r1) || !(e2 instanceof MatchRow r2))
+                    return 0;
+                int cmp = compareStrings(r1.path, r2.path);
+                if (cmp != 0) return cmp;
+                cmp = compareStrings(r1.property, r2.property);
+                if (cmp != 0) return cmp;
+                return Long.compare(r1.lineNumber, r2.lineNumber);
+            }
+        });
+
+        outer.setWeights(new int[] {
+            ComfortSettings.getConfigSearchMatchSashWeight("left", 70), //$NON-NLS-1$
+            ComfortSettings.getConfigSearchMatchSashWeight("right", 30) //$NON-NLS-1$
+        });
+        if (!NATIVE_TABLE_ENABLED && nativeSplit instanceof SashForm nativeSashForm)
+        {
+            // Прячем ТОЛЬКО штатную таблицу (tablePart) внутри штатной SashForm treePart|tablePart —
+            // дерево (treePart) остаётся видимым и рабочим, оно нужно для выбора строк в НАШУ таблицу.
+            Object treePartObj = Global.getField(treeLayout, "treePart"); //$NON-NLS-1$
+            if (treePartObj instanceof Control treePart && !treePart.isDisposed())
+                nativeSashForm.setMaximizedControl(treePart);
+            else
+                log("installMatchTableSplitPane: treePart недоступен, штатная таблица не скрыта"); //$NON-NLS-1$
+        }
+        FormTableInteraction interaction = new FormTableInteraction(matchTable, matchViewer,
+            ConfigSearchResultsHook::matchCellText);
+        interaction.setOwnerDrawColumns(textCol.getColumn());
+        interaction.install();
+
+        cachedMatchTableViewer = matchViewer;
+        cachedMatchTableInteraction = interaction;
+        pageContainer.setData(MATCH_PANE_HOOKED_KEY, Boolean.TRUE);
+        matchTable.addDisposeListener(e -> {
+            if (cachedMatchTableViewer == matchViewer)
+            {
+                cachedMatchTableViewer = null;
+                cachedMatchPathColumn = null;
+                cachedMatchTableInteraction = null;
+            }
+        });
+
+        installMatchTableOpenSupport(matchViewer, activePage);
+        installMatchTableCopyHandler(matchViewer, view);
+
+        treeViewer.addPostSelectionChangedListener(event -> {
+            if (!ComfortSettings.isReplaceListFiltersEnabled())
+                return;
+            refreshMatchTable(treeViewer, matchViewer);
+        });
+        refreshMatchTable(treeViewer, matchViewer);
+
+        pageContainer.layout(true, true);
+        log("installMatchTableSplitPane: OK"); //$NON-NLS-1$
+    }
+
+    private static int compareStrings(String a, String b)
+    {
+        if (a == null && b == null) return 0;
+        if (a == null) return -1;
+        if (b == null) return 1;
+        return String.CASE_INSENSITIVE_ORDER.compare(a, b);
+    }
+
+    /** @return число собранных вхождений (для {@link #scheduleFinalAggregationReapplyAttempt}), -1 если таблица недоступна. */
+    private static int syncMatchTableToTree(TreeViewer treeViewer)
+    {
+        TableViewer matchViewer = cachedMatchTableViewer;
+        return matchViewer != null ? refreshMatchTable(treeViewer, matchViewer) : -1;
+    }
+
+    private static int refreshMatchTable(TreeViewer treeViewer, TableViewer matchViewer)
+    {
+        if (matchViewer.getTable() == null || matchViewer.getTable().isDisposed())
+            return -1;
+        List<Object> selectedNodes = treeViewer.getStructuredSelection().toList();
+        Global.tempLog("guardFirstRoot", "refreshMatchTable: ENTER selectedNodes=" //$NON-NLS-1$ //$NON-NLS-2$
+            + describeNodesForLog(selectedNodes) + " thread=" + Thread.currentThread().getName()); //$NON-NLS-1$
+        List<Object> tableItems = new ArrayList<>();
+        for (Object node : selectedNodes)
+            collectTableItemsRecursively(node, tableItems);
+
+        List<MatchRow> rows = new ArrayList<>();
+        for (Object tableItem : tableItems)
+        {
+            Object match = Global.invoke(tableItem, "getData"); //$NON-NLS-1$
+            IFile file = null;
+            long lineNumber = 0;
+            if (match instanceof TextSearchFileMatch fm)
+            {
+                file = fm.getFile();
+                lineNumber = fm.getLineNumber();
+            }
+            String path = bmTopObjectPathFromTableItem(tableItem);
+            if (path == null || path.isEmpty())
+                path = modulePathFromTableItem(tableItem);
+            if (path == null || path.isEmpty())
+                path = mdPathFromTableItemFile(tableItem);
+            rows.add(new MatchRow(path, extractPropertyText(tableItem), lineNumber,
+                extractMatchStyledText(tableItem), file, tableItem));
+        }
+        matchViewer.setInput(rows);
+        Global.tempLog("guardFirstRoot", "refreshMatchTable: EXIT selectedNodes=" //$NON-NLS-1$ //$NON-NLS-2$
+            + describeNodesForLog(selectedNodes) + " tableItems=" + tableItems.size() //$NON-NLS-1$
+            + " rows=" + rows.size()); //$NON-NLS-1$
+
+        // При терминальном узле путь у всех строк одинаковый (сам узел и есть этот путь) — как и
+        // у штатной таблицы (см. hidePathColumn/showPathColumn), колонку тогда прячем.
+        if (cachedMatchPathColumn != null && !cachedMatchPathColumn.isDisposed())
+        {
+            int desiredWidth = isTerminalTreeSelection(selectedNodes) ? 0
+                : ComfortSettings.getConfigSearchMatchColumnWidth("path", MATCH_PATH_COLUMN_WIDTH); //$NON-NLS-1$
+            if (cachedMatchPathColumn.getWidth() != desiredWidth)
+                cachedMatchPathColumn.setWidth(desiredWidth);
+        }
+        return tableItems.size();
+    }
+
+    /**
+     * Открытие вхождения (двойной клик / Enter) — переиспользует штатную логику диспетчеризации
+     * по типу {@code Match} (TextSearchModelMatch/TextSearchFileMatch/BmObjectMatch/...):
+     * {@code ConfigurationSearchViewPage.handleOpen(OpenEvent)} (приватный метод; тот же, что штатно
+     * вызывается для дерева и штатной таблицы через {@code OpenAndLinkWithEditorHelper.create(...)}
+     * — найдено декомпиляцией). Так открытие не дублируется по типам совпадений отдельным кодом.
+     */
+    private static void installMatchTableOpenSupport(TableViewer matchViewer, Object activePage)
+    {
+        Table table = matchViewer.getTable();
+        Runnable openSelected = () -> {
+            IStructuredSelection selection = matchViewer.getStructuredSelection();
+            if (selection.isEmpty())
+                return;
+            List<Object> tableItems = new ArrayList<>();
+            for (Object element : selection.toList())
+                if (element instanceof MatchRow row && row.tableItem != null)
+                    tableItems.add(row.tableItem);
+            if (tableItems.isEmpty())
+                return;
+            org.eclipse.jface.viewers.OpenEvent openEvent = new org.eclipse.jface.viewers.OpenEvent(
+                matchViewer, new StructuredSelection(tableItems));
+            // ConfigurationSearchViewPage имеет ДВЕ перегрузки handleOpen (OpenEvent и IMatchItem,
+            // обе с 1 аргументом) — Global.invoke(name, argc) их не различает и может молча
+            // (без исключения наружу) попасть не в ту, поэтому здесь — явный тип параметра.
+            try
+            {
+                java.lang.reflect.Method m = activePage.getClass()
+                    .getDeclaredMethod("handleOpen", org.eclipse.jface.viewers.OpenEvent.class); //$NON-NLS-1$
+                m.setAccessible(true);
+                m.invoke(activePage, openEvent);
+            }
+            catch (Exception e)
+            {
+                log("installMatchTableOpenSupport: handleOpen failed: " + e); //$NON-NLS-1$
+            }
+        };
+
+        matchViewer.addDoubleClickListener(event -> {
+            if (ComfortSettings.isReplaceListFiltersEnabled())
+                openSelected.run();
+        });
+        table.addListener(SWT.KeyDown, event -> {
+            if (!ComfortSettings.isReplaceListFiltersEnabled())
+                return;
+            if (event.keyCode == SWT.CR || event.keyCode == SWT.KEYPAD_CR)
+                openSelected.run();
+        });
+    }
+
+    /** Текст ячейки по индексу колонки (0=Путь,1=Свойство,2=Строка,3=Текст) — для {@link FormTableInteraction}. */
+    private static String matchCellText(TableItem item, int column)
+    {
+        if (!(item.getData() instanceof MatchRow row))
+            return ""; //$NON-NLS-1$
+        return switch (column)
+        {
+            case 0 -> row.path != null ? row.path : ""; //$NON-NLS-1$
+            case 1 -> row.property != null ? row.property : ""; //$NON-NLS-1$
+            case 2 -> row.lineNumber > 0 ? String.valueOf(row.lineNumber) : ""; //$NON-NLS-1$
+            case 3 -> row.text != null ? row.text : ""; //$NON-NLS-1$
+            default -> ""; //$NON-NLS-1$
+        };
+    }
+
+    private static void installMatchTableCopyHandler(TableViewer matchViewer, IViewPart view)
+    {
+        Table table = matchViewer.getTable();
+        table.addListener(SWT.KeyDown, event -> {
+            if (!ComfortSettings.isReplaceListFiltersEnabled())
+                return;
+            if ((event.stateMask & SWT.MOD1) == 0)
+                return;
+            if (event.keyCode != 'c' && event.keyCode != 'C')
+                return;
+            if (copyActiveMatchCellToClipboard(matchViewer))
+                event.doit = false;
+        });
+
+        // Как в FileSearchResultsHook.registerGlobalCopyHandler: в панели поиска Ctrl+C нередко
+        // не доходит до SWT.KeyDown (нативный Win32-акселератор), поэтому дублируем через KeyUp.
+        Display display = table.getDisplay();
+        if (display != null && !display.isDisposed())
+        {
+            display.addFilter(SWT.KeyUp, event -> {
+                if (!ComfortSettings.isReplaceListFiltersEnabled())
+                    return;
+                if (table.isDisposed() || !table.isFocusControl())
+                    return;
+                if ((event.stateMask & SWT.MOD1) == 0)
+                    return;
+                if (event.keyCode != 'c' && event.keyCode != 'C')
+                    return;
+                display.asyncExec(() -> copyActiveMatchCellToClipboard(matchViewer));
+            });
+        }
+
+        // "org.eclipse.ui.edit.copy" активируется ОДИН раз на весь view — общая точка
+        // CreateDebuggerBreakpoints.installGlobalCopyHandler (см. её javadoc): если оба хука панели
+        // поиска (этот и FileSearchResultsHook) активируют обработчик этой команды по отдельности,
+        // второй молча перебивает первого на всём view, даже когда фокус не на его таблице.
+        CreateDebuggerBreakpoints.installGlobalCopyHandler(view);
+    }
+
+    /** Копирует активную ячейку, если фокус сейчас на этой таблице — для {@link CreateDebuggerBreakpoints#installGlobalCopyHandler}. */
+    static boolean copyActiveCellIfFocused()
+    {
+        TableViewer matchViewer = cachedMatchTableViewer;
+        if (matchViewer == null)
+            return false;
+        Table table = matchViewer.getTable();
+        if (table == null || table.isDisposed() || !table.isFocusControl())
+            return false;
+        return copyActiveMatchCellToClipboard(matchViewer);
+    }
+
+    /** Копирует текст активной ячейки (правила проекта: не всю строку) — см. {@link FormTableInteraction}. */
+    private static boolean copyActiveMatchCellToClipboard(TableViewer matchViewer)
+    {
+        Table table = matchViewer.getTable();
+        if (table == null || table.isDisposed())
+            return false;
+        FormTableInteraction interaction = cachedMatchTableInteraction;
+        if (interaction == null)
+            return false;
+        String text = interaction.activeCellText();
+        if (text == null)
+            return false;
+
+        Clipboard cb = new Clipboard(table.getDisplay());
+        try
+        {
+            cb.setContents(new Object[] { text }, new Transfer[] { TextTransfer.getInstance() });
+        }
+        finally
+        {
+            cb.dispose();
+        }
+        return true;
+    }
+
     private static void onSearchStarting()
     {
         searchQueryRunning = true;
@@ -175,6 +661,7 @@ public final class SearchViewAggregationHook implements IStartup
         searchGeneration++;
         SAVED_TABLE_SELECTION_BY_VIEWER.clear();
         log("onSearchStarting: watch first root, gen=" + searchGeneration); //$NON-NLS-1$
+        Global.tempLog("guardFirstRoot", "onSearchStarting: searchQueryRunning=true guard=true gen=" + searchGeneration); //$NON-NLS-1$
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
@@ -190,6 +677,7 @@ public final class SearchViewAggregationHook implements IStartup
     {
         searchQueryRunning = false;
         log("onSearchFinished: continue first root watch"); //$NON-NLS-1$
+        Global.tempLog("guardFirstRoot", "onSearchFinished: searchQueryRunning=false guard=" + guardFirstRootSelection); //$NON-NLS-1$
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
@@ -217,20 +705,28 @@ public final class SearchViewAggregationHook implements IStartup
                 return;
             if (!searchQueryRunning && !guardFirstRootSelection)
                 return;
+            Global.tempLog("guardFirstRoot", "watch: attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+                + " searchQueryRunning=" + searchQueryRunning + " guard=" + guardFirstRootSelection); //$NON-NLS-1$ //$NON-NLS-2$
 
             SearchViewViewers viewers = resolveViewers(findSearchViewPart());
             if (viewers == null)
             {
+                Global.tempLog("guardFirstRoot", "watch: attempt=" + attempt + " viewers=null"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 if (searchQueryRunning || attempt < 300)
                     startFirstRootWatch(attempt + 1);
+                else
+                    Global.tempLog("guardFirstRoot", "watch: GIVE UP (viewers=null, attempt cap) guard STILL=" + guardFirstRootSelection); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
 
             Object firstRoot = getFirstRootTreeElement(viewers.tree);
             if (firstRoot == null)
             {
+                Global.tempLog("guardFirstRoot", "watch: attempt=" + attempt + " firstRoot=null"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 if (searchQueryRunning || attempt < 300)
                     startFirstRootWatch(attempt + 1);
+                else
+                    Global.tempLog("guardFirstRoot", "watch: GIVE UP (firstRoot=null, attempt cap) guard STILL=" + guardFirstRootSelection); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
 
@@ -238,22 +734,30 @@ public final class SearchViewAggregationHook implements IStartup
             if (!firstRoot.equals(current))
             {
                 log("watchFirstRoot: " + current + " -> " + firstRoot); //$NON-NLS-1$ //$NON-NLS-2$
+                Global.tempLog("guardFirstRoot", "watch: attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+                    + " forcing selection " + current + " -> " + firstRoot); //$NON-NLS-1$ //$NON-NLS-2$
                 viewers.tree.setSelection(new StructuredSelection(firstRoot), true);
                 showFirstTreeItem(viewers.tree);
             }
             applyAggregationIfNeeded(viewers.tree, viewers.table,
                 Collections.singletonList(firstRoot), Collections.emptyList(), "watchLoop"); //$NON-NLS-1$
+            syncMatchTableToTree(viewers.tree);
 
             if (searchQueryRunning)
             {
+                Global.tempLog("guardFirstRoot", "watch: attempt=" + attempt + " searchQueryRunning still true -> loop again (NO CAP)"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 startFirstRootWatch(attempt + 1);
                 return;
             }
             if (!guardFirstRootSelection)
+            {
+                Global.tempLog("guardFirstRoot", "watch: attempt=" + attempt + " guard already false, exit"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
+            }
             if (firstRoot.equals(viewers.tree.getStructuredSelection().getFirstElement()))
             {
                 guardFirstRootSelection = false;
+                Global.tempLog("guardFirstRoot", "watch: attempt=" + attempt + " CLEARED guard (stable on firstRoot)"); //$NON-NLS-1$ //$NON-NLS-2$
                 scheduleFinalAggregationReapply(viewers.tree, viewers.table, firstRoot);
             }
             else if (attempt < 60)
@@ -261,6 +765,7 @@ public final class SearchViewAggregationHook implements IStartup
             else
             {
                 guardFirstRootSelection = false;
+                Global.tempLog("guardFirstRoot", "watch: attempt=" + attempt + " CLEARED guard (attempt cap 60)"); //$NON-NLS-1$ //$NON-NLS-2$
                 scheduleFinalAggregationReapply(viewers.tree, viewers.table, firstRoot);
             }
         });
@@ -292,6 +797,21 @@ public final class SearchViewAggregationHook implements IStartup
     private static void scheduleFinalAggregationReapply(TreeViewer treeViewer, TableViewer tableViewer,
             Object node)
     {
+        scheduleFinalAggregationReapplyAttempt(treeViewer, tableViewer, node, 0);
+    }
+
+    /**
+     * Узел дерева (getTableItems()/getChildren()) может ещё догружаться асинхронно уже ПОСЛЕ того,
+     * как сам узел выбран и стабилен (issue: гонка со временем загрузки модели узла, а не с порядком
+     * наших вызовов — подтверждено логом {@code guardFirstRoot}: тот же самый объект узла в одном
+     * прогоне поиска давал 12 вхождений, а в другом — насовсем застревал на 2, потому что единственный
+     * фиксированный отложенный вызов срабатывал раньше догрузки). Поэтому — не один вызов, а повтор
+     * каждые 100мс до 10 раз, пока результат не станет непустым (штатное заполнение узла — одноразовое,
+     * непустого результата достаточно, чтобы понять, что оно уже случилось).
+     */
+    private static void scheduleFinalAggregationReapplyAttempt(TreeViewer treeViewer, TableViewer tableViewer,
+            Object node, int attempt)
+    {
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
@@ -305,6 +825,9 @@ public final class SearchViewAggregationHook implements IStartup
                 return; // пользователь уже кликнул на что-то другое — не мешаем
             applyAggregationIfNeeded(treeViewer, tableViewer,
                 Collections.singletonList(node), copySavedSelection(tableViewer), "finalReapply"); //$NON-NLS-1$
+            int count = syncMatchTableToTree(treeViewer);
+            if (attempt < 10 && count <= 0)
+                scheduleFinalAggregationReapplyAttempt(treeViewer, tableViewer, node, attempt + 1);
         });
     }
 
@@ -326,6 +849,64 @@ public final class SearchViewAggregationHook implements IStartup
         if (treeViewer.getTree() == null || treeViewer.getTree().isDisposed())
             return null;
         return new SearchViewViewers(treeViewer, (TableViewer) tableViewerObj);
+    }
+
+    /**
+     * Строки для тулбарной команды {@link CreateDebuggerBreakpoints}: явно выбранные строки
+     * в своей (SWT.MULTI) таблице вхождений {@link #cachedMatchTableViewer} — если ничего не выбрано
+     * специально, все строки текущего выбора дерева (таблица уже синхронизирована с ним, см.
+     * {@link #refreshMatchTable}). Только вхождения с файлом и номером строки (BSL-модули,
+     * {@link TextSearchFileMatch}) становятся целями — остальные (ссылки/свойства модели без
+     * номера строки) просто пропускаются. {@code null}, если эта страница сейчас не активна
+     * (тулбар общий на панель — тогда пробуют другие хуки).
+     */
+    static List<CreateDebuggerBreakpoints.Target> currentBreakpointTargets(IViewPart view)
+    {
+        SearchViewViewers viewers = resolveViewers(view); // также проверяет, что эта страница активна
+        if (viewers == null)
+        {
+            Global.tempLog("createBreakpoints", "configSearch.currentBreakpointTargets: viewers=null (страница не активна)"); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+
+        TableViewer matchViewer = cachedMatchTableViewer;
+        Table matchTable = matchViewer != null ? matchViewer.getTable() : null;
+        if (matchTable == null || matchTable.isDisposed())
+        {
+            Global.tempLog("createBreakpoints", "configSearch.currentBreakpointTargets: matchTable=null/disposed " //$NON-NLS-1$ //$NON-NLS-2$
+                + "(matchViewer=" + matchViewer + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+
+        // Явно выбранные строки — если нет, берём все строки текущего выбора дерева
+        // (таблица уже отфильтрована/синхронизирована с ним через refreshMatchTable).
+        TableItem[] items = matchTable.getSelectionCount() > 0 ? matchTable.getSelection() : matchTable.getItems();
+
+        List<CreateDebuggerBreakpoints.Target> targets = new ArrayList<>();
+        for (TableItem item : items)
+        {
+            if (item != null && item.getData() instanceof MatchRow row
+                && row.file != null && row.lineNumber > 0)
+                targets.add(new CreateDebuggerBreakpoints.Target(row.file, (int) row.lineNumber));
+        }
+        Global.tempLog("createBreakpoints", "configSearch.currentBreakpointTargets: selectionCount=" //$NON-NLS-1$ //$NON-NLS-2$
+            + matchTable.getSelectionCount() + " itemsScanned=" + items.length + " targets=" + targets.size()); //$NON-NLS-1$ //$NON-NLS-2$
+        return targets;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void collectTableItemsRecursively(Object node, List<Object> out)
+    {
+        Object ownItems = Global.invoke(node, "getTableItems"); //$NON-NLS-1$
+        if (ownItems instanceof List<?> list)
+            out.addAll((List<Object>) list);
+
+        Object children = Global.invoke(node, "getChildren"); //$NON-NLS-1$
+        if (children instanceof List<?> childList)
+        {
+            for (Object child : (List<Object>) childList)
+                collectTableItemsRecursively(child, out);
+        }
     }
 
     private static void showFirstTreeItem(TreeViewer treeViewer)
@@ -479,11 +1060,16 @@ public final class SearchViewAggregationHook implements IStartup
             if (treeViewer.getTree().getData(HOOKED_KEY) != null)
                 return true; // фича уже установлена для этого дерева
 
-            installAggregationListener(treeViewer, tableViewer);
-            installPathColumn(tableViewer);
-            installTableCopyHandler(treeViewer, tableViewer);
+            if (NATIVE_TABLE_ENABLED)
+            {
+                installAggregationListener(treeViewer, tableViewer);
+                installPathColumn(tableViewer);
+                installTableCopyHandler(treeViewer, tableViewer);
+            }
             TreeSoleChildAutoExpand.installWhitelisted(
                     TreeSoleChildAutoExpand.Target.SEARCH_CONFIG, treeViewer);
+            installMatchTableSplitPane(view, activePage, treeLayout, treeViewer);
+            CreateDebuggerBreakpoints.installToolbarAction(view);
 
             treeViewer.getTree().setData(HOOKED_KEY, Boolean.TRUE);
             log("tryPatch: PATCH OK для " + activePage.getClass().getName()); //$NON-NLS-1$
@@ -583,6 +1169,8 @@ public final class SearchViewAggregationHook implements IStartup
                 // EDT при появлении результатов спускается к первому терминальному узлу.
                 if (guardFirstRootSelection)
                 {
+                    Global.tempLog("guardFirstRoot", "postSelectionListener: guard=true, selectedNodes=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + describeNodesForLog(selectedNodes));
                     Object firstRoot = getFirstRootTreeElement(treeViewer);
                     if (firstRoot == null)
                         return;
@@ -590,6 +1178,8 @@ public final class SearchViewAggregationHook implements IStartup
                     if (!firstRoot.equals(current))
                     {
                         log("redirectToFirstRoot: " + current + " -> " + firstRoot); //$NON-NLS-1$ //$NON-NLS-2$
+                        Global.tempLog("guardFirstRoot", "REDIRECT (user click hijacked): " + current + " -> " + firstRoot //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                            + " guard=" + guardFirstRootSelection + " searchQueryRunning=" + searchQueryRunning); //$NON-NLS-1$ //$NON-NLS-2$
                         treeViewer.setSelection(new StructuredSelection(firstRoot), true);
                         showFirstTreeItem(treeViewer);
                         // ВАЖНО: programmatic setSelection() не порождает новое post-selection
@@ -602,13 +1192,18 @@ public final class SearchViewAggregationHook implements IStartup
                         applyAggregationIfNeeded(treeViewer, tableViewer,
                             Collections.singletonList(firstRoot), copySavedSelection(tableViewer),
                             "redirectToFirstRoot"); //$NON-NLS-1$
+                        syncMatchTableToTree(treeViewer);
                         return;
                     }
                 }
 
                 if (applyAggregationIfNeeded(treeViewer, tableViewer, selectedNodes,
                         copySavedSelection(tableViewer), "postListener")) //$NON-NLS-1$
+                {
+                    syncMatchTableToTree(treeViewer);
                     return;
+                }
+                syncMatchTableToTree(treeViewer);
 
                 applyTableSortOrder(tableViewer, false);
                 hidePathColumn(tableViewer);
@@ -629,6 +1224,9 @@ public final class SearchViewAggregationHook implements IStartup
     private static boolean applyAggregationIfNeeded(TreeViewer treeViewer, TableViewer tableViewer,
             List<Object> selectedNodes, List<TableRowKey> previousSelection, String source)
     {
+        if (!NATIVE_TABLE_ENABLED)
+            return false; // штатная таблица временно отключена — см. javadoc NATIVE_TABLE_ENABLED
+
         boolean needsAggregation = false;
         for (Object o : selectedNodes)
         {
@@ -1572,16 +2170,57 @@ public final class SearchViewAggregationHook implements IStartup
 
     private static String extractMatchText(Object tableItem)
     {
+        StyledString styled = extractMatchStyledText(tableItem);
+        return styled != null ? styled.getString() : ""; //$NON-NLS-1$
+    }
+
+    /**
+     * Как {@link #extractMatchText}, но с подсветкой вхождения — тем же стилем, что и в панели
+     * текстового поиска ({@link ThemeAwareColors#searchMatchStyler()}, не штатные стили 1С — для
+     * единообразия подсветки между обоими режимами поиска). {@code TextSearchFileMatch} и
+     * {@code TextSearchModelMatch} имеют одинаковые по сигнатуре {@code getText()}/
+     * {@code getTextOffset()}/{@code getTextLength()} (смещение/длина вхождения в тексте) —
+     * читаются рефлексией единообразно для обоих типов. Для типов без текста вхождения
+     * (напр. {@code BmObjectMatch}) — обычный текст без подсветки (штатный {@code getDecoratedText()}/
+     * {@code getStyledText()}, но без его стилей).
+     */
+    private static StyledString extractMatchStyledText(Object tableItem)
+    {
+        Object match = Global.invoke(tableItem, "getData"); //$NON-NLS-1$
+        Object textObj = match != null ? Global.invoke(match, "getText") : null; //$NON-NLS-1$
+        if (!(textObj instanceof String text))
+            return plainMatchStyledText(tableItem);
+
+        Object offObj = Global.invoke(match, "getTextOffset"); //$NON-NLS-1$
+        Object lenObj = Global.invoke(match, "getTextLength"); //$NON-NLS-1$
+        if (!(offObj instanceof Integer off) || !(lenObj instanceof Integer len)
+            || len <= 0 || off < 0 || off > text.length())
+            return new StyledString(text);
+
+        int end = Math.min(off + len, text.length());
+        StyledString ss = new StyledString();
+        if (off > 0)
+            ss.append(text.substring(0, off));
+        if (end > off)
+            ss.append(text.substring(off, end), ThemeAwareColors.searchMatchStyler());
+        if (end < text.length())
+            ss.append(text.substring(end));
+        return ss;
+    }
+
+    /** Текст без подсветки — из штатного {@code getDecoratedText()}/{@code getStyledText()}, без его стилей. */
+    private static StyledString plainMatchStyledText(Object tableItem)
+    {
         try
         {
             Object styled = Global.invoke(tableItem, "getDecoratedText"); //$NON-NLS-1$
             if (styled == null)
                 styled = Global.invoke(tableItem, "getStyledText"); //$NON-NLS-1$
-            if (styled instanceof StyledString)
-                return ((StyledString) styled).getString();
+            if (styled instanceof StyledString ss)
+                return new StyledString(ss.getString());
         }
         catch (Exception ignored) {}
-        return ""; //$NON-NLS-1$
+        return null;
     }
 
     private static void showPathColumn(TableViewer tableViewer)
@@ -1941,8 +2580,8 @@ public final class SearchViewAggregationHook implements IStartup
 
     private static void log(String message)
     {
-        Global.log("SearchViewAggregation", message); //$NON-NLS-1$
+        Global.log("ConfigSearchResults", message); //$NON-NLS-1$
     }
 
-    public SearchViewAggregationHook() {}
+    public ConfigSearchResultsHook() {}
 }

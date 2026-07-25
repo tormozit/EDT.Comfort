@@ -14,7 +14,7 @@ public final class ComfortSettings
      * Ключ булевой настройки «Улучшать списки» (имя ключа исторически осталось прежним).
      * Управляет заменой фильтров по подстроке в списках (навигатор, список баз, панель
      * «Индексирование Git» — {@link GitStagingFilterHook} — и т.д.), а также доработками панели
-     * глобального поиска ({@link SearchViewAggregationHook}, issue #79) и поиска по файлам
+     * глобального поиска ({@link ConfigSearchResultsHook}, issue #79) и поиска по файлам
      * ({@link FileSearchResultsHook}).
      */
     public static final String PREF_REPLACE_LIST_FILTERS = "comfort.replaceListFilters"; //$NON-NLS-1$
@@ -128,6 +128,12 @@ public final class ComfortSettings
 
     /** Prefix for file search sash weights. */
     private static final String PREF_FILE_SEARCH_SASH_PREFIX = "comfort.fileSearch.sash."; //$NON-NLS-1$
+
+    /** Prefix for configuration search match-table pane sash weights. */
+    private static final String PREF_CONFIG_SEARCH_MATCH_SASH_PREFIX = "comfort.configSearchMatch.sash."; //$NON-NLS-1$
+
+    /** Prefix for configuration search match-table column widths. */
+    private static final String PREF_CONFIG_SEARCH_MATCH_COLUMN_PREFIX = "comfort.configSearchMatch.columnWidth."; //$NON-NLS-1$
 
     /** Prefix for git history file table column widths. */
     private static final String PREF_GIT_HISTORY_COLUMN_PREFIX = "comfort.gitHistory.columnWidth."; //$NON-NLS-1$
@@ -563,6 +569,65 @@ public final class ComfortSettings
         catch (Exception ex)
         {
             Global.log("ComfortSettings save error (sashWeights): " + ex); //$NON-NLS-1$
+        }
+    }
+
+    // ---- Configuration search match-table pane sash weights ----
+
+    public static int getConfigSearchMatchSashWeight(String side, int defaultWeight)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return defaultWeight;
+        String key = PREF_CONFIG_SEARCH_MATCH_SASH_PREFIX + side;
+        if (!settings.preferenceStore.contains(key))
+            return defaultWeight;
+        return settings.preferenceStore.getInt(key);
+    }
+
+    public static void setConfigSearchMatchSashWeights(int left, int right)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        settings.preferenceStore.setValue(PREF_CONFIG_SEARCH_MATCH_SASH_PREFIX + "left", left);
+        settings.preferenceStore.setValue(PREF_CONFIG_SEARCH_MATCH_SASH_PREFIX + "right", right);
+        try
+        {
+            settings.preferenceStore.save();
+        }
+        catch (Exception ex)
+        {
+            Global.log("ComfortSettings save error (configSearchMatchSashWeights): " + ex); //$NON-NLS-1$
+        }
+    }
+
+    // ---- Configuration search match-table column widths ----
+
+    public static int getConfigSearchMatchColumnWidth(String columnId, int defaultWidth)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return defaultWidth;
+        String key = PREF_CONFIG_SEARCH_MATCH_COLUMN_PREFIX + columnId;
+        if (!settings.preferenceStore.contains(key))
+            return defaultWidth;
+        return settings.preferenceStore.getInt(key);
+    }
+
+    public static void setConfigSearchMatchColumnWidth(String columnId, int width)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        settings.preferenceStore.setValue(PREF_CONFIG_SEARCH_MATCH_COLUMN_PREFIX + columnId, width);
+        try
+        {
+            settings.preferenceStore.save();
+        }
+        catch (Exception ex)
+        {
+            Global.log("ComfortSettings save error (configSearchMatchColumnWidth): " + ex); //$NON-NLS-1$
         }
     }
 

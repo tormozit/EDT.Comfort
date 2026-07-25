@@ -86,6 +86,25 @@ public final class SmartMatchHighlight
         paintTableCellMatchOverlay(e, table, item, matcher, false);
     }
 
+    /**
+     * Как {@link #paintTableCellMatchOverlay(Event, Table, TableItem, SmartMatcher)}, но без
+     * {@code matchesTree}-гейта (тот при однословном запросе матчит только последний
+     * dot-сегмент — см. javadoc {@code GitStagingFilterHook}, теряет остальной текст для строк
+     * вида «Модуль.bsl [строка: 13] - Процедура»). Для плоского AND по словам ({@link SmartMatcher#matches}).
+     */
+    public static void paintTableCellMatchOverlayFlat(Event e, Table table, TableItem item, SmartMatcher matcher)
+    {
+        if (e == null || e.gc == null || table == null || table.isDisposed() || item == null
+                || item.isDisposed() || matcher == null || matcher.isEmpty)
+            return;
+        String text = item.getText(e.index);
+        if (text == null || text.isEmpty() || !matcher.matches(text))
+            return;
+        Point origin = tableCellTextOrigin(e.gc, table, item, e.index, e, text);
+        MatchStyle style = resolveMatchStyle(table);
+        drawMatchFragments(e.gc, text, matcher, origin.x, origin.y, table.getFont(), style, false);
+    }
+
     /** @param backgroundOnly {@code true} — только фон совпадений (текст уже нарисован). */
     public static void paintTableCellMatchOverlay(Event e, Table table, TableItem item, SmartMatcher matcher,
             boolean backgroundOnly)

@@ -69,12 +69,13 @@
     <startup class="tormozit.GitChangedFileMenuHook"/>
     <startup class="tormozit.GitStagingFilterHook"/>
     <startup class="tormozit.TextEditorFastSearchKeyBindingHook"/> 
-    <startup class="tormozit.SearchViewAggregationHook"/>
+    <startup class="tormozit.ConfigSearchResultsHook"/>
     <startup class="tormozit.FileSearchResultsHook"/>
     <startup class="tormozit.GitHistoryFileColumnsHook"/>
-    <startup class="tormozit.ConfigurationSearchDialogHook"/>
+    <startup class="tormozit.ConfigSearchDialogHook"/>
     <startup class="tormozit.PictureDialogHook"/>
     <startup class="tormozit.RightsDialogFilterHook"/>
+    <startup class="tormozit.FilteredListDialogFilterHook"/>
     <startup class="tormozit.NewAttributeNameIdentifierHook"/>
     <startup class="tormozit.PropertyNameIdentifierHook"/>
     <startup class="tormozit.BslServerCallHighlightingHook"/>

@@ -518,19 +518,31 @@ final class FormTableInteraction
 
     private void copyActiveCell()
     {
-        TableItem item = selectedItem != null && !selectedItem.isDisposed()
-            ? selectedItem
-            : currentSelectedRow();
-        if (item == null || item.isDisposed() || activeColumnIndex() < 0)
-            return;
-        String text = cellAccess.cellText(item, activeColumnIndex());
+        String text = activeCellText();
         if (text == null)
-            text = ""; //$NON-NLS-1$
+            return;
         Clipboard clipboard = new Clipboard(table.getDisplay());
         clipboard.setContents(new Object[] { text }, new Transfer[] { TextTransfer.getInstance() });
         clipboard.dispose();
         if (copyHook != null)
             copyHook.run();
+    }
+
+    /**
+     * Текст активной ячейки (как для копирования по Ctrl+C/меню) — для внешних обработчиков
+     * копирования (например, {@code IHandlerService}-перехват "org.eclipse.ui.edit.copy" в местах,
+     * где Ctrl+C не доходит до {@code SWT.KeyDown}, см. {@code PreferenceSearchFilterAugmenter}).
+     * {@code null}, если активной ячейки сейчас нет.
+     */
+    String activeCellText()
+    {
+        TableItem item = selectedItem != null && !selectedItem.isDisposed()
+            ? selectedItem
+            : currentSelectedRow();
+        if (item == null || item.isDisposed() || activeColumnIndex() < 0)
+            return null;
+        String text = cellAccess.cellText(item, activeColumnIndex());
+        return text != null ? text : ""; //$NON-NLS-1$
     }
 
     private void onEraseItem(Event e)

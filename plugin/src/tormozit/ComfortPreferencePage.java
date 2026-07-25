@@ -319,8 +319,8 @@ public class ComfortPreferencePage
         gd.verticalIndent = 8;
         link.setLayoutData(gd);
         link.setToolTipText(
-            "Орфография Comfort использует Eclipse JDT UI.\n"
-            + "В этой EDT модуль не установлен — откроется мастер установки с сайта Eclipse.\n"
+            "Орфография Comfort использует Eclipse JDT UI (org.eclipse.jdt.ui).\n"
+            + "В этой EDT модуль не установлен — откроется мастер с предвыбором минимума.\n"
             + "После установки перезапустите EDT."); //$NON-NLS-1$
         link.addListener(SWT.Selection, e ->
         {

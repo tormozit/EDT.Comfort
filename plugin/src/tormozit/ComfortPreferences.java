@@ -60,9 +60,19 @@ public final class ComfortPreferences
     }
 
     private static final String NICKNAME_ECLIPSE_RELEASES = "Eclipse Releases"; //$NON-NLS-1$
+    /** Минимальный IU для орфографии Comfort (не вся feature JDT). */
+    private static final String JDT_UI_IU_ID = "org.eclipse.jdt.ui"; //$NON-NLS-1$
+    /** Fallback IU, если в metadata нет отдельного плагина как корня. */
     private static final String JDT_FEATURE_IU_ID = "org.eclipse.jdt.feature.group"; //$NON-NLS-1$
     private static final String ECLIPSE_RELEASES_LATEST =
         "https://download.eclipse.org/releases/latest/"; //$NON-NLS-1$
+    private static final String JDT_INSTALL_TOAST_OK =
+        "Если модуль org.eclipse.jdt.ui установлен — перезапустите EDT, чтобы включить орфографию."; //$NON-NLS-1$
+    private static final String JDT_INSTALL_TOAST_FEATURE =
+        "Выбран пакет Eclipse Java Development Tools (включает org.eclipse.jdt.ui)."; //$NON-NLS-1$
+    private static final String JDT_INSTALL_TOAST_BROWSE =
+        "В фильтре введите org.eclipse.jdt.ui и отметьте «Java Development Tools UI»."; //$NON-NLS-1$
+    private static final String JDT_BROWSE_FILTER = "jdt.ui"; //$NON-NLS-1$
 
     /**
      * Открывает «Справка → Установить новое ПО…» с сайтом
@@ -75,8 +85,9 @@ public final class ComfortPreferences
     }
 
     /**
-     * Мастер установки Eclipse JDT (модуль орфографии Comfort) с сайта releases,
-     * подобранного по версии платформы EDT. После установки нужен перезапуск.
+     * Мастер установки {@code org.eclipse.jdt.ui} (модуль орфографии Comfort)
+     * с сайта Eclipse releases. Ставится минимум, не вся feature JDT.
+     * После установки нужен перезапуск.
      */
     public static void openInstallJdtForSpelling()
     {
@@ -88,24 +99,26 @@ public final class ComfortPreferences
             if (ComfortJdtAvailability.isJdtUiAvailable())
             {
                 ToastNotification.show("Орфография", //$NON-NLS-1$
-                    "Модуль JDT уже установлен. Перезапустите EDT, если орфография не активна.", //$NON-NLS-1$
+                    "Модуль JDT UI уже установлен. Перезапустите EDT, если орфография не активна.", //$NON-NLS-1$
                     8_000);
                 return;
             }
             String siteUrl = resolveEclipseReleasesSiteUrl();
-            Global.log("install", "openInstallJdtForSpelling site=" + siteUrl); //$NON-NLS-1$ //$NON-NLS-2$
             try
             {
-                openInstallWizardForJdt(siteUrl);
-                ToastNotification.show("Орфография", //$NON-NLS-1$
-                    "После установки Eclipse Java Development Tools перезапустите EDT.", //$NON-NLS-1$
-                    10_000);
+                boolean preselected = openInstallWizardForJdt(siteUrl);
+                if (preselected)
+                {
+                    ToastNotification.show("Орфография", //$NON-NLS-1$
+                        JDT_INSTALL_TOAST_OK, 12_000);
+                }
+                // browse: тост уже показан до открытия мастера
             }
             catch (Exception e)
             {
                 logError("Установка JDT (орфография)", e); //$NON-NLS-1$
                 String message = isP2SelfUpdateAvailable()
-                    ? "Не удалось открыть установку JDT. Попробуйте Справка → Установить новое ПО…" //$NON-NLS-1$
+                    ? "Не удалось открыть установку JDT UI. Попробуйте Справка → Установить новое ПО…" //$NON-NLS-1$
                     : "Установщик недоступен в этой среде (нет p2-профиля)."; //$NON-NLS-1$
                 ToastNotification.show("Орфография", message, 8_000); //$NON-NLS-1$
             }
@@ -123,19 +136,12 @@ public final class ComfortPreferences
         if (display == null || display.isDisposed())
             return;
         Runnable open = () -> {
-
-            Global.log("install", "openInstallNewSoftware site=" + siteUrl); //$NON-NLS-1$ //$NON-NLS-2$
             if (tryOpenInstallWizardForSite(siteUrl))
-            {
-
-                Global.log("install", "мастер установки открыт"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
-            }
 
             String message = isP2SelfUpdateAvailable()
                 ? "Не удалось открыть окно «Установить новое ПО»." //$NON-NLS-1$
                 : "Установщик недоступен в этой среде (нет p2-профиля). Проверьте в установленном EDT."; //$NON-NLS-1$
-            Global.log("install", "FAIL: " + message); //$NON-NLS-1$ //$NON-NLS-2$
             ToastNotification.show("EDT Comfort", message, 8_000); //$NON-NLS-1$
         };
         if (display.getThread() == Thread.currentThread())
@@ -177,7 +183,10 @@ public final class ComfortPreferences
         }
     }
 
-    private static void openInstallWizardForJdt(String siteUrl) throws Exception
+    /**
+     * @return {@code true}, если открыт Preselected-мастер с уже выбранным IU
+     */
+    private static boolean openInstallWizardForJdt(String siteUrl) throws Exception
     {
         URI siteUri = URI.create(normalizeSiteUrl(siteUrl));
         Class<?> uiClass = loadBundleClass(BUNDLE_P2_UI,
@@ -191,19 +200,22 @@ public final class ComfortPreferences
         Object job = jobClass.getConstructor(uiClass).newInstance(ui);
         configureLoadJob(job, jobClass);
         runLoadJobModal(job, jobClass);
-        logLoadJobStatus(job, jobClass);
 
-        java.util.List<Object> jdtIus = queryJdtFeatureIus(ui, uiClass, siteUri);
-        if (jdtIus == null || jdtIus.isEmpty())
+        java.util.List<Object> ius = queryInstallableUnits(ui, uiClass, siteUri, JDT_UI_IU_ID);
+        boolean featureFallback = false;
+        if (ius == null || ius.isEmpty())
         {
-            Global.log("install", "JDT IU not found, browse wizard + filter"); //$NON-NLS-1$ //$NON-NLS-2$
+            ius = queryInstallableUnits(ui, uiClass, siteUri, JDT_FEATURE_IU_ID);
+            featureFallback = ius != null && !ius.isEmpty();
+        }
+        if (ius == null || ius.isEmpty())
+        {
             openBrowseInstallWizardWithJdtFilter(ui, uiClass, siteUri, job, jobClass);
-            return;
+            return false;
         }
 
-        Object latest = pickLatestInstallableUnit(jdtIus);
+        Object latest = pickLatestInstallableUnit(ius);
         java.util.Collection<Object> selected = java.util.Collections.singletonList(latest);
-        Global.log("install", "JDT preselected " + describeIu(latest)); //$NON-NLS-1$ //$NON-NLS-2$
 
         Class<?> installOpClass = loadBundleClass(BUNDLE_P2_OPERATIONS,
             "org.eclipse.equinox.p2.operations.InstallOperation"); //$NON-NLS-1$
@@ -213,14 +225,17 @@ public final class ComfortPreferences
         installOpClass.getMethod("resolveModal", IProgressMonitor.class) //$NON-NLS-1$
             .invoke(installOp, new NullProgressMonitor());
 
-        // operation != null → PreselectedIUInstallWizard (только JDT, без дерева категорий)
         uiClass.getMethod("openInstallWizard", //$NON-NLS-1$
             java.util.Collection.class, installOpClass, jobClass)
             .invoke(ui, selected, installOp, job);
+        if (featureFallback)
+            ToastNotification.show("Орфография", JDT_INSTALL_TOAST_FEATURE, 10_000); //$NON-NLS-1$
+        return true;
     }
 
     /**
-     * Fallback: browse-мастер + фильтр «Java Development Tools», если IU не нашли запросом.
+     * Fallback: browse-мастер. Фильтр только после выбора сайта и с задержкой —
+     * иначе список остаётся пустым (каталог ещё не подгружен).
      */
     private static void openBrowseInstallWizardWithJdtFilter(
             Object ui, Class<?> uiClass, URI siteUri, Object job, Class<?> jobClass)
@@ -241,8 +256,67 @@ public final class ComfortPreferences
         Object dialog = newProvisioningWizardDialog(dialogClass, parent, wizard);
         dialogClass.getMethod("create").invoke(dialog); //$NON-NLS-1$
         selectInstallSiteInDialog(wizard, siteUri);
-        setAvailableSoftwareFilter(wizard, "Java Development Tools"); //$NON-NLS-1$
+        ToastNotification.show("Орфография", JDT_INSTALL_TOAST_BROWSE, 12_000); //$NON-NLS-1$
+        // Каталог сайта подгружается асинхронно — повторять фильтр до 10 с, стоп при успехе
+        java.util.concurrent.atomic.AtomicBoolean browseReady =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+        for (int sec = 1; sec <= 10; sec++)
+            scheduleBrowseFilterAndCheck(wizard, ui, uiClass, siteUri, sec * 1000, browseReady);
         dialogClass.getMethod("open").invoke(dialog); //$NON-NLS-1$
+    }
+
+    private static void scheduleBrowseFilterAndCheck(
+            Object wizard, Object ui, Class<?> uiClass, URI siteUri, int delayMs,
+            java.util.concurrent.atomic.AtomicBoolean browseReady)
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.timerExec(delayMs, () ->
+        {
+            if (display.isDisposed() || browseReady.get())
+                return;
+            setAvailableSoftwareFilter(wizard, JDT_BROWSE_FILTER);
+            if (tryCheckVisibleJdtUi(wizard, ui, uiClass, siteUri))
+                browseReady.set(true);
+        });
+    }
+
+    /**
+     * Пометить видимый IU орфографии на AvailableIUsPage.
+     * @return {@code true}, если удалось отметить элемент
+     */
+    private static boolean tryCheckVisibleJdtUi(
+            Object wizard, Object ui, Class<?> uiClass, URI siteUri)
+    {
+        try
+        {
+            java.util.List<Object> ius = queryInstallableUnits(ui, uiClass, siteUri, JDT_UI_IU_ID);
+            if (ius == null || ius.isEmpty())
+                ius = queryInstallableUnits(ui, uiClass, siteUri, JDT_FEATURE_IU_ID);
+            if (ius == null || ius.isEmpty())
+                return false;
+            Object latest = pickLatestInstallableUnit(ius);
+            Object[] pages = (Object[]) wizard.getClass().getMethod("getPages").invoke(wizard); //$NON-NLS-1$
+            if (pages == null)
+                return false;
+            Class<?> availablePageClass = loadBundleClass(BUNDLE_P2_UI,
+                "org.eclipse.equinox.internal.p2.ui.dialogs.AvailableIUsPage"); //$NON-NLS-1$
+            for (Object page : pages)
+            {
+                if (!availablePageClass.isInstance(page))
+                    continue;
+                availablePageClass.getMethod("setCheckedElements", Object[].class) //$NON-NLS-1$
+                    .invoke(page, (Object) new Object[] { latest });
+                return true;
+            }
+            return false;
+        }
+        catch (Exception e)
+        {
+            Global.logError("install", "tryCheckVisibleJdtUi", e); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        }
     }
 
     private static void setAvailableSoftwareFilter(Object wizard, String filterText)
@@ -263,37 +337,108 @@ public final class ComfortPreferences
                 Object group = groupField.get(page);
                 if (group == null)
                     return;
-                // AvailableIUGroup.setPattern / getPatternFilter
-                try
+                // Видимое поле фильтра AvailableIUGroup / DelayedFilterCheckboxTree
+                if (setFilterTextOnControlTree(group, filterText)
+                    || applyPatternToAvailableGroup(group, filterText))
+                    return;
+                Field treeField = findField(group.getClass(), "tree", "filteredTree", //$NON-NLS-1$ //$NON-NLS-2$
+                    "availableIUTree"); //$NON-NLS-1$
+                if (treeField != null)
                 {
-                    group.getClass().getMethod("setPattern", String.class) //$NON-NLS-1$
-                        .invoke(group, filterText);
+                    treeField.setAccessible(true);
+                    Object tree = treeField.get(group);
+                    if (tree != null
+                        && (setFilterTextOnControlTree(tree, filterText)
+                            || applyPatternToAvailableGroup(tree, filterText)))
+                        return;
                 }
-                catch (NoSuchMethodException e)
-                {
-                    Field patternField = findField(group.getClass(), "patternFilter", "filterText", //$NON-NLS-1$ //$NON-NLS-2$
-                        "filter"); //$NON-NLS-1$
-                    if (patternField != null)
-                    {
-                        patternField.setAccessible(true);
-                        Object filter = patternField.get(group);
-                        if (filter != null)
-                        {
-                            Method set = findMethod(filter.getClass(), "setPattern", String.class); //$NON-NLS-1$
-                            if (set == null)
-                                set = findMethod(filter.getClass(), "setText", String.class); //$NON-NLS-1$
-                            if (set != null)
-                                set.invoke(filter, filterText);
-                        }
-                    }
-                }
-                Global.log("install", "setAvailableSoftwareFilter=" + filterText); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
         }
         catch (Exception e)
         {
             Global.logError("install", "setAvailableSoftwareFilter", e); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /** Пишет текст в SWT Text фильтра (то, что видит пользователь). */
+    private static boolean setFilterTextOnControlTree(Object root, String filterText)
+    {
+        try
+        {
+            Method getFilterControl = findMethod(root.getClass(), "getFilterControl"); //$NON-NLS-1$
+            if (getFilterControl != null)
+            {
+                Object control = getFilterControl.invoke(root);
+                if (control instanceof org.eclipse.swt.widgets.Text text && !text.isDisposed())
+                {
+                    text.setText(filterText);
+                    return true;
+                }
+            }
+            Field filterTextField = findField(root.getClass(), "filterText", "filterControl"); //$NON-NLS-1$ //$NON-NLS-2$
+            if (filterTextField != null)
+            {
+                filterTextField.setAccessible(true);
+                Object control = filterTextField.get(root);
+                if (control instanceof org.eclipse.swt.widgets.Text text && !text.isDisposed())
+                {
+                    text.setText(filterText);
+                    return true;
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            Global.logError("install", "setFilterTextOnControlTree", e); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        return false;
+    }
+
+    private static boolean applyPatternToAvailableGroup(Object target, String filterText)
+    {
+        Method setPattern = findMethod(target.getClass(), "setPattern", String.class); //$NON-NLS-1$
+        if (setPattern != null)
+        {
+            try
+            {
+                setPattern.setAccessible(true);
+                setPattern.invoke(target, filterText);
+                return true;
+            }
+            catch (Exception e)
+            {
+                Global.logError("install", "applyPattern setPattern", e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+        Field patternField = findField(target.getClass(), "patternFilter", "filterText", //$NON-NLS-1$ //$NON-NLS-2$
+            "filter", "pattern"); //$NON-NLS-1$ //$NON-NLS-2$
+        if (patternField == null)
+            return false;
+        try
+        {
+            patternField.setAccessible(true);
+            Object filter = patternField.get(target);
+            if (filter == null)
+                return false;
+            if (filter instanceof org.eclipse.swt.widgets.Text text)
+            {
+                text.setText(filterText);
+                return true;
+            }
+            Method set = findMethod(filter.getClass(), "setPattern", String.class); //$NON-NLS-1$
+            if (set == null)
+                set = findMethod(filter.getClass(), "setText", String.class); //$NON-NLS-1$
+            if (set == null)
+                return false;
+            set.setAccessible(true);
+            set.invoke(filter, filterText);
+            return true;
+        }
+        catch (Exception e)
+        {
+            Global.logError("install", "applyPattern field", e); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
         }
     }
 
@@ -359,20 +504,6 @@ public final class ComfortPreferences
         return best;
     }
 
-    private static String describeIu(Object iu)
-    {
-        try
-        {
-            Object id = iu.getClass().getMethod("getId").invoke(iu); //$NON-NLS-1$
-            Object ver = iu.getClass().getMethod("getVersion").invoke(iu); //$NON-NLS-1$
-            return String.valueOf(id) + " " + String.valueOf(ver); //$NON-NLS-1$
-        }
-        catch (Exception e)
-        {
-            return String.valueOf(iu);
-        }
-    }
-
     private static void registerEclipseReleasesSite(Object ui, Class<?> uiClass, URI siteUri)
             throws Exception
     {
@@ -386,11 +517,13 @@ public final class ComfortPreferences
             URI.class, boolean.class, IProgressMonitor.class)
             .invoke(ui, siteUri, Boolean.TRUE, monitor);
         setRepositoryNickname(ui, uiClass, siteUri, NICKNAME_ECLIPSE_RELEASES);
-        Global.log("install", "registerEclipseReleasesSite OK uri=" + siteUri); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
-    private static java.util.List<Object> queryJdtFeatureIus(
-            Object ui, Class<?> uiClass, URI siteUri)
+    /**
+     * Запрос IU по id: сначала конкретный репозиторий сайта, затем весь metadata manager.
+     */
+    private static java.util.List<Object> queryInstallableUnits(
+            Object ui, Class<?> uiClass, URI siteUri, String iuId)
     {
         try
         {
@@ -403,29 +536,81 @@ public final class ComfortPreferences
             Object repo = metaManager.getClass()
                 .getMethod("loadRepository", URI.class, IProgressMonitor.class) //$NON-NLS-1$
                 .invoke(metaManager, siteUri, new NullProgressMonitor());
-            if (repo == null)
-                return null;
             Class<?> queryUtil = loadQueryUtilClass();
             Object query = queryUtil.getMethod("createIUQuery", String.class) //$NON-NLS-1$
-                .invoke(null, JDT_FEATURE_IU_ID);
-            Class<?> queryClass = queryUtil.getClassLoader()
-                .loadClass("org.eclipse.equinox.p2.query.IQuery"); //$NON-NLS-1$
-            Object result = repo.getClass()
-                .getMethod("query", queryClass, IProgressMonitor.class) //$NON-NLS-1$
-                .invoke(repo, query, new NullProgressMonitor());
-            Object[] array = (Object[]) result.getClass().getMethod("toArray").invoke(result); //$NON-NLS-1$
-            if (array == null || array.length == 0)
-                return java.util.Collections.emptyList();
-            java.util.List<Object> list = new java.util.ArrayList<>(array.length);
-            for (Object iu : array)
-                list.add(iu);
-            return list;
+                .invoke(null, iuId);
+            java.util.List<Object> fromRepo = queryToList(repo, query);
+            if (!fromRepo.isEmpty())
+                return fromRepo;
+            return queryToList(metaManager, query);
         }
         catch (Exception e)
         {
-            Global.logError("install", "queryJdtFeatureIus", e); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.logError("install", "queryInstallableUnits " + iuId, e); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
+    }
+
+    private static java.util.List<Object> queryToList(Object queryable, Object query)
+            throws Exception
+    {
+        if (queryable == null || query == null)
+            return java.util.Collections.emptyList();
+        Method queryMethod = null;
+        for (Method m : queryable.getClass().getMethods())
+        {
+            if (!"query".equals(m.getName()) || m.getParameterCount() != 2) //$NON-NLS-1$
+                continue;
+            Class<?>[] pts = m.getParameterTypes();
+            if (IProgressMonitor.class.isAssignableFrom(pts[1])
+                || pts[1].getName().equals("org.eclipse.core.runtime.IProgressMonitor")) //$NON-NLS-1$
+            {
+                queryMethod = m;
+                break;
+            }
+        }
+        if (queryMethod == null)
+            return java.util.Collections.emptyList();
+        Object result = queryMethod.invoke(queryable, query, new NullProgressMonitor());
+        if (result == null)
+            return java.util.Collections.emptyList();
+        // IQueryResult extends Iterable — for-each, без reflection по HashIterator (JPMS)
+        java.util.List<Object> list = new java.util.ArrayList<>();
+        if (result instanceof Iterable<?> iterable)
+        {
+            for (Object iu : iterable)
+                list.add(iu);
+            return list;
+        }
+        if (result instanceof java.util.Collection<?> collection)
+        {
+            list.addAll(collection);
+            return list;
+        }
+        Method toSet = findMethod(result.getClass(), "toUnmodifiableSet"); //$NON-NLS-1$
+        if (toSet != null)
+        {
+            toSet.setAccessible(true);
+            java.util.Collection<?> set = (java.util.Collection<?>) toSet.invoke(result);
+            if (set != null)
+                list.addAll(set);
+            return list;
+        }
+        for (Method m : result.getClass().getMethods())
+        {
+            if (!"toArray".equals(m.getName()) || m.getParameterCount() != 1) //$NON-NLS-1$
+                continue;
+            if (!m.getParameterTypes()[0].isArray())
+                continue;
+            Object[] array = (Object[]) m.invoke(result, (Object) new Object[0]);
+            if (array != null)
+            {
+                for (Object iu : array)
+                    list.add(iu);
+            }
+            return list;
+        }
+        return list;
     }
 
     /** Открывает страницу описания релиза во внешнем браузере. */
@@ -460,20 +645,17 @@ public final class ComfortPreferences
     {
 
         URI siteUri = URI.create(normalizeSiteUrl(siteUrl));
-        Global.log("install", "siteUri=" + siteUri); //$NON-NLS-1$ //$NON-NLS-2$
         Class<?> uiClass = loadBundleClass(BUNDLE_P2_UI,
             "org.eclipse.equinox.p2.ui.ProvisioningUI"); //$NON-NLS-1$
         Object ui = uiClass.getMethod("getDefaultUI").invoke(null); //$NON-NLS-1$
         if (!ensureP2ProfileAvailable(ui, uiClass))
             throw new IllegalStateException("no p2 profile"); //$NON-NLS-1$
         registerUpdateSite(ui, uiClass, siteUri);
-        logKnownRepositories(ui, uiClass, "after registerUpdateSite"); //$NON-NLS-1$
         Class<?> jobClass = loadBundleClass(BUNDLE_P2_UI,
             "org.eclipse.equinox.p2.ui.LoadMetadataRepositoryJob"); //$NON-NLS-1$
         Object job = jobClass.getConstructor(uiClass).newInstance(ui);
         configureLoadJob(job, jobClass);
         runLoadJobModal(job, jobClass);
-        logLoadJobStatus(job, jobClass);
         Class<?> installOpClass = loadBundleClass(BUNDLE_P2_OPERATIONS,
             "org.eclipse.equinox.p2.operations.InstallOperation"); //$NON-NLS-1$
         Class<?> installWizardClass = loadBundleClass(BUNDLE_P2_UI,
@@ -488,7 +670,6 @@ public final class ComfortPreferences
         Shell parent = (Shell) provUIClass.getMethod("getDefaultParentShell").invoke(null); //$NON-NLS-1$
         Object dialog = newProvisioningWizardDialog(dialogClass, parent, wizard);
         dialogClass.getMethod("create").invoke(dialog); //$NON-NLS-1$
-        Global.log("install", "ProvisioningWizardDialog.create() OK"); //$NON-NLS-1$ //$NON-NLS-2$
         selectInstallSiteInDialog(wizard, siteUri);
         dialogClass.getMethod("open").invoke(dialog); //$NON-NLS-1$
     }
@@ -526,7 +707,6 @@ public final class ComfortPreferences
             URI.class, boolean.class, IProgressMonitor.class)
             .invoke(ui, siteUri, Boolean.TRUE, monitor);
         setRepositoryNickname(ui, uiClass, siteUri);
-        Global.log("install", "registerUpdateSite OK uri=" + siteUri); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static void cancelRepositoryLoadJobs() throws Exception
@@ -563,8 +743,6 @@ public final class ComfortPreferences
                 manager.getClass().getMethod("removeRepository", URI.class) //$NON-NLS-1$
                     .invoke(manager, siteUri);
             }
-
-            Global.log("install", "removeRepository " + siteUri); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         catch (Exception e)
@@ -621,9 +799,6 @@ public final class ComfortPreferences
 
         catch (Exception e)
         {
-
-            Global.log("install", //$NON-NLS-1$
-                "AVAILABLE_SPECIFIED fallback=" + AVAILABLE_SPECIFIED_SCOPE); //$NON-NLS-1$
             return AVAILABLE_SPECIFIED_SCOPE;
         }
 
@@ -637,13 +812,8 @@ public final class ComfortPreferences
 
             Object[] pages = (Object[]) wizard.getClass().getMethod("getPages").invoke(wizard); //$NON-NLS-1$
             if (pages == null)
-            {
-
-                Global.log("install", "selectSite: wizard.getPages()=null"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
-            }
 
-            Global.log("install", "selectSite: pages=" + pages.length); //$NON-NLS-1$ //$NON-NLS-2$
             Class<?> availablePageClass = loadBundleClass(BUNDLE_P2_UI,
                 "org.eclipse.equinox.internal.p2.ui.dialogs.AvailableIUsPage"); //$NON-NLS-1$
             int specifiedScope = resolveAvailableSpecifiedScope();
@@ -656,23 +826,13 @@ public final class ComfortPreferences
                 repoSelectorField.setAccessible(true);
                 Object repoSelector = repoSelectorField.get(page);
                 if (repoSelector == null)
-                {
-
-                    Global.log("install", "selectSite: repoSelector=null"); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
-                }
 
-                logInstallRepoCombo(repoSelector, "before setRepositorySelection"); //$NON-NLS-1$
                 repoSelector.getClass().getMethod( //$NON-NLS-1$
                     "setRepositorySelection", int.class, URI.class) //$NON-NLS-1$
                     .invoke(repoSelector, specifiedScope, siteUri);
-                Global.log("install", //$NON-NLS-1$
-                    "setRepositorySelection(scope=AVAILABLE_SPECIFIED, uri=" + siteUri + ")"); //$NON-NLS-1$ //$NON-NLS-2$
-                logInstallRepoCombo(repoSelector, "after setRepositorySelection"); //$NON-NLS-1$
                 return;
             }
-
-            Global.log("install", "selectSite: AvailableIUsPage not found"); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         catch (Exception e)
@@ -747,12 +907,7 @@ public final class ComfortPreferences
                 "org.eclipse.equinox.p2.operations.ProvisioningSession"); //$NON-NLS-1$
             Object agent = sessionClass.getMethod("getProvisioningAgent").invoke(session); //$NON-NLS-1$
             if (agent == null || profileId == null || profileId.isBlank())
-            {
-
-                Global.log("install", "p2 profile missing: profileId=" + profileId //$NON-NLS-1$ //$NON-NLS-2$
-                    + " agent=" + (agent != null)); //$NON-NLS-1$
                 return false;
-            }
 
             Class<?> agentClass = loadBundleClass("org.eclipse.equinox.p2.core", //$NON-NLS-1$
                 "org.eclipse.equinox.p2.core.IProvisioningAgent"); //$NON-NLS-1$
@@ -764,9 +919,7 @@ public final class ComfortPreferences
                 return false;
             Object profile = registryClass.getMethod("getProfile", String.class) //$NON-NLS-1$
                 .invoke(registry, profileId);
-            boolean ok = profile != null;
-            Global.log("install", "p2 profileId=" + profileId + " ok=" + ok); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            return ok;
+            return profile != null;
         }
 
         catch (Exception e)
@@ -860,97 +1013,6 @@ public final class ComfortPreferences
         String text = detail.isBlank() ? message : message + ": " + detail; //$NON-NLS-1$
         Global.logError("install", message, t); //$NON-NLS-1$
         getLog().log(new Status(IStatus.ERROR, Activator.PLUGIN_ID, text, root));
-    }
-
-    private static void logKnownRepositories(Object ui, Class<?> uiClass, String stage)
-    {
-
-        try
-        {
-
-            Object session = uiClass.getMethod("getSession").invoke(ui); //$NON-NLS-1$
-            Object tracker = uiClass.getMethod("getRepositoryTracker").invoke(ui); //$NON-NLS-1$
-            URI[] repos = (URI[]) tracker.getClass().getMethod( //$NON-NLS-1$
-                "getKnownRepositories", session.getClass()) //$NON-NLS-1$
-                .invoke(tracker, session);
-            int count = repos != null ? repos.length : 0;
-            Global.log("install", stage + ": knownRepositories=" + count); //$NON-NLS-1$ //$NON-NLS-2$
-            if (repos != null)
-            {
-
-                for (URI repo : repos)
-                    Global.log("install", "  repo " + repo); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-
-        }
-
-        catch (Exception e)
-        {
-
-            Global.logError("install", "logKnownRepositories " + stage, e); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-
-    }
-
-    private static void logLoadJobStatus(Object job, Class<?> jobClass)
-    {
-
-        try
-        {
-
-            Class<?> statusClass = Class.forName("org.eclipse.core.runtime.IStatus"); //$NON-NLS-1$
-            Class<?> jobBaseClass = Class.forName("org.eclipse.core.runtime.jobs.Job"); //$NON-NLS-1$
-            Object status = jobBaseClass.getMethod("getResult").invoke(job); //$NON-NLS-1$
-            if (status == null)
-            {
-
-                Global.log("install", "LoadMetadataRepositoryJob: status=null"); //$NON-NLS-1$ //$NON-NLS-2$
-                return;
-            }
-
-            boolean ok = (Boolean) statusClass.getMethod("isOK").invoke(status); //$NON-NLS-1$
-            int severity = (Integer) statusClass.getMethod("getSeverity").invoke(status); //$NON-NLS-1$
-            String msg = (String) statusClass.getMethod("getMessage").invoke(status); //$NON-NLS-1$
-            Global.log("install", "LoadMetadataRepositoryJob: ok=" + ok //$NON-NLS-1$ //$NON-NLS-2$
-                + " severity=" + severity + " msg=" + msg); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-
-        catch (Exception e)
-        {
-
-            Global.logError("install", "logLoadJobStatus", e); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-
-    }
-
-    private static void logInstallRepoCombo(Object repoSelector, String stage)
-    {
-
-        try
-        {
-
-            Field comboField = repoSelector.getClass().getDeclaredField("repoCombo"); //$NON-NLS-1$
-            comboField.setAccessible(true);
-            Object combo = comboField.get(repoSelector);
-            if (combo == null)
-            {
-
-                Global.log("install", stage + ": repoCombo=null"); //$NON-NLS-1$ //$NON-NLS-2$
-                return;
-            }
-
-            String text = (String) combo.getClass().getMethod("getText").invoke(combo); //$NON-NLS-1$
-            int sel = (Integer) combo.getClass().getMethod("getSelectionIndex").invoke(combo); //$NON-NLS-1$
-            Global.log("install", stage + ": combo text=\"" + text //$NON-NLS-1$ //$NON-NLS-2$
-                + "\" selectionIndex=" + sel); //$NON-NLS-1$
-        }
-
-        catch (Exception e)
-        {
-
-            Global.logError("install", "logInstallRepoCombo " + stage, e); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-
     }
 
     private static ILog getLog()

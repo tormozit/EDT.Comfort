@@ -287,36 +287,6 @@ public final class GitChangedFileMenuHook implements IStartup
         }
         Global.log("GitChangedFileMenu: MPart.getWidget failed"); //$NON-NLS-1$
 
-        // 4) Fallback: active part
-        try
-        {
-            IWorkbenchPage page = activePage();
-            if (page != null)
-            {
-                IWorkbenchPart active = page.getActivePart();
-                if (active != null)
-                {
-                    String activeId = active.getSite() != null ? active.getSite().getId() : "no-site";
-                    Global.log("GitChangedFileMenu: activePart id=" + activeId); //$NON-NLS-1$
-                    if (isGitView(active))
-                    {
-                        Global.log("GitChangedFileMenu: found by activePart view="
-                            + activeId); //$NON-NLS-1$
-                        return (IViewPart) active;
-                    }
-                }
-                else
-                {
-                    Global.log("GitChangedFileMenu: activePart is null"); //$NON-NLS-1$
-                }
-            }
-        }
-        catch (Exception e)
-        {
-            Global.log("GitChangedFileMenu: activePart error: " + e); //$NON-NLS-1$
-        }
-        Global.log("GitChangedFileMenu: activePart failed"); //$NON-NLS-1$
-
         return null;
     }
 

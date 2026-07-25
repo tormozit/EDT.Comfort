@@ -39,7 +39,7 @@ public final class MdTypeMapping
      * → RU ед.ч. типа МД. В отличие от {@link #RU_PLURAL_TO_RU} (без пробелов, для имён менеджеров
      * вида {@code РегистрыСведений.Имя}), здесь — человекочитаемые подписи с пробелами, ровно как
      * их показывает EDT в дереве поиска (например «Общие формы», «Планы обмена»).
-     * Используется в {@link SearchViewAggregationHook#toSingularRuType} для построения колонки «Путь»
+     * Используется в {@link ConfigSearchResultsHook#toSingularRuType} для построения колонки «Путь»
      * по узлам дерева, когда совпадение не привязано к файлу (матчи внутри бизнес-модели формы и т.п.).
      */
     private static final Map<String, String> TREE_GROUP_LABEL_TO_RU = new LinkedHashMap<>();

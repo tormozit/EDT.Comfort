@@ -16,7 +16,7 @@ import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.IStartup;
 
-public class ConfigurationSearchDialogHook implements IStartup
+public class ConfigSearchDialogHook implements IStartup
 {
     private static final String SETTINGS_SECTION = "TormozitConfigurationSearchSettings";
     private static final String KEY_WHOLE_WORD = "wholeWord";
@@ -67,7 +67,7 @@ public class ConfigurationSearchDialogHook implements IStartup
             Class<?> listenerClass = Class.forName(
                 "org.eclipse.jface.dialogs.IPageChangedListener");
             Object listener = Proxy.newProxyInstance(
-                ConfigurationSearchDialogHook.class.getClassLoader(),
+                ConfigSearchDialogHook.class.getClassLoader(),
                 new Class[] { listenerClass },
                 (proxy, method, args) -> {
                     schedulePatch(shell, dialog, 0);
@@ -246,7 +246,7 @@ public class ConfigurationSearchDialogHook implements IStartup
 
     private static Object createExecutorProviderProxy(Object origExecProvider) throws Exception
     {
-        ClassLoader cl = ConfigurationSearchDialogHook.class.getClassLoader();
+        ClassLoader cl = ConfigSearchDialogHook.class.getClassLoader();
 
         Class<?> providerInterface = null;
         for (String cn : new String[] {
@@ -280,7 +280,7 @@ public class ConfigurationSearchDialogHook implements IStartup
     {
         ClassLoader cl = executor.getClass().getClassLoader();
         final ClassLoader executorCL = cl != null ? cl
-            : ConfigurationSearchDialogHook.class.getClassLoader();
+            : ConfigSearchDialogHook.class.getClassLoader();
         Class<?>[] interfaces = executor.getClass().getInterfaces();
         if (interfaces == null || interfaces.length == 0)
             return executor;

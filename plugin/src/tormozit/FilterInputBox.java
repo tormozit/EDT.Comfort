@@ -80,7 +80,10 @@ final class FilterInputBox
             "comfort.gitHistory.filter.history."), //$NON-NLS-1$
         RIGHTS_DIALOG(
             "comfort.rightsDialog.filter.history.count", //$NON-NLS-1$
-            "comfort.rightsDialog.filter.history."); //$NON-NLS-1$
+            "comfort.rightsDialog.filter.history."), //$NON-NLS-1$
+        FILTERED_LIST_DIALOG(
+            "comfort.filteredListDialog.filter.history.count", //$NON-NLS-1$
+            "comfort.filteredListDialog.filter.history."); //$NON-NLS-1$
 
         final String prefCountKey;
         final String prefItemPrefix;
@@ -202,6 +205,17 @@ final class FilterInputBox
         return create(parent, opts, onSearch);
     }
 
+    /** Замена штатного поля в {@code FilteredList}-диалогах (см. {@code FilteredListDialogFilterHook}) — на всю ширину. */
+    static FilterInputBox forFilteredListDialog(Composite parent, Runnable onSearch)
+    {
+        Options opts = new Options();
+        opts.scope = Scope.FILTERED_LIST_DIALOG;
+        opts.layoutData = new GridData(SWT.FILL, SWT.CENTER, true, false);
+        opts.message = "Фильтр..."; //$NON-NLS-1$
+        opts.tooltip = FLAT_FILTER_TOOLTIP;
+        return create(parent, opts, onSearch);
+    }
+
     /**
      * Заменяет штатное {@link Text} поле паттерна в диалоге EDT на {@link SearchBox} с историей.
      */
@@ -260,6 +274,7 @@ final class FilterInputBox
             case SELECT_TYPE -> forSelectType(parent, onSearch);
             case PICTURE_DIALOG -> forPictureDialog(parent, onSearch);
             case GIT_HISTORY -> forGitHistory(parent, onSearch);
+            case FILTERED_LIST_DIALOG -> forFilteredListDialog(parent, onSearch);
             case RIGHTS_DIALOG -> throw new IllegalStateException("RIGHTS_DIALOG: use attachHistory(SearchBox, Scope.RIGHTS_DIALOG)"); //$NON-NLS-1$
         };
     }

@@ -8,9 +8,6 @@ import java.util.Map;
 
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IResource;
-import org.eclipse.core.commands.AbstractHandler;
-import org.eclipse.core.commands.ExecutionEvent;
-import org.eclipse.core.commands.ExecutionException;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.MenuManager;
 import org.eclipse.jface.viewers.CellLabelProvider;
@@ -43,7 +40,6 @@ import org.eclipse.search.ui.text.AbstractTextSearchViewPage;
 import org.eclipse.search.ui.text.Match;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.SashForm;
-import org.eclipse.swt.graphics.TextStyle;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
@@ -75,7 +71,6 @@ import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.IEditorInput;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.PartInitException;
-import org.eclipse.ui.handlers.IHandlerService;
 import org.eclipse.ui.part.FileEditorInput;
 import org.eclipse.ui.texteditor.ITextEditor;
 
@@ -95,16 +90,7 @@ public final class FileSearchResultsHook implements IStartup
 
     private static final Map<TableViewer, TableColumn> TABLE_COLUMNS_BY_VIEWER = new IdentityHashMap<>();
     private static TableViewer cachedResultTableViewer;
-
-    private static final StyledString.Styler MATCH_STYLER = new StyledString.Styler()
-    {
-        @Override
-        public void applyStyles(TextStyle textStyle)
-        {
-            textStyle.foreground = ThemeAwareColors.effectiveSystemColor(
-                Display.getCurrent(), SWT.COLOR_DARK_BLUE);
-        }
-    };
+    private static FormTableInteraction cachedTableInteraction;
 
     @Override
     public void earlyStartup()
@@ -257,6 +243,7 @@ public final class FileSearchResultsHook implements IStartup
                 return false;
 
             installSplitLayout(treeViewer, pagebook, activePage, view);
+            CreateDebuggerBreakpoints.installToolbarAction(view);
 
             tree.setData(HOOKED_KEY, Boolean.TRUE);
             log("tryPatch: OK");
@@ -355,13 +342,25 @@ public final class FileSearchResultsHook implements IStartup
 
     private static TableViewer createResultTable(Composite parent)
     {
-        Composite rightComposite = new Composite(parent, SWT.NONE);
-        rightComposite.setLayout(new FillLayout());
+        // FormTableInteraction (подсветка заголовка колонки) требует, чтобы прямой родитель Table
+        // либо использовал TableColumnLayout, либо не имел layout вообще (resolveOverlayRoot()) —
+        // обычный FillLayout не подходит (см. эталон "tableStack" в RecentPlacesView.java).
+        Composite tableStack = new Composite(parent, SWT.NONE);
+        tableStack.setLayout(null);
 
-        Table table = new Table(rightComposite,
+        Table table = new Table(tableStack,
             SWT.MULTI | SWT.FULL_SELECTION | SWT.V_SCROLL | SWT.H_SCROLL | SWT.BORDER);
         table.setHeaderVisible(true);
         table.setLinesVisible(true);
+        tableStack.addControlListener(new ControlAdapter()
+        {
+            @Override
+            public void controlResized(ControlEvent e)
+            {
+                if (!table.isDisposed())
+                    table.setBounds(tableStack.getClientArea());
+            }
+        });
 
         TableViewer tableViewer = new TableViewer(table);
         tableViewer.setContentProvider(org.eclipse.jface.viewers.ArrayContentProvider.getInstance());
@@ -454,7 +453,7 @@ public final class FileSearchResultsHook implements IStartup
                     int end = off + len;
                     if (end > text.length()) end = text.length();
                     if (end > off)
-                        ss.append(text.substring(off, end), MATCH_STYLER);
+                        ss.append(text.substring(off, end), ThemeAwareColors.searchMatchStyler());
                     pos = end;
                 }
                 if (pos < text.length())
@@ -494,7 +493,28 @@ public final class FileSearchResultsHook implements IStartup
             }
         });
 
+        FormTableInteraction interaction = new FormTableInteraction(table, tableViewer,
+            FileSearchResultsHook::fileSearchCellText);
+        interaction.setOwnerDrawColumns(textCol.getColumn());
+        interaction.install();
+        cachedTableInteraction = interaction;
+
         return tableViewer;
+    }
+
+    /** Текст ячейки по индексу колонки (0=Путь,1=Файл,2=Номер строки,3=Текст) — для {@link FormTableInteraction}. */
+    private static String fileSearchCellText(TableItem item, int column)
+    {
+        if (!(item.getData() instanceof FileSearchRow row))
+            return "";
+        return switch (column)
+        {
+            case 0 -> row.path != null ? row.path : "";
+            case 1 -> row.file != null ? row.file : "";
+            case 2 -> row.lineNumber > 0 ? String.valueOf(row.lineNumber) : "";
+            case 3 -> row.text != null ? row.text : "";
+            default -> "";
+        };
     }
 
     private static int compareStrings(String a, String b)
@@ -627,42 +647,23 @@ public final class FileSearchResultsHook implements IStartup
         });
     }
 
+    /** Копирует текст активной ячейки (правила проекта: не всю строку) — см. {@link FormTableInteraction}. */
     private static boolean copySelectedRowsToClipboard(TableViewer tableViewer)
     {
         Table table = tableViewer.getTable();
         if (table == null || table.isDisposed())
             return false;
-        TableItem[] selected = table.getSelection();
-        if (selected == null || selected.length == 0)
+        FormTableInteraction interaction = cachedTableInteraction;
+        if (interaction == null)
             return false;
-
-        StringBuilder clipboard = new StringBuilder();
-        for (TableItem item : selected)
-        {
-            if (item == null || item.isDisposed())
-                continue;
-            Object data = item.getData();
-            if (!(data instanceof FileSearchRow row))
-                continue;
-            if (clipboard.length() > 0)
-                clipboard.append('\n');
-            clipboard.append(row.path != null ? row.path : "");
-            clipboard.append('\t');
-            clipboard.append(row.file != null ? row.file : "");
-            clipboard.append('\t');
-            clipboard.append(row.lineNumber > 0 ? String.valueOf(row.lineNumber) : "");
-            clipboard.append('\t');
-            clipboard.append(row.text != null ? row.text : "");
-        }
-        if (clipboard.length() == 0)
+        String text = interaction.activeCellText();
+        if (text == null)
             return false;
 
         Clipboard cb = new Clipboard(table.getDisplay());
         try
         {
-            cb.setContents(
-                new Object[] { clipboard.toString() },
-                new Transfer[] { TextTransfer.getInstance() });
+            cb.setContents(new Object[] { text }, new Transfer[] { TextTransfer.getInstance() });
         }
         finally
         {
@@ -751,16 +752,8 @@ public final class FileSearchResultsHook implements IStartup
                 openFileInEditor(tableViewer, treeViewer, page);
             }
         });
-        menuManager.add(new Action("Копировать")
-        {
-            @Override
-            public void run()
-            {
-                if (!ComfortSettings.isReplaceListFiltersEnabled())
-                    return;
-                copySelectedRowsToClipboard(tableViewer);
-            }
-        });
+        // "Копировать" не добавляем — FormTableInteraction.install() сама добавляет
+        // "Копировать\tCtrl+C" в это же меню (активная ячейка, см. createResultTable).
         Menu menu = menuManager.createContextMenu(table);
         table.setMenu(menu);
     }
@@ -1168,38 +1161,23 @@ public final class FileSearchResultsHook implements IStartup
             display.asyncExec(() -> copySelectedRowsToClipboard(tableViewer));
         });
 
-        // IHandlerService: handler override for environments where KeyUp is not needed
-        IHandlerService handlerService = view.getSite().getService(IHandlerService.class);
-        if (handlerService == null)
-        {
-            try
-            {
-                handlerService = PlatformUI.getWorkbench().getService(IHandlerService.class);
-            }
-            catch (Exception e) { /* ignore */ }
-        }
-        if (handlerService == null)
-            return;
-        handlerService.activateHandler("org.eclipse.ui.edit.copy", new AbstractHandler()
-        {
-            @Override
-            public Object execute(ExecutionEvent event) throws ExecutionException
-            {
-                if (!ComfortSettings.isReplaceListFiltersEnabled())
-                    return null;
-                copySelectedRowsToClipboard(tableViewer);
-                return null;
-            }
+        // "org.eclipse.ui.edit.copy" активируется ОДИН раз на весь view — общая точка
+        // CreateDebuggerBreakpoints.installGlobalCopyHandler (см. её javadoc): если оба хука панели
+        // поиска (этот и ConfigSearchResultsHook) активируют обработчик этой команды по отдельности,
+        // второй молча перебивает первого на всём view, даже когда фокус не на его таблице.
+        CreateDebuggerBreakpoints.installGlobalCopyHandler(view);
+    }
 
-            @Override
-            public boolean isHandled()
-            {
-                if (!ComfortSettings.isReplaceListFiltersEnabled())
-                    return false;
-                Table table = tableViewer.getTable();
-                return table != null && !table.isDisposed() && table.isFocusControl();
-            }
-        });
+    /** Копирует активную ячейку, если фокус сейчас на этой таблице — для {@link CreateDebuggerBreakpoints#installGlobalCopyHandler}. */
+    static boolean copyActiveCellIfFocused()
+    {
+        TableViewer tableViewer = cachedResultTableViewer;
+        if (tableViewer == null)
+            return false;
+        Table table = tableViewer.getTable();
+        if (table == null || table.isDisposed() || !table.isFocusControl())
+            return false;
+        return copySelectedRowsToClipboard(tableViewer);
     }
 
     private static void reinstallHandlers(Object page, IViewPart view)
@@ -1302,6 +1280,48 @@ public final class FileSearchResultsHook implements IStartup
             }
         }
         return total;
+    }
+
+    /**
+     * Строки, выбранные сейчас в этой странице результатов (таблица Комфорта, если в фокусе
+     * и что-то выбрано — иначе штатное дерево), для тулбарной команды
+     * {@link CreateDebuggerBreakpoints}. {@code null}, если эта страница сейчас не активна
+     * (тулбар общий на панель — тогда пробуют другие хуки).
+     */
+    static List<CreateDebuggerBreakpoints.Target> currentBreakpointTargets(IViewPart view)
+    {
+        if (!(view instanceof ISearchResultViewPart))
+            return null;
+        ISearchResultPage activePage = ((ISearchResultViewPart) view).getActivePage();
+        if (activePage == null || !activePage.getClass().getName().contains(PAGE_CLASS_MARKER))
+            return null;
+        Object viewerObj = Global.getField(activePage, "fViewer");
+        if (!(viewerObj instanceof TreeViewer treeViewer))
+            return null;
+
+        List<FileSearchRow> rows = new ArrayList<>();
+        TableViewer tableViewer = cachedResultTableViewer;
+        Table table = tableViewer != null ? tableViewer.getTable() : null;
+        if (table != null && !table.isDisposed() && table.getSelectionCount() > 0)
+        {
+            for (TableItem item : table.getSelection())
+                if (item != null && item.getData() instanceof FileSearchRow row)
+                    rows.add(row);
+        }
+        else
+        {
+            ITreeContentProvider cp = (ITreeContentProvider) treeViewer.getContentProvider();
+            Object input = treeViewer.getInput();
+            AbstractTextSearchResult searchResult = input instanceof AbstractTextSearchResult r ? r : null;
+            for (Object node : treeViewer.getStructuredSelection().toList())
+                collectRows(node, cp, rows, searchResult);
+        }
+
+        List<CreateDebuggerBreakpoints.Target> targets = new ArrayList<>();
+        for (FileSearchRow row : rows)
+            if (row.iFile != null && row.lineNumber > 0)
+                targets.add(new CreateDebuggerBreakpoints.Target(row.iFile, row.lineNumber));
+        return targets;
     }
 
     private static void log(String message)
