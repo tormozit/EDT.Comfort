@@ -503,6 +503,18 @@ public class CompareConfigMenuHook implements IStartup
     }
 
     /**
+     * Возвращает {@code true}, если узел дерева сравнения присутствует только в одной
+     * стороне сравнения (добавлен или удалён) — тот же критерий, что использует команда
+     * «До изменённых» ({@link CompareConfigExpandMode#toBothElement}), чтобы не разворачивать
+     * в него дочерние узлы. Используется {@link TreeSoleChildAutoExpand} для остановки
+     * авторазворачивания цепочки единственных потомков на таких узлах.
+     */
+    public static boolean isAddedOrDeletedCompareNode(Object element)
+    {
+        return CompareConfigExpandHandler.isAddedOrDeleted(element);
+    }
+
+    /**
      * Открывает объект конфигурации выбранный в дереве сравнения EDT.
      *
      * Алгоритм:
