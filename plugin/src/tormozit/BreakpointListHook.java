@@ -43,9 +43,9 @@ import com._1c.g5.v8.dt.debug.core.model.breakpoints.IBslExceptionBreakpoint;
  * </ul>
  *
  * <p>{@link #firstLine} — первая строка уже разобранного EDT текста трассировки, общая для этого
- * редактора и для {@link ExceptionSelectionDialogHook}/{@link StacktraceStopOnExceptionHandler}
- * (кнопка «Вставить из буфера» в штатном диалоге «Остановка по ошибке» и команда/двойной клик
- * в панели «Трассировки стека» — обе используют штатный {@code IStacktraceParser} EDT, не свой
+ * редактора и для {@link ExceptionSelectionDialogHook}/{@link StacktracesViewInteractionHook}
+ * (кнопка «Вставить из буфера» в штатном диалоге «Остановка по ошибке» и двойной клик по причине
+ * в панели «Трассировки стека» — оба используют штатный {@code IStacktraceParser} EDT, не свой
  * разбор текста).
  */
 public final class BreakpointListHook implements IStartup
@@ -281,7 +281,7 @@ public final class BreakpointListHook implements IStartup
     /**
      * Первая непустая строка уже разобранного EDT текста ошибки — {@code IStacktraceError.getName()}
      * (штатный {@code IStacktraceParser} панели «Трассировки стека» — см.
-     * {@link ExceptionSelectionDialogHook}/{@link StacktraceStopOnExceptionHandler}). У 1С сама
+     * {@link ExceptionSelectionDialogHook}/{@link StacktracesViewInteractionHook}). У 1С сама
      * причина всегда первая строка дампа; в {@code getName()} могут попадать и другие
      * нераспознанные парсером строки (например ссылки без имени модуля {@code {(1)}:...} или
      * служебный тег {@code [ОшибкаВоВремя...]}) — они идут ПОСЛЕ причины, не перед ней.

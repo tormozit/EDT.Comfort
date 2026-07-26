@@ -34,7 +34,7 @@ import com._1c.g5.v8.dt.stacktraces.model.IStacktraceParser;
 /**
  * Штатный диалог «Остановка по ошибке» EDT ({@code BslExceptionSelectionDialog} — открывается
  * кнопкой «Добавить точку останова по исключению» панели «Точки останова», а также
- * {@link StacktraceStopOnExceptionHandler} из панели «Трассировки стека»):
+ * {@link StacktracesViewInteractionHook} из панели «Трассировки стека»):
  * <ul>
  * <li>штатное поле фильтра заменяется на общий {@link FilterInputBox} (как обычно в этом плагине)
  * с многословным AND-фильтром {@link BslExceptionSmartFilter} вместо штатного подстрочного;</li>
@@ -45,7 +45,7 @@ import com._1c.g5.v8.dt.stacktraces.model.IStacktraceParser;
  * причину из получившегося {@code IStacktraceError} — парсер сам решает, похож ли текст на дамп
  * ошибки (нужен хотя бы один уровень стека), никакой своей эвристики;</li>
  * <li>это же действие выполняется один раз сразу при открытии диалога (без клика);</li>
- * <li>{@link StacktraceStopOnExceptionHandler} передаёт уже готовую (доверенную) причину напрямую,
+ * <li>{@link StacktracesViewInteractionHook} передаёт уже готовую (доверенную) причину напрямую,
  * через {@link #setPendingReason}, в обход буфера обмена — она и так уже разобрана EDT (панель
  * «Трассировки стека» строит {@code IStacktraceError} при добавлении, парсер повторно не нужен).</li>
  * </ul>
@@ -63,7 +63,7 @@ public final class ExceptionSelectionDialogHook implements IStartup
     private static volatile String pendingReason;
 
     /**
-     * Доверенная причина от {@link StacktraceStopOnExceptionHandler} — уже прошла разбор EDT
+     * Доверенная причина от {@link StacktracesViewInteractionHook} — уже прошла разбор EDT
      * (узел {@code IStacktraceError}), подставляется в поле фильтра при следующем открытии этого
      * диалога напрямую, без повторной проверки «похоже ли на текст ошибки».
      */
