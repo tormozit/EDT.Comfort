@@ -12,6 +12,8 @@ import java.util.Set;
 
 import org.eclipse.core.resources.IFile;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.jface.text.source.ISourceViewer;
+import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
@@ -30,10 +32,13 @@ import org.eclipse.search.ui.ISearchQuery;
 import org.eclipse.search.ui.ISearchResultPage;
 import org.eclipse.search.ui.ISearchResultViewPart;
 import org.eclipse.search.ui.NewSearchUI;
+import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.search.core.text.TextSearchFileMatch;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.SashForm;
+import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Image;
+import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
@@ -46,6 +51,7 @@ import org.eclipse.swt.widgets.TableColumn;
 import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
+import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IViewPart;
@@ -323,7 +329,7 @@ public final class ConfigSearchResultsHook implements IStartup
 
         TableViewerColumn propertyCol = new TableViewerColumn(matchViewer, SWT.LEFT);
         propertyCol.getColumn().setText("Свойство"); //$NON-NLS-1$
-        propertyCol.getColumn().setToolTipText("Свойство" + Global.pluginSignForTooltip());
+        propertyCol.getColumn().setToolTipText("Свойство"); //$NON-NLS-1$
         propertyCol.getColumn().setWidth(ComfortSettings.getConfigSearchMatchColumnWidth("property", 140)); //$NON-NLS-1$
         propertyCol.getColumn().addListener(SWT.Resize, e -> {
             int w = propertyCol.getColumn().getWidth();
@@ -359,7 +365,7 @@ public final class ConfigSearchResultsHook implements IStartup
 
         TableViewerColumn textCol = new TableViewerColumn(matchViewer, SWT.LEFT);
         textCol.getColumn().setText("Текст"); //$NON-NLS-1$
-        textCol.getColumn().setToolTipText("Текст" + Global.pluginSignForTooltip());
+        textCol.getColumn().setToolTipText("Текст"); //$NON-NLS-1$
         textCol.getColumn().setWidth(ComfortSettings.getConfigSearchMatchColumnWidth("text", 280)); //$NON-NLS-1$
         textCol.getColumn().addListener(SWT.Resize, e -> {
             int w = textCol.getColumn().getWidth();
@@ -437,7 +443,7 @@ public final class ConfigSearchResultsHook implements IStartup
             }
         });
 
-        installMatchTableOpenSupport(matchViewer, activePage);
+        installMatchTableOpenSupport(matchViewer, activePage, view.getSite().getPage());
         installMatchTableCopyHandler(matchViewer, view);
 
         treeViewer.addPostSelectionChangedListener(event -> {
@@ -515,7 +521,8 @@ public final class ConfigSearchResultsHook implements IStartup
      * вызывается для дерева и штатной таблицы через {@code OpenAndLinkWithEditorHelper.create(...)}
      * — найдено декомпиляцией). Так открытие не дублируется по типам совпадений отдельным кодом.
      */
-    private static void installMatchTableOpenSupport(TableViewer matchViewer, Object activePage)
+    private static void installMatchTableOpenSupport(TableViewer matchViewer, Object activePage,
+            IWorkbenchPage workbenchPage)
     {
         Table table = matchViewer.getTable();
         Runnable openSelected = () -> {
@@ -539,6 +546,7 @@ public final class ConfigSearchResultsHook implements IStartup
                     .getDeclaredMethod("handleOpen", org.eclipse.jface.viewers.OpenEvent.class); //$NON-NLS-1$
                 m.setAccessible(true);
                 m.invoke(activePage, openEvent);
+                scheduleLeftmostScrollForOpenedMatch(workbenchPage, 0);
             }
             catch (Exception e)
             {
@@ -555,6 +563,48 @@ public final class ConfigSearchResultsHook implements IStartup
                 return;
             if (event.keyCode == SWT.CR || event.keyCode == SWT.KEYPAD_CR)
                 openSelected.run();
+        });
+    }
+
+    /**
+     * После {@code handleOpen} штатное горизонтальное позиционирование модуля не гарантирует
+     * видимость начала строки (левая часть часто важнее правой — конец длинной строки без контекста
+     * малополезен). Догоняем открывшийся BSL-редактор и подкручиваем по горизонтали к самой левой
+     * позиции, при которой вхождение (текущее выделение) всё ещё целиком видно.
+     *
+     * <p>Редактор становится активным не мгновенно (открытие/активация части — асинхронный процесс
+     * workbench) — повтор каждые 100мс до 10 раз, как и {@link #scheduleFinalAggregationReapplyAttempt}.
+     */
+    private static void scheduleLeftmostScrollForOpenedMatch(IWorkbenchPage workbenchPage, int attempt)
+    {
+        if (workbenchPage == null)
+            return;
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.timerExec(100, () -> {
+            IEditorPart activeEditor = workbenchPage.getActiveEditor();
+            BslXtextEditor bslEditor = GetRef.getActiveBslEditor(activeEditor);
+            if (bslEditor == null)
+            {
+                if (attempt < 10)
+                    scheduleLeftmostScrollForOpenedMatch(workbenchPage, attempt + 1);
+                return;
+            }
+            ISourceViewer viewer = bslEditor.getInternalSourceViewer();
+            if (!(viewer instanceof SourceViewer sourceViewer))
+            {
+                if (attempt < 10)
+                    scheduleLeftmostScrollForOpenedMatch(workbenchPage, attempt + 1);
+                return;
+            }
+            StyledText widget = sourceViewer.getTextWidget();
+            if (widget == null || widget.isDisposed())
+                return;
+            Point selection = widget.getSelectionRange(); // x=начало, y=длина
+            if (selection == null)
+                return;
+            SearchMatchScrollSupport.applyLeftmost(widget, selection.x, selection.x + Math.max(0, selection.y));
         });
     }
 

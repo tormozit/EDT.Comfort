@@ -417,8 +417,8 @@ public final class IrBslCompletionSupport
 //        Функция ЗаполнитьТаблицуСлов(ТаблицаТиповКонтекста = Неопределено, Знач ПрименитьОжидаемыйТип = Истина, выхЕстьЛучшееСлово = Неопределено, Знач РазрешитьОткрытиеОкон = Истина,
 //            Знач Сортировать = Истина, Знач ДобавлятьНизкоВероятные = Ложь, Знач ОтделятьБольшиеНаборыСлов = Ложь, Знач СловоФильтр = Неопределено, Знач ЗапретГлобальногоКонтекста = Ложь,
 //            Знач ТипСловаФильтр = Неопределено, ИнлайнРежимДоступен = Ложь) Экспорт
-        boolean autoOpenSuggested = ComBridge.toBoolean(session.invokeCodeEditorQuiet(
-            "ЗаполнитьТаблицуСлов", typesTable, true, false, false, false, !autoInvoke, true)); //$NON-NLS-1$
+        boolean autoOpenSuggested =
+            session.fillWordsTable(typesTable, true, false, !autoInvoke, true, true);
         IrCompletionDebug.timing("Заполнение слов контекста", started); //$NON-NLS-1$
 if (!autoOpenSuggested)
         {

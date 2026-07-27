@@ -1327,7 +1327,11 @@ public final class ParamHintHtmlModifier
                 "try{" //$NON-NLS-1$
                     + "var b=document.querySelector('.contentassist-heading-content b')" //$NON-NLS-1$
                     + "||document.querySelector('b');" //$NON-NLS-1$
-                    + "if(b){b.scrollIntoView(true);}" //$NON-NLS-1$
+                    + "if(b){" //$NON-NLS-1$
+                    + "b.scrollIntoView(true);" //$NON-NLS-1$
+                    + "document.documentElement.scrollLeft=0;" //$NON-NLS-1$
+                    + "document.body.scrollLeft=0;" //$NON-NLS-1$
+                    + "}" //$NON-NLS-1$
                     + "}catch(e){}"); //$NON-NLS-1$
         }
         catch (Exception ignored)

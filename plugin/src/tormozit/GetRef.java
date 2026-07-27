@@ -320,10 +320,26 @@ public class GetRef extends AbstractHandler implements IElementUpdater
     // Конвертация пути файла → путь модуля для ссылок
     // =========================================================================
 
+    /**
+     * Приводит путь к виду, начинающемуся с {@code src/} или {@code src/ext/}.
+     * Панель «История Git» и Staging передают путь <b>от корня git-репозитория</b>
+     * ({@code FileDiff.getPath()} / {@code entry.getPath()}), а не
+     * {@code IFile.getProjectRelativePath()} — если репозиторий содержит несколько
+     * проектов в подпапках (например {@code WMS5/src/...}), префикс до {@code src/}
+     * нужно обрезать, иначе {@link #pathToModuleRef}/{@link #pathToFullName} не резолвят путь.
+     */
+    private static String normalizeToSrcRelative(String path)
+    {
+        if (path.startsWith("src/") || path.startsWith("src/ext/")) //$NON-NLS-1$ //$NON-NLS-2$
+            return path;
+        int idx = path.indexOf("/src/"); //$NON-NLS-1$
+        return idx >= 0 ? path.substring(idx + 1) : path;
+    }
+
     static ModuleRef pathToModuleRef(String projectRelativePath)
     {
         if (projectRelativePath == null) return null;
-        String path = projectRelativePath.replace('\\', '/');
+        String path = normalizeToSrcRelative(projectRelativePath.replace('\\', '/'));
         String extensionName = null;
         String relative;
 
@@ -750,7 +766,7 @@ public class GetRef extends AbstractHandler implements IElementUpdater
     static boolean isConfigurationRootPath(String projectRelativePath)
     {
         if (projectRelativePath == null) return false;
-        String path = projectRelativePath.replace('\\', '/');
+        String path = normalizeToSrcRelative(projectRelativePath.replace('\\', '/'));
         String relative;
         if (path.startsWith("src/ext/")) //$NON-NLS-1$
         {
@@ -768,7 +784,7 @@ public class GetRef extends AbstractHandler implements IElementUpdater
     static String pathToFullName(String projectRelativePath)
     {
         if (projectRelativePath == null) return null;
-        String path = projectRelativePath.replace('\\', '/');
+        String path = normalizeToSrcRelative(projectRelativePath.replace('\\', '/'));
         String extensionName = null;
         String relative;
         if (path.startsWith("src/ext/")) //$NON-NLS-1$
@@ -836,7 +852,7 @@ public class GetRef extends AbstractHandler implements IElementUpdater
     /** Подпись колонки «Путь» для {@code src/Configuration/*} (и Configuration в расширении). */
     private static String configurationRootDisplayName(String projectRelativePath)
     {
-        String path = projectRelativePath.replace('\\', '/');
+        String path = normalizeToSrcRelative(projectRelativePath.replace('\\', '/'));
         if (path.startsWith("src/ext/")) //$NON-NLS-1$
         {
             String rest = path.substring("src/ext/".length()); //$NON-NLS-1$

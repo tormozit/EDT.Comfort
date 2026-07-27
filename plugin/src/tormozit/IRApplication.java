@@ -1469,15 +1469,24 @@ public final class IRApplication
         if (application==null)
         {
             List<IApplication> apps = appManager.getApplications(dtProject.getWorkspaceProject());
+            IInfobaseApplication fallback = null;
             for (IApplication elem : apps)
             {
-                if (elem instanceof IInfobaseApplication)
-                    if (Global.invoke(elem, "getProject") == dtProject.getWorkspaceProject())
-                    {
-                        application = (IInfobaseApplication)elem;
-                        break;
-                    }
-            } 
+                if (!(elem instanceof IInfobaseApplication))
+                    continue;
+                if (Global.invoke(elem, "getProject") != dtProject.getWorkspaceProject())
+                    continue;
+                IInfobaseApplication candidate = (IInfobaseApplication)elem;
+                if (fallback == null)
+                    fallback = candidate;
+                if (getInstance().isAutoConnect(candidate))
+                {
+                    application = candidate;
+                    break;
+                }
+            }
+            if (application == null)
+                application = fallback;
         }
         return application;
     }

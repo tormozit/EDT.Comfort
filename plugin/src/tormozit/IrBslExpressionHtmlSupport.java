@@ -112,7 +112,7 @@ public final class IrBslExpressionHtmlSupport
                 session.applyPreparedCodeEditorSync(payload);
             ensureCodeEditor(session);
             session.invokeCodeEditor("РазобратьТекущийКонтекст"); //$NON-NLS-1$
-            session.invokeCodeEditor("ЗаполнитьТаблицуСлов"); //$NON-NLS-1$
+            session.fillWordsTable(null, true, true, false, false, false);
             return invokeDescriptionHtmlWithCancellation(session, name, kind);
         }
         catch (Exception e)

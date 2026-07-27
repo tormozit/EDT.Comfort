@@ -40,6 +40,7 @@ import org.eclipse.search.ui.text.AbstractTextSearchViewPage;
 import org.eclipse.search.ui.text.Match;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.SashForm;
+import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
@@ -49,6 +50,7 @@ import org.eclipse.swt.events.MouseAdapter;
 import org.eclipse.swt.events.MouseEvent;
 import org.eclipse.swt.layout.FillLayout;
 import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
@@ -971,7 +973,12 @@ public final class FileSearchResultsHook implements IStartup
             if (textEditor.getSite() != null
                 && textEditor.getSite().getShell() != null
                 && !textEditor.getSite().getShell().isDisposed())
+            {
                 textEditor.selectAndReveal(offset, length);
+                Object widgetObj = textEditor.getAdapter(Control.class);
+                if (widgetObj instanceof StyledText widget)
+                    SearchMatchScrollSupport.applyLeftmost(widget, offset, offset + Math.max(0, length));
+            }
         });
     }
 

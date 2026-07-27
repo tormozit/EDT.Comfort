@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.WeakHashMap;
 
+import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Status;
@@ -513,6 +514,10 @@ public final class CommitMessageSpellCheckHook implements IStartup
             {
                 return;
             }
+            // Резолвим активный проект здесь, на UI-потоке (timerExec) — Job ниже выполняется
+            // на фоновом потоке, где PlatformUI.getWorkbench().getActiveWorkbenchWindow()
+            // возвращает null, и проектный словарь орфографии молча выпадает из проверки.
+            final IProject checkProject = Global.getActiveProject((IWorkbenchPage) null, false);
             Job checkJob = new Job(JOB_NAME)
             {
                 @Override
@@ -520,7 +525,16 @@ public final class CommitMessageSpellCheckHook implements IStartup
                 {
                     if (monitor.isCanceled() || gen != scheduleGeneration)
                         return Status.CANCEL_STATUS;
-                    List<int[]> ranges = ComfortSpellingEngine.findMisspelledRanges(text);
+                    List<int[]> ranges;
+                    ComfortSpellingEngine.setCheckProjectOverride(checkProject);
+                    try
+                    {
+                        ranges = ComfortSpellingEngine.findMisspelledRanges(text);
+                    }
+                    finally
+                    {
+                        ComfortSpellingEngine.setCheckProjectOverride(null);
+                    }
                     if (monitor.isCanceled() || gen != scheduleGeneration)
                         return Status.CANCEL_STATUS;
                     List<CommitProblem> problems = new ArrayList<>();

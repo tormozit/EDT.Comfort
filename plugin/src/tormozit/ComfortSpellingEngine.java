@@ -105,6 +105,14 @@ public final class ComfortSpellingEngine
     private static final ConcurrentHashMap<String, List<String>> suggestCache =
         new ConcurrentHashMap<>();
     private static volatile boolean projectMorphListenerInstalled;
+    /**
+     * Явный проект для фоновой проверки (см. {@link #resolveSpellingProject()}):
+     * {@code PlatformUI.getWorkbench().getActiveWorkbenchWindow()} возвращает {@code null}
+     * не с UI-потока, а Job-и хуков орфографии считают вне него. Хук резолвит проект
+     * на UI-потоке (по редактору/файлу) и передаёт его через этот ThreadLocal на время
+     * работы Job на своём потоке.
+     */
+    private static final ThreadLocal<IProject> CHECK_PROJECT_OVERRIDE = new ThreadLocal<>();
 
     private ComfortSpellingEngine()
     {
@@ -314,7 +322,23 @@ public final class ComfortSpellingEngine
 
     private static IProject resolveSpellingProject()
     {
+        IProject override = CHECK_PROJECT_OVERRIDE.get();
+        if (override != null)
+            return override;
         return Global.getActiveProject((IWorkbenchPage) null, false);
+    }
+
+    /**
+     * Задать проект для проверки орфографии на текущем потоке (фоновый Job хука):
+     * вызывать на UI-потоке резолвить {@code project} заранее, затем установить его
+     * перед стартом Job-а и снять ({@code null}) в {@code finally} по завершении.
+     */
+    static void setCheckProjectOverride(IProject project)
+    {
+        if (project == null)
+            CHECK_PROJECT_OVERRIDE.remove();
+        else
+            CHECK_PROJECT_OVERRIDE.set(project);
     }
 
     /** Сброс кэша проектного словаря и пересчёт орфографии (смена активного проекта). */

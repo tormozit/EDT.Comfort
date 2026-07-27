@@ -652,6 +652,10 @@ public final class BslModuleSpellCheckHook implements IStartup
                 return;
 
             final int visEnd = visOffset + visLength;
+            // Резолвим проект здесь, на UI-потоке (timerExec) — Job ниже выполняется на
+            // фоновом потоке, где PlatformUI.getWorkbench().getActiveWorkbenchWindow()
+            // возвращает null, и проектный словарь орфографии молча выпадает из проверки.
+            final IProject checkProject = Global.getActiveProject(editor, false);
             Job checkJob = new Job(JOB_NAME)
             {
                 @Override
@@ -660,6 +664,7 @@ public final class BslModuleSpellCheckHook implements IStartup
                     if (monitor.isCanceled() || gen != scheduleGeneration)
                         return Status.CANCEL_STATUS;
                     List<ModuleProblem> problems;
+                    ComfortSpellingEngine.setCheckProjectOverride(checkProject);
                     try
                     {
                         boolean checkIdents = ComfortSettings.isSpellingCheckIdentifiersVisible();
@@ -669,6 +674,10 @@ public final class BslModuleSpellCheckHook implements IStartup
                     catch (Exception e)
                     {
                         return Status.CANCEL_STATUS;
+                    }
+                    finally
+                    {
+                        ComfortSpellingEngine.setCheckProjectOverride(null);
                     }
                     if (monitor.isCanceled() || gen != scheduleGeneration)
                         return Status.CANCEL_STATUS;

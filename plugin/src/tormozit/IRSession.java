@@ -443,6 +443,24 @@ public final class IRSession
         }
 
         /**
+         * {@code ИР.ЗаполнитьТаблицуСлов} — единственная точка вызова. Всегда
+         * {@code РазрешитьОткрытиеОкон = Ложь}, чтобы ИР не открывал собственные попапы поверх EDT.
+         *
+         * @param quiet {@code true} — {@link #invokeCodeEditorQuiet}, {@code false} — {@link #invokeCodeEditor}
+         * @return результат функции ИР ({@code autoOpenSuggested})
+         */
+        boolean fillWordsTable(Object typesTable, boolean applyExpectedType, boolean sort,
+            boolean addLowProbable, boolean separateBigWordSets, boolean quiet)
+        {
+            Object[] args = {typesTable, applyExpectedType, false, false, sort, addLowProbable,
+                separateBigWordSets};
+            Object result = quiet
+                ? invokeCodeEditorQuiet("ЗаполнитьТаблицуСлов", args) //$NON-NLS-1$
+                : invokeCodeEditor("ЗаполнитьТаблицуСлов", args); //$NON-NLS-1$
+            return ComBridge.toBoolean(result);
+        }
+
+        /**
          * Первый COM-сбой за сессию — тост пользователю. Повторные (каждая буква assist) молчат.
          * Гиперссылка «Отключить ИР» только если для инфобазы не включён «Авто ИР».
          */
