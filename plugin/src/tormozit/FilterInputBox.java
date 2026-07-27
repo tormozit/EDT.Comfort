@@ -83,7 +83,10 @@ final class FilterInputBox
             "comfort.rightsDialog.filter.history."), //$NON-NLS-1$
         FILTERED_LIST_DIALOG(
             "comfort.filteredListDialog.filter.history.count", //$NON-NLS-1$
-            "comfort.filteredListDialog.filter.history."); //$NON-NLS-1$
+            "comfort.filteredListDialog.filter.history."), //$NON-NLS-1$
+        INFOBASES(
+            "comfort.infobasesView.filter.history.count", //$NON-NLS-1$
+            "comfort.infobasesView.filter.history."); //$NON-NLS-1$
 
         final String prefCountKey;
         final String prefItemPrefix;
@@ -276,6 +279,7 @@ final class FilterInputBox
             case GIT_HISTORY -> forGitHistory(parent, onSearch);
             case FILTERED_LIST_DIALOG -> forFilteredListDialog(parent, onSearch);
             case RIGHTS_DIALOG -> throw new IllegalStateException("RIGHTS_DIALOG: use attachHistory(SearchBox, Scope.RIGHTS_DIALOG)"); //$NON-NLS-1$
+            case INFOBASES -> throw new IllegalStateException("INFOBASES: use attachHistory(SearchBox, Scope.INFOBASES)"); //$NON-NLS-1$
         };
     }
 

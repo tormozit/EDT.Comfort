@@ -26,6 +26,8 @@ import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.navigator.CommonViewer;
 import org.eclipse.jface.viewers.ViewerFilter;
 
+import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
+
 /**
  * Умный фильтр и подсветка вхождений в панели «Информационные базы»
  * ({@code com._1c.g5.v8.dt.internal.platform.services.ui.infobases.InfobasesView}).
@@ -186,6 +188,13 @@ public final class InfobasesViewHook implements IStartup
         for (String m : new String[] { "activateSearchBox", "showSearchBox", "expandSearchBox" }) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             Global.invokeVoid(view, m);
         Global.invokeVoid(searchBox, "setVisible", Boolean.TRUE); //$NON-NLS-1$
+
+        if (searchBox instanceof SearchBox box && !box.isDisposed())
+        {
+            box.setToolTipText(FilterInputBox.FLAT_FILTER_TOOLTIP + "\nCtrl+↓ — история запросов."); //$NON-NLS-1$
+            box.setMessage("Фильтр..."); //$NON-NLS-1$
+            FilterInputBox.attachHistory(box, FilterInputBox.Scope.INFOBASES);
+        }
 
         SearchBoxFilterAccess searchInput = SearchBoxFilterAccess.resolve(view, searchBox);
         if (searchInput == null)
