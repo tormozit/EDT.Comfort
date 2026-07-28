@@ -649,7 +649,7 @@ public final class FileSearchResultsHook implements IStartup
         });
     }
 
-    /** Копирует текст активной ячейки (правила проекта: не всю строку) — см. {@link FormTableInteraction}. */
+    /** Копирует текст для активной колонки (см. {@link FormTableInteraction#activeSelectionText()}). */
     private static boolean copySelectedRowsToClipboard(TableViewer tableViewer)
     {
         Table table = tableViewer.getTable();
@@ -658,7 +658,7 @@ public final class FileSearchResultsHook implements IStartup
         FormTableInteraction interaction = cachedTableInteraction;
         if (interaction == null)
             return false;
-        String text = interaction.activeCellText();
+        String text = interaction.activeSelectionText();
         if (text == null)
             return false;
 

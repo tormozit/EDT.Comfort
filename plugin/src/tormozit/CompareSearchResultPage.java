@@ -34,8 +34,30 @@ import org.eclipse.ui.IActionBars;
 import org.eclipse.ui.IMemento;
 import org.eclipse.ui.part.IPageSite;
 
+import com._1c.g5.v8.dt.compare.model.ComparisonSide;
+import com._1c.g5.v8.dt.compare.ui.editor.DtComparisonView;
+import com._1c.g5.v8.dt.compare.ui.partialmodel.node.IPartialModelNode;
+
 public class CompareSearchResultPage implements ISearchResultPage
 {
+    /**
+     * Обходной путь (issue #165, платформенная гонка PageBook/CTabFolder — см. описание у вызова):
+     * повторно скрывает таблицу, если страница всё ещё деактивирована ({@code this.searchResult
+     * == null}) — не трогает состояние, если за это время пришёл новый реальный поиск.
+     */
+    private void scheduleForceHide(Table table, int delayMs)
+    {
+        Display display = table.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        display.timerExec(delayMs, () -> {
+            if (table.isDisposed() || searchResult != null)
+                return;
+            if (table.getVisible())
+                table.setVisible(false);
+        });
+    }
+
     private String id;
     private ISearchResultViewPart viewPart;
     private IPageSite pageSite;
@@ -46,18 +68,6 @@ public class CompareSearchResultPage implements ISearchResultPage
     private String queryText;
 
     private IMemento restoredState;
-
-    private Color bgAdded;
-    private Color bgDeleted;
-
-    private static final StyledString.Styler HIGHLIGHT_STYLER = new StyledString.Styler()
-    {
-        @Override
-        public void applyStyles(TextStyle textStyle)
-        {
-            textStyle.background = Display.getCurrent().getSystemColor(SWT.COLOR_YELLOW);
-        }
-    };
 
     @Override
     public void init(IPageSite site)
@@ -78,9 +88,6 @@ public class CompareSearchResultPage implements ISearchResultPage
             SWT.MULTI | SWT.FULL_SELECTION | SWT.H_SCROLL | SWT.V_SCROLL | SWT.BORDER);
         table.setHeaderVisible(true);
         table.setLinesVisible(true);
-
-        bgAdded = new Color(parent.getDisplay(), 200, 230, 200);
-        bgDeleted = new Color(parent.getDisplay(), 230, 200, 200);
 
         tableViewer = new TableViewer(table);
         tableViewer.setContentProvider(ArrayContentProvider.getInstance());
@@ -304,31 +311,70 @@ public class CompareSearchResultPage implements ISearchResultPage
     {
         if (text == null)
             return new StyledString("");
-        StyledString ss = new StyledString(text);
         if (queryText == null || queryText.isEmpty())
-            return ss;
+            return new StyledString(text);
+
         String lowerText = text.toLowerCase();
         String lowerQuery = queryText.toLowerCase();
+        StyledString.Styler matchStyler = SmartMatchHighlight.textOnlyStyler(table);
+        StyledString ss = new StyledString();
         int idx = 0;
-        while ((idx = lowerText.indexOf(lowerQuery, idx)) >= 0)
+        while (idx < text.length())
         {
-            ss.setStyle(idx, queryText.length(), HIGHLIGHT_STYLER);
-            idx += queryText.length();
+            int matchAt = lowerText.indexOf(lowerQuery, idx);
+            if (matchAt < 0)
+            {
+                ss.append(text.substring(idx));
+                break;
+            }
+            if (matchAt > idx)
+                ss.append(text.substring(idx, matchAt));
+            int matchEnd = matchAt + queryText.length();
+            ss.append(text.substring(matchAt, Math.min(matchEnd, text.length())), matchStyler);
+            idx = matchEnd;
         }
         return ss;
     }
 
     private Color getRowBackground(CompareSearchMatch m)
     {
-        if (m == null) return null;
-        String status = m.getComparisonStatus();
-        if (status == null) return null;
-        return switch (status)
+        if (m == null)
+            return null;
+
+        Object node = m.getComparisonNode();
+        if (!(node instanceof IPartialModelNode partialNode))
+            return null;
+
+        DtComparisonView view = getComparisonView();
+        if (view == null)
+            return null;
+
+        try
         {
-            case "\u0414\u043E\u0431\u0430\u0432\u043B\u0435\u043D\u043E" -> bgAdded;
-            case "\u0423\u0434\u0430\u043B\u0435\u043D\u043E" -> bgDeleted;
-            default -> null;
-        };
+            ComparisonSide side = partialNode.getSide();
+            if (side == ComparisonSide.MAIN)
+                return view.getColorOnlyMain();
+            if (side == ComparisonSide.OTHER)
+                return view.getColorOnlyOther();
+            if (partialNode.hasDifferences(ComparisonSide.MAIN, ComparisonSide.OTHER))
+                return view.getColorHasDiffs();
+        }
+        catch (Throwable t)
+        {
+            Global.logError("CompareSearch", "getRowBackground failed", t); //$NON-NLS-1$
+        }
+        return null;
+    }
+
+    private DtComparisonView getComparisonView()
+    {
+        if (searchResult == null)
+            return null;
+        IEditorPart editor = searchResult.getEditorPart();
+        if (editor == null)
+            return null;
+        Object view = Global.getField(editor, "comparisonView"); //$NON-NLS-1$
+        return view instanceof DtComparisonView dtView ? dtView : null;
     }
 
     private void copySelection()
@@ -394,14 +440,33 @@ public class CompareSearchResultPage implements ISearchResultPage
             this.searchResult = csr;
             this.queryText = csr.getQueryText();
             if (tableViewer != null && !table.isDisposed())
+            {
                 tableViewer.setInput(csr.getMatches());
+                table.setVisible(true);
+            }
         }
         else if (search == null)
         {
             this.searchResult = null;
             this.queryText = null;
             if (tableViewer != null && !table.isDisposed())
+            {
                 tableViewer.setInput(List.of());
+                // PageBook панели "Поиск" не всегда скрывает контрол этой страницы при
+                // переключении на другой вид результатов поиска (штатный или другого расширения) —
+                // без явного скрытия старая таблица остаётся visible=true и накладывается на новую
+                // страницу с теми же bounds. Причина — платформенная гонка (issue #165, та же область:
+                // CTabFolder/PageBook desync), надёжного фикса на уровне SWT не найдено; таблица
+                // возвращает getVisible()=true без прохождения публичного Control.setVisible() (не
+                // ловится ни точечным, ни глобальным SWT.Show listener — проверено). Обходной путь —
+                // повторно скрывать её, пока страница остаётся деактивированной.
+                table.setVisible(false);
+                scheduleForceHide(table, 50);
+                scheduleForceHide(table, 200);
+                scheduleForceHide(table, 500);
+                scheduleForceHide(table, 1000);
+                scheduleForceHide(table, 2000);
+            }
         }
     }
 
@@ -425,8 +490,6 @@ public class CompareSearchResultPage implements ISearchResultPage
     @Override
     public void dispose()
     {
-        if (bgAdded != null) bgAdded.dispose();
-        if (bgDeleted != null) bgDeleted.dispose();
         table = null;
         tableViewer = null;
         searchResult = null;

@@ -6,12 +6,18 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 
 import org.eclipse.core.resources.IFile;
+import org.eclipse.core.resources.IProject;
+import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.EStructuralFeature;
+import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.jface.viewers.CellLabelProvider;
@@ -33,8 +39,34 @@ import org.eclipse.search.ui.ISearchResultPage;
 import org.eclipse.search.ui.ISearchResultViewPart;
 import org.eclipse.search.ui.NewSearchUI;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import com._1c.g5.v8.dt.common.Functions;
+import com._1c.g5.v8.dt.common.localization.LocalizationManager;
+import com._1c.g5.v8.dt.core.platform.IDtProject;
+import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchema;
+import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaCalculatedField;
+import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaDataSetLink;
+import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaParameter;
+import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaTemplateDescription;
+import com._1c.g5.v8.dt.dcs.model.schema.DataCompositionSchemaTotalField;
+import com._1c.g5.v8.dt.dcs.model.schema.DataSet;
+import com._1c.g5.v8.dt.dcs.model.schema.DataSetField;
+import com._1c.g5.v8.dt.dcs.model.schema.NestedDataCompositionSchema;
+import com._1c.g5.v8.dt.dcs.model.settings.SettingsVariant;
+import com._1c.g5.v8.dt.form.model.Form;
+import com._1c.g5.v8.dt.moxel.Cell;
+import com._1c.g5.v8.dt.moxel.Row;
+import com._1c.g5.v8.dt.moxel.SpreadsheetDocument;
+import com._1c.g5.v8.dt.dcs.ui.DataCompositionSchemaEditor;
+import com._1c.g5.v8.dt.dcs.ui.EditorPage;
+import com._1c.g5.v8.dt.dcs.ui.settings.Settings;
+import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
+import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorEmbeddedEditorPage;
+import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.search.core.text.TextSearchFileMatch;
+import com._1c.g5.v8.dt.search.core.text.TextSearchModelMatch;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.custom.CTabFolder;
+import org.eclipse.swt.custom.CTabItem;
 import org.eclipse.swt.custom.SashForm;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Image;
@@ -45,6 +77,7 @@ import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableColumn;
@@ -52,6 +85,7 @@ import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.IEditorPart;
+import org.eclipse.ui.IPageLayout;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IViewPart;
@@ -535,6 +569,8 @@ public final class ConfigSearchResultsHook implements IStartup
                     tableItems.add(row.tableItem);
             if (tableItems.isEmpty())
                 return;
+            if (tableItems.size() == 1 && openDcsMatch(tableItems.get(0), workbenchPage))
+                return;
             org.eclipse.jface.viewers.OpenEvent openEvent = new org.eclipse.jface.viewers.OpenEvent(
                 matchViewer, new StructuredSelection(tableItems));
             // ConfigurationSearchViewPage имеет ДВЕ перегрузки handleOpen (OpenEvent и IMatchItem,
@@ -564,6 +600,937 @@ public final class ConfigSearchResultsHook implements IStartup
             if (event.keyCode == SWT.CR || event.keyCode == SWT.KEYPAD_CR)
                 openSelected.run();
         });
+    }
+
+    /**
+     * Двойной клик по вхождению внутри схемы компоновки данных (СКД): открывает редактор
+     * МД-объекта, содержащего схему (см. {@link GoToDefinition#openMdObjectViaOpenHelper}),
+     * и переходит к найденному варианту настроек в дереве вариантов на встроенной странице
+     * «Настройки» DCS-редактора; для вхождения в представлении варианта сразу выделяет
+     * нужную колонку ({@code Variants.TITLE_COL_INDEX} — доступ рефлексией, пакет не экспортирован).
+     *
+     * <p>Переключение самой верхней вкладки редактора СКД («Наборы данных»/«Настройки»/…)
+     * публичным API не управляется — {@code DataCompositionSchemaEditor} не хранит свой
+     * {@code CTabFolder} в поле (найдено декомпиляцией). Если встроенный DCS-редактор
+     * откроется не на вкладке «Настройки», нужный вариант в дереве вариантов всё равно уже
+     * будет выделен — переключение вкладки вручную.
+     *
+     * @return {@code true}, если открытие/навигация обработаны здесь — штатный
+     *         {@code handleOpen} для этого вхождения вызывать не нужно
+     */
+    private static boolean openDcsMatch(Object tableItem, IWorkbenchPage workbenchPage)
+    {
+        try
+        {
+            Object matchObj = Global.invoke(tableItem, "getData"); //$NON-NLS-1$
+            if (!(matchObj instanceof TextSearchModelMatch match))
+            {
+                Global.tempLog("dcsNav", "openDcsMatch: не TextSearchModelMatch: " //$NON-NLS-1$ //$NON-NLS-2$
+                    + (matchObj != null ? matchObj.getClass().getName() : "null")); //$NON-NLS-1$
+                return false;
+            }
+
+            Optional<?> matchedOpt = match.resolveMatchObject();
+            if (matchedOpt.isEmpty() || !(matchedOpt.get() instanceof EObject matchedObject))
+            {
+                Global.tempLog("dcsNav", "openDcsMatch: resolveMatchObject пуст или не EObject"); //$NON-NLS-1$ //$NON-NLS-2$
+                return false;
+            }
+            boolean insideDcs = isInsideDataCompositionSchema(matchedObject);
+            boolean insideSpreadsheet = isInsideSpreadsheetDocument(matchedObject);
+            // Текст запроса динамического списка (DynamicListExtInfo.queryText) намеренно НЕ
+            // обрабатывается отдельно — попытки открыть DynamicListQueryDialog (и рефлексией, и
+            // через клик по реальной AEF-ссылке) не смогли надёжно дать одновременно рабочее
+            // открытие/выделение И редактируемый диалог; штатная обработка EDT (return false ниже)
+            // хотя бы стабильно открывает форму и выделяет реквизит.
+            if (!insideDcs && !insideSpreadsheet)
+            {
+                // Штатная обработка EDT (handleOpen) сама корректно открывает форму и выделяет
+                // найденный элемент (реквизит/команду/элемент формы) — это уже подтверждено и трогать
+                // не нужно (попытка сделать выделение самим сломала штатную активацию, см. откат
+                // этой правки выше). Единственное, чего штатная обработка не делает сама — не
+                // показывает панель «Свойства». Только показываем её (не трогая выделение/открытие)
+                // и отдаём управление штатному handleOpen (return false) — панель сама подхватит
+                // выделение, которое штатно выставит handleOpen, через ISelectionListener.
+                if (isInsideForm(matchedObject))
+                {
+                    try
+                    {
+                        workbenchPage.showView(IPageLayout.ID_PROP_SHEET);
+                    }
+                    catch (Exception e)
+                    {
+                        Global.tempLog("dcsNav", "openDcsMatch: showView(Свойства) не удался: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                }
+                Global.tempLog("dcsNav", "openDcsMatch: не внутри DataCompositionSchema/SpreadsheetDocument, matchedObject=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + matchedObject.eClass().getName());
+                return false;
+            }
+
+            // Общие макеты (и подобные объекты, где схема — корень своего BM-ресурса, eContainer()==null)
+            // не имеют MdObject-владельца, достижимого через eContainer() — только через отдельный
+            // BM-индекс top-object (тот же, что уже верно отдаёт колонку «Путь», см. hierarchicalPropertyPath).
+            // getMetadataTopObjectId()/resolveObjectById() (базовый Match, resolveObjectById — protected,
+            // отсюда рефлексия) — тот же механизм, что уже верно резолвит верхний МД-объект для колонки
+            // «Путь» (см. bmTopObjectPathFromTableItem). getTopObjectId()/resolveMatchTopObject() у
+            // TextSearchModelMatch — ДРУГОЙ, более локальный top (сама DataCompositionSchema, не МД-объект).
+            MdObject mdObject = null;
+            long metadataTopObjectId = match.getMetadataTopObjectId();
+            Object resolvedTop = Global.invoke(match, "resolveObjectById", metadataTopObjectId); //$NON-NLS-1$
+            Global.tempLog("dcsNav", "openDcsMatch: metadataTopObjectId=" + metadataTopObjectId //$NON-NLS-1$ //$NON-NLS-2$
+                + " resolvedTop=" + (resolvedTop instanceof Optional<?> o && o.isPresent() ? o.get().getClass().getName() : resolvedTop)); //$NON-NLS-1$
+            if (resolvedTop instanceof Optional<?> topOpt && topOpt.isPresent()
+                && topOpt.get() instanceof MdObject topMdObject)
+                mdObject = topMdObject;
+            if (mdObject == null)
+                mdObject = GoToDefinition.findContainingMdObject(matchedObject);
+            if (mdObject == null)
+            {
+                Global.tempLog("dcsNav", "openDcsMatch: ни resolveObjectById(metadataTopObjectId), ни findContainingMdObject не дали MdObject"); //$NON-NLS-1$ //$NON-NLS-2$
+                return false;
+            }
+            String fullName = GetRef.eObjectToFullName(mdObject);
+
+            // Форма/макет объекта (в отличие от общего макета/формы или схемы-в-отчёте) — не
+            // отдельный bm-топ-объект: mdObject/fullName выше указывают на ВЛАДЕЛЬЦА (напр.
+            // Справочник), поэтому OpenHelper открыл бы его редактор, а не саму форму/макет.
+            // Уточняем имя по URI собственного BM-ресурса вхождения (см. ownedChildFullNameFor) —
+            // тот же механизм, что уже даёт верный путь в колонке «Путь».
+            String ownedChildFullName = ownedChildFullNameFor(matchedObject);
+            if (ownedChildFullName != null && !ownedChildFullName.equals(fullName))
+            {
+                Global.tempLog("dcsNav", "openDcsMatch: уточняем fullName формы/макета: " //$NON-NLS-1$ //$NON-NLS-2$
+                    + fullName + " -> " + ownedChildFullName); //$NON-NLS-1$
+                fullName = ownedChildFullName;
+            }
+            Global.tempLog("dcsNav", "openDcsMatch: mdObject=" + fullName //$NON-NLS-1$ //$NON-NLS-2$
+                + " matchedObject=" + matchedObject.eClass().getName()); //$NON-NLS-1$
+
+            // Устаревшие результаты поиска (после правки схемы BM пересоздаёт внутренние ID — старый
+            // metadataTopObjectId выше уже ни на что не указывает): резолвим mdObject ЗАНОВО по
+            // полному имени — тот же путь, что и «Перейти к определению» (GoToDefinition), не
+            // зависящий от старых числовых ID. Если получилось — используем свежий объект вместо
+            // потенциально мёртвой ссылки; если нет (имя само переименовано/удалено) — пробуем со
+            // старым mdObject, как раньше (без регресса).
+            EObject freshMdObject = null;
+            try
+            {
+                Object bmModel = match.getModel();
+                Object dtProjectObj = bmModel != null ? Global.getField(bmModel, "project") : null; //$NON-NLS-1$
+                if (dtProjectObj instanceof IDtProject dtProject)
+                {
+                    IProject iProject = dtProject.getWorkspaceProject();
+                    freshMdObject = GoToDefinition.resolveEObjectForFullName(fullName, workbenchPage, iProject);
+                }
+            }
+            catch (Exception e)
+            {
+                Global.tempLog("dcsNav", "openDcsMatch: свежий резолв mdObject по имени не удался: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            if (freshMdObject instanceof MdObject freshMd)
+            {
+                Global.tempLog("dcsNav", "openDcsMatch: используем свежий mdObject (защита от устаревших результатов поиска)"); //$NON-NLS-1$ //$NON-NLS-2$
+                mdObject = freshMd;
+            }
+
+            boolean opened = GoToDefinition.openMdObjectViaOpenHelper(mdObject,
+                fullName, workbenchPage, new StructuredSelection(matchedObject));
+            Global.tempLog("dcsNav", "openDcsMatch: openMdObjectViaOpenHelper -> " + opened); //$NON-NLS-1$ //$NON-NLS-2$
+            if (!opened)
+                return false;
+
+            if (insideSpreadsheet)
+                scheduleMoxelCellReveal(workbenchPage, matchedObject, 0);
+            else
+                scheduleDcsSettingsReveal(workbenchPage, matchedObject, match, 0);
+            return true;
+        }
+        catch (Throwable t)
+        {
+            Global.tempLogException("dcsNav", "openDcsMatch", t); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        }
+    }
+
+    /** См. {@link #scheduleLeftmostScrollForOpenedMatch} — редактор активируется асинхронно. */
+    private static void scheduleDcsSettingsReveal(IWorkbenchPage workbenchPage, EObject matchedObject,
+            TextSearchModelMatch match, int attempt)
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.timerExec(100, () -> {
+            try
+            {
+                DataCompositionSchemaEditor dcsEditor =
+                    findDataCompositionSchemaEditor(workbenchPage.getActiveEditor());
+                if (dcsEditor == null)
+                {
+                    Global.tempLog("dcsNav", "scheduleDcsSettingsReveal: dcsEditor не найден, attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+                        + " activeEditor=" + workbenchPage.getActiveEditor()); //$NON-NLS-1$
+                    if (attempt < 10)
+                        scheduleDcsSettingsReveal(workbenchPage, matchedObject, match, attempt + 1);
+                    return;
+                }
+                Global.tempLog("dcsNav", "scheduleDcsSettingsReveal: dcsEditor найден, attempt=" + attempt); //$NON-NLS-1$ //$NON-NLS-2$
+                revealInDcsSettings(dcsEditor, matchedObject, match);
+            }
+            catch (Throwable t)
+            {
+                Global.tempLogException("dcsNav", "scheduleDcsSettingsReveal", t); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        });
+    }
+
+    private static DataCompositionSchemaEditor findDataCompositionSchemaEditor(IEditorPart activeEditor)
+    {
+        if (!(activeEditor instanceof DtGranularEditor<?> granularEditor))
+        {
+            Global.tempLog("dcsNav", "findDataCompositionSchemaEditor: activeEditor не DtGranularEditor: " //$NON-NLS-1$ //$NON-NLS-2$
+                + (activeEditor != null ? activeEditor.getClass().getName() : "null")); //$NON-NLS-1$
+            return null;
+        }
+        Object activePage = granularEditor.getActivePageInstance();
+        if (!(activePage instanceof DtGranularEditorEmbeddedEditorPage<?> embeddedPage))
+        {
+            Global.tempLog("dcsNav", "findDataCompositionSchemaEditor: activePage не EmbeddedEditorPage: " //$NON-NLS-1$ //$NON-NLS-2$
+                + (activePage != null ? activePage.getClass().getName() : "null")); //$NON-NLS-1$
+            return null;
+        }
+        Object embedded = embeddedPage.getEmbeddedEditor();
+        Global.tempLog("dcsNav", "findDataCompositionSchemaEditor: embeddedPage.getId()=" + embeddedPage.getId() //$NON-NLS-1$ //$NON-NLS-2$
+            + " embedded=" + (embedded != null ? embedded.getClass().getName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
+        return embedded instanceof DataCompositionSchemaEditor dcsEditor ? dcsEditor : null;
+    }
+
+    /**
+     * Встроенный редактор табличного документа (Moxel) — тот же паттерн, что
+     * {@link #findDataCompositionSchemaEditor}, но без типизированной проверки embedded-объекта:
+     * {@code com._1c.g5.v8.dt.moxel.ui.editor.MoxelEditor} — в пакете {@code .ui.editor}, статус
+     * экспорта не проверялся (в отличие от {@code DataCompositionSchemaEditor}), поэтому вместо
+     * {@code instanceof} — сравнение id встроенной страницы
+     * ({@code com._1c.g5.v8.dt.moxel.ui.TemplateEditorSpreadsheetPage.PAGE_ID},
+     * найдено декомпиляцией: {@code "editors.commontemplate.pages.spreadsheet"}); дальше — только
+     * рефлексия ({@code Global.invoke}), как для Variants/TableExViewer в DCS.
+     */
+    private static Object findMoxelEditor(IEditorPart activeEditor)
+    {
+        if (!(activeEditor instanceof DtGranularEditor<?> granularEditor))
+        {
+            Global.tempLog("dcsNav", "findMoxelEditor: activeEditor не DtGranularEditor: " //$NON-NLS-1$ //$NON-NLS-2$
+                + (activeEditor != null ? activeEditor.getClass().getName() : "null")); //$NON-NLS-1$
+            return null;
+        }
+        Object activePage = granularEditor.getActivePageInstance();
+        if (!(activePage instanceof DtGranularEditorEmbeddedEditorPage<?> embeddedPage))
+        {
+            Global.tempLog("dcsNav", "findMoxelEditor: activePage не EmbeddedEditorPage: " //$NON-NLS-1$ //$NON-NLS-2$
+                + (activePage != null ? activePage.getClass().getName() : "null")); //$NON-NLS-1$
+            return null;
+        }
+        Object embedded = embeddedPage.getEmbeddedEditor();
+        Global.tempLog("dcsNav", "findMoxelEditor: embeddedPage.getId()=" + embeddedPage.getId() //$NON-NLS-1$ //$NON-NLS-2$
+            + " embedded=" + (embedded != null ? embedded.getClass().getName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
+        return "editors.commontemplate.pages.spreadsheet".equals(embeddedPage.getId()) ? embedded : null; //$NON-NLS-1$
+    }
+
+    /**
+     * Строка/колонка ячейки табличного документа из ключей охватывающих {@code EMap}-записей
+     * ({@code SpreadsheetDocument.getRows()}/{@code Row.getCells()}) — тот же подъём, что и в
+     * {@link #hierarchicalPropertyPath} для сегмента «Область(...)», только возвращает индексы,
+     * а не строит текст. Индексы — «как в модели» (с нуля), см. {@link #oneBased} для отображения.
+     */
+    private static int[] findMoxelCellRowCol(EObject obj)
+    {
+        Object col = null;
+        for (EObject cur = obj; cur != null; cur = cur.eContainer())
+        {
+            if (!(cur instanceof java.util.Map.Entry<?, ?> mapEntry))
+                continue;
+            Object value = mapEntry.getValue();
+            if (value instanceof Cell && col == null)
+                col = mapEntry.getKey();
+            else if (value instanceof Row && col instanceof Number colNum)
+            {
+                Object rowKey = mapEntry.getKey();
+                if (rowKey instanceof Number rowNum)
+                    return new int[] { rowNum.intValue(), colNum.intValue() };
+                return null;
+            }
+        }
+        return null;
+    }
+
+    /** См. {@link #scheduleDcsSettingsReveal} — тот же retry-паттерн, редактор активируется асинхронно. */
+    private static void scheduleMoxelCellReveal(IWorkbenchPage workbenchPage, EObject matchedObject, int attempt)
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.timerExec(100, () -> {
+            try
+            {
+                Object moxelEditor = findMoxelEditor(workbenchPage.getActiveEditor());
+                if (moxelEditor == null)
+                {
+                    if (attempt < 10)
+                        scheduleMoxelCellReveal(workbenchPage, matchedObject, attempt + 1);
+                    else
+                        Global.tempLog("dcsNav", "scheduleMoxelCellReveal: MoxelEditor не найден после повторов"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
+                int[] rowCol = findMoxelCellRowCol(matchedObject);
+                if (rowCol == null)
+                {
+                    Global.tempLog("dcsNav", "scheduleMoxelCellReveal: не удалось определить строку/колонку ячейки"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
+                Object moxelControl = Global.invoke(moxelEditor, "getMoxelControl"); //$NON-NLS-1$
+                if (moxelControl == null)
+                {
+                    Global.tempLog("dcsNav", "scheduleMoxelCellReveal: getMoxelControl()=null"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
+                Global.invoke(moxelControl, "setSelectionToCellSelection", rowCol[0], rowCol[1]); //$NON-NLS-1$
+                Global.invoke(moxelControl, "ensureCellVisible", rowCol[0], rowCol[1]); //$NON-NLS-1$
+                Global.tempLog("dcsNav", "scheduleMoxelCellReveal: ячейка выделена row=" + rowCol[0] + " col=" + rowCol[1]); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            }
+            catch (Throwable t)
+            {
+                Global.tempLogException("dcsNav", "scheduleMoxelCellReveal", t); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        });
+    }
+
+    /** Первый предок {@code obj} (включая сам {@code obj}) заданного типа — {@code null}, если не найден. */
+    @SuppressWarnings("unchecked")
+    private static <T extends EObject> T findAncestor(EObject obj, Class<T> type)
+    {
+        for (EObject cur = obj; cur != null; cur = cur.eContainer())
+            if (type.isInstance(cur))
+                return (T) cur;
+        return null;
+    }
+
+    /**
+     * Имя containment-feature, которым владеет объект типа {@code rowType} непосредственным потомком
+     * на пути к {@code matchedObject} — то есть какое СВОЙСТВО строки таблицы реально совпало. Если
+     * {@code matchedObject} сам уже искомого типа, используется {@code matchFeature} (feature
+     * самого матча).
+     *
+     * <p>Сравнение по ТИПУ ({@code rowType.isInstance(cur)}), не по ссылке ({@code cur == rowObject}) —
+     * BM отдаёт РАЗНЫЕ экземпляры на один и тот же логический объект при каждом отдельном подъёме
+     * через {@code eContainer()} (подтверждено логированием {@code System.identityHashCode()}:
+     * объект, найденный {@link #findAncestor}, и объект, встреченный при повторном подъёме в этом
+     * же методе, — разные ссылки одного типа). Сравнение по ссылке поэтому в принципе ненадёжно;
+     * по типу — надёжно, как и {@link #findAncestor} (который уже так работает).
+     */
+    private static String findRowFeatureName(EObject matchedObject, Class<? extends EObject> rowType,
+            EStructuralFeature matchFeature)
+    {
+        if (rowType.isInstance(matchedObject))
+            return matchFeature != null ? matchFeature.getName() : null;
+        EObject prevChild = null;
+        for (EObject cur = matchedObject; cur != null; cur = cur.eContainer())
+        {
+            if (rowType.isInstance(cur))
+                return prevChild != null && prevChild.eContainingFeature() != null
+                    ? prevChild.eContainingFeature().getName() : null;
+            prevChild = cur;
+        }
+        return null;
+    }
+
+    /** Свойство → константа-индекс колонки (имя public static final int поля на КЛАССЕ СТРАНИЦЫ). */
+    private static final Map<String, Map<String, String>> DCS_PAGE_COLUMN_BY_FEATURE = Map.of(
+        "com._1c.g5.v8.dt.dcs.ui.calculated.CalculatedFields", Map.ofEntries( //$NON-NLS-1$
+            Map.entry("dataPath", "DATA_PATH_COL_INDEX"), //$NON-NLS-1$ //$NON-NLS-2$
+            Map.entry("expression", "EXPR_COL_INDEX"), //$NON-NLS-1$ //$NON-NLS-2$
+            Map.entry("title", "TITLE_COL_INDEX"), //$NON-NLS-1$ //$NON-NLS-2$
+            Map.entry("presentationExpression", "PRESENTATION_EXPR_COL_INDEX"), //$NON-NLS-1$ //$NON-NLS-2$
+            Map.entry("valueType", "VALUE_TYPE_COL_INDEX"), //$NON-NLS-1$ //$NON-NLS-2$
+            Map.entry("appearance", "APPEARANCE_COL_INDEX"), //$NON-NLS-1$ //$NON-NLS-2$
+            Map.entry("inputParameters", "INPUT_PARAMETERS_COL_INDEX") //$NON-NLS-1$ //$NON-NLS-2$
+        ),
+        "com._1c.g5.v8.dt.dcs.ui.nested.NestedSchemas", Map.ofEntries( //$NON-NLS-1$
+            Map.entry("name", "NAME_COL_INDEX"), //$NON-NLS-1$ //$NON-NLS-2$
+            Map.entry("title", "HEADER_COL_INDEX"), //$NON-NLS-1$ //$NON-NLS-2$
+            Map.entry("schema", "SCHEMA_COL_INDEX"), //$NON-NLS-1$ //$NON-NLS-2$
+            Map.entry("settings", "SETTINGS_COL_INDEX") //$NON-NLS-1$ //$NON-NLS-2$
+        )
+    );
+
+    /** См. {@link #DCS_PAGE_COLUMN_BY_FEATURE}, но для полей набора данных — константы это ЗНАЧЕНИЯ enum
+     * {@code DataSetsFieldsViewerBase.FieldsColumn} (не поля страницы), см. {@link #scheduleDataSetFieldReveal}. */
+    private static final Map<String, String> DATASET_FIELD_COLUMN_BY_FEATURE = Map.of(
+        "dataPath", "PATH_COL_INDEX", //$NON-NLS-1$ //$NON-NLS-2$
+        "title", "TITLE_COL_INDEX", //$NON-NLS-1$ //$NON-NLS-2$
+        "field", "FIELD_COL_INDEX" //$NON-NLS-1$ //$NON-NLS-2$
+    );
+
+    /**
+     * Свойство → буквальный индекс колонки — для страниц БЕЗ публичных констант индекса
+     * (в отличие от {@link #DCS_PAGE_COLUMN_BY_FEATURE}). Индексы найдены декомпиляцией порядка
+     * вызовов {@code DcsUiUtil.createColumn(...)} в соответствующих {@code createXxx(Composite)}
+     * страниц (Resources/Links/Parameters) — не догадка, реальный порядок создания колонок.
+     */
+    private static final Map<String, Map<String, Integer>> DCS_PAGE_COLUMN_LITERAL_BY_FEATURE = Map.of(
+        // Resources.createResources: Поле(Dcs_Field), Выражение(Dcs_Expression), Рассчитывать по(Dcs_Calculate_by)
+        "com._1c.g5.v8.dt.dcs.ui.resources.Resources", Map.of( //$NON-NLS-1$
+            "dataPath", 0, //$NON-NLS-1$
+            "expression", 1 //$NON-NLS-1$
+        ),
+        // Links: Dcs_Link_source, Dcs_Link_target, Dcs_Source_expression, Dcs_Target_expression,
+        // Dcs_Parameter, Dcs_Parameters_list, Dcs_Link_condition, Dcs_Initial_link_value, Dcs_Mandatory_link
+        "com._1c.g5.v8.dt.dcs.ui.links.Links", Map.ofEntries( //$NON-NLS-1$
+            Map.entry("sourceDataSet", 0), //$NON-NLS-1$
+            Map.entry("destinationDataSet", 1), //$NON-NLS-1$
+            Map.entry("sourceExpression", 2), //$NON-NLS-1$
+            Map.entry("destinationExpression", 3), //$NON-NLS-1$
+            Map.entry("parameter", 4), //$NON-NLS-1$
+            Map.entry("parameterListAllowed", 5), //$NON-NLS-1$
+            Map.entry("linkConditionExpression", 6), //$NON-NLS-1$
+            Map.entry("startExpression", 7), //$NON-NLS-1$
+            Map.entry("required", 8) //$NON-NLS-1$
+        ),
+        // Parameters: Dcs_Name, Dcs_Title, Dcs_Type, Dcs_Available_values, Dcs_Available_list_values,
+        // Dcs_Value, Dcs_Expression, Dcs_Functional_option_parameter, Dcs_Include_available_fields,
+        // Dcs_Availability_restriction, Dcs_Restrict_unfilled_values, Dcs_Usage, Dcs_Edit_parameters
+        "com._1c.g5.v8.dt.dcs.ui.parameters.Parameters", Map.ofEntries( //$NON-NLS-1$
+            Map.entry("name", 0), //$NON-NLS-1$
+            Map.entry("title", 1), //$NON-NLS-1$
+            Map.entry("valueType", 2), //$NON-NLS-1$
+            Map.entry("availableValues", 3), //$NON-NLS-1$
+            Map.entry("valueListAllowed", 4), //$NON-NLS-1$
+            Map.entry("values", 5), //$NON-NLS-1$
+            Map.entry("expression", 6), //$NON-NLS-1$
+            Map.entry("functionalOptionsParameter", 7), //$NON-NLS-1$
+            Map.entry("availableAsField", 8), //$NON-NLS-1$
+            Map.entry("useRestriction", 9), //$NON-NLS-1$
+            Map.entry("denyIncompleteValues", 10), //$NON-NLS-1$
+            Map.entry("use", 11), //$NON-NLS-1$
+            Map.entry("inputParameters", 12) //$NON-NLS-1$
+        )
+    );
+
+    private static void revealInDcsSettings(DataCompositionSchemaEditor dcsEditor, EObject matchedObject,
+            TextSearchModelMatch match)
+    {
+        SettingsVariant variant = findAncestor(matchedObject, SettingsVariant.class);
+        if (variant != null)
+        {
+            revealSettingsVariant(dcsEditor, matchedObject, variant);
+            return;
+        }
+
+        DataCompositionSchemaCalculatedField calcField =
+            findAncestor(matchedObject, DataCompositionSchemaCalculatedField.class);
+        if (calcField != null)
+        {
+            revealSimpleTableExPage(dcsEditor, "com._1c.g5.v8.dt.dcs.ui.calculated.CalculatedFields", //$NON-NLS-1$
+                matchedObject, calcField, DataCompositionSchemaCalculatedField.class, match.getFeature());
+            return;
+        }
+
+        DataCompositionSchemaTotalField totalField = findAncestor(matchedObject, DataCompositionSchemaTotalField.class);
+        if (totalField != null)
+        {
+            revealSimpleTableExPage(dcsEditor, "com._1c.g5.v8.dt.dcs.ui.resources.Resources", //$NON-NLS-1$
+                matchedObject, totalField, DataCompositionSchemaTotalField.class, match.getFeature());
+            return;
+        }
+
+        DataCompositionSchemaDataSetLink link = findAncestor(matchedObject, DataCompositionSchemaDataSetLink.class);
+        if (link != null)
+        {
+            revealSimpleTableExPage(dcsEditor, "com._1c.g5.v8.dt.dcs.ui.links.Links", //$NON-NLS-1$
+                matchedObject, link, DataCompositionSchemaDataSetLink.class, match.getFeature());
+            return;
+        }
+
+        DataCompositionSchemaParameter parameter = findAncestor(matchedObject, DataCompositionSchemaParameter.class);
+        if (parameter != null)
+        {
+            revealSimpleTableExPage(dcsEditor, "com._1c.g5.v8.dt.dcs.ui.parameters.Parameters", //$NON-NLS-1$
+                matchedObject, parameter, DataCompositionSchemaParameter.class, match.getFeature());
+            return;
+        }
+
+        NestedDataCompositionSchema nested = findAncestor(matchedObject, NestedDataCompositionSchema.class);
+        if (nested != null)
+        {
+            revealSimpleTableExPage(dcsEditor, "com._1c.g5.v8.dt.dcs.ui.nested.NestedSchemas", //$NON-NLS-1$
+                matchedObject, nested, NestedDataCompositionSchema.class, match.getFeature());
+            return;
+        }
+
+        DataCompositionSchemaTemplateDescription template =
+            findAncestor(matchedObject, DataCompositionSchemaTemplateDescription.class);
+        if (template != null)
+        {
+            // Содержимое самого макета (Moxel/табличный документ) — отдельная, ещё не решённая
+            // задача (см. согласование по табличным документам); здесь только строка списка макетов.
+            revealSimpleTableExPage(dcsEditor, "com._1c.g5.v8.dt.dcs.ui.templates.Templates", //$NON-NLS-1$
+                matchedObject, template, DataCompositionSchemaTemplateDescription.class, match.getFeature());
+            return;
+        }
+
+        DataSet dataSet = findAncestor(matchedObject, DataSet.class);
+        if (dataSet != null)
+        {
+            revealDataSet(dcsEditor, matchedObject, match, dataSet);
+            return;
+        }
+
+        Global.tempLog("dcsNav", "revealInDcsSettings: неизвестный тип узла схемы: " //$NON-NLS-1$ //$NON-NLS-2$
+            + matchedObject.eClass().getName());
+    }
+
+    private static void revealSettingsVariant(DataCompositionSchemaEditor dcsEditor, EObject matchedObject,
+            SettingsVariant variant)
+    {
+        Settings settingsPage = null;
+        for (EditorPage page : dcsEditor.getPages())
+        {
+            if (page instanceof Settings s)
+            {
+                settingsPage = s;
+                break;
+            }
+        }
+        if (settingsPage == null)
+        {
+            Global.tempLog("dcsNav", "revealSettingsVariant: страница Settings не найдена среди getPages()"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+
+        activateEditorTabFor(settingsPage);
+
+        // com._1c.g5.v8.dt.dcs.ui.settings.variants.Variants и com._1c.g5.v8.dt.common.ui.widgets.tableex.TableExViewer
+        // из НЕвыгруженных (unexported) OSGi-пакетов — "Settings" виден (пакет .settings экспортирован),
+        // а вложенные .settings.variants/.widgets.tableex — нет (NoClassDefFoundError при прямом обращении
+        // к типу в байткоде). Поэтому дальше — только через рефлексию (Global.invoke/getField),
+        // без объявления Variants/TableExViewer как типов.
+        Object variantsObj = Global.invoke(settingsPage, "getVariants"); //$NON-NLS-1$
+        Object viewerObj = variantsObj != null ? Global.invoke(variantsObj, "getViewer") : null; //$NON-NLS-1$
+        if (viewerObj == null)
+        {
+            Global.tempLog("dcsNav", "revealSettingsVariant: viewer=null"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+
+        Global.invoke(viewerObj, "setSelection", //$NON-NLS-1$
+            (org.eclipse.jface.viewers.ISelection) new StructuredSelection(variant), true);
+        String featureName = findRowFeatureName(matchedObject, SettingsVariant.class, null);
+        Global.tempLog("dcsNav", "revealSettingsVariant: вариант выделен, feature=" + featureName); //$NON-NLS-1$ //$NON-NLS-2$
+        if ("presentation".equals(featureName)) //$NON-NLS-1$
+        {
+            Object titleColIndex = Global.getField(variantsObj, "TITLE_COL_INDEX"); //$NON-NLS-1$
+            if (titleColIndex instanceof Integer col)
+                activateGridCell(viewerObj, col.intValue());
+        }
+    }
+
+    /**
+     * Общий случай: страница с одной {@code TableExViewer} и {@code public getViewer()}
+     * (Links/Parameters/CalculatedFields/Resources/NestedSchemas/Templates — все extends
+     * {@code EditorPageBase} → {@code Composite}, см. javap). Строка — {@code rowObject}; колонка —
+     * по {@link #DCS_PAGE_COLUMN_BY_FEATURE}, если для этой страницы есть карта соответствий
+     * (константы найдены не для всех страниц — там, где их нет, точная колонка не активируется,
+     * только строка).
+     */
+    private static void revealSimpleTableExPage(DataCompositionSchemaEditor dcsEditor, String pageClassName,
+            EObject matchedObject, EObject rowObject, Class<? extends EObject> rowType, EStructuralFeature matchFeature)
+    {
+        for (EditorPage page : dcsEditor.getPages())
+        {
+            if (!page.getClass().getName().equals(pageClassName))
+                continue;
+            if (page instanceof Control pageControl)
+                activateEditorTabFor(pageControl);
+
+            Object viewerObj = Global.invoke(page, "getViewer"); //$NON-NLS-1$
+            if (viewerObj == null)
+            {
+                Global.tempLog("dcsNav", "revealSimpleTableExPage: getViewer()=null для " + pageClassName); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            String featureName = findRowFeatureName(matchedObject, rowType, matchFeature);
+            Global.tempLog("dcsNav", "revealSimpleTableExPage: страница=" + pageClassName + " feature=" + featureName); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+
+            Integer column = resolveDcsColumnIndex(page, pageClassName, featureName);
+            scheduleSelectRowAndCell(viewerObj, rowObject, column, 0);
+            return;
+        }
+        Global.tempLog("dcsNav", "revealSimpleTableExPage: страница " + pageClassName + " не найдена среди getPages()"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    /** См. {@link #DCS_PAGE_COLUMN_BY_FEATURE}/{@link #DCS_PAGE_COLUMN_LITERAL_BY_FEATURE}. */
+    private static Integer resolveDcsColumnIndex(EditorPage page, String pageClassName, String featureName)
+    {
+        if (featureName == null)
+            return null;
+        Map<String, String> columnMap = DCS_PAGE_COLUMN_BY_FEATURE.get(pageClassName);
+        String constantName = columnMap != null ? columnMap.get(featureName) : null;
+        if (constantName != null)
+        {
+            Object colIdx = Global.getField(page, constantName);
+            if (colIdx instanceof Integer col)
+                return col;
+            Global.tempLog("dcsNav", "resolveDcsColumnIndex: константа " + constantName + " недоступна"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return null;
+        }
+        Map<String, Integer> literalMap = DCS_PAGE_COLUMN_LITERAL_BY_FEATURE.get(pageClassName);
+        return literalMap != null ? literalMap.get(featureName) : null;
+    }
+
+    /**
+     * {@code setSelection(...)} повторяется на КАЖДОЙ попытке (не только проверка
+     * {@code getSelectionIndices()}) — содержимое таблицы страницы может появиться асинхронно
+     * ПОСЛЕ переключения вкладки (найдено логированием: «Ресурсы» первое время после активации
+     * вкладки не содержат ни одной строки, однократный {@code setSelection} впустую пропадает,
+     * а повторный (на уже заполненной таблице) — срабатывает).
+     */
+    private static void scheduleSelectRowAndCell(Object viewerObj, EObject rowObject, Integer column, int attempt)
+    {
+        Object tableExObj = Global.invoke(viewerObj, "getTable"); //$NON-NLS-1$
+        // Resources.getViewer() отдаёт не сам DataCompositionSchemaTotalField, а обёртку
+        // ResourcesContentProvider$ResourceItem (поле "field") — см. декомпиляцию getElements().
+        // Остальные простые страницы (CalculatedFields/Links/Parameters/NestedSchemas) отдают
+        // модельные объекты напрямую, поэтому оборачивание нужно только здесь.
+        Object selectionElement = rowObject;
+        if (rowObject instanceof DataCompositionSchemaTotalField totalField && tableExObj != null)
+        {
+            Object resourceItem = findResourceItemForTotalField(tableExObj, totalField);
+            if (resourceItem != null)
+                selectionElement = resourceItem;
+        }
+        Global.invoke(viewerObj, "setSelection", //$NON-NLS-1$
+            (org.eclipse.jface.viewers.ISelection) new StructuredSelection(selectionElement), true);
+        Object selectionIndicesObj = tableExObj != null ? Global.invoke(tableExObj, "getSelectionIndices") : null; //$NON-NLS-1$
+        if (!(selectionIndicesObj instanceof int[] selectionIndices) || selectionIndices.length == 0)
+        {
+            if (attempt < 15)
+            {
+                Display display = Display.getDefault();
+                if (display != null && !display.isDisposed())
+                    display.timerExec(50, () -> scheduleSelectRowAndCell(viewerObj, rowObject, column, attempt + 1));
+                return;
+            }
+            Object itemCount = tableExObj != null ? Global.invoke(tableExObj, "getItemCount") : null; //$NON-NLS-1$
+            Object isDisposed = tableExObj != null ? Global.invoke(tableExObj, "isDisposed") : null; //$NON-NLS-1$
+            Object inputObj = Global.invoke(viewerObj, "getInput"); //$NON-NLS-1$
+            Global.tempLog("dcsNav", "scheduleSelectRowAndCell: строка не выделилась после повторов, " //$NON-NLS-1$ //$NON-NLS-2$
+                + "tableEx=" + tableExObj + " itemCount=" + itemCount + " isDisposed=" + isDisposed //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + " input=" + inputObj + " rowObject=" + rowObject + " rowObject.class=" + rowObject.getClass()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return;
+        }
+        Global.tempLog("dcsNav", "scheduleSelectRowAndCell: строка выделена, attempt=" + attempt); //$NON-NLS-1$ //$NON-NLS-2$
+        if (column != null)
+        {
+            Point cell = new Point(column.intValue(), selectionIndices[0]);
+            Global.invoke(tableExObj, "setCellSelection", cell); //$NON-NLS-1$
+            Global.tempLog("dcsNav", "scheduleSelectRowAndCell: setCellSelection(" + cell + ")"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+    }
+
+    /**
+     * Ищет {@code ResourcesContentProvider$ResourceItem}, оборачивающий {@code totalField}, среди
+     * текущих строк грида ({@code TableEx.getItems()} → {@code Item.getData()} — публичный SWT API).
+     * Сравнение по {@code getDataPath()} (обычная строка, стабильна в отличие от идентичности BM-
+     * объектов, см. {@link #findRowFeatureName}), а не по типу/ссылке — иначе не отличить разные
+     * ресурсы схемы друг от друга.
+     */
+    private static Object findResourceItemForTotalField(Object tableExObj, DataCompositionSchemaTotalField totalField)
+    {
+        Object itemsObj = Global.invoke(tableExObj, "getItems"); //$NON-NLS-1$
+        if (!(itemsObj instanceof org.eclipse.swt.widgets.Item[] items))
+            return null;
+        String dataPath = totalField.getDataPath();
+        for (org.eclipse.swt.widgets.Item item : items)
+        {
+            Object data = item.getData();
+            if (data == null)
+                continue;
+            Object fieldObj = Global.getField(data, "field"); //$NON-NLS-1$
+            if (fieldObj instanceof DataCompositionSchemaTotalField f
+                && java.util.Objects.equals(f.getDataPath(), dataPath))
+                return data;
+        }
+        return null;
+    }
+
+    /**
+     * Вкладка «Наборы данных»: дерево наборов ({@code getDataSetsViewer()}, публичный
+     * {@code TreeViewer} — обычный JFace-класс, всегда экспортирован, рефлексия не нужна) + (если
+     * вхождение внутри «Поля» набора) отдельная под-панель полей, которая появляется только ПОСЛЕ
+     * того, как набор данных станет выбранным (см. {@link #scheduleDataSetFieldReveal}).
+     */
+    private static void revealDataSet(DataCompositionSchemaEditor dcsEditor, EObject matchedObject,
+            TextSearchModelMatch match, DataSet dataSet)
+    {
+        for (EditorPage page : dcsEditor.getPages())
+        {
+            if (!page.getClass().getName().equals("com._1c.g5.v8.dt.dcs.ui.datasets.DataSets")) //$NON-NLS-1$
+                continue;
+            if (page instanceof Control pageControl)
+                activateEditorTabFor(pageControl);
+
+            Object treeViewerObj = Global.invoke(page, "getDataSetsViewer"); //$NON-NLS-1$
+            if (treeViewerObj instanceof TreeViewer treeViewer)
+            {
+                treeViewer.setSelection(new StructuredSelection(dataSet), true);
+                Global.tempLog("dcsNav", "revealDataSet: набор данных выделен"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            else
+            {
+                Global.tempLog("dcsNav", "revealDataSet: getDataSetsViewer()=" + treeViewerObj); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+
+            DataSetField field = findAncestor(matchedObject, DataSetField.class);
+            if (field != null)
+                scheduleDataSetFieldReveal(page, matchedObject, match.getFeature(), field, 0);
+            else if (match.getFeature() != null && "query".equals(match.getFeature().getName())) //$NON-NLS-1$
+                scheduleDataSetQueryTextReveal(page, match, 0);
+            return;
+        }
+        Global.tempLog("dcsNav", "revealDataSet: страница DataSets не найдена среди getPages()"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * Текст запроса набора данных ({@code DataCompositionSchemaDataSetQuery.getQuery()}) — встроенный
+     * Xtext-редактор ({@code DataSets.getQueryEditor(): org.eclipse.xtext.ui.editor.embedded.EmbeddedEditor}),
+     * появляется/переключается на нужный набор асинхронно ПОСЛЕ выбора в дереве (см.
+     * {@link #revealDataSet}) — повтор по таймеру, как {@link #scheduleDataSetFieldReveal}.
+     * {@code EmbeddedEditor.getViewer()} — публичный {@code XtextSourceViewer extends SourceViewer}
+     * (класс {@code SourceViewer} уже импортирован и используется для БСЛ-модулей в
+     * {@link #scheduleLeftmostScrollForOpenedMatch} — тот же {@code getTextWidget()}).
+     */
+    private static void scheduleDataSetQueryTextReveal(Object dataSetsPage, TextSearchModelMatch match, int attempt)
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.timerExec(100, () -> {
+            try
+            {
+                Object embeddedEditor = Global.invoke(dataSetsPage, "getQueryEditor"); //$NON-NLS-1$
+                if (embeddedEditor == null)
+                {
+                    if (attempt < 15)
+                        scheduleDataSetQueryTextReveal(dataSetsPage, match, attempt + 1);
+                    else
+                        Global.tempLog("dcsNav", "scheduleDataSetQueryTextReveal: getQueryEditor()=null после повторов"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
+                Object viewerObj = Global.invoke(embeddedEditor, "getViewer"); //$NON-NLS-1$
+                if (!(viewerObj instanceof SourceViewer sourceViewer))
+                {
+                    Global.tempLog("dcsNav", "scheduleDataSetQueryTextReveal: getViewer() не SourceViewer: " //$NON-NLS-1$ //$NON-NLS-2$
+                        + viewerObj);
+                    return;
+                }
+                StyledText widget = sourceViewer.getTextWidget();
+                if (widget == null || widget.isDisposed())
+                {
+                    Global.tempLog("dcsNav", "scheduleDataSetQueryTextReveal: getTextWidget()=null/disposed"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
+                int offset = match.getTextOffset();
+                int length = match.getTextLength();
+                if (offset < 0 || offset > widget.getCharCount())
+                {
+                    if (attempt < 15)
+                        scheduleDataSetQueryTextReveal(dataSetsPage, match, attempt + 1);
+                    else
+                        Global.tempLog("dcsNav", "scheduleDataSetQueryTextReveal: документ ещё не тот, offset=" //$NON-NLS-1$ //$NON-NLS-2$
+                            + offset + " charCount=" + widget.getCharCount()); //$NON-NLS-1$
+                    return;
+                }
+                sourceViewer.setSelectedRange(offset, length);
+                sourceViewer.revealRange(offset, length);
+                Global.tempLog("dcsNav", "scheduleDataSetQueryTextReveal: выделено offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
+                    + " length=" + length); //$NON-NLS-1$
+            }
+            catch (Throwable t)
+            {
+                Global.tempLogException("dcsNav", "scheduleDataSetQueryTextReveal", t); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        });
+    }
+
+    /**
+     * Под-панель «Поля» набора данных ({@code DataSets.getCurrentFieldsViewer()}) появляется/
+     * обновляется асинхронно ПОСЛЕ выбора набора данных в дереве — повтор по таймеру, как
+     * {@link #scheduleLeftmostScrollForOpenedMatch}. Класс под-панели/её колонок
+     * ({@code DataSetsFieldsViewerBase.FieldsColumn}, вложенный enum) — из НЕэкспортированного
+     * пакета {@code .datasets.fields}, поэтому его {@code Class} берём через classloader УЖЕ
+     * полученного чужого экземпляра ({@code fieldsViewerBase.getClass().getClassLoader()}), а не
+     * через собственный импорт — тот же приём, что и весь остальной рефлексивный доступ здесь.
+     */
+    private static void scheduleDataSetFieldReveal(Object dataSetsPage, EObject matchedObject,
+            EStructuralFeature matchFeature, DataSetField field, int attempt)
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.timerExec(100, () -> {
+            try
+            {
+                Object fieldsViewerBase = Global.invoke(dataSetsPage, "getCurrentFieldsViewer"); //$NON-NLS-1$
+                if (fieldsViewerBase == null)
+                {
+                    if (attempt < 10)
+                        scheduleDataSetFieldReveal(dataSetsPage, matchedObject, matchFeature, field, attempt + 1);
+                    else
+                        Global.tempLog("dcsNav", "scheduleDataSetFieldReveal: currentFieldsViewer не появился"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
+                Object treeViewerObj = Global.invoke(fieldsViewerBase, "getViewer"); //$NON-NLS-1$
+                if (treeViewerObj == null)
+                {
+                    Global.tempLog("dcsNav", "scheduleDataSetFieldReveal: getViewer()=null"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
+                Global.invoke(treeViewerObj, "setSelection", //$NON-NLS-1$
+                    (org.eclipse.jface.viewers.ISelection) new StructuredSelection(field), true);
+                String featureName = findRowFeatureName(matchedObject, DataSetField.class, matchFeature);
+                Global.tempLog("dcsNav", "scheduleDataSetFieldReveal: поле выделено, feature=" + featureName); //$NON-NLS-1$ //$NON-NLS-2$
+
+                String enumConstantName = featureName != null ? DATASET_FIELD_COLUMN_BY_FEATURE.get(featureName) : null;
+                if (enumConstantName == null)
+                    return;
+                Class<?> fieldsColumnEnumClass = fieldsViewerBase.getClass().getClassLoader()
+                    .loadClass("com._1c.g5.v8.dt.dcs.ui.datasets.fields.DataSetsFieldsViewerBase$FieldsColumn"); //$NON-NLS-1$
+                Object enumConstant = Global.invoke(fieldsColumnEnumClass, "valueOf", enumConstantName); //$NON-NLS-1$
+                Object colIdxObj = Global.invoke(fieldsViewerBase, "getColumnIndex", enumConstant); //$NON-NLS-1$
+                if (colIdxObj instanceof Integer col)
+                    activateGridCell(treeViewerObj, col.intValue());
+                else
+                    Global.tempLog("dcsNav", "scheduleDataSetFieldReveal: getColumnIndex -> " + colIdxObj); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (Throwable t)
+            {
+                Global.tempLogException("dcsNav", "scheduleDataSetFieldReveal", t); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        });
+    }
+
+    /**
+     * Выделяет активную ячейку грида (не запуск inline-редактора — {@code editElement} требует
+     * установленного {@code ColumnViewerEditor}, которого здесь, похоже, нет: редактирование
+     * варианта настроек в этой таблице — через отдельный диалог/команду
+     * ({@code VariantsEditHandler}/{@code SettingsSetTitleDialog}), не через grid-редактор;
+     * вызов {@code editElement} молча ничего не делал). {@code TableEx.setCellSelection(Point)} —
+     * штатный API самого грида для «активной ячейки» (аналог {@code FormTableInteraction}
+     * в этом же плагине, но для чужого виджета). Работает и для {@code TableExViewer}, и для
+     * {@code TableExTreeViewer} — оба отдают {@code TableEx} через {@code getTable()}.
+     */
+    private static void activateGridCell(Object viewerObj, int col)
+    {
+        scheduleActivateGridCell(viewerObj, col, 0);
+    }
+
+    /**
+     * {@code getSelectionIndices()} сразу после {@code setSelection(...)} не всегда успевает
+     * отразить выделение (грид/страница ещё не отрисовались — например, «Ресурсы» заполняются
+     * асинхронно после переключения вкладки) — повтор по таймеру, как
+     * {@link #scheduleLeftmostScrollForOpenedMatch}.
+     */
+    private static void scheduleActivateGridCell(Object viewerObj, int col, int attempt)
+    {
+        Object tableExObj = Global.invoke(viewerObj, "getTable"); //$NON-NLS-1$
+        if (tableExObj == null)
+        {
+            Global.tempLog("dcsNav", "activateGridCell: getTable()=null"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        Object selectionIndicesObj = Global.invoke(tableExObj, "getSelectionIndices"); //$NON-NLS-1$
+        if (!(selectionIndicesObj instanceof int[] selectionIndices) || selectionIndices.length == 0)
+        {
+            if (attempt < 10)
+            {
+                Display display = Display.getDefault();
+                if (display != null && !display.isDisposed())
+                    display.timerExec(50, () -> scheduleActivateGridCell(viewerObj, col, attempt + 1));
+                return;
+            }
+            Global.tempLog("dcsNav", "activateGridCell: getSelectionIndices() пуст после повторов: " + selectionIndicesObj); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        Point cell = new Point(col, selectionIndices[0]);
+        Global.invoke(tableExObj, "setCellSelection", cell); //$NON-NLS-1$
+        Global.tempLog("dcsNav", "activateGridCell: setCellSelection(" + cell + ")"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    /**
+     * Переключает верхнюю вкладку редактора СКД («Наборы данных»/«Настройки»/…) на ту, что
+     * содержит {@code pageControl} — сам {@code DataCompositionSchemaEditor} не хранит свой
+     * {@code CTabFolder} в поле (см. {@link #openDcsMatch}), поэтому ищем его обходом дерева
+     * SWT-контролов вверх от страницы (публичный SWT API: {@code getParent()}/{@code getItems()}).
+     */
+    private static void activateEditorTabFor(Control pageControl)
+    {
+        if (pageControl == null || pageControl.isDisposed())
+            return;
+        for (Control parent = pageControl.getParent(); parent != null; parent = parent.getParent())
+        {
+            if (!(parent instanceof CTabFolder folder))
+                continue;
+            for (CTabItem item : folder.getItems())
+            {
+                Control itemControl = item.getControl();
+                if (itemControl != pageControl && !isAncestorOf(itemControl, pageControl))
+                    continue;
+                Global.tempLog("dcsNav", "activateEditorTabFor: переключаю на вкладку \"" + item.getText() + "\""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                folder.setSelection(item);
+                Event event = new Event();
+                event.item = item;
+                event.widget = folder;
+                folder.notifyListeners(SWT.Selection, event);
+                return;
+            }
+            Global.tempLog("dcsNav", "activateEditorTabFor: CTabFolder найден, но подходящий CTabItem — нет"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        Global.tempLog("dcsNav", "activateEditorTabFor: CTabFolder-предок не найден"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static boolean isAncestorOf(Control ancestor, Control control)
+    {
+        if (ancestor == null)
+            return false;
+        for (Control cur = control; cur != null; cur = cur.getParent())
+            if (cur == ancestor)
+                return true;
+        return false;
+    }
+
+    private static boolean isInsideDataCompositionSchema(EObject leaf)
+    {
+        for (EObject cur = leaf; cur != null; cur = cur.eContainer())
+            if (cur instanceof DataCompositionSchema)
+                return true;
+        return false;
+    }
+
+    /** Управляемая форма — как и СКД, отдельный BM-ресурс ({@code eContainer()==null} у самой {@code Form}). */
+    private static boolean isInsideForm(EObject leaf)
+    {
+        for (EObject cur = leaf; cur != null; cur = cur.eContainer())
+            if (cur instanceof Form)
+                return true;
+        return false;
+    }
+
+    /** Табличный документ (Moxel) — как и СКД/форма, отдельный BM-ресурс. */
+    private static boolean isInsideSpreadsheetDocument(EObject leaf)
+    {
+        for (EObject cur = leaf; cur != null; cur = cur.eContainer())
+            if (cur instanceof SpreadsheetDocument)
+                return true;
+        return false;
     }
 
     /**
@@ -674,7 +1641,7 @@ public final class ConfigSearchResultsHook implements IStartup
         return copyActiveMatchCellToClipboard(matchViewer);
     }
 
-    /** Копирует текст активной ячейки (правила проекта: не всю строку) — см. {@link FormTableInteraction}. */
+    /** Копирует текст для активной колонки (см. {@link FormTableInteraction#activeSelectionText()}). */
     private static boolean copyActiveMatchCellToClipboard(TableViewer matchViewer)
     {
         Table table = matchViewer.getTable();
@@ -683,7 +1650,7 @@ public final class ConfigSearchResultsHook implements IStartup
         FormTableInteraction interaction = cachedMatchTableInteraction;
         if (interaction == null)
             return false;
-        String text = interaction.activeCellText();
+        String text = interaction.activeSelectionText();
         if (text == null)
             return false;
 
@@ -1697,12 +2664,77 @@ public final class ConfigSearchResultsHook implements IStartup
             Object bmObject = opt.get();
             if (!(bmObject instanceof EObject))
                 return null;
-            return GetRef.eObjectToFullName((EObject) bmObject);
+            String path = GetRef.eObjectToFullName((EObject) bmObject);
+            return appendOwnedChildSegmentIfMissing(path, match);
         }
         catch (Exception ignored)
         {
             return null;
         }
+    }
+
+    /**
+     * Формы/макеты, принадлежащие объекту метаданных (Справочник.Форма.Список1 и т.п.), не являются
+     * отдельным bm-топ-объектом с точки зрения {@code getMetadataTopObjectId()} — у вхождения внутри
+     * них он резолвится к объекту-владельцу (напр. Справочнику), поэтому базовый путь не содержит
+     * сегмент самой формы/макета. Однако собственный BM-ресурс формы/макета (корень {@code eContainer()}
+     * цепочки от найденного вхождения) имеет URI вида {@code bm://Конфигурация/Catalog.Справочник1.Form.ФормаСписка.Form}
+     * / {@code bm://Конфигурация/Catalog.Справочник1.Template.СхемаКомпоновки.Template} — содержит
+     * полный путь включая тип+имя формы/макета, с одним лишним хвостовым сегментом-маркером вида
+     * ({@code .Form}/{@code .Template}), дублирующим тип последней пары. Убрав этот хвост и прогнав
+     * через {@link MdTypeMapping#bmFqnToRuFullName(String)} (тот же маппер, что и для остального пути),
+     * получаем полный путь. Найдено логированием фактических {@code eResource().getURI()} в разных
+     * случаях (формы, макеты объекта, общие макеты/формы, СКД).
+     */
+    private static String appendOwnedChildSegmentIfMissing(String path, Object match)
+    {
+        if (path == null || path.isEmpty())
+            return path;
+        try
+        {
+            Object matchedOpt = Global.invoke(match, "resolveMatchObject"); //$NON-NLS-1$
+            if (!(matchedOpt instanceof java.util.Optional<?> opt) || opt.isEmpty()
+                || !(opt.get() instanceof EObject leaf))
+                return path;
+            String childFullName = ownedChildFullNameFor(leaf);
+            return childFullName != null ? childFullName : path;
+        }
+        catch (Exception e)
+        {
+            Global.tempLog("dcsNav", "appendOwnedChildSegmentIfMissing: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            return path;
+        }
+    }
+
+    /**
+     * Полное имя формы/макета объекта (напр. {@code Справочник.Справочник1.Форма.ФормаСписка}) по
+     * URI собственного BM-ресурса найденного вхождения — см. {@link #appendOwnedChildSegmentIfMissing}.
+     * Используется и для колонки «Путь», и для навигации ({@link #openDcsMatch}), т.к. для таких
+     * вложенных объектов {@code getMetadataTopObjectId()} резолвится к владельцу, а не к форме/макету.
+     *
+     * @return полное русское имя формы/макета, или {@code null}, если вхождение не в таком объекте
+     *         (обычный МД-объект, общий макет/форма — там владелец и так резолвится верно)
+     */
+    private static String ownedChildFullNameFor(EObject leaf)
+    {
+        EObject root = leaf;
+        for (EObject cur = leaf; cur != null; cur = cur.eContainer())
+            root = cur;
+        Resource resource = root.eResource();
+        if (resource == null)
+            return null;
+        URI uri = resource.getURI();
+        if (uri == null || !"bm".equals(uri.scheme())) //$NON-NLS-1$
+            return null;
+        String uriPath = uri.path();
+        if (uriPath == null)
+            return null;
+        if (uriPath.startsWith("/")) //$NON-NLS-1$
+            uriPath = uriPath.substring(1);
+        String[] parts = uriPath.split("\\."); //$NON-NLS-1$
+        if (parts.length >= 5 && parts[parts.length - 1].equals(parts[parts.length - 3]))
+            uriPath = uriPath.substring(0, uriPath.length() - parts[parts.length - 1].length() - 1);
+        return MdTypeMapping.bmFqnToRuFullName(uriPath);
     }
 
     private static final Set<String> LOGGED_API_CLASSES = java.util.Collections.synchronizedSet(new java.util.HashSet<>());
@@ -1802,6 +2834,9 @@ public final class ConfigSearchResultsHook implements IStartup
 
     private static String extractPropertyText(Object tableItem)
     {
+        String hierarchicalPath = hierarchicalPropertyPath(tableItem);
+        if (hierarchicalPath != null && !hierarchicalPath.isEmpty())
+            return hierarchicalPath;
         try
         {
             Object styled = Global.invoke(tableItem, "getPropertyText"); //$NON-NLS-1$
@@ -1810,6 +2845,232 @@ public final class ConfigSearchResultsHook implements IStartup
         }
         catch (Exception ignored) {}
         return ""; //$NON-NLS-1$
+    }
+
+    /** Технические обёртки EMF, не показываемые отдельным сегментом пути (одна голая ссылка без смысловой нагрузки). */
+    private static final Set<String> DCS_FEATURE_SKIP =
+        Set.of("template", "localValue"); //$NON-NLS-1$ //$NON-NLS-2$
+
+    /**
+     * Русская подпись feature — не своя таблица переводов, а штатный механизм платформы
+     * ({@code com._1c.g5.v8.dt.common.Functions.featureToLabel()}, тот же {@code Function<EStructuralFeature,String>},
+     * которым сама панель поиска строит {@code IMatchItem.getPropertyText()} — см. декомпиляцию
+     * {@code TreeTableItemFactory.getPropertyDescription(EObject, EStructuralFeature)}).
+     * Пробелы убираются — по требованию пользователя сегменты пути идут без пробелов
+     * («Макет.ВариантыНастроек.Основной.Представление.ru»).
+     *
+     * <p>Для Moxel (табличный документ) {@code featureToLabel()} ничего не находит — декомпиляция
+     * показала, что он ищет строку по ключу {@code nsURI|EClass|feature} в реестре
+     * {@code LocalizationManager}, а бандл {@code com._1c.g5.v8.dt.moxel.ui} регистрирует переводы
+     * НЕ для реальных EMF-классов Moxel, а для отдельной descriptor-модели панели свойств
+     * ({@code CellsProperties} и т.п., см. {@code moxel.ui/plugin.xml},
+     * {@code objectDescriptors}/{@code localization.bundles}) — те же самые русские строки 1С
+     * ("Текст", "Параметр" и т.п.), но под другим именем EClass. Поэтому для Moxel —
+     * {@link #moxelFeatureLabel}, тоже через {@code LocalizationManager}, просто с ключом по
+     * descriptor-классу, а не по самодельной таблице переводов.
+     */
+    private static String dcsFeatureLabel(EStructuralFeature feature)
+    {
+        if (feature == null)
+            return null;
+        if (DCS_FEATURE_SKIP.contains(feature.getName()))
+            return null;
+        // Moxel-соответствие — ПЕРВЫМ: Functions.featureToLabel() никогда не возвращает null/пусто —
+        // при неудачном поиске в реестре локализации он сам подставляет StringUtils.nameToText(name)
+        // (например "text" → "Text"), поэтому проверка "label == null" после его вызова никогда не
+        // сработала бы как признак «перевода нет» (найдено логированием: 0 вызовов moxelFeatureLabel).
+        String label = moxelFeatureLabel(feature);
+        if (label == null || label.isBlank())
+        {
+            try
+            {
+                label = Functions.featureToLabel().apply(feature);
+            }
+            catch (Exception e)
+            {
+                Global.tempLog("dcsNav", "dcsFeatureLabel: featureToLabel(" + feature.getName() + "): " + e); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                label = null;
+            }
+        }
+        if (label == null || label.isBlank())
+            label = feature.getName();
+        return toCamelCase(label);
+    }
+
+    /**
+     * Ключ реестра {@code LocalizationManager}: {@code feature-names|<nsURI>|<descriptor-EClass>|<feature>}
+     * (см. декомпиляцию {@code FeatureNameLocalizationProvider.getKey}). {@code nsURI} и соответствие
+     * «реальный EClass → descriptor-EClass» — из {@code com._1c.g5.v8.dt.moxel.ui/plugin.xml}
+     * ({@code objectDescriptors}), не догадка. Расширять список по мере необходимости (сейчас нужен
+     * только {@code Cell→CellsProperties} для «Текст»/«Параметр» ячейки).
+     */
+    private static final String MOXEL_FEATURE_NAMES_KEY_PREFIX =
+        "feature-names|http://g5.1c.ru/v8/dt/moxel/content|"; //$NON-NLS-1$
+    private static final Map<String, String> MOXEL_DESCRIPTOR_CLASS_BY_ECLASS = Map.of(
+        "Cell", "CellsProperties" //$NON-NLS-1$ //$NON-NLS-2$
+    );
+
+    private static String moxelFeatureLabel(EStructuralFeature feature)
+    {
+        String eClassName = feature.getEContainingClass().getName();
+        String descriptorClass = MOXEL_DESCRIPTOR_CLASS_BY_ECLASS.get(eClassName);
+        Global.tempLog("dcsNav", "moxelFeatureLabel: eClassName=" + eClassName + " feature=" + feature.getName() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " descriptorClass=" + descriptorClass); //$NON-NLS-1$
+        if (descriptorClass == null)
+            return null;
+        try
+        {
+            String key = MOXEL_FEATURE_NAMES_KEY_PREFIX + descriptorClass + "|" + feature.getName(); //$NON-NLS-1$
+            String value = LocalizationManager.getInstance().getString(key);
+            Global.tempLog("dcsNav", "moxelFeatureLabel: key=" + key + " value=" + value); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return value;
+        }
+        catch (Exception e)
+        {
+            Global.tempLogException("dcsNav", "moxelFeatureLabel", e); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+    }
+
+    /**
+     * «Вычисляемые поля» → «ВычисляемыеПоля» (не просто удаление пробелов — второе и следующие
+     * слова обычной русской фразы начинаются со строчной буквы, при склейке без капитализации
+     * граница слов исчезает: «Вычисляемыеполя»).
+     */
+    private static String toCamelCase(String phrase)
+    {
+        StringBuilder sb = new StringBuilder(phrase.length());
+        for (String word : phrase.split("\\s+")) //$NON-NLS-1$
+        {
+            if (word.isEmpty())
+                continue;
+            sb.append(Character.toUpperCase(word.charAt(0)));
+            if (word.length() > 1)
+                sb.append(word.substring(1));
+        }
+        return sb.toString();
+    }
+
+    /** EMap-ключ (с нуля) → видимый номер строки/колонки табличного документа (с единицы). */
+    private static String oneBased(Object key)
+    {
+        return key instanceof Number n ? String.valueOf(n.intValue() + 1) : String.valueOf(key);
+    }
+
+    private static String dcsElementName(EObject node)
+    {
+        Object name = Global.invoke(node, "getName"); //$NON-NLS-1$
+        return (name instanceof String s && !s.isBlank()) ? s : null;
+    }
+
+    /**
+     * Полный путь до найденного вхождения внутри схемы компоновки данных (СКД), управляемой формы
+     * (Form) или табличного документа (Moxel/SpreadsheetDocument) — например
+     * «Макет.ВариантыНастроек.Основной.Представление.ru», «Элементы.ОсновнаяГруппа.Поле1.Заголовок.ru»
+     * или «Область(3,2).Текст.ru»/«Область(4,1).Параметр» (без пробелов внутри сегментов) — вместо
+     * штатной короткой подписи {@code IMatchItem.getPropertyText()} (см. {@link #extractPropertyText}).
+     * Алгоритм не специфичен для СКД: обход {@code eContainer()}/{@code eContainingFeature()} через
+     * штатный {@link Functions#featureToLabel()} — общая EMF-инфраструктура, работает для любой
+     * поддерживаемой модели (проверка типа — только чтобы не трогать вхождения БСЛ-модулей/файлов).
+     *
+     * <p>Терминальный сегмент: если найденный объект — запись {@code EMap} (например, конкретная
+     * локаль в {@code LocalString.getContent()}/{@code Titled.getTitle()}), путь оканчивается её
+     * ключом (кодом локали); иначе — подписью features самого найденного объекта.
+     *
+     * <p>Для остальных типов вхождений (BSL-модуль, файловый поиск и т.п.) возвращает {@code null} —
+     * вызывающий код ({@link #extractPropertyText}) откатывается на старое поведение.
+     */
+    private static String hierarchicalPropertyPath(Object tableItem)
+    {
+        try
+        {
+            Object matchObj = Global.invoke(tableItem, "getData"); //$NON-NLS-1$
+            if (!(matchObj instanceof TextSearchModelMatch match))
+                return null;
+
+            Optional<?> matchedOpt = match.resolveMatchObject();
+            if (matchedOpt.isEmpty() || !(matchedOpt.get() instanceof EObject leaf))
+                return null;
+            if (!isInsideDataCompositionSchema(leaf) && !isInsideForm(leaf) && !isInsideSpreadsheetDocument(leaf))
+                return null;
+
+            Optional<?> topOpt = match.resolveMatchTopObject();
+            EObject top = (topOpt.isPresent() && topOpt.get() instanceof EObject) ? (EObject) topOpt.get() : null;
+
+            List<String> terminal = new ArrayList<>();
+            EObject walkStart;
+            if (leaf instanceof java.util.Map.Entry<?, ?> entry)
+            {
+                // Для DCS Presentation (LocalStringMapEntry -> LocalString -> Presentation -> ...)
+                // сегмент "Заголовок"/"Представление" даёт containingFeature обёртки Presentation при
+                // проходе цикла ниже (её feature — не "content"). Но title-подобные EMap<String,String>
+                // без обёртки (FormCommand/FormAttribute/FormField.getTitle()) хранятся ПРЯМО на
+                // объекте — там нет такой обёртки, и без этой ветки терялся сегмент "Заголовок"
+                // (было "КомандыФормы.Команда2.ru" вместо "КомандыФормы.Команда2.Заголовок.ru").
+                EStructuralFeature entryFeature = leaf.eContainingFeature();
+                if (entryFeature != null && !"content".equals(entryFeature.getName())) //$NON-NLS-1$
+                {
+                    String entryFeatureLabel = dcsFeatureLabel(entryFeature);
+                    if (entryFeatureLabel != null)
+                        terminal.add(entryFeatureLabel);
+                }
+                Object key = entry.getKey();
+                if (key != null)
+                    terminal.add(String.valueOf(key));
+                walkStart = leaf.eContainer();
+            }
+            else
+            {
+                String featureLabel = dcsFeatureLabel(match.getFeature());
+                if (featureLabel != null)
+                    terminal.add(featureLabel);
+                walkStart = leaf;
+            }
+
+            LinkedList<String> path = new LinkedList<>();
+            Object pendingCellColumn = null;
+            for (EObject node = walkStart; node != null && node != top; node = node.eContainer())
+            {
+                // Табличный документ (Moxel): Cell/Row — сами по себе не EMF containment-узлы с
+                // осмысленным именем/подписью, а лишь ЗНАЧЕНИЯ записей EMap
+                // (SpreadsheetDocument.getRows()/Row.getCells(), ключи — номер строки/колонки).
+                // Один сегмент "Область(строка,колонка)" собирается из ДВУХ ключей этих EMap-записей
+                // вместо generic-меток по containment-feature.
+                if (node instanceof Cell || node instanceof Row)
+                    continue;
+                if (node instanceof java.util.Map.Entry<?, ?> mapEntry)
+                {
+                    Object value = mapEntry.getValue();
+                    if (value instanceof Cell)
+                    {
+                        pendingCellColumn = mapEntry.getKey();
+                        continue;
+                    }
+                    if (value instanceof Row && pendingCellColumn != null)
+                    {
+                        // EMap-ключи (SpreadsheetDocument.getRows()/Row.getCells()) — с нуля,
+                        // видимые номера строки/колонки в редакторе — с единицы.
+                        path.addFirst("Область(" + oneBased(mapEntry.getKey()) + "," //$NON-NLS-1$ //$NON-NLS-2$
+                            + oneBased(pendingCellColumn) + ")"); //$NON-NLS-1$
+                        continue;
+                    }
+                }
+
+                String name = dcsElementName(node);
+                if (name != null)
+                    path.addFirst(name);
+                String label = dcsFeatureLabel(node.eContainingFeature());
+                if (label != null)
+                    path.addFirst(label);
+            }
+            path.addAll(terminal);
+            return path.isEmpty() ? null : String.join(".", path); //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+            log("hierarchicalPropertyPath: " + e); //$NON-NLS-1$
+            return null;
+        }
     }
 
     @SuppressWarnings("unchecked")
@@ -2208,17 +3469,39 @@ public final class ConfigSearchResultsHook implements IStartup
         if (!(offObj instanceof Integer off) || !(lenObj instanceof Integer len)
             || len <= 0 || off < 0 || off > text.length())
             return new StyledString(text);
+        int end = Math.min(off + len, text.length());
+
+        // Многострочный текст (например запрос СКД/динамического списка) — match.getText() отдаёт
+        // ВЕСЬ текст целиком, а не одну строку (как для БСЛ, где вхождение уже приходит построчно) —
+        // SWT-ячейка таблицы показывает только первую строку, остальное обрезается визуально. Поэтому
+        // вырезаем именно ту строку, где реально произошло совпадение, а не весь текст с начала.
+        int lineStart = text.lastIndexOf('\n', Math.max(off - 1, 0)) + 1; //$NON-NLS-1$
+        int lineEndNl = text.indexOf('\n', end); //$NON-NLS-1$
+        int lineEnd = lineEndNl < 0 ? text.length() : lineEndNl;
+        while (lineEnd > lineStart && text.charAt(lineEnd - 1) == '\r')
+            lineEnd--;
+        String rawLine = text.substring(lineStart, lineEnd);
+        int leadWs = 0;
+        while (leadWs < rawLine.length() && Character.isWhitespace(rawLine.charAt(leadWs)))
+            leadWs++;
+        int trailWs = 0;
+        while (trailWs < rawLine.length() - leadWs && Character.isWhitespace(rawLine.charAt(rawLine.length() - 1 - trailWs)))
+            trailWs++;
+        String line = rawLine.substring(leadWs, rawLine.length() - trailWs);
+        int relOff = off - lineStart - leadWs;
+        int relEnd = relOff + (end - off);
+        relOff = Math.max(0, Math.min(relOff, line.length()));
+        relEnd = Math.max(relOff, Math.min(relEnd, line.length()));
 
         TableViewer matchViewer = cachedMatchTableViewer;
         Control styleContext = matchViewer != null ? matchViewer.getTable() : null;
-        int end = Math.min(off + len, text.length());
         StyledString ss = new StyledString();
-        if (off > 0)
-            ss.append(text.substring(0, off));
-        if (end > off)
-            ss.append(text.substring(off, end), SmartMatchHighlight.textOnlyStyler(styleContext));
-        if (end < text.length())
-            ss.append(text.substring(end));
+        if (relOff > 0)
+            ss.append(line.substring(0, relOff));
+        if (relEnd > relOff)
+            ss.append(line.substring(relOff, relEnd), SmartMatchHighlight.textOnlyStyler(styleContext));
+        if (relEnd < line.length())
+            ss.append(line.substring(relEnd));
         return ss;
     }
 

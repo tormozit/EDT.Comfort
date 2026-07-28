@@ -254,80 +254,18 @@ public class CompareConfigMenuHook implements IStartup
                 {
                     AbstractTreeViewer v = getTreeViewerFromEditor(editor);
                     if (v != null)
-                        onCompareTreeViewerReady(listener, v);
+                    {
+                        listener.setTreeViewer(v);
+                        TreeSoleChildAutoExpand.installWhitelisted(
+                                TreeSoleChildAutoExpand.Target.COMPARE_CONFIG, v);
+                    }
                 });
                 return;
             }
-            onCompareTreeViewerReady(listener, viewer);
+            listener.setTreeViewer(viewer);
+            TreeSoleChildAutoExpand.installWhitelisted(
+                    TreeSoleChildAutoExpand.Target.COMPARE_CONFIG, viewer);
         });
-    }
-
-    private static void onCompareTreeViewerReady(CompareConfigSelectionListener listener, AbstractTreeViewer viewer)
-    {
-        listener.setTreeViewer(viewer);
-        TreeSoleChildAutoExpand.installWhitelisted(
-                TreeSoleChildAutoExpand.Target.COMPARE_CONFIG, viewer);
-        scheduleExpandCompareRoot(viewer, 0);
-    }
-
-    /**
-     * Авторазворот корневого узла, если на корневом уровне ровно один элемент (повтор до готовности input).
-     */
-    private static void scheduleExpandCompareRoot(AbstractTreeViewer viewer, int attempt)
-    {
-        if (viewer == null)
-            return;
-
-        Display display = Display.getDefault();
-        display.asyncExec(() -> {
-            if (tryExpandCompareRoot(viewer))
-                return;
-            if (attempt < 20)
-                display.timerExec(150, () -> scheduleExpandCompareRoot(viewer, attempt + 1));
-        });
-    }
-
-    /** @return {@code true}, если корневой уровень обработан (развёрнут единственный узел или узлов несколько) */
-    private static boolean tryExpandCompareRoot(AbstractTreeViewer viewer)
-    {
-        if (viewer == null)
-            return false;
-
-        Tree tree = resolveCompareConfigTree(viewer);
-        if (tree == null || tree.isDisposed())
-            return false;
-
-        Object cpObj = viewer.getContentProvider();
-        if (!(cpObj instanceof ITreeContentProvider cp))
-            return false;
-
-        Object input = viewer.getInput();
-        if (input == null)
-            return false;
-
-        Object[] roots = cp.getElements(input);
-        if (roots == null || roots.length == 0)
-            return false;
-
-        if (roots.length != 1)
-            return true;
-
-        Object root = roots[0];
-        if (root == null)
-            return true;
-
-        if (!viewer.getExpandedState(root))
-            viewer.setExpandedState(root, true);
-        return true;
-    }
-
-    private static Tree resolveCompareConfigTree(AbstractTreeViewer viewer)
-    {
-        if (viewer instanceof TreeViewer treeViewer)
-            return treeViewer.getTree();
-
-        Object widget = Global.call(viewer, "getTree"); //$NON-NLS-1$
-        return widget instanceof Tree ? (Tree) widget : null;
     }
 
     private AbstractTreeViewer getTreeViewerFromEditor(IEditorPart editor)

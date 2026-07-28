@@ -1,6 +1,8 @@
 package tormozit;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 
@@ -518,7 +520,7 @@ final class FormTableInteraction
 
     private void copyActiveCell()
     {
-        String text = activeCellText();
+        String text = activeSelectionText();
         if (text == null)
             return;
         Clipboard clipboard = new Clipboard(table.getDisplay());
@@ -543,6 +545,35 @@ final class FormTableInteraction
             return null;
         String text = cellAccess.cellText(item, activeColumnIndex());
         return text != null ? text : ""; //$NON-NLS-1$
+    }
+
+    /**
+     * Текст для копирования (Ctrl+C/меню/внешние обработчики — тот же случай, что и
+     * {@link #activeCellText()}): одна выделенная строка — активная ячейка, как раньше.
+     * Несколько выделенных строк (таблица {@code SWT.MULTI}) — ячейки АКТИВНОЙ колонки по всем
+     * выделенным строкам, в порядке отображения (не порядке выделения), через перевод строки —
+     * не вся строка целиком (правило проекта: копировать только активную колонку).
+     * {@code null}, если активной колонки сейчас нет.
+     */
+    String activeSelectionText()
+    {
+        TableItem[] selection = table.getSelection();
+        if (selection.length <= 1)
+            return activeCellText();
+
+        int column = activeColumnIndex();
+        if (column < 0)
+            return null;
+        Arrays.sort(selection, Comparator.comparingInt(table::indexOf));
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < selection.length; i++)
+        {
+            if (i > 0)
+                sb.append('\n');
+            String text = cellAccess.cellText(selection[i], column);
+            sb.append(text != null ? text : ""); //$NON-NLS-1$
+        }
+        return sb.toString();
     }
 
     private void onEraseItem(Event e)

@@ -6,6 +6,7 @@ import java.nio.file.FileVisitResult;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.SimpleFileVisitor;
+import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.util.ArrayList;
 import java.util.List;
@@ -13,6 +14,7 @@ import java.util.List;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IProjectDescription;
 import org.eclipse.core.resources.IResource;
+import org.eclipse.core.resources.IResourceVisitor;
 import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.IPath;
@@ -235,11 +237,11 @@ public final class NavigatorCopyProjectMenuHook implements IStartup
         if (sourceProject == null || sourceProject.getLocation() == null)
             return;
 
-        String newName = askNewProjectName(shell, sourceProject.getName());
+        File sourceDir = sourceProject.getLocation().toFile();
+        String newName = askNewProjectName(shell, sourceProject.getName(), sourceDir);
         if (newName == null)
             return;
 
-        File sourceDir = sourceProject.getLocation().toFile();
         File parentDir = askParentDirectory(shell, sourceDir.getParentFile());
         if (parentDir == null)
             return;
@@ -267,7 +269,7 @@ public final class NavigatorCopyProjectMenuHook implements IStartup
         IOException[] copyError = new IOException[1];
         try
         {
-            copyFiles(sourceDir.toPath(), targetDir.toPath(), display, overlay);
+            copyFiles(sourceProject, sourceDir.toPath(), targetDir.toPath(), display, overlay);
         }
         catch (IOException e)
         {
@@ -297,7 +299,7 @@ public final class NavigatorCopyProjectMenuHook implements IStartup
         });
     }
 
-    private static String askNewProjectName(Shell shell, String sourceName)
+    private static String askNewProjectName(Shell shell, String sourceName, File sourceDir)
     {
         IInputValidator validator = value -> {
             if (value == null || value.isBlank())
@@ -309,19 +311,43 @@ public final class NavigatorCopyProjectMenuHook implements IStartup
                 return "Проект с таким именем уже существует в рабочей области"; //$NON-NLS-1$
             return null;
         };
+        String shortCommitId = resolveShortHeadCommitId(sourceDir);
+        String defaultName = sourceName + " - копия" //$NON-NLS-1$
+                + (shortCommitId != null ? " " + shortCommitId : ""); //$NON-NLS-1$ //$NON-NLS-2$
         InputDialog dialog = new InputDialog(shell,
             Global.withPluginWindowTitle("Скопировать проект"), //$NON-NLS-1$
-            "Имя нового проекта:", sourceName + " - копия", validator); //$NON-NLS-1$ //$NON-NLS-2$
+            "Имя нового проекта:", defaultName, validator); //$NON-NLS-1$
         if (dialog.open() != org.eclipse.jface.window.Window.OK)
             return null;
         return dialog.getValue().trim();
     }
 
+    /**
+     * Короткий (7 hex) HEAD-коммит репозитория проекта — тот же фрагмент,
+     * что штатный навигатор EDT показывает динамическим суффиксом ветки проекта.
+     * {@code null}, если проект не под git или HEAD не резолвится (пустой репозиторий).
+     */
+    private static String resolveShortHeadCommitId(File projectDir)
+    {
+        org.eclipse.jgit.storage.file.FileRepositoryBuilder builder =
+                new org.eclipse.jgit.storage.file.FileRepositoryBuilder().findGitDir(projectDir);
+        if (builder.getGitDir() == null)
+            return null;
+        try (org.eclipse.jgit.lib.Repository repository = builder.build())
+        {
+            org.eclipse.jgit.lib.ObjectId head = repository.resolve(org.eclipse.jgit.lib.Constants.HEAD);
+            return head != null ? head.abbreviate(7).name() : null;
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+    }
+
     private static File askParentDirectory(Shell shell, File initialDir)
     {
         DirectoryDialog dialog = new DirectoryDialog(shell);
-        dialog.setText(Global.withPluginWindowTitle("Скопировать проект")); //$NON-NLS-1$
-        dialog.setMessage("Выберите папку, в которой будет создана папка нового проекта:"); //$NON-NLS-1$
+        dialog.setText(Global.withPluginWindowTitle("Укажите каталог размещения копии проекта")); //$NON-NLS-1$
         if (initialDir != null && initialDir.isDirectory())
             dialog.setFilterPath(initialDir.getAbsolutePath());
         String selected = dialog.open();
@@ -334,7 +360,8 @@ public final class NavigatorCopyProjectMenuHook implements IStartup
      * Сначала собирает списки папок/файлов (без учёта {@code .git}), чтобы знать
      * общее количество файлов для прогресс-бара {@code overlay}.
      */
-    private static void copyFiles(Path sourceDir, Path targetDir, Display display, Shell overlay) throws IOException
+    private static void copyFiles(IProject sourceProject, Path sourceDir, Path targetDir, Display display,
+            Shell overlay) throws IOException
     {
         List<Path> directories = new ArrayList<>();
         List<Path> files = new ArrayList<>();
@@ -373,6 +400,77 @@ public final class NavigatorCopyProjectMenuHook implements IStartup
                     display.asyncExec(() -> updateOverlayProgress(overlay, doneSnapshot, total));
             }
         }
+        copyLinkedProjectResources(sourceProject, targetDir);
+    }
+
+    /**
+     * У проектов EDT типа «Конфигурация» отдельные файлы (например {@code PROJECT.PMF})
+     * могут быть linked-ресурсами и физически лежать вне {@code project.getLocation()}.
+     * Копируем такие ресурсы в ту же project-relative структуру целевого проекта.
+     */
+    private static void copyLinkedProjectResources(IProject sourceProject, Path targetDir) throws IOException
+    {
+        try
+        {
+            sourceProject.accept((IResourceVisitor) resource -> {
+                if (resource.getType() == IResource.PROJECT || !resource.isLinked())
+                    return true;
+                IPath sourceResourcePath = resource.getLocation();
+                IPath relativePath = resource.getProjectRelativePath();
+                if (sourceResourcePath == null || relativePath == null || relativePath.segmentCount() == 0)
+                    return true;
+                try
+                {
+                    Path sourcePath = sourceResourcePath.toFile().toPath();
+                    Path resolvedTargetPath = targetDir.resolve(relativePath.toString());
+                    if (resource.getType() == IResource.FOLDER)
+                    {
+                        copyLinkedDirectory(sourcePath, resolvedTargetPath);
+                        return true;
+                    }
+                    if (resource.getType() == IResource.FILE)
+                    {
+                        Files.createDirectories(resolvedTargetPath.getParent());
+                        Files.copy(sourcePath, resolvedTargetPath, StandardCopyOption.REPLACE_EXISTING);
+                    }
+                    return true;
+                }
+                catch (IOException e)
+                {
+                    throw new LinkedResourceCopyException(e);
+                }
+            }, IResource.NONE, false);
+        }
+        catch (LinkedResourceCopyException e)
+        {
+            throw e.cause;
+        }
+        catch (CoreException e)
+        {
+            throw new IOException("Ошибка обхода linked-ресурсов проекта", e); //$NON-NLS-1$
+        }
+    }
+
+    private static void copyLinkedDirectory(Path sourceDir, Path targetDir) throws IOException
+    {
+        Files.walkFileTree(sourceDir, new SimpleFileVisitor<Path>()
+        {
+            @Override
+            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) throws IOException
+            {
+                if (".git".equals(dir.getFileName().toString())) //$NON-NLS-1$
+                    return FileVisitResult.SKIP_SUBTREE;
+                Files.createDirectories(targetDir.resolve(sourceDir.relativize(dir)));
+                return FileVisitResult.CONTINUE;
+            }
+
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException
+            {
+                Files.copy(file, targetDir.resolve(sourceDir.relativize(file)), StandardCopyOption.REPLACE_EXISTING);
+                return FileVisitResult.CONTINUE;
+            }
+        });
     }
 
     /**
@@ -445,5 +543,17 @@ public final class NavigatorCopyProjectMenuHook implements IStartup
     {
         Object viewer = Global.invoke(navigator, "getCommonViewer"); //$NON-NLS-1$
         return viewer instanceof CommonViewer ? (CommonViewer) viewer : null;
+    }
+
+    private static final class LinkedResourceCopyException extends RuntimeException
+    {
+        private static final long serialVersionUID = 1L;
+        private final IOException cause;
+
+        LinkedResourceCopyException(IOException cause)
+        {
+            super(cause);
+            this.cause = cause;
+        }
     }
 }

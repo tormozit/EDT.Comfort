@@ -936,7 +936,7 @@ public class GoToDefinition extends AbstractHandler
         return openMdObjectViaOpenHelper(parent, norm.normalizedRef(), page, new StructuredSelection(eObject));
     }
 
-    private static MdObject findContainingMdObject(EObject eObject)
+    static MdObject findContainingMdObject(EObject eObject)
     {
         for (EObject p = eObject.eContainer(); p != null; p = p.eContainer())
         {
@@ -953,7 +953,7 @@ public class GoToDefinition extends AbstractHandler
      * с неинициализированной сценой — в этом случае возвращаем {@code false},
      * чтобы сработал fallback на {@code IDE.openEditor(.mdo)}.
      */
-    private static boolean openMdObjectViaOpenHelper(
+    static boolean openMdObjectViaOpenHelper(
         MdObject mdObject, String fullName, IWorkbenchPage page, ISelection selection)
     {
         if (page == null || mdObject == null)
@@ -965,7 +965,29 @@ public class GoToDefinition extends AbstractHandler
             if (!hasSelection)
                 return true;
             org.eclipse.emf.ecore.EStructuralFeature feature = selectionFeature(selection);
-            return helper.activateEditor(mdObject, feature, selection);
+            try
+            {
+                return helper.activateEditor(mdObject, feature, selection);
+            }
+            catch (RuntimeException e)
+            {
+                // OpenHelper.getFile() внутри activateEditor падает (IllegalArgumentException:
+                // "The feature 'X' is not a valid feature") на глубоко вложенных EObject-выделениях
+                // внутри формы (LocalStringMapEntry title-полей, DynamicListExtInfo и т.п.) — но
+                // ТОЛЬКО когда редактор уже активен (этот метод, а не openEditor ниже). Тот же
+                // выбор уже работал бы через openEditor(mdObject, feature, selection) — используем
+                // его как fallback вместо падения.
+                Global.log("GoToDefinition: OpenHelper.activateEditor: " + e.getMessage()); //$NON-NLS-1$
+                try
+                {
+                    return helper.openEditor(mdObject, feature, selection) != null;
+                }
+                catch (RuntimeException e2)
+                {
+                    Global.log("GoToDefinition: OpenHelper.openEditor (fallback): " + e2.getMessage()); //$NON-NLS-1$
+                    return true;
+                }
+            }
         }
         try
         {
