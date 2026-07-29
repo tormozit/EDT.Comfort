@@ -625,15 +625,12 @@ public final class ConfigSearchResultsHook implements IStartup
             Object matchObj = Global.invoke(tableItem, "getData"); //$NON-NLS-1$
             if (!(matchObj instanceof TextSearchModelMatch match))
             {
-                Global.tempLog("dcsNav", "openDcsMatch: не TextSearchModelMatch: " //$NON-NLS-1$ //$NON-NLS-2$
-                    + (matchObj != null ? matchObj.getClass().getName() : "null")); //$NON-NLS-1$
                 return false;
             }
 
             Optional<?> matchedOpt = match.resolveMatchObject();
             if (matchedOpt.isEmpty() || !(matchedOpt.get() instanceof EObject matchedObject))
             {
-                Global.tempLog("dcsNav", "openDcsMatch: resolveMatchObject пуст или не EObject"); //$NON-NLS-1$ //$NON-NLS-2$
                 return false;
             }
             boolean insideDcs = isInsideDataCompositionSchema(matchedObject);
@@ -660,11 +657,8 @@ public final class ConfigSearchResultsHook implements IStartup
                     }
                     catch (Exception e)
                     {
-                        Global.tempLog("dcsNav", "openDcsMatch: showView(Свойства) не удался: " + e); //$NON-NLS-1$ //$NON-NLS-2$
                     }
                 }
-                Global.tempLog("dcsNav", "openDcsMatch: не внутри DataCompositionSchema/SpreadsheetDocument, matchedObject=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + matchedObject.eClass().getName());
                 return false;
             }
 
@@ -678,8 +672,6 @@ public final class ConfigSearchResultsHook implements IStartup
             MdObject mdObject = null;
             long metadataTopObjectId = match.getMetadataTopObjectId();
             Object resolvedTop = Global.invoke(match, "resolveObjectById", metadataTopObjectId); //$NON-NLS-1$
-            Global.tempLog("dcsNav", "openDcsMatch: metadataTopObjectId=" + metadataTopObjectId //$NON-NLS-1$ //$NON-NLS-2$
-                + " resolvedTop=" + (resolvedTop instanceof Optional<?> o && o.isPresent() ? o.get().getClass().getName() : resolvedTop)); //$NON-NLS-1$
             if (resolvedTop instanceof Optional<?> topOpt && topOpt.isPresent()
                 && topOpt.get() instanceof MdObject topMdObject)
                 mdObject = topMdObject;
@@ -687,7 +679,6 @@ public final class ConfigSearchResultsHook implements IStartup
                 mdObject = GoToDefinition.findContainingMdObject(matchedObject);
             if (mdObject == null)
             {
-                Global.tempLog("dcsNav", "openDcsMatch: ни resolveObjectById(metadataTopObjectId), ни findContainingMdObject не дали MdObject"); //$NON-NLS-1$ //$NON-NLS-2$
                 return false;
             }
             String fullName = GetRef.eObjectToFullName(mdObject);
@@ -700,12 +691,8 @@ public final class ConfigSearchResultsHook implements IStartup
             String ownedChildFullName = ownedChildFullNameFor(matchedObject);
             if (ownedChildFullName != null && !ownedChildFullName.equals(fullName))
             {
-                Global.tempLog("dcsNav", "openDcsMatch: уточняем fullName формы/макета: " //$NON-NLS-1$ //$NON-NLS-2$
-                    + fullName + " -> " + ownedChildFullName); //$NON-NLS-1$
                 fullName = ownedChildFullName;
             }
-            Global.tempLog("dcsNav", "openDcsMatch: mdObject=" + fullName //$NON-NLS-1$ //$NON-NLS-2$
-                + " matchedObject=" + matchedObject.eClass().getName()); //$NON-NLS-1$
 
             // Устаревшие результаты поиска (после правки схемы BM пересоздаёт внутренние ID — старый
             // metadataTopObjectId выше уже ни на что не указывает): резолвим mdObject ЗАНОВО по
@@ -726,17 +713,14 @@ public final class ConfigSearchResultsHook implements IStartup
             }
             catch (Exception e)
             {
-                Global.tempLog("dcsNav", "openDcsMatch: свежий резолв mdObject по имени не удался: " + e); //$NON-NLS-1$ //$NON-NLS-2$
             }
             if (freshMdObject instanceof MdObject freshMd)
             {
-                Global.tempLog("dcsNav", "openDcsMatch: используем свежий mdObject (защита от устаревших результатов поиска)"); //$NON-NLS-1$ //$NON-NLS-2$
                 mdObject = freshMd;
             }
 
             boolean opened = GoToDefinition.openMdObjectViaOpenHelper(mdObject,
                 fullName, workbenchPage, new StructuredSelection(matchedObject));
-            Global.tempLog("dcsNav", "openDcsMatch: openMdObjectViaOpenHelper -> " + opened); //$NON-NLS-1$ //$NON-NLS-2$
             if (!opened)
                 return false;
 
@@ -748,7 +732,6 @@ public final class ConfigSearchResultsHook implements IStartup
         }
         catch (Throwable t)
         {
-            Global.tempLogException("dcsNav", "openDcsMatch", t); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
     }
@@ -767,18 +750,14 @@ public final class ConfigSearchResultsHook implements IStartup
                     findDataCompositionSchemaEditor(workbenchPage.getActiveEditor());
                 if (dcsEditor == null)
                 {
-                    Global.tempLog("dcsNav", "scheduleDcsSettingsReveal: dcsEditor не найден, attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                        + " activeEditor=" + workbenchPage.getActiveEditor()); //$NON-NLS-1$
                     if (attempt < 10)
                         scheduleDcsSettingsReveal(workbenchPage, matchedObject, match, attempt + 1);
                     return;
                 }
-                Global.tempLog("dcsNav", "scheduleDcsSettingsReveal: dcsEditor найден, attempt=" + attempt); //$NON-NLS-1$ //$NON-NLS-2$
                 revealInDcsSettings(dcsEditor, matchedObject, match);
             }
             catch (Throwable t)
             {
-                Global.tempLogException("dcsNav", "scheduleDcsSettingsReveal", t); //$NON-NLS-1$ //$NON-NLS-2$
             }
         });
     }
@@ -787,20 +766,14 @@ public final class ConfigSearchResultsHook implements IStartup
     {
         if (!(activeEditor instanceof DtGranularEditor<?> granularEditor))
         {
-            Global.tempLog("dcsNav", "findDataCompositionSchemaEditor: activeEditor не DtGranularEditor: " //$NON-NLS-1$ //$NON-NLS-2$
-                + (activeEditor != null ? activeEditor.getClass().getName() : "null")); //$NON-NLS-1$
             return null;
         }
         Object activePage = granularEditor.getActivePageInstance();
         if (!(activePage instanceof DtGranularEditorEmbeddedEditorPage<?> embeddedPage))
         {
-            Global.tempLog("dcsNav", "findDataCompositionSchemaEditor: activePage не EmbeddedEditorPage: " //$NON-NLS-1$ //$NON-NLS-2$
-                + (activePage != null ? activePage.getClass().getName() : "null")); //$NON-NLS-1$
             return null;
         }
         Object embedded = embeddedPage.getEmbeddedEditor();
-        Global.tempLog("dcsNav", "findDataCompositionSchemaEditor: embeddedPage.getId()=" + embeddedPage.getId() //$NON-NLS-1$ //$NON-NLS-2$
-            + " embedded=" + (embedded != null ? embedded.getClass().getName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
         return embedded instanceof DataCompositionSchemaEditor dcsEditor ? dcsEditor : null;
     }
 
@@ -818,20 +791,14 @@ public final class ConfigSearchResultsHook implements IStartup
     {
         if (!(activeEditor instanceof DtGranularEditor<?> granularEditor))
         {
-            Global.tempLog("dcsNav", "findMoxelEditor: activeEditor не DtGranularEditor: " //$NON-NLS-1$ //$NON-NLS-2$
-                + (activeEditor != null ? activeEditor.getClass().getName() : "null")); //$NON-NLS-1$
             return null;
         }
         Object activePage = granularEditor.getActivePageInstance();
         if (!(activePage instanceof DtGranularEditorEmbeddedEditorPage<?> embeddedPage))
         {
-            Global.tempLog("dcsNav", "findMoxelEditor: activePage не EmbeddedEditorPage: " //$NON-NLS-1$ //$NON-NLS-2$
-                + (activePage != null ? activePage.getClass().getName() : "null")); //$NON-NLS-1$
             return null;
         }
         Object embedded = embeddedPage.getEmbeddedEditor();
-        Global.tempLog("dcsNav", "findMoxelEditor: embeddedPage.getId()=" + embeddedPage.getId() //$NON-NLS-1$ //$NON-NLS-2$
-            + " embedded=" + (embedded != null ? embedded.getClass().getName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
         return "editors.commontemplate.pages.spreadsheet".equals(embeddedPage.getId()) ? embedded : null; //$NON-NLS-1$
     }
 
@@ -877,28 +844,25 @@ public final class ConfigSearchResultsHook implements IStartup
                     if (attempt < 10)
                         scheduleMoxelCellReveal(workbenchPage, matchedObject, attempt + 1);
                     else
-                        Global.tempLog("dcsNav", "scheduleMoxelCellReveal: MoxelEditor не найден после повторов"); //$NON-NLS-1$ //$NON-NLS-2$
+                        {
+                        }
                     return;
                 }
                 int[] rowCol = findMoxelCellRowCol(matchedObject);
                 if (rowCol == null)
                 {
-                    Global.tempLog("dcsNav", "scheduleMoxelCellReveal: не удалось определить строку/колонку ячейки"); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
                 }
                 Object moxelControl = Global.invoke(moxelEditor, "getMoxelControl"); //$NON-NLS-1$
                 if (moxelControl == null)
                 {
-                    Global.tempLog("dcsNav", "scheduleMoxelCellReveal: getMoxelControl()=null"); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
                 }
                 Global.invoke(moxelControl, "setSelectionToCellSelection", rowCol[0], rowCol[1]); //$NON-NLS-1$
                 Global.invoke(moxelControl, "ensureCellVisible", rowCol[0], rowCol[1]); //$NON-NLS-1$
-                Global.tempLog("dcsNav", "scheduleMoxelCellReveal: ячейка выделена row=" + rowCol[0] + " col=" + rowCol[1]); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             }
             catch (Throwable t)
             {
-                Global.tempLogException("dcsNav", "scheduleMoxelCellReveal", t); //$NON-NLS-1$ //$NON-NLS-2$
             }
         });
     }
@@ -1083,8 +1047,6 @@ public final class ConfigSearchResultsHook implements IStartup
             return;
         }
 
-        Global.tempLog("dcsNav", "revealInDcsSettings: неизвестный тип узла схемы: " //$NON-NLS-1$ //$NON-NLS-2$
-            + matchedObject.eClass().getName());
     }
 
     private static void revealSettingsVariant(DataCompositionSchemaEditor dcsEditor, EObject matchedObject,
@@ -1101,7 +1063,6 @@ public final class ConfigSearchResultsHook implements IStartup
         }
         if (settingsPage == null)
         {
-            Global.tempLog("dcsNav", "revealSettingsVariant: страница Settings не найдена среди getPages()"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
 
@@ -1116,14 +1077,12 @@ public final class ConfigSearchResultsHook implements IStartup
         Object viewerObj = variantsObj != null ? Global.invoke(variantsObj, "getViewer") : null; //$NON-NLS-1$
         if (viewerObj == null)
         {
-            Global.tempLog("dcsNav", "revealSettingsVariant: viewer=null"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
 
         Global.invoke(viewerObj, "setSelection", //$NON-NLS-1$
             (org.eclipse.jface.viewers.ISelection) new StructuredSelection(variant), true);
         String featureName = findRowFeatureName(matchedObject, SettingsVariant.class, null);
-        Global.tempLog("dcsNav", "revealSettingsVariant: вариант выделен, feature=" + featureName); //$NON-NLS-1$ //$NON-NLS-2$
         if ("presentation".equals(featureName)) //$NON-NLS-1$
         {
             Object titleColIndex = Global.getField(variantsObj, "TITLE_COL_INDEX"); //$NON-NLS-1$
@@ -1153,17 +1112,14 @@ public final class ConfigSearchResultsHook implements IStartup
             Object viewerObj = Global.invoke(page, "getViewer"); //$NON-NLS-1$
             if (viewerObj == null)
             {
-                Global.tempLog("dcsNav", "revealSimpleTableExPage: getViewer()=null для " + pageClassName); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
             String featureName = findRowFeatureName(matchedObject, rowType, matchFeature);
-            Global.tempLog("dcsNav", "revealSimpleTableExPage: страница=" + pageClassName + " feature=" + featureName); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
             Integer column = resolveDcsColumnIndex(page, pageClassName, featureName);
             scheduleSelectRowAndCell(viewerObj, rowObject, column, 0);
             return;
         }
-        Global.tempLog("dcsNav", "revealSimpleTableExPage: страница " + pageClassName + " не найдена среди getPages()"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     /** См. {@link #DCS_PAGE_COLUMN_BY_FEATURE}/{@link #DCS_PAGE_COLUMN_LITERAL_BY_FEATURE}. */
@@ -1178,7 +1134,6 @@ public final class ConfigSearchResultsHook implements IStartup
             Object colIdx = Global.getField(page, constantName);
             if (colIdx instanceof Integer col)
                 return col;
-            Global.tempLog("dcsNav", "resolveDcsColumnIndex: константа " + constantName + " недоступна"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return null;
         }
         Map<String, Integer> literalMap = DCS_PAGE_COLUMN_LITERAL_BY_FEATURE.get(pageClassName);
@@ -1221,17 +1176,12 @@ public final class ConfigSearchResultsHook implements IStartup
             Object itemCount = tableExObj != null ? Global.invoke(tableExObj, "getItemCount") : null; //$NON-NLS-1$
             Object isDisposed = tableExObj != null ? Global.invoke(tableExObj, "isDisposed") : null; //$NON-NLS-1$
             Object inputObj = Global.invoke(viewerObj, "getInput"); //$NON-NLS-1$
-            Global.tempLog("dcsNav", "scheduleSelectRowAndCell: строка не выделилась после повторов, " //$NON-NLS-1$ //$NON-NLS-2$
-                + "tableEx=" + tableExObj + " itemCount=" + itemCount + " isDisposed=" + isDisposed //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                + " input=" + inputObj + " rowObject=" + rowObject + " rowObject.class=" + rowObject.getClass()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
-        Global.tempLog("dcsNav", "scheduleSelectRowAndCell: строка выделена, attempt=" + attempt); //$NON-NLS-1$ //$NON-NLS-2$
         if (column != null)
         {
             Point cell = new Point(column.intValue(), selectionIndices[0]);
             Global.invoke(tableExObj, "setCellSelection", cell); //$NON-NLS-1$
-            Global.tempLog("dcsNav", "scheduleSelectRowAndCell: setCellSelection(" + cell + ")"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         }
     }
 
@@ -1281,11 +1231,9 @@ public final class ConfigSearchResultsHook implements IStartup
             if (treeViewerObj instanceof TreeViewer treeViewer)
             {
                 treeViewer.setSelection(new StructuredSelection(dataSet), true);
-                Global.tempLog("dcsNav", "revealDataSet: набор данных выделен"); //$NON-NLS-1$ //$NON-NLS-2$
             }
             else
             {
-                Global.tempLog("dcsNav", "revealDataSet: getDataSetsViewer()=" + treeViewerObj); //$NON-NLS-1$ //$NON-NLS-2$
             }
 
             DataSetField field = findAncestor(matchedObject, DataSetField.class);
@@ -1295,7 +1243,6 @@ public final class ConfigSearchResultsHook implements IStartup
                 scheduleDataSetQueryTextReveal(page, match, 0);
             return;
         }
-        Global.tempLog("dcsNav", "revealDataSet: страница DataSets не найдена среди getPages()"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /**
@@ -1321,20 +1268,18 @@ public final class ConfigSearchResultsHook implements IStartup
                     if (attempt < 15)
                         scheduleDataSetQueryTextReveal(dataSetsPage, match, attempt + 1);
                     else
-                        Global.tempLog("dcsNav", "scheduleDataSetQueryTextReveal: getQueryEditor()=null после повторов"); //$NON-NLS-1$ //$NON-NLS-2$
+                        {
+                        }
                     return;
                 }
                 Object viewerObj = Global.invoke(embeddedEditor, "getViewer"); //$NON-NLS-1$
                 if (!(viewerObj instanceof SourceViewer sourceViewer))
                 {
-                    Global.tempLog("dcsNav", "scheduleDataSetQueryTextReveal: getViewer() не SourceViewer: " //$NON-NLS-1$ //$NON-NLS-2$
-                        + viewerObj);
                     return;
                 }
                 StyledText widget = sourceViewer.getTextWidget();
                 if (widget == null || widget.isDisposed())
                 {
-                    Global.tempLog("dcsNav", "scheduleDataSetQueryTextReveal: getTextWidget()=null/disposed"); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
                 }
                 int offset = match.getTextOffset();
@@ -1344,18 +1289,15 @@ public final class ConfigSearchResultsHook implements IStartup
                     if (attempt < 15)
                         scheduleDataSetQueryTextReveal(dataSetsPage, match, attempt + 1);
                     else
-                        Global.tempLog("dcsNav", "scheduleDataSetQueryTextReveal: документ ещё не тот, offset=" //$NON-NLS-1$ //$NON-NLS-2$
-                            + offset + " charCount=" + widget.getCharCount()); //$NON-NLS-1$
+                        {
+                        }
                     return;
                 }
                 sourceViewer.setSelectedRange(offset, length);
                 sourceViewer.revealRange(offset, length);
-                Global.tempLog("dcsNav", "scheduleDataSetQueryTextReveal: выделено offset=" + offset //$NON-NLS-1$ //$NON-NLS-2$
-                    + " length=" + length); //$NON-NLS-1$
             }
             catch (Throwable t)
             {
-                Global.tempLogException("dcsNav", "scheduleDataSetQueryTextReveal", t); //$NON-NLS-1$ //$NON-NLS-2$
             }
         });
     }
@@ -1384,19 +1326,18 @@ public final class ConfigSearchResultsHook implements IStartup
                     if (attempt < 10)
                         scheduleDataSetFieldReveal(dataSetsPage, matchedObject, matchFeature, field, attempt + 1);
                     else
-                        Global.tempLog("dcsNav", "scheduleDataSetFieldReveal: currentFieldsViewer не появился"); //$NON-NLS-1$ //$NON-NLS-2$
+                        {
+                        }
                     return;
                 }
                 Object treeViewerObj = Global.invoke(fieldsViewerBase, "getViewer"); //$NON-NLS-1$
                 if (treeViewerObj == null)
                 {
-                    Global.tempLog("dcsNav", "scheduleDataSetFieldReveal: getViewer()=null"); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
                 }
                 Global.invoke(treeViewerObj, "setSelection", //$NON-NLS-1$
                     (org.eclipse.jface.viewers.ISelection) new StructuredSelection(field), true);
                 String featureName = findRowFeatureName(matchedObject, DataSetField.class, matchFeature);
-                Global.tempLog("dcsNav", "scheduleDataSetFieldReveal: поле выделено, feature=" + featureName); //$NON-NLS-1$ //$NON-NLS-2$
 
                 String enumConstantName = featureName != null ? DATASET_FIELD_COLUMN_BY_FEATURE.get(featureName) : null;
                 if (enumConstantName == null)
@@ -1408,11 +1349,11 @@ public final class ConfigSearchResultsHook implements IStartup
                 if (colIdxObj instanceof Integer col)
                     activateGridCell(treeViewerObj, col.intValue());
                 else
-                    Global.tempLog("dcsNav", "scheduleDataSetFieldReveal: getColumnIndex -> " + colIdxObj); //$NON-NLS-1$ //$NON-NLS-2$
+                    {
+                    }
             }
             catch (Throwable t)
             {
-                Global.tempLogException("dcsNav", "scheduleDataSetFieldReveal", t); //$NON-NLS-1$ //$NON-NLS-2$
             }
         });
     }
@@ -1443,7 +1384,6 @@ public final class ConfigSearchResultsHook implements IStartup
         Object tableExObj = Global.invoke(viewerObj, "getTable"); //$NON-NLS-1$
         if (tableExObj == null)
         {
-            Global.tempLog("dcsNav", "activateGridCell: getTable()=null"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         Object selectionIndicesObj = Global.invoke(tableExObj, "getSelectionIndices"); //$NON-NLS-1$
@@ -1456,12 +1396,10 @@ public final class ConfigSearchResultsHook implements IStartup
                     display.timerExec(50, () -> scheduleActivateGridCell(viewerObj, col, attempt + 1));
                 return;
             }
-            Global.tempLog("dcsNav", "activateGridCell: getSelectionIndices() пуст после повторов: " + selectionIndicesObj); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         Point cell = new Point(col, selectionIndices[0]);
         Global.invoke(tableExObj, "setCellSelection", cell); //$NON-NLS-1$
-        Global.tempLog("dcsNav", "activateGridCell: setCellSelection(" + cell + ")"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     /**
@@ -1483,7 +1421,6 @@ public final class ConfigSearchResultsHook implements IStartup
                 Control itemControl = item.getControl();
                 if (itemControl != pageControl && !isAncestorOf(itemControl, pageControl))
                     continue;
-                Global.tempLog("dcsNav", "activateEditorTabFor: переключаю на вкладку \"" + item.getText() + "\""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 folder.setSelection(item);
                 Event event = new Event();
                 event.item = item;
@@ -1491,10 +1428,8 @@ public final class ConfigSearchResultsHook implements IStartup
                 folder.notifyListeners(SWT.Selection, event);
                 return;
             }
-            Global.tempLog("dcsNav", "activateEditorTabFor: CTabFolder найден, но подходящий CTabItem — нет"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
-        Global.tempLog("dcsNav", "activateEditorTabFor: CTabFolder-предок не найден"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static boolean isAncestorOf(Control ancestor, Control control)
@@ -2701,7 +2636,6 @@ public final class ConfigSearchResultsHook implements IStartup
         }
         catch (Exception e)
         {
-            Global.tempLog("dcsNav", "appendOwnedChildSegmentIfMissing: " + e); //$NON-NLS-1$ //$NON-NLS-2$
             return path;
         }
     }
@@ -2888,7 +2822,6 @@ public final class ConfigSearchResultsHook implements IStartup
             }
             catch (Exception e)
             {
-                Global.tempLog("dcsNav", "dcsFeatureLabel: featureToLabel(" + feature.getName() + "): " + e); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 label = null;
             }
         }
@@ -2914,20 +2847,16 @@ public final class ConfigSearchResultsHook implements IStartup
     {
         String eClassName = feature.getEContainingClass().getName();
         String descriptorClass = MOXEL_DESCRIPTOR_CLASS_BY_ECLASS.get(eClassName);
-        Global.tempLog("dcsNav", "moxelFeatureLabel: eClassName=" + eClassName + " feature=" + feature.getName() //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " descriptorClass=" + descriptorClass); //$NON-NLS-1$
         if (descriptorClass == null)
             return null;
         try
         {
             String key = MOXEL_FEATURE_NAMES_KEY_PREFIX + descriptorClass + "|" + feature.getName(); //$NON-NLS-1$
             String value = LocalizationManager.getInstance().getString(key);
-            Global.tempLog("dcsNav", "moxelFeatureLabel: key=" + key + " value=" + value); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return value;
         }
         catch (Exception e)
         {
-            Global.tempLogException("dcsNav", "moxelFeatureLabel", e); //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         }
     }

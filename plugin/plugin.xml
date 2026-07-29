@@ -26,6 +26,7 @@
     <startup class="tormozit.KeyBindingToastHook"/>
     <startup class="tormozit.GlobalListCopyHook"/>
     <startup class="tormozit.SmartOutlineHook"/>
+    <startup class="tormozit.TemplateTypeSuffixDecorator"/>
     <!-- ГЛОБАЛЬНЫЙ СКАН ОТКЛЮЧЁН ОКОНЧАТЕЛЬНО (issue #165), 2026-07-20. История фиксов: v1
          (guard+debounce SWT.Show), v2 (исключить редакторы из partOpened/partVisible), v3
          (debounce и для part-триггеров тоже), v4 (defer FocusIn/FocusOut через asyncExec —
@@ -855,6 +856,22 @@
 
   <extension point="com._1c.g5.v8.dt.bsl.ui.bslHoverContributor">
     <bslHoverContributor class="tormozit.ComfortBslAnnotationHoverContributor"/>
+  </extension>
+
+  <extension point="org.eclipse.ui.decorators">
+    <decorator
+        id="tormozit.templateTypeSuffixDecorator"
+        label="Тип макета (Комфорт)"
+        lightweight="true"
+        state="true"
+        class="tormozit.TemplateTypeSuffixDecorator">
+      <enablement>
+        <or>
+          <objectClass name="com._1c.g5.v8.dt.metadata.mdclass.Template"/>
+          <objectClass name="com._1c.g5.v8.dt.metadata.mdclass.CommonTemplate"/>
+        </or>
+      </enablement>
+    </decorator>
   </extension>
 
   <!--
