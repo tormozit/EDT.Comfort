@@ -1008,6 +1008,45 @@ public class GoToDefinition extends AbstractHandler
         }
     }
 
+    /**
+     * Открывает/выделяет элемент формы ВЕРХНЕГО уровня (прямой потомок {@code Form} —
+     * {@code FormAttribute}/{@code FormCommand}/{@code FormField}/{@code FormParameter}) через
+     * {@code OpenHelper.openEditor(EObject, EStructuralFeature)} — 2-arg, БЕЗ {@code ISelection}.
+     * Это ТОТ ЖЕ вызов, что штатный EDT делает для title-полей этих объектов (декомпиляция
+     * {@code ConfigurationSearchViewPage.handleOpen}: {@code TextSearchModelMatch} → {@code openEditor
+     * (resolveMatchObject(), match.getFeature())}) и который реально выделяет элемент в редакторе
+     * формы. Для {@code BmReferenceMatch} (напр. «Найти ссылки на объект») штатный код вместо этого
+     * зовёт 3-arg {@code openEditor(EObject, EStructuralFeature, ISelection)} с ГЛУБОКО вложенным
+     * {@code getSource()} — судя по наблюдаемому поведению (форма открывается, элемент не
+     * выделяется), этот вариант выделение в дереве формы не форвардит. Здесь усекаем вложенность до
+     * верхнего уровня и вызываем ПОДТВЕРЖДЁННО рабочим способом — ценой потери точности до самого
+     * глубокого вхождения.
+     */
+    static boolean openTopLevelFormElement(EObject topLevelElement, IWorkbenchPage page)
+    {
+        if (topLevelElement == null || page == null)
+            return false;
+        try
+        {
+            OpenHelper helper = new OpenHelper(page);
+            // eContainingFeature() (как ВЛАДЕЛЕЦ содержит topLevelElement — "items" для FormField,
+            // "attributes"/"formCommands"/"parameters" для остальных) — ошибочная идея: это feature
+            // РОДИТЕЛЯ (как объект ХРАНИТСЯ), а не feature САМОГО topLevelElement — OpenHelper.getFile()
+            // делает по нему eGet() НА topLevelElement, где такой feature просто нет
+            // (IllegalArgumentException: "The feature 'items' is not a valid feature" — подтверждено
+            // логом для FormField). Проверенный без крашей вариант — только 1-arg openEditor(EObject),
+            // без какого-либо feature, для ЛЮБОГО типа top-level элемента формы (тот же вызов, что и
+            // подтверждённо рабочий CompareConfigOpenObjectHandler.openInEditor()).
+            IEditorPart editor = helper.openEditor(topLevelElement);
+            return editor != null;
+        }
+        catch (RuntimeException e)
+        {
+            Global.log("GoToDefinition: OpenHelper.openEditor(top-level form element): " + e.getMessage()); //$NON-NLS-1$
+            return false;
+        }
+    }
+
     private static org.eclipse.emf.ecore.EStructuralFeature selectionFeature(ISelection selection)
     {
         if (!(selection instanceof StructuredSelection structured) || structured.isEmpty())

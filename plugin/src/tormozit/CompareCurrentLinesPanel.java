@@ -39,6 +39,8 @@ public final class CompareCurrentLinesPanel
 {
     /** Отступ слева от первого различия при автопрокрутке — виден небольшой контекст. */
     private static final int SCROLL_MARGIN_PIXELS = 20;
+    /** Максимальная длина заголовка стороны в панели «Текущая строка» — длиннее обрезаем с «…». */
+    private static final int MAX_LABEL_LENGTH = 50;
     /** Композит панели — всегда 2 колонки (подпись, поле), независимо от числа строк. */
     private static final int LAYOUT_COLUMNS = 2;
 
@@ -107,7 +109,7 @@ public final class CompareCurrentLinesPanel
         for (int i = 0; i < labels.length; i++)
         {
             Label label = new Label(composite, SWT.NONE);
-            label.setText(sideLabelForCurrentLines(labels[i]));
+            label.setText(truncateLabel(sideLabelForCurrentLines(labels[i])));
             panel.labelWidgets[i] = label;
             boolean isLastRow = i == labels.length - 1;
             panel.rows[i] = createRowWidget(composite, isLastRow);
@@ -309,13 +311,21 @@ public final class CompareCurrentLinesPanel
         return text;
     }
 
+    /** Обрезает подпись стороны до {@link #MAX_LABEL_LENGTH} символов с «…» в конце. */
+    private static String truncateLabel(String text)
+    {
+        if (text.length() <= MAX_LABEL_LENGTH)
+            return text;
+        return text.substring(0, MAX_LABEL_LENGTH) + "…"; //$NON-NLS-1$
+    }
+
     /** Меняет подпись строки — например, при обновлении заголовков сторон в редакторе слияния. */
     public void setLabelText(int rowIndex, String text)
     {
         Label label = labelWidgets[rowIndex];
         if (label == null || label.isDisposed() || text == null)
             return;
-        String shortLabel = sideLabelForCurrentLines(text);
+        String shortLabel = truncateLabel(sideLabelForCurrentLines(text));
         if (!shortLabel.equals(label.getText()))
             label.setText(shortLabel);
     }

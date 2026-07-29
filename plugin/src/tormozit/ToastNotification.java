@@ -5,6 +5,10 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.stream.Collectors;
 
+import org.eclipse.core.commands.ExecutionEvent;
+import org.eclipse.core.commands.ExecutionException;
+import org.eclipse.core.commands.IExecutionListener;
+import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
@@ -18,6 +22,8 @@ import org.eclipse.swt.graphics.TextLayout;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.*;
+import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.commands.ICommandService;
 
 public final class ToastNotification
 {
@@ -519,25 +525,7 @@ public final class ToastNotification
         gd.widthHint  = 480;
         gd.heightHint = 220;
         textWidget.setLayoutData(gd);
-
-        // SWT.READ_ONLY блокирует стандартные горячие клавиши на Windows,
-        // поэтому Ctrl+C обрабатываем вручную.
-        textWidget.addListener(SWT.KeyDown, e ->
-        {
-            if (e.stateMask == SWT.CTRL && e.keyCode == 'c')
-            {
-                String sel = textWidget.getSelectionText();
-                if (sel != null && !sel.isEmpty())
-                {
-                    Clipboard cb = new Clipboard(display);
-                    cb.setContents(
-                        new Object[]{ sel },
-                        new Transfer[]{ TextTransfer.getInstance() }
-                    );
-                    cb.dispose();
-                }
-            }
-        });
+        wireTextCopy(textWidget);
 
         Button btnClose = new Button(dialog, SWT.PUSH);
         btnClose.setText("Закрыть"); //$NON-NLS-1$
@@ -550,5 +538,82 @@ public final class ToastNotification
         dialog.setLocation(screen.x + (screen.width  - db.width)  / 2,
                            screen.y + (screen.height - db.height) / 2);
         dialog.open();
+    }
+
+    /** Text, для которого сейчас нужно перехватывать команду Copy (см. {@link #wireTextCopy}). */
+    private static volatile Text copyTargetText;
+    private static boolean copyExecutionListenerInstalled;
+
+    /**
+     * Ctrl+C в READ_ONLY {@link Text} на Windows не порождает {@code SWT.KeyDown} —
+     * тот же архитектурный потолок, что и для {@code KeyBindingToastHook}/Ctrl+Shift+F и
+     * {@code PreferenceSearchFilterAugmenter.wireTreeCopy}: нативная Win32-трансляция
+     * акселератора съедает клавишу раньше, чем до неё доходит SWT. Перехват — через
+     * {@code ICommandService.addExecutionListener} на команде {@code org.eclipse.ui.edit.copy}.
+     */
+    private static void wireTextCopy(Text text)
+    {
+        copyTargetText = text;
+        text.addDisposeListener(e ->
+        {
+            if (copyTargetText == text)
+                copyTargetText = null;
+        });
+        installCopyExecutionListener();
+    }
+
+    private static void installCopyExecutionListener()
+    {
+        if (copyExecutionListenerInstalled || PlatformUI.getWorkbench() == null)
+            return;
+        ICommandService commandService = PlatformUI.getWorkbench().getService(ICommandService.class);
+        if (commandService == null)
+            return;
+        commandService.addExecutionListener(new IExecutionListener()
+        {
+            @Override
+            public void preExecute(String commandId, ExecutionEvent event)
+            {
+                handlePossibleTextCopy(commandId);
+            }
+
+            @Override
+            public void postExecuteSuccess(String commandId, Object returnValue)
+            {
+            }
+
+            @Override
+            public void notHandled(String commandId, NotHandledException exception)
+            {
+                handlePossibleTextCopy(commandId);
+            }
+
+            @Override
+            public void postExecuteFailure(String commandId, ExecutionException exception)
+            {
+            }
+        });
+        copyExecutionListenerInstalled = true;
+    }
+
+    private static void handlePossibleTextCopy(String commandId)
+    {
+        Text text = copyTargetText;
+        if (text == null || text.isDisposed() || text.getDisplay().getFocusControl() != text)
+            return;
+        if (!"org.eclipse.ui.edit.copy".equals(commandId)) //$NON-NLS-1$
+            return;
+        String sel = text.getSelectionText();
+        if (sel == null || sel.isEmpty())
+            return;
+        Clipboard clipboard = new Clipboard(text.getDisplay());
+        try
+        {
+            clipboard.setContents(new Object[]{ sel }, new Transfer[]{ TextTransfer.getInstance() });
+        }
+        finally
+        {
+            clipboard.dispose();
+        }
     }
 }

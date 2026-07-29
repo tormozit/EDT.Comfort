@@ -53,6 +53,10 @@ import com._1c.g5.v8.dt.dcs.model.schema.DataSetField;
 import com._1c.g5.v8.dt.dcs.model.schema.NestedDataCompositionSchema;
 import com._1c.g5.v8.dt.dcs.model.settings.SettingsVariant;
 import com._1c.g5.v8.dt.form.model.Form;
+import com._1c.g5.v8.dt.form.model.FormAttribute;
+import com._1c.g5.v8.dt.form.model.FormCommand;
+import com._1c.g5.v8.dt.form.model.FormField;
+import com._1c.g5.v8.dt.form.model.FormParameter;
 import com._1c.g5.v8.dt.moxel.Cell;
 import com._1c.g5.v8.dt.moxel.Row;
 import com._1c.g5.v8.dt.moxel.SpreadsheetDocument;
@@ -62,6 +66,8 @@ import com._1c.g5.v8.dt.dcs.ui.settings.Settings;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorEmbeddedEditorPage;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
+import com._1c.g5.v8.dt.search.core.BmObjectMatch;
+import com._1c.g5.v8.dt.search.core.refs.BmReferenceMatch;
 import com._1c.g5.v8.dt.search.core.text.TextSearchFileMatch;
 import com._1c.g5.v8.dt.search.core.text.TextSearchModelMatch;
 import org.eclipse.swt.SWT;
@@ -247,8 +253,10 @@ public final class ConfigSearchResultsHook implements IStartup
 
     private static TableViewer cachedMatchTableViewer;
     private static TableColumn cachedMatchPathColumn;
+    private static TableColumn cachedMatchTextColumn;
     private static FormTableInteraction cachedMatchTableInteraction;
     private static final int MATCH_PATH_COLUMN_WIDTH = 220;
+    private static final int MATCH_TEXT_COLUMN_WIDTH = 280;
 
     private static final class MatchRow
     {
@@ -400,7 +408,7 @@ public final class ConfigSearchResultsHook implements IStartup
         TableViewerColumn textCol = new TableViewerColumn(matchViewer, SWT.LEFT);
         textCol.getColumn().setText("Текст"); //$NON-NLS-1$
         textCol.getColumn().setToolTipText("Текст"); //$NON-NLS-1$
-        textCol.getColumn().setWidth(ComfortSettings.getConfigSearchMatchColumnWidth("text", 280)); //$NON-NLS-1$
+        textCol.getColumn().setWidth(ComfortSettings.getConfigSearchMatchColumnWidth("text", MATCH_TEXT_COLUMN_WIDTH)); //$NON-NLS-1$
         textCol.getColumn().addListener(SWT.Resize, e -> {
             int w = textCol.getColumn().getWidth();
             if (w > 0) ComfortSettings.setConfigSearchMatchColumnWidth("text", w); //$NON-NLS-1$
@@ -447,8 +455,8 @@ public final class ConfigSearchResultsHook implements IStartup
         });
 
         outer.setWeights(new int[] {
-            ComfortSettings.getConfigSearchMatchSashWeight("left", 70), //$NON-NLS-1$
-            ComfortSettings.getConfigSearchMatchSashWeight("right", 30) //$NON-NLS-1$
+            ComfortSettings.getConfigSearchMatchSashWeight("left", 40), //$NON-NLS-1$
+            ComfortSettings.getConfigSearchMatchSashWeight("right", 60) //$NON-NLS-1$
         });
         if (!NATIVE_TABLE_ENABLED && nativeSplit instanceof SashForm nativeSashForm)
         {
@@ -466,12 +474,14 @@ public final class ConfigSearchResultsHook implements IStartup
         interaction.install();
 
         cachedMatchTableViewer = matchViewer;
+        cachedMatchTextColumn = textCol.getColumn();
         cachedMatchTableInteraction = interaction;
         pageContainer.setData(MATCH_PANE_HOOKED_KEY, Boolean.TRUE);
         matchTable.addDisposeListener(e -> {
             if (cachedMatchTableViewer == matchViewer)
             {
                 cachedMatchTableViewer = null;
+                cachedMatchTextColumn = null;
                 cachedMatchPathColumn = null;
                 cachedMatchTableInteraction = null;
             }
@@ -544,6 +554,18 @@ public final class ConfigSearchResultsHook implements IStartup
                 : ComfortSettings.getConfigSearchMatchColumnWidth("path", MATCH_PATH_COLUMN_WIDTH); //$NON-NLS-1$
             if (cachedMatchPathColumn.getWidth() != desiredWidth)
                 cachedMatchPathColumn.setWidth(desiredWidth);
+        }
+
+        // «Найти ссылки на объект» (BmReferenceMatch) — структурные вхождения без текста/смещения,
+        // колонка «Текст» у них всегда пустая (в отличие от текстового поиска, TextSearchModelMatch/
+        // TextSearchFileMatch) — прячем её для ТАКОГО набора результатов, тем же приёмом, что и «Путь».
+        if (cachedMatchTextColumn != null && !cachedMatchTextColumn.isDisposed())
+        {
+            boolean anyText = rows.stream().anyMatch(row -> row.text != null && !row.text.isBlank());
+            int desiredWidth = (!rows.isEmpty() && !anyText) ? 0
+                : ComfortSettings.getConfigSearchMatchColumnWidth("text", MATCH_TEXT_COLUMN_WIDTH); //$NON-NLS-1$
+            if (cachedMatchTextColumn.getWidth() != desiredWidth)
+                cachedMatchTextColumn.setWidth(desiredWidth);
         }
         return tableItems.size();
     }
@@ -625,6 +647,34 @@ public final class ConfigSearchResultsHook implements IStartup
             Object matchObj = Global.invoke(tableItem, "getData"); //$NON-NLS-1$
             if (!(matchObj instanceof TextSearchModelMatch match))
             {
+                // BmReferenceMatch («Найти ссылки на объект») внутри формы: штатный handleOpen
+                // открывает форму, но не выделяет элемент (декомпиляция: штатно зовёт 3-arg
+                // OpenHelper.openEditor(EObject, feature, ISelection) с глубоко вложенным
+                // getSource() — выделение в дерево формы не форвардит). Находим ближайший
+                // предок-реквизит/команду/параметр/элемент формы и открываем ПОДТВЕРЖДЁННО рабочим
+                // способом — OpenHelper.openEditor(EObject), 1-arg, без feature (см.
+                // GoToDefinition#openTopLevelFormElement; тот же вызов, что и у уже существующего
+                // CompareConfigOpenObjectHandler.openInEditor() для дерева сравнения).
+                if (matchObj instanceof BmReferenceMatch)
+                {
+                    EObject leaf = resolveMatchLeaf(matchObj);
+                    if (leaf != null && isInsideForm(leaf))
+                    {
+                        EObject formChildElement = findNearestFormChild(leaf);
+                        if (formChildElement != null
+                            && GoToDefinition.openTopLevelFormElement(formChildElement, workbenchPage))
+                        {
+                            try
+                            {
+                                workbenchPage.showView(IPageLayout.ID_PROP_SHEET);
+                            }
+                            catch (Exception e)
+                            {
+                            }
+                            return true;
+                        }
+                    }
+                }
                 return false;
             }
 
@@ -1457,6 +1507,23 @@ public final class ConfigSearchResultsHook implements IStartup
             if (cur instanceof Form)
                 return true;
         return false;
+    }
+
+    /**
+     * Ближайший к {@code leaf} (включая сам {@code leaf}) предок-реквизит/команда/параметр/элемент
+     * формы ({@code FormAttribute}/{@code FormCommand}/{@code FormParameter}/{@code FormField}).
+     * Имена элементов формы уникальны во ВСЁМ дереве формы (в отличие от более ранней версии,
+     * искавшей элемент на фиксированной "глубине" — вложенность {@code FormField} может быть любой,
+     * а самый внутренний элемент однозначно идентифицирует место вхождения). См.
+     * {@link GoToDefinition#openTopLevelFormElement}.
+     */
+    private static EObject findNearestFormChild(EObject leaf)
+    {
+        for (EObject cur = leaf; cur != null; cur = cur.eContainer())
+            if (cur instanceof FormField || cur instanceof FormAttribute
+                || cur instanceof FormCommand || cur instanceof FormParameter)
+                return cur;
+        return null;
     }
 
     /** Табличный документ (Moxel) — как и СКД/форма, отдельный BM-ресурс. */
@@ -2621,15 +2688,99 @@ public final class ConfigSearchResultsHook implements IStartup
      * получаем полный путь. Найдено логированием фактических {@code eResource().getURI()} в разных
      * случаях (формы, макеты объекта, общие макеты/формы, СКД).
      */
+    /**
+     * Резолвит "найденный объект" вхождения (BM/EMF-объект, где сработало совпадение) единообразно
+     * для разных подклассов {@code Match} — панель «Поиск» (текстовый поиск, {@link TextSearchModelMatch})
+     * и «Найти ссылки на объект» ({@link BmReferenceMatch}, где источник ссылки — {@code getSource()})
+     * дают РАЗНЫЕ подклассы, но обе задачи (колонки «Путь»/«Свойство») по сути одна и та же —
+     * определить, ГДЕ внутри модели (в т.ч. внутри формы/СКД/табл. документа) лежит вхождение.
+     */
+    private static EObject resolveMatchLeaf(Object match)
+    {
+        try
+        {
+            if (match instanceof TextSearchModelMatch tsm)
+            {
+                Optional<?> opt = tsm.resolveMatchObject();
+                return opt.isPresent() && opt.get() instanceof EObject eObj ? eObj : null;
+            }
+            if (match instanceof BmReferenceMatch brm)
+            {
+                Optional<?> opt = brm.getSource().resolve();
+                return opt.isPresent() && opt.get() instanceof EObject eObj ? eObj : null;
+            }
+            if (match instanceof BmObjectMatch bom)
+            {
+                Optional<?> opt = bom.resolve();
+                return opt.isPresent() && opt.get() instanceof EObject eObj ? eObj : null;
+            }
+        }
+        catch (Exception ignored)
+        {
+        }
+        return null;
+    }
+
+    /** Feature вхождения — см. {@link #resolveMatchLeaf}, тот же разнобой подклассов {@code Match}. */
+    private static EStructuralFeature resolveMatchFeature(Object match)
+    {
+        if (match instanceof TextSearchModelMatch tsm)
+            return tsm.getFeature();
+        if (match instanceof BmReferenceMatch brm)
+            return brm.getFeature();
+        return null;
+    }
+
+    /**
+     * МД-объект-владелец вхождения ({@code getMetadataTopObjectId()} + {@code resolveObjectById()} —
+     * оба метода объявлены на базовом {@code Match}, {@code resolveObjectById} — protected, отсюда
+     * рефлексия; тот же механизм, что уже верно резолвит колонку «Путь», см.
+     * {@link #bmTopObjectPathFromTableItem}), работает единообразно для ЛЮБОГО подкласса {@code Match}.
+     */
+    private static EObject resolveMatchTopMdObject(Object match)
+    {
+        try
+        {
+            Object topIdObj = Global.invoke(match, "getMetadataTopObjectId"); //$NON-NLS-1$
+            if (!(topIdObj instanceof Long topId) || topId < 0)
+                return null;
+            Object optObj = Global.invoke(match, "resolveObjectById", topId); //$NON-NLS-1$
+            if (!(optObj instanceof Optional<?> opt) || opt.isEmpty())
+                return null;
+            return opt.get() instanceof EObject eObj ? eObj : null;
+        }
+        catch (Exception ignored)
+        {
+            return null;
+        }
+    }
+
+    /**
+     * BM-объекты, полученные РАЗНЫМИ резолвами (напр. {@code eContainer()} у одного и тот же
+     * логический объект через {@link #resolveMatchTopMdObject}), — РАЗНЫЕ Java-инстансы ({@code !=}),
+     * даже когда представляют один и тот же объект БД (нестабильность идентичности BM-объектов,
+     * многократно всплывавшая в этой сессии). {@code bmGetId()} — стабильный идентификатор в рамках
+     * одной транзакции, в отличие от ссылочной идентичности. Без этого сравнения обход в
+     * {@link #hierarchicalPropertyPath} не останавливался на объекте-владельце (полученном ЭТИМ,
+     * а не {@code eContainer()}, путём) и добавлял лишний ведущий сегмент с его именем.
+     */
+    private static boolean sameBmObject(EObject a, EObject b)
+    {
+        if (a == b)
+            return true;
+        if (a instanceof com._1c.g5.v8.bm.core.IBmObject ba && b instanceof com._1c.g5.v8.bm.core.IBmObject bb)
+            return ba.bmGetId() == bb.bmGetId();
+        return false;
+    }
+
     private static String appendOwnedChildSegmentIfMissing(String path, Object match)
     {
         if (path == null || path.isEmpty())
             return path;
         try
         {
-            Object matchedOpt = Global.invoke(match, "resolveMatchObject"); //$NON-NLS-1$
-            if (!(matchedOpt instanceof java.util.Optional<?> opt) || opt.isEmpty()
-                || !(opt.get() instanceof EObject leaf))
+            EObject leaf = resolveMatchLeaf(match);
+            if (leaf == null)
                 return path;
             String childFullName = ownedChildFullNameFor(leaf);
             return childFullName != null ? childFullName : path;
@@ -2893,14 +3044,17 @@ public final class ConfigSearchResultsHook implements IStartup
     }
 
     /**
-     * Полный путь до найденного вхождения внутри схемы компоновки данных (СКД), управляемой формы
-     * (Form) или табличного документа (Moxel/SpreadsheetDocument) — например
-     * «Макет.ВариантыНастроек.Основной.Представление.ru», «Элементы.ОсновнаяГруппа.Поле1.Заголовок.ru»
-     * или «Область(3,2).Текст.ru»/«Область(4,1).Параметр» (без пробелов внутри сегментов) — вместо
-     * штатной короткой подписи {@code IMatchItem.getPropertyText()} (см. {@link #extractPropertyText}).
-     * Алгоритм не специфичен для СКД: обход {@code eContainer()}/{@code eContainingFeature()} через
-     * штатный {@link Functions#featureToLabel()} — общая EMF-инфраструктура, работает для любой
-     * поддерживаемой модели (проверка типа — только чтобы не трогать вхождения БСЛ-модулей/файлов).
+     * Полный путь до найденного вхождения внутри модели МД-объекта — не только внутри схемы
+     * компоновки данных (СКД), управляемой формы (Form) или табличного документа (Moxel/
+     * SpreadsheetDocument), но и для обычных вложенных реквизитов/элементов метаданных — например
+     * «Макет.ВариантыНастроек.Основной.Представление.ru», «Элементы.Поле1.Заголовок.ru» (без
+     * промежуточных контейнеров — имена элементов формы уникальны во всём дереве формы),
+     * «Область(3,2).Текст.ru»/«Область(4,1).Параметр» или «Реквизиты.Валюта2.Типы» (без пробелов
+     * внутри сегментов) — вместо штатной короткой подписи {@code IMatchItem.getPropertyText()}
+     * (см. {@link #extractPropertyText}). Алгоритм не специфичен для СКД: обход
+     * {@code eContainer()}/{@code eContainingFeature()} через штатный {@link Functions#featureToLabel()}
+     * — общая EMF-инфраструктура, работает для любой поддерживаемой модели (проверка типа match —
+     * только чтобы не трогать вхождения БСЛ-модулей/файлов, для которых нет смысла).
      *
      * <p>Терминальный сегмент: если найденный объект — запись {@code EMap} (например, конкретная
      * локаль в {@code LocalString.getContent()}/{@code Titled.getTitle()}), путь оканчивается её
@@ -2914,17 +3068,21 @@ public final class ConfigSearchResultsHook implements IStartup
         try
         {
             Object matchObj = Global.invoke(tableItem, "getData"); //$NON-NLS-1$
-            if (!(matchObj instanceof TextSearchModelMatch match))
+            if (!(matchObj instanceof TextSearchModelMatch) && !(matchObj instanceof BmReferenceMatch))
                 return null;
 
-            Optional<?> matchedOpt = match.resolveMatchObject();
-            if (matchedOpt.isEmpty() || !(matchedOpt.get() instanceof EObject leaf))
-                return null;
-            if (!isInsideDataCompositionSchema(leaf) && !isInsideForm(leaf) && !isInsideSpreadsheetDocument(leaf))
+            EObject leaf = resolveMatchLeaf(matchObj);
+            if (leaf == null)
                 return null;
 
-            Optional<?> topOpt = match.resolveMatchTopObject();
-            EObject top = (topOpt.isPresent() && topOpt.get() instanceof EObject) ? (EObject) topOpt.get() : null;
+            // Границей обхода вверх служит МД-объект-владелец (getMetadataTopObjectId(), тот же,
+            // что уже верно резолвит колонку «Путь» — см. bmTopObjectPathFromTableItem) — единый
+            // механизм для ЛЮБОГО вложенного вхождения, не только DCS/формы/табл. документа: для
+            // обычного реквизита объекта (напр. Реквизиты.Валюта2.Типы) обход останавливается на
+            // самом объекте-владельце (Справочнике), а для вхождений внутри формы/СКД/табл. документа
+            // не мешает — они всё равно root СВОЕГО отдельного BM-ресурса (eContainer()==null),
+            // так что обход останавливается там раньше, до Справочника, независимо от top.
+            EObject top = resolveMatchTopMdObject(matchObj);
 
             List<String> terminal = new ArrayList<>();
             EObject walkStart;
@@ -2950,7 +3108,7 @@ public final class ConfigSearchResultsHook implements IStartup
             }
             else
             {
-                String featureLabel = dcsFeatureLabel(match.getFeature());
+                String featureLabel = dcsFeatureLabel(resolveMatchFeature(matchObj));
                 if (featureLabel != null)
                     terminal.add(featureLabel);
                 walkStart = leaf;
@@ -2958,7 +3116,15 @@ public final class ConfigSearchResultsHook implements IStartup
 
             LinkedList<String> path = new LinkedList<>();
             Object pendingCellColumn = null;
-            for (EObject node = walkStart; node != null && node != top; node = node.eContainer())
+            // Элементы формы (FormField) могут быть вложены рекурсивно (напр. колонка Код внутри
+            // поля-таблицы Список — оба хранятся через одну и ту же containment-feature "items",
+            // FormItemContainer.getItems()) — но имена элементов формы уникальны во ВСЁМ дереве
+            // формы, поэтому промежуточные контейнеры (Список) в пути не нужны: "Элементы.Код",
+            // а не "Элементы.Список.Элементы.Код". formItemNameEmitted отслеживает, что имя
+            // самого внутреннего (ближайшего к вхождению) элемента уже добавлено — остальные имена
+            // и повторные метки "Элементы" в этой же цепочке пропускаются.
+            boolean formItemNameEmitted = false;
+            for (EObject node = walkStart; node != null && !sameBmObject(node, top); node = node.eContainer())
             {
                 // Табличный документ (Moxel): Cell/Row — сами по себе не EMF containment-узлы с
                 // осмысленным именем/подписью, а лишь ЗНАЧЕНИЯ записей EMap
@@ -2985,11 +3151,23 @@ public final class ConfigSearchResultsHook implements IStartup
                     }
                 }
 
+                EStructuralFeature containingFeature = node.eContainingFeature();
+                // ВАЖНО: без instanceof FormField — контейнер "Список" (таблица, тип Table)
+                // содержит колонки ТОЖЕ через "items" (FormItemContainer), но САМ Table НЕ
+                // реализует FormField (проверено декомпиляцией TableImpl) — проверка типа узла
+                // ошибочно исключала таблицы-контейнеры из дедупликации, оставляя "Список" в пути.
+                boolean isNestedFormItem = containingFeature != null
+                    && "items".equals(containingFeature.getName()); //$NON-NLS-1$
+
                 String name = dcsElementName(node);
-                if (name != null)
+                if (name != null && (!isNestedFormItem || !formItemNameEmitted))
+                {
                     path.addFirst(name);
-                String label = dcsFeatureLabel(node.eContainingFeature());
-                if (label != null)
+                    if (isNestedFormItem)
+                        formItemNameEmitted = true;
+                }
+                String label = dcsFeatureLabel(containingFeature);
+                if (label != null && (!isNestedFormItem || path.isEmpty() || !label.equals(path.getFirst())))
                     path.addFirst(label);
             }
             path.addAll(terminal);

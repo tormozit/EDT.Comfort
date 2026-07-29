@@ -98,8 +98,8 @@ public final class RecentPlacesView extends ViewPart
     private static final String KEY_COL_ORDER         = "columnOrderV2";   //$NON-NLS-1$
     private static final String KEY_FILTER_BY_PROJECT = "filterByProject"; //$NON-NLS-1$
 
-    private static final int DEFAULT_PLACE_COL_WIDTH   = 280;
-    private static final int DEFAULT_NAME_COL_WIDTH    = 120;
+    private static final int DEFAULT_PLACE_COL_WIDTH   = 560;
+    private static final int DEFAULT_NAME_COL_WIDTH    = 240;
     private static final int DEFAULT_PROJECT_COL_WIDTH = 90;
     private static final int DEFAULT_DATE_COL_WIDTH    = 90;
     private static final int MIN_PLACE_COL_WIDTH       = 80;

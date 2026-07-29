@@ -8,6 +8,11 @@ import org.eclipse.core.commands.ExecutionException;
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.dialogs.IDialogSettingsProvider;
+import org.eclipse.jface.text.IDocument;
+import org.eclipse.jface.text.ITextViewer;
+import org.eclipse.jface.text.ITextViewerExtension5;
+import org.eclipse.jface.text.Region;
+import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.widgets.Control;
@@ -42,19 +47,26 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
         ITextEditor textEditor = editorPart != null
             ? TextEditor.resolveTextEditor(editorPart) : null;
 
+        ISourceViewer viewer = null;
         StyledText textWidget = null;
         if (textEditor != null)
         {
-            var viewer = TextEditor.getSourceViewer(textEditor);
+            viewer = TextEditor.getSourceViewer(textEditor);
             if (viewer != null && viewer.getTextWidget() instanceof StyledText st)
                 textWidget = st;
+            else
+                viewer = null;
         }
         if (textWidget == null)
+        {
             textWidget = resolveStyledTextFromFocus();
+            if (textWidget != null)
+                viewer = TextEditor.resolveViewerFromFocus(textWidget);
+        }
         if (textWidget == null || textWidget.isDisposed())
             return null;
 
-        return executeSearch(textWidget, forward);
+        return executeSearch(viewer, textWidget, forward);
     }
 
     private static StyledText resolveStyledTextFromFocus()
@@ -67,27 +79,53 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
         return null;
     }
 
-    /** Общий вход для {@link #execute} и для Display-фильтра (модальный «Редактор запроса»). */
+    /** Общий вход для Display-фильтра (модальный «Редактор запроса») — сам ищет вьювер по фокусу. */
     public static Object executeSearch(StyledText textWidget, boolean forward)
     {
         if (textWidget == null || textWidget.isDisposed())
             return null;
+        return executeSearch(TextEditor.resolveViewerFromFocus(textWidget), textWidget, forward);
+    }
 
-        Point selRange = textWidget.getSelectionRange();
-        int offset = selRange.x;
+    /**
+     * Общий вход для {@link #execute}. При наличии {@code viewer} ищет по полному тексту документа
+     * (модельные офсеты) — иначе, как виджет {@link StyledText#getText()}, видны только развёрнутые
+     * (не свёрнутые) строки, т.к. под капотом лежит проекционный документ.
+     */
+    public static Object executeSearch(ITextViewer viewer, StyledText textWidget, boolean forward)
+    {
+        if (textWidget == null || textWidget.isDisposed())
+            return null;
+
+        Point widgetSelRange = textWidget.getSelectionRange();
         String selectionText = textWidget.getSelectionText();
-        String fullText = textWidget.getText();
 
-        String searchString = getSearchString(offset, selectionText, textWidget);
+        String searchString = getSearchString(widgetSelRange.x, selectionText, textWidget);
         if (searchString == null || searchString.isEmpty())
         {
             if (Global.isLogEnabled())
-                Global.log(TAG, "executeSearch: searchString=null offset=" + offset);
+                Global.log(TAG, "executeSearch: searchString=null offset=" + widgetSelRange.x);
             return null;
         }
 
-        if (selectionText != null && !selectionText.isEmpty())
-            offset = forward ? selRange.x + selRange.y : selRange.x;
+        IDocument document = viewer != null ? viewer.getDocument() : null;
+        String fullText;
+        int offset;
+        if (document != null)
+        {
+            fullText = document.get();
+            Point modelSelRange = viewer.getSelectedRange();
+            offset = selectionText != null && !selectionText.isEmpty()
+                ? (forward ? modelSelRange.x + modelSelRange.y : modelSelRange.x)
+                : modelSelRange.x;
+        }
+        else
+        {
+            fullText = textWidget.getText();
+            offset = selectionText != null && !selectionText.isEmpty()
+                ? (forward ? widgetSelRange.x + widgetSelRange.y : widgetSelRange.x)
+                : widgetSelRange.x;
+        }
 
         boolean caseSensitive = isCaseSensitiveSearch();
         boolean wholeWord = isWholeWordSearch();
@@ -95,7 +133,8 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
         if (Global.isLogEnabled())
             Global.log(TAG, "executeSearch: search='" + searchString
                 + "' from=" + offset + " forward=" + forward
-                + " caseSensitive=" + caseSensitive + " wholeWord=" + wholeWord);
+                + " caseSensitive=" + caseSensitive + " wholeWord=" + wholeWord
+                + " viaDocument=" + (document != null));
 
         int found = forward
             ? indexOf(fullText, searchString, offset + 1, caseSensitive, wholeWord)
@@ -106,14 +145,26 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
                 : lastIndexOf(fullText, searchString, fullText.length() - 1, caseSensitive, wholeWord);
 
         if (found >= 0)
-        {
-            textWidget.setSelectionRange(found, searchString.length());
-            textWidget.showSelection();
-        }
+            selectFound(viewer, textWidget, found, searchString.length());
 
         if (Global.isLogEnabled())
             Global.log(TAG, "executeSearch: result=" + found);
         return null;
+    }
+
+    /** Выделяет найденный фрагмент; для сворачиваемого вьювера предварительно разворачивает область. */
+    private static void selectFound(ITextViewer viewer, StyledText textWidget, int offset, int length)
+    {
+        if (viewer != null && viewer.getDocument() != null)
+        {
+            if (viewer instanceof ITextViewerExtension5 ext5)
+                ext5.exposeModelRange(new Region(offset, length));
+            viewer.setSelectedRange(offset, length);
+            viewer.revealRange(offset, length);
+            return;
+        }
+        textWidget.setSelectionRange(offset, length);
+        textWidget.showSelection();
     }
 
     private static boolean isCaseSensitiveSearch()
@@ -193,7 +244,7 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
         return backwardPart.reverse().append(forwardPart).toString();
     }
 
-    // ========= Поиск напрямую через StyledText =========
+    // ========= Поиск по строке (тексту документа/виджета) =========
 
     private static int indexOf(String text, String search, int from,
         boolean caseSensitive, boolean wholeWord)

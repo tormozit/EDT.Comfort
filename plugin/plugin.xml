@@ -11,6 +11,8 @@
     <startup class="tormozit.MoxelEditorHook"/>
     <startup class="tormozit.BSLEditorMenuHook"/>
     <startup class="tormozit.BslModulePositionMemoryHook"/>
+    <startup class="tormozit.HorizontalScrollBarPositionFixHook"/>
+    <startup class="tormozit.BslEditorRevealScrollFixHook"/>
     <startup class="tormozit.TextEditorRightClickCaretHook"/>
     <startup class="tormozit.TextEditorIdentifierSelectionHook"/>
     <startup class="tormozit.TextEditorMenuHook"/>
@@ -47,8 +49,10 @@
     <startup class="tormozit.NavigatorFilterHook"/>
     <startup class="tormozit.NavigatorShowInExplorerMenuHook"/>
     <startup class="tormozit.InfobasesViewHook"/>
+    <startup class="tormozit.InfobaseActiveProjectApplicationMenuHook"/>
     <startup class="tormozit.OpenMdObjectHook"/>
     <startup class="tormozit.MenuTooltipStatusLineHook"/>
+    <startup class="tormozit.BackgroundJobsStatusLineHook"/>
     <startup class="tormozit.RecentPlacesTracker"/>
     <startup class="tormozit.ObjectSetsBootstrapHook"/>
     <startup class="tormozit.ObjectSetSubsystemsFilterBridge"/>
@@ -68,6 +72,7 @@
     <startup class="tormozit.BreakpointPropertiesHook"/>
     <startup class="tormozit.BreakpointListHook"/>
     <startup class="tormozit.ExceptionSelectionDialogHook"/>
+    <startup class="tormozit.ErrorDialogActivateHook"/>
     <startup class="tormozit.StacktracesViewInteractionHook"/>
     <startup class="tormozit.InfobaseSyncQuestionDialogHook"/>
     <startup class="tormozit.FilterBySubsystemsDialogHook"/>

@@ -79,10 +79,23 @@ public class BslModulePositionMemoryHook implements IStartup
         IWorkbenchPage page = window.getActivePage();
         if (page != null)
         {
+            // Активный редактор при старте EDT восстановлен синхронно (уже виден на экране),
+            // но остальные вкладки — лениво: ref.getEditor(false) для них вернёт null, и это
+            // нормально, partActivated поймает их при реальном переключении позже. А для уже
+            // активного (значит, точно материализованного) редактора getEditor(false) мог
+            // вернуть null просто из-за гонки между own asyncExec здесь и восстановлением
+            // состояния workbench — тогда partActivated для него уже не прилетит (стал активным
+            // раньше, чем подписался наш partListener ниже), и позиция для него не
+            // восстановится до следующего переоткрытия. Поэтому активный редактор достаётся
+            // отдельно, напрямую через getActiveEditor(), в обход ref.
+            IEditorPart active = page.getActiveEditor();
+            if (active != null)
+                hookEditorIfNeeded(active);
+
             for (IEditorReference ref : page.getEditorReferences())
             {
                 IEditorPart ed = ref.getEditor(false);
-                if (ed != null)
+                if (ed != null && ed != active)
                     hookEditorIfNeeded(ed);
             }
         }

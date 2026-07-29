@@ -230,6 +230,12 @@ powershell -NoProfile -File "C:\VC\EDT.Comfort\.cursor\scripts\repair-double-eol
 
 **Решение:** перехватывать команду, не клавишу — `ICommandService.addExecutionListener` (`preExecute`/`notHandled` срабатывают независимо от пути; `ExecutionEvent.getTrigger()` при необходимости). Эталоны: `KeyBindingToastHook`, `PreferenceSearchFilterAugmenter.wireTreeCopy`/`handlePossibleTreeCopy`. Для View с `IActionBars` — альтернатива через `globalActions`, см. `DebugInspectorTreeEnhancement.hookGlobalCopyAction()` (не подходит для модальных диалогов вроде `PreferenceDialog`).
 
+## OpenHelper.openEditor(EObject, EStructuralFeature) — feature не «активировать свойство»
+
+`feature` в `OpenHelper.openEditor(...)` — не «какое свойство выделить в Свойствах» и не `eContainingFeature()`. Декомпиляция `getFile()`: `feature` используется только как резерв для поиска BSL-модуля — `object.eGet(feature)`, и если результат `instanceof Module`, открывается его файл (для команд/общих модулей). Иначе — `IllegalArgumentException: The feature 'X' is not a valid feature`.
+
+**Для активации произвольного EObject — 1-arg `openEditor(EObject)`, без feature.** Эталон: `CompareConfigOpenObjectHandler.openInEditor()`.
+
 ## Комфорт-подменю (сортировка)
 
 Использовать `ComfortSubmenuHelper.createSortedMenuItem` везде, где элементы добавляются в подменю «Комфорт»; несколько хуков могут разделять один и тот же экземпляр подменю.

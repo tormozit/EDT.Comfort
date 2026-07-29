@@ -1469,7 +1469,7 @@ public class ApplicationsViewHook implements IStartup
         return null;
     }
 
-    private static ColumnViewer findViewer(Object view)
+    static ColumnViewer findViewer(Object view)
     {
         Class<?> cls = view.getClass();
         while (cls != null)

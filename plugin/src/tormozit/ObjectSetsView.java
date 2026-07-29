@@ -99,8 +99,8 @@ public final class ObjectSetsView extends ViewPart
     private static final String KEY_SELECTED_SET_ID      = "selectedSetId"; //$NON-NLS-1$
     private static final String KEY_SELECTED_ITEM_KEY    = "selectedItemKey"; //$NON-NLS-1$
 
-    private static final int DEFAULT_ITEMS_NAME_COL_WIDTH = 120;
-    private static final int DEFAULT_ITEMS_PATH_COL_WIDTH = 220;
+    private static final int DEFAULT_ITEMS_NAME_COL_WIDTH = 240;
+    private static final int DEFAULT_ITEMS_PATH_COL_WIDTH = 440;
     private static final int MIN_ITEMS_NAME_COL_WIDTH     = 50;
     private static final int MIN_ITEMS_PATH_COL_WIDTH     = 80;
     private static final int ITEMS_ICON_COL_WIDTH         = 24;
