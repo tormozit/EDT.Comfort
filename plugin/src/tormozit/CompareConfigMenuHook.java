@@ -122,7 +122,16 @@ import org.osgi.framework.ServiceReference;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.AbstractDirectPartialModelNode;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.ProjectPartialModelNode;
 import java.util.HashSet;
+import java.util.Map;
+
 import org.eclipse.jface.viewers.ITreeContentProvider;
+import org.eclipse.jface.viewers.Viewer;
+import org.eclipse.jface.viewers.ViewerFilter;
+import org.eclipse.xtext.naming.IQualifiedNameProvider;
+import org.eclipse.xtext.naming.QualifiedName;
+
+import com._1c.g5.v8.dt.common.EObjectTrie;
+import com._1c.g5.v8.dt.compare.model.SymlinkComparisonNode;
 
 /**
  * Добавляет пункты в контекстное меню и командную панель редактора сравнения EDT.
@@ -223,6 +232,7 @@ public class CompareConfigMenuHook implements IStartup
         // ВМЕСТО УСТАНОВКИ SELECTION PROVIDER — ПРОСТО ВЕШАЕМ СЛУШАТЕЛЬ НА ДЕРЕВО
         CompareConfigSelectionListener syncListener = new CompareConfigSelectionListener(editor);
         wireTreeViewerToListener(editor, syncListener);
+        SubsystemFilterFix.install(editor);
 
         Tree tree = getCompareTree(editor);
         if (tree == null)
@@ -586,6 +596,329 @@ public class CompareConfigMenuHook implements IStartup
      * 4. Получаем EObject через IActiveComparisonDataSource.getObjectById()
      * 5. Открываем через OpenHelper
      */
+
+    /**
+     * Коррекция EDT-фильтра по подсистемам: односторонние не-{@link SymlinkComparisonNode}
+     * узлы EDT пропускает ({@code checkNodeIsSelectedForSide} → true). Добавляем свой
+     * {@link ViewerFilter}, используя те же trie через {@code ViewerFilterBySubsystems}.
+     *
+     * <p>Не ждём появления EDT-{@code ViewerFilter} в {@code viewer.getFilters()} —
+     * берём {@code editor.filterBySubsystems} (создаётся в {@code createFilterBySubsystems})
+     * и ставим коррекцию, когда готов tree viewer ({@code createComparisonViewIfNecessary}).
+     */
+    private static class SubsystemFilterFix
+    {
+        private static final String FILTER_FLAG = "tormozit.subsystemFilterFix"; //$NON-NLS-1$
+        private static final String LOG = "SubsystemFilterFix"; //$NON-NLS-1$
+        private static final int MAX_ATTEMPTS = 60;
+        private static final int RETRY_MS = 250;
+
+        static void install(IEditorPart editor)
+        {
+            install(editor, 0);
+        }
+
+        private static void install(IEditorPart editor, int attempt)
+        {
+            if (editor == null)
+                return;
+            if (!ComfortSettings.isReplaceListFiltersEnabled())
+            {
+                Global.tempLog(LOG, "skip: replaceListFilters disabled"); //$NON-NLS-1$
+                return;
+            }
+
+            Display display = Display.getDefault();
+            Runnable body = () ->
+            {
+                AbstractTreeViewer viewer = resolveTreeViewer(editor);
+                Object namedFilter = Global.getField(editor, "filterBySubsystems"); //$NON-NLS-1$
+                Global.tempLog(LOG, "attempt=" + attempt //$NON-NLS-1$
+                        + " editor=" + editor.getClass().getSimpleName() //$NON-NLS-1$
+                        + "@" + System.identityHashCode(editor) //$NON-NLS-1$
+                        + " viewer=" + (viewer != null) //$NON-NLS-1$
+                        + " namedFilter=" + (namedFilter != null ? namedFilter.getClass().getSimpleName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
+
+                if (viewer != null && Boolean.TRUE.equals(viewer.getData(FILTER_FLAG)))
+                    return;
+
+                if (viewer == null || namedFilter == null)
+                {
+                    if (attempt < MAX_ATTEMPTS)
+                        display.timerExec(RETRY_MS, () -> install(editor, attempt + 1));
+                    else
+                        Global.tempLog(LOG, "give up after " + attempt + " attempts"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
+
+                try
+                {
+                    viewer.addFilter(new CorrectionViewerFilter(namedFilter));
+                    viewer.setData(FILTER_FLAG, Boolean.TRUE);
+                    Global.tempLog(LOG, "CorrectionViewerFilter installed"); //$NON-NLS-1$
+                }
+                catch (Exception e)
+                {
+                    Global.tempLog(LOG, "install error: " + e); //$NON-NLS-1$
+                }
+            };
+
+            if (Thread.currentThread() == display.getThread())
+                body.run();
+            else
+                display.asyncExec(body);
+        }
+
+        private static AbstractTreeViewer resolveTreeViewer(IEditorPart editor)
+        {
+            Object view = Global.getField(editor, "comparisonView"); //$NON-NLS-1$
+            if (!(view instanceof DtComparisonView))
+                return null;
+            Object treeControl = ((DtComparisonView) view).getTreeControl();
+            if (treeControl == null)
+                return null;
+            Object viewer = Global.call(treeControl, "getTreeViewer"); //$NON-NLS-1$
+            return (viewer instanceof AbstractTreeViewer) ? (AbstractTreeViewer) viewer : null;
+        }
+
+        private static class CorrectionViewerFilter extends ViewerFilter
+        {
+            private final Object namedFilter;
+            private final Object coreFilter;
+            private final IQualifiedNameProvider qnProvider;
+            private int decideLogsLeft = 80;
+            private boolean verifiedAttached;
+            private String lastDetail = ""; //$NON-NLS-1$
+
+            CorrectionViewerFilter(Object namedFilter)
+            {
+                this.namedFilter = namedFilter;
+                this.coreFilter = Global.invoke(namedFilter, "getCoreFilter"); //$NON-NLS-1$
+                this.qnProvider = coreFilter == null
+                        ? null
+                        : (IQualifiedNameProvider) Global.getField(coreFilter, "qualifiedNameProvider"); //$NON-NLS-1$
+                Global.tempLog(LOG, "ctor coreFilter=" + (coreFilter != null) //$NON-NLS-1$
+                        + " qnProvider=" + (qnProvider != null)); //$NON-NLS-1$
+            }
+
+            @Override
+            public boolean select(Viewer viewer, Object parentElement, Object element)
+            {
+                if (coreFilter == null)
+                    return true;
+
+                boolean empty = Boolean.TRUE.equals(Global.invoke(coreFilter, "isFilterEmpty")); //$NON-NLS-1$
+                if (empty)
+                {
+                    verifiedAttached = false;
+                    return true;
+                }
+
+                // Если EDT/Combo сбросил фильтры через setFilters — вернуть коррекцию
+                if (viewer instanceof AbstractTreeViewer treeViewer)
+                    ensureAttached(treeViewer);
+
+                if (!(element instanceof IDirectPartialModelNode))
+                    return true;
+
+                IDirectPartialModelNode node = (IDirectPartialModelNode) element;
+                ComparisonNode cn = node.retrieveComparisonNode();
+                IComparisonSession session = node.getComparisonSession();
+                if (cn == null || session == null || !cn.isOneSideNode())
+                    return true;
+
+                boolean visible = checkOneSideNode(cn, session);
+                logDecision(element, cn, visible, lastDetail);
+                return visible;
+            }
+
+            private void ensureAttached(AbstractTreeViewer treeViewer)
+            {
+                if (verifiedAttached)
+                    return;
+                verifiedAttached = true;
+                boolean found = false;
+                for (ViewerFilter f : treeViewer.getFilters())
+                {
+                    if (f == this)
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                Global.tempLog(LOG, "ensureAttached found=" + found //$NON-NLS-1$
+                        + " filters=" + treeViewer.getFilters().length); //$NON-NLS-1$
+                if (!found)
+                {
+                    try
+                    {
+                        treeViewer.addFilter(this);
+                        treeViewer.setData(FILTER_FLAG, Boolean.TRUE);
+                        Global.tempLog(LOG, "re-attached CorrectionViewerFilter"); //$NON-NLS-1$
+                    }
+                    catch (Exception e)
+                    {
+                        Global.tempLog(LOG, "re-attach error: " + e); //$NON-NLS-1$
+                    }
+                }
+            }
+
+            private void logDecision(Object element, ComparisonNode cn, boolean visible,
+                    String detail)
+            {
+                if (decideLogsLeft <= 0 && visible)
+                    return;
+                if (decideLogsLeft > 0)
+                    decideLogsLeft--;
+                Global.tempLog(LOG, "oneSide visible=" + visible //$NON-NLS-1$
+                        + " el=" + element.getClass().getSimpleName() //$NON-NLS-1$
+                        + " cn=" + cn.getClass().getSimpleName() //$NON-NLS-1$
+                        + " symlink=" + (cn instanceof SymlinkComparisonNode) //$NON-NLS-1$
+                        + " side=" + cn.getNodeSide() //$NON-NLS-1$
+                        + " " + detail); //$NON-NLS-1$
+            }
+
+            private boolean checkOneSideNode(ComparisonNode cn, IComparisonSession session)
+            {
+                ComparisonSide side = cn.getNodeSide();
+                if (side == null)
+                    return true;
+
+                IComparisonDataSource ds = session.getDataSource(side);
+                if (ds == null)
+                    return true;
+
+                String symlink = cn instanceof SymlinkComparisonNode
+                        ? ((SymlinkComparisonNode) cn).getSymlink(side)
+                        : null;
+                QualifiedName qn = resolveQualifiedName(cn, side, ds, symlink);
+                if (qn == null)
+                {
+                    Global.tempLog(LOG, "qn=null → hide cn=" + cn.getClass().getSimpleName() //$NON-NLS-1$
+                            + " symlink=" + symlink); //$NON-NLS-1$
+                    return false;
+                }
+
+                try
+                {
+                    // addProject() → isProjectChecked=true. Тогда getSelectedSubsystems()
+                    // возвращает ВСЕ подсистемы проекта (у Main было 232), хотя пользователь
+                    // отметил подсистему только на Other. Смотрим явные checkedSubsystemIds.
+                    int checkedIds = countCheckedSubsystemIds(ds);
+                    boolean projectChecked = isProjectChecked(ds);
+                    boolean includeOrphans = isIncludeNotIncluded(ds);
+                    if (checkedIds == 0)
+                    {
+                        lastDetail = "checkedIds=0 projectChecked=" + projectChecked //$NON-NLS-1$
+                                + " includeOrphans=" + includeOrphans //$NON-NLS-1$
+                                + " qn=" + qn + " → hide (no explicit subsystems on side)"; //$NON-NLS-1$
+                        return false;
+                    }
+
+                    EObjectTrie included = getTrie("includedInSelectedSubsystemsTrieMap", ds); //$NON-NLS-1$
+                    EObjectTrie allTop = getTrie("allTopObjectsToFilterTrieMap", ds); //$NON-NLS-1$
+                    boolean isTop = allTop != null && allTop.belongsTo(qn);
+                    boolean inIncluded = included != null && included.belongsTo(qn);
+                    boolean visible;
+                    if (included == null && allTop == null)
+                        visible = true;
+                    else
+                        visible = inIncluded;
+                    lastDetail = "qn=" + qn //$NON-NLS-1$
+                            + " symlink=" + symlink //$NON-NLS-1$
+                            + " checkedIds=" + checkedIds //$NON-NLS-1$
+                            + " projectChecked=" + projectChecked //$NON-NLS-1$
+                            + " includeOrphans=" + includeOrphans //$NON-NLS-1$
+                            + " isTop=" + isTop //$NON-NLS-1$
+                            + " inIncluded=" + inIncluded //$NON-NLS-1$
+                            + " hasIncluded=" + (included != null) //$NON-NLS-1$
+                            + " hasAllTop=" + (allTop != null); //$NON-NLS-1$
+                    return visible;
+                }
+                catch (Exception e)
+                {
+                    Global.tempLog(LOG, "checkOneSideNode error: " + e); //$NON-NLS-1$
+                    lastDetail = "error"; //$NON-NLS-1$
+                    return true;
+                }
+            }
+
+            private int countCheckedSubsystemIds(IComparisonDataSource ds)
+            {
+                Object settings = Global.getField(namedFilter, "filterBySubsystemSettings"); //$NON-NLS-1$
+                Object project = ds.getDtProject();
+                if (settings == null || project == null)
+                    return -1;
+                Object ids = Global.invoke(settings, "getCheckedSubsystemIds", project); //$NON-NLS-1$
+                if (ids instanceof java.util.Collection<?> col)
+                    return col.size();
+                return -1;
+            }
+
+            private boolean isProjectChecked(IComparisonDataSource ds)
+            {
+                Object settings = Global.getField(namedFilter, "filterBySubsystemSettings"); //$NON-NLS-1$
+                Object project = ds.getDtProject();
+                if (settings == null || project == null)
+                    return false;
+                return Boolean.TRUE.equals(Global.invoke(settings, "isProjectChecked", project)); //$NON-NLS-1$
+            }
+
+            private boolean isIncludeNotIncluded(IComparisonDataSource ds)
+            {
+                Object settings = Global.getField(namedFilter, "filterBySubsystemSettings"); //$NON-NLS-1$
+                Object project = ds.getDtProject();
+                if (settings == null || project == null)
+                    return false;
+                return Boolean.TRUE.equals(Global.invoke(settings,
+                        "isIncludeNotIncludedInSubsystems", project)); //$NON-NLS-1$
+            }
+
+            @SuppressWarnings("unchecked")
+            private EObjectTrie getTrie(String fieldName, IComparisonDataSource ds)
+            {
+                Object raw = Global.getField(coreFilter, fieldName);
+                if (!(raw instanceof Map<?, ?> map) || map.isEmpty())
+                    return null;
+                Object direct = map.get(ds);
+                if (direct instanceof EObjectTrie trie)
+                    return trie;
+                // Только тот же DtProject — без fallback на другую сторону сравнения
+                Object project = ds.getDtProject();
+                if (project == null)
+                    return null;
+                for (Map.Entry<?, ?> e : map.entrySet())
+                {
+                    if (!(e.getKey() instanceof IComparisonDataSource keyDs))
+                        continue;
+                    if (project.equals(keyDs.getDtProject())
+                            && e.getValue() instanceof EObjectTrie trie)
+                        return trie;
+                }
+                return null;
+            }
+
+            private QualifiedName resolveQualifiedName(ComparisonNode cn, ComparisonSide side,
+                    IComparisonDataSource ds, String symlink)
+            {
+                if (symlink != null && !symlink.isEmpty())
+                    return QualifiedName.create(symlink.split("\\.")); //$NON-NLS-1$
+
+                if (!(cn instanceof MatchedObjectsComparisonNode matched))
+                    return null;
+
+                Long objectId = matched.getObjectId(side);
+                if (objectId == null || objectId == -1L || qnProvider == null)
+                    return null;
+
+                EObject obj = ds.getObjectById(objectId);
+                if (obj == null)
+                    return null;
+                return qnProvider.getFullyQualifiedName(obj);
+            }
+        }
+    }
+
     private static class CompareConfigCompareInIRHandler extends AbstractHandler {
         @Override
         public Object execute(ExecutionEvent event) throws ExecutionException {

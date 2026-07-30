@@ -741,7 +741,7 @@ public final class FileSearchResultsHook implements IStartup
             {
                 if (!ComfortSettings.isReplaceListFiltersEnabled())
                     return;
-                openSelectedRow(tableViewer, treeViewer, page);
+                openSelectedRow(tableViewer, treeViewer);
             }
         });
         menuManager.add(new Action("Открыть редактор файла")
@@ -760,7 +760,17 @@ public final class FileSearchResultsHook implements IStartup
         table.setMenu(menu);
     }
 
-    private static void openSelectedRow(TableViewer tableViewer, TreeViewer treeViewer, Object page)
+    /**
+     * «Открыть редактор объекта» — раньше шло через штатный {@code page.showMatch(...)}
+     * ({@code AbstractTextSearchViewPage}), который внутри вызывает {@code EditorOpener
+     * .openAndSelect()}: если включена глобальная настройка Eclipse "Reuse editor" (Preferences →
+     * General → Search), тот ищет УЖЕ ОТКРЫТЫЙ редактор для этого файла (декомпиляция) и
+     * переиспользует ЕГО — даже если это простой текстовый редактор, а не объектный. Поэтому
+     * команда не открывала объектный редактор, если файл уже был открыт как текст.
+     * {@code OpenHelper.openEditor(IFile, ISelection)} эту логику не использует вовсе — тот же
+     * вызов, что уже применяется для BSL-модулей, см. {@link #openObjectEditorForFile}.
+     */
+    private static void openSelectedRow(TableViewer tableViewer, TreeViewer treeViewer)
     {
         Table table = tableViewer.getTable();
         TableItem[] selection = table.getSelection();
@@ -771,15 +781,8 @@ public final class FileSearchResultsHook implements IStartup
             return;
         if (row.lineElement == null || row.iFile == null)
             return;
-        Match[] matches = findMatches(treeViewer, row.iFile, row.lineElement);
-        if (matches != null && matches.length > 0)
-        {
-            Match match = matches[0];
-            Global.invoke(page, "showMatch", match,
-                Integer.valueOf(row.lineElement.getOffset()),
-                Integer.valueOf(row.lineElement.getLength()),
-                Boolean.TRUE);
-        }
+        int[] bounds = resolveMatchBounds(row.iFile, row.lineElement, treeViewer, row);
+        openObjectEditorForFile(row.iFile, bounds);
     }
 
     private static Match[] findMatches(TreeViewer treeViewer, IFile file, LineElement lineElement)
@@ -874,7 +877,7 @@ public final class FileSearchResultsHook implements IStartup
         int[] bounds = resolveMatchBounds(file, lineElement, treeViewer, row);
 
         if (isBslModuleFile(file))
-            openBslMatchInObjectEditor(file, bounds);
+            openObjectEditorForFile(file, bounds);
         else
             openMatchInSourceEditor(file, bounds);
     }
@@ -904,7 +907,8 @@ public final class FileSearchResultsHook implements IStartup
         return new int[] { 0, 1 };
     }
 
-    private static void openBslMatchInObjectEditor(IFile file, int[] bounds)
+    /** См. {@link #openSelectedRow} — общий вызов через {@code OpenHelper}, для любого типа файла. */
+    private static void openObjectEditorForFile(IFile file, int[] bounds)
     {
         IWorkbenchPage wbPage = PlatformUI.getWorkbench()
             .getActiveWorkbenchWindow().getActivePage();

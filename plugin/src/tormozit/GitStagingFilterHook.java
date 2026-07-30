@@ -1,9 +1,15 @@
 package tormozit;
 
+import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.IntSupplier;
 
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.Status;
+import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.ILabelProvider;
@@ -59,6 +65,20 @@ import org.eclipse.ui.PlatformUI;
  * по фрагментам, без dot-иерархии), а «показать папку, если внутри есть совпадение» — своей
  * рекурсией по {@link ITreeContentProvider}.
  *
+ * <p><b>Производительность (тысячи изменённых файлов):</b> на каждый элемент дерева матчинг
+ * дёргает рефлексию ({@code element.getPath()}) и {@link GetRef#resolveFullNameOrNull} — при
+ * наивном пересчёте на каждое нажатие клавиши синхронно на UI-потоке это ощутимо тормозит и
+ * блокирует UI на тысячах файлов. Поэтому набор текста дебаунсится (см. {@link #DEBOUNCE_MS},
+ * {@link FilterSession}), а сам обход дерева и матчинг переносятся в фоновый {@link Job}
+ * (по образцу {@code CompareConfigSearchDialogHook} — счётчик поколений {@code activeGeneration},
+ * отмена устаревшего job'а, применение результата через {@code asyncExec}). Результат обхода —
+ * {@code Map<Object,Boolean>} по идентичности узла — кладётся в {@link GitStagingSearchFilter}
+ * как {@code precomputedMatches}; {@code select()} на UI-потоке становится O(1)-поиском по этой
+ * карте. Если элемента в карте нет (узел появился уже после фонового прохода — например, штатный
+ * refresh вида из-за внешнего изменения git-статуса во время набора текста), {@code select()}
+ * откатывается на старый инлайн-подсчёт (тот же код, что был до этой правки) — только для
+ * непокрытых узлов, не для всего дерева.
+ *
  * <p>Дополнительно к подсветке — {@link #GitStagingLabelWrapper} дописывает к штатному тексту
  * строки полное имя объекта метаданных через « - » (см. {@link GetRef#resolveFullNameOrNull}),
  * как в панели «Результаты поиска» ({@link FileSearchResultsHook}), но не отдельной колонкой —
@@ -71,6 +91,9 @@ public final class GitStagingFilterHook implements IStartup
     private static final String VIEW_ID = "com._1c.g5.v8.dt.internal.team.ui.views.DtStagingView"; //$NON-NLS-1$
     private static final String PATCHED_KEY = "tormozit.gitStagingFilterPatched"; //$NON-NLS-1$
     private static final String HISTORY_SCOPE_ID = "gitStagingFilter"; //$NON-NLS-1$
+
+    /** Пауза после последнего нажатия клавиши, прежде чем реально пересчитать фильтр. */
+    private static final int DEBOUNCE_MS = 200;
 
     @Override
     public void earlyStartup()
@@ -174,14 +197,14 @@ public final class GitStagingFilterHook implements IStartup
 
             stripModifyListeners(filterText);
             filterText.setData(PATCHED_KEY, Boolean.TRUE);
-            filterText.addListener(SWT.Modify, e ->
-                applyFilter(view, filterText, stagedFilter, unstagedFilter));
+            FilterSession session = new FilterSession(view, filterText, stagedFilter, unstagedFilter);
+            filterText.addListener(SWT.Modify, e -> session.onModify());
             filterText.setToolTipText(
                 FilterInputBox.FLAT_FILTER_TOOLTIP + "\nCtrl+↓ — история запросов."); //$NON-NLS-1$
             FilterHistoryUi.wireKeyboard(filterText, HISTORY_SCOPE_ID);
             addHistoryButton(filterText);
 
-            applyFilter(view, filterText, stagedFilter, unstagedFilter);
+            session.onModify();
 
             Debug.log("tryPatch PATCH OK"); //$NON-NLS-1$
             return true;
@@ -265,54 +288,243 @@ public final class GitStagingFilterHook implements IStartup
     }
 
     // -----------------------------------------------------------------------
-    // Фильтрация
+    // Фильтрация: дебаунс ввода + фоновый Job на обход дерева
     // -----------------------------------------------------------------------
 
-    private static void applyFilter(IViewPart view, Text filterText,
-        GitStagingSearchFilter stagedFilter, GitStagingSearchFilter unstagedFilter)
+    /**
+     * Состояние фильтрации одного экземпляра {@code DtStagingView}: счётчик поколений
+     * ({@code activeGeneration}) и ссылка на текущий фоновый {@link Job}, по образцу
+     * {@code CompareConfigSearchDialogHook} (поиск по дереву сравнения — тоже тысячи узлов).
+     *
+     * <p>Пустой текст обрабатывается сразу и синхронно (дёшево — {@code select()} всегда
+     * {@code true}). Непустой текст — через {@link #DEBOUNCE_MS} дебаунс ({@code Display.timerExec}
+     * с одним и тем же {@link Runnable}, что и переиспользует штатное поведение SWT — повторный
+     * вызов до срабатывания таймера переносит его), затем обход дерева и матчинг — в {@link Job},
+     * применение результата — через {@code asyncExec} с проверкой поколения.
+     */
+    private static final class FilterSession
     {
-        if (filterText.isDisposed())
-            return;
-        String text = filterText.getText();
+        private final IViewPart view;
+        private final Text filterText;
+        private final GitStagingSearchFilter stagedFilter;
+        private final GitStagingSearchFilter unstagedFilter;
+        private final Runnable debounceRunnable = this::fireDebounced;
 
-        refreshOneViewer(view, "stagedViewer", stagedFilter, text); //$NON-NLS-1$
-        refreshOneViewer(view, "unstagedViewer", unstagedFilter, text); //$NON-NLS-1$
+        private volatile int activeGeneration;
+        private volatile Job activeJob;
 
-        Debug.log("applyFilter text=\"" + text + "\""); //$NON-NLS-1$ //$NON-NLS-2$
-    }
-
-    private static void refreshOneViewer(IViewPart view, String viewerField,
-        GitStagingSearchFilter filter, String text)
-    {
-        if (filter == null)
-            return;
-        Object viewerObj = Global.getField(view, viewerField);
-        if (!(viewerObj instanceof TreeViewer viewer) || viewer.getControl().isDisposed())
-            return;
-
-        filter.setPattern(text);
-        IBaseLabelProvider lp = viewer.getLabelProvider();
-        if (lp instanceof GitStagingLabelWrapper wrapper)
-            wrapper.setHighlightPattern(text);
-
-        viewer.getTree().setRedraw(false);
-        try
+        FilterSession(IViewPart view, Text filterText, GitStagingSearchFilter stagedFilter,
+            GitStagingSearchFilter unstagedFilter)
         {
-            viewer.refresh();
-            // Раскрытие веток к совпадениям — только пока реально фильтруем; при очистке поля
-            // возвращаемся к снимку раскрытости на момент патча, а не трогаем текущее состояние
-            // ещё раз (см. javadoc класса), иначе схлопывали бы то, что пользователь успел
-            // раскрыть руками в промежутке.
-            if (filter.isFiltering())
-                viewer.expandAll();
-            else
+            this.view = view;
+            this.filterText = filterText;
+            this.stagedFilter = stagedFilter;
+            this.unstagedFilter = unstagedFilter;
+        }
+
+        void onModify()
+        {
+            if (filterText.isDisposed())
+                return;
+            String text = filterText.getText();
+            if (text.isEmpty())
+            {
+                activeGeneration++;
+                cancelActiveJob();
+                applyEmptyFilter();
+                return;
+            }
+            filterText.getDisplay().timerExec(DEBOUNCE_MS, debounceRunnable);
+        }
+
+        private void fireDebounced()
+        {
+            if (filterText.isDisposed())
+                return;
+            String text = filterText.getText();
+            if (text.isEmpty())
+                return;
+
+            int generation = ++activeGeneration;
+            cancelActiveJob();
+            startBackgroundJob(generation, text);
+        }
+
+        private void cancelActiveJob()
+        {
+            Job job = activeJob;
+            activeJob = null;
+            if (job != null)
+                job.cancel();
+        }
+
+        private void applyEmptyFilter()
+        {
+            clearViewer(stagedFilter, "stagedViewer"); //$NON-NLS-1$
+            clearViewer(unstagedFilter, "unstagedViewer"); //$NON-NLS-1$
+            Debug.log("applyEmptyFilter"); //$NON-NLS-1$
+        }
+
+        private void clearViewer(GitStagingSearchFilter filter, String viewerField)
+        {
+            TreeViewer viewer = getViewer(viewerField);
+            if (viewer == null)
+                return;
+            filter.setPattern(""); //$NON-NLS-1$
+            IBaseLabelProvider lp = viewer.getLabelProvider();
+            if (lp instanceof GitStagingLabelWrapper wrapper)
+                wrapper.setHighlightPattern(""); //$NON-NLS-1$
+            viewer.getTree().setRedraw(false);
+            try
+            {
+                viewer.refresh();
                 filter.restoreInitialExpandedElements(viewer);
+            }
+            finally
+            {
+                viewer.getTree().setRedraw(true);
+            }
         }
-        finally
+
+        private void startBackgroundJob(int generation, String text)
         {
-            viewer.getTree().setRedraw(true);
+            TreeViewer stagedViewer = getViewer("stagedViewer"); //$NON-NLS-1$
+            TreeViewer unstagedViewer = getViewer("unstagedViewer"); //$NON-NLS-1$
+            ITreeContentProvider stagedCp = contentProviderOf(stagedViewer);
+            Object stagedInput = stagedViewer != null ? stagedViewer.getInput() : null;
+            ITreeContentProvider unstagedCp = contentProviderOf(unstagedViewer);
+            Object unstagedInput = unstagedViewer != null ? unstagedViewer.getInput() : null;
+
+            Job job = new Job("Фильтрация списка изменений...") //$NON-NLS-1$
+            {
+                @Override
+                protected IStatus run(IProgressMonitor monitor)
+                {
+                    try
+                    {
+                        SmartMatcher matcher = new SmartMatcher(text);
+                        int[] visited = {0};
+
+                        Map<Object, Boolean> stagedResults = new IdentityHashMap<>();
+                        List<Object> stagedLeaves = new ArrayList<>();
+                        if (stagedCp != null)
+                            for (Object root : stagedCp.getElements(stagedInput))
+                                computeMatches(root, stagedCp, matcher, stagedResults, stagedLeaves,
+                                    visited, generation, () -> activeGeneration, monitor);
+
+                        Map<Object, Boolean> unstagedResults = new IdentityHashMap<>();
+                        List<Object> unstagedLeaves = new ArrayList<>();
+                        if (unstagedCp != null)
+                            for (Object root : unstagedCp.getElements(unstagedInput))
+                                computeMatches(root, unstagedCp, matcher, unstagedResults, unstagedLeaves,
+                                    visited, generation, () -> activeGeneration, monitor);
+
+                        Display.getDefault().asyncExec(() ->
+                        {
+                            if (generation != activeGeneration || filterText.isDisposed())
+                                return;
+                            applyPrecomputed(stagedViewer, stagedFilter, text, stagedResults, stagedLeaves);
+                            applyPrecomputed(unstagedViewer, unstagedFilter, text, unstagedResults, unstagedLeaves);
+                        });
+
+                        Debug.log("job OK generation=" + generation + " visited=" + visited[0]); //$NON-NLS-1$ //$NON-NLS-2$
+                        return Status.OK_STATUS;
+                    }
+                    catch (FilterCancelledException cancelled)
+                    {
+                        Debug.log("job CANCELLED generation=" + generation); //$NON-NLS-1$
+                        return Status.CANCEL_STATUS;
+                    }
+                }
+            };
+            activeJob = job;
+            job.setSystem(true);
+            job.schedule();
+        }
+
+        private void applyPrecomputed(TreeViewer viewer, GitStagingSearchFilter filter, String text,
+            Map<Object, Boolean> results, List<Object> matchedLeaves)
+        {
+            if (viewer == null || viewer.getControl().isDisposed())
+                return;
+            filter.installPrecomputed(text, results);
+            IBaseLabelProvider lp = viewer.getLabelProvider();
+            if (lp instanceof GitStagingLabelWrapper wrapper)
+                wrapper.setHighlightPattern(text);
+            viewer.getTree().setRedraw(false);
+            try
+            {
+                viewer.refresh();
+                viewer.setExpandedElements(matchedLeaves.toArray());
+            }
+            finally
+            {
+                viewer.getTree().setRedraw(true);
+            }
+        }
+
+        private TreeViewer getViewer(String fieldName)
+        {
+            Object obj = Global.getField(view, fieldName);
+            return (obj instanceof TreeViewer v && !v.getControl().isDisposed()) ? v : null;
+        }
+
+        private static ITreeContentProvider contentProviderOf(TreeViewer viewer)
+        {
+            if (viewer == null)
+                return null;
+            Object cp = viewer.getContentProvider();
+            return cp instanceof ITreeContentProvider tcp ? tcp : null;
         }
     }
+
+    /**
+     * Обход дерева на фоновом потоке: {@code element.getPath()} + {@link GetRef#resolveFullNameOrNull}
+     * не трогают SWT-виджеты (обычные Java-объекты модели EGit), поэтому это безопасно вне UI-потока.
+     * Каждые ~512 узлов проверяется отмена — устаревшее поколение (пользователь напечатал ещё)
+     * прерывает обход немедленно через {@link FilterCancelledException}, не тратя время впустую.
+     */
+    private static void computeMatches(Object node, ITreeContentProvider cp, SmartMatcher matcher,
+        Map<Object, Boolean> results, List<Object> matchedLeaves, int[] visited, int generation,
+        IntSupplier currentGeneration, IProgressMonitor monitor)
+    {
+        if ((++visited[0] & 0x1FF) == 0 && (monitor.isCanceled() || generation != currentGeneration.getAsInt()))
+            throw CANCELLED;
+
+        String text = matchText(node);
+        if (!text.isEmpty())
+        {
+            boolean matches = matcher.matches(text);
+            results.put(node, matches);
+            if (matches)
+                matchedLeaves.add(node);
+            return;
+        }
+
+        boolean any = false;
+        for (Object child : cp.getChildren(node))
+        {
+            computeMatches(child, cp, matcher, results, matchedLeaves, visited, generation, currentGeneration,
+                monitor);
+            Boolean childValue = results.get(child);
+            if (childValue != null && childValue)
+                any = true;
+        }
+        results.put(node, any);
+    }
+
+    /** Без сообщения/стека — бросается часто и только для быстрого выхода из обхода, не как ошибка. */
+    private static final class FilterCancelledException extends RuntimeException
+    {
+        private static final long serialVersionUID = 1L;
+
+        FilterCancelledException()
+        {
+            super(null, null, false, false);
+        }
+    }
+
+    private static final FilterCancelledException CANCELLED = new FilterCancelledException();
 
     /** «ПолноеИмя ИмяФайла» для листа ({@code getPath()} есть); "" для остальных узлов (папки и т.п.). */
     private static String matchText(Object element)
@@ -335,17 +547,32 @@ public final class GitStagingFilterHook implements IStartup
      * Плоский AND по фрагментам {@link SmartMatcher} для листьев ({@link #matchText}, без
      * dot-иерархии — см. javadoc класса, почему не {@link SmartOutlineFilter}); для узлов без
      * своего пути (папки) — рекурсивная проверка «есть ли совпадение среди потомков».
+     *
+     * <p>{@link #precomputedMatches} — результат фонового обхода {@link FilterSession}: карта
+     * «узел (по идентичности) → матчится ли он (лист) / есть ли совпадение в поддереве (папка)».
+     * {@code select()} сначала смотрит туда (O(1)); если узла там нет (появился уже после
+     * фонового прохода), считает как раньше — инлайн, с локальным memo {@link #subtreeMemo} на
+     * время одного {@code refresh()}.
      */
     private static final class GitStagingSearchFilter extends ViewerFilter
     {
         private SmartMatcher matcher = new SmartMatcher(""); //$NON-NLS-1$
         private final Map<Object, Boolean> subtreeMemo = new IdentityHashMap<>();
         private Object[] initialExpandedElements = new Object[0];
+        private volatile Map<Object, Boolean> precomputedMatches;
 
         void setPattern(String pattern)
         {
             matcher = new SmartMatcher(pattern != null ? pattern : ""); //$NON-NLS-1$
             subtreeMemo.clear();
+            precomputedMatches = null;
+        }
+
+        void installPrecomputed(String pattern, Map<Object, Boolean> results)
+        {
+            matcher = new SmartMatcher(pattern != null ? pattern : ""); //$NON-NLS-1$
+            subtreeMemo.clear();
+            precomputedMatches = results;
         }
 
         boolean isFiltering()
@@ -369,6 +596,15 @@ public final class GitStagingFilterHook implements IStartup
         {
             if (matcher.isEmpty)
                 return true;
+
+            Map<Object, Boolean> precomputed = precomputedMatches;
+            if (precomputed != null)
+            {
+                Boolean cached = precomputed.get(element);
+                if (cached != null)
+                    return cached.booleanValue();
+            }
+
             String text = matchText(element);
             if (!text.isEmpty())
                 return matcher.matches(text);

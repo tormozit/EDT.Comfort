@@ -160,7 +160,14 @@ public class BackgroundJobsStatusLineHook implements IStartup
         for (int percent : otherPercents)
             suffix.append(", ").append(percent).append('%'); //$NON-NLS-1$
 
-        String prefix = jobInfos.length + ". "; //$NON-NLS-1$
+        // Число в префиксе — реальное количество задач (jobInfos.length), а НЕ количество показанных
+        // процентов: часть задач может не предоставлять процент (percentOf вернул null для них и они
+        // не попали в otherPercents) — они всё равно должны учитываться в счётчике. На случай редкой
+        // гонки, когда mainJobInfo к моменту вызова уже не входит в jobInfos (тогда цикл выше не находит
+        // и не пропускает "свой" элемент, и otherPercents.size() может доходить до jobInfos.length) —
+        // берём max, чтобы N никогда не оказалось меньше количества реально показанных процентов.
+        int shownPercents = 1 + otherPercents.size();
+        String prefix = Math.max(jobInfos.length, shownPercents) + ". "; //$NON-NLS-1$
         return new String[] { prefix, taskName, suffix.toString() };
     }
 

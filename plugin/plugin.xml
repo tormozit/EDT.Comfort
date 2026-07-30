@@ -16,6 +16,7 @@
     <startup class="tormozit.TextEditorRightClickCaretHook"/>
     <startup class="tormozit.TextEditorIdentifierSelectionHook"/>
     <startup class="tormozit.TextEditorMenuHook"/>
+    <startup class="tormozit.XmlEditorShowInNavigatorHook"/>
     <startup class="tormozit.QueryTextEditDialogHook"/>
     <startup class="tormozit.QueryConstructorFilterHook"/>
     <startup class="tormozit.FormEditorHook"/>
@@ -58,6 +59,7 @@
     <startup class="tormozit.ObjectSetSubsystemsFilterBridge"/>
     <startup class="tormozit.NavigatorAddToObjectSetMenuHook"/>
     <startup class="tormozit.NavigatorCopyProjectMenuHook"/>
+    <startup class="tormozit.NavigatorRecomputeChecksMenuHook"/>
     <startup class="tormozit.NavigatorAttributePropertiesHook"/>
     <startup class="tormozit.PropertySheetHook"/>
     <startup class="tormozit.ChoiceParametersHook"/>
@@ -75,6 +77,8 @@
     <startup class="tormozit.ErrorDialogActivateHook"/>
     <startup class="tormozit.StacktracesViewInteractionHook"/>
     <startup class="tormozit.InfobaseSyncQuestionDialogHook"/>
+    <startup class="tormozit.DeployConfigurationFixHook"/>
+    <startup class="tormozit.ExportConfigurationXmlFixHook"/>
     <startup class="tormozit.FilterBySubsystemsDialogHook"/>
     <startup class="tormozit.GitChangedFileMenuHook"/>
     <startup class="tormozit.GitStagingFilterHook"/>
@@ -231,6 +235,12 @@
         sequence="M1+T">
     </key>
     <key
+        commandId="tormozit.xmlEditor.showInNavigator"
+        contextId="org.eclipse.wst.sse.ui.structuredTextEditorScope"
+        schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
+        sequence="M1+T">
+    </key>
+    <key
         commandId="tormozit.TextEditorFastSearchForward"
         contextId="org.eclipse.xtext.ui.XtextEditorScope"
         schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
@@ -318,6 +328,11 @@
         name="Показать в навигаторе"
         categoryId="tormozit.commands.global"
         description="Показать объект-владелец выбранного поля «Объект.*» дерева реквизитов формы в навигаторе (Комфорт)"/>
+    <command
+        id="tormozit.xmlEditor.showInNavigator"
+        name="Показать в навигаторе"
+        categoryId="tormozit.commands.global"
+        description="Показать в навигаторе объект метаданных, которому принадлежит файл, открытый в редакторе XML (Комфорт)"/>
     <command
         id="tormozit.git.openObject"
         name="Открыть объект"
@@ -433,6 +448,16 @@
         name="История ИР"
         categoryId="tormozit.commands.global"
         description="Открыть историю выделенного коммита в приложении ИР (Комфорт)"/>
+    <command
+        id="tormozit.problemView.openInTextEditor"
+        name="Открыть в текстовом редакторе"
+        categoryId="tormozit.commands.global"
+        description="Открыть исходный файл объекта ошибки конфигурации в редакторе XML (Комфорт)"/>
+    <command
+        id="tormozit.problemView.recomputeChecks"
+        name="Проверить"
+        categoryId="tormozit.commands.global"
+        description="Перепроверить объекты, попадающие под текущий отбор панели «Ошибки конфигурации» (Комфорт)"/>
   </extension>
 
   <extension point="org.eclipse.ui.handlers">
@@ -687,6 +712,17 @@
         commandId="tormozit.git.addToObjectSet">
     </handler>
     <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.XmlEditorShowInNavigatorHandler"
+        commandId="tormozit.xmlEditor.showInNavigator">
+      <activeWhen>
+        <with variable="activeContexts">
+          <iterate operator="or">
+            <equals value="org.eclipse.wst.sse.ui.structuredTextEditorScope"/>
+          </iterate>
+        </with>
+      </activeWhen>
+    </handler>
+    <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.HistoryViewHandler"
         commandId="tormozit.history.openInIr">
       <activeWhen>
@@ -695,6 +731,24 @@
             <equals value="org.eclipse.egit.ui.HistoryView"/>
             <equals value="org.eclipse.team.ui.GenericHistoryView"/>
           </or>
+        </with>
+      </activeWhen>
+    </handler>
+    <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.ProblemViewOpenInTextEditorHandler"
+        commandId="tormozit.problemView.openInTextEditor">
+      <activeWhen>
+        <with variable="activePartId">
+          <equals value="com._1c.g5.v8.dt.ui.problemView"/>
+        </with>
+      </activeWhen>
+    </handler>
+    <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.ProblemViewRecomputeChecksHandler"
+        commandId="tormozit.problemView.recomputeChecks">
+      <activeWhen>
+        <with variable="activePartId">
+          <equals value="com._1c.g5.v8.dt.ui.problemView"/>
         </with>
       </activeWhen>
     </handler>
@@ -732,6 +786,33 @@
             label="Фильтр по набору"
             style="toggle"
             tooltip="Показать только объекты активного набора; вытесняет фильтр подсистем (Комфорт)"/>
+      </menuContribution>
+      <menuContribution locationURI="popup:com._1c.g5.v8.dt.ui.problemView?after=additions">
+        <command
+            commandId="tormozit.problemView.openInTextEditor"
+            label="Открыть в текстовом редакторе"
+            style="push"
+            tooltip="Открыть исходный файл объекта ошибки в редакторе XML (Комфорт)"/>
+        <command
+            commandId="tormozit.problemView.recomputeChecks"
+            label="Проверить"
+            style="push"
+            tooltip="Перепроверить объекты по текущему отбору панели (Комфорт)"/>
+      </menuContribution>
+      <menuContribution locationURI="menu:com._1c.g5.v8.dt.ui.problemView?after=additions">
+        <command
+            commandId="tormozit.problemView.recomputeChecks"
+            label="Проверить"
+            style="push"
+            tooltip="Перепроверить объекты по текущему отбору панели (Комфорт)"/>
+      </menuContribution>
+      <menuContribution locationURI="toolbar:com._1c.g5.v8.dt.ui.problemView?after=additions">
+        <command
+            commandId="tormozit.problemView.recomputeChecks"
+            icon="platform:/plugin/org.eclipse.ui/icons/full/elcl16/refresh_nav.png"
+            label="Проверить"
+            style="push"
+            tooltip="Перепроверить объекты по текущему отбору панели (Комфорт)"/>
       </menuContribution>
     </extension>
 
@@ -877,6 +958,18 @@
         </or>
       </enablement>
     </decorator>
+  </extension>
+
+  <extension point="com.e1c.g5.v8.dt.check.checks">
+    <category
+        id="tormozit.comfort.check.category"
+        title="%check.category.comfort"
+        category="com.e1c.g5.v8.dt.check.edt.checks">
+    </category>
+    <check
+        category="tormozit.comfort.check.category"
+        class="tormozit.BrokenFormPictureCheck">
+    </check>
   </extension>
 
   <!--

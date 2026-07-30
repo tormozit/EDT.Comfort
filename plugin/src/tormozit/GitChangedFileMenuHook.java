@@ -8,11 +8,20 @@ import java.util.Map;
 
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
+import org.eclipse.core.resources.IResource;
 import org.eclipse.core.resources.ResourcesPlugin;
+import org.eclipse.core.resources.WorkspaceJob;
+import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.IPath;
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.MultiStatus;
 import org.eclipse.core.runtime.Platform;
+import org.eclipse.core.runtime.Status;
+import org.eclipse.egit.core.op.DiscardChangesOperation;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.jface.dialogs.MessageDialog;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.ISelectionProvider;
 import org.eclipse.jface.viewers.IStructuredSelection;
@@ -86,6 +95,28 @@ public final class GitChangedFileMenuHook implements IStartup
     private static final String OBJ_ITEM_TEXT_COMMIT = "Открыть рабочий объект"; //$NON-NLS-1$
     private static final String ADD_TO_SET_CMD = "tormozit.git.addToObjectSet"; //$NON-NLS-1$
     private static final String ADD_TO_SET_MARKER = "tormozit.gitAddToObjectSetItem"; //$NON-NLS-1$
+
+    private static final String STAGING_ENTRY_CLASS = "org.eclipse.egit.ui.internal.staging.StagingEntry"; //$NON-NLS-1$
+    private static final String REPLACE_WITH_HEAD_ITEM_TEXT = "Заменить на HEAD-ревизию"; //$NON-NLS-1$
+    /**
+     * Состояния {@code StagingEntry.State}, для которых EGit-приватный
+     * {@code StagingView.getAvailableActions()} включает {@code REPLACE_WITH_HEAD_REVISION}
+     * (см. декомпилированный {@code StagingEntry$State}, {@code .tmp/bundles/egit-ui/}):
+     * файл существует в HEAD, поэтому его можно заменить на версию из HEAD. Для ADDED/
+     * UNTRACKED/MODIFIED_AND_ADDED/MISSING_AND_CHANGED в HEAD файла нет — там действие
+     * недоступно даже у самого EGit.
+     */
+    private static final java.util.Set<String> REPLACE_WITH_HEAD_STATES = java.util.Set.of(
+        "CHANGED", "REMOVED", "MISSING", "MODIFIED", "MODIFIED_AND_CHANGED", "CONFLICTING"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
+    /**
+     * Размер чанка для {@link DiscardChangesOperation} при больших выделениях.
+     * {@code execute()} держит правило планирования на всю операцию (один batched
+     * JGit checkout + один resource-refresh на все пути сразу, см. декомпилированный
+     * {@code .tmp/bundles/egit-core/DiscardChangesOperation.javap.txt}) — при тысячах
+     * файлов это ощущается как зависание всего окна на время удержания правила.
+     * Чанкинг ограничивает время одного удержания и делает отмену возможной.
+     */
+    private static final int REPLACE_WITH_HEAD_CHUNK_SIZE = 100;
 
     private static final String COMPARE_WITH_COMMIT_TEXT =
         "Сравнить рабочий каталог с коммитом"; //$NON-NLS-1$
@@ -733,6 +764,42 @@ public final class GitChangedFileMenuHook implements IStartup
                     }
                 }
 
+                // === Любое выделение: "Заменить на HEAD-ревизию" для совместимых файлов ===
+                // Штатный пункт EGit (StagingView$53.menuAboutToShow) добавляется только если
+                // действие доступно у ВСЕХ выделенных элементов (пересечение через retainAll,
+                // см. .tmp/bundles/egit-ui/StagingView.53.javap.txt) — при смешанном выделении
+                // пункт не появляется вовсе. Здесь — свой пункт, фильтрующий выделение сам.
+                List<IFile> headReplaceFiles = new ArrayList<>();
+                for (Object element : structured.toList())
+                {
+                    if (!STAGING_ENTRY_CLASS.equals(element.getClass().getName()))
+                        continue;
+                    Object state = Global.call(element, "getState"); //$NON-NLS-1$
+                    String stateName = state != null ? (String) Global.call(state, "name") : null; //$NON-NLS-1$
+                    if (stateName == null || !REPLACE_WITH_HEAD_STATES.contains(stateName))
+                        continue;
+                    IFile f = resolveFile(view, element);
+                    if (f != null)
+                        headReplaceFiles.add(f);
+                }
+                if (!headReplaceFiles.isEmpty())
+                {
+                    MenuItem replaceItem = new MenuItem(submenu, SWT.PUSH);
+                    replaceItem.setText(REPLACE_WITH_HEAD_ITEM_TEXT);
+                    replaceItem.setToolTipText(
+                        "Заменить содержимое выбранных файлов на состояние из HEAD (текущего коммита)"
+                            + Global.pluginSignForTooltip());
+                    replaceItem.addSelectionListener(new SelectionAdapter()
+                    {
+                        @Override
+                        public void widgetSelected(SelectionEvent ev)
+                        {
+                            replaceWithHeadRevision(headReplaceFiles, shell);
+                        }
+                    });
+                    addedItems.add(replaceItem);
+                }
+
                 // === Любое выделение: "Добавить в набор" ===
                 MenuItem addToSetItem = new MenuItem(submenu, SWT.PUSH);
                 // Определяем проект из первого подходящего элемента selection
@@ -814,6 +881,87 @@ public final class GitChangedFileMenuHook implements IStartup
                 });
             }
         };
+    }
+
+    // ========================================================================
+    // "Заменить на HEAD-ревизию" для частично совместимого выделения
+    // ========================================================================
+
+    private static void replaceWithHeadRevision(List<IFile> files, Shell shell)
+    {
+        if (files.isEmpty())
+            return;
+
+        String message = "Заменить содержимое " + files.size() + " файл(ов) на состояние из HEAD?\n"
+            + "Несохранённые изменения будут потеряны без возможности восстановления.";
+        if (files.size() > REPLACE_WITH_HEAD_CHUNK_SIZE)
+            message += "\nБольшое количество файлов — операция будет выполняться по частям "
+                + "и может занять продолжительное время.";
+
+        boolean confirmed = MessageDialog.openQuestion(shell, REPLACE_WITH_HEAD_ITEM_TEXT, message);
+        if (!confirmed)
+            return;
+
+        WorkspaceJob job = new WorkspaceJob(REPLACE_WITH_HEAD_ITEM_TEXT)
+        {
+            @Override
+            public IStatus runInWorkspace(IProgressMonitor monitor)
+            {
+                return discardInChunks(files, monitor);
+            }
+        };
+        job.setUser(true);
+        job.schedule();
+    }
+
+    /**
+     * Выполняет {@link DiscardChangesOperation} чанками по
+     * {@link #REPLACE_WITH_HEAD_CHUNK_SIZE} файлов вместо одного вызова на всё
+     * выделение — см. обоснование у {@link #REPLACE_WITH_HEAD_CHUNK_SIZE}.
+     * Отмена — по границе чанка (сам {@code DiscardChangesOperation.execute()}
+     * не проверяет {@code isCanceled()} внутри себя). Ошибка одного чанка не
+     * прерывает остальные: к моменту {@code CoreException} checkout чанка уже
+     * применён (падать может только последующий resource-refresh), поэтому
+     * прерывать необработанные файлы из-за сбоя в одном чанке не в пользу пользователя.
+     */
+    private static IStatus discardInChunks(List<IFile> files, IProgressMonitor monitor)
+    {
+        int total = files.size();
+        int chunkCount = (total + REPLACE_WITH_HEAD_CHUNK_SIZE - 1) / REPLACE_WITH_HEAD_CHUNK_SIZE;
+        monitor.beginTask(REPLACE_WITH_HEAD_ITEM_TEXT, chunkCount);
+
+        MultiStatus errors = new MultiStatus(Activator.PLUGIN_ID, IStatus.ERROR,
+            "Не удалось заменить некоторые файлы на HEAD-ревизию", null); //$NON-NLS-1$
+
+        try
+        {
+            for (int start = 0; start < total; start += REPLACE_WITH_HEAD_CHUNK_SIZE)
+            {
+                if (monitor.isCanceled())
+                    return Status.CANCEL_STATUS;
+
+                int end = Math.min(start + REPLACE_WITH_HEAD_CHUNK_SIZE, total);
+                monitor.subTask("Файлы " + (start + 1) + "–" + end + " из " + total); //$NON-NLS-1$
+
+                IResource[] chunkResources = files.subList(start, end).toArray(new IResource[0]);
+                try
+                {
+                    new DiscardChangesOperation(chunkResources, "HEAD").execute(monitor); //$NON-NLS-1$
+                }
+                catch (CoreException e)
+                {
+                    errors.add(e.getStatus());
+                }
+
+                monitor.worked(1);
+            }
+        }
+        finally
+        {
+            monitor.done();
+        }
+
+        return errors.isOK() ? Status.OK_STATUS : errors;
     }
 
     // ========================================================================

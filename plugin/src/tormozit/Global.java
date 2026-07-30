@@ -973,6 +973,23 @@ public final class Global
         return ComfortSettings.isDebugLogEnabled();
     }
 
+    /**
+     * Склоняет существительное после числительного (1 файл, 2 файла, 5 файлов).
+     * {@code one}/{@code few}/{@code many} — формы для 1/2-4/5+ (с учётом 11-14 → many).
+     */
+    public static String russianPlural(int n, String one, String few, String many)
+    {
+        int mod100 = Math.abs(n) % 100;
+        int mod10 = mod100 % 10;
+        if (mod100 >= 11 && mod100 <= 14)
+            return many;
+        if (mod10 == 1)
+            return one;
+        if (mod10 >= 2 && mod10 <= 4)
+            return few;
+        return many;
+    }
+
     public static void log(String message)
     {
         log(null, message);
