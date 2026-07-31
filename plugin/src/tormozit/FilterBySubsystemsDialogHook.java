@@ -1,5 +1,9 @@
 package tormozit;
 
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
+
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.core.runtime.Adapters;
@@ -11,14 +15,22 @@ import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.TreePath;
 import org.eclipse.jface.viewers.TreeSelection;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.events.MenuAdapter;
+import org.eclipse.swt.events.MenuEvent;
+import org.eclipse.swt.events.SelectionAdapter;
+import org.eclipse.swt.events.SelectionEvent;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
+import org.eclipse.swt.widgets.Menu;
+import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Monitor;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.swt.widgets.ToolBar;
+import org.eclipse.swt.widgets.ToolItem;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.IWorkbenchPage;
@@ -53,6 +65,10 @@ public final class FilterBySubsystemsDialogHook implements IStartup
     private static final int MIN_WIDTH = 400;
     private static final int MIN_HEIGHT = 300;
     private static final int MAX_PATCH_ATTEMPTS = 15;
+
+    private static final String COMFORT_TOOLBAR_KEY = "tormozit.filterBySubsystemsComfortToolbar"; //$NON-NLS-1$
+    private static final String MENU_SET_MARK = "Установить пометку с потомками"; //$NON-NLS-1$
+    private static final String MENU_CLEAR_MARK = "Снять пометку с потомками"; //$NON-NLS-1$
 
     @Override
     public void earlyStartup()
@@ -114,13 +130,20 @@ public final class FilterBySubsystemsDialogHook implements IStartup
             return false;
         }
 
-        CheckboxTreeViewer viewer = resolveViewer(dialog);
+        Object panel = Global.getField(dialog, "subsystemsPanel"); //$NON-NLS-1$
+        CheckboxTreeViewer viewer = resolveViewer(panel);
+        Global.tempLog("filter-subsystems", "patch attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+            + " shell=\"" + shell.getText() + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+            + " dialog=" + dialog.getClass().getName() //$NON-NLS-1$
+            + " panel=" + (panel == null ? "null" : panel.getClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$
+            + " viewer=" + (viewer == null ? "null" : "ok")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (viewer == null || viewer.getTree() == null || viewer.getTree().isDisposed())
         {
             FilterBySubsystemsDialogDebug.step("patch", "attempt=" + attempt + " viewer=null"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return false;
         }
 
+        installComfortToolbarActions(panel, viewer);
         expandNavigatorProject(viewer, attempt);
         return true;
     }
@@ -192,13 +215,214 @@ public final class FilterBySubsystemsDialogHook implements IStartup
             + " project=" + project.getName()); //$NON-NLS-1$
     }
 
-    private static CheckboxTreeViewer resolveViewer(Object dialog)
+    private static CheckboxTreeViewer resolveViewer(Object panel)
     {
-        Object panel = Global.getField(dialog, "subsystemsPanel"); //$NON-NLS-1$
         if (panel == null)
             return null;
         Object viewer = Global.getField(panel, "viewer"); //$NON-NLS-1$
         return viewer instanceof CheckboxTreeViewer checkboxTreeViewer ? checkboxTreeViewer : null;
+    }
+
+    private static void installComfortToolbarActions(Object panel, CheckboxTreeViewer viewer)
+    {
+        Object toolbarObj = Global.getField(panel, "toolBar"); //$NON-NLS-1$
+        Global.tempLog("filter-subsystems", "install: panel=" + panel.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+            + " toolbar=" + (toolbarObj == null ? "null" : toolbarObj.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
+        if (!(toolbarObj instanceof ToolBar toolbar) || toolbar.isDisposed())
+        {
+            Global.tempLog("filter-subsystems", "install: toolbar unusable, skip"); //$NON-NLS-1$
+            return;
+        }
+        if (Boolean.TRUE.equals(toolbar.getData(COMFORT_TOOLBAR_KEY)))
+        {
+            Global.tempLog("filter-subsystems", "install: marker already set, skip"); //$NON-NLS-1$
+            return;
+        }
+        Global.tempLog("filter-subsystems", "install: before items=" + toolbar.getItemCount() //$NON-NLS-1$ //$NON-NLS-2$
+            + " texts=" + itemTexts(toolbar)); //$NON-NLS-1$
+        toolbar.setData(COMFORT_TOOLBAR_KEY, Boolean.TRUE);
+
+        ToolItem comfortItem = new ToolItem(toolbar, SWT.DROP_DOWN);
+        comfortItem.setText("Комфорт"); //$NON-NLS-1$
+        comfortItem.setToolTipText(
+            "Пометка выделенной подсистемы вместе с подчинёнными" + Global.pluginSignForTooltip()); //$NON-NLS-1$
+        comfortItem.addSelectionListener(new SelectionAdapter()
+        {
+            @Override public void widgetSelected(SelectionEvent e)
+            {
+                showComfortMarkMenu(comfortItem, toolbar, panel, viewer);
+            }
+        });
+        Global.tempLog("filter-subsystems", "install: after items=" + toolbar.getItemCount() //$NON-NLS-1$ //$NON-NLS-2$
+            + " texts=" + itemTexts(toolbar) //$NON-NLS-1$
+            + " comfort=" + comfortItem.getBounds()); //$NON-NLS-1$
+        Global.tempLog("filter-subsystems", "install: toolbarChain=" + controlChain(toolbar)); //$NON-NLS-1$
+        Global.tempLog("filter-subsystems", "install: tree=" + controlChain(viewer.getTree())); //$NON-NLS-1$
+        Global.tempLog("filter-subsystems", "install: gap(toolbar->tree)=" //$NON-NLS-1$
+            + verticalGap(toolbar, viewer.getTree())); //$NON-NLS-1$
+        if (panel instanceof Composite panelComposite && !panelComposite.isDisposed())
+            panelComposite.layout(true, true);
+        Global.tempLog("filter-subsystems", "install: after-relayout toolbar=" + toolbar.getBounds() //$NON-NLS-1$ //$NON-NLS-2$
+            + " comfort=" + comfortItem.getBounds() //$NON-NLS-1$
+            + " gap(toolbar->tree)=" + verticalGap(toolbar, viewer.getTree())); //$NON-NLS-1$
+        FilterBySubsystemsDialogDebug.log("toolbar: добавлена кнопка «Комфорт»"); //$NON-NLS-1$
+    }
+
+    private static String itemTexts(ToolBar toolbar)
+    {
+        if (toolbar == null || toolbar.isDisposed())
+            return "[]"; //$NON-NLS-1$
+        List<String> texts = new ArrayList<>();
+        for (ToolItem item : toolbar.getItems())
+            texts.add(item.getText().isEmpty() ? "(icon)" : "\"" + item.getText() + "\""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        return texts.toString();
+    }
+
+    private static String controlChain(Control control)
+    {
+        StringBuilder sb = new StringBuilder();
+        Control c = control;
+        while (c != null && !c.isDisposed())
+        {
+            sb.append(c.getClass().getSimpleName())
+              .append("@").append(Integer.toHexString(System.identityHashCode(c)))
+              .append(c.getBounds());
+            if (c.getParent() != null)
+                sb.append(" -> ");
+            c = c.getParent();
+        }
+        return sb.append(" -> null").toString(); //$NON-NLS-1$
+    }
+
+    private static int verticalGap(Control top, Control bottom)
+    {
+        if (top == null || bottom == null || top.isDisposed() || bottom.isDisposed())
+            return Integer.MIN_VALUE;
+        Point topPos = top.toDisplay(0, 0);
+        Point bottomPos = bottom.toDisplay(0, 0);
+        return bottomPos.y - (topPos.y + top.getSize().y);
+    }
+
+    private static void showComfortMarkMenu(
+            ToolItem item, ToolBar toolbar, Object panel, CheckboxTreeViewer viewer)
+    {
+        if (viewer.getTree() == null || viewer.getTree().isDisposed())
+            return;
+
+        IStructuredSelection selection = viewer.getStructuredSelection();
+        boolean hasSelection = selection != null && !selection.isEmpty();
+
+        Menu menu = new Menu(toolbar.getShell(), SWT.POP_UP);
+
+        MenuItem setMark = ComfortSubmenuHelper.createSortedMenuItem(menu, SWT.PUSH, MENU_SET_MARK);
+        setMark.setToolTipText("Отметить выделенную подсистему и все её подчинённые подсистемы"); //$NON-NLS-1$
+        setMark.setEnabled(hasSelection);
+        setMark.addSelectionListener(new SelectionAdapter()
+        {
+            @Override public void widgetSelected(SelectionEvent e)
+            {
+                applySubtreeMark(panel, viewer, true);
+            }
+        });
+
+        MenuItem clearMark = ComfortSubmenuHelper.createSortedMenuItem(menu, SWT.PUSH, MENU_CLEAR_MARK);
+        clearMark.setToolTipText("Снять отметку с выделенной подсистемы и всех её подчинённых подсистем"); //$NON-NLS-1$
+        clearMark.setEnabled(hasSelection);
+        clearMark.addSelectionListener(new SelectionAdapter()
+        {
+            @Override public void widgetSelected(SelectionEvent e)
+            {
+                applySubtreeMark(panel, viewer, false);
+            }
+        });
+
+        Rectangle bounds = item.getBounds();
+        Point location = toolbar.toDisplay(bounds.x, bounds.y + bounds.height);
+        menu.setLocation(location);
+        menu.setVisible(true);
+        menu.addMenuListener(new MenuAdapter()
+        {
+            @Override public void menuHidden(MenuEvent e)
+            {
+                toolbar.getDisplay().asyncExec(menu::dispose);
+            }
+        });
+    }
+
+    private static void applySubtreeMark(Object panel, CheckboxTreeViewer viewer, boolean checked)
+    {
+        IStructuredSelection selection = viewer.getStructuredSelection();
+        if (selection == null || selection.isEmpty())
+            return;
+        if (!(viewer.getContentProvider() instanceof ITreeContentProvider provider))
+            return;
+
+        List<Object> nodes = new ArrayList<>();
+        try
+        {
+            for (Object element : selection.toList())
+                collectSubtree(provider, element, nodes);
+        }
+        catch (RuntimeException ex)
+        {
+            FilterBySubsystemsDialogDebug.step("mark", "collect failed: " + ex); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        if (nodes.isEmpty())
+            return;
+
+        for (Object node : nodes)
+        {
+            try
+            {
+                viewer.setGrayed(node, false);
+                if (checked)
+                    Global.invokeVoid(panel, "setNodeChecked", node); //$NON-NLS-1$
+                else
+                    Global.invokeVoid(panel, "setNodeUnchecked", node); //$NON-NLS-1$
+                syncCheckedStateSets(panel, node, checked);
+            }
+            catch (RuntimeException ex)
+            {
+                FilterBySubsystemsDialogDebug.step("mark", "node failed: " + ex); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+        Global.invokeVoid(panel, "changeActionEnable"); //$NON-NLS-1$
+        FilterBySubsystemsDialogDebug.step("mark",
+            (checked ? "set" : "clear") + " nodes=" + nodes.size()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    private static void collectSubtree(ITreeContentProvider provider, Object element, List<Object> result)
+    {
+        if (element == null)
+            return;
+        result.add(element);
+        Object[] children = provider.getChildren(element);
+        if (children == null)
+            return;
+        for (Object child : children)
+            collectSubtree(provider, child, result);
+    }
+
+    @SuppressWarnings({ "rawtypes", "unchecked" })
+    private static void syncCheckedStateSets(Object panel, Object element, boolean checked)
+    {
+        Object checkedField = Global.getField(panel, "checkedElements"); //$NON-NLS-1$
+        Object grayedField = Global.getField(panel, "grayedElements"); //$NON-NLS-1$
+        if (!(checkedField instanceof Set) || !(grayedField instanceof Set))
+            return;
+        Set checkedSet = (Set) checkedField;
+        Set grayedSet = (Set) grayedField;
+        if (checked)
+        {
+            checkedSet.add(element);
+            grayedSet.remove(element);
+        }
+        else
+        {
+            checkedSet.remove(element);
+            grayedSet.remove(element);
+        }
     }
 
     private static Object findProjectElement(Object[] roots, IProject target)
