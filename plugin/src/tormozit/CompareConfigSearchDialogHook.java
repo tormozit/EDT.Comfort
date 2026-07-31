@@ -13,6 +13,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.ForkJoinPool;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.IntConsumer;
 import java.util.function.IntSupplier;
 
 import org.eclipse.core.runtime.IProgressMonitor;
@@ -231,6 +232,7 @@ public class CompareConfigSearchDialogHook
         });
         shell.setData(SESSION_KEY, session);
         shell.addListener(SWT.Close, event -> session.onShellClose());
+        session.ensurePrefetch();
 
         interceptButton(btnNext, dialog, cbSearchAllRows, session, false, cbSearchAllColumns, cbWholeWord);
         interceptButton(btnPrev, dialog, cbSearchAllRows, session, true, cbSearchAllColumns, cbWholeWord);
@@ -619,6 +621,8 @@ public class CompareConfigSearchDialogHook
     /**
      * Параллельный сбор всех узлов дерева сравнения через общую очередь BFS-обхода.
      * Корень один — воркеры делят между собой узлы из очереди, а не «по корням».
+     *
+     * @param progressPercent грубая оценка % по формуле processed/(processed+queue+inFlight); может быть {@code null}
      */
     private static CollectTreeResult collectTreeItems(
         Object[] roots,
@@ -629,18 +633,28 @@ public class CompareConfigSearchDialogHook
         IProgressMonitor monitor,
         AtomicInteger collectedCounter,
         AtomicInteger processedCounter,
-        AtomicInteger activeCollectThreads)
+        AtomicInteger activeCollectThreads,
+        AtomicInteger progressPercent)
     {
         if (roots == null || roots.length == 0)
+        {
+            if (progressPercent != null)
+                progressPercent.set(100);
             return new CollectTreeResult(new ArrayList<>(), false);
+        }
+
+        if (progressPercent != null)
+            progressPercent.set(0);
 
         List<Object> items = Collections.synchronizedList(new ArrayList<>());
         ConcurrentLinkedQueue<Object> queue = new ConcurrentLinkedQueue<>();
+        AtomicInteger queueSize = new AtomicInteger(0);
         for (Object root : roots)
         {
             items.add(root);
             collectedCounter.incrementAndGet();
             queue.offer(root);
+            queueSize.incrementAndGet();
         }
 
         int parallelism = Math.max(1, Math.min(COLLECT_PARALLEL_THREADS,
@@ -659,8 +673,9 @@ public class CompareConfigSearchDialogHook
                     activeCollectThreads.incrementAndGet();
                     try
                     {
-                        collectTreeWorker(queue, items, provider, viewer, generation, activeGeneration,
-                            monitor, collectedCounter, processedCounter, cancelled, inFlight);
+                        collectTreeWorker(queue, queueSize, items, provider, viewer, generation,
+                            activeGeneration, monitor, collectedCounter, processedCounter, cancelled,
+                            inFlight, progressPercent);
                     }
                     finally
                     {
@@ -676,11 +691,39 @@ public class CompareConfigSearchDialogHook
             pool.shutdown();
         }
 
+        if (progressPercent != null && !cancelled.get())
+            progressPercent.set(100);
+
         return new CollectTreeResult(new ArrayList<>(items), cancelled.get());
+    }
+
+    /** Грубая оценка прогресса BFS: processed / (processed + очередь + inFlight). */
+    private static void publishCollectPercent(
+        AtomicInteger progressPercent,
+        AtomicInteger processedCounter,
+        AtomicInteger queueSize,
+        AtomicInteger inFlight)
+    {
+        if (progressPercent == null)
+            return;
+        int done = processedCounter.get();
+        int rem = queueSize.get() + inFlight.get();
+        if (done <= 0 && rem <= 0)
+        {
+            progressPercent.set(0);
+            return;
+        }
+        if (rem <= 0)
+        {
+            progressPercent.set(100);
+            return;
+        }
+        progressPercent.set((int)Math.min(99L, done * 100L / (done + rem)));
     }
 
     private static void collectTreeWorker(
         ConcurrentLinkedQueue<Object> queue,
+        AtomicInteger queueSize,
         List<Object> items,
         ITreeContentProvider provider,
         AbstractTreeViewer viewer,
@@ -690,7 +733,8 @@ public class CompareConfigSearchDialogHook
         AtomicInteger collectedCounter,
         AtomicInteger processedCounter,
         AtomicBoolean cancelled,
-        AtomicInteger inFlight)
+        AtomicInteger inFlight,
+        AtomicInteger progressPercent)
     {
         CollectProgress progress = new CollectProgress(generation, activeGeneration, monitor,
             collectedCounter::incrementAndGet, processedCounter::incrementAndGet);
@@ -706,6 +750,7 @@ public class CompareConfigSearchDialogHook
                 if (++idleYields >= COLLECT_QUEUE_IDLE_YIELDS)
                 {
                     idleYields = 0;
+                    publishCollectPercent(progressPercent, processedCounter, queueSize, inFlight);
                     if (generation != activeGeneration.getAsInt()
                         || (monitor != null && monitor.isCanceled()))
                     {
@@ -717,6 +762,7 @@ public class CompareConfigSearchDialogHook
                 continue;
             }
 
+            queueSize.decrementAndGet();
             idleYields = 0;
             inFlight.incrementAndGet();
             try
@@ -738,13 +784,358 @@ public class CompareConfigSearchDialogHook
                         progress.nodeAdded();
                     }
                     queue.offer(child);
+                    queueSize.incrementAndGet();
+                    if ((processedCounter.get() & 63) == 0)
+                        publishCollectPercent(progressPercent, processedCounter, queueSize, inFlight);
                 }
             }
             finally
             {
                 inFlight.decrementAndGet();
+                publishCollectPercent(progressPercent, processedCounter, queueSize, inFlight);
             }
         }
+    }
+
+    private static final class StreamSearchResult
+    {
+        final Object match;
+        final boolean cancelled;
+        final int scanned;
+
+        StreamSearchResult(Object match, boolean cancelled, int scanned)
+        {
+            this.match = match;
+            this.cancelled = cancelled;
+            this.scanned = scanned;
+        }
+    }
+
+    @FunctionalInterface
+    private interface StreamNodeVisitor
+    {
+        /** @return {@code false} — остановить обход */
+        boolean visit(Object node, boolean isCandidate);
+    }
+
+    /**
+     * DFS pre-order: корни всегда кандидаты (как в {@link #collectTreeItems});
+     * потомки — только при {@link #isNodeMatchFilters}, но вглубь идём всегда.
+     */
+    private static boolean dfsStreamNodes(
+        Object[] roots,
+        ITreeContentProvider provider,
+        AbstractTreeViewer viewer,
+        StreamNodeVisitor visitor)
+    {
+        if (roots == null)
+            return true;
+        for (Object root : roots)
+        {
+            if (!visitor.visit(root, true))
+                return false;
+            if (!dfsStreamChildren(root, provider, viewer, visitor))
+                return false;
+        }
+        return true;
+    }
+
+    private static boolean dfsStreamChildren(
+        Object parent,
+        ITreeContentProvider provider,
+        AbstractTreeViewer viewer,
+        StreamNodeVisitor visitor)
+    {
+        Object[] children = getChildrenSafe(provider, parent);
+        if (children == null)
+            return true;
+        for (Object child : children)
+        {
+            boolean candidate = isNodeMatchFilters(child, viewer);
+            if (!visitor.visit(child, candidate))
+                return false;
+            if (!dfsStreamChildren(child, provider, viewer, visitor))
+                return false;
+        }
+        return true;
+    }
+
+    /**
+     * Пошаговый поиск без полного индекса: isMatched на лету, стоп на первом hit.
+     * Порядок — DFS pre-order; от selection вперёд/назад с wrap (как скан списка).
+     */
+    private static StreamSearchResult streamSearchFirstMatch(
+        Object[] roots,
+        ITreeContentProvider provider,
+        AbstractTreeViewer viewer,
+        Object selection,
+        boolean backward,
+        String query,
+        boolean caseSensitive,
+        IBaseLabelProvider labelProvider,
+        boolean searchAllColumns,
+        boolean wholeWord,
+        int generation,
+        IntSupplier activeGeneration,
+        IProgressMonitor monitor,
+        IntConsumer onScanned)
+    {
+        if (backward)
+        {
+            return streamSearchBackward(roots, provider, viewer, selection, query, caseSensitive,
+                labelProvider, searchAllColumns, wholeWord, generation, activeGeneration, monitor,
+                onScanned);
+        }
+        return streamSearchForward(roots, provider, viewer, selection, query, caseSensitive,
+            labelProvider, searchAllColumns, wholeWord, generation, activeGeneration, monitor,
+            onScanned);
+    }
+
+    private static boolean streamCancelled(
+        int generation,
+        IntSupplier activeGeneration,
+        IProgressMonitor monitor)
+    {
+        return generation != activeGeneration.getAsInt()
+            || (monitor != null && monitor.isCanceled());
+    }
+
+    private static StreamSearchResult streamSearchForward(
+        Object[] roots,
+        ITreeContentProvider provider,
+        AbstractTreeViewer viewer,
+        Object selection,
+        String query,
+        boolean caseSensitive,
+        IBaseLabelProvider labelProvider,
+        boolean searchAllColumns,
+        boolean wholeWord,
+        int generation,
+        IntSupplier activeGeneration,
+        IProgressMonitor monitor,
+        IntConsumer onScanned)
+    {
+        final Object[] found = { null };
+        final boolean[] cancelled = { false };
+        final int[] scanned = { 0 };
+        final boolean[] pastSelection = { selection == null };
+        final boolean[] sawSelection = { selection == null };
+
+        StreamNodeVisitor afterSelection = (node, candidate) ->
+        {
+            if (streamCancelled(generation, activeGeneration, monitor))
+            {
+                cancelled[0] = true;
+                return false;
+            }
+            if (!pastSelection[0])
+            {
+                if (Objects.equals(node, selection))
+                {
+                    pastSelection[0] = true;
+                    sawSelection[0] = true;
+                }
+                return true;
+            }
+            if (!candidate)
+                return true;
+            scanned[0]++;
+            if (onScanned != null)
+                onScanned.accept(scanned[0]);
+            if (isMatched(node, query, caseSensitive, labelProvider, searchAllColumns, wholeWord))
+            {
+                found[0] = node;
+                return false;
+            }
+            return true;
+        };
+
+        if (!dfsStreamNodes(roots, provider, viewer, afterSelection))
+        {
+            if (cancelled[0])
+                return new StreamSearchResult(null, true, scanned[0]);
+            if (found[0] != null)
+                return new StreamSearchResult(found[0], false, scanned[0]);
+        }
+
+        if (cancelled[0])
+            return new StreamSearchResult(null, true, scanned[0]);
+
+        // selection не в дереве — ищем с начала (как startIdx == -1)
+        if (!sawSelection[0])
+        {
+            StreamNodeVisitor fromStart = (node, candidate) ->
+            {
+                if (streamCancelled(generation, activeGeneration, monitor))
+                {
+                    cancelled[0] = true;
+                    return false;
+                }
+                if (!candidate)
+                    return true;
+                scanned[0]++;
+                if (onScanned != null)
+                    onScanned.accept(scanned[0]);
+                if (isMatched(node, query, caseSensitive, labelProvider, searchAllColumns, wholeWord))
+                {
+                    found[0] = node;
+                    return false;
+                }
+                return true;
+            };
+            dfsStreamNodes(roots, provider, viewer, fromStart);
+            return new StreamSearchResult(found[0], cancelled[0], scanned[0]);
+        }
+
+        // wrap: с начала до selection (не включая)
+        if (selection != null && found[0] == null)
+        {
+            StreamNodeVisitor wrap = (node, candidate) ->
+            {
+                if (streamCancelled(generation, activeGeneration, monitor))
+                {
+                    cancelled[0] = true;
+                    return false;
+                }
+                if (Objects.equals(node, selection))
+                    return false;
+                if (!candidate)
+                    return true;
+                scanned[0]++;
+                if (onScanned != null)
+                    onScanned.accept(scanned[0]);
+                if (isMatched(node, query, caseSensitive, labelProvider, searchAllColumns, wholeWord))
+                {
+                    found[0] = node;
+                    return false;
+                }
+                return true;
+            };
+            dfsStreamNodes(roots, provider, viewer, wrap);
+        }
+
+        if (cancelled[0])
+            return new StreamSearchResult(null, true, scanned[0]);
+
+        // последний шаг модульного скана — сама selection
+        if (found[0] == null && selection != null
+            && isMatched(selection, query, caseSensitive, labelProvider, searchAllColumns, wholeWord))
+        {
+            boolean selectionCandidate = true;
+            boolean isRoot = false;
+            if (roots != null)
+            {
+                for (Object root : roots)
+                {
+                    if (Objects.equals(root, selection))
+                    {
+                        isRoot = true;
+                        break;
+                    }
+                }
+            }
+            if (!isRoot)
+                selectionCandidate = isNodeMatchFilters(selection, viewer);
+            if (selectionCandidate)
+                found[0] = selection;
+        }
+
+        return new StreamSearchResult(found[0], false, scanned[0]);
+    }
+
+    private static StreamSearchResult streamSearchBackward(
+        Object[] roots,
+        ITreeContentProvider provider,
+        AbstractTreeViewer viewer,
+        Object selection,
+        String query,
+        boolean caseSensitive,
+        IBaseLabelProvider labelProvider,
+        boolean searchAllColumns,
+        boolean wholeWord,
+        int generation,
+        IntSupplier activeGeneration,
+        IProgressMonitor monitor,
+        IntConsumer onScanned)
+    {
+        final Object[] lastBefore = { null };
+        final Object[] lastAfter = { null };
+        final boolean[] cancelled = { false };
+        final int[] scanned = { 0 };
+        final boolean[] pastSelection = { selection == null };
+        final boolean[] sawSelection = { selection == null };
+
+        StreamNodeVisitor visitor = (node, candidate) ->
+        {
+            if (streamCancelled(generation, activeGeneration, monitor))
+            {
+                cancelled[0] = true;
+                return false;
+            }
+            if (!pastSelection[0])
+            {
+                if (Objects.equals(node, selection))
+                {
+                    pastSelection[0] = true;
+                    sawSelection[0] = true;
+                    return true;
+                }
+                if (candidate)
+                {
+                    scanned[0]++;
+                    if (onScanned != null)
+                        onScanned.accept(scanned[0]);
+                    if (isMatched(node, query, caseSensitive, labelProvider, searchAllColumns, wholeWord))
+                        lastBefore[0] = node;
+                }
+                return true;
+            }
+            if (candidate)
+            {
+                scanned[0]++;
+                if (onScanned != null)
+                    onScanned.accept(scanned[0]);
+                if (isMatched(node, query, caseSensitive, labelProvider, searchAllColumns, wholeWord))
+                    lastAfter[0] = node;
+            }
+            return true;
+        };
+
+        dfsStreamNodes(roots, provider, viewer, visitor);
+
+        if (cancelled[0])
+            return new StreamSearchResult(null, true, scanned[0]);
+
+        Object match;
+        if (!sawSelection[0] || selection == null)
+        {
+            // нет selection / не в дереве: последний hit в дереве
+            match = lastBefore[0] != null ? lastBefore[0] : lastAfter[0];
+        }
+        else if (lastBefore[0] != null)
+            match = lastBefore[0];
+        else if (lastAfter[0] != null)
+            match = lastAfter[0];
+        else if (isMatched(selection, query, caseSensitive, labelProvider, searchAllColumns, wholeWord))
+        {
+            boolean isRoot = false;
+            if (roots != null)
+            {
+                for (Object root : roots)
+                {
+                    if (Objects.equals(root, selection))
+                    {
+                        isRoot = true;
+                        break;
+                    }
+                }
+            }
+            match = (isRoot || isNodeMatchFilters(selection, viewer)) ? selection : null;
+        }
+        else
+            match = null;
+
+        return new StreamSearchResult(match, false, scanned[0]);
     }
 
     private static boolean isMatched(Object element, String query, boolean caseSensitive,
@@ -1003,16 +1394,19 @@ public class CompareConfigSearchDialogHook
         catch (Exception ignored) {}
     }
 
-    /** Компактная строка прогресса сбора — диалог не запоминает ширину. */
-    private static String formatCollectProgressStatus(int collected, int processed, int threads)
+    /** Компактная строка прогресса сбора — грубый % по фронту BFS. */
+    private static String formatCollectProgressStatus(int percent)
     {
-        return "Сбор узлов… " + collected + "/" + processed + " (" + threads + " потоков)"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        return "Сбор узлов… ~" + Math.max(0, Math.min(100, percent)) + "%"; //$NON-NLS-1$ //$NON-NLS-2$
     }
 
-    /** Компактная строка прогресса фильтрации. */
+    /** Компактная строка прогресса поиска/фильтрации. */
     private static String formatSearchProgressStatus(int scanned, int total)
     {
-        return total > 0 ? "Поиск… " + scanned + "/" + total : "Поиск…"; //$NON-NLS-1$ //$NON-NLS-2$
+        if (total <= 0)
+            return "Поиск…"; //$NON-NLS-1$
+        int percent = (int)Math.min(100L, Math.max(0L, scanned * 100L / total));
+        return "Поиск… ~" + percent + "%"; //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static IEditorPart getEditorFromDialog(Object dialog)
@@ -1229,6 +1623,7 @@ public class CompareConfigSearchDialogHook
 
         private volatile Job activeJob;
         private volatile Job findAllJob;
+        private volatile Job prefetchJob;
         private volatile int scanned;
         private volatile int total;
         private final AtomicInteger collected = new AtomicInteger();
@@ -1238,6 +1633,16 @@ public class CompareConfigSearchDialogHook
         private volatile boolean running;
         private volatile boolean searchError;
         private int activeGeneration;
+        private volatile int prefetchGeneration;
+        private volatile Object prefetchInput;
+        private volatile int prefetchFilterHash;
+        private final AtomicInteger prefetchCollected = new AtomicInteger();
+        private final AtomicInteger prefetchProcessed = new AtomicInteger();
+        private final AtomicInteger prefetchThreads = new AtomicInteger();
+        private final AtomicInteger prefetchProgressPercent = new AtomicInteger();
+        private final AtomicInteger collectProgressPercent = new AtomicInteger();
+        /** UI прогресса: ждём prefetch Job, а не свой collect. */
+        private volatile boolean reportPrefetchProgress;
         private Runnable progressTick;
 
         private IEditorPart editorPart;
@@ -1294,6 +1699,7 @@ public class CompareConfigSearchDialogHook
         void onShellClose()
         {
             cancel();
+            cancelPrefetch();
         }
 
         void cancel()
@@ -1312,7 +1718,19 @@ public class CompareConfigSearchDialogHook
                 running = false;
                 activeGeneration++;
             }
+            reportPrefetchProgress = false;
             restoreSearchButtons();
+        }
+
+        private void cancelPrefetch()
+        {
+            prefetchGeneration++;
+            Job job = prefetchJob;
+            prefetchJob = null;
+            prefetchInput = null;
+            prefetchFilterHash = 0;
+            if (job != null)
+                job.cancel();
         }
 
         private void invalidateCache()
@@ -1327,6 +1745,23 @@ public class CompareConfigSearchDialogHook
             return cachedItems != null && cachedInput == input && cachedFilterHash == filterHash;
         }
 
+        private boolean tryAdoptEditorCache(Object input, int filterHash)
+        {
+            if (isCacheValid(input, filterHash))
+                return true;
+            if (editorPart == null)
+                return false;
+            SearchCache cached = searchCacheByEditor.get(editorPart);
+            if (cached != null && cached.input == input && cached.filterHash == filterHash)
+            {
+                cachedInput = cached.input;
+                cachedFilterHash = cached.filterHash;
+                cachedItems = cached.items;
+                return true;
+            }
+            return false;
+        }
+
         private void saveCache(Object input, int filterHash, List<Object> items)
         {
             cachedInput = input;
@@ -1334,6 +1769,150 @@ public class CompareConfigSearchDialogHook
             cachedItems = items;
             if (editorPart != null)
                 searchCacheByEditor.put(editorPart, new SearchCache(items, input, filterHash));
+        }
+
+        /**
+         * Фоновая сборка кэша узлов при открытии «Найти», чтобы Next/Prev не ждали полный collect.
+         */
+        void ensurePrefetch()
+        {
+            if (editorPart == null)
+                return;
+            AbstractTreeViewer viewer = getTreeViewerFromEditor(editorPart);
+            if (viewer == null)
+                return;
+            IContentProvider cp = viewer.getContentProvider();
+            if (!(cp instanceof ITreeContentProvider))
+                return;
+            ITreeContentProvider provider = (ITreeContentProvider)cp;
+            Object input = viewer.getInput();
+            if (input == null)
+                return;
+            int filterHash = computeTreeCacheKey(viewer, input);
+
+            if (tryAdoptEditorCache(input, filterHash))
+                return;
+
+            Job existing = prefetchJob;
+            if (existing != null && existing.getState() != Job.NONE
+                && prefetchInput == input && prefetchFilterHash == filterHash)
+            {
+                return;
+            }
+            if (existing != null)
+                cancelPrefetch();
+
+            prefetchInput = input;
+            prefetchFilterHash = filterHash;
+            prefetchGeneration++;
+            final int generation = prefetchGeneration;
+            final AbstractTreeViewer treeViewer = viewer;
+            final ITreeContentProvider treeProvider = provider;
+
+            prefetchCollected.set(0);
+            prefetchProcessed.set(0);
+            prefetchThreads.set(0);
+            prefetchProgressPercent.set(0);
+
+            Job job = new Job("Индексация дерева сравнения...") //$NON-NLS-1$
+            {
+                @Override
+                protected IStatus run(IProgressMonitor monitor)
+                {
+                    try
+                    {
+                        if (generation != prefetchGeneration)
+                            return Status.CANCEL_STATUS;
+
+                        Object[] roots = treeProvider.getElements(input);
+                        CollectTreeResult collectResult = collectTreeItems(roots, treeProvider, treeViewer,
+                            generation, () -> prefetchGeneration, monitor, prefetchCollected,
+                            prefetchProcessed, prefetchThreads, prefetchProgressPercent);
+                        if (collectResult.cancelled || generation != prefetchGeneration)
+                            return Status.CANCEL_STATUS;
+
+                        List<Object> items = collectResult.items;
+                        Display display = Display.getDefault();
+                        if (display == null || display.isDisposed())
+                            return Status.CANCEL_STATUS;
+
+                        boolean[] saved = { false };
+                        display.syncExec(() ->
+                        {
+                            if (generation != prefetchGeneration || shell.isDisposed())
+                                return;
+                            AbstractTreeViewer current = getTreeViewerFromEditor(editorPart);
+                            if (current == null)
+                                return;
+                            Object currentInput = current.getInput();
+                            int currentHash = computeTreeCacheKey(current, currentInput);
+                            if (currentInput != input || currentHash != filterHash)
+                                return;
+                            saveCache(input, filterHash, items);
+                            saved[0] = true;
+                        });
+
+                        if (saved[0])
+                            Global.log("CompareSearch", "prefetch cached " + items.size() + " items"); //$NON-NLS-1$ //$NON-NLS-2$
+                        return saved[0] ? Status.OK_STATUS : Status.CANCEL_STATUS;
+                    }
+                    catch (Throwable t)
+                    {
+                        Global.logError("CompareSearch", "prefetch error", t); //$NON-NLS-1$
+                        return Status.CANCEL_STATUS;
+                    }
+                    finally
+                    {
+                        if (prefetchJob == this)
+                            prefetchJob = null;
+                    }
+                }
+            };
+            prefetchJob = job;
+            job.setSystem(true);
+            job.setPriority(Job.DECORATE);
+            job.schedule();
+            Global.log("CompareSearch", "prefetch started"); //$NON-NLS-1$
+        }
+
+        /**
+         * Дождаться prefetch (если идёт) и подтянуть кэш. {@code false} — кэша нет, нужен свой collect.
+         */
+        private boolean awaitPrefetchAndAdopt(Object input, int filterHash, int generation,
+            IProgressMonitor monitor)
+        {
+            if (tryAdoptEditorCache(input, filterHash))
+                return true;
+
+            Job pf = prefetchJob;
+            if (pf == null)
+                return tryAdoptEditorCache(input, filterHash);
+
+            if (prefetchInput != input || prefetchFilterHash != filterHash)
+                return tryAdoptEditorCache(input, filterHash);
+
+            reportPrefetchProgress = true;
+            try
+            {
+                while (pf.getState() != Job.NONE)
+                {
+                    if (generation != activeGeneration
+                        || (monitor != null && monitor.isCanceled()))
+                        return false;
+                    pf.join(100, null);
+                }
+            }
+            catch (InterruptedException e)
+            {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+            finally
+            {
+                reportPrefetchProgress = false;
+            }
+
+            return tryAdoptEditorCache(input, filterHash);
         }
 
         void startSearch(boolean backward, boolean searchAllColumns, boolean wholeWord)
@@ -1367,25 +1946,13 @@ public class CompareConfigSearchDialogHook
             ISelection sel = viewer.getSelection();
             Object input = viewer.getInput();
             int filterHash = computeTreeCacheKey(viewer, input);
-            boolean cacheHit = isCacheValid(input, filterHash);
-
-            if (!cacheHit && editorPart != null)
-            {
-                SearchCache cached = searchCacheByEditor.get(editorPart);
-                if (cached != null && cached.input == input && cached.filterHash == filterHash)
-                {
-                    cachedInput = cached.input;
-                    cachedFilterHash = cached.filterHash;
-                    cachedItems = cached.items;
-                    cacheHit = true;
-                }
-            }
+            boolean cacheHit = tryAdoptEditorCache(input, filterHash);
 
             final boolean hasCachedItems = cacheHit;
 
             final int generation = activeGeneration;
             running = true;
-            collecting = !hasCachedItems;
+            collecting = false;
             searchError = false;
             scanned = 0;
             total = hasCachedItems ? cachedItems.size() : 0;
@@ -1400,6 +1967,10 @@ public class CompareConfigSearchDialogHook
                     + " allColumns=" + searchAllColumns + " wholeWord=" + wholeWord //$NON-NLS-1$ //$NON-NLS-2$
                     + " cacheHit=" + cacheHit); //$NON-NLS-1$
 
+            Object selectionElement = (sel instanceof IStructuredSelection && !sel.isEmpty())
+                ? ((IStructuredSelection)sel).getFirstElement()
+                : null;
+
             Job job = new Job("Поиск по дереву сравнения...") //$NON-NLS-1$
             {
                 @Override
@@ -1410,87 +1981,97 @@ public class CompareConfigSearchDialogHook
                         if (generation != activeGeneration)
                             return Status.CANCEL_STATUS;
 
-                        List<Object> items;
                         if (hasCachedItems)
                         {
-                            items = cachedItems;
-                        }
-                        else
-                        {
-                            long t0 = System.currentTimeMillis();
+                            List<Object> items = cachedItems;
+                            int n = items.size();
+                            total = n;
+                            scanned = 0;
 
-                            Object[] roots = provider.getElements(input);
-                            CollectTreeResult collectResult = collectTreeItems(roots, provider, viewer,
-                                generation, () -> activeGeneration, monitor, collected, totalProcessed,
-                                activeSearchThreads);
-                            items = collectResult.items;
-                            if (collectResult.cancelled)
-                                return finishCancelled(generation);
-
-                            long collectMs = System.currentTimeMillis() - t0;
-
-                            Global.log("CompareSearch", "collected " + items.size() + " items in " + collectMs + "ms"); //$NON-NLS-1$ //$NON-NLS-2$
-
-                            saveCache(input, filterHash, items);
-                            collecting = false;
-                        }
-
-                        int n = items.size();
-                        total = n;
-                        scanned = 0;
-
-                        if (n <= 0)
-                        {
-                            finishOnUi(generation, false, false);
-                            return Status.OK_STATUS;
-                        }
-
-                        int startIdx = (sel instanceof IStructuredSelection && !sel.isEmpty())
-                            ? items.indexOf(((IStructuredSelection) sel).getFirstElement())
-                            : -1;
-
-                        monitor.beginTask("Поиск по дереву сравнения...", n); //$NON-NLS-1$
-
-                        for (int i = 1; i <= n; i++)
-                        {
-                            if (monitor.isCanceled() || generation != activeGeneration)
-                                return finishCancelled(generation);
-
-                            int idx = backward
-                                ? Math.floorMod(startIdx - i, n)
-                                : (startIdx + i) % n;
-                            Object candidate = items.get(idx);
-
-                            if (isMatched(candidate, effectiveQuery, caseSensitive, labelProvider,
-                                    searchAllColumns, wholeWord))
+                            if (n <= 0)
                             {
-                                Object found = candidate;
-                                Display.getDefault().asyncExec(() ->
-                                {
-                                    if (generation != activeGeneration || textFilter.isDisposed())
-                                        return;
-                                    viewer.setSelection(new StructuredSelection(found), true);
-                                    finishOnUi(generation, false, true);
-                                });
-
-                                Global.log("CompareSearch", "found at i=" + i + " idx=" + idx); //$NON-NLS-1$ //$NON-NLS-2$
-
-                                monitor.done();
+                                finishOnUi(generation, false, false);
                                 return Status.OK_STATUS;
                             }
 
-                            scanned = i;
+                            int startIdx = selectionElement != null
+                                ? items.indexOf(selectionElement)
+                                : -1;
 
-                            if (i % 500 == 0)
-                                Global.log("CompareSearch", "progress " + i + "/" + n); //$NON-NLS-1$ //$NON-NLS-2$
+                            monitor.beginTask("Поиск по дереву сравнения...", n); //$NON-NLS-1$
 
-                            monitor.worked(1);
+                            for (int i = 1; i <= n; i++)
+                            {
+                                if (monitor.isCanceled() || generation != activeGeneration)
+                                    return finishCancelled(generation);
+
+                                int idx = backward
+                                    ? Math.floorMod(startIdx - i, n)
+                                    : (startIdx + i) % n;
+                                Object candidate = items.get(idx);
+
+                                if (isMatched(candidate, effectiveQuery, caseSensitive, labelProvider,
+                                        searchAllColumns, wholeWord))
+                                {
+                                    Object found = candidate;
+                                    Display.getDefault().asyncExec(() ->
+                                    {
+                                        if (generation != activeGeneration || textFilter.isDisposed())
+                                            return;
+                                        viewer.setSelection(new StructuredSelection(found), true);
+                                        finishOnUi(generation, false, true);
+                                    });
+
+                                    Global.log("CompareSearch", "found at i=" + i + " idx=" + idx); //$NON-NLS-1$ //$NON-NLS-2$
+
+                                    monitor.done();
+                                    return Status.OK_STATUS;
+                                }
+
+                                scanned = i;
+
+                                if (i % 500 == 0)
+                                    Global.log("CompareSearch", "progress " + i + "/" + n); //$NON-NLS-1$ //$NON-NLS-2$
+
+                                monitor.worked(1);
+                            }
+
+                            Global.log("CompareSearch", "no match after " + n + " items"); //$NON-NLS-1$
+
+                            finishOnUi(generation, false, false);
+                            monitor.done();
+                            return Status.OK_STATUS;
                         }
 
-                        Global.log("CompareSearch", "no match after " + n + " items"); //$NON-NLS-1$
+                        // Cache miss: streaming, без второго collect (prefetch достроит кэш сам)
+                        Object[] roots = provider.getElements(input);
+                        Global.log("CompareSearch", "stream search (cache miss)"); //$NON-NLS-1$
 
+                        StreamSearchResult streamResult = streamSearchFirstMatch(
+                            roots, provider, viewer, selectionElement, backward,
+                            effectiveQuery, caseSensitive, labelProvider, searchAllColumns, wholeWord,
+                            generation, () -> activeGeneration, monitor, v -> scanned = v);
+
+                        scanned = streamResult.scanned;
+                        if (streamResult.cancelled || generation != activeGeneration)
+                            return finishCancelled(generation);
+
+                        if (streamResult.match != null)
+                        {
+                            Object found = streamResult.match;
+                            Display.getDefault().asyncExec(() ->
+                            {
+                                if (generation != activeGeneration || textFilter.isDisposed())
+                                    return;
+                                viewer.setSelection(new StructuredSelection(found), true);
+                                finishOnUi(generation, false, true);
+                            });
+                            Global.log("CompareSearch", "stream found after " + streamResult.scanned); //$NON-NLS-1$
+                            return Status.OK_STATUS;
+                        }
+
+                        Global.log("CompareSearch", "stream no match after " + streamResult.scanned); //$NON-NLS-1$
                         finishOnUi(generation, false, false);
-                        monitor.done();
                         return Status.OK_STATUS;
                     }
                     catch (Throwable t)
@@ -1541,19 +2122,7 @@ public class CompareConfigSearchDialogHook
             String headerAncestor = getColumnHeader(editorPart, ComparisonSide.COMMON_ANCESTOR);
             String headerObject = getObjectColumnHeader(editorPart);
 
-            boolean cacheHit = isCacheValid(input, filterHash);
-
-            if (!cacheHit && editorPart != null)
-            {
-                SearchCache cached = searchCacheByEditor.get(editorPart);
-                if (cached != null && cached.input == input && cached.filterHash == filterHash)
-                {
-                    cachedInput = cached.input;
-                    cachedFilterHash = cached.filterHash;
-                    cachedItems = cached.items;
-                    cacheHit = true;
-                }
-            }
+            boolean cacheHit = tryAdoptEditorCache(input, filterHash);
 
             final boolean hasCachedItems = cacheHit;
             final String effectiveQuery = caseSensitive ? query : query.toLowerCase();
@@ -1568,6 +2137,11 @@ public class CompareConfigSearchDialogHook
             collected.set(0);
             totalProcessed.set(0);
             activeSearchThreads.set(0);
+            collectProgressPercent.set(0);
+            Job pfEarly = prefetchJob;
+            reportPrefetchProgress = !hasCachedItems
+                && pfEarly != null && pfEarly.getState() != Job.NONE
+                && prefetchInput == input && prefetchFilterHash == filterHash;
             setSearchButtonsToCancelMode();
             startProgressTimer(generation);
 
@@ -1586,16 +2160,26 @@ public class CompareConfigSearchDialogHook
                         {
                             items = cachedItems;
                         }
+                        else if (awaitPrefetchAndAdopt(input, filterHash, generation, monitor))
+                        {
+                            collecting = false;
+                            items = cachedItems;
+                        }
                         else
                         {
+                            if (generation != activeGeneration
+                                || (monitor != null && monitor.isCanceled()))
+                                return Status.CANCEL_STATUS;
+
                             collecting = true;
                             collected.set(0);
                             totalProcessed.set(0);
+                            collectProgressPercent.set(0);
 
                             Object[] roots = provider.getElements(input);
                             CollectTreeResult collectResult = collectTreeItems(roots, provider, viewer,
                                 generation, () -> activeGeneration, monitor, collected, totalProcessed,
-                                activeSearchThreads);
+                                activeSearchThreads, collectProgressPercent);
                             items = collectResult.items;
                             if (collectResult.cancelled)
                                 return Status.CANCEL_STATUS;
@@ -1753,19 +2337,19 @@ public class CompareConfigSearchDialogHook
             if (btnNext != null && !btnNext.isDisposed())
             {
                 btnNextOriginal2 = btnNext.getText();
-                btnNext.setText("\u041E\u0442\u043C\u0435\u043D\u0430");
+                btnNext.setText("Отмена");
                 btnNext.setEnabled(true);
             }
             if (btnPrev != null && !btnPrev.isDisposed())
             {
                 btnPrevOriginal2 = btnPrev.getText();
-                btnPrev.setText("\u041E\u0442\u043C\u0435\u043D\u0430");
+                btnPrev.setText("Отмена");
                 btnPrev.setEnabled(true);
             }
             if (btnFindAll != null && !btnFindAll.isDisposed())
             {
                 btnFindAllOriginal2 = btnFindAll.getText();
-                btnFindAll.setText("\u041E\u0442\u043C\u0435\u043D\u0430");
+                btnFindAll.setText("Отмена");
                 btnFindAll.setEnabled(true);
             }
         }
@@ -1790,8 +2374,12 @@ public class CompareConfigSearchDialogHook
                 if (generation != activeGeneration || !running || shell.isDisposed())
                     return;
                 if (collecting)
-                    setStatus(dialog, formatCollectProgressStatus(
-                        collected.get(), totalProcessed.get(), activeSearchThreads.get()));
+                {
+                    if (reportPrefetchProgress)
+                        setStatus(dialog, formatCollectProgressStatus(prefetchProgressPercent.get()));
+                    else
+                        setStatus(dialog, formatCollectProgressStatus(collectProgressPercent.get()));
+                }
                 else
                     setStatus(dialog, formatSearchProgressStatus(scanned, total));
                 if (running && generation == activeGeneration && !shell.isDisposed())

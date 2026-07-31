@@ -61,6 +61,7 @@ import org.eclipse.swt.widgets.ToolItem;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.swt.widgets.TypedListener;
+import org.eclipse.swt.widgets.Widget;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
@@ -1562,8 +1563,9 @@ public class CompareConfigMenuHook implements IStartup
                     node.setChecked(agg.checked);
                     Global.invoke(node, "setGrayed", Boolean.valueOf(agg.grayed)); //$NON-NLS-1$
                 }
-                ctv.setGrayed(node, agg.grayed);
-                ctv.setChecked(node, agg.checked);
+                // Не ctv.setGrayed/setChecked — они делают internalExpand и на
+                // «Справочники» с фильтром отличий подвешивают UI (тысячи BM getChildren).
+                paintTreeItemCheckNoExpand(ctv, node, agg.checked, agg.grayed);
             }
 
             private static final class AggregateCheck
@@ -1691,9 +1693,10 @@ public class CompareConfigMenuHook implements IStartup
             }
 
             /**
-             * Кэш агрегатов + галочки TreeItem по загруженному поддереву папок/коллекций.
-             * Иначе после каскада от корня «Общие»/«Константы» остаются со старым UI,
-             * хотя потомки уже помечены ({@code ctv.update} только у кликнутого узла).
+             * Кэш агрегатов + галочки уже существующих TreeItem (без expand).
+             * {@link CheckboxTreeViewer#setGrayed}/{@code setChecked} вызывают
+             * {@code internalExpand} → createChildren → PartialModelController.getChildren
+             * и на большой папке («Справочники» + «Показывать отличия») UI зависает.
              */
             private void applyAggregateTreeCheckUi(CheckboxTreeViewer ctv, IPartialModelNode node,
                     boolean checked)
@@ -1706,10 +1709,7 @@ public class CompareConfigMenuHook implements IStartup
                     boolean checked)
             {
                 if (isAggregateCheckNode(node) || isVisibleOnlyClickTarget(node))
-                {
-                    ctv.setGrayed(node, false);
-                    ctv.setChecked(node, checked);
-                }
+                    paintTreeItemCheckNoExpand(ctv, node, checked, false);
                 Collection<IPartialModelNode> children = node.getChildren();
                 if (children == null)
                     return;
@@ -1718,6 +1718,22 @@ public class CompareConfigMenuHook implements IStartup
                     if (shouldRecurseOnly(child))
                         paintAggregateChecks(ctv, child, checked);
                 }
+            }
+
+            /**
+             * Ставит checked/grayed только если TreeItem уже создан — без
+             * {@code setGrayed}/{@code setChecked} viewer'а (они разворачивают узел).
+             */
+            private static void paintTreeItemCheckNoExpand(CheckboxTreeViewer ctv, Object element,
+                    boolean checked, boolean grayed)
+            {
+                if (ctv == null || element == null)
+                    return;
+                Widget w = ctv.testFindItem(element);
+                if (!(w instanceof TreeItem item) || item.isDisposed())
+                    return;
+                item.setChecked(checked);
+                item.setGrayed(grayed);
             }
 
             private void invalidateAggregateUiAncestors(IPartialModelNode from)
@@ -2139,9 +2155,39 @@ public class CompareConfigMenuHook implements IStartup
                 }
                 // Кэш checked/grayed по уже загруженным потомкам (без resolveChildren).
                 syncSubtreeCheckCacheFromMergeSettings(node);
-                // TreeItem «Формы»/потомков — иначе модель обновлена, а галочки старые.
-                ctv.refresh(node, true);
+                // Только уже созданные TreeItem — refresh(node,true) = createChildren
+                // на каждый справочник при bulk по «Справочники».
+                paintExistingSubtreeChecksFromModel(ctv, node);
                 return ok;
+            }
+
+            /**
+             * Обновляет галочки на уже материализованных TreeItem (без expand).
+             */
+            private static void paintExistingSubtreeChecksFromModel(CheckboxTreeViewer ctv,
+                    Object element)
+            {
+                if (ctv == null || element == null)
+                    return;
+                Widget w = ctv.testFindItem(element);
+                if (!(w instanceof TreeItem item) || item.isDisposed())
+                    return;
+                if (element instanceof IPartialModelNode node)
+                {
+                    item.setChecked(node.isChecked());
+                    item.setGrayed(node.isGrayed());
+                }
+                TreeItem[] kids = item.getItems();
+                if (kids == null)
+                    return;
+                for (TreeItem childItem : kids)
+                {
+                    if (childItem == null || childItem.isDisposed())
+                        continue;
+                    Object data = childItem.getData();
+                    if (data != null)
+                        paintExistingSubtreeChecksFromModel(ctv, data);
+                }
             }
 
             /**
