@@ -1,6 +1,7 @@
 package tormozit;
 
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Set;
 
@@ -40,7 +41,7 @@ public class ProblemViewRecomputeChecksHandler extends AbstractHandler
             return null;
         }
 
-        Map<IProject, Set<EObject>> selectedObjects = selectedObjects(scopeSelection);
+        Map<IProject, Set<EObject>> selectedObjects = nonEmptySelectedObjects(scopeSelection);
         Global.tempLog(LOG_TOPIC, "Проверить: область — объектов по проектам: " + describe(selectedObjects)); //$NON-NLS-1$
 
         if (selectedObjects.isEmpty())
@@ -59,11 +60,27 @@ public class ProblemViewRecomputeChecksHandler extends AbstractHandler
         return null;
     }
 
+    /**
+     * Объекты области отбора без пустых Set: EDT иногда кладёт в map проект с пустым набором
+     * ({@code putIfAbsent}), и тогда «непустая» map молча ничего не перепроверяла.
+     */
     @SuppressWarnings("unchecked")
-    private static Map<IProject, Set<EObject>> selectedObjects(Object scopeSelection)
+    private static Map<IProject, Set<EObject>> nonEmptySelectedObjects(Object scopeSelection)
     {
         Object result = Global.invoke(scopeSelection, "getSelectedObjects"); //$NON-NLS-1$
-        return result instanceof Map ? (Map<IProject, Set<EObject>>)result : Map.of();
+        if (!(result instanceof Map<?, ?> raw) || raw.isEmpty())
+            return Map.of();
+
+        Map<IProject, Set<EObject>> filtered = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : raw.entrySet())
+        {
+            if (!(entry.getKey() instanceof IProject project))
+                continue;
+            if (!(entry.getValue() instanceof Set<?> set) || set.isEmpty())
+                continue;
+            filtered.put(project, (Set<EObject>)set);
+        }
+        return filtered;
     }
 
     private static void toast(String title, String message)

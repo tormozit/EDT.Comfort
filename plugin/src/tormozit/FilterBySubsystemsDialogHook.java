@@ -1,48 +1,74 @@
 package tormozit;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.List;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
+import java.util.WeakHashMap;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.core.runtime.Adapters;
+import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.viewers.CheckboxTreeViewer;
+import org.eclipse.jface.viewers.CheckStateChangedEvent;
+import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
+import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
+import org.eclipse.jface.viewers.IBaseLabelProvider;
+import org.eclipse.jface.viewers.ICheckStateListener;
+import org.eclipse.jface.viewers.ILabelProviderListener;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.ITreeContentProvider;
+import org.eclipse.jface.viewers.StructuredViewer;
+import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.jface.viewers.TreePath;
+import org.eclipse.jface.viewers.Viewer;
+import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.jface.viewers.TreeSelection;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
 import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.events.SelectionEvent;
+import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
+import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
+import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Monitor;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.ToolBar;
 import org.eclipse.swt.widgets.ToolItem;
+import org.eclipse.swt.widgets.Tree;
+import org.eclipse.swt.widgets.TypedListener;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 
+import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
+import com._1c.g5.v8.dt.compare.model.ComparisonSide;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 
 /**
  * Штатный EDT «Фильтр по подсистемам» (в интерфейсе также «Отбор по подсистемам»):
  * автораскрытие ветки проекта из выделения навигатора и запоминание размеров окна
  * между сеансами.
+ *
+ * <p>Для диалога из сравнения конфигураций — запоминание переключателя источника
+ * подсистем (MAIN/OTHER) на время сессии сравнения ({@code filterSettings} редактора).
  *
  * <p><b>TODO (наборы объектов):</b> наборы объектов в этом диалоге <em>не</em> показываются
  * и не выбираются — только штатное дерево подсистем. Связь с наборами сейчас только через
@@ -69,6 +95,21 @@ public final class FilterBySubsystemsDialogHook implements IStartup
     private static final String COMFORT_TOOLBAR_KEY = "tormozit.filterBySubsystemsComfortToolbar"; //$NON-NLS-1$
     private static final String MENU_SET_MARK = "Установить пометку с потомками"; //$NON-NLS-1$
     private static final String MENU_CLEAR_MARK = "Снять пометку с потомками"; //$NON-NLS-1$
+
+    private static final String SMART_FILTER_KEY = "tormozit.filterBySubsystemsSmartFilter"; //$NON-NLS-1$
+    private static final String HIGHLIGHT_KEY = "tormozit.filterBySubsystemsHighlight"; //$NON-NLS-1$
+    private static final String LAST_PATTERN_KEY = "tormozit.filterBySubsystemsLastPattern"; //$NON-NLS-1$
+    private static final String DESELECT_ALWAYS_KEY = "tormozit.filterBySubsystemsDeselectAlways"; //$NON-NLS-1$
+    private static final String LAST_CHILD_CHECK_KEY = "tormozit.filterBySubsystemsLastChildCheck"; //$NON-NLS-1$
+    private static final String TREE_CONTEXT_MENU_KEY = "tormozit.filterBySubsystemsTreeContextMenu"; //$NON-NLS-1$
+    private static final String SIDE_MEMORY_KEY = "tormozit.filterBySubsystemsSideMemory"; //$NON-NLS-1$
+
+    /**
+     * Выбранная сторона подсистем в диалоге сравнения — на жизнь
+     * {@code ViewerFilterBySubsystemsSettings} / batch редактора сравнения.
+     */
+    private static final Map<Object, ComparisonSide> SIDE_BY_COMPARISON_SESSION =
+        Collections.synchronizedMap(new WeakHashMap<>());
 
     @Override
     public void earlyStartup()
@@ -132,11 +173,6 @@ public final class FilterBySubsystemsDialogHook implements IStartup
 
         Object panel = Global.getField(dialog, "subsystemsPanel"); //$NON-NLS-1$
         CheckboxTreeViewer viewer = resolveViewer(panel);
-        Global.tempLog("filter-subsystems", "patch attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-            + " shell=\"" + shell.getText() + "\"" //$NON-NLS-1$ //$NON-NLS-2$
-            + " dialog=" + dialog.getClass().getName() //$NON-NLS-1$
-            + " panel=" + (panel == null ? "null" : panel.getClass().getName()) //$NON-NLS-1$ //$NON-NLS-2$
-            + " viewer=" + (viewer == null ? "null" : "ok")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (viewer == null || viewer.getTree() == null || viewer.getTree().isDisposed())
         {
             FilterBySubsystemsDialogDebug.step("patch", "attempt=" + attempt + " viewer=null"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
@@ -144,8 +180,195 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         }
 
         installComfortToolbarActions(panel, viewer);
+        installTreeContextMarkMenu(panel, viewer);
+        installLastChildCheckGuard(panel, viewer);
+        installDeselectAllAlwaysEnabled(dialog, panel, viewer);
+        installComparisonSideMemory(shell, dialog, panel);
         expandNavigatorProject(viewer, attempt);
-        return true;
+        return installSmartFilter(panel, viewer);
+    }
+
+    /**
+     * EDT всегда открывает диалог сравнения с {@code side = OTHER}. Запоминаем выбор
+     * MAIN/OTHER по ключу настроек фильтра редактора и восстанавливаем при повторном открытии
+     * в той же сессии сравнения.
+     */
+    private static void installComparisonSideMemory(Shell shell, Object dialog, Object panel)
+    {
+        if (shell == null || shell.isDisposed() || dialog == null || panel == null)
+            return;
+        if (Boolean.TRUE.equals(shell.getData(SIDE_MEMORY_KEY)))
+            return;
+
+        Object toolItemObj = Global.getField(dialog, "toolBarChangeSideElement"); //$NON-NLS-1$
+        if (!(toolItemObj instanceof ToolItem) || ((ToolItem) toolItemObj).isDisposed())
+            return;
+
+        Object sessionKey = resolveComparisonSessionKey(dialog);
+        if (sessionKey == null)
+            return;
+
+        shell.setData(SIDE_MEMORY_KEY, Boolean.TRUE);
+
+        ComparisonSide remembered = SIDE_BY_COMPARISON_SESSION.get(sessionKey);
+        Object currentObj = Global.getField(dialog, "side"); //$NON-NLS-1$
+        ComparisonSide current = currentObj instanceof ComparisonSide side ? side : null;
+        if (remembered != null && current != null && remembered != current)
+        {
+            Global.setField(dialog, "side", remembered); //$NON-NLS-1$
+            Global.invokeVoid(panel, "updateChangeSideElement"); //$NON-NLS-1$
+            syncChangeSideMenuSelection(dialog, remembered);
+            FilterBySubsystemsDialogDebug.log("sideMemory: restored " + remembered); //$NON-NLS-1$
+        }
+
+        shell.addDisposeListener(e ->
+        {
+            Object sideObj = Global.getField(dialog, "side"); //$NON-NLS-1$
+            if (!(sideObj instanceof ComparisonSide side))
+                return;
+            SIDE_BY_COMPARISON_SESSION.put(sessionKey, side);
+            FilterBySubsystemsDialogDebug.step("sideMemory", "saved " + side); //$NON-NLS-1$ //$NON-NLS-2$
+        });
+    }
+
+    private static Object resolveComparisonSessionKey(Object dialog)
+    {
+        Object filterSettings = Global.getField(dialog, "filterSettings"); //$NON-NLS-1$
+        if (filterSettings != null)
+            return filterSettings;
+        return Global.getField(dialog, "compareMergeProcessBatch"); //$NON-NLS-1$
+    }
+
+    /**
+     * Пункты DROP_DOWN: 0 — «главного» ({@link ComparisonSide#MAIN}), 1 — «второго»
+     * ({@link ComparisonSide#OTHER}); см. {@code createChangeSideAction} EDT.
+     */
+    private static void syncChangeSideMenuSelection(Object dialog, ComparisonSide side)
+    {
+        Menu menu = resolveChangeSideMenu(dialog);
+        if (menu == null || menu.isDisposed() || menu.getItemCount() < 2)
+            return;
+        boolean main = side == ComparisonSide.MAIN;
+        menu.getItem(0).setSelection(main);
+        menu.getItem(1).setSelection(!main);
+    }
+
+    private static Menu resolveChangeSideMenu(Object dialog)
+    {
+        Object toolItemObj = Global.getField(dialog, "toolBarChangeSideElement"); //$NON-NLS-1$
+        if (!(toolItemObj instanceof ToolItem toolItem) || toolItem.isDisposed())
+            return null;
+        for (Listener listener : toolItem.getListeners(SWT.Selection))
+        {
+            Object eventListener = listener instanceof TypedListener typed
+                ? typed.getEventListener()
+                : listener;
+            if (eventListener == null)
+                continue;
+            if (!eventListener.getClass().getName().contains("DropdownSelectionListener")) //$NON-NLS-1$
+                continue;
+            Object menuObj = Global.getField(eventListener, "menu"); //$NON-NLS-1$
+            if (menuObj instanceof Menu menu)
+                return menu;
+        }
+        return null;
+    }
+
+    /**
+     * При «включать объекты подчинённых/родительских» штатный {@code setState} если у родителя
+     * полная пометка, при клике по непомеченному потомку делает {@code setSubtreeChecked(parent, false)}
+     * — сносит пометки всех детей. Если кликнули по последнему непомеченному ребёнку, это не нужно:
+     * просто дописываем пометку и поднимаем родителя до полной.
+     */
+    private static void installLastChildCheckGuard(Object panel, CheckboxTreeViewer viewer)
+    {
+        Tree tree = viewer.getTree();
+        if (tree == null || tree.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(tree.getData(LAST_CHILD_CHECK_KEY)))
+            return;
+
+        Object listObj = Global.getField(viewer, "checkStateListeners"); //$NON-NLS-1$
+        if (listObj == null)
+            return;
+        Object raw = Global.invoke(listObj, "getListeners"); //$NON-NLS-1$
+        if (!(raw instanceof Object[] existing) || existing.length == 0)
+            return;
+
+        ICheckStateListener[] originals = new ICheckStateListener[existing.length];
+        for (int i = 0; i < existing.length; i++)
+        {
+            if (!(existing[i] instanceof ICheckStateListener listener))
+                return;
+            if (listener instanceof LastChildCheckGuard)
+            {
+                tree.setData(LAST_CHILD_CHECK_KEY, Boolean.TRUE);
+                return;
+            }
+            originals[i] = listener;
+        }
+
+        Global.invoke(listObj, "clear"); //$NON-NLS-1$
+        Global.invoke(listObj, "add", new LastChildCheckGuard(panel, viewer, originals)); //$NON-NLS-1$
+        tree.setData(LAST_CHILD_CHECK_KEY, Boolean.TRUE);
+        FilterBySubsystemsDialogDebug.log("lastChildCheck: guard установлен"); //$NON-NLS-1$
+    }
+
+    /**
+     * Штатный {@code AbstractSubsystemsPanel.changeActionEnable} при включённом
+     * «включать объекты подчинённых/родительских» активирует «Снять отметку со всех»
+     * только если помечены все корни. Держим кнопку всегда доступной.
+     */
+    private static void installDeselectAllAlwaysEnabled(
+            Object dialog, Object panel, CheckboxTreeViewer viewer)
+    {
+        Object itemObj = Global.getField(panel, "toolBarDeselectAllElement"); //$NON-NLS-1$
+        if (!(itemObj instanceof ToolItem deselect) || deselect.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(deselect.getData(DESELECT_ALWAYS_KEY)))
+            return;
+        deselect.setData(DESELECT_ALWAYS_KEY, Boolean.TRUE);
+
+        Runnable keepEnabled = () ->
+        {
+            if (!deselect.isDisposed())
+                deselect.setEnabled(true);
+        };
+        keepEnabled.run();
+
+        // Штатный ICheckStateListener сначала вызывает changeActionEnable — наш после него.
+        viewer.addCheckStateListener((ICheckStateListener) event -> keepEnabled.run());
+
+        Object selectAllObj = Global.getField(panel, "toolBarSelectAllElement"); //$NON-NLS-1$
+        if (selectAllObj instanceof ToolItem selectAll && !selectAll.isDisposed())
+            selectAll.addSelectionListener(afterSelection(keepEnabled));
+        deselect.addSelectionListener(afterSelection(keepEnabled));
+
+        if (dialog != null)
+        {
+            wireKeepEnabledAfterButton(dialog, "includeFromSubordinateCheckbox", keepEnabled); //$NON-NLS-1$
+            wireKeepEnabledAfterButton(dialog, "includeFromParentCheckbox", keepEnabled); //$NON-NLS-1$
+        }
+        FilterBySubsystemsDialogDebug.log("deselectAll: всегда доступна"); //$NON-NLS-1$
+    }
+
+    private static void wireKeepEnabledAfterButton(Object dialog, String field, Runnable keepEnabled)
+    {
+        Object buttonObj = Global.getField(dialog, field);
+        if (!(buttonObj instanceof Button button) || button.isDisposed())
+            return;
+        button.addSelectionListener(afterSelection(keepEnabled));
+    }
+
+    private static SelectionAdapter afterSelection(Runnable action)
+    {
+        return new SelectionAdapter()
+        {
+            @Override public void widgetSelected(SelectionEvent e)
+            {
+                action.run();
+            }
+        };
     }
 
     private static void applyStoredShellBounds(Shell shell)
@@ -226,20 +449,10 @@ public final class FilterBySubsystemsDialogHook implements IStartup
     private static void installComfortToolbarActions(Object panel, CheckboxTreeViewer viewer)
     {
         Object toolbarObj = Global.getField(panel, "toolBar"); //$NON-NLS-1$
-        Global.tempLog("filter-subsystems", "install: panel=" + panel.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
-            + " toolbar=" + (toolbarObj == null ? "null" : toolbarObj.getClass().getName())); //$NON-NLS-1$ //$NON-NLS-2$
         if (!(toolbarObj instanceof ToolBar toolbar) || toolbar.isDisposed())
-        {
-            Global.tempLog("filter-subsystems", "install: toolbar unusable, skip"); //$NON-NLS-1$
             return;
-        }
         if (Boolean.TRUE.equals(toolbar.getData(COMFORT_TOOLBAR_KEY)))
-        {
-            Global.tempLog("filter-subsystems", "install: marker already set, skip"); //$NON-NLS-1$
             return;
-        }
-        Global.tempLog("filter-subsystems", "install: before items=" + toolbar.getItemCount() //$NON-NLS-1$ //$NON-NLS-2$
-            + " texts=" + itemTexts(toolbar)); //$NON-NLS-1$
         toolbar.setData(COMFORT_TOOLBAR_KEY, Boolean.TRUE);
 
         ToolItem comfortItem = new ToolItem(toolbar, SWT.DROP_DOWN);
@@ -253,54 +466,194 @@ public final class FilterBySubsystemsDialogHook implements IStartup
                 showComfortMarkMenu(comfortItem, toolbar, panel, viewer);
             }
         });
-        Global.tempLog("filter-subsystems", "install: after items=" + toolbar.getItemCount() //$NON-NLS-1$ //$NON-NLS-2$
-            + " texts=" + itemTexts(toolbar) //$NON-NLS-1$
-            + " comfort=" + comfortItem.getBounds()); //$NON-NLS-1$
-        Global.tempLog("filter-subsystems", "install: toolbarChain=" + controlChain(toolbar)); //$NON-NLS-1$
-        Global.tempLog("filter-subsystems", "install: tree=" + controlChain(viewer.getTree())); //$NON-NLS-1$
-        Global.tempLog("filter-subsystems", "install: gap(toolbar->tree)=" //$NON-NLS-1$
-            + verticalGap(toolbar, viewer.getTree())); //$NON-NLS-1$
         if (panel instanceof Composite panelComposite && !panelComposite.isDisposed())
             panelComposite.layout(true, true);
-        Global.tempLog("filter-subsystems", "install: after-relayout toolbar=" + toolbar.getBounds() //$NON-NLS-1$ //$NON-NLS-2$
-            + " comfort=" + comfortItem.getBounds() //$NON-NLS-1$
-            + " gap(toolbar->tree)=" + verticalGap(toolbar, viewer.getTree())); //$NON-NLS-1$
         FilterBySubsystemsDialogDebug.log("toolbar: добавлена кнопка «Комфорт»"); //$NON-NLS-1$
     }
 
-    private static String itemTexts(ToolBar toolbar)
+    private static boolean installSmartFilter(Object panel, CheckboxTreeViewer viewer)
     {
-        if (toolbar == null || toolbar.isDisposed())
-            return "[]"; //$NON-NLS-1$
-        List<String> texts = new ArrayList<>();
-        for (ToolItem item : toolbar.getItems())
-            texts.add(item.getText().isEmpty() ? "(icon)" : "\"" + item.getText() + "\""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-        return texts.toString();
-    }
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+            return true;
+        Tree tree = viewer.getTree();
+        if (tree == null || tree.isDisposed())
+            return false;
+        if (Boolean.TRUE.equals(tree.getData(SMART_FILTER_KEY)))
+            return true;
 
-    private static String controlChain(Control control)
-    {
-        StringBuilder sb = new StringBuilder();
-        Control c = control;
-        while (c != null && !c.isDisposed())
+        Object searchBoxObj = Global.getField(panel, "searchBox"); //$NON-NLS-1$
+        if (!(searchBoxObj instanceof SearchBox searchBox) || searchBox.isDisposed())
         {
-            sb.append(c.getClass().getSimpleName())
-              .append("@").append(Integer.toHexString(System.identityHashCode(c)))
-              .append(c.getBounds());
-            if (c.getParent() != null)
-                sb.append(" -> ");
-            c = c.getParent();
+            FilterBySubsystemsDialogDebug.step("smartFilter", "searchBox=null"); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
         }
-        return sb.append(" -> null").toString(); //$NON-NLS-1$
+
+        IBaseLabelProvider labelProvider = viewer.getLabelProvider();
+        if (!(labelProvider instanceof DelegatingStyledCellLabelProvider delegating))
+        {
+            FilterBySubsystemsDialogDebug.step("smartFilter", "labelProvider=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (labelProvider != null ? labelProvider.getClass().getName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        }
+        IStyledLabelProvider inner = delegating.getStyledStringProvider();
+        if (inner == null)
+        {
+            FilterBySubsystemsDialogDebug.step("smartFilter", "inner=null"); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        }
+
+        SubsystemHighlightStyledProvider highlight = new SubsystemHighlightStyledProvider(inner);
+        injectStyledStringProvider(delegating, highlight);
+        SmartMatchHighlight.enableColorsOnSelection(delegating);
+
+        SmartSubsystemsFilter filter = new SmartSubsystemsFilter(inner);
+        tree.setData(SMART_FILTER_KEY, filter);
+        tree.setData(HIGHLIGHT_KEY, highlight);
+        tree.setData(LAST_PATTERN_KEY, ""); //$NON-NLS-1$
+
+        searchBox.setMessage("Фильтр"); //$NON-NLS-1$
+        searchBox.setToolTipText(
+            FilterInputBox.SUBSYSTEMS_FILTER_TOOLTIP + "\nCtrl+↓ — история запросов."); //$NON-NLS-1$
+        FilterInputBox.attachHistory(searchBox, FilterInputBox.Scope.FILTER_BY_SUBSYSTEMS);
+        searchBox.setMinimumSearchTextLength(0);
+        searchBox.setJobScheduleDelay(0);
+        searchBox.setRunSearchOnTextChange(true);
+        searchBox.setSearchListener(new SearchBox.ISearchListener()
+        {
+            @Override
+            public void performSearch(String text, IProgressMonitor monitor)
+            {
+                applySmartFilter(panel, viewer, text);
+            }
+        });
+
+        String initial = searchBox.getText();
+        if (initial != null && !initial.isEmpty())
+            applySmartFilter(panel, viewer, initial);
+
+        FilterBySubsystemsDialogDebug.log("smartFilter: установлен"); //$NON-NLS-1$
+        return true;
     }
 
-    private static int verticalGap(Control top, Control bottom)
+    private static void applySmartFilter(Object panel, CheckboxTreeViewer viewer, String text)
     {
-        if (top == null || bottom == null || top.isDisposed() || bottom.isDisposed())
-            return Integer.MIN_VALUE;
-        Point topPos = top.toDisplay(0, 0);
-        Point bottomPos = bottom.toDisplay(0, 0);
-        return bottomPos.y - (topPos.y + top.getSize().y);
+        Tree tree = viewer.getTree();
+        if (tree == null || tree.isDisposed())
+            return;
+        String pattern = text != null ? text.trim() : ""; //$NON-NLS-1$
+        String last = tree.getData(LAST_PATTERN_KEY) instanceof String lastStr ? lastStr : ""; //$NON-NLS-1$
+        if (pattern.equals(last))
+            return;
+
+        Object filterObj = tree.getData(SMART_FILTER_KEY);
+        if (!(filterObj instanceof SmartSubsystemsFilter filter))
+            return;
+        Object highlightObj = tree.getData(HIGHLIGHT_KEY);
+        if (highlightObj instanceof SubsystemHighlightStyledProvider highlight)
+            highlight.setHighlightPattern(pattern);
+        filter.setPattern(pattern);
+
+        // Штатный addViewerFilter/removeViewerFilter (AbstractViewerPanel) перед сменой
+        // фильтра снимает снимок пометок (checkedElements/grayedElements) и после снятия
+        // восстанавливает их — иначе refresh CheckboxTreeViewer теряет клики при фильтре.
+        Object nativeFilterObj = Global.getField(panel, "searchFilterWithHistory"); //$NON-NLS-1$
+        if (nativeFilterObj instanceof ViewerFilter nativeFilter
+            && Arrays.asList(viewer.getFilters()).contains(nativeFilter))
+            Global.invokeVoid(panel, "removeViewerFilter", nativeFilter); //$NON-NLS-1$
+
+        boolean filtering = !pattern.isEmpty();
+        List<ViewerFilter> current = Arrays.asList(viewer.getFilters());
+        if (filtering)
+        {
+            // Уже установлен — тоже вызываем: внутри снова updateCheckedAndGrayedElements + refresh
+            Global.invokeVoid(panel, "addViewerFilter", filter); //$NON-NLS-1$
+            viewer.expandAll();
+        }
+        else if (current.contains(filter))
+        {
+            // removeViewerFilter делает collapseAll — без снимка теряется текущая строка
+            ISelection selection = viewer.getSelection();
+            Global.invokeVoid(panel, "removeViewerFilter", filter); //$NON-NLS-1$
+            restoreTreeSelection(viewer, selection);
+        }
+
+        tree.setData(LAST_PATTERN_KEY, pattern);
+        FilterBySubsystemsDialogDebug.step("smartFilter", "pattern=\"" + pattern //$NON-NLS-1$ //$NON-NLS-2$
+            + "\" filtering=" + filtering); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static void restoreTreeSelection(CheckboxTreeViewer viewer, ISelection selection)
+    {
+        if (selection == null || selection.isEmpty())
+            return;
+        Tree tree = viewer.getTree();
+        if (tree == null || tree.isDisposed())
+            return;
+        viewer.setSelection(selection, true);
+    }
+
+    private static void injectStyledStringProvider(DelegatingStyledCellLabelProvider provider,
+            IStyledLabelProvider smartProvider)
+    {
+        Class<?> cls = provider.getClass();
+        while (cls != null)
+        {
+            for (java.lang.reflect.Field field : cls.getDeclaredFields())
+            {
+                if (IStyledLabelProvider.class.isAssignableFrom(field.getType()))
+                {
+                    try
+                    {
+                        field.setAccessible(true);
+                        field.set(provider, smartProvider);
+                        return;
+                    }
+                    catch (Exception ignored) {}
+                }
+            }
+            cls = cls.getSuperclass();
+        }
+    }
+
+    private static void installTreeContextMarkMenu(Object panel, CheckboxTreeViewer viewer)
+    {
+        Tree tree = viewer.getTree();
+        if (tree == null || tree.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(tree.getData(TREE_CONTEXT_MENU_KEY)))
+            return;
+
+        Menu menu = tree.getMenu();
+        if (menu == null)
+        {
+            menu = new Menu(tree);
+            tree.setMenu(menu);
+        }
+        final Menu contextMenu = menu;
+
+        MenuItem setMark = fillSubtreeMarkMenuItem(contextMenu, panel, viewer, true);
+        MenuItem clearMark = fillSubtreeMarkMenuItem(contextMenu, panel, viewer, false);
+
+        MenuAdapter enableAdapter = new MenuAdapter()
+        {
+            @Override public void menuShown(MenuEvent e)
+            {
+                IStructuredSelection selection = viewer.getStructuredSelection();
+                boolean hasSelection = selection != null && !selection.isEmpty();
+                if (!setMark.isDisposed())
+                    setMark.setEnabled(hasSelection);
+                if (!clearMark.isDisposed())
+                    clearMark.setEnabled(hasSelection);
+            }
+        };
+        contextMenu.addMenuListener(enableAdapter);
+        tree.setData(TREE_CONTEXT_MENU_KEY, Boolean.TRUE);
+        tree.addDisposeListener(ev ->
+        {
+            if (!contextMenu.isDisposed())
+                contextMenu.removeMenuListener(enableAdapter);
+        });
+        FilterBySubsystemsDialogDebug.log("treeContextMenu: команды пометки добавлены"); //$NON-NLS-1$
     }
 
     private static void showComfortMarkMenu(
@@ -313,28 +666,10 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         boolean hasSelection = selection != null && !selection.isEmpty();
 
         Menu menu = new Menu(toolbar.getShell(), SWT.POP_UP);
-
-        MenuItem setMark = ComfortSubmenuHelper.createSortedMenuItem(menu, SWT.PUSH, MENU_SET_MARK);
-        setMark.setToolTipText("Отметить выделенную подсистему и все её подчинённые подсистемы"); //$NON-NLS-1$
+        MenuItem setMark = fillSubtreeMarkMenuItem(menu, panel, viewer, true);
         setMark.setEnabled(hasSelection);
-        setMark.addSelectionListener(new SelectionAdapter()
-        {
-            @Override public void widgetSelected(SelectionEvent e)
-            {
-                applySubtreeMark(panel, viewer, true);
-            }
-        });
-
-        MenuItem clearMark = ComfortSubmenuHelper.createSortedMenuItem(menu, SWT.PUSH, MENU_CLEAR_MARK);
-        clearMark.setToolTipText("Снять отметку с выделенной подсистемы и всех её подчинённых подсистем"); //$NON-NLS-1$
+        MenuItem clearMark = fillSubtreeMarkMenuItem(menu, panel, viewer, false);
         clearMark.setEnabled(hasSelection);
-        clearMark.addSelectionListener(new SelectionAdapter()
-        {
-            @Override public void widgetSelected(SelectionEvent e)
-            {
-                applySubtreeMark(panel, viewer, false);
-            }
-        });
 
         Rectangle bounds = item.getBounds();
         Point location = toolbar.toDisplay(bounds.x, bounds.y + bounds.height);
@@ -347,6 +682,24 @@ public final class FilterBySubsystemsDialogHook implements IStartup
                 toolbar.getDisplay().asyncExec(menu::dispose);
             }
         });
+    }
+
+    private static MenuItem fillSubtreeMarkMenuItem(
+            Menu menu, Object panel, CheckboxTreeViewer viewer, boolean setMark)
+    {
+        String label = setMark ? MENU_SET_MARK : MENU_CLEAR_MARK;
+        MenuItem item = ComfortSubmenuHelper.createSortedMenuItem(menu, SWT.PUSH, label);
+        item.setToolTipText(setMark
+            ? "Отметить выделенную подсистему и все её подчинённые подсистемы" //$NON-NLS-1$
+            : "Снять отметку с выделенной подсистемы и всех её подчинённых подсистем"); //$NON-NLS-1$
+        item.addSelectionListener(new SelectionAdapter()
+        {
+            @Override public void widgetSelected(SelectionEvent e)
+            {
+                applySubtreeMark(panel, viewer, setMark);
+            }
+        });
+        return item;
     }
 
     private static void applySubtreeMark(Object panel, CheckboxTreeViewer viewer, boolean checked)
@@ -388,8 +741,258 @@ public final class FilterBySubsystemsDialogHook implements IStartup
             }
         }
         Global.invokeVoid(panel, "changeActionEnable"); //$NON-NLS-1$
+        forceDeselectAllEnabled(panel);
         FilterBySubsystemsDialogDebug.step("mark",
             (checked ? "set" : "clear") + " nodes=" + nodes.size()); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    private static void forceDeselectAllEnabled(Object panel)
+    {
+        Object itemObj = Global.getField(panel, "toolBarDeselectAllElement"); //$NON-NLS-1$
+        if (itemObj instanceof ToolItem deselect && !deselect.isDisposed())
+            deselect.setEnabled(true);
+    }
+
+    private static boolean isFullyChecked(CheckboxTreeViewer viewer, Object element)
+    {
+        return viewer.getChecked(element) && !viewer.getGrayed(element);
+    }
+
+    /** Кликнутый узел, для которого перехватываем штатный setState (не служебные). */
+    private static boolean isMarkTarget(Object element)
+    {
+        if (element == null)
+            return false;
+        if (element instanceof IProject || element instanceof IDtProject)
+            return false;
+        String name = element.getClass().getName();
+        if (name.contains("AttachedNavigatorAdapter")) //$NON-NLS-1$
+            return false;
+        if (name.contains("SubsystemNavigatorAdapter$Folder")) //$NON-NLS-1$
+            return false;
+        return true;
+    }
+
+    /** Корень проекта / папка подсистем — штатный setState сам ставит серую пометку. */
+    private static boolean isProjectOrFolderParent(Object parent)
+    {
+        if (parent == null)
+            return false;
+        if (parent instanceof IProject || parent instanceof IDtProject)
+            return true;
+        String name = parent.getClass().getName();
+        return name.contains("SubsystemNavigatorAdapter$Folder") //$NON-NLS-1$
+            || name.contains("IWorkspaceRoot") //$NON-NLS-1$
+            || name.contains("WorkspaceRoot"); //$NON-NLS-1$
+    }
+
+    /**
+     * Дети, которые должны быть помечены для «полной» пометки родителя.
+     * AttachedNavigatorAdapter («объекты вне подсистем») учитывается — иначе при одной
+     * подсистеме родитель ошибочно поднимается до полной пометки.
+     */
+    private static boolean countsForParentCompletion(Object element)
+    {
+        if (element == null)
+            return false;
+        if (element instanceof IProject || element instanceof IDtProject)
+            return false;
+        String name = element.getClass().getName();
+        return !name.contains("SubsystemNavigatorAdapter$Folder"); //$NON-NLS-1$
+    }
+
+    private static boolean isMarked(CheckboxTreeViewer viewer, Object element)
+    {
+        // После переоткрытия унаследованная пометка часто checked+grayed — это тоже «помечен».
+        return viewer.getChecked(element);
+    }
+
+    private static boolean allMarkSiblingsMarked(
+            CheckboxTreeViewer viewer, ITreeContentProvider provider, Object parent, Object except)
+    {
+        Object[] children = provider.getChildren(parent);
+        if (children == null)
+            return false;
+        boolean any = false;
+        for (Object child : children)
+        {
+            if (!countsForParentCompletion(child))
+                continue;
+            any = true;
+            if (except != null && Objects.equals(child, except))
+            {
+                if (!isMarked(viewer, child))
+                    return false;
+                continue;
+            }
+            if (!isMarked(viewer, child))
+                return false;
+        }
+        return any;
+    }
+
+    private static String markBrief(Object element)
+    {
+        if (element == null)
+            return "null"; //$NON-NLS-1$
+        String cn = element.getClass().getSimpleName();
+        try
+        {
+            if (element instanceof IProject project)
+                return cn + ":" + project.getName(); //$NON-NLS-1$
+            if (element instanceof IDtProject dt)
+                return cn + ":" + dt.getName(); //$NON-NLS-1$
+            Object name = Global.invoke(element, "getName"); //$NON-NLS-1$
+            if (name instanceof String s && !s.isEmpty())
+                return cn + ":" + s; //$NON-NLS-1$
+        }
+        catch (RuntimeException ignored) {}
+        return cn;
+    }
+
+    /**
+     * К моменту listener TreeItem уже переключён SWT. Считаем «последним непомеченным»,
+     * если остальные учитываемые братья уже помечены (в т.ч. серой/унаследованной пометкой).
+     * Для корня проекта/папки не перехватываем — иначе срывается серая пометка «Конфигурация».
+     */
+    private static boolean isLastUncheckedChildNowChecked(
+            CheckboxTreeViewer viewer, ITreeContentProvider provider, Object element)
+    {
+        if (!isMarkTarget(element) || !isMarked(viewer, element))
+            return false;
+        Object parent = provider.getParent(element);
+        if (parent == null || isProjectOrFolderParent(parent))
+            return false;
+        return allMarkSiblingsMarked(viewer, provider, parent, element);
+    }
+
+    /**
+     * Штатный setState при полностью помеченном родителе (✓ без серого) сносит поддерево
+     * через setSubtreeChecked(parent, false). После переоткрытия так выглядит почти любой
+     * родитель при «включать подчинённые» — перехватываем установку пометки ребёнку.
+     */
+    private static boolean wouldStaffResetParentSubtree(
+            CheckboxTreeViewer viewer, ITreeContentProvider provider, Object element)
+    {
+        if (!isMarkTarget(element))
+            return false;
+        Object parent = provider.getParent(element);
+        while (parent != null)
+        {
+            if (isFullyChecked(viewer, parent))
+                return true;
+            if (!viewer.getChecked(parent))
+                return false;
+            // серый предок — штатный код идёт выше
+            parent = provider.getParent(parent);
+        }
+        return false;
+    }
+
+    private static void markNodeAndPromoteParents(
+            Object panel, CheckboxTreeViewer viewer, ITreeContentProvider provider, Object element)
+    {
+        Global.invokeVoid(panel, "setNodeChecked", element); //$NON-NLS-1$
+        syncCheckedStateSets(panel, element, true);
+
+        Object parent = provider.getParent(element);
+        while (parent != null)
+        {
+            // Корень проекта не поднимаем до полной пометки — только серая при частичном выборе.
+            if (isProjectOrFolderParent(parent))
+            {
+                if (!allMarkSiblingsMarked(viewer, provider, parent, null)
+                    && isFullyChecked(viewer, parent))
+                {
+                    Global.invokeVoid(panel, "setNodeGrayed", parent); //$NON-NLS-1$
+                    syncCheckedStateSets(panel, parent, false);
+                }
+                break;
+            }
+            if (!allMarkSiblingsMarked(viewer, provider, parent, null))
+            {
+                if (isFullyChecked(viewer, parent))
+                {
+                    Global.invokeVoid(panel, "setNodeGrayed", parent); //$NON-NLS-1$
+                    syncCheckedStateSets(panel, parent, false);
+                }
+                break;
+            }
+            Global.invokeVoid(panel, "setNodeChecked", parent); //$NON-NLS-1$
+            syncCheckedStateSets(panel, parent, true);
+            parent = provider.getParent(parent);
+        }
+        Global.invokeVoid(panel, "changeActionEnable"); //$NON-NLS-1$
+        forceDeselectAllEnabled(panel);
+    }
+
+    /**
+     * Перехват штатного check-listener: не давать {@code setState} сносить поддерево родителя
+     * при установке пометки ребёнку (последний непомеченный / родитель уже полностью помечен).
+     */
+    private static final class LastChildCheckGuard implements ICheckStateListener
+    {
+        private final Object panel;
+        private final CheckboxTreeViewer viewer;
+        private final ICheckStateListener[] delegates;
+
+        LastChildCheckGuard(Object panel, CheckboxTreeViewer viewer, ICheckStateListener[] delegates)
+        {
+            this.panel = panel;
+            this.viewer = viewer;
+            this.delegates = delegates;
+        }
+
+        @Override
+        public void checkStateChanged(CheckStateChangedEvent event)
+        {
+            Object element = event.getElement();
+            if (!event.getChecked() || element == null
+                || !(viewer.getContentProvider() instanceof ITreeContentProvider provider))
+            {
+                for (ICheckStateListener delegate : delegates)
+                {
+                    if (delegate != null)
+                        delegate.checkStateChanged(event);
+                }
+                return;
+            }
+
+            Object parent = provider.getParent(element);
+            boolean last = isLastUncheckedChildNowChecked(viewer, provider, element);
+            boolean reset = wouldStaffResetParentSubtree(viewer, provider, element);
+            StringBuilder kids = new StringBuilder();
+            Object[] children = parent != null ? provider.getChildren(parent) : null;
+            if (children != null)
+            {
+                for (Object child : children)
+                {
+                    if (kids.length() > 0)
+                        kids.append(',');
+                    kids.append(markBrief(child))
+                        .append(isMarked(viewer, child) ? '+' : '-');
+                }
+            }
+            Global.tempLog("subsystems-mark", //$NON-NLS-1$
+                "el=" + markBrief(element) //$NON-NLS-1$
+                    + " parent=" + markBrief(parent) //$NON-NLS-1$
+                    + " parentClass=" + (parent != null ? parent.getClass().getName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
+                    + " projectParent=" + isProjectOrFolderParent(parent) //$NON-NLS-1$
+                    + " last=" + last + " reset=" + reset //$NON-NLS-1$ //$NON-NLS-2$
+                    + " kids=[" + kids + "]"); //$NON-NLS-1$ //$NON-NLS-2$
+
+            if (last || reset)
+            {
+                markNodeAndPromoteParents(panel, viewer, provider, element);
+                FilterBySubsystemsDialogDebug.step("lastChildCheck", "without subtree reset"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            for (ICheckStateListener delegate : delegates)
+            {
+                if (delegate != null)
+                    delegate.checkStateChanged(event);
+            }
+        }
     }
 
     private static void collectSubtree(ITreeContentProvider provider, Object element, List<Object> result)
@@ -596,6 +1199,150 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         if (y < client.y)
             y = client.y;
         return new Rectangle(x, y, width, height);
+    }
+
+    /**
+     * Подсветка совпадений smart-фильтра поверх штатного label provider дерева подсистем.
+     * Матч строго по тексту самого узла ({@link SmartMatcher#matches}) — как выбрал пользователь
+     * («только имя узла»), и подсветка красит только такие узлы.
+     */
+    private static final class SubsystemHighlightStyledProvider implements IStyledLabelProvider
+    {
+        private final IStyledLabelProvider delegate;
+        private String highlightPattern = ""; //$NON-NLS-1$
+
+        SubsystemHighlightStyledProvider(IStyledLabelProvider delegate)
+        {
+            this.delegate = delegate;
+        }
+
+        void setHighlightPattern(String pattern)
+        {
+            this.highlightPattern = pattern != null ? pattern : ""; //$NON-NLS-1$
+        }
+
+        @Override
+        public StyledString getStyledText(Object element)
+        {
+            StyledString styled = delegate.getStyledText(element);
+            if (styled == null)
+                styled = new StyledString();
+            if (highlightPattern.isEmpty())
+                return styled;
+            String text = styled.getString();
+            if (text == null || text.isEmpty())
+                return styled;
+            SmartMatcher matcher = new SmartMatcher(highlightPattern);
+            if (matcher.isEmpty || !matcher.matches(text))
+                return styled;
+            SmartMatchHighlight.applyRanges(styled, matcher.getHighlightRanges(text));
+            return styled;
+        }
+
+        @Override
+        public Image getImage(Object element)
+        {
+            return delegate.getImage(element);
+        }
+
+        @Override
+        public void addListener(ILabelProviderListener listener)
+        {
+            delegate.addListener(listener);
+        }
+
+        @Override
+        public void removeListener(ILabelProviderListener listener)
+        {
+            delegate.removeListener(listener);
+        }
+
+        @Override
+        public boolean isLabelProperty(Object element, String property)
+        {
+            return delegate.isLabelProperty(element, property);
+        }
+
+        @Override
+        public void dispose()
+        {
+            delegate.dispose();
+        }
+    }
+
+    /**
+     * Фильтр дерева подсистем по {@link SmartMatcher}: узел виден, если матчится текст самого узла
+     * или есть матчащийся потомок (как штатный {@code InMemorySearchFilter} — родители совпадений
+     * не прячутся).
+     */
+    private static final class SmartSubsystemsFilter extends ViewerFilter
+    {
+        private final IStyledLabelProvider labelProvider;
+        private SmartMatcher matcher;
+
+        SmartSubsystemsFilter(IStyledLabelProvider labelProvider)
+        {
+            this.labelProvider = labelProvider;
+            this.matcher = new SmartMatcher("");
+        }
+
+        void setPattern(String pattern)
+        {
+            this.matcher = new SmartMatcher(pattern);
+        }
+
+        @Override
+        public boolean select(Viewer viewer, Object parentElement, Object element)
+        {
+            if (matcher.isEmpty)
+                return true;
+            if (nodeMatches(element))
+                return true;
+            if (!(viewer instanceof StructuredViewer structuredViewer))
+                return false;
+            Object provider = structuredViewer.getContentProvider();
+            if (provider instanceof ITreeContentProvider treeProvider)
+                return hasMatchingDescendant(treeProvider, element);
+            return false;
+        }
+
+        private boolean nodeMatches(Object element)
+        {
+            if (element == null)
+                return false;
+            String text = nodeText(element);
+            return text != null && matcher.matches(text);
+        }
+
+        private String nodeText(Object element)
+        {
+            try
+            {
+                StyledString styled = labelProvider.getStyledText(element);
+                return styled != null ? styled.getString() : null;
+            }
+            catch (RuntimeException ex)
+            {
+                return null;
+            }
+        }
+
+        private boolean hasMatchingDescendant(ITreeContentProvider provider, Object element)
+        {
+            Object[] children = provider.getChildren(element);
+            if (children == null)
+                return false;
+            for (Object child : children)
+            {
+                if (child == null)
+                    continue;
+                if (nodeMatches(child))
+                    return true;
+                if (hasMatchingDescendant(provider, child))
+                    return true;
+            }
+            return false;
+        }
     }
 }
 

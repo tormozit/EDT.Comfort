@@ -13,12 +13,11 @@ import com._1c.g5.v8.bm.integration.IBmModel;
 import com._1c.g5.v8.derived.IDerivedDataManager;
 import com._1c.g5.v8.derived.IDerivedDataUpdate;
 import com._1c.g5.v8.derived.context.IContextCollectingSession;
+import com._1c.g5.v8.derived.context.IObjectDerivedDataContext;
 import com._1c.g5.v8.dt.core.platform.IDerivedDataManagerProvider;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.metadata.mdclass.AbstractForm;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
-import com.e1c.g5.v8.dt.check.CheckComplexity;
-import com.e1c.g5.v8.dt.check.context.CheckContextCollectingSession;
 import com.e1c.g5.v8.dt.check.settings.CheckUid;
 import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
 
@@ -28,17 +27,22 @@ import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
  * {@code ICheckScheduler.scheduleValidation} для этой задачи не работает (проверено), а
  * {@code IDerivedDataManager.recomputeAll()} пересчитывает проект целиком — десятки секунд на
  * средней конфигурации. Рабочий путь — пометить объекту контекст производных данных сегмента
- * проверок как «полная перепроверка» и продавить отложенные обновления.
+ * проверок как «полная перепроверка» ({@code setFullRebuild} + {@code setInactive(false)} +
+ * {@code addCheckIds}) и продавить отложенные обновления через {@code applyForcedUpdates}.
  * <p>
- * Пометка делается штатным {@link CheckContextCollectingSession#addFullCheck} из публичного
- * пакета {@code com.e1c.g5.v8.dt.check.context}: он сам выбирает сегмент по сложности проверки
- * ({@code M_CHECKS_SEGMENT} / {@code CM_CHECKS_SEGMENT}), сам поднимается к top-объекту и
- * заполняет фильтр перепроверяемых проверок — то же самое, что делалось рефлексией по
- * {@code ModelCheckObjectContext}, но типизированно.
+ * Штатный {@code CheckContextCollectingSession#addFullCheck} этого недостаточно: он не снимает
+ * флаг {@code inactive} у контекста, и помеченные проверки не запускаются. Эталон — путь
+ * «Проверить» в меню навигатора.
  */
 public final class ComfortCheckRecompute
 {
     private static final String LOG_TOPIC = "comfort-check-recompute"; //$NON-NLS-1$
+
+    /** Сегмент обычных (NORMAL) модельных проверок. */
+    private static final String M_CHECKS_SEGMENT = "M_CHECKS_SEGMENT"; //$NON-NLS-1$
+
+    /** Сегмент сложных (COMPLEX) модельных проверок. */
+    private static final String CM_CHECKS_SEGMENT = "CM_CHECKS_SEGMENT"; //$NON-NLS-1$
 
     private ComfortCheckRecompute() {}
 
@@ -80,19 +84,15 @@ public final class ComfortCheckRecompute
                 for (EObject object : objects)
                 {
                     EObject target = toCheckTarget(object);
-                    if (!(target instanceof IBmObject bmObject) || bmObject.bmGetTransaction() == null)
+                    if (!(target instanceof IBmObject bmObject))
                     {
-                        Global.tempLog(LOG_TOPIC, "пропущен объект вне BM-транзакции: " + target); //$NON-NLS-1$
+                        Global.tempLog(LOG_TOPIC, "пропущен не-BM объект: " + target); //$NON-NLS-1$
                         continue;
                     }
-                    for (String checkId : checkIds)
-                    {
-                        // сложность проверки заранее неизвестна — помечаем оба модельных сегмента,
-                        // лишняя пометка безвредна: фильтр просто не найдёт такой проверки в сегменте
-                        markFullCheck(session, checkId, CheckComplexity.NORMAL, bmObject);
-                        markFullCheck(session, checkId, CheckComplexity.COMPLEX, bmObject);
-                    }
-                    marked[0]++;
+                    boolean okM = markSegmentFullRebuild(session, bmObject, M_CHECKS_SEGMENT, checkIds);
+                    boolean okCm = markSegmentFullRebuild(session, bmObject, CM_CHECKS_SEGMENT, checkIds);
+                    if (okM || okCm)
+                        marked[0]++;
                 }
             }
         }, 0L, "comfort-recompute-checks"); //$NON-NLS-1$
@@ -102,8 +102,15 @@ public final class ComfortCheckRecompute
             Global.tempLog(LOG_TOPIC, "ни один объект не помечен — перепроверять нечего"); //$NON-NLS-1$
             return;
         }
-        manager.applyForcedUpdates();
-        Global.tempLog(LOG_TOPIC, "перепроверка запланирована, помечено объектов: " + marked[0]); //$NON-NLS-1$
+        try
+        {
+            manager.applyForcedUpdates();
+            Global.tempLog(LOG_TOPIC, "перепроверка запланирована, помечено объектов: " + marked[0]); //$NON-NLS-1$
+        }
+        catch (RuntimeException e)
+        {
+            Global.tempLogException(LOG_TOPIC, "applyForcedUpdates не удался", e); //$NON-NLS-1$
+        }
     }
 
     /**
@@ -112,7 +119,7 @@ public final class ComfortCheckRecompute
      * Из навигатора и из области отбора панели приходит объект метаданных формы
      * ({@code BasicForm}: {@code DocumentFormImpl}, {@code CommonFormImpl} и т.п.), а проверки форм
      * зарегистрированы на {@code form.model.Form} — вложенный объект, который и привязан к
-     * BM-транзакции. Без этого перехода объект молча отбраковывается как «вне транзакции».
+     * BM-транзакции. Без этого перехода объект молча отбраковывается.
      */
     private static EObject toCheckTarget(EObject object)
     {
@@ -125,16 +132,46 @@ public final class ComfortCheckRecompute
         return object;
     }
 
-    private static void markFullCheck(IContextCollectingSession session, String checkId,
-        CheckComplexity complexity, IBmObject bmObject)
+    /**
+     * Помечает контекст сегмента проверок на полную перепроверку всех {@code checkIds}.
+     *
+     * @return {@code true}, если контекст успешно помечен
+     */
+    private static boolean markSegmentFullRebuild(IContextCollectingSession session, IBmObject bmObject,
+        String segmentId, Set<String> checkIds)
     {
         try
         {
-            new CheckContextCollectingSession(checkId, complexity, false, session).addFullCheck(bmObject);
+            Object ctx = session.getObjectContext(bmObject, segmentId);
+            if (ctx == null)
+            {
+                Global.tempLog(LOG_TOPIC, "контекст null для сегмента " + segmentId //$NON-NLS-1$
+                    + ", объект=" + bmObject); //$NON-NLS-1$
+                return false;
+            }
+            if (ctx instanceof IObjectDerivedDataContext typed)
+            {
+                typed.setFullRebuild(true);
+                typed.setInactive(false);
+            }
+            else
+            {
+                ctx.getClass().getMethod("setFullRebuild", boolean.class).invoke(ctx, Boolean.TRUE); //$NON-NLS-1$
+                ctx.getClass().getMethod("setInactive", boolean.class).invoke(ctx, Boolean.FALSE); //$NON-NLS-1$
+            }
+            ctx.getClass().getMethod("addCheckIds", Set.class).invoke(ctx, checkIds); //$NON-NLS-1$
+            if (ctx instanceof IObjectDerivedDataContext typed)
+                typed.setFullRebuild(true);
+            else
+                ctx.getClass().getMethod("setFullRebuild", boolean.class).invoke(ctx, Boolean.TRUE); //$NON-NLS-1$
+            Global.tempLog(LOG_TOPIC, "контекст готов: сегмент=" + segmentId //$NON-NLS-1$
+                + ", объект=" + bmObject); //$NON-NLS-1$
+            return true;
         }
-        catch (RuntimeException e)
+        catch (Exception e)
         {
-            Global.tempLogException(LOG_TOPIC, "addFullCheck(" + checkId + ") не удался", e); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.tempLogException(LOG_TOPIC, "пометка сегмента " + segmentId + " не удалась", e); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
         }
     }
 

@@ -58,6 +58,7 @@ import com._1c.g5.v8.dt.compare.model.ComparisonSide;
 import com._1c.g5.v8.dt.compare.ui.editor.DtComparisonView;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.AbstractDirectPartialModelNode;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.AbstractNodeWithLabels;
+import com._1c.g5.v8.dt.compare.ui.partialmodel.node.IPartialModelNode;
 
 /**
  * Патч диалога поиска EDT (CTRL+F в дереве сравнения конфигураций).
@@ -74,6 +75,7 @@ public class CompareConfigSearchDialogHook
     private static final String SETTINGS_SECTION = "TormozitCompareConfigSearchSettings"; //$NON-NLS-1$
     private static final String KEY_SEARCH_All_rows = "searchAllRows"; //$NON-NLS-1$
     private static final String KEY_SEARCH_All_columns = "searchAllColumns"; //$NON-NLS-1$
+    private static final String KEY_WHOLE_WORD = "wholeWord"; //$NON-NLS-1$
 
     /** scopeId для {@link FilterHistoryStore} — история запросов этого диалога отдельна от других полей фильтра. */
     private static final String COMPARE_SEARCH_HISTORY_SCOPE = "compareConfigSearch"; //$NON-NLS-1$
@@ -130,39 +132,81 @@ public class CompareConfigSearchDialogHook
 
         IDialogSettings settings = getDialogSettings();
 
-        Button cbSearchAllRows = new Button(parent, SWT.CHECK);
+        // Все флажки в одном вертикальном блоке (ячейка бывшего «С учётом регистра»),
+        // иначе moveBelow разносит их по колонкам GridLayout и даёт пустоты.
+        Composite checkGroup = new Composite(parent, SWT.NONE);
+        GridLayout checkLayout = new GridLayout(1, false);
+        checkLayout.marginWidth = 0;
+        checkLayout.marginHeight = 0;
+        checkLayout.verticalSpacing = 2;
+        checkGroup.setLayout(checkLayout);
+
+        if (btnCase != null)
+        {
+            GridData caseGd = (GridData) btnCase.getLayoutData();
+            GridData groupGd;
+            if (caseGd != null)
+            {
+                groupGd = new GridData(caseGd.horizontalAlignment, caseGd.verticalAlignment,
+                        caseGd.grabExcessHorizontalSpace, caseGd.grabExcessVerticalSpace);
+                groupGd.horizontalIndent = caseGd.horizontalIndent;
+                groupGd.horizontalSpan = caseGd.horizontalSpan;
+                groupGd.verticalSpan = caseGd.verticalSpan;
+                groupGd.widthHint = caseGd.widthHint;
+                groupGd.heightHint = SWT.DEFAULT;
+                groupGd.exclude = caseGd.exclude;
+            }
+            else
+            {
+                groupGd = new GridData(SWT.BEGINNING, SWT.CENTER, false, false);
+            }
+            checkGroup.setLayoutData(groupGd);
+            checkGroup.moveBelow(btnCase);
+            btnCase.setParent(checkGroup);
+            btnCase.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
+        }
+        else
+        {
+            checkGroup.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
+        }
+
+        Button cbWholeWord = new Button(checkGroup, SWT.CHECK);
+        cbWholeWord.setText("Слово целиком");
+        cbWholeWord.setToolTipText("Искать только целые слова, а не подстроки"
+                + Global.pluginSignForTooltip());
+        cbWholeWord.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
+        cbWholeWord.setSelection(settings.getBoolean(KEY_WHOLE_WORD));
+        cbWholeWord.addListener(SWT.Selection, event ->
+                settings.put(KEY_WHOLE_WORD, cbWholeWord.getSelection()));
+
+        Button cbSearchAllRows = new Button(checkGroup, SWT.CHECK);
         cbSearchAllRows.setText("По всем строкам");
-        cbSearchAllRows.setToolTipText("Стандартный поиск EDT ищет только по строкам имен объектов. Этот флажок включает просмотр всех строк" + Global.pluginSignForTooltip());
-        cbSearchAllRows.setLayoutData(new GridData(GridData.BEGINNING, GridData.CENTER, false, false));
-
-        boolean loadDetailed = settings.get(KEY_SEARCH_All_rows) == null ? true : settings.getBoolean(KEY_SEARCH_All_rows);
+        cbSearchAllRows.setToolTipText(
+                "Стандартный поиск EDT ищет только по строкам имен объектов. Этот флажок включает просмотр всех строк"
+                        + Global.pluginSignForTooltip());
+        cbSearchAllRows.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
+        boolean loadDetailed = settings.get(KEY_SEARCH_All_rows) == null ? true
+                : settings.getBoolean(KEY_SEARCH_All_rows);
         cbSearchAllRows.setSelection(loadDetailed);
+        cbSearchAllRows.addListener(SWT.Selection,
+                event -> settings.put(KEY_SEARCH_All_rows, cbSearchAllRows.getSelection()));
 
-        cbSearchAllRows.addListener(SWT.Selection, event -> {
-            settings.put(KEY_SEARCH_All_rows, cbSearchAllRows.getSelection());
-        });
-
-        if (btnCase != null)
-            cbSearchAllRows.moveBelow(btnCase);
-
-        Button cbSearchAllColumns = new Button(parent, SWT.CHECK);
+        Button cbSearchAllColumns = new Button(checkGroup, SWT.CHECK);
         cbSearchAllColumns.setText("По всем колонкам");
-        cbSearchAllColumns.setToolTipText("Дополнительно к поиску в колонках значений еще искать в колонке \"Объект\"" + Global.pluginSignForTooltip());
-        cbSearchAllColumns.setLayoutData(new GridData(GridData.BEGINNING, GridData.CENTER, false, false));
-
-        boolean loadObjectCol = settings.get(KEY_SEARCH_All_columns) == null ? true : settings.getBoolean(KEY_SEARCH_All_columns);
+        cbSearchAllColumns.setToolTipText(
+                "Дополнительно к поиску в колонках значений еще искать в колонке \"Объект\""
+                        + Global.pluginSignForTooltip());
+        cbSearchAllColumns.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
+        boolean loadObjectCol = settings.get(KEY_SEARCH_All_columns) == null ? true
+                : settings.getBoolean(KEY_SEARCH_All_columns);
         cbSearchAllColumns.setSelection(loadObjectCol);
-
-        cbSearchAllColumns.addListener(SWT.Selection, event -> {
-            settings.put(KEY_SEARCH_All_columns, cbSearchAllColumns.getSelection());
-        });
-
-        if (btnCase != null)
-            cbSearchAllColumns.moveBelow(btnCase);
+        cbSearchAllColumns.addListener(SWT.Selection,
+                event -> settings.put(KEY_SEARCH_All_columns, cbSearchAllColumns.getSelection()));
 
         Button btnFindAll = new Button(buttonBar, SWT.PUSH);
-        btnFindAll.setText("\u041D\u0430\u0439\u0442\u0438 \u0432\u0441\u0435"); //$NON-NLS-1$
-        btnFindAll.setToolTipText("\u041F\u043E\u043A\u0430\u0437\u0430\u0442\u044C \u0432\u0441\u0435 \u043D\u0430\u0439\u0434\u0435\u043D\u043D\u044B\u0435 \u0443\u0437\u043B\u044B \u0432 \u043F\u0430\u043D\u0435\u043B\u0438 \u0440\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442\u043E\u0432 \u043F\u043E\u0438\u0441\u043A\u0430" + Global.pluginSignForTooltip()); //$NON-NLS-1$
+        btnFindAll.setText("Найти все");
+        btnFindAll.setToolTipText("Показать все найденные узлы в панели результатов поиска"
+                + Global.pluginSignForTooltip());
         btnFindAll.setLayoutData(new org.eclipse.swt.layout.RowData());
 
         btnFindAll.moveAbove(btnPrev);
@@ -182,28 +226,25 @@ public class CompareConfigSearchDialogHook
                 session.cancel();
                 return;
             }
-            session.findAndShowAll(cbSearchAllColumns.getSelection());
+            session.findAndShowAll(cbSearchAllColumns.getSelection(), cbWholeWord.getSelection());
             session.focusComparisonTree();
         });
         shell.setData(SESSION_KEY, session);
         shell.addListener(SWT.Close, event -> session.onShellClose());
 
-        interceptButton(btnNext, dialog, cbSearchAllRows, session, false, cbSearchAllColumns);
-        interceptButton(btnPrev, dialog, cbSearchAllRows, session, true, cbSearchAllColumns);
+        interceptButton(btnNext, dialog, cbSearchAllRows, session, false, cbSearchAllColumns, cbWholeWord);
+        interceptButton(btnPrev, dialog, cbSearchAllRows, session, true, cbSearchAllColumns, cbWholeWord);
 
         installEnterTriggersNext(textFilter, btnNext);
 
-        installSearchDialogButtonKeepAlive(shell, dialog, session, textFilter, cbSearchAllRows, cbSearchAllColumns, btnCase);
+        installSearchDialogButtonKeepAlive(shell, dialog, session, textFilter, cbSearchAllRows,
+                cbSearchAllColumns, cbWholeWord, btnCase);
 
         buttonBar.layout(true, true);
         parent.layout(true, true);
-        shell.pack();
-
-        // Оверлей кнопки истории сам пересчитывает позицию от текущих границ textFilter
-        // (см. installSearchHistory/reposition), поэтому расширение диалога здесь безопасно —
-        // в отличие от ControlDecoration, кнопка просто уедет вместе с полем, не обрезаясь.
-        Point packedSize = shell.getSize();
-        shell.setSize(packedSize.x + 100, packedSize.y);
+        // Ширина +100 под оверлей истории; высоту — по содержимому, без лишней «дыры» снизу.
+        Point pref = shell.computeSize(SWT.DEFAULT, SWT.DEFAULT, true);
+        shell.setSize(pref.x + 100, pref.y);
     }
 
     private static IDialogSettings getDialogSettings()
@@ -217,7 +258,9 @@ public class CompareConfigSearchDialogHook
         return section;
     }
 
-    private static void interceptButton(Button button, Object dialog, Button cbSearchAllRows, CompareConfigSearchSession session, boolean backward, Button cbSearchAllColumns)
+    private static void interceptButton(Button button, Object dialog, Button cbSearchAllRows,
+            CompareConfigSearchSession session, boolean backward, Button cbSearchAllColumns,
+            Button cbWholeWord)
     {
         Listener[] original = button.getListeners(SWT.Selection);
         for (Listener l : original)
@@ -230,7 +273,7 @@ public class CompareConfigSearchDialogHook
                 session.cancel();
                 return;
             }
-            if (!cbSearchAllRows.getSelection())
+            if (!cbSearchAllRows.getSelection() && !cbWholeWord.getSelection())
             {
                 reattachSearchEngineMediator(dialog);
                 for (Listener l : original)
@@ -238,7 +281,8 @@ public class CompareConfigSearchDialogHook
             }
             else
             {
-                session.startSearch(backward, cbSearchAllColumns.getSelection());
+                session.startSearch(backward, cbSearchAllColumns.getSelection(),
+                        cbWholeWord.getSelection());
             }
             session.focusComparisonTree();
             session.refreshSearchButtons();
@@ -401,7 +445,7 @@ public class CompareConfigSearchDialogHook
     }
 
     private static void installSearchDialogButtonKeepAlive(Shell shell, Object dialog, CompareConfigSearchSession session,
-        Text textFilter, Button cbSearchAllRows, Button cbSearchAllColumns, Button btnCase)
+        Text textFilter, Button cbSearchAllRows, Button cbSearchAllColumns, Button cbWholeWord, Button btnCase)
     {
         Runnable keepAlive = () ->
         {
@@ -431,6 +475,8 @@ public class CompareConfigSearchDialogHook
             cbSearchAllRows.addFocusListener(focusIn);
         if (cbSearchAllColumns != null)
             cbSearchAllColumns.addFocusListener(focusIn);
+        if (cbWholeWord != null)
+            cbWholeWord.addFocusListener(focusIn);
         if (btnCase != null)
             btnCase.addFocusListener(focusIn);
 
@@ -701,36 +747,28 @@ public class CompareConfigSearchDialogHook
         }
     }
 
-    private static boolean isMatched(Object element, String query, boolean caseSensitive, IBaseLabelProvider baseLabelProvider, boolean cbSearchAllColumns)
+    private static boolean isMatched(Object element, String query, boolean caseSensitive,
+            IBaseLabelProvider baseLabelProvider, boolean cbSearchAllColumns, boolean wholeWord)
     {
         if (baseLabelProvider instanceof ILabelProvider) {
             String text;
             if (element instanceof AbstractNodeWithLabels) {
                 AbstractNodeWithLabels node = (AbstractNodeWithLabels) element;
                 text = getSideLabelSafe(node, ComparisonSide.MAIN);
-                if (text != null && (caseSensitive ? text.contains(query) : text.toLowerCase().contains(query)))
-                {
+                if (textMatches(text, query, caseSensitive, wholeWord))
                     return true;
-                }
                 text = getSideLabelSafe(node, ComparisonSide.OTHER);
-                if (text != null && (caseSensitive ? text.contains(query) : text.toLowerCase().contains(query)))
-                {
+                if (textMatches(text, query, caseSensitive, wholeWord))
                     return true;
-                }
                 text = getSideLabelSafe(node, ComparisonSide.COMMON_ANCESTOR);
-                if (text != null && (caseSensitive ? text.contains(query) : text.toLowerCase().contains(query)))
-                {
+                if (textMatches(text, query, caseSensitive, wholeWord))
                     return true;
-                }
             }
             if (cbSearchAllColumns)
             {
                 text = extractNodeLabel(element);
-                if (text != null && !text.isEmpty()
-                    && (caseSensitive ? text.contains(query) : text.toLowerCase().contains(query)))
-                {
+                if (textMatches(text, query, caseSensitive, wholeWord))
                     return true;
-                }
             }
         }
         return false;
@@ -787,49 +825,90 @@ public class CompareConfigSearchDialogHook
         return cache.computeIfAbsent(parent, CompareConfigSearchDialogHook::buildPathForNode);
     }
 
-    private static boolean textMatches(String text, String effectiveQuery, boolean caseSensitive)
+    private static boolean textMatches(String text, String effectiveQuery, boolean caseSensitive,
+            boolean wholeWord)
     {
-        return text != null && (caseSensitive ? text.contains(effectiveQuery) : text.toLowerCase().contains(effectiveQuery));
+        if (text == null || effectiveQuery == null || effectiveQuery.isEmpty())
+            return false;
+        if (!wholeWord)
+            return caseSensitive ? text.contains(effectiveQuery)
+                    : text.toLowerCase().contains(effectiveQuery);
+        return containsWholeWord(text, effectiveQuery, caseSensitive);
+    }
+
+    /** Как в {@link ConfigSearchDialogHook}: границы слова = буква/цифра/`_`. */
+    private static boolean containsWholeWord(String text, String query, boolean caseSensitive)
+    {
+        String src = caseSensitive ? text : text.toLowerCase();
+        // effectiveQuery уже в lower при !caseSensitive
+        String q = query;
+        int from = 0;
+        while (from <= src.length() - q.length())
+        {
+            int idx = src.indexOf(q, from);
+            if (idx < 0)
+                return false;
+            boolean startOk = idx == 0 || !isWordChar(src.charAt(idx - 1));
+            int end = idx + q.length();
+            boolean endOk = end >= src.length() || !isWordChar(src.charAt(end));
+            if (startOk && endOk)
+                return true;
+            from = idx + 1;
+        }
+        return false;
+    }
+
+    private static boolean isWordChar(char c)
+    {
+        return Character.isLetterOrDigit(c) || c == '_';
     }
 
     private static final class ComparisonStatusInfo
     {
         final String status;
+        final CompareSearchMatch.RowColorKind rowColorKind;
         final boolean checkable;
 
-        ComparisonStatusInfo(String status, boolean checkable)
+        ComparisonStatusInfo(String status, CompareSearchMatch.RowColorKind rowColorKind, boolean checkable)
         {
             this.status = status;
+            this.rowColorKind = rowColorKind;
             this.checkable = checkable;
         }
     }
 
+    /**
+     * Статус и цвет строки — одно вычисление.
+     * Сначала {@code getSide()} (как окраска дерева EDT): MAIN/OTHER = только на стороне.
+     * {@code hasOnlyOnOneSide(MAIN,OTHER)} при {@code getSide()==null} в трёхстороннем сравнении
+     * даёт ложные «Удалено» — не использовать для статуса.
+     */
     private static ComparisonStatusInfo computeComparisonStatus(Object element)
     {
-        String comparisonStatus = ""; //$NON-NLS-1$
         boolean checkable = true;
+        if (element instanceof AbstractNodeWithLabels labeled)
+            checkable = labeled.isCheckable();
 
+        ComparisonSide side = null;
+        if (element instanceof IPartialModelNode partial)
+            side = partial.getSide();
+
+        if (side == ComparisonSide.MAIN)
+            return new ComparisonStatusInfo("Удалено", CompareSearchMatch.RowColorKind.ONLY_MAIN, checkable);
+        if (side == ComparisonSide.OTHER)
+            return new ComparisonStatusInfo("Добавлено", CompareSearchMatch.RowColorKind.ONLY_OTHER, checkable);
+
+        boolean changed = false;
         if (element instanceof AbstractNodeWithLabels node)
-        {
-            if (node.hasOnlyOnOneSide(ComparisonSide.OTHER, ComparisonSide.MAIN))
-                comparisonStatus = "Добавлено"; //$NON-NLS-1$
-            else if (node.hasOnlyOnOneSide(ComparisonSide.MAIN, ComparisonSide.OTHER))
-                comparisonStatus = "Удалено"; //$NON-NLS-1$
-            else if (node.hasChanged(ComparisonSide.MAIN, ComparisonSide.OTHER))
-                comparisonStatus = "Изменено"; //$NON-NLS-1$
-            checkable = node.isCheckable();
-        }
+            changed = node.hasChanged(ComparisonSide.MAIN, ComparisonSide.OTHER);
         else if (element instanceof AbstractDirectPartialModelNode node)
-        {
-            if (node.hasOnlyOnOneSide(ComparisonSide.OTHER, ComparisonSide.MAIN))
-                comparisonStatus = "Добавлено"; //$NON-NLS-1$
-            else if (node.hasOnlyOnOneSide(ComparisonSide.MAIN, ComparisonSide.OTHER))
-                comparisonStatus = "Удалено"; //$NON-NLS-1$
-            else if (node.hasDifferences(ComparisonSide.MAIN, ComparisonSide.OTHER))
-                comparisonStatus = "Изменено"; //$NON-NLS-1$
-        }
+            changed = node.hasDifferences(ComparisonSide.MAIN, ComparisonSide.OTHER);
+        else if (element instanceof IPartialModelNode node)
+            changed = node.hasDifferences(ComparisonSide.MAIN, ComparisonSide.OTHER);
 
-        return new ComparisonStatusInfo(comparisonStatus, checkable);
+        if (changed)
+            return new ComparisonStatusInfo("Изменено", CompareSearchMatch.RowColorKind.HAS_DIFFS, checkable);
+        return new ComparisonStatusInfo("", CompareSearchMatch.RowColorKind.NONE, checkable);
     }
 
     /**
@@ -846,7 +925,7 @@ public class CompareConfigSearchDialogHook
         catch (Throwable t)
         {
             Global.logError("CompareSearch", "findAll: status computation failed", t); //$NON-NLS-1$
-            return new ComparisonStatusInfo("", true); //$NON-NLS-1$
+            return new ComparisonStatusInfo("", CompareSearchMatch.RowColorKind.NONE, true);
         }
     }
 
@@ -876,27 +955,27 @@ public class CompareConfigSearchDialogHook
     }
 
     private static void collectColumnHits(Object element, String effectiveQuery, boolean caseSensitive,
-        boolean searchAllColumns, String headerMain, String headerOther, String headerAncestor,
-        String headerObject, List<ColumnHit> hits)
+        boolean searchAllColumns, boolean wholeWord, String headerMain, String headerOther,
+        String headerAncestor, String headerObject, List<ColumnHit> hits)
     {
         if (element instanceof AbstractNodeWithLabels node)
         {
             String text = getSideLabelSafe(node, ComparisonSide.MAIN);
-            if (textMatches(text, effectiveQuery, caseSensitive))
+            if (textMatches(text, effectiveQuery, caseSensitive, wholeWord))
                 hits.add(new ColumnHit(headerMain != null ? headerMain : "MAIN", text)); //$NON-NLS-1$
 
             text = getSideLabelSafe(node, ComparisonSide.OTHER);
-            if (textMatches(text, effectiveQuery, caseSensitive))
+            if (textMatches(text, effectiveQuery, caseSensitive, wholeWord))
                 hits.add(new ColumnHit(headerOther != null ? headerOther : "OTHER", text)); //$NON-NLS-1$
 
             text = getSideLabelSafe(node, ComparisonSide.COMMON_ANCESTOR);
-            if (textMatches(text, effectiveQuery, caseSensitive))
+            if (textMatches(text, effectiveQuery, caseSensitive, wholeWord))
                 hits.add(new ColumnHit(headerAncestor != null ? headerAncestor : "ОбщийПредок", text)); //$NON-NLS-1$
         }
         if (searchAllColumns)
         {
             String text = extractNodeLabel(element);
-            if (textMatches(text, effectiveQuery, caseSensitive))
+            if (textMatches(text, effectiveQuery, caseSensitive, wholeWord))
                 hits.add(new ColumnHit(headerObject, text));
         }
     }
@@ -1067,6 +1146,7 @@ public class CompareConfigSearchDialogHook
         String effectiveQuery,
         boolean caseSensitive,
         boolean searchAllColumns,
+        boolean wholeWord,
         String headerMain,
         String headerOther,
         String headerAncestor,
@@ -1091,7 +1171,7 @@ public class CompareConfigSearchDialogHook
             try
             {
                 columnHits.clear();
-                collectColumnHits(element, effectiveQuery, caseSensitive, searchAllColumns,
+                collectColumnHits(element, effectiveQuery, caseSensitive, searchAllColumns, wholeWord,
                     headerMain, headerOther, headerAncestor, headerObject, columnHits);
 
                 if (!columnHits.isEmpty())
@@ -1104,7 +1184,8 @@ public class CompareConfigSearchDialogHook
                     for (ColumnHit hit : columnHits)
                     {
                         matches.add(new CompareSearchMatch(element, objectPath, propertyName,
-                            hit.columnSide, hit.matchText, statusInfo.status, statusInfo.checkable));
+                            hit.columnSide, hit.matchText, statusInfo.status, statusInfo.rowColorKind,
+                            statusInfo.checkable));
                     }
                 }
             }
@@ -1255,7 +1336,7 @@ public class CompareConfigSearchDialogHook
                 searchCacheByEditor.put(editorPart, new SearchCache(items, input, filterHash));
         }
 
-        void startSearch(boolean backward, boolean searchAllColumns)
+        void startSearch(boolean backward, boolean searchAllColumns, boolean wholeWord)
         {
             cancel();
             activeGeneration++;
@@ -1315,7 +1396,9 @@ public class CompareConfigSearchDialogHook
             setSearchButtonsToCancelMode();
             startProgressTimer(generation);
 
-            Global.log("CompareSearch", "start query=\"" + query + "\" backward=" + backward + " allColumns=" + searchAllColumns + " cacheHit=" + cacheHit); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            Global.log("CompareSearch", "start query=\"" + query + "\" backward=" + backward //$NON-NLS-1$ //$NON-NLS-2$
+                    + " allColumns=" + searchAllColumns + " wholeWord=" + wholeWord //$NON-NLS-1$ //$NON-NLS-2$
+                    + " cacheHit=" + cacheHit); //$NON-NLS-1$
 
             Job job = new Job("Поиск по дереву сравнения...") //$NON-NLS-1$
             {
@@ -1378,7 +1461,8 @@ public class CompareConfigSearchDialogHook
                                 : (startIdx + i) % n;
                             Object candidate = items.get(idx);
 
-                            if (isMatched(candidate, effectiveQuery, caseSensitive, labelProvider, searchAllColumns))
+                            if (isMatched(candidate, effectiveQuery, caseSensitive, labelProvider,
+                                    searchAllColumns, wholeWord))
                             {
                                 Object found = candidate;
                                 Display.getDefault().asyncExec(() ->
@@ -1422,7 +1506,7 @@ public class CompareConfigSearchDialogHook
             job.schedule();
         }
 
-        void findAndShowAll(boolean searchAllColumns)
+        void findAndShowAll(boolean searchAllColumns, boolean wholeWord)
         {
             cancel();
 
@@ -1526,7 +1610,7 @@ public class CompareConfigSearchDialogHook
                         monitor.beginTask("Фильтрация...", n); //$NON-NLS-1$
 
                         List<CompareSearchMatch> matches = buildFindAllMatches(items, effectiveQuery,
-                            caseSensitive, searchAllColumns, headerMain, headerOther,
+                            caseSensitive, searchAllColumns, wholeWord, headerMain, headerOther,
                             headerAncestor, headerObject, generation, monitor);
 
                         if (generation != activeGeneration)
@@ -1566,7 +1650,7 @@ public class CompareConfigSearchDialogHook
         }
 
         private List<CompareSearchMatch> buildFindAllMatches(List<Object> items, String effectiveQuery,
-            boolean caseSensitive, boolean searchAllColumns,
+            boolean caseSensitive, boolean searchAllColumns, boolean wholeWord,
             String headerMain, String headerOther, String headerAncestor, String headerObject,
             int generation, IProgressMonitor monitor)
         {
@@ -1574,7 +1658,7 @@ public class CompareConfigSearchDialogHook
             if (n <= 0)
                 return new ArrayList<>();
             return buildFindAllMatchesRange(items, 0, n, effectiveQuery, caseSensitive, searchAllColumns,
-                headerMain, headerOther, headerAncestor, headerObject, generation,
+                wholeWord, headerMain, headerOther, headerAncestor, headerObject, generation,
                 () -> activeGeneration, monitor, idx -> scanned = idx);
         }
 

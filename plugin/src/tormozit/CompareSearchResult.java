@@ -50,7 +50,10 @@ public class CompareSearchResult implements ISearchResult
     public String getLabel()
     {
         int count = matches != null ? matches.size() : 0;
-        return "\u0420\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442\u044B \u043F\u043E\u0438\u0441\u043A\u0430 \u043F\u043E \u0434\u0435\u0440\u0435\u0432\u0443 \u0441\u0440\u0430\u0432\u043D\u0435\u043D\u0438\u044F — " + count;
+        String q = queryText != null ? queryText.trim() : "";
+        if (!q.isEmpty())
+            return "Результаты поиска по дереву сравнения «" + q + "» — " + count;
+        return "Результаты поиска по дереву сравнения — " + count;
     }
 
     @Override

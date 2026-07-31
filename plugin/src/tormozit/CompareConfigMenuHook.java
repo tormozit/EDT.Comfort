@@ -3,8 +3,12 @@ package tormozit;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collection;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 
 import org.eclipse.compare.CompareConfiguration;
@@ -28,6 +32,7 @@ import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.viewers.AbstractTreeViewer;
 import org.eclipse.jface.viewers.CheckboxTreeViewer;
 import org.eclipse.jface.viewers.CheckStateChangedEvent;
+import org.eclipse.jface.viewers.ComboViewer;
 import org.eclipse.jface.viewers.ICheckStateListener;
 import org.eclipse.jface.viewers.ICheckStateProvider;
 import org.eclipse.jface.viewers.IStructuredSelection;
@@ -44,13 +49,18 @@ import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
+import org.eclipse.swt.widgets.Combo;
+import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.ToolBar;
 import org.eclipse.swt.widgets.ToolItem;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
+import org.eclipse.swt.widgets.TypedListener;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
@@ -78,7 +88,13 @@ import com._1c.g5.v8.dt.compare.ui.partialmodel.node.IDirectPartialModelNode;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.IPartialModelNode;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.VirtualFolderPartialModelNode;
 import org.eclipse.jface.resource.ResourceManager;
+import com._1c.g5.v8.dt.compare.ui.ComparisonFilterKind;
+import com._1c.g5.v8.dt.compare.ui.FilterUtils;
 import com._1c.g5.v8.dt.compare.ui.editor.DtComparisonView;
+import com._1c.g5.v8.dt.compare.ui.editor.DtComparisonViewContext;
+import com._1c.g5.v8.dt.compare.ui.editor.LightweightCompareMergeProcessDescriptor;
+import com._1c.g5.v8.dt.compare.ui.editor.LightweightComparisonProcessHandle;
+import com._1c.g5.v8.dt.compare.ui.partialmodel.INamedViewerFilter;
 import com._1c.g5.v8.dt.compare.core.ComparisonUtils;
 import com._1c.g5.v8.dt.compare.core.IComparisonManager;
 import com._1c.g5.v8.dt.compare.core.IComparisonSession;
@@ -89,6 +105,7 @@ import com._1c.g5.v8.dt.compare.model.ComparisonNode;
 import com._1c.g5.v8.dt.compare.model.ComparisonSide;
 import com._1c.g5.v8.dt.compare.model.ExternalPropertyComparisonNode;
 import com._1c.g5.v8.dt.compare.model.FeatureCollectionComparisonNode;
+import com._1c.g5.v8.dt.compare.model.FeatureComparisonNode;
 import com._1c.g5.v8.dt.compare.model.MergeSettings;
 import com._1c.g5.v8.dt.compare.model.SolidResourceComparisonNode;
 import com._1c.g5.v8.dt.compare.model.UnsupportedObjectComparisonNode;
@@ -112,7 +129,6 @@ import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Set;
 import javafx.scene.control.TreeView;
 import org.eclipse.compare.internal.CompareEditorSelectionProvider;
 import org.eclipse.core.commands.AbstractHandler;
@@ -127,6 +143,7 @@ import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.dialogs.MessageDialog;
 import org.eclipse.jface.viewers.ISelection;
+import org.eclipse.jface.viewers.ISelectionChangedListener;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.ui.handlers.HandlerUtil;
@@ -134,10 +151,6 @@ import org.osgi.framework.BundleContext;
 import org.osgi.framework.ServiceReference;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.AbstractDirectPartialModelNode;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.ProjectPartialModelNode;
-import java.util.Collection;
-import java.util.HashSet;
-import java.util.IdentityHashMap;
-import java.util.Map;
 
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.Viewer;
@@ -248,6 +261,7 @@ public class CompareConfigMenuHook implements IStartup
         CompareConfigSelectionListener syncListener = new CompareConfigSelectionListener(editor);
         wireTreeViewerToListener(editor, syncListener);
         SubsystemFilterFix.install(editor);
+        ThreeWayOnlyPresentFiltersFix.install(editor);
 
         Tree tree = getCompareTree(editor);
         if (tree == null)
@@ -279,11 +293,15 @@ public class CompareConfigMenuHook implements IStartup
                 {
                     AbstractTreeViewer v = getTreeViewerFromEditor(editor);
                     if (v != null)
+                    {
                         onCompareTreeViewerReady(listener, v);
+                        ThreeWayOnlyPresentFiltersFix.install(editor);
+                    }
                 });
                 return;
             }
             onCompareTreeViewerReady(listener, viewer);
+            ThreeWayOnlyPresentFiltersFix.install(editor);
         });
     }
 
@@ -613,9 +631,412 @@ public class CompareConfigMenuHook implements IStartup
      */
 
     /**
+     * В 3-way комбо «Фильтр» нет пунктов «Показывать только присутствующие в 'X'»
+     * ({@link ComparisonFilterKind#ONLY_MAIN}/{@link ComparisonFilterKind#ONLY_OTHER}
+     * с {@code isApplicableForThreeWay=false}). Добавляем те же фильтры, что в 2-way,
+     * через {@link FilterUtils#twoWayOnlyOnOneSide} — после блока «Показывать отличия …».
+     */
+    private static class ThreeWayOnlyPresentFiltersFix
+    {
+        private static final String FLAG = "tormozit.threeWayOnlyPresentFilters"; //$NON-NLS-1$
+        private static final String LOG = "ThreeWayOnlyPresentFilters"; //$NON-NLS-1$
+        /** Сравнение может идти минуты — ждём появление view/combo дольше. */
+        private static final int MAX_ATTEMPTS = 480;
+        private static final int RETRY_MS = 250;
+
+        static void install(IEditorPart editor)
+        {
+            install(editor, 0);
+        }
+
+        private static void install(IEditorPart editor, int attempt)
+        {
+            if (editor == null)
+                return;
+
+            Display display = Display.getDefault();
+            Runnable body = () ->
+            {
+                try
+                {
+                    if (editor.getSite() == null)
+                        return;
+                    Object viewObj = Global.getField(editor, "comparisonView"); //$NON-NLS-1$
+                    if (!(viewObj instanceof DtComparisonView))
+                    {
+                        retryOrGiveUp(editor, attempt, "no comparisonView"); //$NON-NLS-1$
+                        return;
+                    }
+                    DtComparisonView view = (DtComparisonView) viewObj;
+                    if (view.isDisposed())
+                    {
+                        Global.tempLog(LOG, "skip: view disposed"); //$NON-NLS-1$
+                        return;
+                    }
+                    if (Boolean.TRUE.equals(view.getData(FLAG)))
+                        return;
+
+                    Object filtersObj = Global.getField(editor, "filters"); //$NON-NLS-1$
+                    if (!(filtersObj instanceof INamedViewerFilter[]))
+                    {
+                        retryOrGiveUp(editor, attempt, "no filters"); //$NON-NLS-1$
+                        return;
+                    }
+                    INamedViewerFilter[] current = (INamedViewerFilter[]) filtersObj;
+
+                    Object editorInput = Global.getField(editor, "dtComparisonEditorInput"); //$NON-NLS-1$
+                    if (editorInput == null)
+                    {
+                        retryOrGiveUp(editor, attempt, "no editorInput"); //$NON-NLS-1$
+                        return;
+                    }
+                    if (!isThreeWay(editorInput))
+                    {
+                        Global.tempLog(LOG, "skip: not three-way"); //$NON-NLS-1$
+                        view.setData(FLAG, Boolean.TRUE);
+                        return;
+                    }
+
+                    String mainName = (String) Global.call(editorInput, "getMainComparisonSideName"); //$NON-NLS-1$
+                    String otherName = (String) Global.call(editorInput, "getOtherComparisonSideName"); //$NON-NLS-1$
+                    if (mainName == null || otherName == null)
+                    {
+                        Global.tempLog(LOG, "skip: side names null"); //$NON-NLS-1$
+                        return;
+                    }
+
+                    INamedViewerFilter onlyMain = (INamedViewerFilter) Global.invoke(FilterUtils.class,
+                        "twoWayOnlyOnOneSide", //$NON-NLS-1$
+                        ComparisonSide.MAIN, ComparisonSide.OTHER, mainName);
+                    INamedViewerFilter onlyOther = (INamedViewerFilter) Global.invoke(FilterUtils.class,
+                        "twoWayOnlyOnOneSide", //$NON-NLS-1$
+                        ComparisonSide.OTHER, ComparisonSide.MAIN, otherName);
+                    if (onlyMain == null || onlyOther == null)
+                    {
+                        Global.tempLog(LOG, "skip: twoWayOnlyOnOneSide returned null"); //$NON-NLS-1$
+                        return;
+                    }
+
+                    INamedViewerFilter[] patched = insertOnlyPresentFilters(current, mainName, otherName,
+                        onlyMain, onlyOther);
+                    if (patched == current)
+                    {
+                        Global.tempLog(LOG, "skip: already present or insert point missing"
+                            + " count=" + current.length); //$NON-NLS-1$
+                        view.setData(FLAG, Boolean.TRUE);
+                        return;
+                    }
+
+                    ComboViewer comboViewer = findFilterComboViewer(view);
+                    if (comboViewer == null)
+                    {
+                        if (attempt == 0 || attempt % 20 == 0)
+                            Global.tempLog(LOG, "no ComboViewer yet attempt=" + attempt //$NON-NLS-1$
+                                + " " + describeFilterControl(view)); //$NON-NLS-1$
+                        retryOrGiveUp(editor, attempt, "no ComboViewer"); //$NON-NLS-1$
+                        return;
+                    }
+
+                    Global.setField(editor, "filters", patched); //$NON-NLS-1$
+
+                    Object contextObj = Global.getField(view, "context"); //$NON-NLS-1$
+                    if (contextObj instanceof DtComparisonViewContext)
+                    {
+                        if (!Global.setFieldForce(contextObj, "filters", patched)) //$NON-NLS-1$
+                            Global.tempLog(LOG, "warn: context.filters setFieldForce failed"); //$NON-NLS-1$
+                    }
+                    else
+                        Global.tempLog(LOG, "warn: no DtComparisonViewContext"); //$NON-NLS-1$
+
+                    INamedViewerFilter selected = view.getCurrentNamedViewerFilter();
+                    comboViewer.setInput(patched);
+                    if (selected != null)
+                        comboViewer.setSelection(new StructuredSelection(selected), true);
+
+                    view.setData(FLAG, Boolean.TRUE);
+                    Global.tempLog(LOG, "installed only-present filters"
+                        + " main=" + mainName //$NON-NLS-1$
+                        + " other=" + otherName //$NON-NLS-1$
+                        + " count=" + patched.length); //$NON-NLS-1$
+                }
+                catch (Exception e)
+                {
+                    Global.tempLog(LOG, "error: " + e); //$NON-NLS-1$
+                    if (attempt < MAX_ATTEMPTS)
+                        Display.getDefault().timerExec(RETRY_MS, () -> install(editor, attempt + 1));
+                }
+            };
+
+            if (Thread.currentThread() == display.getThread())
+                body.run();
+            else
+                display.asyncExec(body);
+        }
+
+        private static void retryOrGiveUp(IEditorPart editor, int attempt, String reason)
+        {
+            Display display = Display.getDefault();
+            if (attempt < MAX_ATTEMPTS)
+                display.timerExec(RETRY_MS, () -> install(editor, attempt + 1));
+            else
+                Global.tempLog(LOG, "give up after " + attempt + " attempts reason=" + reason); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        private static boolean isThreeWay(Object editorInput)
+        {
+            Object descriptorsObj = Global.call(editorInput, "getDescriptors"); //$NON-NLS-1$
+            if (!(descriptorsObj instanceof List<?>))
+                return false;
+            for (Object descriptor : (List<?>) descriptorsObj)
+            {
+                if (!(descriptor instanceof LightweightCompareMergeProcessDescriptor))
+                    continue;
+                LightweightComparisonProcessHandle handle =
+                    ((LightweightCompareMergeProcessDescriptor) descriptor).getHandle();
+                if (handle != null && handle.isThreeWay())
+                    return true;
+            }
+            return false;
+        }
+
+        /**
+         * Вставляет два фильтра сразу после {@link ComparisonFilterKind#OTHER_TO_ANCESTOR}.
+         * Если точка вставки не найдена или фильтры уже есть — возвращает исходный массив.
+         */
+        private static INamedViewerFilter[] insertOnlyPresentFilters(INamedViewerFilter[] current,
+                String mainName, String otherName,
+                INamedViewerFilter onlyMain, INamedViewerFilter onlyOther)
+        {
+            if (current == null || current.length == 0)
+                return current;
+
+            String onlyMainName = onlyMain.getName();
+            String onlyOtherName = onlyOther.getName();
+            for (INamedViewerFilter f : current)
+            {
+                if (f == null)
+                    continue;
+                String name = f.getName();
+                if (onlyMainName.equals(name) || onlyOtherName.equals(name))
+                    return current;
+            }
+
+            Map<ComparisonFilterKind, INamedViewerFilter> threeWay =
+                FilterUtils.getThreeWayFilters(mainName, otherName);
+            INamedViewerFilter otherToAncestor = threeWay.get(ComparisonFilterKind.OTHER_TO_ANCESTOR);
+            String markerName = otherToAncestor != null ? otherToAncestor.getName() : null;
+            if (markerName == null)
+                return current;
+
+            int insertAfter = -1;
+            for (int i = 0; i < current.length; i++)
+            {
+                if (current[i] != null && markerName.equals(current[i].getName()))
+                {
+                    insertAfter = i;
+                    break;
+                }
+            }
+            if (insertAfter < 0)
+                return current;
+
+            INamedViewerFilter[] patched = new INamedViewerFilter[current.length + 2];
+            System.arraycopy(current, 0, patched, 0, insertAfter + 1);
+            patched[insertAfter + 1] = onlyMain;
+            patched[insertAfter + 2] = onlyOther;
+            System.arraycopy(current, insertAfter + 1, patched, insertAfter + 3,
+                current.length - insertAfter - 1);
+            return patched;
+        }
+
+        private static ComboViewer findFilterComboViewer(DtComparisonView view)
+        {
+            Object filterControlObj = Global.getField(view, "filterControl"); //$NON-NLS-1$
+            if (!(filterControlObj instanceof Composite))
+                return null;
+            Composite filterControl = (Composite) filterControlObj;
+            if (filterControl.isDisposed())
+                return null;
+            Combo combo = findCombo(filterControl);
+            if (combo == null || combo.isDisposed())
+                return null;
+            return resolveComboViewer(combo);
+        }
+
+        private static String describeFilterControl(DtComparisonView view)
+        {
+            try
+            {
+                Object filterControlObj = Global.getField(view, "filterControl"); //$NON-NLS-1$
+                if (!(filterControlObj instanceof Composite))
+                    return "filterControl=" + (filterControlObj == null ? "null" : filterControlObj.getClass().getName()); //$NON-NLS-1$ //$NON-NLS-2$
+                Composite filterControl = (Composite) filterControlObj;
+                if (filterControl.isDisposed())
+                    return "filterControl disposed"; //$NON-NLS-1$
+                Combo combo = findCombo(filterControl);
+                if (combo == null)
+                    return "no Combo children=" + filterControl.getChildren().length; //$NON-NLS-1$
+                Listener[] sel = combo.getListeners(SWT.Selection);
+                Listener[] disp = combo.getListeners(SWT.Dispose);
+                return "combo selListeners=" + sel.length //$NON-NLS-1$
+                    + " disposeListeners=" + disp.length //$NON-NLS-1$
+                    + " sample=" + sampleListener(sel); //$NON-NLS-1$
+            }
+            catch (Exception e)
+            {
+                return "describe error: " + e; //$NON-NLS-1$
+            }
+        }
+
+        private static String sampleListener(Listener[] listeners)
+        {
+            if (listeners == null || listeners.length == 0)
+                return "none"; //$NON-NLS-1$
+            Object eventListener = listeners[0];
+            if (listeners[0] instanceof TypedListener)
+                eventListener = ((TypedListener) listeners[0]).getEventListener();
+            if (eventListener == null)
+                return "null-event"; //$NON-NLS-1$
+            StringBuilder sb = new StringBuilder(eventListener.getClass().getName());
+            Object outer = Global.getField(eventListener, "this$0"); //$NON-NLS-1$
+            if (outer != null)
+                sb.append(" this$0=").append(outer.getClass().getName()); //$NON-NLS-1$
+            Object arg1 = Global.getField(eventListener, "arg$1"); //$NON-NLS-1$
+            if (arg1 != null)
+                sb.append(" arg$1=").append(arg1.getClass().getName()); //$NON-NLS-1$
+            return sb.toString();
+        }
+
+        private static Combo findCombo(Composite parent)
+        {
+            if (parent == null || parent.isDisposed())
+                return null;
+            for (Control child : parent.getChildren())
+            {
+                if (child instanceof Combo)
+                    return (Combo) child;
+                if (child instanceof Composite)
+                {
+                    Combo nested = findCombo((Composite) child);
+                    if (nested != null)
+                        return nested;
+                }
+            }
+            return null;
+        }
+
+        /**
+         * JFace вешает на Combo не сам ComboViewer, а {@code OpenStrategy} /
+         * lambda DisposeListener. Достаём viewer из {@code this$0}/{@code arg$1}
+         * или из {@code OpenStrategy.selectionEventListeners}.
+         */
+        private static ComboViewer resolveComboViewer(Combo combo)
+        {
+            ComboViewer fromSelection = resolveFromListeners(combo.getListeners(SWT.Selection));
+            if (fromSelection != null)
+                return fromSelection;
+            ComboViewer fromDispose = resolveFromListeners(combo.getListeners(SWT.Dispose));
+            if (fromDispose != null)
+                return fromDispose;
+            Object data = combo.getData("org.eclipse.jface.viewers.WIDGET_DATA"); //$NON-NLS-1$
+            if (data instanceof ComboViewer)
+                return (ComboViewer) data;
+            return null;
+        }
+
+        private static ComboViewer resolveFromListeners(Listener[] listeners)
+        {
+            if (listeners == null)
+                return null;
+            for (Listener listener : listeners)
+            {
+                Object eventListener = listener;
+                if (listener instanceof TypedListener)
+                    eventListener = ((TypedListener) listener).getEventListener();
+                ComboViewer found = extractComboViewer(eventListener);
+                if (found != null)
+                    return found;
+            }
+            return null;
+        }
+
+        private static ComboViewer extractComboViewer(Object eventListener)
+        {
+            if (eventListener == null)
+                return null;
+            if (eventListener instanceof ComboViewer)
+                return (ComboViewer) eventListener;
+
+            for (String field : new String[] { "this$0", "arg$1", "arg$2", "val$viewer" }) //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            {
+                Object holder = Global.getField(eventListener, field);
+                if (holder instanceof ComboViewer)
+                    return (ComboViewer) holder;
+                if (holder != null && holder.getClass().getName().contains("OpenStrategy")) //$NON-NLS-1$
+                {
+                    ComboViewer fromOpen = resolveFromOpenStrategy(holder);
+                    if (fromOpen != null)
+                        return fromOpen;
+                }
+            }
+
+            if (eventListener.getClass().getName().contains("OpenStrategy")) //$NON-NLS-1$
+                return resolveFromOpenStrategy(eventListener);
+
+            return null;
+        }
+
+        private static ComboViewer resolveFromOpenStrategy(Object openStrategy)
+        {
+            Object listObj = Global.getField(openStrategy, "selectionEventListeners"); //$NON-NLS-1$
+            ComboViewer fromSel = resolveFromListenerList(listObj);
+            if (fromSel != null)
+                return fromSel;
+            Object postObj = Global.getField(openStrategy, "postSelectionEventListeners"); //$NON-NLS-1$
+            return resolveFromListenerList(postObj);
+        }
+
+        private static ComboViewer resolveFromListenerList(Object listenerList)
+        {
+            if (listenerList == null)
+                return null;
+            Object[] listeners;
+            try
+            {
+                Object got = Global.call(listenerList, "getListeners"); //$NON-NLS-1$
+                if (!(got instanceof Object[]))
+                    return null;
+                listeners = (Object[]) got;
+            }
+            catch (Exception e)
+            {
+                return null;
+            }
+            for (Object sl : listeners)
+            {
+                if (sl instanceof ComboViewer)
+                    return (ComboViewer) sl;
+                Object outer = Global.getField(sl, "this$0"); //$NON-NLS-1$
+                if (outer instanceof ComboViewer)
+                    return (ComboViewer) outer;
+                // StructuredViewer$4 → this$0 = StructuredViewer (ComboViewer)
+                if (outer != null && outer.getClass().getName().contains("ComboViewer")) //$NON-NLS-1$
+                    return (ComboViewer) outer;
+                Object arg1 = Global.getField(sl, "arg$1"); //$NON-NLS-1$
+                if (arg1 instanceof ComboViewer)
+                    return (ComboViewer) arg1;
+            }
+            return null;
+        }
+    }
+
+    /**
      * Коррекция EDT-фильтра по подсистемам: односторонние не-{@link SymlinkComparisonNode}
      * узлы EDT пропускает ({@code checkNodeIsSelectedForSide} → true). Добавляем свой
      * {@link ViewerFilter}, используя те же trie через {@code ViewerFilterBySubsystems}.
+     *
+     * <p>Свойства объектов ({@link FeatureComparisonNode}, в т.ч. внешние модули) не трогаем —
+     * их видимость определяется родителем-объектом.
      *
      * <p>Не ждём появления EDT-{@code ViewerFilter} в {@code viewer.getFilters()} —
      * берём {@code editor.filterBySubsystems} (создаётся в {@code createFilterBySubsystems})
@@ -703,6 +1124,38 @@ public class CompareConfigMenuHook implements IStartup
             return (viewer instanceof AbstractTreeViewer) ? (AbstractTreeViewer) viewer : null;
         }
 
+        /**
+         * При отборе по подсистемам скрываем ветки вне состава подсистем:
+         * «Манифест», «Настройки проекта» (symlink {@code Settings}).
+         * «Конфигурация» уже прячет штатный EDT ({@code Symlink}/isTop).
+         */
+        private static boolean isNonSubsystemStructuralBranch(Object element)
+        {
+            if (element == null)
+                return false;
+            String simple = element.getClass().getSimpleName();
+            if ("ManifestPartialModelNode".equals(simple)) //$NON-NLS-1$
+                return true;
+            if (!"UnsupportedObjectPartialModelNode".equals(simple)) //$NON-NLS-1$
+                return false;
+            if (!(element instanceof IDirectPartialModelNode node))
+                return false;
+            ComparisonNode cn;
+            try
+            {
+                cn = node.retrieveComparisonNode();
+            }
+            catch (RuntimeException e)
+            {
+                return false;
+            }
+            if (!(cn instanceof SymlinkComparisonNode symlink))
+                return false;
+            String main = symlink.getMainSymlink();
+            String other = symlink.getOtherSymlink();
+            return "Settings".equals(main) || "Settings".equals(other); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
         private static class CorrectionViewerFilter extends ViewerFilter
         {
             private final Object namedFilter;
@@ -728,10 +1181,10 @@ public class CompareConfigMenuHook implements IStartup
 
 
             /**
-             * С активным отбором: без EDT-каскада.
-             * {@code setMustBeMerged} только по видимым; скрытые не трогаем.
-             * Корень / «Общие» / любые узлы с детьми + кнопки «Отметить все»/снять.
-             * Без отбора — только прозрачный проброс в EDT (поведение флажков не меняем).
+             * С активным отбором (подсистемы и/или штатный combo-фильтр): без EDT-каскада
+             * по скрытым. {@code setMustBeMerged} только по видимым.
+             * Корень / «Общие» / папки + кнопки «Отметить все»/снять.
+             * Без отборов — прозрачный проброс в EDT.
              */
             void installCheckHooks(CheckboxTreeViewer ctv, Object treeControl, IEditorPart editor)
             {
@@ -748,12 +1201,20 @@ public class CompareConfigMenuHook implements IStartup
                 wrapToolbarSelectAllActions(editor, ctv);
                 if (!Boolean.TRUE.equals(ctv.getData(SELECT_ALL_HOOK_FLAG)))
                     scheduleSelectAllWrap(editor, ctv, 0);
-                // CheckStateProvider ставим только при активном отборе (см. syncCheckHooksToFilterState).
+                wrapToolbarFilterActions(editor, ctv);
+                if (!Boolean.TRUE.equals(ctv.getData(FILTER_ACTION_HOOK_FLAG)))
+                    scheduleFilterActionWrap(editor, ctv, 0);
+                installNamedFilterComboHook(editor, ctv);
+                if (!Boolean.TRUE.equals(ctv.getData(NAMED_FILTER_HOOK_FLAG)))
+                    scheduleNamedFilterComboHook(editor, ctv, 0);
+                // CheckStateProvider — при любом скрывающем отборе (см. syncCheckHooksToFilterState).
+                hookedEditor = editor;
                 hookedCtv = ctv;
                 syncCheckHooksToFilterState(ctv);
                 ctv.setData(CHECK_HOOK_FLAG, Boolean.TRUE);
             }
 
+            private IEditorPart hookedEditor;
             private CheckboxTreeViewer hookedCtv;
             private ICheckStateProvider edtCheckStateProvider;
             private boolean ourCheckStateProviderActive;
@@ -773,8 +1234,38 @@ public class CompareConfigMenuHook implements IStartup
                 });
             }
 
+            private void scheduleFilterActionWrap(IEditorPart editor, CheckboxTreeViewer ctv, int attempt)
+            {
+                if (ctv.getControl() == null || ctv.getControl().isDisposed())
+                    return;
+                ctv.getControl().getDisplay().timerExec(300, () ->
+                {
+                    if (ctv.getControl() == null || ctv.getControl().isDisposed())
+                        return;
+                    wrapToolbarFilterActions(editor, ctv);
+                    if (!Boolean.TRUE.equals(ctv.getData(FILTER_ACTION_HOOK_FLAG)) && attempt < 30)
+                        scheduleFilterActionWrap(editor, ctv, attempt + 1);
+                });
+            }
+
+            private void scheduleNamedFilterComboHook(IEditorPart editor, CheckboxTreeViewer ctv, int attempt)
+            {
+                if (ctv.getControl() == null || ctv.getControl().isDisposed())
+                    return;
+                ctv.getControl().getDisplay().timerExec(300, () ->
+                {
+                    if (ctv.getControl() == null || ctv.getControl().isDisposed())
+                        return;
+                    installNamedFilterComboHook(editor, ctv);
+                    if (!Boolean.TRUE.equals(ctv.getData(NAMED_FILTER_HOOK_FLAG)) && attempt < 30)
+                        scheduleNamedFilterComboHook(editor, ctv, attempt + 1);
+                });
+            }
+
             private static final String CHECK_HOOK_FLAG = "tormozit.subsystemFilterCheckHook"; //$NON-NLS-1$
             private static final String SELECT_ALL_HOOK_FLAG = "tormozit.subsystemFilterSelectAllHook"; //$NON-NLS-1$
+            private static final String FILTER_ACTION_HOOK_FLAG = "tormozit.subsystemFilterActionHook"; //$NON-NLS-1$
+            private static final String NAMED_FILTER_HOOK_FLAG = "tormozit.namedFilterCheckRecalcHook"; //$NON-NLS-1$
 
             private boolean wrapCheckStateListeners(CheckboxTreeViewer ctv)
             {
@@ -842,21 +1333,300 @@ public class CompareConfigMenuHook implements IStartup
             }
 
             /**
-             * Без отбора — штатный EDT CheckStateProvider.
-             * С отбором — наш кэш агрегатов (без обхода дерева в paint).
+             * После смены/сброса отбора по подсистемам — сохранить текущую строку
+             * или подняться к ближайшему видимому родителю.
+             */
+            private void wrapToolbarFilterActions(IEditorPart editor, CheckboxTreeViewer ctv)
+            {
+                if (Boolean.TRUE.equals(ctv.getData(FILTER_ACTION_HOOK_FLAG)))
+                    return;
+                Object tbmObj = Global.getField(editor, "toolBarManager"); //$NON-NLS-1$
+                if (!(tbmObj instanceof ToolBarManager tbm))
+                {
+                    Global.tempLog(LOG, "filterAction hooks: toolBarManager missing"); //$NON-NLS-1$
+                    return;
+                }
+                int wrapped = 0;
+                for (IContributionItem item : tbm.getItems())
+                {
+                    if (!(item instanceof ActionContributionItem aci))
+                        continue;
+                    IAction action = aci.getAction();
+                    if (action == null || action instanceof FilterAwareSubsystemFilterAction)
+                        continue;
+                    String cn = action.getClass().getName();
+                    boolean apply = cn.contains("FilterBySubsystemsAction") //$NON-NLS-1$
+                            && !cn.contains("DropFilter"); //$NON-NLS-1$
+                    boolean drop = cn.contains("DropFilterBySubsystemsAction"); //$NON-NLS-1$
+                    if (!apply && !drop)
+                        continue;
+                    FilterAwareSubsystemFilterAction wrapper =
+                            new FilterAwareSubsystemFilterAction(editor, ctv, action);
+                    if (!Global.setFieldForce(aci, "action", wrapper)) //$NON-NLS-1$
+                    {
+                        Global.tempLog(LOG, "filterAction hooks: setField action failed " + cn); //$NON-NLS-1$
+                        continue;
+                    }
+                    wrapped++;
+                }
+                if (wrapped > 0)
+                    tbm.update(true);
+                ctv.setData(FILTER_ACTION_HOOK_FLAG, Boolean.TRUE);
+                Global.tempLog(LOG, "filterAction hooks: wrapped n=" + wrapped); //$NON-NLS-1$
+            }
+
+            private final class FilterAwareSubsystemFilterAction extends Action
+            {
+                private final IEditorPart editor;
+                private final CheckboxTreeViewer ctv;
+                private final IAction original;
+
+                FilterAwareSubsystemFilterAction(IEditorPart editor, CheckboxTreeViewer ctv,
+                        IAction original)
+                {
+                    super(original.getText() != null ? original.getText() : "", //$NON-NLS-1$
+                            original.getStyle());
+                    this.editor = editor;
+                    this.ctv = ctv;
+                    this.original = original;
+                    setImageDescriptor(original.getImageDescriptor());
+                    setDisabledImageDescriptor(original.getDisabledImageDescriptor());
+                    setHoverImageDescriptor(original.getHoverImageDescriptor());
+                    setToolTipText(original.getToolTipText());
+                    setEnabled(original.isEnabled());
+                    super.setChecked(original.isChecked());
+                }
+
+                @Override
+                public void run()
+                {
+                    Object saved = firstSelectedElement(ctv);
+                    original.run();
+                    syncApplyFilterCheckedFromEditor(editor);
+                    recalculateCheckStatesAfterFilterChange(ctv);
+                    restoreSelectionOrParent(ctv, saved);
+                }
+
+                @Override
+                public void setChecked(boolean checked)
+                {
+                    super.setChecked(checked);
+                    original.setChecked(checked);
+                }
+
+                void setCheckedUiOnly(boolean checked)
+                {
+                    super.setChecked(checked);
+                }
+            }
+
+            /** Тулбар держит wrapper, EDT пишет checked в поле editor.filterBySubsystemsAction. */
+            private void syncApplyFilterCheckedFromEditor(IEditorPart editor)
+            {
+                Object applyOrig = Global.getField(editor, "filterBySubsystemsAction"); //$NON-NLS-1$
+                if (!(applyOrig instanceof IAction apply))
+                    return;
+                Object tbmObj = Global.getField(editor, "toolBarManager"); //$NON-NLS-1$
+                if (!(tbmObj instanceof ToolBarManager tbm))
+                    return;
+                for (IContributionItem item : tbm.getItems())
+                {
+                    if (!(item instanceof ActionContributionItem aci))
+                        continue;
+                    IAction action = aci.getAction();
+                    if (action instanceof FilterAwareSubsystemFilterAction wrapper
+                            && wrapper.original == apply)
+                    {
+                        wrapper.setCheckedUiOnly(apply.isChecked());
+                        break;
+                    }
+                }
+                tbm.update(true);
+            }
+
+            private static Object firstSelectedElement(CheckboxTreeViewer ctv)
+            {
+                if (ctv == null || ctv.getControl() == null || ctv.getControl().isDisposed())
+                    return null;
+                ISelection sel = ctv.getSelection();
+                if (!(sel instanceof IStructuredSelection ss) || ss.isEmpty())
+                    return null;
+                return ss.getFirstElement();
+            }
+
+            private void restoreSelectionOrParent(CheckboxTreeViewer ctv, Object element)
+            {
+                if (element == null || ctv == null
+                        || ctv.getControl() == null || ctv.getControl().isDisposed())
+                    return;
+                Object candidate = element;
+                while (candidate != null)
+                {
+                    ctv.setSelection(new StructuredSelection(candidate), true);
+                    ISelection sel = ctv.getSelection();
+                    if (sel instanceof IStructuredSelection ss
+                            && !ss.isEmpty()
+                            && candidate.equals(ss.getFirstElement()))
+                    {
+                        ctv.reveal(candidate);
+                        Global.tempLog(LOG, "filter selection restored el=" //$NON-NLS-1$
+                                + candidate.getClass().getSimpleName()
+                                + (candidate == element ? " (same)" : " (parent)")); //$NON-NLS-1$ //$NON-NLS-2$
+                        return;
+                    }
+                    candidate = candidate instanceof IPartialModelNode n ? n.getParent() : null;
+                }
+                Global.tempLog(LOG, "filter selection: no visible ancestor"); //$NON-NLS-1$
+            }
+
+            /**
+             * Слушатель combo «Фильтр» (отличия / сторона / …): после смены — пересчёт пометок.
+             */
+            private void installNamedFilterComboHook(IEditorPart editor, CheckboxTreeViewer ctv)
+            {
+                if (Boolean.TRUE.equals(ctv.getData(NAMED_FILTER_HOOK_FLAG)))
+                    return;
+                Object view = Global.getField(editor, "comparisonView"); //$NON-NLS-1$
+                if (!(view instanceof DtComparisonView dcv) || dcv.isDisposed())
+                    return;
+                ComboViewer combo = ThreeWayOnlyPresentFiltersFix.findFilterComboViewer(dcv);
+                if (combo == null)
+                    return;
+                combo.addSelectionChangedListener((ISelectionChangedListener) event ->
+                {
+                    if (ctv.getControl() == null || ctv.getControl().isDisposed())
+                        return;
+                    // После EDT refresh дерева
+                    ctv.getControl().getDisplay().asyncExec(
+                            () -> recalculateCheckStatesAfterFilterChange(ctv));
+                });
+                ctv.setData(NAMED_FILTER_HOOK_FLAG, Boolean.TRUE);
+                Global.tempLog(LOG, "namedFilter combo: recalc hook installed"); //$NON-NLS-1$
+            }
+
+            /**
+             * После смены фильтра: только агрегаты, которым при фильтре ставили
+             * «полную пометку» (кэш), плюс их предки — не всё дерево.
+             */
+            private void recalculateCheckStatesAfterFilterChange(CheckboxTreeViewer ctv)
+            {
+                if (ctv == null || ctv.getControl() == null || ctv.getControl().isDisposed())
+                    return;
+                LinkedHashSet<IPartialModelNode> affected =
+                        new LinkedHashSet<>(aggregateCheckedUi.keySet());
+                if (affected.isEmpty())
+                {
+                    clearAggregateUiCache();
+                    syncCheckHooksToFilterState(ctv);
+                    Global.tempLog(LOG, "recalc checks: skip (no cached aggregates)"); //$NON-NLS-1$
+                    return;
+                }
+                // Предки тоже могли показывать «полную» из‑за кэша / UI.
+                LinkedHashSet<IPartialModelNode> withAncestors = new LinkedHashSet<>(affected);
+                for (IPartialModelNode node : affected)
+                {
+                    for (IPartialModelNode p = node.getParent(); p != null; p = p.getParent())
+                        withAncestors.add(p);
+                }
+                clearAggregateUiCache();
+                // Подтянуть MergeSettings только в поддеревьях затронутых агрегатов.
+                for (IPartialModelNode node : affected)
+                    syncSubtreeCheckCacheFromMergeSettings(node);
+                syncCheckHooksToFilterState(ctv);
+                // Снизу вверх по глубине: сначала более глубокие узлы.
+                ArrayList<IPartialModelNode> ordered = new ArrayList<>(withAncestors);
+                ordered.sort((a, b) -> Integer.compare(depthOf(b), depthOf(a)));
+                for (IPartialModelNode node : ordered)
+                    paintAggregateFromChildren(ctv, node);
+                Global.tempLog(LOG, "recalc checks after filter change n=" + ordered.size() //$NON-NLS-1$
+                        + " (cachedAggregates=" + affected.size() + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+
+            private static int depthOf(IPartialModelNode node)
+            {
+                int d = 0;
+                for (IPartialModelNode p = node.getParent(); p != null; p = p.getParent())
+                    d++;
+                return d;
+            }
+
+            private void paintAggregateFromChildren(CheckboxTreeViewer ctv, IPartialModelNode node)
+            {
+                if (!(isAggregateCheckNode(node) || isVisibleOnlyClickTarget(node)))
+                    return;
+                AggregateCheck agg = computeAggregateFromLoadedChildren(node);
+                if (agg == null)
+                    return;
+                if (!(node instanceof VirtualFolderPartialModelNode))
+                {
+                    node.setChecked(agg.checked);
+                    Global.invoke(node, "setGrayed", Boolean.valueOf(agg.grayed)); //$NON-NLS-1$
+                }
+                ctv.setGrayed(node, agg.grayed);
+                ctv.setChecked(node, agg.checked);
+            }
+
+            private static final class AggregateCheck
+            {
+                final boolean checked;
+                final boolean grayed;
+
+                AggregateCheck(boolean checked, boolean grayed)
+                {
+                    this.checked = checked;
+                    this.grayed = grayed;
+                }
+            }
+
+            private AggregateCheck computeAggregateFromLoadedChildren(IPartialModelNode node)
+            {
+                Collection<IPartialModelNode> children = node.getChildren();
+                if (children == null || children.isEmpty())
+                    return null;
+                boolean anyChecked = false;
+                boolean anyUnchecked = false;
+                boolean anyGrayed = false;
+                int considered = 0;
+                for (IPartialModelNode child : children)
+                {
+                    boolean consider = child.isCheckable()
+                            || isAggregateCheckNode(child)
+                            || isVisibleOnlyClickTarget(child);
+                    if (!consider)
+                        continue;
+                    considered++;
+                    if (child.isGrayed())
+                        anyGrayed = true;
+                    if (child.isChecked())
+                        anyChecked = true;
+                    else
+                        anyUnchecked = true;
+                }
+                if (considered == 0)
+                    return null;
+                if (anyGrayed || (anyChecked && anyUnchecked))
+                    return new AggregateCheck(true, true);
+                if (anyChecked)
+                    return new AggregateCheck(true, false);
+                return new AggregateCheck(false, false);
+            }
+
+            /**
+             * Без скрывающих отборов — штатный EDT CheckStateProvider.
+             * С отбором (подсистемы / combo «Показывать отличия» и т.п.) — кэш агрегатов.
              */
             private void syncCheckHooksToFilterState(CheckboxTreeViewer ctv)
             {
                 if (ctv == null || ctv.getControl() == null || ctv.getControl().isDisposed())
                     return;
-                if (isFilterEmpty())
+                if (!shouldRestrictChecksToVisible())
                 {
                     if (ourCheckStateProviderActive)
                     {
                         ctv.setCheckStateProvider(edtCheckStateProvider);
                         ourCheckStateProviderActive = false;
                         clearAggregateUiCache();
-                        Global.tempLog(LOG, "filter off: restored EDT CheckStateProvider"); //$NON-NLS-1$
+                        Global.tempLog(LOG, "filters off: restored EDT CheckStateProvider"); //$NON-NLS-1$
                     }
                     return;
                 }
@@ -920,6 +1690,36 @@ public class CompareConfigMenuHook implements IStartup
                     putAggregateUi(node, checked, false);
             }
 
+            /**
+             * Кэш агрегатов + галочки TreeItem по загруженному поддереву папок/коллекций.
+             * Иначе после каскада от корня «Общие»/«Константы» остаются со старым UI,
+             * хотя потомки уже помечены ({@code ctv.update} только у кликнутого узла).
+             */
+            private void applyAggregateTreeCheckUi(CheckboxTreeViewer ctv, IPartialModelNode node,
+                    boolean checked)
+            {
+                markAggregatesUiAfterBulk(node, checked);
+                paintAggregateChecks(ctv, node, checked);
+            }
+
+            private void paintAggregateChecks(CheckboxTreeViewer ctv, IPartialModelNode node,
+                    boolean checked)
+            {
+                if (isAggregateCheckNode(node) || isVisibleOnlyClickTarget(node))
+                {
+                    ctv.setGrayed(node, false);
+                    ctv.setChecked(node, checked);
+                }
+                Collection<IPartialModelNode> children = node.getChildren();
+                if (children == null)
+                    return;
+                for (IPartialModelNode child : children)
+                {
+                    if (shouldRecurseOnly(child))
+                        paintAggregateChecks(ctv, child, checked);
+                }
+            }
+
             private void invalidateAggregateUiAncestors(IPartialModelNode from)
             {
                 for (IPartialModelNode p = from; p != null; p = p.getParent())
@@ -940,8 +1740,9 @@ public class CompareConfigMenuHook implements IStartup
             }
 
             /**
-             * Клик visible-only: агрегаты + Конфигурация (checkable с папками-детьми)
-             * + нечекable контейнеры.
+             * Клик visible-only: папки/коллекции/проект/«Конфигурация».
+             * Одиночный MD (обработка со «Формы») — штатный EDT: каскад только
+             * в его поддерево, скрытых соседних объектов не трогает.
              */
             private static boolean isVisibleOnlyClickTarget(Object el)
             {
@@ -949,9 +1750,13 @@ public class CompareConfigMenuHook implements IStartup
                     return true;
                 if (!(el instanceof IPartialModelNode node))
                     return false;
+                if (needsOwnMergeFlag(node))
+                    return false;
+                if (isConfigurationPartialModelNode(node))
+                    return true;
                 if (!node.isCheckable() && node.hasChildren())
                     return true;
-                return hasStructuralChild(node);
+                return false;
             }
 
             private static boolean isFolderOrCollection(Object el)
@@ -961,9 +1766,10 @@ public class CompareConfigMenuHook implements IStartup
             }
 
             /**
-             * Только обход вниз: проект, папки/коллекции, нечекable контейнеры,
-             * checkable с дочерними папками (Конфигурация). Не setMustBeMerged на них —
-             * иначе каскад по всей BM включая скрытых.
+             * Только обход вниз без setMustBeMerged: проект, папки/коллекции,
+             * нечекable-контейнеры, «Конфигурация».
+             * Checkable MD с «Формы»/свойствами сюда НЕ входит — иначе каскад
+             * resolveChildren по формам каждой (в т.ч. скрытой) обработки ×100.
              */
             private static boolean shouldRecurseOnly(IPartialModelNode node)
             {
@@ -971,9 +1777,51 @@ public class CompareConfigMenuHook implements IStartup
                     return true;
                 if (isFolderOrCollection(node))
                     return true;
+                if (isConfigurationPartialModelNode(node))
+                    return true;
                 if (!node.isCheckable())
                     return node.hasChildren();
+                return false;
+            }
+
+            /**
+             * Checkable MD-объект с папками-детьми (обработка, справочник…):
+             * нужен setMustBeMerged на себе, плюс обход видимых детей.
+             * Папки / проект / «Конфигурация» — нет.
+             */
+            private static boolean needsOwnMergeFlag(IPartialModelNode node)
+            {
+                if (node == null || !node.isCheckable())
+                    return false;
+                if (node instanceof ProjectPartialModelNode || isFolderOrCollection(node))
+                    return false;
+                if (isConfigurationPartialModelNode(node))
+                    return false;
                 return hasStructuralChild(node);
+            }
+
+            private static boolean isConfigurationPartialModelNode(Object element)
+            {
+                if (element == null)
+                    return false;
+                String simple = element.getClass().getSimpleName();
+                if ("ConfigurationPartialModelNode".equals(simple)) //$NON-NLS-1$
+                    return true;
+                if (!(element instanceof IDirectPartialModelNode node))
+                    return false;
+                try
+                {
+                    ComparisonNode cn = node.retrieveComparisonNode();
+                    if (!(cn instanceof SymlinkComparisonNode symlink))
+                        return false;
+                    String main = symlink.getMainSymlink();
+                    String other = symlink.getOtherSymlink();
+                    return "Configuration".equals(main) || "Configuration".equals(other); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                catch (RuntimeException e)
+                {
+                    return false;
+                }
             }
 
             private static boolean hasStructuralChild(IPartialModelNode node)
@@ -1001,8 +1849,8 @@ public class CompareConfigMenuHook implements IStartup
                 @Override
                 public boolean isChecked(Object element)
                 {
-                    // Без отбора этот provider не должен быть установлен; на всякий случай — EDT.
-                    if (isFilterEmpty())
+                    // Без скрывающих отборов этот provider не должен быть установлен.
+                    if (!shouldRestrictChecksToVisible())
                         return delegate != null ? delegate.isChecked(element)
                                 : element instanceof IPartialModelNode n && n.isChecked();
                     if (element instanceof IPartialModelNode node && isAggregateCheckNode(node))
@@ -1018,7 +1866,7 @@ public class CompareConfigMenuHook implements IStartup
                 @Override
                 public boolean isGrayed(Object element)
                 {
-                    if (isFilterEmpty())
+                    if (!shouldRestrictChecksToVisible())
                         return delegate != null ? delegate.isGrayed(element)
                                 : element instanceof IPartialModelNode n && n.isGrayed();
                     if (element instanceof IPartialModelNode node && isAggregateCheckNode(node))
@@ -1056,7 +1904,7 @@ public class CompareConfigMenuHook implements IStartup
                 @Override
                 public void run()
                 {
-                    if (isFilterEmpty())
+                    if (!shouldRestrictChecksToVisible())
                     {
                         original.run();
                         return;
@@ -1084,11 +1932,7 @@ public class CompareConfigMenuHook implements IStartup
                     if (!(rootObj instanceof ProjectPartialModelNode root))
                         continue;
                     total += applyCheckVisibleOnly(ctv, root, checked);
-                    // Кэш MdCollection ← MergeSettings (только уже загруженные дети —
-                    // без resolveChildren, иначе подгрузка всего дерева и зависание).
-                    syncSubtreeCheckCacheFromMergeSettings(root);
-                    markAggregatesUiAfterBulk(root, checked);
-                    applyVisibleTreeCheck(ctv, root, checked);
+                    applyAggregateTreeCheckUi(ctv, root, checked);
                 }
                 return total;
             }
@@ -1108,8 +1952,8 @@ public class CompareConfigMenuHook implements IStartup
                 @Override
                 public void checkStateChanged(CheckStateChangedEvent event)
                 {
-                    // Без отбора по подсистемам — только штатный EDT, без побочных эффектов.
-                    if (isFilterEmpty())
+                    // Без скрывающих отборов — только штатный EDT.
+                    if (!shouldRestrictChecksToVisible())
                     {
                         syncCheckHooksToFilterState(ctv);
                         for (ICheckStateListener delegate : delegates)
@@ -1125,20 +1969,23 @@ public class CompareConfigMenuHook implements IStartup
                     Global.tempLog(LOG, "checkState: el=" //$NON-NLS-1$
                             + (el == null ? "null" : el.getClass().getSimpleName()) //$NON-NLS-1$
                             + " checked=" + checked //$NON-NLS-1$
-                            + " filterEmpty=false" //$NON-NLS-1$
+                            + " subsystemFilterEmpty=" + isFilterEmpty() //$NON-NLS-1$
+                            + " namedFilterActive=" + isNamedComparisonFilterActive() //$NON-NLS-1$
                             + " bulk=" + bulk); //$NON-NLS-1$
 
-                    // С отбором: НЕ вызывать EDT-каскад (он переписывает скрытых).
+                    // С отбором: фильтр только на top-MD; каскад внутрь объекта — штатный.
                     if (bulk && el instanceof IPartialModelNode node)
                     {
                         applyLogLeft = 30;
+                        long t0 = System.nanoTime();
                         int applied = applyCheckVisibleOnly(ctv, node, checked);
-                        syncSubtreeCheckCacheFromMergeSettings(node);
                         syncAncestorsCheckCacheFromMergeSettings(node);
-                        markAggregatesUiAfterBulk(node, checked);
-                        applyVisibleTreeCheck(ctv, node, checked);
+                        applyAggregateTreeCheckUi(ctv, node, checked);
+                        for (IPartialModelNode p = node.getParent(); p != null; p = p.getParent())
+                            ctv.update(p, null);
                         Global.tempLog(LOG, "check visible-only: applied=" + applied //$NON-NLS-1$
-                                + " checked=" + checked); //$NON-NLS-1$
+                                + " checked=" + checked //$NON-NLS-1$
+                                + " ms=" + ((System.nanoTime() - t0) / 1_000_000L)); //$NON-NLS-1$
                         return;
                     }
 
@@ -1150,10 +1997,31 @@ public class CompareConfigMenuHook implements IStartup
                 }
             }
 
+            /** Отбор по подсистемам пуст (не путать со штатным combo-фильтром). */
             private boolean isFilterEmpty()
             {
                 return coreFilter == null
                         || Boolean.TRUE.equals(Global.invoke(coreFilter, "isFilterEmpty")); //$NON-NLS-1$
+            }
+
+            /**
+             * Каскад пометок только по видимым: активен отбор по подсистемам
+             * и/или штатный фильтр combo (не {@link INamedViewerFilter#NONE}).
+             */
+            private boolean shouldRestrictChecksToVisible()
+            {
+                return !isFilterEmpty() || isNamedComparisonFilterActive();
+            }
+
+            private boolean isNamedComparisonFilterActive()
+            {
+                if (hookedEditor == null)
+                    return false;
+                Object view = Global.getField(hookedEditor, "comparisonView"); //$NON-NLS-1$
+                if (!(view instanceof DtComparisonView dcv) || dcv.isDisposed())
+                    return false;
+                INamedViewerFilter current = dcv.getCurrentNamedViewerFilter();
+                return current != null && current != INamedViewerFilter.NONE;
             }
 
             private boolean isVisibleInViewer(Viewer viewer, Object parent, Object element)
@@ -1198,14 +2066,16 @@ public class CompareConfigMenuHook implements IStartup
             }
 
             /**
-             * Только видимые checkable-объекты (каталоги и т.п.).
-             * Контейнеры (проект, Конфигурация, папки) — только обход, без setMustBeMerged.
+             * Скрывающие отборы (подсистемы / combo): только видимые top-MD
+             * (Справочник, Обработка, …). Для каждого — штатный каскад EDT на всё
+             * его поддерево, без повторной фильтрации внутри объекта.
              */
             private int applyCheckVisibleOnly(CheckboxTreeViewer ctv, IPartialModelNode parent,
                     boolean checked)
             {
                 int applied = 0;
                 int visible = 0;
+                long t0 = System.nanoTime();
                 Collection<IPartialModelNode> children = resolveChildren(ctv, parent);
                 for (IPartialModelNode child : children)
                 {
@@ -1216,46 +2086,85 @@ public class CompareConfigMenuHook implements IStartup
                         applied += applyCheckVisibleOnly(ctv, child, checked);
                         continue;
                     }
-                    if (!isVisibleInViewer(ctv, parent, child))
+                    if (!isVisibleForCheck(ctv, parent, child))
                         continue;
                     visible++;
                     if (!child.isCheckable())
                         continue;
-                    if (!applyMustBeMerged(child, checked))
+                    if (!applyStockTopObjectCascade(ctv, child, checked))
                         continue;
                     applied++;
-                    syncSubtreeCheckCacheFromMergeSettings(child);
                 }
-                if (applied == 0 && visible == 0 && isVisibleOnlyClickTarget(parent))
-                    Global.tempLog(LOG, "visible-only empty parent=" //$NON-NLS-1$
+                if (parent instanceof ICollectionPartialNode || parent instanceof VirtualFolderPartialModelNode)
+                {
+                    long ms = (System.nanoTime() - t0) / 1_000_000L;
+                    Global.tempLog(LOG, "visible-only folder=" //$NON-NLS-1$
                             + parent.getClass().getSimpleName()
-                            + " childCount=" + children.size()); //$NON-NLS-1$
+                            + " children=" + children.size() //$NON-NLS-1$
+                            + " visible=" + visible //$NON-NLS-1$
+                            + " applied=" + applied //$NON-NLS-1$
+                            + " ms=" + ms); //$NON-NLS-1$
+                }
                 return applied;
             }
 
-            private int applyLogLeft = 30;
-
-            private boolean applyMustBeMerged(IPartialModelNode node, boolean want)
+            /**
+             * Штатный каскад на top-MD и всё поддерево (как {@code PartialModelController.check}):
+             * BM {@code setMustBeMergedToTree}, синхрон кэша загруженных узлов, refresh UI.
+             * Фильтр сюда не применяется.
+             */
+            private boolean applyStockTopObjectCascade(CheckboxTreeViewer ctv, IPartialModelNode node,
+                    boolean want)
             {
                 IComparisonSession session = node.getComparisonSession();
                 long id = node.getNodeId();
-                if (session == null || id == -1L)
+                boolean ok;
+                if (session != null && id != -1L)
+                {
+                    // Всегда BM-каскад: node.check() no-op, если кэш уже == want,
+                    // а «Формы» при этом могут быть рассинхронены.
+                    ok = session.setMustBeMerged(id, want, true);
+                    node.setChecked(want);
+                }
+                else
                 {
                     node.check(want);
-                    node.setChecked(want);
-                    return node.isChecked() == want;
+                    ok = node.isChecked() == want;
                 }
-                boolean ok = session.setMustBeMerged(id, want, true);
-                node.setChecked(want);
                 if (applyLogLeft > 0)
                 {
                     applyLogLeft--;
-                    Global.tempLog(LOG, "visible set id=" + id + " want=" + want //$NON-NLS-1$ //$NON-NLS-2$
-                            + " ok=" + ok + " after=" + node.isChecked() //$NON-NLS-1$
-                            + " el=" + node.getClass().getSimpleName()); //$NON-NLS-1$
+                    Global.tempLog(LOG, "stock cascade id=" + id + " want=" + want //$NON-NLS-1$ //$NON-NLS-2$
+                            + " ok=" + ok + " el=" + node.getClass().getSimpleName()); //$NON-NLS-1$
                 }
+                // Кэш checked/grayed по уже загруженным потомкам (без resolveChildren).
+                syncSubtreeCheckCacheFromMergeSettings(node);
+                // TreeItem «Формы»/потомков — иначе модель обновлена, а галочки старые.
+                ctv.refresh(node, true);
                 return ok;
             }
+
+            /**
+             * Видимость для каскада флажков: без {@code ViewerFilter.select} по папкам
+             * (дорого) и без oneSide-логов во время bulk.
+             */
+            private boolean isVisibleForCheck(Viewer viewer, Object parent, Object element)
+            {
+                boolean prev = suppressDecideLogs;
+                suppressDecideLogs = true;
+                try
+                {
+                    return isVisibleInViewer(viewer, parent, element);
+                }
+                finally
+                {
+                    suppressDecideLogs = prev;
+                }
+            }
+
+            private boolean suppressDecideLogs;
+
+            private int applyLogLeft = 30;
 
             /**
              * Как {@code MdObjectPartialModelController.refreshNode}:
@@ -1313,35 +2222,6 @@ public class CompareConfigMenuHook implements IStartup
                 return true;
             }
 
-            /**
-             * Обновить TreeItem листьев; агрегаты — через кэш provider.
-             */
-            private void applyVisibleTreeCheck(CheckboxTreeViewer ctv, IPartialModelNode node,
-                    boolean checked)
-            {
-                Collection<IPartialModelNode> children = node.getChildren();
-                if (children != null)
-                {
-                    for (IPartialModelNode child : children)
-                    {
-                        if (shouldRecurseOnly(child))
-                        {
-                            applyVisibleTreeCheck(ctv, child, checked);
-                            continue;
-                        }
-                        if (!isVisibleInViewer(ctv, node, child))
-                            continue;
-                        if (!child.isCheckable())
-                            continue;
-                        ctv.setGrayed(child, false);
-                        ctv.setChecked(child, checked);
-                    }
-                }
-                ctv.update(node, null);
-                for (IPartialModelNode p = node.getParent(); p != null; p = p.getParent())
-                    ctv.update(p, null);
-            }
-
             @Override
             public boolean select(Viewer viewer, Object parentElement, Object element)
             {
@@ -1358,10 +2238,10 @@ public class CompareConfigMenuHook implements IStartup
                         if (ctv == null && viewer instanceof CheckboxTreeViewer c)
                             ctv = c;
                         if (ctv != null)
-                            syncCheckHooksToFilterState(ctv);
+                            recalculateCheckStatesAfterFilterChange(ctv);
                         else
                             clearAggregateUiCache();
-                        Global.tempLog(LOG, "filter off: passthrough EDT checkboxes"); //$NON-NLS-1$
+                        Global.tempLog(LOG, "subsystem filter off: recalc checkmarks"); //$NON-NLS-1$
                     }
                     return true;
                 }
@@ -1375,6 +2255,10 @@ public class CompareConfigMenuHook implements IStartup
                 // Если EDT/Combo сбросил фильтры через setFilters — вернуть коррекцию
                 if (viewer instanceof AbstractTreeViewer treeViewer)
                     ensureAttached(treeViewer);
+
+                // Манифест / Настройки проекта — вне состава подсистем
+                if (isNonSubsystemStructuralBranch(element))
+                    return false;
 
                 // Как ViewerFilterBySubsystems$1: папка видна, только если есть видимый потомок
                 if (element instanceof VirtualFolderPartialModelNode
@@ -1422,6 +2306,11 @@ public class CompareConfigMenuHook implements IStartup
                 if (cn == null || session == null || !cn.isOneSideNode())
                     return true;
 
+                // Свойства (модули, реквизиты-фичи…) — не объекты подсистемы;
+                // видимость от родителя. Остальные односторонние объекты — через trie.
+                if (cn instanceof FeatureComparisonNode)
+                    return true;
+
                 boolean visible = checkOneSideNode(cn, session);
                 logDecision(element, cn, visible, lastDetail);
                 return visible;
@@ -1434,6 +2323,8 @@ public class CompareConfigMenuHook implements IStartup
                     Object selected = Global.invoke(coreFilter, "checkNodeIsSelected", cn, session); //$NON-NLS-1$
                     return !Boolean.FALSE.equals(selected);
                 }
+                if (cn instanceof FeatureComparisonNode)
+                    return true;
                 return checkOneSideNode(cn, session);
             }
 
@@ -1471,6 +2362,8 @@ public class CompareConfigMenuHook implements IStartup
             private void logDecision(Object element, ComparisonNode cn, boolean visible,
                     String detail)
             {
+                if (suppressDecideLogs)
+                    return;
                 // Раньше скрытые (visible=false) логировались без лимита → зависание UI.
                 if (decideLogsLeft <= 0)
                     return;
@@ -1524,11 +2417,13 @@ public class CompareConfigMenuHook implements IStartup
                     EObjectTrie allTop = getTrie("allTopObjectsToFilterTrieMap", ds); //$NON-NLS-1$
                     boolean isTop = allTop != null && allTop.belongsTo(qn);
                     boolean inIncluded = included != null && included.belongsTo(qn);
+                    // Как EDT isIncludedInSelectedSubsystems: не top → не фильтруем;
+                    // top → только входящие в выбранные подсистемы.
                     boolean visible;
                     if (included == null && allTop == null)
                         visible = true;
                     else
-                        visible = inIncluded;
+                        visible = !isTop || inIncluded;
                     lastDetail = "qn=" + qn //$NON-NLS-1$
                             + " symlink=" + symlink //$NON-NLS-1$
                             + " checkedIds=" + checkedIds //$NON-NLS-1$

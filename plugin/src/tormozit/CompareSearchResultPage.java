@@ -1,10 +1,23 @@
 package tormozit;
 
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
 
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.Status;
+import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.jface.action.Action;
+import org.eclipse.jface.action.MenuManager;
 import org.eclipse.jface.viewers.ArrayContentProvider;
+import org.eclipse.jface.viewers.CheckStateChangedEvent;
+import org.eclipse.jface.viewers.CheckboxTreeViewer;
+import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
+import org.eclipse.jface.viewers.ICheckStateListener;
 import org.eclipse.jface.viewers.ILabelProviderListener;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.StyledString;
@@ -22,20 +35,26 @@ import org.eclipse.swt.events.KeyEvent;
 import org.eclipse.swt.events.MouseAdapter;
 import org.eclipse.swt.events.MouseEvent;
 import org.eclipse.swt.graphics.Color;
+import org.eclipse.swt.graphics.GC;
 import org.eclipse.swt.graphics.Image;
+import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.graphics.TextStyle;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableItem;
+import org.eclipse.swt.widgets.TreeItem;
+import org.eclipse.swt.widgets.Widget;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IActionBars;
 import org.eclipse.ui.IMemento;
 import org.eclipse.ui.part.IPageSite;
 
-import com._1c.g5.v8.dt.compare.model.ComparisonSide;
 import com._1c.g5.v8.dt.compare.ui.editor.DtComparisonView;
+import com._1c.g5.v8.dt.compare.core.IComparisonSession;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.IPartialModelNode;
 
 public class CompareSearchResultPage implements ISearchResultPage
@@ -69,6 +88,22 @@ public class CompareSearchResultPage implements ISearchResultPage
 
     private IMemento restoredState;
 
+    private CheckboxTreeViewer hookedTreeViewer;
+    private ICheckStateListener treeCheckListener;
+    private boolean applyingCheckFromResults;
+    /** Только факт «были изменения флажков», без списка узлов. */
+    private final AtomicBoolean treeCheckDirty = new AtomicBoolean(false);
+    private Job treeCheckSyncJob;
+
+    private Image checkImageUnchecked;
+    private Image checkImageChecked;
+    private Image checkImageGrayed;
+
+    private static final int TREE_CHECK_SYNC_DELAY_MS = 1000;
+    private static final String CHECK_SYNC_LOG = "compare-search-check-sync"; //$NON-NLS-1$
+    private static final String KEY_CHECKED = "tormozit.compareSearchChecked"; //$NON-NLS-1$
+    private static final String KEY_GRAYED = "tormozit.compareSearchGrayed"; //$NON-NLS-1$
+
     @Override
     public void init(IPageSite site)
     {
@@ -84,6 +119,8 @@ public class CompareSearchResultPage implements ISearchResultPage
     @Override
     public void createControl(Composite parent)
     {
+        // Не SWT.CHECK: EraseItem + StyledCellLabelProvider включают owner-draw,
+        // и нативные флажки Win32 не рисуются. Колонка — иконки + клик.
         table = new Table(parent,
             SWT.MULTI | SWT.FULL_SELECTION | SWT.H_SCROLL | SWT.V_SCROLL | SWT.BORDER);
         table.setHeaderVisible(true);
@@ -92,12 +129,27 @@ public class CompareSearchResultPage implements ISearchResultPage
         tableViewer = new TableViewer(table);
         tableViewer.setContentProvider(ArrayContentProvider.getInstance());
 
+        ensureCheckImages();
+        addCheckColumn();
         addPathColumn();
         addPropertyColumn();
         addTextColumn();
         addStatusColumn();
         addColumnSideColumn();
         applyRestoredState();
+
+        table.addListener(SWT.MouseDown, event ->
+        {
+            if (event.button != 1)
+                return;
+            TableItem item = table.getItem(new Point(event.x, event.y));
+            if (item == null)
+                return;
+            Rectangle checkBounds = item.getBounds(0);
+            if (!checkBounds.contains(event.x, event.y))
+                return;
+            handleResultCheckToggle(item);
+        });
 
         table.addMouseListener(new MouseAdapter()
         {
@@ -137,12 +189,229 @@ public class CompareSearchResultPage implements ISearchResultPage
                 }
             }
         });
+
+        table.addListener(SWT.PaintItem, event ->
+        {
+            if (event.index != 0 || !(event.item instanceof TableItem item))
+                return;
+            if (!(item.getData() instanceof CompareSearchMatch match) || !match.isCheckable())
+                return;
+            Image img = checkImageForTableItem(item, match);
+            if (img == null || img.isDisposed())
+                return;
+            Rectangle imgBounds = img.getBounds();
+            int x = event.x + Math.max(0, (event.width - imgBounds.width) / 2);
+            int y = event.y + Math.max(0, (event.height - imgBounds.height) / 2);
+            event.gc.drawImage(img, x, y);
+        });
+
+        // Дерево → результаты: в каскаде только AtomicBoolean; синхронизация — Job.DECORATE.
+        table.addListener(SWT.FocusIn, event -> syncChecksFromTree());
+
+        installContextMenu();
+    }
+
+    private void installContextMenu()
+    {
+        MenuManager menuManager = new MenuManager();
+        menuManager.setRemoveAllWhenShown(true);
+        menuManager.addMenuListener(manager ->
+        {
+            boolean hasCheckable = selectionHasCheckable();
+            Action setMarks = new Action("Установить пометки")
+            {
+                @Override
+                public void run()
+                {
+                    applyCheckToSelection(true);
+                }
+            };
+            setMarks.setEnabled(hasCheckable);
+            setMarks.setToolTipText(
+                    "Установить пометки для выделенных строк" + Global.pluginSignForTooltip());
+
+            Action clearMarks = new Action("Снять пометки")
+            {
+                @Override
+                public void run()
+                {
+                    applyCheckToSelection(false);
+                }
+            };
+            clearMarks.setEnabled(hasCheckable);
+            clearMarks.setToolTipText(
+                    "Снять пометки с выделенных строк" + Global.pluginSignForTooltip());
+
+            manager.add(setMarks);
+            manager.add(clearMarks);
+        });
+        Menu menu = menuManager.createContextMenu(table);
+        table.setMenu(menu);
+    }
+
+    private boolean selectionHasCheckable()
+    {
+        if (table == null || table.isDisposed())
+            return false;
+        TableItem[] selection = table.getSelection();
+        if (selection == null || selection.length == 0)
+            return false;
+        for (TableItem item : selection)
+        {
+            if (item.getData() instanceof CompareSearchMatch m && m.isCheckable())
+                return true;
+        }
+        return false;
+    }
+
+    private void applyCheckToSelection(boolean want)
+    {
+        if (table == null || table.isDisposed())
+            return;
+        TableItem[] selection = table.getSelection();
+        if (selection == null || selection.length == 0)
+            return;
+
+        Map<Object, Boolean> uniqueNodes = new IdentityHashMap<>();
+        for (TableItem item : selection)
+        {
+            if (!(item.getData() instanceof CompareSearchMatch match) || !match.isCheckable())
+                continue;
+            Object node = match.getComparisonNode();
+            if (node != null)
+                uniqueNodes.put(node, Boolean.TRUE);
+        }
+        if (uniqueNodes.isEmpty())
+            return;
+
+        applyingCheckFromResults = true;
+        try
+        {
+            for (Object node : uniqueNodes.keySet())
+                applyCheckToTree(node, want);
+            syncChecksFromTree();
+        }
+        finally
+        {
+            applyingCheckFromResults = false;
+        }
+    }
+
+    private static final int CHECK_COLUMN_WIDTH = 22;
+
+    private void addCheckColumn()
+    {
+        TableViewerColumn col = new TableViewerColumn(tableViewer, SWT.CENTER);
+        col.getColumn().setText("");
+        col.getColumn().setResizable(false);
+        col.getColumn().setMoveable(false);
+        col.getColumn().setWidth(CHECK_COLUMN_WIDTH);
+        col.getColumn().setToolTipText("Объединить" + Global.pluginSignForTooltip());
+        // Текст/image через label provider в owner-draw таблице не видны —
+        // флажок рисуется в SWT.PaintItem (колонка 0).
+        col.setLabelProvider(new ColumnLabelProvider()
+        {
+            @Override
+            public String getText(Object element)
+            {
+                return "";
+            }
+        });
+    }
+
+    private Image checkImageFor(CompareSearchMatch match)
+    {
+        if (isMatchGrayed(match))
+            return checkImageGrayed;
+        return isMatchChecked(match) ? checkImageChecked : checkImageUnchecked;
+    }
+
+    private Image checkImageForTableItem(TableItem item, CompareSearchMatch match)
+    {
+        Object cached = item.getData(KEY_CHECKED);
+        if (cached instanceof Boolean checked)
+        {
+            boolean grayed = Boolean.TRUE.equals(item.getData(KEY_GRAYED));
+            if (!checked.booleanValue())
+                return checkImageUnchecked;
+            return grayed ? checkImageGrayed : checkImageChecked;
+        }
+        return checkImageFor(match);
+    }
+
+    private void ensureCheckImages()
+    {
+        if (checkImageUnchecked != null)
+            return;
+        Display display = table.getDisplay();
+        checkImageUnchecked = createDrawnCheckImage(display, false, false);
+        checkImageChecked = createDrawnCheckImage(display, true, false);
+        checkImageGrayed = createDrawnCheckImage(display, true, true);
+    }
+
+    private static Image createDrawnCheckImage(Display display, boolean checked, boolean grayed)
+    {
+        int size = 16;
+        Image image = new Image(display, size, size);
+        GC gc = new GC(image);
+        try
+        {
+            drawFallbackCheckbox(display, gc, new Point(size, size), checked, grayed);
+        }
+        finally
+        {
+            gc.dispose();
+        }
+        return image;
+    }
+
+    private static void drawFallbackCheckbox(Display display, GC gc, Point size, boolean checked,
+            boolean grayed)
+    {
+        gc.setBackground(display.getSystemColor(SWT.COLOR_WHITE));
+        gc.fillRectangle(0, 0, size.x, size.y);
+        int box = Math.min(size.x, size.y) - 4;
+        int x = (size.x - box) / 2;
+        int y = (size.y - box) / 2;
+        gc.setBackground(display.getSystemColor(SWT.COLOR_WHITE));
+        gc.setForeground(display.getSystemColor(SWT.COLOR_DARK_GRAY));
+        gc.fillRectangle(x, y, box, box);
+        gc.drawRectangle(x, y, box - 1, box - 1);
+        if (!checked)
+            return;
+        gc.setForeground(display.getSystemColor(grayed ? SWT.COLOR_GRAY : SWT.COLOR_BLACK));
+        int x1 = x + 2;
+        int y1 = y + box / 2;
+        int x2 = x + box / 2 - 1;
+        int y2 = y + box - 3;
+        int x3 = x + box - 2;
+        int y3 = y + 2;
+        gc.drawLine(x1, y1, x2, y2);
+        gc.drawLine(x2, y2, x3, y3);
+        gc.drawLine(x1, y1 - 1, x2, y2 - 1);
+        gc.drawLine(x2, y2 - 1, x3, y3 - 1);
+    }
+
+    private static boolean isMatchChecked(CompareSearchMatch match)
+    {
+        if (match == null || !match.isCheckable())
+            return false;
+        Object node = match.getComparisonNode();
+        return node instanceof IPartialModelNode partial && partial.isChecked();
+    }
+
+    private static boolean isMatchGrayed(CompareSearchMatch match)
+    {
+        if (match == null || !match.isCheckable())
+            return false;
+        Object node = match.getComparisonNode();
+        return node instanceof IPartialModelNode partial && partial.isGrayed();
     }
 
     private void addPropertyColumn()
     {
         TableViewerColumn col = new TableViewerColumn(tableViewer, SWT.LEFT);
-        col.getColumn().setText("\u0421\u0432\u043E\u0439\u0441\u0442\u0432\u043E");
+        col.getColumn().setText("Свойство");
         col.getColumn().setResizable(true);
         col.getColumn().setWidth(200);
         col.setLabelProvider(new DelegatingStyledCellLabelProvider(new IStyledLabelProvider()
@@ -176,9 +445,9 @@ public class CompareSearchResultPage implements ISearchResultPage
     private void addPathColumn()
     {
         TableViewerColumn col = new TableViewerColumn(tableViewer, SWT.LEFT);
-        col.getColumn().setText("\u041F\u0443\u0442\u044C");
+        col.getColumn().setText("Путь");
         col.getColumn().setResizable(true);
-        col.getColumn().setWidth(180);
+        col.getColumn().setWidth(360);
         col.setLabelProvider(new DelegatingStyledCellLabelProvider(new IStyledLabelProvider()
         {
             @Override
@@ -205,7 +474,7 @@ public class CompareSearchResultPage implements ISearchResultPage
     private void addTextColumn()
     {
         TableViewerColumn col = new TableViewerColumn(tableViewer, SWT.LEFT);
-        col.getColumn().setText("\u0422\u0435\u043A\u0441\u0442");
+        col.getColumn().setText("Текст");
         col.getColumn().setResizable(true);
         col.getColumn().setWidth(250);
         col.setLabelProvider(new DelegatingStyledCellLabelProvider(new IStyledLabelProvider()
@@ -234,7 +503,7 @@ public class CompareSearchResultPage implements ISearchResultPage
     private void addStatusColumn()
     {
         TableViewerColumn col = new TableViewerColumn(tableViewer, SWT.LEFT);
-        col.getColumn().setText("\u0421\u0442\u0430\u0442\u0443\u0441");
+        col.getColumn().setText("Статус");
         col.getColumn().setResizable(true);
         col.getColumn().setWidth(100);
         col.setLabelProvider(new DelegatingStyledCellLabelProvider(new IStyledLabelProvider()
@@ -246,7 +515,7 @@ public class CompareSearchResultPage implements ISearchResultPage
                 {
                     String status = m.getComparisonStatus();
                     String text = status != null && !status.isEmpty() ? status : "";
-                    String prefix = m.isCheckable() ? "" : "\u25CB ";
+                    String prefix = m.isCheckable() ? "" : "○ ";
                     StyledString ss = new StyledString(prefix + text);
                     if (!m.isCheckable())
                         ss.setStyle(0, 1, UNEDITABLE_STYLER);
@@ -271,7 +540,7 @@ public class CompareSearchResultPage implements ISearchResultPage
     private void addColumnSideColumn()
     {
         TableViewerColumn col = new TableViewerColumn(tableViewer, SWT.LEFT);
-        col.getColumn().setText("\u041A\u043E\u043B\u043E\u043D\u043A\u0430");
+        col.getColumn().setText("Колонка");
         col.getColumn().setResizable(true);
         col.getColumn().setWidth(100);
         col.setLabelProvider(new DelegatingStyledCellLabelProvider(new IStyledLabelProvider()
@@ -341,28 +610,19 @@ public class CompareSearchResultPage implements ISearchResultPage
         if (m == null)
             return null;
 
-        Object node = m.getComparisonNode();
-        if (!(node instanceof IPartialModelNode partialNode))
-            return null;
-
         DtComparisonView view = getComparisonView();
         if (view == null)
             return null;
 
-        try
-        {
-            ComparisonSide side = partialNode.getSide();
-            if (side == ComparisonSide.MAIN)
-                return view.getColorOnlyMain();
-            if (side == ComparisonSide.OTHER)
-                return view.getColorOnlyOther();
-            if (partialNode.hasDifferences(ComparisonSide.MAIN, ComparisonSide.OTHER))
-                return view.getColorHasDiffs();
-        }
-        catch (Throwable t)
-        {
-            Global.logError("CompareSearch", "getRowBackground failed", t); //$NON-NLS-1$
-        }
+        CompareSearchMatch.RowColorKind kind = m.getRowColorKind();
+        if (kind == null || kind == CompareSearchMatch.RowColorKind.NONE)
+            return null;
+        if (kind == CompareSearchMatch.RowColorKind.ONLY_MAIN)
+            return view.getColorOnlyMain();
+        if (kind == CompareSearchMatch.RowColorKind.ONLY_OTHER)
+            return view.getColorOnlyOther();
+        if (kind == CompareSearchMatch.RowColorKind.HAS_DIFFS)
+            return view.getColorHasDiffs();
         return null;
     }
 
@@ -377,6 +637,305 @@ public class CompareSearchResultPage implements ISearchResultPage
         return view instanceof DtComparisonView dtView ? dtView : null;
     }
 
+    private CheckboxTreeViewer getCheckboxTreeViewer()
+    {
+        if (searchResult == null)
+            return null;
+        IEditorPart editor = searchResult.getEditorPart();
+        if (editor == null)
+            return null;
+        Object view = Global.getField(editor, "comparisonView"); //$NON-NLS-1$
+        if (view == null)
+            return null;
+        Object treeControl = Global.call(view, "getTreeControl"); //$NON-NLS-1$
+        if (treeControl == null)
+            return null;
+        Object viewer = Global.call(treeControl, "getTreeViewer"); //$NON-NLS-1$
+        return viewer instanceof CheckboxTreeViewer ctv ? ctv : null;
+    }
+
+    private void handleResultCheckToggle(TableItem item)
+    {
+        if (item == null || item.isDisposed())
+            return;
+        Object data = item.getData();
+        if (!(data instanceof CompareSearchMatch match) || !match.isCheckable())
+            return;
+
+        boolean want = !isMatchChecked(match);
+        applyingCheckFromResults = true;
+        try
+        {
+            applyCheckToTree(match.getComparisonNode(), want);
+            syncChecksFromTree();
+        }
+        finally
+        {
+            applyingCheckFromResults = false;
+        }
+    }
+
+    /**
+     * Как клик по флажку в дереве сравнения: через {@code CheckStateChangedEvent},
+     * чтобы сработали EDT-слушатели и FilterAware-обёртка Comfort.
+     */
+    private void applyCheckToTree(Object node, boolean want)
+    {
+        CheckboxTreeViewer ctv = getCheckboxTreeViewer();
+        if (ctv != null && ctv.getControl() != null && !ctv.getControl().isDisposed()
+                && hasCheckStateListeners(ctv))
+        {
+            ctv.setChecked(node, want);
+            CheckStateChangedEvent event = new CheckStateChangedEvent(ctv, node, want);
+            Global.invoke(ctv, "fireCheckStateChanged", event); //$NON-NLS-1$
+            return;
+        }
+        applyCheckDirect(node, want);
+        if (ctv != null && ctv.getControl() != null && !ctv.getControl().isDisposed())
+            ctv.setChecked(node, want);
+    }
+
+    private static boolean hasCheckStateListeners(CheckboxTreeViewer ctv)
+    {
+        Object listObj = Global.getField(ctv, "checkStateListeners"); //$NON-NLS-1$
+        if (listObj == null)
+            return false;
+        Object raw = Global.invoke(listObj, "getListeners"); //$NON-NLS-1$
+        return raw instanceof Object[] arr && arr.length > 0;
+    }
+
+    private static void applyCheckDirect(Object element, boolean want)
+    {
+        if (!(element instanceof IPartialModelNode node))
+            return;
+        IComparisonSession session = node.getComparisonSession();
+        long id = node.getNodeId();
+        if (session == null || id == -1L)
+        {
+            node.check(want);
+            node.setChecked(want);
+            return;
+        }
+        session.setMustBeMerged(id, want, true);
+        node.setChecked(want);
+    }
+
+    private void syncChecksFromTree()
+    {
+        if (table == null || table.isDisposed())
+            return;
+        treeCheckDirty.set(false);
+        CheckboxTreeViewer ctv = getCheckboxTreeViewer();
+        long t0 = System.nanoTime();
+        int rows = 0;
+        int fromTreeItem = 0;
+        for (TableItem item : table.getItems())
+        {
+            if (item.isDisposed() || !(item.getData() instanceof CompareSearchMatch match))
+                continue;
+            rows++;
+            if (!match.isCheckable())
+            {
+                item.setData(KEY_CHECKED, null);
+                item.setData(KEY_GRAYED, null);
+                continue;
+            }
+            Object node = match.getComparisonNode();
+            boolean checked;
+            boolean grayed;
+            Widget treeRow = findTreeRow(ctv, node);
+            if (treeRow instanceof TreeItem ti && !ti.isDisposed())
+            {
+                // Строка дерева создана — берём её UI-состояние.
+                checked = ti.getChecked();
+                grayed = ti.getGrayed();
+                fromTreeItem++;
+            }
+            else if (node instanceof IPartialModelNode partial)
+            {
+                // Нет TreeItem (узел не развёрнут): ctv.getChecked() врёт (всегда false).
+                // Источник истины — модель узла.
+                checked = partial.isChecked();
+                grayed = partial.isGrayed();
+            }
+            else
+            {
+                checked = false;
+                grayed = false;
+            }
+            item.setData(KEY_CHECKED, Boolean.valueOf(checked));
+            item.setData(KEY_GRAYED, Boolean.valueOf(grayed));
+            Rectangle bounds = item.getBounds(0);
+            table.redraw(bounds.x, bounds.y, bounds.width, bounds.height, false);
+        }
+        Global.tempLog(CHECK_SYNC_LOG, "sync rows=" + rows //$NON-NLS-1$
+                + " treeItems=" + fromTreeItem //$NON-NLS-1$
+                + " ms=" + ((System.nanoTime() - t0) / 1_000_000L)); //$NON-NLS-1$
+    }
+
+    private static Widget findTreeRow(CheckboxTreeViewer ctv, Object node)
+    {
+        if (ctv == null || node == null)
+            return null;
+        Object found = Global.invoke(ctv, "findItem", node); //$NON-NLS-1$
+        if (found instanceof Widget widget)
+            return widget;
+        found = Global.invoke(ctv, "testFindItem", node); //$NON-NLS-1$
+        return found instanceof Widget widget ? widget : null;
+    }
+
+    /** Горячий путь каскада: только AtomicBoolean. Job.schedule — лишь при false→true. */
+    private void noteTreeCheckChanged()
+    {
+        if (applyingCheckFromResults)
+            return;
+        if (!treeCheckDirty.getAndSet(true))
+            ensureTreeCheckSyncJob();
+    }
+
+    private void requestTreeCheckSync()
+    {
+        if (!treeCheckDirty.getAndSet(true))
+            ensureTreeCheckSyncJob();
+    }
+
+    private void ensureTreeCheckSyncJob()
+    {
+        if (treeCheckSyncJob == null)
+        {
+            treeCheckSyncJob = new Job("Комфорт: синхронизация пометок поиска сравнения")
+            {
+                @Override
+                protected IStatus run(IProgressMonitor monitor)
+                {
+                    return runTreeCheckSyncJob(monitor);
+                }
+            };
+            treeCheckSyncJob.setPriority(Job.DECORATE);
+            treeCheckSyncJob.setSystem(true);
+        }
+        if (treeCheckSyncJob.getState() == Job.NONE)
+            treeCheckSyncJob.schedule();
+    }
+
+    private IStatus runTreeCheckSyncJob(IProgressMonitor monitor)
+    {
+        try
+        {
+            while (!monitor.isCanceled() && searchResult != null)
+            {
+                if (!treeCheckDirty.get())
+                {
+                    try
+                    {
+                        Thread.sleep(300);
+                    }
+                    catch (InterruptedException e)
+                    {
+                        Thread.currentThread().interrupt();
+                        return Status.CANCEL_STATUS;
+                    }
+                    if (!treeCheckDirty.get())
+                        break;
+                    continue;
+                }
+                if (!waitForTreeCheckQuietPeriod(monitor, TREE_CHECK_SYNC_DELAY_MS))
+                    return Status.CANCEL_STATUS;
+                if (monitor.isCanceled() || searchResult == null)
+                    return Status.CANCEL_STATUS;
+                syncChecksFromTreeOnUiThread();
+            }
+            return Status.OK_STATUS;
+        }
+        finally
+        {
+            // schedule() на ещё RUNNING job поставит повторный запуск после завершения.
+            if (treeCheckDirty.get() && searchResult != null
+                    && monitor != null && !monitor.isCanceled() && treeCheckSyncJob != null)
+                treeCheckSyncJob.schedule(100);
+            Global.tempLog(CHECK_SYNC_LOG, "job finished dirty=" + treeCheckDirty.get()); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * Ждёт {@code delayMs} без новых note (dirty не взводится заново).
+     * Во время каскада dirty постоянно true → ждём до конца каскада + delayMs.
+     */
+    private boolean waitForTreeCheckQuietPeriod(IProgressMonitor monitor, int delayMs)
+    {
+        while (!monitor.isCanceled())
+        {
+            treeCheckDirty.set(false);
+            long deadline = System.currentTimeMillis() + delayMs;
+            while (System.currentTimeMillis() < deadline)
+            {
+                if (monitor.isCanceled())
+                    return false;
+                if (treeCheckDirty.get())
+                    break;
+                try
+                {
+                    Thread.sleep(50);
+                }
+                catch (InterruptedException e)
+                {
+                    Thread.currentThread().interrupt();
+                    return false;
+                }
+            }
+            if (!treeCheckDirty.get())
+                return true;
+        }
+        return false;
+    }
+
+    private void syncChecksFromTreeOnUiThread()
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        // syncExec: дождаться применения, пока Job ещё в quiet-цикле.
+        display.syncExec(() ->
+        {
+            if (table == null || table.isDisposed() || searchResult == null)
+                return;
+            syncChecksFromTree();
+        });
+    }
+
+    private void installTreeCheckListener()
+    {
+        uninstallTreeCheckListener();
+        CheckboxTreeViewer ctv = getCheckboxTreeViewer();
+        if (ctv == null || ctv.getControl() == null || ctv.getControl().isDisposed())
+            return;
+        treeCheckListener = event -> noteTreeCheckChanged();
+        ctv.addCheckStateListener(treeCheckListener);
+        hookedTreeViewer = ctv;
+        Global.tempLog(CHECK_SYNC_LOG, "listener installed (dirty-flag + Job.DECORATE)"); //$NON-NLS-1$
+    }
+
+    private void uninstallTreeCheckListener()
+    {
+        if (treeCheckSyncJob != null)
+            treeCheckSyncJob.cancel();
+        if (hookedTreeViewer != null && treeCheckListener != null)
+        {
+            try
+            {
+                if (hookedTreeViewer.getControl() != null
+                        && !hookedTreeViewer.getControl().isDisposed())
+                    hookedTreeViewer.removeCheckStateListener(treeCheckListener);
+            }
+            catch (Throwable ignored)
+            {
+            }
+        }
+        hookedTreeViewer = null;
+        treeCheckListener = null;
+        treeCheckDirty.set(false);
+    }
+
     private void copySelection()
     {
         TableItem[] selection = table.getSelection();
@@ -387,7 +946,8 @@ public class CompareSearchResultPage implements ISearchResultPage
         {
             if (item.getData() instanceof CompareSearchMatch m)
             {
-                sb.append(m.getPropertyName()).append('\t')
+                sb.append(isMatchChecked(m) ? "1" : "0").append('\t')
+                  .append(m.getPropertyName()).append('\t')
                   .append(m.getObjectPath()).append('\t')
                   .append(m.getMatchText()).append('\t')
                   .append(m.getComparisonStatus()).append('\t')
@@ -442,11 +1002,14 @@ public class CompareSearchResultPage implements ISearchResultPage
             if (tableViewer != null && !table.isDisposed())
             {
                 tableViewer.setInput(csr.getMatches());
+                syncChecksFromTree();
                 table.setVisible(true);
             }
+            installTreeCheckListener();
         }
         else if (search == null)
         {
+            uninstallTreeCheckListener();
             this.searchResult = null;
             this.queryText = null;
             if (tableViewer != null && !table.isDisposed())
@@ -490,9 +1053,24 @@ public class CompareSearchResultPage implements ISearchResultPage
     @Override
     public void dispose()
     {
+        uninstallTreeCheckListener();
+        disposeCheckImages();
         table = null;
         tableViewer = null;
         searchResult = null;
+    }
+
+    private void disposeCheckImages()
+    {
+        if (checkImageUnchecked != null && !checkImageUnchecked.isDisposed())
+            checkImageUnchecked.dispose();
+        if (checkImageChecked != null && !checkImageChecked.isDisposed())
+            checkImageChecked.dispose();
+        if (checkImageGrayed != null && !checkImageGrayed.isDisposed())
+            checkImageGrayed.dispose();
+        checkImageUnchecked = null;
+        checkImageChecked = null;
+        checkImageGrayed = null;
     }
 
     @Override
@@ -505,7 +1083,10 @@ public class CompareSearchResultPage implements ISearchResultPage
     public void setFocus()
     {
         if (table != null && !table.isDisposed())
+        {
+            syncChecksFromTree();
             table.setFocus();
+        }
     }
 
     @Override
@@ -525,7 +1106,7 @@ public class CompareSearchResultPage implements ISearchResultPage
     {
         if (searchResult != null)
             return searchResult.getLabel();
-        return "\u0420\u0435\u0437\u0443\u043B\u044C\u0442\u0430\u0442\u044B \u043F\u043E\u0438\u0441\u043A\u0430 \u043F\u043E \u0434\u0435\u0440\u0435\u0432\u0443 \u0441\u0440\u0430\u0432\u043D\u0435\u043D\u0438\u044F";
+        return "Результаты поиска по дереву сравнения";
     }
 
     @Override
@@ -541,6 +1122,11 @@ public class CompareSearchResultPage implements ISearchResultPage
         org.eclipse.swt.widgets.TableColumn[] cols = table.getColumns();
         for (int i = 0; i < cols.length; i++)
         {
+            if (i == 0)
+            {
+                cols[i].setWidth(CHECK_COLUMN_WIDTH);
+                continue;
+            }
             Integer w = restoredState.getInteger("colWidth" + i);
             if (w != null && w > 0)
                 cols[i].setWidth(w);
@@ -556,6 +1142,11 @@ public class CompareSearchResultPage implements ISearchResultPage
         org.eclipse.swt.widgets.TableColumn[] cols = table.getColumns();
         for (int i = 0; i < cols.length; i++)
         {
+            if (i == 0)
+            {
+                memento.putInteger("colWidth" + i, CHECK_COLUMN_WIDTH);
+                continue;
+            }
             memento.putInteger("colWidth" + i, cols[i].getWidth());
         }
     }

@@ -45,6 +45,16 @@ final class FilterInputBox
         + "• \"текст в кавычках\" — точная фраза целиком; точки и пробелы внутри неё не разделяют\n" //$NON-NLS-1$
         + "• ищет по полному имени объекта метаданных и имени файла"; //$NON-NLS-1$
 
+    /**
+     * Текст подсказки для «Фильтра по подсистемам» EDT: простой плоский AND по словам
+     * (точка — такой же разделитель слов, как пробел), матч по имени узла дерева подсистем.
+     */
+    static final String SUBSYSTEMS_FILTER_TOOLTIP =
+        "Многословный фильтр по подсистемам:\n" //$NON-NLS-1$
+        + "• пробел или точка между словами — И (все слова должны совпасть)\n" //$NON-NLS-1$
+        + "• \"текст в кавычках\" — точная фраза целиком; точки и пробелы внутри неё не разделяют\n" //$NON-NLS-1$
+        + "• ищет по имени подсистемы; родители совпадений не скрываются"; //$NON-NLS-1$
+
     private static final int MAX_ITEMS = 20;
     /** Максимальная ширина compact-поля (окно «Коллекция»). */
     static final int COMPACT_MAX_WIDTH = 267;
@@ -81,6 +91,9 @@ final class FilterInputBox
         RIGHTS_DIALOG(
             "comfort.rightsDialog.filter.history.count", //$NON-NLS-1$
             "comfort.rightsDialog.filter.history."), //$NON-NLS-1$
+        FILTER_BY_SUBSYSTEMS(
+            "comfort.filterBySubsystems.filter.history.count", //$NON-NLS-1$
+            "comfort.filterBySubsystems.filter.history."), //$NON-NLS-1$
         FILTERED_LIST_DIALOG(
             "comfort.filteredListDialog.filter.history.count", //$NON-NLS-1$
             "comfort.filteredListDialog.filter.history."), //$NON-NLS-1$
@@ -279,6 +292,7 @@ final class FilterInputBox
             case GIT_HISTORY -> forGitHistory(parent, onSearch);
             case FILTERED_LIST_DIALOG -> forFilteredListDialog(parent, onSearch);
             case RIGHTS_DIALOG -> throw new IllegalStateException("RIGHTS_DIALOG: use attachHistory(SearchBox, Scope.RIGHTS_DIALOG)"); //$NON-NLS-1$
+            case FILTER_BY_SUBSYSTEMS -> throw new IllegalStateException("FILTER_BY_SUBSYSTEMS: use attachHistory(SearchBox, Scope.FILTER_BY_SUBSYSTEMS)"); //$NON-NLS-1$
             case INFOBASES -> throw new IllegalStateException("INFOBASES: use attachHistory(SearchBox, Scope.INFOBASES)"); //$NON-NLS-1$
         };
     }

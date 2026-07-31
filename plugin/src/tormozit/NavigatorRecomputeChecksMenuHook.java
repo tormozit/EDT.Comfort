@@ -2,9 +2,6 @@ package tormozit;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.stream.Collectors;
 
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
@@ -35,14 +32,6 @@ import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.navigator.CommonViewer;
 
 import com._1c.g5.v8.bm.core.IBmObject;
-import com._1c.g5.v8.bm.integration.IBmModel;
-import com._1c.g5.v8.derived.IDerivedDataManager;
-import com._1c.g5.v8.derived.IDerivedDataUpdate;
-import com._1c.g5.v8.derived.context.IContextCollectingSession;
-import com._1c.g5.v8.dt.core.platform.IDerivedDataManagerProvider;
-import com._1c.g5.v8.dt.core.platform.IDtProject;
-import com.e1c.g5.v8.dt.check.settings.CheckUid;
-import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
 
 /**
  * Добавляет «Проверить» в подменю «Комфорт» навигатора EDT — точечно пересчитывает проверки
@@ -220,16 +209,10 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
     {
         Global.tempLog("navigator-recompute-checks", "recomputeChecks: start, selection=" + selection); //$NON-NLS-1$ //$NON-NLS-2$
         EObject model = NavigatorElementModels.resolveEObject(selection.getFirstElement());
-        if (model instanceof com._1c.g5.v8.dt.metadata.mdclass.BasicForm basicForm)
-        {
-            com._1c.g5.v8.dt.metadata.mdclass.AbstractForm form = basicForm.getForm();
-            if (form != null)
-                model = form;
-        }
         Global.tempLog("navigator-recompute-checks", "recomputeChecks: model=" + model); //$NON-NLS-1$ //$NON-NLS-2$
-        if (!(model instanceof IBmObject bmObject))
+        if (!(model instanceof IBmObject) && !(model instanceof com._1c.g5.v8.dt.metadata.mdclass.BasicForm))
         {
-            Global.tempLog("navigator-recompute-checks", "STOP: selected model is not an IBmObject"); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.tempLog("navigator-recompute-checks", "STOP: selected model is not an IBmObject/BasicForm"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         IResource resource = NavigatorResourceResolver.resolveFirst(selection);
@@ -242,104 +225,20 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
             return;
         }
 
-        try
+        if (resource != null)
         {
-            resource.refreshLocal(IResource.DEPTH_INFINITE, new NullProgressMonitor());
-        }
-        catch (CoreException e)
-        {
-            Global.tempLogException("navigator-recompute-checks", "refreshLocal failed for " + resource, e); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-
-        IDtProject dtProject = Global.getDtProjectFromWorkspaceProject(project);
-        Global.tempLog("navigator-recompute-checks", //$NON-NLS-1$
-            "recomputeChecks: dtProject=" + dtProject); //$NON-NLS-1$
-        if (dtProject == null)
-        {
-            Global.tempLog("navigator-recompute-checks", "STOP: IDtProject is null"); //$NON-NLS-1$ //$NON-NLS-2$
-            return;
-        }
-
-        ICheckRepository checkRepo = Global.getOsgiService(ICheckRepository.class);
-        Global.tempLog("navigator-recompute-checks", //$NON-NLS-1$
-            "recomputeChecks: checkRepo=" + checkRepo); //$NON-NLS-1$
-        if (checkRepo == null)
-        {
-            Global.tempLog("navigator-recompute-checks", "STOP: ICheckRepository is null"); //$NON-NLS-1$ //$NON-NLS-2$
-            return;
-        }
-
-        Map<IDtProject, Set<CheckUid>> allCheckUids = checkRepo.getCheckUids();
-        Set<CheckUid> projectCheckUids = allCheckUids.get(dtProject);
-        Global.tempLog("navigator-recompute-checks", //$NON-NLS-1$
-            "recomputeChecks: projectCheckUids count=" + (projectCheckUids != null ? projectCheckUids.size() : 0)); //$NON-NLS-1$
-        if (projectCheckUids == null || projectCheckUids.isEmpty())
-        {
-            Global.tempLog("navigator-recompute-checks", "STOP: no check UIDs for project"); //$NON-NLS-1$ //$NON-NLS-2$
-            return;
-        }
-
-        Set<String> checkIds = projectCheckUids.stream()
-            .map(CheckUid::getCheckId)
-            .collect(Collectors.toSet());
-        Global.tempLog("navigator-recompute-checks", //$NON-NLS-1$
-            "recomputeChecks: checkIds count=" + checkIds.size()); //$NON-NLS-1$
-
-        IDerivedDataManagerProvider dmProvider = Global.getOsgiService(IDerivedDataManagerProvider.class);
-        IDerivedDataManager dm = dmProvider != null ? dmProvider.get(project) : null;
-
-        if (dm != null)
-        {
-            Global.tempLog("navigator-recompute-checks",
-                "recomputeChecks: setting up check context via updateDerivedData");
-            dm.updateDerivedData(new IDerivedDataUpdate()
-            {
-                @Override
-                public void update(IContextCollectingSession session, IBmModel model)
-                {
-                    try
-                    {
-                        Object ctx = session.getObjectContext(bmObject, "M_CHECKS_SEGMENT");
-                        if (ctx == null)
-                        {
-                            Global.tempLog("navigator-recompute-checks",
-                                "context is null after getObjectContext");
-                            return;
-                        }
-                        ctx.getClass().getMethod("setFullRebuild", boolean.class).invoke(ctx, true);
-                        ctx.getClass().getMethod("setInactive", boolean.class).invoke(ctx, false);
-                        ctx.getClass().getMethod("addCheckIds", Set.class).invoke(ctx, checkIds);
-                        ctx.getClass().getMethod("setFullRebuild", boolean.class).invoke(ctx, true);
-                        Global.tempLog("navigator-recompute-checks",
-                            "context ready, id=" + ctx.getClass().getMethod("getBmObjectId").invoke(ctx));
-                    }
-                    catch (Exception e)
-                    {
-                        Global.tempLogException("navigator-recompute-checks",
-                            "context setup reflection error", e);
-                    }
-                }
-            }, 0L, "comfort-recompute-checks-context");
-            Global.tempLog("navigator-recompute-checks",
-                "recomputeChecks: updateDerivedData returned, calling applyForcedUpdates");
-
             try
             {
-                dm.applyForcedUpdates();
-                Global.tempLog("navigator-recompute-checks",
-                    "recomputeChecks: applyForcedUpdates returned");
+                resource.refreshLocal(IResource.DEPTH_INFINITE, new NullProgressMonitor());
             }
-            catch (Exception e)
+            catch (CoreException e)
             {
-                Global.tempLogException("navigator-recompute-checks",
-                    "applyForcedUpdates failed", e);
+                Global.tempLogException("navigator-recompute-checks", "refreshLocal failed for " + resource, e); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
-        else
-        {
-            Global.tempLog("navigator-recompute-checks",
-                "STOP: IDerivedDataManager is null");
-        }
+
+        Global.tempLog("navigator-recompute-checks", "recomputeChecks: delegating to ComfortCheckRecompute"); //$NON-NLS-1$ //$NON-NLS-2$
+        ComfortCheckRecompute.recomputeObjects(project, List.of(model));
     }
 
     private static CommonViewer getCommonViewer(IViewPart navigator)
