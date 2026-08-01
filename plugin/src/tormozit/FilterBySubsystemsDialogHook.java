@@ -13,6 +13,10 @@ import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.core.runtime.Adapters;
 import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.commands.ExecutionEvent;
+import org.eclipse.core.commands.ExecutionException;
+import org.eclipse.core.commands.IExecutionListener;
+import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.viewers.CheckboxTreeViewer;
 import org.eclipse.jface.viewers.CheckStateChangedEvent;
@@ -31,6 +35,9 @@ import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.jface.viewers.TreeSelection;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.dnd.Clipboard;
+import org.eclipse.swt.dnd.TextTransfer;
+import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
 import org.eclipse.swt.events.SelectionAdapter;
@@ -38,11 +45,14 @@ import org.eclipse.swt.events.SelectionEvent;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
+import org.eclipse.swt.layout.GridData;
+import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
+import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
@@ -51,12 +61,14 @@ import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.ToolBar;
 import org.eclipse.swt.widgets.ToolItem;
 import org.eclipse.swt.widgets.Tree;
+import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.swt.widgets.TypedListener;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.commands.ICommandService;
 
 import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
 import com._1c.g5.v8.dt.compare.model.ComparisonSide;
@@ -103,6 +115,11 @@ public final class FilterBySubsystemsDialogHook implements IStartup
     private static final String LAST_CHILD_CHECK_KEY = "tormozit.filterBySubsystemsLastChildCheck"; //$NON-NLS-1$
     private static final String TREE_CONTEXT_MENU_KEY = "tormozit.filterBySubsystemsTreeContextMenu"; //$NON-NLS-1$
     private static final String SIDE_MEMORY_KEY = "tormozit.filterBySubsystemsSideMemory"; //$NON-NLS-1$
+    private static final String CTRL_MARK_KEY = "tormozit.filterBySubsystemsCtrlMark"; //$NON-NLS-1$
+    private static final String GRAY_MARK_HINT_KEY = "tormozit.filterBySubsystemsGrayMarkHint"; //$NON-NLS-1$
+    private static final String GRAY_MARK_HINT = "CTRL+клик превратит соседние динамические пометки в статические"; //$NON-NLS-1$
+    private static final String COPY_HOOKED_KEY = "tormozit.filterBySubsystemsCopyHooked"; //$NON-NLS-1$
+    private static final String COPY_ACTIVE_COLUMN_KEY = "tormozit.filterBySubsystemsCopyColumn"; //$NON-NLS-1$
 
     /**
      * Выбранная сторона подсистем в диалоге сравнения — на жизнь
@@ -110,6 +127,10 @@ public final class FilterBySubsystemsDialogHook implements IStartup
      */
     private static final Map<Object, ComparisonSide> SIDE_BY_COMPARISON_SESSION =
         Collections.synchronizedMap(new WeakHashMap<>());
+
+    /** Дерево, для которого сейчас нужно перехватывать команду Copy (см. {@link #installTreeCellCopy}). */
+    private static volatile Tree copyTargetTree;
+    private static boolean copyExecutionListenerInstalled;
 
     @Override
     public void earlyStartup()
@@ -182,8 +203,10 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         installComfortToolbarActions(panel, viewer);
         installTreeContextMarkMenu(panel, viewer);
         installLastChildCheckGuard(panel, viewer);
+        installTreeCellCopy(viewer);
         installDeselectAllAlwaysEnabled(dialog, panel, viewer);
         installComparisonSideMemory(shell, dialog, panel);
+        installGrayMarkHint(panel);
         expandNavigatorProject(viewer, attempt);
         return installSmartFilter(panel, viewer);
     }
@@ -308,10 +331,177 @@ public final class FilterBySubsystemsDialogHook implements IStartup
             originals[i] = listener;
         }
 
+        // CTRL-состояние последнего клика по дереву — CheckStateChangedEvent модификаторов
+        // не несёт (JFace читает только TreeItem.getChecked()), а клик по серой пометке
+        // для SWT выглядит как toggle «галка → пусто». Запоминаем на MouseDown/MouseUp.
+        Listener ctrlTrack = ctrlTrackListener(tree);
+        tree.addListener(SWT.MouseDown, ctrlTrack);
+        tree.addListener(SWT.MouseUp, ctrlTrack);
+
         Global.invoke(listObj, "clear"); //$NON-NLS-1$
         Global.invoke(listObj, "add", new LastChildCheckGuard(panel, viewer, originals)); //$NON-NLS-1$
         tree.setData(LAST_CHILD_CHECK_KEY, Boolean.TRUE);
         FilterBySubsystemsDialogDebug.log("lastChildCheck: guard установлен"); //$NON-NLS-1$
+    }
+
+    private static Listener ctrlTrackListener(Tree tree)
+    {
+        return event ->
+        {
+            if (event.button == 1 && !tree.isDisposed())
+                tree.setData(CTRL_MARK_KEY, (event.stateMask & SWT.CTRL) != 0);
+        };
+    }
+
+    /** CTRL был зажат на последнем клике по дереву (см. {@link #ctrlTrackListener}). */
+    private static boolean isCtrlClick(CheckboxTreeViewer viewer)
+    {
+        Tree tree = viewer.getTree();
+        return tree != null && !tree.isDisposed()
+            && Boolean.TRUE.equals(tree.getData(CTRL_MARK_KEY));
+    }
+
+    private static void clearCtrlClick(CheckboxTreeViewer viewer)
+    {
+        Tree tree = viewer.getTree();
+        if (tree != null && !tree.isDisposed())
+            tree.setData(CTRL_MARK_KEY, null);
+    }
+
+    /** Надпись-подсказка про CTRL+клик — внизу окна, сразу под панелью дерева. */
+    private static void installGrayMarkHint(Object panel)
+    {
+        if (!(panel instanceof Composite panelComposite) || panelComposite.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(panelComposite.getData(GRAY_MARK_HINT_KEY)))
+            return;
+        panelComposite.setData(GRAY_MARK_HINT_KEY, Boolean.TRUE);
+
+        Composite host = panelComposite.getParent();
+        if (host == null || host.isDisposed() || !(host.getLayout() instanceof GridLayout))
+            host = panelComposite;
+
+        Label hint = new Label(host, SWT.WRAP);
+        hint.setText(GRAY_MARK_HINT);
+        hint.setFont(host.getFont());
+        GridData hintData = new GridData(SWT.FILL, SWT.CENTER, true, false);
+        hintData.verticalIndent = 3;
+        hint.setLayoutData(hintData);
+        if (host != panelComposite)
+            hint.moveBelow(panelComposite);
+        host.layout(true, true);
+        FilterBySubsystemsDialogDebug.log("grayMarkHint: надпись добавлена"); //$NON-NLS-1$
+    }
+
+    /**
+     * Ctrl+C при фокусе на дереве копирует текст активной ячейки. Тот же архитектурный потолок,
+     * что и в {@code PreferenceSearchFilterAugmenter.wireTreeCopy}/{@code KeyBindingToastHook}:
+     * буква C при зажатом Ctrl не порождает {@code SWT.KeyDown} в модальном диалоге — нативная
+     * Win32-трансляция акселератора съедает её раньше. Перехват — через
+     * {@code ICommandService.addExecutionListener} на {@code org.eclipse.ui.edit.copy}, а не
+     * KeyDown — срабатывание команды долетает независимо от пути.
+     */
+    private static void installTreeCellCopy(CheckboxTreeViewer viewer)
+    {
+        Tree tree = viewer.getTree();
+        if (tree == null || tree.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(tree.getData(COPY_HOOKED_KEY)))
+            return;
+        tree.setData(COPY_HOOKED_KEY, Boolean.TRUE);
+        copyTargetTree = tree;
+        tree.addDisposeListener(e ->
+        {
+            if (copyTargetTree == tree)
+                copyTargetTree = null;
+        });
+        // Активная колонка запоминается кликом по дереву (см. таблицы/деревья в кастомных окнах).
+        tree.addListener(SWT.MouseDown, e ->
+        {
+            if (e.button != 1 || tree.isDisposed())
+                return;
+            TreeItem item = tree.getItem(new Point(e.x, e.y));
+            if (item == null)
+                return;
+            tree.setData(COPY_ACTIVE_COLUMN_KEY, columnAt(tree, e.x, e.y, item));
+        });
+        installCopyExecutionListener();
+        FilterBySubsystemsDialogDebug.log("cellCopy: hook установлен"); //$NON-NLS-1$
+    }
+
+    private static int columnAt(Tree tree, int x, int y, TreeItem item)
+    {
+        for (int i = 0; i < tree.getColumnCount(); i++)
+        {
+            Rectangle bounds = item.getBounds(i);
+            if (bounds != null && !bounds.isEmpty() && bounds.contains(x, y))
+                return i;
+        }
+        return 0;
+    }
+
+    private static void installCopyExecutionListener()
+    {
+        if (copyExecutionListenerInstalled || PlatformUI.getWorkbench() == null)
+            return;
+        ICommandService commandService = PlatformUI.getWorkbench().getService(ICommandService.class);
+        if (commandService == null)
+            return;
+        commandService.addExecutionListener(new IExecutionListener()
+        {
+            @Override
+            public void preExecute(String commandId, ExecutionEvent event)
+            {
+                handlePossibleTreeCopy(commandId);
+            }
+
+            @Override
+            public void postExecuteSuccess(String commandId, Object returnValue)
+            {
+            }
+
+            @Override
+            public void notHandled(String commandId, NotHandledException exception)
+            {
+                handlePossibleTreeCopy(commandId);
+            }
+
+            @Override
+            public void postExecuteFailure(String commandId, ExecutionException exception)
+            {
+            }
+        });
+        copyExecutionListenerInstalled = true;
+    }
+
+    private static void handlePossibleTreeCopy(String commandId)
+    {
+        Tree tree = copyTargetTree;
+        if (tree == null || tree.isDisposed() || tree.getDisplay().getFocusControl() != tree)
+            return;
+        if (!"org.eclipse.ui.edit.copy".equals(commandId)) //$NON-NLS-1$
+            return;
+        TreeItem[] selection = tree.getSelection();
+        if (selection.length == 0)
+            return;
+        int column = 0;
+        Object stored = tree.getData(COPY_ACTIVE_COLUMN_KEY);
+        if (stored instanceof Integer col && col >= 0 && col < tree.getColumnCount())
+            column = col;
+        String text = selection[0].getText(column);
+        if (text == null || text.isBlank())
+            return;
+        Clipboard clipboard = new Clipboard(tree.getDisplay());
+        try
+        {
+            clipboard.setContents(new Object[] {text}, new Transfer[] {TextTransfer.getInstance()});
+        }
+        finally
+        {
+            clipboard.dispose();
+        }
+        FilterBySubsystemsDialogDebug.step("cellCopy", //$NON-NLS-1$
+            "column=" + column + " len=" + text.length()); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /**
@@ -631,8 +821,10 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         }
         final Menu contextMenu = menu;
 
-        MenuItem setMark = fillSubtreeMarkMenuItem(contextMenu, panel, viewer, true);
-        MenuItem clearMark = fillSubtreeMarkMenuItem(contextMenu, panel, viewer, false);
+        MenuItem setMark = fillSubtreeMarkMenuItem(contextMenu, panel, viewer, true,
+            isIncludeObjectsFromSubordinateSubsystems(panel));
+        MenuItem clearMark = fillSubtreeMarkMenuItem(contextMenu, panel, viewer, false,
+            isIncludeObjectsFromSubordinateSubsystems(panel));
 
         MenuAdapter enableAdapter = new MenuAdapter()
         {
@@ -640,10 +832,17 @@ public final class FilterBySubsystemsDialogHook implements IStartup
             {
                 IStructuredSelection selection = viewer.getStructuredSelection();
                 boolean hasSelection = selection != null && !selection.isEmpty();
+                boolean fromSubordinate = isIncludeObjectsFromSubordinateSubsystems(panel);
                 if (!setMark.isDisposed())
-                    setMark.setEnabled(hasSelection);
+                {
+                    setMark.setEnabled(hasSelection && !fromSubordinate);
+                    setMark.setToolTipText(subtreeMarkTooltip(true, fromSubordinate));
+                }
                 if (!clearMark.isDisposed())
-                    clearMark.setEnabled(hasSelection);
+                {
+                    clearMark.setEnabled(hasSelection && !fromSubordinate);
+                    clearMark.setToolTipText(subtreeMarkTooltip(false, fromSubordinate));
+                }
             }
         };
         contextMenu.addMenuListener(enableAdapter);
@@ -664,12 +863,13 @@ public final class FilterBySubsystemsDialogHook implements IStartup
 
         IStructuredSelection selection = viewer.getStructuredSelection();
         boolean hasSelection = selection != null && !selection.isEmpty();
+        boolean fromSubordinate = isIncludeObjectsFromSubordinateSubsystems(panel);
 
         Menu menu = new Menu(toolbar.getShell(), SWT.POP_UP);
-        MenuItem setMark = fillSubtreeMarkMenuItem(menu, panel, viewer, true);
-        setMark.setEnabled(hasSelection);
-        MenuItem clearMark = fillSubtreeMarkMenuItem(menu, panel, viewer, false);
-        clearMark.setEnabled(hasSelection);
+        MenuItem setMark = fillSubtreeMarkMenuItem(menu, panel, viewer, true, fromSubordinate);
+        setMark.setEnabled(hasSelection && !fromSubordinate);
+        MenuItem clearMark = fillSubtreeMarkMenuItem(menu, panel, viewer, false, fromSubordinate);
+        clearMark.setEnabled(hasSelection && !fromSubordinate);
 
         Rectangle bounds = item.getBounds();
         Point location = toolbar.toDisplay(bounds.x, bounds.y + bounds.height);
@@ -684,14 +884,21 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         });
     }
 
+    private static boolean isIncludeObjectsFromSubordinateSubsystems(Object panel)
+    {
+        Object settings = Global.getField(panel, "currentFilterSettings"); //$NON-NLS-1$
+        if (settings == null)
+            return false;
+        return Boolean.TRUE.equals(Global.invoke(
+            settings, "isIncludeObjectsFromSubordinateSubsystems")); //$NON-NLS-1$
+    }
+
     private static MenuItem fillSubtreeMarkMenuItem(
-            Menu menu, Object panel, CheckboxTreeViewer viewer, boolean setMark)
+            Menu menu, Object panel, CheckboxTreeViewer viewer, boolean setMark, boolean fromSubordinate)
     {
         String label = setMark ? MENU_SET_MARK : MENU_CLEAR_MARK;
         MenuItem item = ComfortSubmenuHelper.createSortedMenuItem(menu, SWT.PUSH, label);
-        item.setToolTipText(setMark
-            ? "Отметить выделенную подсистему и все её подчинённые подсистемы" //$NON-NLS-1$
-            : "Снять отметку с выделенной подсистемы и всех её подчинённых подсистем"); //$NON-NLS-1$
+        item.setToolTipText(subtreeMarkTooltip(setMark, fromSubordinate));
         item.addSelectionListener(new SelectionAdapter()
         {
             @Override public void widgetSelected(SelectionEvent e)
@@ -700,6 +907,16 @@ public final class FilterBySubsystemsDialogHook implements IStartup
             }
         });
         return item;
+    }
+
+    private static String subtreeMarkTooltip(boolean setMark, boolean fromSubordinate)
+    {
+        String base = setMark
+            ? "Отметить выделенную подсистему и все её подчинённые подсистемы" //$NON-NLS-1$
+            : "Снять отметку с выделенной подсистемы и всех её подчинённых подсистем"; //$NON-NLS-1$
+        if (fromSubordinate)
+            base += ". Недоступно при включённом «Включать объекты из подчинённых подсистем»"; //$NON-NLS-1$
+        return base + Global.pluginSignForTooltip();
     }
 
     private static void applySubtreeMark(Object panel, CheckboxTreeViewer viewer, boolean checked)
@@ -889,6 +1106,95 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         return false;
     }
 
+    /**
+     * CTRL+клик по серой (унаследованной) пометке потомка при «включать подчинённые/родительские»:
+     * штатный {@code setState} трактует клик как установку явной пометки ({@code checked=true}),
+     * но предварительно делает {@code setSubtreeChecked} ближайшего полностью помеченного предка —
+     * сносит пометки всего поддерева. Вместо этого материализуем в явные ({@code setNodeChecked})
+     * серые пометки, лежащие в поддереве ближайшей статической пометки ({@code checked && !grayed})
+     * кликнутого узла; серые пометки вне этого поддерева не трогаем. Пометку кликнутого узла снимаем.
+     */
+    private static void materializeGrayedMarks(
+            Object panel, CheckboxTreeViewer viewer, Object clicked)
+    {
+        if (!(viewer.getContentProvider() instanceof ITreeContentProvider provider))
+        {
+            FilterBySubsystemsDialogDebug.step("grayPromote", "no tree provider, skip"); //$NON-NLS-1$
+            return;
+        }
+        Object staticMark = nearestStaticMarkAncestor(viewer, provider, clicked);
+        if (staticMark == null)
+        {
+            FilterBySubsystemsDialogDebug.step("grayPromote", //$NON-NLS-1$
+                "no static mark ancestor, skip clicked=" + markBrief(clicked)); //$NON-NLS-1$
+            return;
+        }
+        List<Object> scope = new ArrayList<>();
+        collectSubtree(provider, staticMark, scope);
+
+        Object[] grayed = viewer.getGrayedElements();
+        int explicitCount = 0;
+        for (Object g : grayed)
+        {
+            if (g == null || g == clicked || !countsForParentCompletion(g) || !scope.contains(g))
+                continue;
+            Global.invokeVoid(panel, "setNodeChecked", g); //$NON-NLS-1$
+            syncCheckedStateSets(panel, g, true);
+            explicitCount++;
+        }
+        viewer.setGrayed(clicked, false);
+        Global.invokeVoid(panel, "setNodeUnchecked", clicked); //$NON-NLS-1$
+        syncCheckedStateSets(panel, clicked, false);
+        // Статическая пометка — рассчитанная: третье состояние, если в поддереве остались
+        // помеченные узлы; полное снятие, если помеченных не осталось (братьев у кликнутого нет).
+        boolean staticGrayed = false;
+        for (Object node : scope)
+        {
+            if (node != staticMark && viewer.getChecked(node))
+            {
+                staticGrayed = true;
+                break;
+            }
+        }
+        if (staticGrayed)
+        {
+            Global.invokeVoid(panel, "setNodeGrayed", staticMark); //$NON-NLS-1$
+            syncCheckedStateSets(panel, staticMark, false);
+        }
+        else
+        {
+            Global.invokeVoid(panel, "setNodeUnchecked", staticMark); //$NON-NLS-1$
+            syncCheckedStateSets(panel, staticMark, false);
+        }
+        Global.invokeVoid(panel, "changeActionEnable"); //$NON-NLS-1$
+        forceDeselectAllEnabled(panel);
+        FilterBySubsystemsDialogDebug.step("grayPromote", //$NON-NLS-1$
+            "static=" + markBrief(staticMark) //$NON-NLS-1$
+                + " staticState=" + (staticGrayed ? "grayed" : "unchecked") //$NON-NLS-1$ //$NON-NLS-2$
+                + " scope=" + scope.size() //$NON-NLS-1$
+                + " explicit=" + explicitCount //$NON-NLS-1$
+                + " cleared=" + markBrief(clicked)); //$NON-NLS-1$
+        Global.tempLog("subsystems-mark", //$NON-NLS-1$
+            "materialize clicked=" + markBrief(clicked) //$NON-NLS-1$
+                + " staticMark=" + markBrief(staticMark) //$NON-NLS-1$
+                + " grayed=" + (grayed != null ? grayed.length : -1) //$NON-NLS-1$
+                + " explicit=" + explicitCount); //$NON-NLS-1$
+    }
+
+    /** Ближайшая статическая пометка ({@code checked && !grayed}) среди предков элемента. */
+    private static Object nearestStaticMarkAncestor(
+            CheckboxTreeViewer viewer, ITreeContentProvider provider, Object element)
+    {
+        Object current = element;
+        while (current != null)
+        {
+            if (isFullyChecked(viewer, current))
+                return current;
+            current = provider.getParent(current);
+        }
+        return null;
+    }
+
     private static void markNodeAndPromoteParents(
             Object panel, CheckboxTreeViewer viewer, ITreeContentProvider provider, Object element)
     {
@@ -950,6 +1256,15 @@ public final class FilterBySubsystemsDialogHook implements IStartup
             if (!event.getChecked() || element == null
                 || !(viewer.getContentProvider() instanceof ITreeContentProvider provider))
             {
+                if (!event.getChecked() && element != null
+                    && isMarkTarget(element)
+                    && viewer.getGrayed(element) && !viewer.getChecked(element)
+                    && isCtrlClick(viewer))
+                {
+                    materializeGrayedMarks(panel, viewer, element);
+                    clearCtrlClick(viewer);
+                    return;
+                }
                 for (ICheckStateListener delegate : delegates)
                 {
                     if (delegate != null)
