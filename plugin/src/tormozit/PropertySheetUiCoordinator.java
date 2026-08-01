@@ -570,7 +570,10 @@ session.rowSelection.selectRow(ctx, row);
                         String drawn = activeText(control, HOOK_KEY);
                         if (active == null || drawn.isEmpty() || !active.matches(drawn))
                             return;
-                        SmartMatchHighlight.paintTextMatchOverlay(e.gc, control, drawn, active);
+                        // bold=false: overlay рисуется поверх уже отрисованного нативного текста и
+                        // не может сдвинуть то, что правее совпадения — жирный шрифт шире и наезжал
+                        // на соседние буквы (тот же баг, что был в PictureDialogHook).
+                        SmartMatchHighlight.paintTextMatchOverlay(e.gc, control, drawn, active, false);
                     }
                 });
                 control.setData(HOOK_KEY, Boolean.TRUE);
@@ -639,8 +642,10 @@ session.rowSelection.selectRow(ctx, row);
                             Rectangle prevClip = e.gc.getClipping();
                             if (band != null)
                                 e.gc.setClipping(band);
+                            // bold=false: тот же баг, что был в PictureDialogHook — overlay поверх
+                            // уже отрисованного текста не может сдвинуть то, что правее совпадения.
                             SmartMatchHighlight.paintLwtTextMatchOverlay(e.gc, host, rh.text, rh.matcher,
-                                    origin.x, origin.y, rh.light);
+                                    origin.x, origin.y, rh.light, false);
                             if (band != null)
                                 e.gc.setClipping(prevClip);
                         }
