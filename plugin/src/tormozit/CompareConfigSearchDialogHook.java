@@ -640,11 +640,22 @@ public class CompareConfigSearchDialogHook
         {
             if (progressPercent != null)
                 progressPercent.set(100);
+            if (monitor != null)
+            {
+                monitor.beginTask("Подготовка индекса поиска по сравнению", 100); //$NON-NLS-1$
+                monitor.worked(100);
+                monitor.done();
+            }
             return new CollectTreeResult(new ArrayList<>(), false);
         }
 
         if (progressPercent != null)
             progressPercent.set(0);
+
+        // worked() только с потока Job (монитор не thread-safe); воркеры пишут только AtomicInteger.
+        AtomicInteger monitorReported = new AtomicInteger(0);
+        if (monitor != null)
+            monitor.beginTask("Подготовка индекса поиска по сравнению", 100); //$NON-NLS-1$
 
         List<Object> items = Collections.synchronizedList(new ArrayList<>());
         ConcurrentLinkedQueue<Object> queue = new ConcurrentLinkedQueue<>();
@@ -683,6 +694,31 @@ public class CompareConfigSearchDialogHook
                     }
                 }));
             }
+            while (true)
+            {
+                boolean pending = false;
+                for (java.util.concurrent.ForkJoinTask<?> worker : workers)
+                {
+                    if (!worker.isDone())
+                    {
+                        pending = true;
+                        break;
+                    }
+                }
+                advanceCollectMonitor(monitor, progressPercent, monitorReported);
+                if (!pending)
+                    break;
+                try
+                {
+                    Thread.sleep(100);
+                }
+                catch (InterruptedException e)
+                {
+                    Thread.currentThread().interrupt();
+                    cancelled.set(true);
+                    break;
+                }
+            }
             for (java.util.concurrent.ForkJoinTask<?> worker : workers)
                 worker.join();
         }
@@ -693,6 +729,16 @@ public class CompareConfigSearchDialogHook
 
         if (progressPercent != null && !cancelled.get())
             progressPercent.set(100);
+        if (monitor != null)
+        {
+            if (!cancelled.get())
+            {
+                int left = 100 - monitorReported.get();
+                if (left > 0)
+                    monitor.worked(left);
+            }
+            monitor.done();
+        }
 
         return new CollectTreeResult(new ArrayList<>(items), cancelled.get());
     }
@@ -719,6 +765,23 @@ public class CompareConfigSearchDialogHook
             return;
         }
         progressPercent.set((int)Math.min(99L, done * 100L / (done + rem)));
+    }
+
+    /** Перенос % в IProgressMonitor с потока Job (не из воркеров). */
+    private static void advanceCollectMonitor(
+        IProgressMonitor monitor,
+        AtomicInteger progressPercent,
+        AtomicInteger monitorReported)
+    {
+        if (monitor == null || progressPercent == null || monitorReported == null)
+            return;
+        int pct = Math.max(0, Math.min(100, progressPercent.get()));
+        int last = monitorReported.get();
+        if (pct > last)
+        {
+            monitor.worked(pct - last);
+            monitorReported.set(pct);
+        }
     }
 
     private static void collectTreeWorker(
@@ -1397,7 +1460,7 @@ public class CompareConfigSearchDialogHook
     /** Компактная строка прогресса сбора — грубый % по фронту BFS. */
     private static String formatCollectProgressStatus(int percent)
     {
-        return "Сбор узлов… ~" + Math.max(0, Math.min(100, percent)) + "%"; //$NON-NLS-1$ //$NON-NLS-2$
+        return "Подготовка индекса " + Math.max(0, Math.min(100, percent)) + "%"; //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /** Компактная строка прогресса поиска/фильтрации. */
@@ -1814,7 +1877,7 @@ public class CompareConfigSearchDialogHook
             prefetchThreads.set(0);
             prefetchProgressPercent.set(0);
 
-            Job job = new Job("Индексация дерева сравнения...") //$NON-NLS-1$
+            Job job = new Job("Подготовка индекса поиска по сравнению") //$NON-NLS-1$
             {
                 @Override
                 protected IStatus run(IProgressMonitor monitor)
@@ -1828,7 +1891,8 @@ public class CompareConfigSearchDialogHook
                         CollectTreeResult collectResult = collectTreeItems(roots, treeProvider, treeViewer,
                             generation, () -> prefetchGeneration, monitor, prefetchCollected,
                             prefetchProcessed, prefetchThreads, prefetchProgressPercent);
-                        if (collectResult.cancelled || generation != prefetchGeneration)
+                        if (collectResult.cancelled || generation != prefetchGeneration
+                            || (monitor != null && monitor.isCanceled()))
                             return Status.CANCEL_STATUS;
 
                         List<Object> items = collectResult.items;
@@ -1869,8 +1933,9 @@ public class CompareConfigSearchDialogHook
                 }
             };
             prefetchJob = job;
-            job.setSystem(true);
-            job.setPriority(Job.DECORATE);
+            job.setUser(true);
+            job.setSystem(false);
+            job.setPriority(Job.LONG);
             job.schedule();
             Global.log("CompareSearch", "prefetch started"); //$NON-NLS-1$
         }
