@@ -1120,8 +1120,9 @@ public class TypeComboOverlayHook implements IStartup
         List<TypeEntry> entries;
         List<TypeEntry> visibleEntries = new ArrayList<>();
         // Раскраску совпадений делает SmartMatchHighlight.paintTableCellMatchOverlay из
-        // PaintItem — ему нужен сам matcher (сам считает диапазоны через getHighlightRanges),
-        // отдельно готовые диапазоны хранить не нужно.
+        // PaintItem — ему нужен сам matcher (сам считает диапазоны посекционно через
+        // getTreeHighlightRanges, в соответствии с матчингом matchesTree), отдельно готовые
+        // диапазоны хранить не нужно.
         SmartMatcher currentMatcher;
         String lastCommittedText;
         Runnable pendingFilter;
@@ -1393,9 +1394,10 @@ public class TypeComboOverlayHook implements IStartup
 
         // Иконка и текст — штатная отрисовка TableItem (setImage/setText в refresh()). Подсветку
         // совпадений рисует общий SmartMatchHighlight.paintTableCellMatchOverlay — overlay поверх
-        // уже отрисованной платформой ячейки (сам берёт диапазоны из matcher.getHighlightRanges,
-        // сам определяет позицию текста через item.getTextBounds — корректно учитывает нашу
-        // иконку, т.к. она теперь настоящая TableItem-иконка, а не наша ручная отрисовка).
+        // уже отрисованной платформой ячейки (сам берёт посекционные диапазоны из
+        // matcher.getTreeHighlightRanges, сам определяет позицию текста через item.getTextBounds —
+        // корректно учитывает нашу иконку, т.к. она теперь настоящая TableItem-иконка, а не наша
+        // ручная отрисовка).
         // Раньше здесь была своя ручная отрисовка иконки+текста в обход этого метода — оказалось
         // избыточным и дублирующим раскраску, которая уже есть в общем коде.
         table.addListener(SWT.PaintItem, e ->

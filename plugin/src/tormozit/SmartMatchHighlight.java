@@ -217,12 +217,19 @@ public final class SmartMatchHighlight
         // Текст ячейки сам вида "Категория.Имя" (например, TypeComboOverlayHook —
         // "СправочникСсылка.Валюты") — matchesTree сам откатывается к последнему сегменту при
         // однословном фильтре, plain matches() по всей строке матчил бы и нелистовую часть.
+        // Диапазоны берём посекционно (getTreeHighlightRanges), как и сам гейт matchesTree:
+        // плоский getHighlightRanges красил бы слова во ВСЕХ секциях текста, включая не
+        // сопоставленные фильтру (напр. «спр.ник» по «Справочник.Справочник1» красил бы
+        // [Спр]авоч[ник].[Спр]авоч[ник]1 вместо [Спр]авочник.Справоч[ник]1).
         if (!matcher.matchesTree(text))
+            return;
+        List<SmartMatcher.HighlightRange> ranges = matcher.getTreeHighlightRanges(text);
+        if (ranges.isEmpty())
             return;
         CellTextOrigin origin = tableCellTextOrigin(e.gc, table, item, e.index, e, text);
         MatchStyle style = resolveMatchStyle(table);
-        drawMatchFragments(e.gc, text, matcher, origin.x + xAdjustPx, origin.y, origin.availableWidth, table.getFont(),
-            style, backgroundOnly, bold);
+        drawMatchFragments(e.gc, text, ranges, origin.x + xAdjustPx, origin.y, origin.availableWidth,
+            table.getFont(), style, backgroundOnly, bold);
     }
 
     /** Жирный синий overlay поверх уже отрисованного SWT-текста (Label и др.). */
@@ -462,7 +469,17 @@ public final class SmartMatchHighlight
         drawMatchFragments(gc, text, matcher, baseX, baseY, -1, baseFont, style, backgroundOnly, bold);
     }
 
+    private static void drawMatchFragments(GC gc, String text, SmartMatcher matcher,
+            int baseX, int baseY, int maxWidth, Font baseFont, MatchStyle style, boolean backgroundOnly, boolean bold)
+    {
+        drawMatchFragments(gc, text, matcher.getHighlightRanges(text), baseX, baseY, maxWidth, baseFont, style,
+            backgroundOnly, bold);
+    }
+
     /**
+     * @param ranges готовые диапазоны подсветки (плоские {@code getHighlightRanges} — в
+     * {@code matches()}‑контексте, посекционные {@code getTreeHighlightRanges} — в
+     * {@code matchesTree}‑контексте, см. {@code paintTableCellMatchOverlay}).
      * @param maxWidth доступная под текст ширина в px ({@code -1} — без ограничения) — ячейка
      * таблицы обрезает лишний текст многоточием силами платформы, а мы рисуем поверх уже
      * нарисованного, поэтому вхождение, попавшее в обрезанную часть, надо не дорисовывать (иначе
@@ -471,11 +488,10 @@ public final class SmartMatchHighlight
      * остальной текст ячейки; нужно там, где overlay рисуется поверх уже нативно отрисованного
      * текста и не может сдвинуть то, что находится правее совпадения (см. вызовы с {@code xAdjustPx}).
      */
-    private static void drawMatchFragments(GC gc, String text, SmartMatcher matcher,
+    private static void drawMatchFragments(GC gc, String text, List<SmartMatcher.HighlightRange> ranges,
             int baseX, int baseY, int maxWidth, Font baseFont, MatchStyle style, boolean backgroundOnly, boolean bold)
     {
-        List<SmartMatcher.HighlightRange> ranges = matcher.getHighlightRanges(text);
-        if (ranges.isEmpty())
+        if (ranges == null || ranges.isEmpty())
             return;
 
         Font prevFont = gc.getFont();
