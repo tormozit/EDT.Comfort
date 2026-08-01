@@ -2,11 +2,14 @@ package tormozit;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.eclipse.core.resources.IFile;
+import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.MenuManager;
@@ -28,6 +31,7 @@ import org.eclipse.jface.viewers.TableViewerColumn;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.search.internal.ui.text.FileMatch;
+import org.eclipse.search.internal.ui.text.FileSearchQuery;
 import org.eclipse.search.internal.ui.text.LineElement;
 import org.eclipse.search.ui.IQueryListener;
 import org.eclipse.search.ui.ISearchQuery;
@@ -36,6 +40,7 @@ import org.eclipse.search.ui.ISearchResultViewPart;
 import org.eclipse.search.ui.NewSearchUI;
 import org.eclipse.search.ui.text.AbstractTextSearchResult;
 import org.eclipse.search.ui.text.AbstractTextSearchViewPage;
+import org.eclipse.search.ui.text.FileTextSearchScope;
 import org.eclipse.search.ui.text.Match;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.SashForm;
@@ -88,6 +93,7 @@ public final class FileSearchResultsHook implements IStartup
         IWorkbenchPage.MATCH_INPUT | IWorkbenchPage.MATCH_ID | IWorkbenchPage.MATCH_IGNORE_SIZE;
 
     private static volatile boolean searchQueryRunning;
+    private static volatile boolean searchCoversMultipleProjects;
 
     private static final Map<TableViewer, TableColumn> TABLE_COLUMNS_BY_VIEWER = new IdentityHashMap<>();
     private static TableViewer cachedResultTableViewer;
@@ -115,6 +121,7 @@ public final class FileSearchResultsHook implements IStartup
                 @Override public void queryAdded(ISearchQuery query)
                 {
                     Global.tempLog("search-tree-empty", "file.queryAdded: " + describeQuery(query));
+                    searchCoversMultipleProjects = computeCoversMultipleProjects(query);
                     onQueryEvent();
                 }
                 @Override public void queryRemoved(ISearchQuery query)    {}
@@ -122,14 +129,54 @@ public final class FileSearchResultsHook implements IStartup
                 {
                     Global.tempLog("search-tree-empty", "file.queryStarting: " + describeQuery(query));
                     searchQueryRunning = true;
+                    searchCoversMultipleProjects = computeCoversMultipleProjects(query);
                 }
                 @Override public void queryFinished(ISearchQuery query)
                 {
                     Global.tempLog("search-tree-empty", "file.queryFinished: " + describeQuery(query));
-                    searchQueryRunning = false; onQueryEvent();
+                    searchQueryRunning = false;
+                    searchCoversMultipleProjects = computeCoversMultipleProjects(query);
+                    onQueryEvent();
                 }
             });
         });
+    }
+
+    /**
+     * {@code true}, если поиск реально охватывает больше одного проекта — тогда второй/третий
+     * корень дерева результатов (отдельный проект) может появиться значительно позже первого, и
+     * включать {@link TreeAutoExpand#notifyContentLoaded} по первому же появившемуся корню
+     * преждевременно (тот же случай, что для {@code ConfigSearchResultsHook.startFirstRootWatch}).
+     * <p>
+     * Без отбора по проекту (область «Рабочая область») {@code getRoots()} возвращает не список
+     * проектов, а один элемент — сам {@code IWorkspaceRoot} (декомпиляция
+     * {@code FileTextSearchScope.newWorkspaceScope()}), у которого {@code getProject()==null} —
+     * поэтому такой корень считается отдельно, через число проектов в рабочей области.
+     */
+    private static boolean computeCoversMultipleProjects(ISearchQuery query)
+    {
+        if (!(query instanceof FileSearchQuery fsq))
+            return false;
+        FileTextSearchScope scope = fsq.getSearchScope();
+        IResource[] roots = scope != null ? scope.getRoots() : null;
+        if (roots == null)
+            return false;
+        Set<IProject> projects = new HashSet<>();
+        for (IResource root : roots)
+        {
+            if (root == null)
+                continue;
+            if (root instanceof org.eclipse.core.resources.IWorkspaceRoot workspaceRoot)
+            {
+                for (IProject project : workspaceRoot.getProjects())
+                    projects.add(project);
+            }
+            else if (root.getProject() != null)
+                projects.add(root.getProject());
+        }
+        boolean multi = projects.size() > 1;
+        log("computeCoversMultipleProjects: " + multi + " (" + projects.size() + ")");
+        return multi;
     }
 
     private static String describeQuery(ISearchQuery query)
@@ -386,8 +433,8 @@ public final class FileSearchResultsHook implements IStartup
             updateTableFromSelection(treeViewer, tableViewer);
 
         installFileTreeMatchCount(treeViewer);
-        TreeSoleChildAutoExpand.installWhitelisted(
-                TreeSoleChildAutoExpand.Target.SEARCH_FILES, treeViewer);
+        TreeAutoExpand.installWhitelisted(
+                TreeAutoExpand.Target.SEARCH_FILES, treeViewer);
 
         log("installSplitLayout: done");
     }
@@ -454,6 +501,29 @@ public final class FileSearchResultsHook implements IStartup
             {
                 if (element instanceof FileSearchRow row)
                     return row.file != null ? row.file : ""; //$NON-NLS-1$
+                return ""; //$NON-NLS-1$
+            }
+        });
+
+        TableViewerColumn typeCol = new TableViewerColumn(tableViewer, SWT.LEFT);
+        typeCol.getColumn().setText("Тип");
+        typeCol.getColumn().setToolTipText("Тип" + Global.pluginSignForTooltip());
+        typeCol.getColumn().setResizable(true);
+        typeCol.getColumn().setWidth(ComfortSettings.getFileSearchColumnWidth("type", 50));
+        typeCol.getColumn().addListener(SWT.Resize, e -> {
+            int w = typeCol.getColumn().getWidth();
+            if (w > 0) ComfortSettings.setFileSearchColumnWidth("type", w);
+        });
+        typeCol.setLabelProvider(new ColumnLabelProvider()
+        {
+            @Override
+            public String getText(Object element)
+            {
+                if (element instanceof FileSearchRow row && row.iFile != null)
+                {
+                    String ext = row.iFile.getFileExtension();
+                    return ext != null ? ext : ""; //$NON-NLS-1$
+                }
                 return ""; //$NON-NLS-1$
             }
         });
@@ -1190,12 +1260,23 @@ public final class FileSearchResultsHook implements IStartup
                     selectFirstTreeResult(view, attempt + 1);
                 return;
             }
+
             Object first = tree.getItem(0).getData();
             if (first != null)
             {
                 tv.setSelection(new StructuredSelection(first), true);
                 log("selectFirstTreeResult: selected " + first);
             }
+
+            // Штатное поведение панели поиска (как и у ConfigSearchResultsHook) само выделяет
+            // первый терминальный узел (совпадение), и reveal у этого выделения разворачивает путь
+            // до него независимо от наших правил — сбрасываем и разворачиваем заново по своим.
+            // Дерево этой панели переиспользуется между поисками и не виртуальное, поэтому
+            // собственный (одноразовый) ретрай TreeAutoExpand при установке хука не перепроверяет
+            // повторные поиски — нужен вызов из точки, где мы точно знаем, что результаты уже
+            // загружены. При поиске по нескольким проектам — не разворачиваем заново, второй корень
+            // может появиться позже первого.
+            TreeAutoExpand.resetExpansionAfterReveal(tv, !searchCoversMultipleProjects);
         });
     }
 

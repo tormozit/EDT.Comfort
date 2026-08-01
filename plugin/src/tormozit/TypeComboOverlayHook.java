@@ -13,6 +13,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
 
+import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.wizard.IWizard;
 import org.eclipse.jface.wizard.IWizardContainer;
 import org.eclipse.jface.wizard.IWizardPage;
@@ -263,6 +265,56 @@ public class TypeComboOverlayHook implements IStartup
     private static final String TYPE_PROPERTY_LABEL = "Тип"; //$NON-NLS-1$
     private static final Map<IViewPart, OverlayState> PROPERTY_OVERLAYS = new HashMap<>();
 
+    /**
+     * Окно после загрузки панелью «Свойства» значений для нового объекта, в течение которого наш
+     * оверлей НЕ забирает фокус себе.
+     *
+     * <p>{@code createOverlay(..., focusAfterCreate)} задуман для пересборки оверлея во время
+     * работы С НИМ (выбор из нашего попапа, возврат из диалога «...»): там старый контейнер с
+     * фокусом уничтожается, и фокус надо вернуть в наше поле. Но {@code tryAttachPropertySheet}
+     * передавал туда жёсткое {@code true}, поэтому фокус утаскивался и при обычном присоединении
+     * оверлея — то есть при КАЖДОЙ смене объекта в дереве, отбирая фокус у дерева/редактора (и у
+     * того, кто поставил его намеренно — напр. переход к результату поиска ставит фокус в поле,
+     * на которое указывает вхождение, а через ~100мс оверлей уводил его в «Тип»).
+     *
+     * <p>Пересборка «во время работы» происходит заведомо позже этого окна, поэтому она не
+     * страдает. Момент загрузки определяется по смене набора показываемых панелью объектов.
+     */
+    private static final int FOCUS_GRAB_SUPPRESS_MS = 1000;
+    private static volatile long propertiesLoadedAtMs;
+    private static final Map<IViewPart, String> SHOWN_OBJECTS = new HashMap<>();
+
+    private static void notePropertiesLoad(IViewPart view, Object page)
+    {
+        String signature = shownObjectsSignature(page);
+        String previous = SHOWN_OBJECTS.put(view, signature);
+        if (!java.util.Objects.equals(previous, signature))
+            propertiesLoadedAtMs = System.currentTimeMillis();
+    }
+
+    private static boolean isFreshPropertiesLoad()
+    {
+        return System.currentTimeMillis() - propertiesLoadedAtMs < FOCUS_GRAB_SUPPRESS_MS;
+    }
+
+    /**
+     * Отпечаток набора объектов, показываемых панелью ({@code PropertyPaletteModel.getObjects()}).
+     * По EMF-URI, а не по ссылке: BM-объекты при каждой загрузке резолвятся в НОВЫЕ Java-инстансы,
+     * и сравнение ссылок давало бы «объект сменился» на каждом опросе.
+     */
+    private static String shownObjectsSignature(Object page)
+    {
+        Object paletteModel = Global.invoke(page, "getPaletteModel"); //$NON-NLS-1$
+        Object objects = paletteModel != null ? Global.invoke(paletteModel, "getObjects") : null; //$NON-NLS-1$
+        if (!(objects instanceof Iterable))
+            return ""; //$NON-NLS-1$
+        StringBuilder sb = new StringBuilder();
+        for (Object obj : (Iterable<?>)objects)
+            sb.append(obj instanceof EObject eObject ? String.valueOf(EcoreUtil.getURI(eObject))
+                : String.valueOf(System.identityHashCode(obj))).append('|');
+        return sb.toString();
+    }
+
     private static void installPropertySheet()
     {
         IWorkbench wb = PlatformUI.getWorkbench();
@@ -311,7 +363,13 @@ public class TypeComboOverlayHook implements IStartup
             {
                 IWorkbenchPart part = ref != null ? ref.getPart(false) : null;
                 if (part instanceof IViewPart view)
+                {
                     disposePropertyOverlay(view);
+                    // Только здесь, не в disposePropertyOverlay: та зовётся ещё и при смене объекта,
+                    // и сброс отпечатка там заставлял бы notePropertiesLoad считать загрузкой
+                    // каждый следующий опрос, бесконечно продлевая окно подавления.
+                    SHOWN_OBJECTS.remove(view);
+                }
             }
 
             private void tryFromRef(IWorkbenchPartReference ref)
@@ -401,6 +459,8 @@ public class TypeComboOverlayHook implements IStartup
             return false;
         }
 
+        notePropertiesLoad(view, page);
+
         Map.Entry<?, ?> typeEditorEntry = PropertyNameIdentifierHook.findValueViewAfterLabel(scene, TYPE_PROPERTY_LABEL);
         if (typeEditorEntry == null)
         {
@@ -484,7 +544,8 @@ public class TypeComboOverlayHook implements IStartup
             if (!tryAttachPropertySheet(view))
                 schedulePropertyAttach(view, 1);
         };
-        OverlayState state = createOverlay(nativeControl, typeModel, viewModel, rediscover, true);
+        OverlayState state = createOverlay(nativeControl, typeModel, viewModel, rediscover,
+            !isFreshPropertiesLoad());
         if (state == null)
         {
             // Не гадаем интервалом — вешаем одноразовый ControlListener прямо на найденный
@@ -499,6 +560,35 @@ public class TypeComboOverlayHook implements IStartup
         PROPERTY_OVERLAYS.put(view, state);
         diag("tryAttachPropertySheet: оверлей установлен для view=" + view); //$NON-NLS-1$
         return true;
+    }
+
+    /**
+     * Ставит фокус в наше поле-оверлей панели «Свойства», если оно накрывает свойство с подписью
+     * {@code propertyLabel}. Нужен внешним потребителям, которым надо «активировать поле X в панели
+     * свойств» ({@code ConfigSearchResultsHook.PropertyFieldFocus} — переход к результату поиска,
+     * найденному в реквизите/измерении/ресурсе): для перекрытых оверлеем свойств штатный AEF-фокус
+     * бесполезен — видимый ввод это наш SWT {@link Text}, а штатный {@code LightCombo} под ним лишь
+     * визуально перекрыт.
+     *
+     * <p>Знание о том, КАКИЕ свойства накрыты, намеренно остаётся здесь (сейчас единственное —
+     * {@link #TYPE_PROPERTY_LABEL}), а не растекается по вызывающим.
+     *
+     * @return {@code true}, если оверлей есть и фокус в него поставлен
+     */
+    /** Свойство с такой подписью в панели «Свойства» перекрыто нашим оверлеем. */
+    static boolean coversProperty(String propertyLabel)
+    {
+        return TYPE_PROPERTY_LABEL.equals(propertyLabel);
+    }
+
+    static boolean focusPropertyOverlay(IViewPart view, String propertyLabel)
+    {
+        if (view == null || !coversProperty(propertyLabel))
+            return false;
+        OverlayState state = PROPERTY_OVERLAYS.get(view);
+        if (state == null || state.text == null || state.text.isDisposed())
+            return false;
+        return state.text.setFocus();
     }
 
     private static void disposePropertyOverlay(IViewPart view)

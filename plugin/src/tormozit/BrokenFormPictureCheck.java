@@ -62,6 +62,9 @@ public class BrokenFormPictureCheck extends BasicCheck<Void>
     {
         PictureRef pictureRef = (PictureRef)object;
         Picture picture = pictureRef.getPicture();
+        Global.tempLog("broken-form-picture-check", //$NON-NLS-1$
+            "check(): поток=" + Thread.currentThread().getName() + ", pictureRef=" + pictureRef //$NON-NLS-1$ //$NON-NLS-2$
+                + ", picture=" + picture + ", isProxy=" + (picture != null && picture.eIsProxy())); //$NON-NLS-1$ //$NON-NLS-2$
         if (picture == null || !picture.eIsProxy())
             return;
 

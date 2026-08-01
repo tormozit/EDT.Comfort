@@ -10,7 +10,8 @@ import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.swt.widgets.Display;
-import org.eclipse.ui.IWorkbenchPart;
+import org.eclipse.ui.IViewPart;
+import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.handlers.HandlerUtil;
 
 /**
@@ -25,6 +26,11 @@ import org.eclipse.ui.handlers.HandlerUtil;
  * Если область — проект целиком (или отбор по подсистемам), конкретных объектов у панели нет;
  * такой случай не выполняется молча дорогой полной перепроверкой, а честно сообщается в лог:
  * для проверки всего проекта есть штатная команда EDT.
+ * <p>
+ * Кнопка живёт в собственной панели инструментов панели «Ошибки конфигурации», поэтому у обработчика
+ * нет {@code activeWhen} по {@code activePartId}: иначе кнопка сереет, как только фокус уходит из
+ * панели. Панель ищется явно через {@link IWorkbenchPage#findView}, а не через
+ * {@link HandlerUtil#getActivePart}, который вне фокуса вернёт не тот part.
  */
 public class ProblemViewRecomputeChecksHandler extends AbstractHandler
 {
@@ -33,7 +39,8 @@ public class ProblemViewRecomputeChecksHandler extends AbstractHandler
     @Override
     public Object execute(ExecutionEvent event)
     {
-        IWorkbenchPart part = HandlerUtil.getActivePart(event);
+        IWorkbenchPage page = HandlerUtil.getActiveWorkbenchWindow(event).getActivePage();
+        IViewPart part = page != null ? page.findView(ProblemViewMarkers.PROBLEM_VIEW_ID) : null;
         Object scopeSelection = Global.getField(part, "scopeSelection"); //$NON-NLS-1$
         if (scopeSelection == null)
         {

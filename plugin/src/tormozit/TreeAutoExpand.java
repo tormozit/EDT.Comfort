@@ -15,6 +15,7 @@ import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.ViewerFilter;
+import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.TreeAdapter;
 import org.eclipse.swt.events.TreeEvent;
 import org.eclipse.swt.widgets.Display;
@@ -39,14 +40,20 @@ import com._1c.g5.v8.dt.form.ui.editor.FormEditor;
 import com._1c.g5.v8.dt.form.ui.editor.FormEditorPage;
 
 /**
- * Авторазворачивание цепочки единственных дочерних узлов при ручном expand.
+ * Авторазворачивание в деревьях: цепочка единственных дочерних узлов (как при ручном expand, так
+ * и при загрузке/обновлении дерева) и единственный корневой узел дерева независимо от числа его
+ * детей.
  * <p>
  * Единая точка: белый список {@link Target}. Поведение включается только для
  * перечисленных деревьев и только при «Улучшать списки».
  */
-public final class TreeSoleChildAutoExpand implements IStartup
+public final class TreeAutoExpand implements IStartup
 {
     private static final String MARKER_KEY = "tormozit.treeSoleChildAutoExpand"; //$NON-NLS-1$
+    private static final String LOAD_MARKER_KEY = "tormozit.treeSoleChildAutoExpand.onLoad"; //$NON-NLS-1$
+    private static final int LOAD_DEBOUNCE_MS = 150;
+    private static final int INITIAL_RETRY_ATTEMPTS = 20;
+    private static final String LOG_TOPIC = "tree-sole-child-autoexpand"; //$NON-NLS-1$
 
     private static final String COMPARE_EDITOR_ID = "com._1c.g5.v8.dt.compare.ui.editor"; //$NON-NLS-1$
     private static final String FORM_EDITOR_ID = "com._1c.g5.v8.dt.form.ui.formEditor"; //$NON-NLS-1$
@@ -91,7 +98,7 @@ public final class TreeSoleChildAutoExpand implements IStartup
     @Override
     public void earlyStartup()
     {
-        Display.getDefault().asyncExec(TreeSoleChildAutoExpand::bootstrap);
+        Display.getDefault().asyncExec(TreeAutoExpand::bootstrap);
     }
 
     private static void bootstrap()
@@ -167,7 +174,7 @@ public final class TreeSoleChildAutoExpand implements IStartup
             scheduleResolve(Target.COMPARE_CONFIG, () -> resolveCompareTree(editor));
         else if ((FORM_EDITOR_ID.equals(id) || ORDINARY_FORM_EDITOR_ID.equals(id))
                 && part instanceof IEditorPart)
-            scheduleResolve(Target.FORM_ITEMS, TreeSoleChildAutoExpand::resolveFormItemsTree);
+            scheduleResolve(Target.FORM_ITEMS, TreeAutoExpand::resolveFormItemsTree);
         else if (SEARCH_VIEW_ID.equals(id) && part instanceof IViewPart view)
         {
             scheduleResolve(Target.SEARCH_CONFIG, () -> resolveSearchConfigTree(view));
@@ -211,7 +218,156 @@ public final class TreeSoleChildAutoExpand implements IStartup
             return;
         if (!ComfortSettings.isReplaceListFiltersEnabled())
             return;
-        install(viewer, TreeSoleChildAutoExpand::defaultVisible, ComfortSettings::isReplaceListFiltersEnabled);
+        install(viewer, TreeAutoExpand::defaultVisible, ComfortSettings::isReplaceListFiltersEnabled);
+        installLoadAutoExpand(viewer);
+    }
+
+    /**
+     * Авторазворачивание при загрузке/обновлении дерева (не только при ручном expand, как
+     * {@link #install}): единственный корень — как в дереве сравнения конфигураций, и цепочки
+     * единственных потомков внутри каждого корня (см. {@link #expandAllRootsSoleChildChains}).
+     * Общий механизм для всех деревьев из белого списка, два независимых пути обнаружения:
+     * <ul>
+     * <li>{@code SWT.SetData} — если дерево виртуальное ({@code SWT.VIRTUAL}, подтверждено для
+     * панели «Ошибки конфигурации» декомпиляцией {@code LazyProblemView.initViewer()}), SWT сам
+     * присылает это событие при создании/обновлении элементов; для корневых элементов
+     * ({@code getParentItem() == null}) это и есть сигнал «в дереве появилась/обновилась верхняя
+     * ветка». Debounce на {@value #LOAD_DEBOUNCE_MS} мс — один проход рефреша обычно шлёт SetData
+     * на несколько корней подряд. Для невиртуальных деревьев событие просто никогда не придёт.</li>
+     * <li>Повтор с задержкой при установке хука (до {@value #INITIAL_RETRY_ATTEMPTS} попыток по
+     * {@value #LOAD_DEBOUNCE_MS} мс) — покрывает невиртуальные деревья (сравнение конфигураций,
+     * поиск, элементы формы), где входные данные (viewer input) устанавливаются асинхронно уже
+     * после появления самого viewer'а; повторяет тот же приём, что раньше был только у
+     * {@code CompareConfigMenuHook.tryExpandCompareRoot}.</li>
+     * </ul>
+     */
+    private static void installLoadAutoExpand(AbstractTreeViewer viewer)
+    {
+        Tree tree = resolveTree(viewer);
+        if (tree == null || tree.isDisposed() || Boolean.TRUE.equals(tree.getData(LOAD_MARKER_KEY)))
+        {
+            Global.tempLog(LOG_TOPIC, "installLoadAutoExpand: пропуск, tree=" + tree //$NON-NLS-1$
+                + ", disposed=" + (tree != null && tree.isDisposed()) //$NON-NLS-1$
+                + ", уже установлен=" + (tree != null && Boolean.TRUE.equals(tree.getData(LOAD_MARKER_KEY)))); //$NON-NLS-1$
+            return;
+        }
+        tree.setData(LOAD_MARKER_KEY, Boolean.TRUE);
+        Global.tempLog(LOG_TOPIC, "installLoadAutoExpand: хук установлен, tree=" + tree); //$NON-NLS-1$
+
+        Runnable[] pending = new Runnable[1];
+        pending[0] = () -> expandAllRootsSoleChildChains(viewer, tree);
+
+        tree.addListener(SWT.SetData, event ->
+        {
+            TreeItem item = event.item instanceof TreeItem ti ? ti : null;
+            Global.tempLog(LOG_TOPIC, "SetData: item=" + item //$NON-NLS-1$
+                + ", parent=" + (item != null ? item.getParentItem() : null) //$NON-NLS-1$
+                + ", data=" + (item != null ? item.getData() : null) //$NON-NLS-1$
+                + ", enabled=" + ComfortSettings.isReplaceListFiltersEnabled() //$NON-NLS-1$
+                + ", suppressed=" + SUPPRESSED.get() + ", inAutoExpand=" + IN_AUTO_EXPAND.get()); //$NON-NLS-1$ //$NON-NLS-2$
+            if (!ComfortSettings.isReplaceListFiltersEnabled()
+                    || Boolean.TRUE.equals(SUPPRESSED.get())
+                    || Boolean.TRUE.equals(IN_AUTO_EXPAND.get()))
+                return;
+            if (item == null || item.getParentItem() != null)
+                return; // интересуют только корневые ветки
+            Global.tempLog(LOG_TOPIC, "SetData: корневой элемент, планирую debounce-проверку"); //$NON-NLS-1$
+            tree.getDisplay().timerExec(LOAD_DEBOUNCE_MS, pending[0]);
+        });
+
+        // Повтор до готовности input — для невиртуальных деревьев SetData не придёт вообще,
+        // а на момент установки хука viewer.getInput() ещё может быть null.
+        scheduleInitialLoadCheck(viewer, tree, 0);
+    }
+
+    private static void scheduleInitialLoadCheck(AbstractTreeViewer viewer, Tree tree, int attempt)
+    {
+        tree.getDisplay().timerExec(LOAD_DEBOUNCE_MS, () ->
+        {
+            if (tree.isDisposed())
+                return;
+            expandAllRootsSoleChildChains(viewer, tree);
+            if (tree.getItemCount() == 0 && attempt < INITIAL_RETRY_ATTEMPTS)
+                scheduleInitialLoadCheck(viewer, tree, attempt + 1);
+        });
+    }
+
+    private static void expandAllRootsSoleChildChains(AbstractTreeViewer viewer, Tree tree)
+    {
+        if (tree.isDisposed() || !ComfortSettings.isReplaceListFiltersEnabled()
+                || Boolean.TRUE.equals(SUPPRESSED.get()))
+        {
+            Global.tempLog(LOG_TOPIC, "expandAllRootsSoleChildChains: пропуск, disposed=" + tree.isDisposed() //$NON-NLS-1$
+                + ", enabled=" + ComfortSettings.isReplaceListFiltersEnabled() //$NON-NLS-1$
+                + ", suppressed=" + SUPPRESSED.get()); //$NON-NLS-1$
+            return;
+        }
+        Global.tempLog(LOG_TOPIC, "expandAllRootsSoleChildChains: корневых элементов=" + tree.getItemCount()); //$NON-NLS-1$
+        IN_AUTO_EXPAND.set(Boolean.TRUE);
+        try
+        {
+            expandSingleRootIfAny(viewer, tree);
+
+            for (TreeItem rootItem : tree.getItems())
+            {
+                Object root = rootItem.getData();
+                Global.tempLog(LOG_TOPIC, "expandAllRootsSoleChildChains: root=" + root //$NON-NLS-1$
+                    + ", itemChildCount=" + rootItem.getItemCount()); //$NON-NLS-1$
+                if (root != null)
+                    expandSoleChildChain(viewer, root, TreeAutoExpand::defaultVisible);
+            }
+        }
+        finally
+        {
+            IN_AUTO_EXPAND.set(Boolean.FALSE);
+        }
+    }
+
+    /**
+     * Разворачивает единственный корневой узел дерева, если он один — как в дереве сравнения
+     * конфигураций ({@code CompareConfigMenuHook.tryExpandCompareRoot}). В отличие от «цепочки
+     * единственных потомков» ({@link #expandSoleChildChain}), здесь неважно, сколько у узла детей:
+     * само наличие ровно одного узла на верхнем уровне — уже причина его развернуть.
+     * <p>
+     * Список корней берётся по-разному в зависимости от content provider'а:
+     * {@code cp.getElements(input)} для обычного {@link ITreeContentProvider} (дерево сравнения,
+     * поиск) — тут {@code tree.getItemCount()} для виртуальных деревьев ненадёжен. Но у панели
+     * «Ошибки конфигурации» content provider — {@code LazyTreeNodeContentProvider}, а он реализует
+     * {@code ILazyTreeContentProvider} (подтверждено декомпиляцией), у которого вовсе нет
+     * {@code getElements()} — там как раз {@code tree.getItemCount()} и есть источник истины
+     * (в этом весь смысл ленивого провайдера), поэтому для него используется он.
+     */
+    private static void expandSingleRootIfAny(AbstractTreeViewer viewer, Tree tree)
+    {
+        Object cpObj = viewer.getContentProvider();
+        Object root;
+        if (cpObj instanceof ITreeContentProvider cp)
+        {
+            Object input = viewer.getInput();
+            if (input == null)
+                return;
+            Object[] roots = cp.getElements(input);
+            Global.tempLog(LOG_TOPIC, "expandSingleRootIfAny: корней(cp)=" //$NON-NLS-1$
+                + (roots != null ? roots.length : -1));
+            if (roots == null || roots.length != 1 || roots[0] == null)
+                return;
+            root = roots[0];
+        }
+        else
+        {
+            Global.tempLog(LOG_TOPIC, "expandSingleRootIfAny: корней(tree.getItemCount())=" //$NON-NLS-1$
+                + tree.getItemCount() + ", cp=" + cpObj); //$NON-NLS-1$
+            if (tree.getItemCount() != 1)
+                return;
+            root = tree.getItem(0).getData();
+            if (root == null)
+                return;
+        }
+        if (!viewer.getExpandedState(root))
+        {
+            Global.tempLog(LOG_TOPIC, "expandSingleRootIfAny: разворачиваю единственный корень " + root); //$NON-NLS-1$
+            viewer.setExpandedState(root, true);
+        }
     }
 
     static void runSuppressed(Runnable action)
@@ -232,12 +388,53 @@ public final class TreeSoleChildAutoExpand implements IStartup
     }
 
     /**
+     * Точечный вызов проверки «единственный корень / цепочка единственных потомков» из места, где
+     * вызывающий код уже точно знает, что контент дерева реально загружен — например, из
+     * {@code ConfigSearchResultsHook.startFirstRootWatch}, который надёжно (до 300 попыток по 80 мс)
+     * дожидается появления первого корня поиска. Для таких деревьев (обычный
+     * {@code ITreeContentProvider}, не виртуальные) собственный ретрай {@link #installLoadAutoExpand}
+     * — всего {@value #INITIAL_RETRY_ATTEMPTS} попыток по {@value #LOAD_DEBOUNCE_MS} мс — может не
+     * дождаться результатов поиска, если они пришли позже; повторный вызов после уже пройденного
+     * install безопасен и идемпотентен ({@code viewer.getExpandedState} проверяется перед разворотом).
+     */
+    public static void notifyContentLoaded(AbstractTreeViewer viewer)
+    {
+        Tree tree = resolveTree(viewer);
+        if (tree == null || tree.isDisposed())
+            return;
+        expandAllRootsSoleChildChains(viewer, tree);
+    }
+
+    /**
+     * Сброс после штатного «select + reveal» первого терминального узла — EDT/Eclipse при
+     * появлении результатов поиска сам выделяет первый листовой узел совпадения, а не корень, и
+     * реализация {@code reveal=true} у {@code setSelection} разворачивает весь путь до него
+     * независимо от наших правил (см. {@code ConfigSearchResultsHook.installAggregationListener}:
+     * «EDT при появлении результатов спускается к первому терминальному узлу»). Сворачивает дерево
+     * целиком, затем — если {@code allowReexpand} — заново применяет свои правила через
+     * {@link #notifyContentLoaded}, так что видимым остаётся только оправданное ими, а не случайный
+     * путь до первого совпадения.
+     */
+    public static void resetExpansionAfterReveal(AbstractTreeViewer viewer, boolean allowReexpand)
+    {
+        if (viewer == null)
+            return;
+        Tree tree = resolveTree(viewer);
+        if (tree == null || tree.isDisposed())
+            return;
+        Global.tempLog(LOG_TOPIC, "resetExpansionAfterReveal: collapseAll, allowReexpand=" + allowReexpand); //$NON-NLS-1$
+        viewer.collapseAll();
+        if (allowReexpand)
+            expandAllRootsSoleChildChains(viewer, tree);
+    }
+
+    /**
      * Программный sole-child разворот от {@code root} (после фильтра и т.п.).
      * Для lazy-деревьев догружает детей через {@code loadAndGetChildren}.
      */
     public static void expandSoleChildChainFrom(AbstractTreeViewer viewer, Object root)
     {
-        expandSoleChildChainFrom(viewer, root, TreeSoleChildAutoExpand::defaultVisible);
+        expandSoleChildChainFrom(viewer, root, TreeAutoExpand::defaultVisible);
     }
 
     public static void expandSoleChildChainFrom(AbstractTreeViewer viewer, Object root, VisibleChildFilter filter)
@@ -413,11 +610,16 @@ public final class TreeSoleChildAutoExpand implements IStartup
         Tree tree = resolveTree(viewer);
         Object current = element;
         int safety = 0;
+        Global.tempLog(LOG_TOPIC, "expandSoleChildChain: старт, element=" + element //$NON-NLS-1$
+            + ", cp=" + cpObj); //$NON-NLS-1$
         while (safety++ < 64)
         {
             Object[] raw = getVisibleChildren(viewer, cp, tree, current, filter);
             if (raw == null || raw.length == 0)
+            {
+                Global.tempLog(LOG_TOPIC, "expandSoleChildChain: стоп — нет видимых детей у " + current); //$NON-NLS-1$
                 break;
+            }
 
             Object onlyChild = null;
             int visibleCount = 0;
@@ -431,18 +633,35 @@ public final class TreeSoleChildAutoExpand implements IStartup
                     break;
             }
             if (visibleCount != 1 || onlyChild == null)
+            {
+                Global.tempLog(LOG_TOPIC, "expandSoleChildChain: стоп — видимых детей=" + visibleCount //$NON-NLS-1$
+                    + " у " + current); //$NON-NLS-1$
                 break;
+            }
 
             if (isLabelCycle(viewer, current, onlyChild, labelsInChain))
+            {
+                Global.tempLog(LOG_TOPIC, "expandSoleChildChain: стоп — цикл по подписи, " + current //$NON-NLS-1$
+                    + " -> " + onlyChild); //$NON-NLS-1$
                 break;
+            }
 
             if (isCompareConfigAddedOrDeletedCheckable(onlyChild))
+            {
+                Global.tempLog(LOG_TOPIC, "expandSoleChildChain: стоп — добавлен/удалён+checkable, " //$NON-NLS-1$
+                    + onlyChild);
                 break;
+            }
 
             boolean hasKids = nodeHasChildren(viewer, cp, tree, onlyChild);
             if (!hasKids)
+            {
+                Global.tempLog(LOG_TOPIC, "expandSoleChildChain: стоп — у единственного потомка нет детей, " //$NON-NLS-1$
+                    + onlyChild);
                 break;
+            }
 
+            Global.tempLog(LOG_TOPIC, "expandSoleChildChain: разворачиваю " + onlyChild); //$NON-NLS-1$
             if (!viewer.getExpandedState(onlyChild))
                 viewer.setExpandedState(onlyChild, true);
             rememberLabel(labelsInChain, nodeLabel(viewer, onlyChild));

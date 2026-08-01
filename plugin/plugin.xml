@@ -20,7 +20,7 @@
     <startup class="tormozit.QueryTextEditDialogHook"/>
     <startup class="tormozit.QueryConstructorFilterHook"/>
     <startup class="tormozit.FormEditorHook"/>
-    <startup class="tormozit.TreeSoleChildAutoExpand"/>
+    <startup class="tormozit.TreeAutoExpand"/>
     <startup class="tormozit.IrKeyBindingHook"/>
     <startup class="tormozit.IrBslEditorHoverHook"/>
     <startup class="tormozit.PriorityGlobalKeyBindingHook"/>
@@ -746,11 +746,6 @@
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.ProblemViewRecomputeChecksHandler"
         commandId="tormozit.problemView.recomputeChecks">
-      <activeWhen>
-        <with variable="activePartId">
-          <equals value="com._1c.g5.v8.dt.ui.problemView"/>
-        </with>
-      </activeWhen>
     </handler>
   </extension>
 
@@ -802,6 +797,7 @@
       <menuContribution locationURI="menu:com._1c.g5.v8.dt.ui.problemView?after=additions">
         <command
             commandId="tormozit.problemView.recomputeChecks"
+            icon="platform:/plugin/org.eclipse.ui/icons/full/elcl16/refresh_nav.png"
             label="Проверить"
             style="push"
             tooltip="Перепроверить объекты по текущему отбору панели (Комфорт)"/>

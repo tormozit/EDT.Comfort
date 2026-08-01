@@ -14,10 +14,15 @@ import java.util.Set;
 
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.Status;
+import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.resource.Resource;
+import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
@@ -36,6 +41,7 @@ import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.search.ui.IQueryListener;
 import org.eclipse.search.ui.ISearchQuery;
+import org.eclipse.search.ui.ISearchResult;
 import org.eclipse.search.ui.ISearchResultPage;
 import org.eclipse.search.ui.ISearchResultViewPart;
 import org.eclipse.search.ui.NewSearchUI;
@@ -66,6 +72,7 @@ import com._1c.g5.v8.dt.dcs.ui.EditorPage;
 import com._1c.g5.v8.dt.dcs.ui.settings.Settings;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorEmbeddedEditorPage;
+import com._1c.g5.v8.dt.metadata.mdclass.BasicFeature;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.search.core.BmObjectMatch;
 import com._1c.g5.v8.dt.search.core.refs.BmReferenceMatch;
@@ -86,6 +93,7 @@ import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
+import org.eclipse.swt.widgets.ScrollBar;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableColumn;
 import org.eclipse.swt.widgets.TableItem;
@@ -282,14 +290,40 @@ public final class ConfigSearchResultsHook implements IStartup
     private static final int MATCH_PATH_COLUMN_WIDTH = 220;
     private static final int MATCH_TEXT_COLUMN_WIDTH = 280;
 
+    // Отложенное довычисление «Текст» для BslResourceMatchTreeTableItem (IMatchItemDeferredCalculation) —
+    // штатный элемент результатов "Найти ссылки на объект" по BSL-модулям изначально отдаёт заглушку
+    // "<Pending>" в getDecoratedText(), пока не вызван его calculate() (резолв EMF-ресурса модуля и
+    // текста строки через Xtext node model — декомпиляция search-ui, .tmp/bundles/search-ui). Штатная
+    // таблица результатов вызывает calculate() сама (предположительно лениво при отрисовке); наша
+    // таблица строится через reflection-снимок и раньше никогда calculate() не вызывала — колонка
+    // "Текст" оставалась с "<Pending>" навсегда. Довычисляем только для строк, видимых в данный момент
+    // в НАШЕЙ таблице (по согласованию с пользователем — не для всех строк сразу), фоновым Job,
+    // последовательно (calculate() трогает общий EMF ResourceSet — не распараллеливаем).
+    private static final Map<Object, Boolean> deferredCalcScheduled = new IdentityHashMap<>();
+    /** Очередь и {@link #deferredCalcWorkerActive} — всегда вместе, под этим замком (см. {@link #enqueueDeferredCalculations}). */
+    private static final Object DEFERRED_CALC_LOCK = new Object();
+    private static final java.util.ArrayDeque<MatchRow> deferredCalcQueue = new java.util.ArrayDeque<>();
+    private static boolean deferredCalcWorkerActive;
+
+    /**
+     * Простое имя искомого объекта (последний сегмент из заголовка запроса, например
+     * "ВажностьПроблемыУчета" из "Перечисление.ВажностьПроблемыУчета") — для подсветки его
+     * вхождений в колонке "Текст" структурных совпадений ("Найти ссылки на объект"), у которых,
+     * в отличие от текстового поиска, НЕТ готового диапазона вхождения от 1С (см.
+     * {@link #highlightSearchedObjectOccurrences}). Обновляется в {@link #refreshMatchTable} —
+     * дёшево, пересчитывается на каждое изменение выбора в дереве результатов.
+     */
+    private static volatile String cachedSearchedObjectSimpleName;
+
     private static final class MatchRow
     {
         final String path;
         final String property;
         final long lineNumber;
-        final String text;
+        /** Не final — обновляется после фонового {@code calculate()} для отложенных BSL-совпадений. */
+        String text;
         /** С подсветкой вхождения (стили штатного {@code getDecoratedText()}/{@code getStyledText()}). */
-        final StyledString styledText;
+        StyledString styledText;
         final IFile file;
         /** Исходный элемент таблицы (IMatchItem) — нужен для открытия через {@code handleOpen}. */
         final Object tableItem;
@@ -499,6 +533,13 @@ public final class ConfigSearchResultsHook implements IStartup
         interaction.setOwnerDrawColumns(textCol.getColumn());
         interaction.install();
 
+        // Скролл/resize открывают новые строки — довычисляем "<Pending>" и для них
+        // (см. scheduleVisibleDeferredCalculations).
+        matchTable.addListener(SWT.Resize, e -> scheduleVisibleDeferredCalculations(matchViewer));
+        ScrollBar matchVBar = matchTable.getVerticalBar();
+        if (matchVBar != null)
+            matchVBar.addListener(SWT.Selection, e -> scheduleVisibleDeferredCalculations(matchViewer));
+
         cachedMatchTableViewer = matchViewer;
         cachedMatchTextColumn = textCol.getColumn();
         cachedMatchTableInteraction = interaction;
@@ -546,6 +587,7 @@ public final class ConfigSearchResultsHook implements IStartup
     {
         if (matchViewer.getTable() == null || matchViewer.getTable().isDisposed())
             return -1;
+        cachedSearchedObjectSimpleName = extractSearchedObjectSimpleName(treeViewer);
         List<Object> selectedNodes = treeViewer.getStructuredSelection().toList();
         List<Object> tableItems = new ArrayList<>();
         for (Object node : selectedNodes)
@@ -593,7 +635,173 @@ public final class ConfigSearchResultsHook implements IStartup
             if (cachedMatchTextColumn.getWidth() != desiredWidth)
                 cachedMatchTextColumn.setWidth(desiredWidth);
         }
+        scheduleVisibleDeferredCalculations(matchViewer);
         return tableItems.size();
+    }
+
+    /**
+     * Простое имя искомого объекта из заголовка запроса ({@code ISearchQuery.getLabel()} —
+     * штатный API, для {@code FindReferencesSearchInput} это ровно {@code ISearchInput.getLabel()},
+     * т.е. чистое имя объекта без счётчика совпадений). Заголовок обычно вида
+     * {@code Ссылки на "Перечисление.ВажностьПроблемыУчета"} — берём содержимое кавычек, если
+     * они есть, иначе весь label целиком; затем — последний сегмент после точки (само совпадение
+     * в тексте БСЛ обычно идёт с другим префиксом типа: "ПеречислениеСсылка."/"Перечисления." —
+     * общий у них только последний сегмент).
+     */
+    private static String extractSearchedObjectSimpleName(TreeViewer treeViewer)
+    {
+        Object input = treeViewer.getInput();
+        if (!(input instanceof ISearchResult searchResult))
+            return null;
+        ISearchQuery query = searchResult.getQuery();
+        String label = query != null ? query.getLabel() : null;
+        if (label == null || label.isBlank())
+            return null;
+        int start = label.indexOf('"');
+        int end = start >= 0 ? label.indexOf('"', start + 1) : -1;
+        String qualified = (start >= 0 && end > start) ? label.substring(start + 1, end) : label;
+        int dot = qualified.lastIndexOf('.');
+        return dot >= 0 && dot + 1 < qualified.length() ? qualified.substring(dot + 1) : qualified;
+    }
+
+    /**
+     * {@code true}, если {@code tableItem} реализует внутренний
+     * {@code com._1c.g5.v8.dt.internal.search.ui.provider.IMatchItemDeferredCalculation}
+     * (проверка по простому имени интерфейса — тип не экспортирован бандлом search-ui,
+     * доступен только рефлексией, как и остальной обход {@code IMatchItem} в этом классе).
+     */
+    private static boolean isDeferredCalculationItem(Object tableItem)
+    {
+        if (tableItem == null)
+            return false;
+        for (Class<?> c = tableItem.getClass(); c != null; c = c.getSuperclass())
+            for (Class<?> iface : c.getInterfaces())
+                if ("IMatchItemDeferredCalculation".equals(iface.getSimpleName())) //$NON-NLS-1$
+                    return true;
+        return false;
+    }
+
+    /**
+     * Ставит в очередь фонового довычисления только те строки, что сейчас реально видны в
+     * {@code matchViewer} (плюс небольшой запас на неполную последнюю строку) — не весь список
+     * результатов сразу. Повторные вызовы (скролл/resize/обновление таблицы) добавляют только новые
+     * видимые элементы — уже поставленные или уже вычисленные повторно не планируются
+     * ({@link #deferredCalcScheduled}).
+     */
+    private static void scheduleVisibleDeferredCalculations(TableViewer matchViewer)
+    {
+        Table table = matchViewer.getTable();
+        if (table == null || table.isDisposed())
+            return;
+        int itemCount = table.getItemCount();
+        int itemHeight = table.getItemHeight();
+        if (itemCount == 0 || itemHeight <= 0)
+            return;
+        int top = table.getTopIndex();
+        int visibleRows = table.getClientArea().height / itemHeight + 1;
+        int last = Math.min(itemCount - 1, top + visibleRows);
+        List<MatchRow> newlyQueued = new ArrayList<>();
+        for (int i = top; i <= last; i++)
+        {
+            Object data = table.getItem(i).getData();
+            if (!(data instanceof MatchRow row) || row.tableItem == null)
+                continue;
+            if (deferredCalcScheduled.containsKey(row.tableItem))
+                continue;
+            if (!isDeferredCalculationItem(row.tableItem))
+                continue;
+            if (Boolean.TRUE.equals(Global.invoke(row.tableItem, "isCalculated"))) //$NON-NLS-1$
+                continue;
+            deferredCalcScheduled.put(row.tableItem, Boolean.TRUE);
+            newlyQueued.add(row);
+        }
+        if (!newlyQueued.isEmpty())
+            enqueueDeferredCalculations(matchViewer, newlyQueued);
+    }
+
+    /**
+     * Добавляет строки в очередь и, если фоновый воркер сейчас не работает, запускает новый —
+     * добавление в очередь и переключение {@link #deferredCalcWorkerActive} выполняются под одним
+     * замком с {@link #drainDeferredCalcQueue}, иначе возможна гонка «воркер как раз опустошил очередь
+     * и уже помечает себя неактивным, а мы в этот момент решаем, что он ещё активен, и не
+     * перезапускаем» — новые элементы застряли бы в очереди до следующего скролла/обновления.
+     */
+    private static void enqueueDeferredCalculations(TableViewer matchViewer, List<MatchRow> rows)
+    {
+        boolean startWorker;
+        synchronized (DEFERRED_CALC_LOCK)
+        {
+            deferredCalcQueue.addAll(rows);
+            startWorker = !deferredCalcWorkerActive;
+            if (startWorker)
+                deferredCalcWorkerActive = true;
+        }
+        if (startWorker)
+            startDeferredCalcWorker(matchViewer);
+    }
+
+    /**
+     * Фоновый Job, вычисляющий очередь по одному элементу (последовательно — {@code calculate()}
+     * трогает общий EMF ResourceSet штатного поиска, распараллеливать не будем) и после каждого
+     * элемента точечно обновляющий его строку в таблице через {@link #applyDeferredCalcResult}.
+     */
+    private static void startDeferredCalcWorker(TableViewer matchViewer)
+    {
+        Job job = new Job("Комфорт: довычисление результатов поиска") //$NON-NLS-1$
+        {
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                while (true)
+                {
+                    MatchRow row = drainDeferredCalcQueue();
+                    if (row == null)
+                        return Status.OK_STATUS;
+                    if (monitor.isCanceled())
+                    {
+                        synchronized (DEFERRED_CALC_LOCK) { deferredCalcWorkerActive = false; }
+                        return Status.CANCEL_STATUS;
+                    }
+                    try
+                    {
+                        Global.invoke(row.tableItem, "calculate"); //$NON-NLS-1$
+                    }
+                    catch (Exception e)
+                    {
+                        log("startDeferredCalcWorker: calculate() упал: " + e); //$NON-NLS-1$
+                    }
+                    Display display = Display.getDefault();
+                    if (display != null && !display.isDisposed())
+                        display.asyncExec(() -> applyDeferredCalcResult(matchViewer, row));
+                }
+            }
+        };
+        job.setSystem(true);
+        job.schedule();
+    }
+
+    /** Атомарно: снять голову очереди, а если она пуста — тут же пометить воркер неактивным. */
+    private static MatchRow drainDeferredCalcQueue()
+    {
+        synchronized (DEFERRED_CALC_LOCK)
+        {
+            MatchRow row = deferredCalcQueue.poll();
+            if (row == null)
+                deferredCalcWorkerActive = false;
+            return row;
+        }
+    }
+
+    /** Перечитывает текст строки после {@code calculate()} и точечно обновляет её ячейку. */
+    private static void applyDeferredCalcResult(TableViewer matchViewer, MatchRow row)
+    {
+        Table table = matchViewer.getTable();
+        if (table == null || table.isDisposed())
+            return;
+        StyledString styled = extractMatchStyledText(row.tableItem);
+        row.styledText = styled;
+        row.text = styled != null ? styled.getString() : ""; //$NON-NLS-1$
+        matchViewer.update(row, null);
     }
 
     /**
@@ -697,8 +905,25 @@ public final class ConfigSearchResultsHook implements IStartup
                             catch (Exception e)
                             {
                             }
+                            PropertyFieldFocus.schedule(workbenchPage, leaf, resolveMatchFeature(matchObj));
                             return true;
                         }
+                    }
+                    // Обычный реквизит/измерение/ресурс объекта (не форма/СКД/табл. документ):
+                    // штатный handleOpen сам открывает редактор объекта и выделяет найденный
+                    // элемент — как и для isInsideForm ниже, здесь только показываем панель
+                    // «Свойства» (выделение штатно подхватит её через ISelectionListener) и
+                    // активируем в ней поле, на которое указывает вхождение.
+                    else if (leaf != null && isInsideMdObjectMember(leaf))
+                    {
+                        try
+                        {
+                            workbenchPage.showView(IPageLayout.ID_PROP_SHEET);
+                        }
+                        catch (Exception e)
+                        {
+                        }
+                        PropertyFieldFocus.schedule(workbenchPage, leaf, resolveMatchFeature(matchObj));
                     }
                 }
                 return false;
@@ -725,7 +950,7 @@ public final class ConfigSearchResultsHook implements IStartup
                 // показывает панель «Свойства». Только показываем её (не трогая выделение/открытие)
                 // и отдаём управление штатному handleOpen (return false) — панель сама подхватит
                 // выделение, которое штатно выставит handleOpen, через ISelectionListener.
-                if (isInsideForm(matchedObject))
+                if (isInsideForm(matchedObject) || isInsideMdObjectMember(matchedObject))
                 {
                     try
                     {
@@ -735,6 +960,11 @@ public final class ConfigSearchResultsHook implements IStartup
                     {
                     }
                 }
+                // Доводим до конкретного поля панели (см. PropertyFieldFocus) — и для реквизита
+                // МД-объекта, и для элемента формы: у элемента формы свой редактор есть, но
+                // свойство вроде «ПутьКДанным» правится всё равно только в панели «Свойства».
+                if (isInsideMdObjectMember(matchedObject) || isInsideForm(matchedObject))
+                    PropertyFieldFocus.schedule(workbenchPage, matchedObject, match.getFeature());
                 return false;
             }
 
@@ -1536,6 +1766,22 @@ public final class ConfigSearchResultsHook implements IStartup
     }
 
     /**
+     * Обычный реквизит/измерение/ресурс объекта конфигурации ({@code BasicFeature} — общий
+     * интерфейс-предок {@code DbObjectAttribute} (реквизиты справочников/документов/...),
+     * {@code RegisterAttribute}/{@code RegisterDimension}/{@code RegisterResource} (измерения и
+     * ресурсы регистров) и т.п., подтверждено decompile/{@code javap} пакета
+     * {@code com._1c.g5.v8.dt.metadata.mdclass}). Колонка «Свойство» в этом случае указывает на сам
+     * реквизит/измерение/ресурс или на что-то внутри него (напр. «Ресурсы.Имя.Тип.Типы»).
+     */
+    private static boolean isInsideMdObjectMember(EObject leaf)
+    {
+        for (EObject cur = leaf; cur != null; cur = cur.eContainer())
+            if (cur instanceof BasicFeature)
+                return true;
+        return false;
+    }
+
+    /**
      * Ближайший к {@code leaf} (включая сам {@code leaf}) предок-реквизит/команда/параметр/элемент
      * формы ({@code FormAttribute}/{@code FormCommand}/{@code FormParameter}/{@code FormField}).
      * Имена элементов формы уникальны во ВСЁМ дереве формы (в отличие от более ранней версии,
@@ -1787,6 +2033,36 @@ public final class ConfigSearchResultsHook implements IStartup
     }
 
     /**
+     * {@code true}, если текущий поиск реально охватывает больше одного проекта — тогда
+     * второй/третий корень дерева результатов (отдельный проект) может появиться значительно
+     * позже первого, и включать {@link TreeAutoExpand#notifyContentLoaded} по первому же
+     * появившемуся корню преждевременно.
+     * <p>
+     * Реальный набор проектов запроса — {@code SearchQuery.searchInput} (внутренний, не
+     * экспортируется, поэтому через рефлексию) → {@code TextSearchInput.getProjects()}. Дерево не
+     * входит в белый список виртуальных ({@code TreeSearchViewPageLayout.createViewer()}: маска
+     * {@code 2818} = BORDER|V_SCROLL|H_SCROLL|MULTI, без VIRTUAL), поэтому единственная реальная
+     * точка риска — этот вызов из {@code startFirstRootWatch}.
+     */
+    private static boolean searchCoversMultipleProjects(TreeViewer treeViewer)
+    {
+        Object searchResult = treeViewer.getInput();
+        if (searchResult == null)
+            return false;
+        Object query = Global.invoke(searchResult, "getQuery"); //$NON-NLS-1$
+        if (query == null)
+            return false;
+        Object searchInput = Global.getField(query, "searchInput"); //$NON-NLS-1$
+        if (searchInput == null)
+            return false;
+        Object projects = Global.invoke(searchInput, "getProjects"); //$NON-NLS-1$
+        boolean multi = projects instanceof java.util.Set<?> set && set.size() > 1;
+        log("searchCoversMultipleProjects: " + multi //$NON-NLS-1$
+            + (projects instanceof java.util.Set<?> set2 ? " (" + set2.size() + ")" : "")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        return multi;
+    }
+
+    /**
      * Пока идёт поиск — как только в дереве появляется первая строка, выбираем её
      * и периодически обновляем агрегированную таблицу (прирост результатов в реальном времени).
      */
@@ -1828,6 +2104,21 @@ public final class ConfigSearchResultsHook implements IStartup
                 log("watchFirstRoot: " + current + " -> " + firstRoot); //$NON-NLS-1$ //$NON-NLS-2$
                 viewers.tree.setSelection(new StructuredSelection(firstRoot), true);
                 showFirstTreeItem(viewers.tree);
+                // reveal у setSelection выше уже развернул путь до терминального узла, с которого
+                // редиректим — сбрасываем и разворачиваем заново по своим правилам. Если поиск идёт
+                // больше чем по одному проекту, второй/третий корень (проект) может появиться
+                // заметно позже первого — тогда «единственный корень» был бы преждевременным.
+                TreeAutoExpand.resetExpansionAfterReveal(viewers.tree,
+                    !searchCoversMultipleProjects(viewers.tree));
+            }
+            else
+            {
+                // Надёжный сигнал «результаты реально загружены» — собственный ретрай TreeAutoExpand
+                // (3 с) при установке хука может не успеть, если поиск идёт дольше. Здесь выделение
+                // уже верное (редирект выше не потребовался), reveal не разворачивал ничего лишнего —
+                // просто применяем правила поверх текущего состояния.
+                if (!searchCoversMultipleProjects(viewers.tree))
+                    TreeAutoExpand.notifyContentLoaded(viewers.tree);
             }
             applyAggregationIfNeeded(viewers.tree, viewers.table,
                 Collections.singletonList(firstRoot), Collections.emptyList(), "watchLoop"); //$NON-NLS-1$
@@ -2143,8 +2434,8 @@ public final class ConfigSearchResultsHook implements IStartup
                 installPathColumn(tableViewer);
                 installTableCopyHandler(treeViewer, tableViewer);
             }
-            TreeSoleChildAutoExpand.installWhitelisted(
-                    TreeSoleChildAutoExpand.Target.SEARCH_CONFIG, treeViewer);
+            TreeAutoExpand.installWhitelisted(
+                    TreeAutoExpand.Target.SEARCH_CONFIG, treeViewer);
             installMatchTableSplitPane(view, activePage, treeLayout, treeViewer);
             CreateDebuggerBreakpoints.installToolbarAction(view);
             installTreeInputChangeWatch(treeViewer);
@@ -2257,6 +2548,10 @@ public final class ConfigSearchResultsHook implements IStartup
                         log("redirectToFirstRoot: " + current + " -> " + firstRoot); //$NON-NLS-1$ //$NON-NLS-2$
                         treeViewer.setSelection(new StructuredSelection(firstRoot), true);
                         showFirstTreeItem(treeViewer);
+                        // reveal у setSelection выше уже развернул путь до терминального узла,
+                        // с которого редиректим — сбрасываем и разворачиваем заново по своим правилам.
+                        TreeAutoExpand.resetExpansionAfterReveal(treeViewer,
+                            !searchCoversMultipleProjects(treeViewer));
                         // ВАЖНО: programmatic setSelection() не порождает новое post-selection
                         // событие (JFace фича — post-selection реагирует только на реальные SWT.Selection
                         // от мыши/клавиатуры), поэтому applyAggregationIfNeeded нужно вызвать явно здесь —
@@ -3050,6 +3345,18 @@ public final class ConfigSearchResultsHook implements IStartup
      */
     private static String dcsFeatureLabel(EStructuralFeature feature)
     {
+        String label = rawFeatureLabel(feature);
+        return label != null ? toCamelCase(label) : null;
+    }
+
+    /**
+     * Подпись feature КАК ЕСТЬ, без склейки слов {@link #toCamelCase} — именно в таком виде
+     * («Вычисляемые поля», а не «ВычисляемыеПоля») подпись показывает панель «Свойства», поэтому
+     * для поиска поля в панели ({@link PropertyFieldFocus}) нужен этот вариант, а не
+     * {@link #dcsFeatureLabel} (тот собирает сегменты пути, где пробелы недопустимы).
+     */
+    private static String rawFeatureLabel(EStructuralFeature feature)
+    {
         if (feature == null)
             return null;
         if (DCS_FEATURE_SKIP.contains(feature.getName()))
@@ -3072,7 +3379,7 @@ public final class ConfigSearchResultsHook implements IStartup
         }
         if (label == null || label.isBlank())
             label = feature.getName();
-        return toCamelCase(label);
+        return label;
     }
 
     /**
@@ -3663,7 +3970,10 @@ public final class ConfigSearchResultsHook implements IStartup
         Object match = Global.invoke(tableItem, "getData"); //$NON-NLS-1$
         Object textObj = match != null ? Global.invoke(match, "getText") : null; //$NON-NLS-1$
         if (!(textObj instanceof String text))
-            return plainMatchStyledText(tableItem);
+        {
+            StyledString plain = plainMatchStyledText(tableItem);
+            return plain != null ? highlightSearchedObjectOccurrences(plain.getString()) : null;
+        }
 
         Object offObj = Global.invoke(match, "getTextOffset"); //$NON-NLS-1$
         Object lenObj = Global.invoke(match, "getTextLength"); //$NON-NLS-1$
@@ -3721,6 +4031,38 @@ public final class ConfigSearchResultsHook implements IStartup
         }
         catch (Exception ignored) {}
         return null;
+    }
+
+    /**
+     * Подсвечивает вхождения {@link #cachedSearchedObjectSimpleName} в тексте структурных
+     * совпадений ("Найти ссылки на объект" — {@code BmReferenceMatch}/{@code BslReferenceMatch}),
+     * у которых, в отличие от текстового поиска, НЕТ готового диапазона от 1С: у {@code calculate()}
+     * в {@code BslResourceMatchTreeTableItem} offset/length всегда {@code OptionalInt.empty()}
+     * (декомпиляция search-ui). Подсвечиваем ВСЕ непересекающиеся вхождения простого имени —
+     * по согласованию с пользователем, раз штатного диапазона нет.
+     */
+    private static StyledString highlightSearchedObjectOccurrences(String text)
+    {
+        if (text == null)
+            return new StyledString(""); //$NON-NLS-1$
+        String name = cachedSearchedObjectSimpleName;
+        if (name == null || name.isEmpty())
+            return new StyledString(text);
+        TableViewer matchViewer = cachedMatchTableViewer;
+        Control styleContext = matchViewer != null ? matchViewer.getTable() : null;
+        StyledString ss = new StyledString();
+        int pos = 0;
+        int idx;
+        while ((idx = text.indexOf(name, pos)) >= 0)
+        {
+            if (idx > pos)
+                ss.append(text.substring(pos, idx), SmartMatchHighlight.plainStyler());
+            ss.append(text.substring(idx, idx + name.length()), SmartMatchHighlight.textOnlyStyler(styleContext));
+            pos = idx + name.length();
+        }
+        if (pos < text.length())
+            ss.append(text.substring(pos), SmartMatchHighlight.plainStyler());
+        return ss;
     }
 
     private static void showPathColumn(TableViewer tableViewer)
@@ -4084,4 +4426,423 @@ public final class ConfigSearchResultsHook implements IStartup
     }
 
     public ConfigSearchResultsHook() {}
+
+    /**
+     * Активация конкретного поля в панели «Свойства» после открытия вхождения, найденного в
+     * реквизите/измерении/ресурсе МД-объекта (см. {@link #isInsideMdObjectMember}). Такие дочерние
+     * объекты не имеют собственного редактора — их свойства правятся ТОЛЬКО в панели «Свойства»,
+     * поэтому после {@code handleOpen} (открыл редактор владельца и выделил сам реквизит) остаётся
+     * поставить курсор в то поле, на которое указывает колонка «Свойство» результата поиска:
+     * для «Ресурсы.ВажностьПроблемы.Тип.Типы» — в поле «Тип».
+     *
+     * <p>Панель — AEF2-сцена ({@code com._1c.g5.properties.ui.PropertySheetPage}: {@code getScene()},
+     * {@code getPaletteModel()}), её бандлы в {@code Require-Bundle} плагина не заявлены, поэтому
+     * весь доступ — рефлексией через {@link Global#invoke}/{@link Global#getField}, как и в
+     * {@code PropertySheetControlInterop}.
+     *
+     * <p>Фокус ставится штатным механизмом AEF, а не «руками» по SWT-контролу:
+     * {@code StandardComponent.setFocus()} (public, без аргументов) кладёт в очередь сцены
+     * {@code FocusEvent(первый viewModel)}, который {@code com._1c.g5.aef2.views.View} и отрабатывает
+     * (подтверждено {@code javap -c} по {@code com._1c.g5.aef2.standard_16.1.100}). Это одинаково
+     * работает и для LWT-, и для SWT-рендерера панели — в отличие от {@code Control.setFocus()},
+     * который для LWT-полей бесполезен (они рисуются на общем canvas и не являются SWT-контролами).
+     *
+     * <p>Поле ищется по EMF-признаку, а не по подписи («Тип») — подписи не уникальны. Источник
+     * связи «компонент → признак» — карта {@code componentToDefinitionMap} построителя палитры
+     * (см. {@link #findFieldComponent}).
+     */
+    private static final class PropertyFieldFocus
+    {
+        /** Панель наполняется асинхронно (MdPropertySheetPage ведёт свой прогресс) — ждём до ~6с. */
+        private static final int MAX_ATTEMPTS = 40;
+        private static final int RETRY_DELAY_MS = 150;
+
+        /**
+         * Метка текущего цикла ожидания. Каждое новое открытие вхождения обесценивает предыдущий
+         * цикл: без этого циклы от нескольких открытий подряд работают ПАРАЛЛЕЛЬНО (в логе видно по
+         * перемешанным номерам попыток) и дерутся за фокус — старый цикл продолжает ставить фокус
+         * уже после того, как панель переключилась на другой объект.
+         */
+        private static volatile Object activeToken;
+
+        private PropertyFieldFocus() {}
+
+        /**
+         * Запуск ожидания и активации поля.
+         *
+         * @param leaf найденный объект (может быть как сам реквизит, так и вложенный в него объект)
+         * @param matchFeature признак вхождения — используется, когда {@code leaf} и есть реквизит
+         */
+        static void schedule(IWorkbenchPage workbenchPage, EObject leaf, EStructuralFeature matchFeature)
+        {
+            if (workbenchPage == null || leaf == null)
+                return;
+            EObject member = nearestMember(leaf);
+            EStructuralFeature feature = targetFeature(leaf, matchFeature);
+            if (member == null || feature == null)
+                return;
+            Object token = new Object();
+            activeToken = token;
+            retry(workbenchPage, member, feature, 0, token);
+        }
+
+        /**
+         * Объект, чьи свойства покажет панель: реквизит/измерение/ресурс МД-объекта
+         * ({@code BasicFeature}) либо элемент формы (те же типы, что и в
+         * {@link ConfigSearchResultsHook#findNearestFormChild} — именно они выделяются в редакторе
+         * формы и попадают в панель). Общий обход для обоих случаев: логика «поле панели = признак,
+         * которым владелец содержит ветку с вхождением» одна и та же — для
+         * «Ресурсы.ВажностьПроблемы.Тип.Типы» это {@code type}, для
+         * «Элементы.ВажностьПроблемы.ПутьКДанным.Objects.ValueType.Типы» — {@code dataPath}.
+         */
+        private static boolean isPanelMember(EObject obj)
+        {
+            return obj instanceof BasicFeature || obj instanceof FormField || obj instanceof FormAttribute
+                || obj instanceof FormCommand || obj instanceof FormParameter;
+        }
+
+        private static EObject nearestMember(EObject leaf)
+        {
+            for (EObject cur = leaf; cur != null; cur = cur.eContainer())
+                if (isPanelMember(cur))
+                    return cur;
+            return null;
+        }
+
+        /**
+         * Признак реквизита, соответствующий полю панели: признак, которым сам реквизит содержит
+         * ветку с вхождением (для «Ресурсы.ВажностьПроблемы.Тип.Типы» — {@code type}, т.к. вхождение
+         * лежит внутри {@code TypeDescription}, а её {@code eContainingFeature()} — как раз
+         * {@code type}). Если вхождение — прямо в самом реквизите (напр. его «Имя»/«Комментарий»),
+         * ветки нет и берётся признак самого вхождения.
+         */
+        private static EStructuralFeature targetFeature(EObject leaf, EStructuralFeature matchFeature)
+        {
+            EObject child = null;
+            for (EObject cur = leaf; cur != null; cur = cur.eContainer())
+            {
+                if (isPanelMember(cur))
+                    return child != null ? child.eContainingFeature() : matchFeature;
+                child = cur;
+            }
+            return null;
+        }
+
+        private static void retry(IWorkbenchPage workbenchPage, EObject member,
+                EStructuralFeature feature, int attempt, Object token)
+        {
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            display.timerExec(RETRY_DELAY_MS, () -> {
+                if (token != activeToken)
+                    return; // цикл обесценен более свежим открытием вхождения
+                try
+                {
+                    if (tryFocus(workbenchPage, member, feature))
+                        return;
+                }
+                catch (Throwable t)
+                {
+                    Global.logError("ConfigSearchResults", "PropertyFieldFocus.tryFocus", t); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                if (attempt + 1 < MAX_ATTEMPTS)
+                    retry(workbenchPage, member, feature, attempt + 1, token);
+            });
+        }
+
+        private static boolean tryFocus(IWorkbenchPage workbenchPage, EObject member,
+                EStructuralFeature feature)
+        {
+            IViewPart view = findPropertySheetView(workbenchPage);
+            Object page = view != null ? PropertyNameIdentifierHook.resolvePropertySheetPage(view) : null;
+            if (page == null)
+                return false;
+            // Панель ещё может показывать ПРЕДЫДУЩИЙ объект — тогда нужное поле найдётся, но не то.
+            if (!paletteShowsObject(page, member))
+                return false;
+
+            // Поле «Тип» в панели «Свойства» перекрыто нашим же SWT-оверлеем (TypeComboOverlayHook):
+            // видимый ввод — его Text, а штатный LightCombo под ним только визуально закрыт.
+            // Для таких свойств штатный AEF-путь НЕ годится и не является запасным: он поставил бы
+            // фокус в невидимый контрол под оверлеем — причём успешно и на первой же попытке,
+            // прекратив ожидание раньше, чем оверлей вообще успеет присоединиться. Поэтому здесь
+            // либо оверлей, либо ничего: если его нет (составной тип — комбобокса под ним нет
+            // вовсе), то фокусировать и нечего.
+            String label = rawFeatureLabel(feature);
+            if (TypeComboOverlayHook.coversProperty(label))
+                return TypeComboOverlayHook.focusPropertyOverlay(view, label);
+
+            Object scene = Global.invoke(page, "getScene"); //$NON-NLS-1$
+            if (scene == null)
+                return false;
+            Object fieldComponent = findFieldComponent(scene, feature);
+            if (fieldComponent == null)
+                return false;
+            return focusFieldComponent(scene, fieldComponent);
+        }
+
+        /**
+         * View панели «Свойства». Первая версия искала только по {@code Global.PROPERTIES_SHEET_ID}
+         * ({@code org.eclipse.ui.views.properties.PropertySheet}), тогда как панель показывается по
+         * ДРУГОМУ id — {@code IPageLayout.ID_PROP_SHEET} ({@code org.eclipse.ui.views.PropertySheet}),
+         * и всегда получала {@code null} (лог {@code propfocus}: {@code page=<null>}). Проверка
+         * самого признака «это панель свойств» — общая с остальными хуками панели
+         * ({@code PropertyNameIdentifierHook.isPropertySheetView}), чтобы id не расходились.
+         */
+        private static IViewPart findPropertySheetView(IWorkbenchPage workbenchPage)
+        {
+            for (IViewReference ref : workbenchPage.getViewReferences())
+            {
+                IViewPart view = ref.getView(false);
+                if (PropertyNameIdentifierHook.isPropertySheetView(view))
+                    return view;
+            }
+            return null;
+        }
+
+        /**
+         * Панель уже переключилась на нужный объект. {@code PropertyPaletteModel.getObjects()} —
+         * показываемые объекты; сравнение — {@link ConfigSearchResultsHook#sameBmObject} (BM-объект
+         * из результатов поиска и из редактора — разные Java-инстансы с одним {@code bmGetId()}).
+         */
+        private static boolean paletteShowsObject(Object page, EObject member)
+        {
+            Object paletteModel = Global.invoke(page, "getPaletteModel"); //$NON-NLS-1$
+            Object objects = paletteModel != null ? Global.invoke(paletteModel, "getObjects") : null; //$NON-NLS-1$
+            if (!(objects instanceof Iterable))
+                return false;
+            for (Object obj : (Iterable<?>)objects)
+                if (obj instanceof EObject eObj && sameShownObject(eObj, member))
+                    return true;
+            return false;
+        }
+
+        /**
+         * {@link ConfigSearchResultsHook#sameBmObject} сравнивает по {@code bmGetId()} и работает
+         * только для {@code IBmObject} (МД-объекты и их реквизиты), иначе скатывается к сравнению
+         * ссылок. Элемент формы — вложенный EObject внутри BM-ресурса формы, и объект из результатов
+         * поиска с объектом, выделенным в редакторе, — разные инстансы: {@code ==} не сработает.
+         * Поэтому запасной вариант — сравнение EMF-URI (ресурс + фрагмент), одинакового у обоих.
+         */
+        private static boolean sameShownObject(EObject a, EObject b)
+        {
+            if (sameBmObject(a, b))
+                return true;
+            try
+            {
+                URI uriA = EcoreUtil.getURI(a);
+                return uriA != null && uriA.equals(EcoreUtil.getURI(b));
+            }
+            catch (Exception e)
+            {
+                return false;
+            }
+        }
+
+        /**
+         * Компонент-редактор поля по EMF-признаку. Связь «компонент → определение поля» хранит НЕ
+         * сам компонент, а построивший его {@code DefinitionDrivenComponent} — в приватном поле
+         * {@code componentToDefinitionMap} ({@code Map<IComponent, IDefinition>}); у самого
+         * {@code FieldComponent} методов {@code getFieldDefinition()}/{@code getDefinition()} нет
+         * вовсе. Обход ищет узлы с этой картой (палитра — дерево {@code SectionDefinitionComponent},
+         * по одному на секцию свойств) и сверяет {@code IFieldDefinition.getFeaturePaths()} с
+         * искомым признаком: путь должен ЗАКАНЧИВАТЬСЯ им.
+         *
+         * <p>Каждое поле панели присутствует в карте ДВУМЯ записями с одним и тем же определением —
+         * редактор ({@code DtTextComponent}, {@code MultilanguageComponent},
+         * {@code TypeDescriptionComponent}, …) и {@code LabelComponent} (подпись, фокуса не имеет и
+         * поэтому исключается).
+         */
+        private static Object findFieldComponent(Object scene, EStructuralFeature feature)
+        {
+            return findInTree(Global.invoke(scene, "getComponent"), feature.getName(), 0); //$NON-NLS-1$
+        }
+
+        private static Object findInTree(Object component, String featureName, int depth)
+        {
+            if (component == null || depth > 32)
+                return null;
+            Object map = Global.getField(component, "componentToDefinitionMap"); //$NON-NLS-1$
+            if (map instanceof Map)
+            {
+                for (Map.Entry<?, ?> entry : ((Map<?, ?>)map).entrySet())
+                {
+                    Object candidate = entry.getKey();
+                    if (candidate == null
+                        || candidate.getClass().getName().contains("LabelComponent")) //$NON-NLS-1$
+                        continue;
+                    if (definitionTargets(entry.getValue(), featureName))
+                        return candidate;
+                }
+            }
+            for (Object child : childComponents(component))
+            {
+                Object found = findInTree(child, featureName, depth + 1);
+                if (found != null)
+                    return found;
+            }
+            return null;
+        }
+
+        /** Определение поля описывает именно этот признак — последний в пути {@code getFeaturePaths()}. */
+        private static boolean definitionTargets(Object definition, String featureName)
+        {
+            for (List<String> path : featurePathsOfDefinition(definition))
+                if (!path.isEmpty() && featureName.equals(path.get(path.size() - 1)))
+                    return true;
+            return false;
+        }
+
+        /**
+         * Дочерние компоненты: обычные {@code getComponents()} плюс {@code getDefinitionComponent()} —
+         * {@code PropertyPaletteComponent} держит построитель палитры в отдельном поле, и в
+         * {@code getComponents()} он не обязан попадать.
+         */
+        private static List<Object> childComponents(Object component)
+        {
+            List<Object> out = new ArrayList<>();
+            Object children = Global.invoke(component, "getComponents"); //$NON-NLS-1$
+            if (children instanceof Iterable)
+                for (Object child : (Iterable<?>)children)
+                    if (child != null)
+                        out.add(child);
+            Object definitionComponent = Global.invoke(component, "getDefinitionComponent"); //$NON-NLS-1$
+            if (definitionComponent != null && !out.contains(definitionComponent))
+                out.add(definitionComponent);
+            return out;
+        }
+
+        /**
+         * Пути EMF-признаков определения поля ({@code IFieldDefinition.getFeaturePaths()} →
+         * {@code FeaturePath[]}) — каждый путь как список имён признаков, ПО ПОРЯДКУ (порядок важен
+         * для {@link #score}: последний признак пути определяет, «про что» это поле).
+         */
+        private static List<List<String>> featurePathsOfDefinition(Object definition)
+        {
+            List<List<String>> out = new ArrayList<>();
+            Object paths = definition != null ? Global.invoke(definition, "getFeaturePaths") : null; //$NON-NLS-1$
+            if (paths instanceof Object[] arr)
+                for (Object path : arr)
+                    addFeaturePath(path, out);
+            else if (paths instanceof Iterable)
+                for (Object path : (Iterable<?>)paths)
+                    addFeaturePath(path, out);
+            return out;
+        }
+
+        private static void addFeaturePath(Object featurePath, List<List<String>> out)
+        {
+            Object features = featurePath != null ? Global.invoke(featurePath, "getFeaturePath") : null; //$NON-NLS-1$
+            if (!(features instanceof EStructuralFeature[] arr))
+                return;
+            List<String> names = new ArrayList<>(arr.length);
+            for (EStructuralFeature f : arr)
+                if (f != null)
+                    names.add(f.getName());
+            if (!names.isEmpty())
+                out.add(names);
+        }
+
+        /**
+         * Фокус ставится ПРЯМО на нативный контрол представления, а не через
+         * {@code StandardComponent.setFocus()}. Причина (декомпиляция, подтверждена логом
+         * {@code propfocus}: {@code setFocus done, but focus NOT confirmed for DataPathComponent}):
+         * {@code setFocus()} шлёт {@code FocusEvent(Iterables.getFirst(getViewModels()))}, а
+         * {@code LwtView.handleFocusEvent} реагирует, только если viewModel события совпал с
+         * viewModel САМОГО представления. У составного поля (текст + кнопки «...»/«x», как у
+         * «Путь к данным») первый viewModel — контейнерный, его представление фокус не принимает,
+         * и событие уходит в никуда.
+         *
+         * <p>Поэтому перебираются нативные контролы всех представлений компонента и его потомков
+         * (подписи пропускаются) до первого, у которого фокус ПОДТВЕРДИЛСЯ: у LWT это
+         * {@code ILightControl.setFocus(FocusSource)}/{@code isFocused()} (LWT-поля рисуются на
+         * общем canvas и SWT-фокуса не имеют), у SWT-рендерера — обычные
+         * {@code Control.setFocus()}/{@code isFocusControl()}.
+         */
+        private static boolean focusFieldComponent(Object scene, Object fieldComponent)
+        {
+            for (Object nativeControl : editorNativeControls(scene, fieldComponent))
+                if (focusNativeControl(nativeControl))
+                    return true;
+            return false;
+        }
+
+        /**
+         * Нативные контролы редакторов компонента и его потомков в порядке обхода. Подписи
+         * ({@code LabelViewModel}/{@code LabelComponent}) исключаются — фокус нужен в поле ввода.
+         */
+        private static List<Object> editorNativeControls(Object scene, Object component)
+        {
+            Object renderer = Global.invoke(scene, "getRenderer"); //$NON-NLS-1$
+            Object mapObj = renderer != null ? Global.getField(renderer, "viewModelToView") : null; //$NON-NLS-1$
+            List<Object> out = new ArrayList<>();
+            if (mapObj instanceof Map)
+                collectEditorNativeControls((Map<?, ?>)mapObj, component, out, 0);
+            return out;
+        }
+
+        private static void collectEditorNativeControls(Map<?, ?> viewModelToView, Object component,
+                List<Object> out, int depth)
+        {
+            if (component == null || depth > 8)
+                return;
+            Object viewModels = Global.invoke(component, "getViewModels"); //$NON-NLS-1$
+            if (viewModels instanceof Iterable)
+            {
+                for (Object viewModel : (Iterable<?>)viewModels)
+                {
+                    if (viewModel == null || viewModel.getClass().getName().contains("LabelViewModel")) //$NON-NLS-1$
+                        continue;
+                    Object view = viewModelToView.get(viewModel);
+                    Object nativeControl = view != null ? Global.invoke(view, "getNativeControl") : null; //$NON-NLS-1$
+                    if (nativeControl != null && !out.contains(nativeControl))
+                        out.add(nativeControl);
+                }
+            }
+            for (Object child : childComponents(component))
+                if (!child.getClass().getName().contains("LabelComponent")) //$NON-NLS-1$
+                    collectEditorNativeControls(viewModelToView, child, out, depth + 1);
+        }
+
+        /** @return {@code true}, если контрол реально ЗАБРАЛ фокус (а не просто принял вызов) */
+        private static boolean focusNativeControl(Object nativeControl)
+        {
+            if (nativeControl instanceof Control control)
+                return !control.isDisposed() && control.setFocus() && control.isFocusControl();
+            Object focusSource = lwtKeyboardFocusSource(nativeControl);
+            if (focusSource == null)
+                return false;
+            Object result = Global.invoke(nativeControl, "setFocus", focusSource); //$NON-NLS-1$
+            return Boolean.TRUE.equals(result)
+                || Boolean.TRUE.equals(Global.invoke(nativeControl, "isFocused")); //$NON-NLS-1$
+        }
+
+        /**
+         * {@code com._1c.g5.lwt.FocusSource.Keyboard} — аргумент {@code ILightControl.setFocus}.
+         * Бандл LWT в {@code Require-Bundle} плагина не заявлен, поэтому класс грузится по имени
+         * через загрузчик самого контрола (тот же приём, что и в
+         * {@code TypeComboOverlayHook.resolveHost} для {@code SwtLightComposite}).
+         */
+        private static volatile Object lwtKeyboardFocusSource;
+
+        private static Object lwtKeyboardFocusSource(Object nativeControl)
+        {
+            Object cached = lwtKeyboardFocusSource;
+            if (cached != null)
+                return cached;
+            try
+            {
+                Class<?> focusSourceClass = Class.forName("com._1c.g5.lwt.FocusSource", true, //$NON-NLS-1$
+                    nativeControl.getClass().getClassLoader());
+                cached = focusSourceClass.getField("Keyboard").get(null); //$NON-NLS-1$
+                lwtKeyboardFocusSource = cached;
+                return cached;
+            }
+            catch (Exception e)
+            {
+                return null;
+            }
+        }
+    }
 }

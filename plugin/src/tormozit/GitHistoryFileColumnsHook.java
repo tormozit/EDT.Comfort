@@ -255,7 +255,7 @@ public final class GitHistoryFileColumnsHook implements IStartup
                 origLabelProvider = clp;
 
             TableColumn[] cols = installColumns(table);
-            installFilterComposite(fileViewer, table, origLabelProvider, cols[0], cols[1]);
+            installFilterComposite(fileViewer, table, origLabelProvider, cols[0], cols[1], cols[2]);
 
             Debug.log("tryPatch: OK"); //$NON-NLS-1$
             return true;
@@ -276,7 +276,7 @@ public final class GitHistoryFileColumnsHook implements IStartup
     // Колонки
     // -----------------------------------------------------------------------
 
-    /** @return [0]=«Файл», [1]=«Путь» */
+    /** @return [0]=«Файл», [1]=«Тип», [2]=«Путь» */
     private static TableColumn[] installColumns(Table table)
     {
         TableColumn fileCol = new TableColumn(table, SWT.LEFT, 0);
@@ -291,7 +291,13 @@ public final class GitHistoryFileColumnsHook implements IStartup
                 ComfortSettings.setGitHistoryColumnWidth("file", w); //$NON-NLS-1$
         });
 
-        TableColumn pathCol = new TableColumn(table, SWT.LEFT, 1);
+        TableColumn typeCol = new TableColumn(table, SWT.LEFT, 1);
+        typeCol.setText("Тип"); //$NON-NLS-1$
+        typeCol.setToolTipText("Расширение файла" + Global.pluginSignForTooltip()); //$NON-NLS-1$
+        typeCol.setResizable(true);
+        typeCol.setWidth(60);
+
+        TableColumn pathCol = new TableColumn(table, SWT.LEFT, 2);
         pathCol.setText("Путь"); //$NON-NLS-1$
         pathCol.setToolTipText("Полное имя объекта метаданных" + Global.pluginSignForTooltip()); //$NON-NLS-1$
         pathCol.setResizable(true);
@@ -299,7 +305,7 @@ public final class GitHistoryFileColumnsHook implements IStartup
 
         table.setHeaderVisible(true);
         table.setLinesVisible(true);
-        return new TableColumn[] { fileCol, pathCol };
+        return new TableColumn[] { fileCol, typeCol, pathCol };
     }
 
     // -----------------------------------------------------------------------
@@ -307,7 +313,7 @@ public final class GitHistoryFileColumnsHook implements IStartup
     // -----------------------------------------------------------------------
 
     private static void installFilterComposite(TableViewer fileViewer, Table table,
-        CellLabelProvider origLabelProvider, TableColumn fileCol, TableColumn pathCol)
+        CellLabelProvider origLabelProvider, TableColumn fileCol, TableColumn typeCol, TableColumn pathCol)
     {
         Composite revInfoSplit = table.getParent();
         if (revInfoSplit == null || revInfoSplit.isDisposed())
@@ -433,6 +439,7 @@ public final class GitHistoryFileColumnsHook implements IStartup
 
         int fileWidth = ComfortSettings.getGitHistoryColumnWidth("file", 300); //$NON-NLS-1$
         columnLayout.setColumnData(fileCol, new ColumnPixelData(fileWidth, true, true));
+        columnLayout.setColumnData(typeCol, new ColumnPixelData(60, true, true));
         columnLayout.setColumnData(pathCol, new ColumnWeightData(1, 50, true));
 
         FormTableInteraction interaction =
@@ -443,7 +450,7 @@ public final class GitHistoryFileColumnsHook implements IStartup
                 String text = item.getText(col);
                 return text != null ? text : ""; //$NON-NLS-1$
             });
-        interaction.setOwnerDrawColumns(fileCol, pathCol);
+        interaction.setOwnerDrawColumns(fileCol, typeCol, pathCol);
         interaction.setColumnReorderEnabled(true);
         interaction.install();
         interactionRef[0] = interaction;
@@ -729,6 +736,14 @@ public final class GitHistoryFileColumnsHook implements IStartup
         return idx >= 0 ? path.substring(idx + 1) : path;
     }
 
+    /** Расширение файла (без точки) по пути; пусто, если точки нет. */
+    private static String extensionOf(String path)
+    {
+        String name = fileNameOf(path);
+        int dot = name.lastIndexOf('.');
+        return dot >= 0 ? name.substring(dot + 1) : ""; //$NON-NLS-1$
+    }
+
     // -----------------------------------------------------------------------
     // ViewerFilter
     // -----------------------------------------------------------------------
@@ -805,6 +820,13 @@ public final class GitHistoryFileColumnsHook implements IStartup
                 origProvider.update(cell);
             }
             else if (col == 1)
+            {
+                Object element = cell.getElement();
+                Object pathObj = Global.call(element, "getPath"); //$NON-NLS-1$
+                String path = pathObj instanceof String s ? s : ""; //$NON-NLS-1$
+                cell.setText(extensionOf(path));
+            }
+            else if (col == 2)
             {
                 Object element = cell.getElement();
                 Object pathObj = Global.call(element, "getPath"); //$NON-NLS-1$
