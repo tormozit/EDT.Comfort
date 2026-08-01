@@ -146,6 +146,26 @@ public final class SmartMatchHighlight
     public static void paintTableCellMatchOverlayFlat(Event e, Table table, TableItem item, SmartMatcher matcher,
             String textOverride)
     {
+        paintTableCellMatchOverlayFlat(e, table, item, matcher, textOverride, true);
+    }
+
+    /**
+     * Как {@link #paintTableCellMatchOverlayFlat(Event, Table, TableItem, SmartMatcher)}, но с флагом
+     * {@code bold} — см. {@link #paintTableCellMatchOverlay(Event, Table, TableItem, SmartMatcher,
+     * boolean, int, boolean)}: жирный overlay поверх уже нарисованного нативного текста не может
+     * сдвинуть то, что идёт правее совпадения, и наезжает на соседние буквы, если совпадение не в
+     * самом конце текста ячейки.
+     */
+    public static void paintTableCellMatchOverlayFlat(Event e, Table table, TableItem item, SmartMatcher matcher,
+            boolean bold)
+    {
+        paintTableCellMatchOverlayFlat(e, table, item, matcher, null, bold);
+    }
+
+    /** Как {@link #paintTableCellMatchOverlayFlat(Event, Table, TableItem, SmartMatcher, String)}, но с флагом {@code bold}. */
+    public static void paintTableCellMatchOverlayFlat(Event e, Table table, TableItem item, SmartMatcher matcher,
+            String textOverride, boolean bold)
+    {
         if (e == null || e.gc == null || table == null || table.isDisposed() || item == null
                 || item.isDisposed() || matcher == null || matcher.isEmpty)
             return;
@@ -155,7 +175,7 @@ public final class SmartMatchHighlight
         CellTextOrigin origin = tableCellTextOrigin(e.gc, table, item, e.index, e, text);
         MatchStyle style = resolveMatchStyle(table);
         drawMatchFragments(e.gc, text, matcher, origin.x, origin.y, origin.availableWidth, table.getFont(), style,
-            false, true);
+            false, bold);
     }
 
     /** @param backgroundOnly {@code true} — только фон совпадений (текст уже нарисован). */
@@ -208,17 +228,36 @@ public final class SmartMatchHighlight
     /** Жирный синий overlay поверх уже отрисованного SWT-текста (Label и др.). */
     public static void paintTextMatchOverlay(GC gc, Control control, String text, SmartMatcher matcher)
     {
+        paintTextMatchOverlay(gc, control, text, matcher, true);
+    }
+
+    /**
+     * Как {@link #paintTextMatchOverlay(GC, Control, String, SmartMatcher)}, но с флагом
+     * {@code bold} — см. {@link #paintTableCellMatchOverlay(Event, Table, TableItem, SmartMatcher,
+     * boolean, int, boolean)}: жирный overlay поверх уже нарисованного нативного текста не может
+     * сдвинуть то, что идёт правее совпадения, и наезжает на соседние буквы, если совпадение не в
+     * самом конце текста.
+     */
+    public static void paintTextMatchOverlay(GC gc, Control control, String text, SmartMatcher matcher, boolean bold)
+    {
         if (gc == null || control == null || control.isDisposed() || text == null || text.isEmpty()
                 || matcher == null || matcher.isEmpty)
             return;
         Point origin = swtTextOrigin(gc, control, text);
         drawMatchFragments(gc, text, matcher, origin.x, origin.y, control.getFont(),
-            resolveMatchStyle(control), false);
+            resolveMatchStyle(control), false, bold);
     }
 
     /** Жирный синий overlay для LWT LightLabel в координатах host-контрола. */
     public static void paintLwtTextMatchOverlay(GC gc, Control host, String text, SmartMatcher matcher,
             int originX, int originY, Object light)
+    {
+        paintLwtTextMatchOverlay(gc, host, text, matcher, originX, originY, light, true);
+    }
+
+    /** Как {@link #paintLwtTextMatchOverlay(GC, Control, String, SmartMatcher, int, int, Object)}, но с флагом {@code bold}. */
+    public static void paintLwtTextMatchOverlay(GC gc, Control host, String text, SmartMatcher matcher,
+            int originX, int originY, Object light, boolean bold)
     {
         if (gc == null || host == null || host.isDisposed() || text == null || text.isEmpty()
                 || matcher == null || matcher.isEmpty)
@@ -226,7 +265,7 @@ public final class SmartMatchHighlight
         Font font = PropertySheetControlInterop.lwtFont(light);
         if (font == null)
             font = host.getFont();
-        drawMatchFragments(gc, text, matcher, originX, originY, font, resolveMatchStyle(host), false);
+        drawMatchFragments(gc, text, matcher, originX, originY, font, resolveMatchStyle(host), false, bold);
     }
 
     /**
@@ -418,9 +457,9 @@ public final class SmartMatchHighlight
     }
 
     private static void drawMatchFragments(GC gc, String text, SmartMatcher matcher,
-            int baseX, int baseY, Font baseFont, MatchStyle style, boolean backgroundOnly)
+            int baseX, int baseY, Font baseFont, MatchStyle style, boolean backgroundOnly, boolean bold)
     {
-        drawMatchFragments(gc, text, matcher, baseX, baseY, -1, baseFont, style, backgroundOnly, true);
+        drawMatchFragments(gc, text, matcher, baseX, baseY, -1, baseFont, style, backgroundOnly, bold);
     }
 
     /**

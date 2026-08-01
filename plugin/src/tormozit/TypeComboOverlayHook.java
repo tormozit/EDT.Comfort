@@ -1401,7 +1401,11 @@ public class TypeComboOverlayHook implements IStartup
         table.addListener(SWT.PaintItem, e ->
         {
             if (state.currentMatcher != null && !state.currentMatcher.isEmpty)
-                SmartMatchHighlight.paintTableCellMatchOverlay(e, state.table, (TableItem) e.item, state.currentMatcher);
+                // bold=false: overlay рисуется поверх уже отрисованной платформой ячейки и не
+                // может сдвинуть текст правее совпадения — жирный шрифт шире и наезжал на соседние
+                // буквы (тот же баг, что был в PictureDialogHook, см. историю фикса).
+                SmartMatchHighlight.paintTableCellMatchOverlay(e, state.table, (TableItem) e.item, state.currentMatcher,
+                        false, 0, false);
         });
     }
 

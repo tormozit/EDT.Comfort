@@ -143,7 +143,10 @@ public final class FilteredListDialogFilterHook implements IStartup
         table.addListener(SWT.PaintItem, e -> {
             SmartMatcher current = matcher.current();
             if (current != null && !current.isEmpty)
-                SmartMatchHighlight.paintTableCellMatchOverlayFlat(e, table, (TableItem) e.item, current);
+                // bold=false: overlay рисуется поверх уже отрисованной платформой ячейки и не
+                // может сдвинуть текст правее совпадения — жирный шрифт шире и наезжал на соседние
+                // буквы (тот же баг, что был в PictureDialogHook, см. историю фикса).
+                SmartMatchHighlight.paintTableCellMatchOverlayFlat(e, table, (TableItem) e.item, current, false);
         });
 
         filterInput.scheduleFocusWhenReady();
