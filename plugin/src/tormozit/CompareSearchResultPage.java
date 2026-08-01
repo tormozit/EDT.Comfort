@@ -30,8 +30,8 @@ import org.eclipse.swt.SWT;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
-import org.eclipse.swt.events.KeyAdapter;
-import org.eclipse.swt.events.KeyEvent;
+import org.eclipse.swt.events.ControlAdapter;
+import org.eclipse.swt.events.ControlEvent;
 import org.eclipse.swt.events.MouseAdapter;
 import org.eclipse.swt.events.MouseEvent;
 import org.eclipse.swt.graphics.Color;
@@ -43,8 +43,10 @@ import org.eclipse.swt.graphics.TextStyle;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.Table;
+import org.eclipse.swt.widgets.TableColumn;
 import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.swt.widgets.Widget;
@@ -59,29 +61,36 @@ import com._1c.g5.v8.dt.compare.ui.partialmodel.node.IPartialModelNode;
 
 public class CompareSearchResultPage implements ISearchResultPage
 {
+    /** Активная страница для глобального Copy в панели поиска. */
+    private static volatile CompareSearchResultPage activeInstance;
+
     /**
      * Обходной путь (issue #165, платформенная гонка PageBook/CTabFolder — см. описание у вызова):
      * повторно скрывает таблицу, если страница всё ещё деактивирована ({@code this.searchResult
      * == null}) — не трогает состояние, если за это время пришёл новый реальный поиск.
      */
-    private void scheduleForceHide(Table table, int delayMs)
+    private void scheduleForceHide(Control control, int delayMs)
     {
-        Display display = table.getDisplay();
+        Display display = control.getDisplay();
         if (display == null || display.isDisposed())
             return;
         display.timerExec(delayMs, () -> {
-            if (table.isDisposed() || searchResult != null)
+            if (control.isDisposed() || searchResult != null)
                 return;
-            if (table.getVisible())
-                table.setVisible(false);
+            if (control.getVisible())
+                control.setVisible(false);
         });
     }
 
     private String id;
     private ISearchResultViewPart viewPart;
     private IPageSite pageSite;
+    private Composite tableStack;
     private Table table;
     private TableViewer tableViewer;
+    private FormTableInteraction tableInteraction;
+    private TableColumn checkColumn;
+    private Listener copyKeyUpFilter;
 
     private CompareSearchResult searchResult;
     private String queryText;
@@ -119,12 +128,26 @@ public class CompareSearchResultPage implements ISearchResultPage
     @Override
     public void createControl(Composite parent)
     {
+        // FormTableInteraction (accent заголовка) требует родителя Table без layout
+        // либо TableColumnLayout — эталон tableStack в ConfigSearchResultsHook / RecentPlacesView.
+        tableStack = new Composite(parent, SWT.NONE);
+        tableStack.setLayout(null);
+
         // Не SWT.CHECK: EraseItem + StyledCellLabelProvider включают owner-draw,
         // и нативные флажки Win32 не рисуются. Колонка — иконки + клик.
-        table = new Table(parent,
+        table = new Table(tableStack,
             SWT.MULTI | SWT.FULL_SELECTION | SWT.H_SCROLL | SWT.V_SCROLL | SWT.BORDER);
         table.setHeaderVisible(true);
         table.setLinesVisible(true);
+        tableStack.addControlListener(new ControlAdapter()
+        {
+            @Override
+            public void controlResized(ControlEvent e)
+            {
+                if (!table.isDisposed())
+                    table.setBounds(tableStack.getClientArea());
+            }
+        });
 
         tableViewer = new TableViewer(table);
         tableViewer.setContentProvider(ArrayContentProvider.getInstance());
@@ -165,28 +188,22 @@ public class CompareSearchResultPage implements ISearchResultPage
             }
         });
 
-        table.addKeyListener(new KeyAdapter()
-        {
-            @Override
-            public void keyPressed(KeyEvent e)
-            {
-                if ((e.stateMask & SWT.CTRL) != 0 && (e.keyCode == 'c' || e.keyCode == 'C'))
-                    copySelection();
-            }
-        });
-
+        // Фон статуса сравнения — только вне selection; выделение/ячейка — FormTableInteraction.
         table.addListener(SWT.EraseItem, event ->
         {
             event.detail &= ~SWT.HOT;
-            if (event.item.getData() instanceof CompareSearchMatch m)
+            if (!(event.item instanceof TableItem item))
+                return;
+            if (isTableItemSelected(item))
+                return;
+            if (!(item.getData() instanceof CompareSearchMatch m))
+                return;
+            Color bg = getRowBackground(m);
+            if (bg != null)
             {
-                Color bg = getRowBackground(m);
-                if (bg != null)
-                {
-                    event.gc.setBackground(bg);
-                    event.gc.fillRectangle(event.x, event.y, event.width, event.height);
-                    event.detail &= ~SWT.BACKGROUND;
-                }
+                event.gc.setBackground(bg);
+                event.gc.fillRectangle(event.x, event.y, event.width, event.height);
+                event.detail &= ~SWT.BACKGROUND;
             }
         });
 
@@ -209,6 +226,99 @@ public class CompareSearchResultPage implements ISearchResultPage
         table.addListener(SWT.FocusIn, event -> syncChecksFromTree());
 
         installContextMenu();
+
+        tableInteraction = new FormTableInteraction(table, tableViewer);
+        TableColumn[] ownerDraw = new TableColumn[table.getColumnCount() - 1];
+        for (int i = 1; i < table.getColumnCount(); i++)
+            ownerDraw[i - 1] = table.getColumn(i);
+        tableInteraction.setOwnerDrawColumns(ownerDraw);
+        tableInteraction.install();
+        if (checkColumn != null && !checkColumn.isDisposed())
+            checkColumn.setMoveable(false);
+
+        installCopyKeyUpFilter();
+        activeInstance = this;
+    }
+
+    private static boolean isTableItemSelected(TableItem item)
+    {
+        if (item == null || item.isDisposed())
+            return false;
+        Table t = item.getParent();
+        if (t == null || t.isDisposed())
+            return false;
+        for (TableItem sel : t.getSelection())
+        {
+            if (sel == item)
+                return true;
+        }
+        return false;
+    }
+
+    private void installCopyKeyUpFilter()
+    {
+        // Win32: Ctrl+C часто не доходит до KeyDown (нативный акселератор) — см. AGENTS.md.
+        Display display = table.getDisplay();
+        copyKeyUpFilter = event ->
+        {
+            if (table.isDisposed() || !table.isFocusControl())
+                return;
+            if ((event.stateMask & SWT.MOD1) == 0)
+                return;
+            if (event.keyCode != 'c' && event.keyCode != 'C')
+                return;
+            display.asyncExec(this::copyActiveCellToClipboard);
+        };
+        display.addFilter(SWT.KeyUp, copyKeyUpFilter);
+        table.addDisposeListener(e ->
+        {
+            if (copyKeyUpFilter != null && !display.isDisposed())
+                display.removeFilter(SWT.KeyUp, copyKeyUpFilter);
+            copyKeyUpFilter = null;
+        });
+    }
+
+    private void copyActiveCellToClipboard()
+    {
+        if (table == null || table.isDisposed() || tableInteraction == null)
+            return;
+        String text = tableInteraction.activeSelectionText();
+        if (text == null)
+            return;
+        Clipboard clipboard = new Clipboard(table.getDisplay());
+        try
+        {
+            clipboard.setContents(new Object[] { text },
+                new Transfer[] { TextTransfer.getInstance() });
+        }
+        finally
+        {
+            clipboard.dispose();
+        }
+    }
+
+    /** Для {@link CreateDebuggerBreakpoints#installGlobalCopyHandler}: копия активной ячейки. */
+    static boolean copyActiveCellIfFocused()
+    {
+        CompareSearchResultPage page = activeInstance;
+        if (page == null || page.table == null || page.table.isDisposed() || page.tableInteraction == null)
+            return false;
+        if (!page.table.isFocusControl())
+            return false;
+        String text = page.tableInteraction.activeSelectionText();
+        if (text == null)
+            return false;
+        Clipboard clipboard = new Clipboard(page.table.getDisplay());
+        try
+        {
+            clipboard.setContents(new Object[] { text },
+                new Transfer[] { TextTransfer.getInstance() });
+        }
+        finally
+        {
+            clipboard.dispose();
+        }
+        return true;
     }
 
     private void installContextMenu()
@@ -302,11 +412,12 @@ public class CompareSearchResultPage implements ISearchResultPage
     private void addCheckColumn()
     {
         TableViewerColumn col = new TableViewerColumn(tableViewer, SWT.CENTER);
-        col.getColumn().setText("");
-        col.getColumn().setResizable(false);
-        col.getColumn().setMoveable(false);
-        col.getColumn().setWidth(CHECK_COLUMN_WIDTH);
-        col.getColumn().setToolTipText("Объединить" + Global.pluginSignForTooltip());
+        checkColumn = col.getColumn();
+        checkColumn.setText("");
+        checkColumn.setResizable(false);
+        checkColumn.setMoveable(false);
+        checkColumn.setWidth(CHECK_COLUMN_WIDTH);
+        checkColumn.setToolTipText("Объединить" + Global.pluginSignForTooltip());
         // Текст/image через label provider в owner-draw таблице не видны —
         // флажок рисуется в SWT.PaintItem (колонка 0).
         col.setLabelProvider(new ColumnLabelProvider()
@@ -593,11 +704,13 @@ public class CompareSearchResultPage implements ISearchResultPage
             int matchAt = lowerText.indexOf(lowerQuery, idx);
             if (matchAt < 0)
             {
-                ss.append(text.substring(idx));
+                // plainStyler(), а не без стиля вообще — иначе у "голого" куска текста нет ни одного
+                // StyleRange (см. SmartMatchHighlight.plainStyler()).
+                ss.append(text.substring(idx), SmartMatchHighlight.plainStyler());
                 break;
             }
             if (matchAt > idx)
-                ss.append(text.substring(idx, matchAt));
+                ss.append(text.substring(idx, matchAt), SmartMatchHighlight.plainStyler());
             int matchEnd = matchAt + queryText.length();
             ss.append(text.substring(matchAt, Math.min(matchEnd, text.length())), matchStyler);
             idx = matchEnd;
@@ -936,38 +1049,6 @@ public class CompareSearchResultPage implements ISearchResultPage
         treeCheckDirty.set(false);
     }
 
-    private void copySelection()
-    {
-        TableItem[] selection = table.getSelection();
-        if (selection.length == 0)
-            return;
-        StringBuilder sb = new StringBuilder();
-        for (TableItem item : selection)
-        {
-            if (item.getData() instanceof CompareSearchMatch m)
-            {
-                sb.append(isMatchChecked(m) ? "1" : "0").append('\t')
-                  .append(m.getPropertyName()).append('\t')
-                  .append(m.getObjectPath()).append('\t')
-                  .append(m.getMatchText()).append('\t')
-                  .append(m.getComparisonStatus()).append('\t')
-                  .append(m.getColumnSide()).append(System.lineSeparator());
-            }
-        }
-        if (sb.length() == 0)
-            return;
-        Clipboard clipboard = new Clipboard(table.getDisplay());
-        try
-        {
-            clipboard.setContents(new Object[] { sb.toString() },
-                new Transfer[] { TextTransfer.getInstance() });
-        }
-        finally
-        {
-            clipboard.dispose();
-        }
-    }
-
     private void navigateToNode(CompareSearchMatch match)
     {
         if (match == null || searchResult == null)
@@ -1003,7 +1084,10 @@ public class CompareSearchResultPage implements ISearchResultPage
             {
                 tableViewer.setInput(csr.getMatches());
                 syncChecksFromTree();
-                table.setVisible(true);
+                if (tableInteraction != null)
+                    tableInteraction.resyncSelectionTheme();
+                if (tableStack != null && !tableStack.isDisposed())
+                    tableStack.setVisible(true);
             }
             installTreeCheckListener();
         }
@@ -1023,12 +1107,13 @@ public class CompareSearchResultPage implements ISearchResultPage
                 // возвращает getVisible()=true без прохождения публичного Control.setVisible() (не
                 // ловится ни точечным, ни глобальным SWT.Show listener — проверено). Обходной путь —
                 // повторно скрывать её, пока страница остаётся деактивированной.
-                table.setVisible(false);
-                scheduleForceHide(table, 50);
-                scheduleForceHide(table, 200);
-                scheduleForceHide(table, 500);
-                scheduleForceHide(table, 1000);
-                scheduleForceHide(table, 2000);
+                Control pageControl = tableStack != null ? tableStack : table;
+                pageControl.setVisible(false);
+                scheduleForceHide(pageControl, 50);
+                scheduleForceHide(pageControl, 200);
+                scheduleForceHide(pageControl, 500);
+                scheduleForceHide(pageControl, 1000);
+                scheduleForceHide(pageControl, 2000);
             }
         }
     }
@@ -1037,6 +1122,8 @@ public class CompareSearchResultPage implements ISearchResultPage
     public void setViewPart(ISearchResultViewPart part)
     {
         this.viewPart = part;
+        if (part != null)
+            CreateDebuggerBreakpoints.installGlobalCopyHandler(part);
     }
 
     @Override
@@ -1053,8 +1140,12 @@ public class CompareSearchResultPage implements ISearchResultPage
     @Override
     public void dispose()
     {
+        if (activeInstance == this)
+            activeInstance = null;
         uninstallTreeCheckListener();
         disposeCheckImages();
+        tableInteraction = null;
+        tableStack = null;
         table = null;
         tableViewer = null;
         searchResult = null;
@@ -1076,7 +1167,7 @@ public class CompareSearchResultPage implements ISearchResultPage
     @Override
     public Control getControl()
     {
-        return table;
+        return tableStack != null ? tableStack : table;
     }
 
     @Override

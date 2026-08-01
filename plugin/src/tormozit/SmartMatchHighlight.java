@@ -71,6 +71,28 @@ public final class SmartMatchHighlight
         };
     }
 
+    /**
+     * No-op стиль (не меняет ни fg, ни bg, ни font) — для "голых" кусков текста в
+     * {@code StyledString}, собираемой по частям вместе с подсвеченными фрагментами
+     * ({@link #textOnlyStyler}). Без ЯВНОГО {@code Styler} такой кусок вообще не получает
+     * {@code StyleRange}, и {@code StyledCellLabelProvider} на ВЫДЕЛЕННОЙ строке рисует его
+     * нативным цветом selection вместо кастомного фона плагина (виден как чужеродная плашка).
+     * {@code StyledString} не даёт публичного доступа к своему внутреннему no-op стилю —
+     * этот метод его заменяет.
+     */
+    public static Styler plainStyler()
+    {
+        return PLAIN_STYLER;
+    }
+
+    private static final Styler PLAIN_STYLER = new Styler()
+    {
+        @Override
+        public void applyStyles(TextStyle textStyle)
+        {
+        }
+    };
+
     /** Только жирный шрифт — для совпадений на выбранной строке (без fg/bg). */
     public static Styler boldOnlyStyler()
     {

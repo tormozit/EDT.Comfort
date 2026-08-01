@@ -46,9 +46,9 @@ import com._1c.g5.v8.dt.stacktraces.model.IStacktraceError;
  * клик — общий {@code SWT.MouseDoubleClick} фильтр Display (с проверкой, что активная часть
  * workbench — именно эта панель; двойной клик по строке сам активирует часть), а не привязка
  * к дереву конкретной страницы. Копирование — переопределение обработчика команды на самом view
- * ({@code IViewSite.getService(IHandlerService.class).activateHandler(...)}, как
- * {@code CreateDebuggerBreakpoints.installGlobalCopyHandler}) — активация на этом уровне перебивает
- * штатный обработчик, зарегистрированный EDT через {@code org.eclipse.ui.handlers}.
+ * ({@code IViewSite.getService(IHandlerService.class).activateHandler(...)}) — активация на этом
+ * уровне перебивает штатный обработчик, зарегистрированный EDT через
+ * {@code org.eclipse.ui.handlers}.
  */
 public final class StacktracesViewInteractionHook implements IStartup
 {

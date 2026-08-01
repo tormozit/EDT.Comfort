@@ -5,6 +5,10 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
+import org.eclipse.core.commands.ExecutionEvent;
+import org.eclipse.core.commands.ExecutionException;
+import org.eclipse.core.commands.IExecutionListener;
+import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.Platform;
@@ -27,6 +31,7 @@ import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.PartInitException;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.ui.dialogs.PreferencesUtil;
 import org.osgi.framework.Bundle;
 
@@ -42,10 +47,14 @@ import com._1c.g5.v8.dt.debug.core.model.breakpoints.IBslLineBreakpoint;
  * <li>{@link #installToolbarAction} — общая кнопка тулбара (идемпотентно, сработает только первый
  * вызов); оба хука предоставляют {@code currentBreakpointTargets(IViewPart)}, возвращающий
  * {@code null}, если их страница результатов сейчас не активна.</li>
- * <li>{@link #installGlobalCopyHandler} — общий {@code IHandlerService}-перехват
- * "org.eclipse.ui.edit.copy": если оба хука по отдельности активируют обработчик этой же команды
- * на этом же view, второй молча перебивает первый (даже когда фокус не на его таблице) — здесь
- * единственная активация на view, диспетчеризующая по тому, у чьей таблицы сейчас фокус.</li>
+ * <li>{@link #installGlobalCopyHandler} — общий перехват "org.eclipse.ui.edit.copy" через
+ * {@code ICommandService.addExecutionListener} (как {@link GitHistoryFileColumnsHook}). Штатный
+ * {@code AbstractTextSearchViewPage} при создании КАЖДОЙ страницы результатов вызывает
+ * {@code setGlobalActionHandler(COPY, fCopyToClipboardAction)} и перебивает любую одиночную
+ * {@code IHandlerService}-активацию на view — поэтому диспетчеризация не через handler, а через
+ * {@code postExecuteSuccess}/{@code notHandled} команды: после штатного копирования дерева буфер
+ * перезаписывается текстом активной ячейки той таблицы, у которой сейчас фокус (compare → file
+ * → config). Когда фокус не на наших таблицах, штатное копирование не трогается.</li>
  * </ul>
  */
 final class CreateDebuggerBreakpoints
@@ -54,56 +63,85 @@ final class CreateDebuggerBreakpoints
     /** Как {@code com._1c.g5.v8.dt.internal.debug.core.model.breakpoints.BslLineBreakpoint.getModelIdentifier()}. */
     private static final String BSL_DEBUG_MODEL_ID = "com._1c.g5.v8.dt.debug";
 
-    private static final java.util.Set<IViewPart> COPY_HANDLER_INSTALLED =
-        java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
+    private static final String COPY_COMMAND_ID = "org.eclipse.ui.edit.copy"; //$NON-NLS-1$
+    private static boolean copyExecutionListenerInstalled;
 
     private CreateDebuggerBreakpoints() {}
 
     /**
-     * Единственная активация "org.eclipse.ui.edit.copy" на этом view — идемпотентно (повторные
-     * вызовы для того же view игнорируются, независимо от того, кто из двух хуков вызвал первым).
+     * Гарантирует установку общего перехвата "org.eclipse.ui.edit.copy" (идемпотентно — один
+     * глобальный {@code IExecutionListener} на workbench). Каждый из трёх хуков панели результатов
+     * вызывает этот метод, когда создаёт свою страницу; сам перехват от конкретного view не
+     * зависит и не перебивается штатной активацией handler'а на новой странице.
      */
     static void installGlobalCopyHandler(IViewPart view)
     {
         if (view == null || view.getSite() == null)
             return;
-        if (!COPY_HANDLER_INSTALLED.add(view))
-            return;
+        installCopyExecutionListener();
+    }
 
-        org.eclipse.ui.handlers.IHandlerService handlerService =
-            view.getSite().getService(org.eclipse.ui.handlers.IHandlerService.class);
-        if (handlerService == null)
-        {
-            try
-            {
-                handlerService = PlatformUI.getWorkbench().getService(org.eclipse.ui.handlers.IHandlerService.class);
-            }
-            catch (Exception e) { /* ignore */ }
-        }
-        if (handlerService == null)
-        {
-            COPY_HANDLER_INSTALLED.remove(view);
+    private static void installCopyExecutionListener()
+    {
+        if (copyExecutionListenerInstalled || PlatformUI.getWorkbench() == null)
             return;
-        }
-        handlerService.activateHandler("org.eclipse.ui.edit.copy", //$NON-NLS-1$
-            new org.eclipse.core.commands.AbstractHandler()
+        ICommandService commandService =
+            PlatformUI.getWorkbench().getService(ICommandService.class);
+        if (commandService == null)
+            return;
+        commandService.addExecutionListener(new IExecutionListener()
         {
             @Override
-            public Object execute(org.eclipse.core.commands.ExecutionEvent event)
+            public void preExecute(String commandId, ExecutionEvent event)
             {
-                if (!ComfortSettings.isReplaceListFiltersEnabled())
-                    return null;
-                if (!FileSearchResultsHook.copyActiveCellIfFocused())
-                    ConfigSearchResultsHook.copyActiveCellIfFocused();
-                return null;
             }
 
             @Override
-            public boolean isHandled()
+            public void postExecuteSuccess(String commandId, Object returnValue)
             {
-                return ComfortSettings.isReplaceListFiltersEnabled();
+                handlePossibleActiveCellCopy(commandId);
+            }
+
+            @Override
+            public void notHandled(String commandId, NotHandledException exception)
+            {
+                handlePossibleActiveCellCopy(commandId);
+            }
+
+            @Override
+            public void postExecuteFailure(String commandId, ExecutionException exception)
+            {
             }
         });
+        copyExecutionListenerInstalled = true;
+    }
+
+    /**
+     * Если фокус сейчас на таблице одного из хуков панели результатов — перезаписывает буфер
+     * текстом активной ячейки. Вызывается из {@code postExecuteSuccess} (штатный handler команды
+     * уже положил текст дерева — перебиваем его, как {@code GitHistoryFileColumnsHook}) и из
+     * {@code notHandled} (обработчика нет вовсе). Когда фокус не на наших таблицах — бездействуем,
+     * оставляя штатное копирование.
+     */
+    private static void handlePossibleActiveCellCopy(String commandId)
+    {
+        if (!COPY_COMMAND_ID.equals(commandId))
+            return;
+        Global.tempLog("search-copy-dispatch", "dispatch: entered, commandId=" + commandId);
+        boolean compare = CompareSearchResultPage.copyActiveCellIfFocused();
+        Global.tempLog("search-copy-dispatch", "dispatch: compareCopied=" + compare);
+        if (compare)
+            return;
+        boolean setting = ComfortSettings.isReplaceListFiltersEnabled();
+        Global.tempLog("search-copy-dispatch", "dispatch: replaceListFilters=" + setting);
+        if (!setting)
+            return;
+        boolean fileCopied = FileSearchResultsHook.copyActiveCellIfFocused();
+        boolean configCopied = false;
+        if (!fileCopied)
+            configCopied = ConfigSearchResultsHook.copyActiveCellIfFocused();
+        Global.tempLog("search-copy-dispatch", "dispatch: fileCopied=" + fileCopied
+            + " configCopied=" + configCopied);
     }
 
     record Target(IFile file, int lineNumber) {}

@@ -10,7 +10,7 @@ import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.MenuManager;
-import org.eclipse.jface.viewers.CellLabelProvider;
+import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
@@ -26,7 +26,6 @@ import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.jface.viewers.TableViewer;
 import org.eclipse.jface.viewers.TableViewerColumn;
 import org.eclipse.jface.viewers.TreeViewer;
-import org.eclipse.jface.viewers.ViewerCell;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.search.internal.ui.text.FileMatch;
 import org.eclipse.search.internal.ui.text.LineElement;
@@ -376,13 +375,14 @@ public final class FileSearchResultsHook implements IStartup
             int w = pathCol.getColumn().getWidth();
             if (w > 0) ComfortSettings.setFileSearchColumnWidth("path", w);
         });
-        pathCol.setLabelProvider(new CellLabelProvider()
+        pathCol.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
-            public void update(ViewerCell cell)
+            public String getText(Object element)
             {
-                if (cell.getElement() instanceof FileSearchRow row)
-                    cell.setText(row.path != null ? row.path : "");
+                if (element instanceof FileSearchRow row)
+                    return row.path != null ? row.path : ""; //$NON-NLS-1$
+                return ""; //$NON-NLS-1$
             }
         });
         TABLE_COLUMNS_BY_VIEWER.put(tableViewer, pathCol.getColumn());
@@ -396,13 +396,14 @@ public final class FileSearchResultsHook implements IStartup
             int w = fileCol.getColumn().getWidth();
             if (w > 0) ComfortSettings.setFileSearchColumnWidth("file", w);
         });
-        fileCol.setLabelProvider(new CellLabelProvider()
+        fileCol.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
-            public void update(ViewerCell cell)
+            public String getText(Object element)
             {
-                if (cell.getElement() instanceof FileSearchRow row)
-                    cell.setText(row.file != null ? row.file : "");
+                if (element instanceof FileSearchRow row)
+                    return row.file != null ? row.file : ""; //$NON-NLS-1$
+                return ""; //$NON-NLS-1$
             }
         });
 
@@ -415,13 +416,14 @@ public final class FileSearchResultsHook implements IStartup
             int w = lineCol.getColumn().getWidth();
             if (w > 0) ComfortSettings.setFileSearchColumnWidth("line", w);
         });
-        lineCol.setLabelProvider(new CellLabelProvider()
+        lineCol.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
-            public void update(ViewerCell cell)
+            public String getText(Object element)
             {
-                if (cell.getElement() instanceof FileSearchRow row)
-                    cell.setText(row.lineNumber > 0 ? String.valueOf(row.lineNumber) : "");
+                if (element instanceof FileSearchRow row)
+                    return row.lineNumber > 0 ? String.valueOf(row.lineNumber) : ""; //$NON-NLS-1$
+                return ""; //$NON-NLS-1$
             }
         });
 
@@ -450,8 +452,10 @@ public final class FileSearchResultsHook implements IStartup
                 {
                     int off = row.matchOffsets[i];
                     int len = row.matchLengths[i];
+                    // plainStyler(), а не без стиля вообще — иначе у "голого" куска текста нет ни
+                    // одного StyleRange (см. SmartMatchHighlight.plainStyler()).
                     if (off > pos)
-                        ss.append(text.substring(pos, off));
+                        ss.append(text.substring(pos, off), SmartMatchHighlight.plainStyler());
                     int end = off + len;
                     if (end > text.length()) end = text.length();
                     if (end > off)
@@ -459,7 +463,7 @@ public final class FileSearchResultsHook implements IStartup
                     pos = end;
                 }
                 if (pos < text.length())
-                    ss.append(text.substring(pos));
+                    ss.append(text.substring(pos), SmartMatchHighlight.plainStyler());
                 return ss;
             }
 
@@ -495,28 +499,12 @@ public final class FileSearchResultsHook implements IStartup
             }
         });
 
-        FormTableInteraction interaction = new FormTableInteraction(table, tableViewer,
-            FileSearchResultsHook::fileSearchCellText);
+        FormTableInteraction interaction = new FormTableInteraction(table, tableViewer);
         interaction.setOwnerDrawColumns(textCol.getColumn());
         interaction.install();
         cachedTableInteraction = interaction;
 
         return tableViewer;
-    }
-
-    /** Текст ячейки по индексу колонки (0=Путь,1=Файл,2=Номер строки,3=Текст) — для {@link FormTableInteraction}. */
-    private static String fileSearchCellText(TableItem item, int column)
-    {
-        if (!(item.getData() instanceof FileSearchRow row))
-            return "";
-        return switch (column)
-        {
-            case 0 -> row.path != null ? row.path : "";
-            case 1 -> row.file != null ? row.file : "";
-            case 2 -> row.lineNumber > 0 ? String.valueOf(row.lineNumber) : "";
-            case 3 -> row.text != null ? row.text : "";
-            default -> "";
-        };
     }
 
     private static int compareStrings(String a, String b)
@@ -659,6 +647,7 @@ public final class FileSearchResultsHook implements IStartup
         if (interaction == null)
             return false;
         String text = interaction.activeSelectionText();
+        Global.tempLog("search-copy-dispatch", "file.copySelectedRowsToClipboard: text=" + logShort(text));
         if (text == null)
             return false;
 
@@ -672,6 +661,13 @@ public final class FileSearchResultsHook implements IStartup
             cb.dispose();
         }
         return true;
+    }
+
+    private static String logShort(String s)
+    {
+        if (s == null)
+            return "null";
+        return s.length() > 120 ? s.substring(0, 120) + "…(" + s.length() + ")" : s;
     }
 
     private static void registerOpenHandler(TableViewer tableViewer,
@@ -1169,6 +1165,7 @@ public final class FileSearchResultsHook implements IStartup
                 return;
             if (event.keyCode != 'c' && event.keyCode != 'C')
                 return;
+            Global.tempLog("search-copy-dispatch", "file.KeyUp filter: firing async copy");
             display.asyncExec(() -> copySelectedRowsToClipboard(tableViewer));
         });
 
@@ -1184,11 +1181,18 @@ public final class FileSearchResultsHook implements IStartup
     {
         TableViewer tableViewer = cachedResultTableViewer;
         if (tableViewer == null)
+        {
+            Global.tempLog("search-copy-dispatch", "file.copyActiveCellIfFocused: cachedResultTableViewer=null");
             return false;
+        }
         Table table = tableViewer.getTable();
-        if (table == null || table.isDisposed() || !table.isFocusControl())
+        boolean focused = table != null && !table.isDisposed() && table.isFocusControl();
+        Global.tempLog("search-copy-dispatch", "file.copyActiveCellIfFocused: table=" + table + " focus=" + focused);
+        if (!focused)
             return false;
-        return copySelectedRowsToClipboard(tableViewer);
+        boolean copied = copySelectedRowsToClipboard(tableViewer);
+        Global.tempLog("search-copy-dispatch", "file.copyActiveCellIfFocused: result=" + copied);
+        return copied;
     }
 
     private static void reinstallHandlers(Object page, IViewPart view)

@@ -20,7 +20,7 @@ import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.text.source.SourceViewer;
-import org.eclipse.jface.viewers.CellLabelProvider;
+import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
@@ -32,7 +32,6 @@ import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.jface.viewers.TableViewer;
 import org.eclipse.jface.viewers.TableViewerColumn;
 import org.eclipse.jface.viewers.TreeViewer;
-import org.eclipse.jface.viewers.ViewerCell;
 import org.eclipse.search.ui.IQueryListener;
 import org.eclipse.search.ui.ISearchQuery;
 import org.eclipse.search.ui.ISearchResultPage;
@@ -359,13 +358,14 @@ public final class ConfigSearchResultsHook implements IStartup
             if (w > 0) ComfortSettings.setConfigSearchMatchColumnWidth("path", w); //$NON-NLS-1$
         });
         cachedMatchPathColumn = pathCol.getColumn();
-        pathCol.setLabelProvider(new CellLabelProvider()
+        pathCol.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
-            public void update(ViewerCell cell)
+            public String getText(Object element)
             {
-                if (cell.getElement() instanceof MatchRow row)
-                    cell.setText(row.path != null ? row.path : ""); //$NON-NLS-1$
+                if (element instanceof MatchRow row)
+                    return row.path != null ? row.path : ""; //$NON-NLS-1$
+                return ""; //$NON-NLS-1$
             }
         });
 
@@ -377,13 +377,14 @@ public final class ConfigSearchResultsHook implements IStartup
             int w = propertyCol.getColumn().getWidth();
             if (w > 0) ComfortSettings.setConfigSearchMatchColumnWidth("property", w); //$NON-NLS-1$
         });
-        propertyCol.setLabelProvider(new CellLabelProvider()
+        propertyCol.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
-            public void update(ViewerCell cell)
+            public String getText(Object element)
             {
-                if (cell.getElement() instanceof MatchRow row)
-                    cell.setText(row.property != null ? row.property : ""); //$NON-NLS-1$
+                if (element instanceof MatchRow row)
+                    return row.property != null ? row.property : ""; //$NON-NLS-1$
+                return ""; //$NON-NLS-1$
             }
         });
 
@@ -395,13 +396,14 @@ public final class ConfigSearchResultsHook implements IStartup
             int w = lineCol.getColumn().getWidth();
             if (w > 0) ComfortSettings.setConfigSearchMatchColumnWidth("line", w); //$NON-NLS-1$
         });
-        lineCol.setLabelProvider(new CellLabelProvider()
+        lineCol.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
-            public void update(ViewerCell cell)
+            public String getText(Object element)
             {
-                if (cell.getElement() instanceof MatchRow row)
-                    cell.setText(row.lineNumber > 0 ? String.valueOf(row.lineNumber) : ""); //$NON-NLS-1$
+                if (element instanceof MatchRow row)
+                    return row.lineNumber > 0 ? String.valueOf(row.lineNumber) : ""; //$NON-NLS-1$
+                return ""; //$NON-NLS-1$
             }
         });
 
@@ -468,8 +470,7 @@ public final class ConfigSearchResultsHook implements IStartup
             else
                 log("installMatchTableSplitPane: treePart недоступен, штатная таблица не скрыта"); //$NON-NLS-1$
         }
-        FormTableInteraction interaction = new FormTableInteraction(matchTable, matchViewer,
-            ConfigSearchResultsHook::matchCellText);
+        FormTableInteraction interaction = new FormTableInteraction(matchTable, matchViewer);
         interaction.setOwnerDrawColumns(textCol.getColumn());
         interaction.install();
 
@@ -1575,21 +1576,6 @@ public final class ConfigSearchResultsHook implements IStartup
                 return;
             SearchMatchScrollSupport.applyLeftmost(widget, selection.x, selection.x + Math.max(0, selection.y));
         });
-    }
-
-    /** Текст ячейки по индексу колонки (0=Путь,1=Свойство,2=Строка,3=Текст) — для {@link FormTableInteraction}. */
-    private static String matchCellText(TableItem item, int column)
-    {
-        if (!(item.getData() instanceof MatchRow row))
-            return ""; //$NON-NLS-1$
-        return switch (column)
-        {
-            case 0 -> row.path != null ? row.path : ""; //$NON-NLS-1$
-            case 1 -> row.property != null ? row.property : ""; //$NON-NLS-1$
-            case 2 -> row.lineNumber > 0 ? String.valueOf(row.lineNumber) : ""; //$NON-NLS-1$
-            case 3 -> row.text != null ? row.text : ""; //$NON-NLS-1$
-            default -> ""; //$NON-NLS-1$
-        };
     }
 
     private static void installMatchTableCopyHandler(TableViewer matchViewer, IViewPart view)
@@ -3603,12 +3589,14 @@ public final class ConfigSearchResultsHook implements IStartup
         TableViewer matchViewer = cachedMatchTableViewer;
         Control styleContext = matchViewer != null ? matchViewer.getTable() : null;
         StyledString ss = new StyledString();
+        // plainStyler(), а не без стиля вообще — иначе у "голого" куска текста нет ни одного
+        // StyleRange (см. SmartMatchHighlight.plainStyler()).
         if (relOff > 0)
-            ss.append(line.substring(0, relOff));
+            ss.append(line.substring(0, relOff), SmartMatchHighlight.plainStyler());
         if (relEnd > relOff)
             ss.append(line.substring(relOff, relEnd), SmartMatchHighlight.textOnlyStyler(styleContext));
         if (relEnd < line.length())
-            ss.append(line.substring(relEnd));
+            ss.append(line.substring(relEnd), SmartMatchHighlight.plainStyler());
         return ss;
     }
 

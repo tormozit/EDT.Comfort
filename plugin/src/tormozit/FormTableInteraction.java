@@ -6,9 +6,15 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
 
+import org.eclipse.jface.viewers.CellLabelProvider;
+import org.eclipse.jface.viewers.ColumnLabelProvider;
+import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
+import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.StructuredSelection;
+import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.jface.viewers.TableViewer;
+import org.eclipse.jface.viewers.ViewerCell;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
@@ -22,7 +28,6 @@ import org.eclipse.swt.events.SelectionEvent;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Device;
 import org.eclipse.swt.graphics.GC;
-import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.graphics.Rectangle;
@@ -62,6 +67,7 @@ final class FormTableInteraction
     private static final TableColumn[] NO_OWNER_DRAW_COLUMNS = new TableColumn[0];
 
     private final Table table;
+    /** Опциональный override; иначе текст из label provider / {@code TableItem.getText}. */
     private final FormTableCellAccess cellAccess;
 
     private Runnable selectionSync;
@@ -76,7 +82,6 @@ final class FormTableInteraction
     private Color ownedRowBg;
     private Color ownedInactiveRowBg;
     private Color ownedActiveCellBg;
-    private Color ownedSelectionFg;
     private Color ownedHeaderAccentBg;
     private Color ownedHeaderSeparatorBg;
 
@@ -105,6 +110,12 @@ final class FormTableInteraction
         this.cellAccess = cellAccess;
     }
 
+    /** Текст ячейки — из label provider колонок {@code viewer} (универсально). */
+    FormTableInteraction(Table table, TableViewer viewer)
+    {
+        this(table, viewer, null);
+    }
+
     FormTableInteraction(Table table, TableViewer viewer, FormTableCellAccess cellAccess)
     {
         this(table, cellAccess);
@@ -117,6 +128,143 @@ final class FormTableInteraction
         selectionSync = viewer == null
             ? null
             : () -> syncTableViewerSelection(table, viewer);
+    }
+
+    /**
+     * Текст ячейки для копирования / dark-theme paint:
+     * 1) явный {@link FormTableCellAccess}, если задан;
+     * 2) label provider колонки {@link TableViewer} (в т.ч. {@link CellLabelProvider} через update);
+     * 3) {@link TableItem#getText(int)}.
+     */
+    private String resolveCellText(TableItem item, int column)
+    {
+        if (item == null || item.isDisposed())
+            return ""; //$NON-NLS-1$
+        String result;
+        if (cellAccess != null)
+        {
+            String custom = cellAccess.cellText(item, column);
+            result = custom != null ? custom : ""; //$NON-NLS-1$
+        }
+        else
+        {
+            Object element = item.getData();
+            if (multiSelectViewer != null && element != null && column >= 0)
+            {
+                String fromProvider = textFromColumnLabelProvider(multiSelectViewer, item, column, element);
+                if (fromProvider != null && !fromProvider.isEmpty())
+                    result = fromProvider;
+                else
+                {
+                    String plain = item.getText(column);
+                    result = plain != null ? plain : ""; //$NON-NLS-1$
+                }
+            }
+            else
+            {
+                String plain = item.getText(column);
+                result = plain != null ? plain : ""; //$NON-NLS-1$
+            }
+        }
+        Global.tempLog("search-copy-dispatch", "resolveCellText: column=" + column
+            + " element=" + (item.getData() != null ? item.getData().getClass().getSimpleName() : "null")
+            + " result=" + logShort(result));
+        return result;
+    }
+
+    private static String logShort(String s)
+    {
+        if (s == null)
+            return "null";
+        return s.length() > 120 ? s.substring(0, 120) + "…(" + s.length() + ")" : s;
+    }
+
+    private static String textFromColumnLabelProvider(
+        TableViewer viewer,
+        TableItem item,
+        int column,
+        Object element)
+    {
+        if (viewer == null || element == null || column < 0)
+            return null;
+        CellLabelProvider cellLp;
+        try
+        {
+            cellLp = viewer.getLabelProvider(column);
+        }
+        catch (RuntimeException ignored)
+        {
+            Global.tempLog("search-copy-dispatch", "textFromColumnLabelProvider: getLabelProvider(" + column + ") threw "
+                + ignored);
+            return null;
+        }
+        Global.tempLog("search-copy-dispatch", "textFromColumnLabelProvider: column=" + column
+            + " provider=" + (cellLp != null ? cellLp.getClass().getSimpleName() : "null"));
+        if (cellLp == null)
+            return null;
+        if (cellLp instanceof SelectionAwareStyledCellLabelProvider selectionAware)
+        {
+            String s = selectionAware.textForCopy(element);
+            if (s != null && !s.isEmpty())
+                return s;
+        }
+        if (cellLp instanceof DelegatingStyledCellLabelProvider delegating)
+        {
+            DelegatingStyledCellLabelProvider.IStyledLabelProvider styled = delegating.getStyledStringProvider();
+            if (styled != null)
+            {
+                StyledString ss = styled.getStyledText(element);
+                if (ss != null)
+                {
+                    String s = ss.getString();
+                    if (s != null && !s.isEmpty())
+                        return s;
+                }
+            }
+        }
+        if (cellLp instanceof ColumnLabelProvider columnLp)
+        {
+            String t = columnLp.getText(element);
+            if (t != null && !t.isEmpty())
+                return t;
+        }
+        if (cellLp instanceof ILabelProvider labelProvider)
+        {
+            String t = labelProvider.getText(element);
+            if (t != null && !t.isEmpty())
+                return t;
+        }
+        // CellLabelProvider без getText (как «Файл»/«Номер строки» в поиске по файлам):
+        // update(ViewerCell) заполняет текст, иначе item.getText пуст и Ctrl+C уходит в дерево.
+        return textFromViewerCellAfterUpdate(viewer, item, column, cellLp);
+    }
+
+    private static String textFromViewerCellAfterUpdate(
+        TableViewer viewer,
+        TableItem item,
+        int column,
+        CellLabelProvider cellLp)
+    {
+        if (viewer == null || item == null || item.isDisposed() || cellLp == null || column < 0)
+            return null;
+        Rectangle bounds = item.getBounds(column);
+        if (bounds == null || bounds.width <= 0 || bounds.height <= 0)
+            return null;
+        int x = bounds.x + Math.max(1, Math.min(bounds.width / 2, bounds.width - 1));
+        int y = bounds.y + Math.max(0, bounds.height / 2);
+        ViewerCell cell = viewer.getCell(new Point(x, y));
+        if (cell == null || cell.getItem() != item || cell.getColumnIndex() != column)
+            return null;
+        try
+        {
+            cellLp.update(cell);
+        }
+        catch (RuntimeException ignored)
+        {
+            return null;
+        }
+        String t = cell.getText();
+        return t != null && !t.isEmpty() ? t : null;
     }
 
     static void syncTableViewerSelection(Table table, TableViewer viewer)
@@ -171,7 +319,6 @@ final class FormTableInteraction
         focusListener = e ->
         {
             invalidateHighlightColor();
-            syncSelectedRowForeground();
             redrawSelectedRows();
             redrawHeader();
         };
@@ -196,7 +343,6 @@ final class FormTableInteraction
                 return null;
             return new Color(t.getDisplay(), bg.getRGB());
         }, "formTable"); //$NON-NLS-1$
-        table.getDisplay().asyncExec(this::syncSelectedRowForeground);
         table.addDisposeListener(e -> dispose());
     }
 
@@ -208,10 +354,20 @@ final class FormTableInteraction
         disposeColors();
     }
 
-    /** После {@code viewer.refresh()} / {@code setInput} — plain-колонки теряют fg selection. */
+    /**
+     * После {@code viewer.refresh()} / {@code setInput} — перерисовать подсветку выделения.
+     * Проходит по ВСЕМ строкам (не только выделенным) — SWT переиспользует {@code TableItem} между
+     * refresh-ами; если под тем же физическим индексом раньше была выделенная строка с уже
+     * выставленным {@link #syncCellBackgrounds} фоном, а после refresh она перестала быть
+     * выделенной, фон нужно явно сбросить — иначе он останется от предыдущих данных.
+     */
     void resyncSelectionTheme()
     {
-        syncSelectedRowForeground();
+        if (!table.isDisposed() && ListSelectionThemeColors.isDarkList(table))
+        {
+            for (TableItem item : table.getItems())
+                syncCellBackgrounds(item);
+        }
         redrawSelectedRows();
     }
 
@@ -451,14 +607,12 @@ final class FormTableInteraction
             redrawSelectedRows();
             if (previousActive != null && !isRowSelected(previousActive))
                 redrawRow(previousActive);
-            syncSelectedRowForeground();
         }
         else
         {
             redrawRow(previousActive);
             redrawRow(selectedItem);
         }
-        syncSelectedRowForeground();
         redrawHeader();
         if (suppressTableToViewerSync <= 0)
             syncSelection();
@@ -541,9 +695,12 @@ final class FormTableInteraction
         TableItem item = selectedItem != null && !selectedItem.isDisposed()
             ? selectedItem
             : currentSelectedRow();
-        if (item == null || item.isDisposed() || activeColumnIndex() < 0)
+        int idx = activeColumnIndex();
+        Global.tempLog("search-copy-dispatch", "activeCellText: itemData=" + (item != null ? item.getData() : "null")
+            + " activeColumnIndex=" + idx + " selectedItemLive=" + (selectedItem != null && !selectedItem.isDisposed()));
+        if (item == null || item.isDisposed() || idx < 0)
             return null;
-        String text = cellAccess.cellText(item, activeColumnIndex());
+        String text = resolveCellText(item, idx);
         return text != null ? text : ""; //$NON-NLS-1$
     }
 
@@ -570,12 +727,16 @@ final class FormTableInteraction
         {
             if (i > 0)
                 sb.append('\n');
-            String text = cellAccess.cellText(selection[i], column);
+            String text = resolveCellText(selection[i], column);
             sb.append(text != null ? text : ""); //$NON-NLS-1$
         }
         return sb.toString();
     }
 
+    /**
+     * Только фон ячейки строки под курсором — текст (в т.ч. его цвет, выравнивание, обрезка)
+     * остаётся штатной отрисовкой SWT, как у невыделенных строк.
+     */
     private void onEraseItem(Event e)
     {
         if (!(e.item instanceof TableItem item) || !isRowSelected(item))
@@ -583,19 +744,28 @@ final class FormTableInteraction
         Color bg = selectionCellBackground(table, item, e.index);
         if (bg == null)
             return;
+        // Одна и та же отрисовка для обеих тем. Раньше тёмная шла через
+        // ListSelectionThemeColors.fillSelectionBackground со своим расчётом границ
+        // (item.getBounds(col) + растягивание последней колонки до края клиентской области) —
+        // из-за этого прямоугольник ячейки не совпадал с тем, что заливает светлая тема, и
+        // различие «активная ячейка / прочие ячейки текущей строки» в тёмной теме пропадало.
+        // В светлой теме оформление всегда было единообразным именно потому, что здесь
+        // заливается ровно прямоугольник ячейки из события.
+        e.gc.setBackground(bg);
+        e.gc.fillRectangle(e.x, e.y, e.width, e.height);
+        e.detail &= ~SWT.BACKGROUND;
         if (ListSelectionThemeColors.isDarkList(table))
         {
-            ListSelectionThemeColors.fillSelectionBackground(e, table, item, bg);
-            Color fg = selectionForeground();
-            if (fg != null)
-                e.gc.setForeground(fg);
+            // Заливка выше кладёт верный цвет в верный прямоугольник (подтверждено логом
+            // formtable-erase), но с оставшимся флагом SELECTED Windows дорисовывает поверх неё
+            // СВОЮ подсветку выделения — единым цветом на всю строку, стирая различие «активная
+            // ячейка / прочие ячейки текущей строки». Заметно это было только в обычных колонках:
+            // owner-draw колонка («Текст») переживала затирание, т.к. её фон кладётся повторно
+            // позже, в фазе PaintItem (installSelectionPrePaintFilter).
+            // Только тёмная тема — в светлой оформление и так корректно, поведение не меняем.
+            e.detail &= ~SWT.SELECTED;
+            e.detail &= ~SWT.HOT;
         }
-        else
-        {
-            e.gc.setBackground(bg);
-            e.gc.fillRectangle(e.x, e.y, e.width, e.height);
-        }
-        e.detail &= ~SWT.BACKGROUND;
     }
 
     private Color selectionCellBackground(Table t, TableItem item, int column)
@@ -606,55 +776,15 @@ final class FormTableInteraction
         Color rowBg = activeRow ? rowSelectionBackground() : inactiveRowSelectionBackground();
         if (rowBg == null)
             return null;
-        if (activeRow && column == activeColumnIndex())
+        boolean isActiveCell = activeRow && column == activeColumnIndex();
+        if (isActiveCell)
             return activeCellBackground(rowBg);
         return rowBg;
     }
 
-    private Color selectionForeground()
-    {
-        if (ownedSelectionFg != null && !ownedSelectionFg.isDisposed())
-            return ownedSelectionFg;
-        Color resolved = ListSelectionThemeColors.listSelectionForeground(table);
-        if (resolved == null)
-            return null;
-        ownedSelectionFg = new Color(table.getDisplay(), resolved.getRGB());
-        return ownedSelectionFg;
-    }
-
-    /** Plain-колонки: светлый текст на кастомном фоне selection в тёмной теме. */
-    private void syncSelectedRowForeground()
-    {
-        if (table == null || table.isDisposed())
-            return;
-        Color selFg = selectionForeground();
-        if (selFg == null)
-            return;
-        int cols = table.getColumnCount();
-        for (TableItem item : table.getItems())
-        {
-            if (item == null || item.isDisposed())
-                continue;
-            boolean isSel = isRowSelected(item);
-            for (int c = 0; c < cols; c++)
-            {
-                // Owner-draw колонки (напр. "Текст" с DelegatingStyledCellLabelProvider) красят себя
-                // сами через StyledString/StyleRange — единый foreground здесь затирал бы их
-                // собственную (в т.ч. подсветку вхождения) раскраску текста.
-                if (isOwnerDrawColumn(c))
-                    continue;
-                item.setForeground(c, isSel ? selFg : null);
-            }
-        }
-    }
-
+    /** Рамка активной ячейки поверх фона — не текст, применяется одинаково в обеих темах. */
     private void onPaintItem(Event e)
     {
-        if (ListSelectionThemeColors.isDarkList(table))
-        {
-            paintDarkSelectedPlainCell(e);
-            return;
-        }
         if (!(e.item instanceof TableItem item) || item != selectedItem || e.index != activeColumnIndex())
             return;
         Rectangle bounds = item.getBounds(e.index);
@@ -672,54 +802,6 @@ final class FormTableInteraction
         {
             if (!frame.isDisposed())
                 frame.dispose();
-        }
-    }
-
-    /**
-     * Plain-колонки (не owner-draw): SWT рисует серый текст/без иконки поверх кастомного фона —
-     * перекрываем ячейку и рисуем фон + иконку + текст заново.
-     */
-    private void paintDarkSelectedPlainCell(Event e)
-    {
-        if (!(e.item instanceof TableItem item) || !isRowSelected(item) || e.gc == null)
-            return;
-        int col = e.index;
-        if (isOwnerDrawColumn(col))
-            return;
-
-        Rectangle bounds = item.getBounds(col);
-        if (bounds == null || bounds.isEmpty())
-            return;
-
-        Color bg = rowSelectionBackground();
-        Color fg = selectionForeground();
-        if (bg == null || fg == null)
-            return;
-
-        String text = cellAccess != null ? cellAccess.cellText(item, col) : item.getText(col);
-        if (text == null)
-            text = ""; //$NON-NLS-1$
-        Image image = item.getImage(col);
-
-        GC gc = e.gc;
-        gc.setBackground(bg);
-        gc.fillRectangle(bounds);
-
-        if (image != null && !image.isDisposed())
-        {
-            Rectangle imgBounds = item.getImageBounds(col);
-            if (imgBounds != null && !imgBounds.isEmpty())
-                gc.drawImage(image, imgBounds.x, imgBounds.y);
-        }
-
-        if (!text.isEmpty())
-        {
-            gc.setForeground(fg);
-            gc.setFont(table.getFont());
-            Point ext = gc.textExtent(text);
-            int x = bounds.x + 6;
-            int y = bounds.y + Math.max(0, (bounds.height - ext.y) / 2);
-            gc.drawText(text, x, y, true);
         }
     }
 
@@ -1079,21 +1161,32 @@ final class FormTableInteraction
         return table.getLocation();
     }
 
+    /**
+     * Нативное выделение — источник истины для покраски (именно на него ориентируются
+     * EraseItem/PaintItem и реальная нативная отрисовка Windows). Раньше при {@code SWT.MULTI}
+     * здесь проверялось ТОЛЬКО {@code multiSelectViewer.getStructuredSelection()} — если после
+     * клика таблица обновится (например, {@code TableViewer.setInput(...)} с новыми объектами строк,
+     * не совпадающими по {@code equals()} со старыми, как {@code MatchRow}/{@code FileSearchRow} без
+     * переопределённого {@code equals()}), выделение во viewer теряется, а нативное {@code Table}
+     * всё ещё показывает строку выделенной — эта проверка возвращала {@code false}, и вся наша
+     * покраска (фон строки/активной ячейки, синхронизация фона owner-draw колонки) отключалась,
+     * оставляя строку на откуп нативной Windows-отрисовке (несогласованной между обычными и
+     * owner-draw колонками — отсюда разные цвета в одной "текущей" строке).
+     */
     private boolean isRowSelected(TableItem item)
     {
         if (item == null || item.isDisposed())
             return false;
-        if (useViewerForMultiSelect())
-        {
-            Object data = item.getData();
-            if (data == null)
-                return false;
-            return multiSelectViewer.getStructuredSelection().toList().contains(data);
-        }
         for (TableItem s : table.getSelection())
         {
             if (s == item)
                 return true;
+        }
+        if (useViewerForMultiSelect())
+        {
+            Object data = item.getData();
+            if (data != null)
+                return multiSelectViewer.getStructuredSelection().toList().contains(data);
         }
         return false;
     }
@@ -1110,10 +1203,38 @@ final class FormTableInteraction
     {
         if (item == null || item.isDisposed() || table.isDisposed())
             return;
+        syncCellBackgrounds(item);
         Rectangle bounds = rowBounds(item);
         if (bounds == null || bounds.isEmpty())
             return;
         table.redraw(bounds.x, bounds.y, bounds.width, bounds.height, false);
+    }
+
+    /**
+     * Фон ячеек строки — через штатное {@code TableItem.setBackground(колонка, …)}, а не только
+     * заливкой в {@link #onEraseItem}.
+     *
+     * <p>Заливки в {@code EraseItem} достаточно для общего фона СТРОКИ, но не для отдельной ячейки:
+     * у обычных (не owner-draw) колонок нативная отрисовка строки перекрывает её, и более светлый
+     * оттенок АКТИВНОЙ ячейки пропадал — он был виден только в owner-draw колонке («Текст»), куда
+     * цвет доезжал через {@code cell.getBackground()} (то же самое {@code TableItem}-свойство,
+     * которое {@code StyledCellLabelProvider} накладывает на GC перед отрисовкой текста).
+     * Per-cell background — единственный механизм, который одинаково уважают ОБА пути отрисовки,
+     * поэтому синхронизируем его для ВСЕХ колонок тем же цветом, что даёт
+     * {@link #selectionCellBackground} ({@code null} для невыделенных строк — сброс к штатному).
+     *
+     * <p>Только тёмная тема: в светлой оформление и так соблюдается везде единообразно, и вмешиваться
+     * в нативную отрисовку там незачем.
+     */
+    private void syncCellBackgrounds(TableItem item)
+    {
+        if (item == null || item.isDisposed() || table.isDisposed())
+            return;
+        if (!ListSelectionThemeColors.isDarkList(table))
+            return;
+        int cols = table.getColumnCount();
+        for (int idx = 0; idx < cols; idx++)
+            item.setBackground(idx, selectionCellBackground(table, item, idx));
     }
 
     private void redrawRows(TableItem[] items)
@@ -1200,7 +1321,7 @@ final class FormTableInteraction
         Color base = table.getBackground();
         if (base == null || base.isDisposed())
             base = table.getDisplay().getSystemColor(SWT.COLOR_LIST_BACKGROUND);
-        double factor = table.isFocusControl() ? 0.06 : 0.04;
+        double factor = table.isFocusControl() ? 0.045 : 0.03;
         ownedRowBg = slightlyDarker(base, factor);
         return ownedRowBg;
     }
@@ -1221,7 +1342,7 @@ final class FormTableInteraction
         Color base = table.getBackground();
         if (base == null || base.isDisposed())
             base = table.getDisplay().getSystemColor(SWT.COLOR_LIST_BACKGROUND);
-        double factor = table.isFocusControl() ? 0.045 : 0.03;
+        double factor = table.isFocusControl() ? 0.034 : 0.0225;
         ownedInactiveRowBg = slightlyDarker(base, factor);
         return ownedInactiveRowBg;
     }
@@ -1235,7 +1356,7 @@ final class FormTableInteraction
             ownedActiveCellBg = ListSelectionThemeColors.activeCellBackground(table, rowBg);
             return ownedActiveCellBg;
         }
-        ownedActiveCellBg = slightlyDarker(rowBg, table.isFocusControl() ? 0.045 : 0.03);
+        ownedActiveCellBg = slightlyDarker(rowBg, table.isFocusControl() ? 0.034 : 0.0225);
         return ownedActiveCellBg;
     }
 
@@ -1294,8 +1415,6 @@ final class FormTableInteraction
             ownedInactiveRowBg.dispose();
         if (ownedActiveCellBg != null && !ownedActiveCellBg.isDisposed())
             ownedActiveCellBg.dispose();
-        if (ownedSelectionFg != null && !ownedSelectionFg.isDisposed())
-            ownedSelectionFg.dispose();
         if (ownedHeaderAccentBg != null && !ownedHeaderAccentBg.isDisposed())
             ownedHeaderAccentBg.dispose();
         if (ownedHeaderSeparatorBg != null && !ownedHeaderSeparatorBg.isDisposed())
@@ -1303,7 +1422,6 @@ final class FormTableInteraction
         ownedRowBg = null;
         ownedInactiveRowBg = null;
         ownedActiveCellBg = null;
-        ownedSelectionFg = null;
         ownedHeaderAccentBg = null;
         ownedHeaderSeparatorBg = null;
     }

@@ -46,6 +46,18 @@ final class SelectionAwareStyledCellLabelProvider extends StyledCellLabelProvide
         super.update(cell);
     }
 
+    /** Плоский текст ячейки для копирования ({@link FormTableInteraction}). */
+    String textForCopy(Object element)
+    {
+        if (element == null)
+            return ""; //$NON-NLS-1$
+        StyledString styled = styledLabelProvider.getStyledText(element);
+        if (styled == null)
+            return ""; //$NON-NLS-1$
+        String s = styled.getString();
+        return s != null ? s : ""; //$NON-NLS-1$
+    }
+
     @Override
     public void dispose()
     {

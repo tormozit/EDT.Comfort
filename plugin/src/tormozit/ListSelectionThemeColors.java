@@ -28,15 +28,20 @@ public final class ListSelectionThemeColors
     Color cellBackground(Table table, TableItem item, int column);
   }
 
-  private static final double FOCUSED_T = 0.34;
-  private static final double UNFOCUSED_T = 0.40;
-  private static final double INACTIVE_MULTI_T = 0.16;
-  private static final int FOCUSED_BLUE_EXTRA = 14;
-  private static final int UNFOCUSED_BLUE_EXTRA = 14;
+  /**
+   * Единая концепция фона (одинаково в светлой и тёмной теме): нетекущая строка → текущая строка
+   * немного светлее/темнее → активная ячейка текущей строки ещё на шаг светлее/темнее.
+   * Меняется ТОЛЬКО яркость, оттенок не сдвигается — иначе в тёмной теме строка выглядит синей
+   * на фоне серых (в светлой теме {@code FormTableInteraction} всегда использовал чистый
+   * {@code slightlyDarker}, поэтому там расхождения не было).
+   */
+  private static final double FOCUSED_T = 0.16;
+  private static final double UNFOCUSED_T = 0.12;
+  private static final double INACTIVE_MULTI_T = 0.073;
   /** Тёмная тема: фиксированные цвета match — контрастны и к фону списка, и к selection. */
   private static final RGB DARK_MATCH_BG = new RGB(170, 205, 255);
   private static final RGB DARK_MATCH_FG = new RGB(18, 32, 68);
-  private static final double ACTIVE_CELL_EXTRA_T = 0.06;
+  private static final double ACTIVE_CELL_EXTRA_T = 0.058;
 
   private ListSelectionThemeColors() {}
 
@@ -83,9 +88,7 @@ public final class ListSelectionThemeColors
       return null;
     RGB base = listBackgroundRgb(list);
     double t = listFocused ? FOCUSED_T : UNFOCUSED_T;
-    if (listFocused)
-      return color(list.getDisplay(), blueTintRgb(base, t, FOCUSED_BLUE_EXTRA));
-    return color(list.getDisplay(), blueTintRgb(base, t, UNFOCUSED_BLUE_EXTRA));
+    return color(list.getDisplay(), neutralLightenRgb(base, t));
   }
 
   /**
@@ -175,14 +178,18 @@ public final class ListSelectionThemeColors
     return color(list.getDisplay(), neutralLightenRgb(base, t));
   }
 
+  /**
+   * Акцент активной ячейки — сдвиг в синюю сторону, а не к белому (в отличие от
+   * {@link #neutralLightenRgb}, которым красится сам фон строки). У тёмной темы изначально более
+   * слабый контраст — чистое осветление к белому давало малозаметную разницу; синий сдвиг заметнее
+   * при той же яркости. Только акцент активной ячейки, не общий фон строки/списка.
+   */
   public static Color activeCellBackground(Control list, Color rowBg)
   {
     if (!isDarkList(list) || rowBg == null || rowBg.isDisposed())
       return rowBg;
     RGB row = rowBg.getRGB();
-    if (list.isFocusControl())
-      return color(list.getDisplay(), blueTintRgb(row, ACTIVE_CELL_EXTRA_T, 6));
-    return color(list.getDisplay(), neutralLightenRgb(row, ACTIVE_CELL_EXTRA_T));
+    return color(list.getDisplay(), blueAccentLightenRgb(row, ACTIVE_CELL_EXTRA_T));
   }
 
   public static Color matchBackground(Color base)
@@ -219,13 +226,13 @@ public final class ListSelectionThemeColors
         lerp(base.blue, 255, t));
   }
 
-  static RGB blueTintRgb(RGB base, double t, int blueExtra)
+  /** Как {@link #neutralLightenRgb}, но синий канал тянется к цели заметно сильнее остальных. */
+  static RGB blueAccentLightenRgb(RGB base, double t)
   {
-    int r = lerp(base.red, 200, t * 0.6);
-    int g = lerp(base.green, 220, t * 0.8);
-    int b = clampChannel(lerp(base.blue, 255, t) + blueExtra);
-    RGB result = new RGB(r, g, b);
-    return result;
+    return new RGB(
+        lerp(base.red, 255, t * 0.7),
+        lerp(base.green, 255, t * 0.85),
+        lerp(base.blue, 255, Math.min(1.0, t * 1.3)));
   }
 
   private static int lerp(int from, int to, double t)
