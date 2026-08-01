@@ -112,12 +112,34 @@ public final class FileSearchResultsHook implements IStartup
 
             NewSearchUI.addQueryListener(new IQueryListener()
             {
-                @Override public void queryAdded(ISearchQuery query)     { onQueryEvent(); }
+                @Override public void queryAdded(ISearchQuery query)
+                {
+                    Global.tempLog("search-tree-empty", "file.queryAdded: " + describeQuery(query));
+                    onQueryEvent();
+                }
                 @Override public void queryRemoved(ISearchQuery query)    {}
-                @Override public void queryStarting(ISearchQuery query)   { searchQueryRunning = true; }
-                @Override public void queryFinished(ISearchQuery query)   { searchQueryRunning = false; onQueryEvent(); }
+                @Override public void queryStarting(ISearchQuery query)
+                {
+                    Global.tempLog("search-tree-empty", "file.queryStarting: " + describeQuery(query));
+                    searchQueryRunning = true;
+                }
+                @Override public void queryFinished(ISearchQuery query)
+                {
+                    Global.tempLog("search-tree-empty", "file.queryFinished: " + describeQuery(query));
+                    searchQueryRunning = false; onQueryEvent();
+                }
             });
         });
+    }
+
+    private static String describeQuery(ISearchQuery query)
+    {
+        if (query == null)
+            return "null";
+        return query.getClass().getName() + "@" + System.identityHashCode(query)
+            + " result=" + (query.getSearchResult() != null
+                ? query.getSearchResult().getClass().getName() + "@" + System.identityHashCode(query.getSearchResult())
+                : "null");
     }
 
     private static void onQueryEvent()
@@ -216,6 +238,8 @@ public final class FileSearchResultsHook implements IStartup
             if (!(view instanceof ISearchResultViewPart))
                 return false;
             ISearchResultPage activePage = ((ISearchResultViewPart) view).getActivePage();
+            Global.tempLog("search-tree-empty", "file.tryPatch: activePage="
+                + (activePage != null ? activePage.getClass().getName() + "@" + System.identityHashCode(activePage) : "null"));
             if (activePage == null)
                 return false;
             if (!activePage.getClass().getName().contains(PAGE_CLASS_MARKER))
@@ -235,18 +259,21 @@ public final class FileSearchResultsHook implements IStartup
 
             if (tree.getData(HOOKED_KEY) != null)
             {
+                Global.tempLog("search-tree-empty", "file.tryPatch: already hooked, treeItems=" + tree.getItemCount());
                 reinstallHandlers(activePage, view);
                 return true;
             }
 
-            Object pagebookObj = Global.getField(activePage, "fPagebook");
-            if (!(pagebookObj instanceof Composite pagebook) || pagebook.isDisposed())
+            Object viewerContainerObj = Global.getField(activePage, "fViewerContainer");
+            if (!(viewerContainerObj instanceof Composite viewerContainer) || viewerContainer.isDisposed())
                 return false;
 
-            installSplitLayout(treeViewer, pagebook, activePage, view);
+            installSplitLayout(treeViewer, viewerContainer, activePage, view);
             CreateDebuggerBreakpoints.installToolbarAction(view);
 
             tree.setData(HOOKED_KEY, Boolean.TRUE);
+            Global.tempLog("search-tree-empty", "file.tryPatch: PATCH OK treeItems=" + tree.getItemCount()
+                + " input=" + (treeViewer.getInput() != null ? treeViewer.getInput().getClass().getName() : "null"));
             log("tryPatch: OK");
             return true;
         }
@@ -257,30 +284,57 @@ public final class FileSearchResultsHook implements IStartup
         }
     }
 
-    private static void installSplitLayout(TreeViewer treeViewer, Composite pagebook, Object page, IViewPart view)
+    /**
+     * {@code activePage} ({@code AbstractTextSearchViewPage}) — трёхуровневая структура виджетов
+     * (декомпиляция/исходники, {@code .tmp/bundles/ui-workbench-source/org/eclipse/ui/part/PageBook.java}
+     * + {@code .tmp/bundles/search-ui-source/.../AbstractTextSearchViewPage.java}):
+     * СНАРУЖИ {@code SearchView} — сам {@code PageBookView} — держит СВОЙ {@code book}
+     * ({@code org.eclipse.ui.part.PageBook}), переключающий МЕЖДУ страницами результатов целиком
+     * ({@code book.showPage(activePage.getControl())}, где {@code getControl()} возвращает
+     * {@code fPagebook}); ВНУТРИ страницы — сам {@code fPagebook} (тоже {@code PageBook}), переключающий
+     * между "идёт поиск" ({@code fBusyLabel}) и результатами ({@code fViewerContainer} — простой
+     * {@code Composite} с {@code FillLayout}, единственный потомок — сам {@code Tree}/{@code Table}).
+     *
+     * <p>{@code PageBook.showPage(Control page)} молча выходит (no-op), если
+     * {@code page.getParent() != this} (сам класс, не переопределяем) — т.е. КАЖДЫЙ уровень PageBook
+     * работает, только если контрол, которым он управляет, остаётся его НЕПОСРЕДСТВЕННЫМ потомком.
+     * Прежняя версия хука репарентила САМ {@code fPagebook} (= {@code activePage.getControl()},
+     * контрол, которым управляет ВНЕШНИЙ {@code book} панели поиска) внутрь новой {@code SashForm} —
+     * после этого {@code fPagebook.getParent() != book}, и последующие переключения СТРАНИЦ результатов
+     * (смена вида поиска через историю/новый поиск другого типа) переставали показывать/скрывать её
+     * корректно: внешний {@code book} у СЕБЯ дома молча не находил {@code fPagebook} среди прямых
+     * потомков и не мог ни показать её снова, ни (что менее заметно) гарантированно скрыть при уходе —
+     * отсюда репорт «показываются элементы управления от поиска по конфигурации» при возврате
+     * к результатам поиска по файлам из истории: СВОЙ (файловый) контрол так и оставался скрыт,
+     * а предыдущая (конфигурационная) страница технически так и оставалась «текущей» у внешнего book.
+     *
+     * <p>Правильная точка врезки — {@code fViewerContainer} (аналог {@code pageContainer} в
+     * {@link ConfigSearchResultsHook#installMatchTableSplitPane}): её родитель — ВНУТРЕННИЙ
+     * {@code fPagebook}, а сам {@code fPagebook} — контрол, который трекает ВНЕШНИЙ {@code book},
+     * НИКОГДА не трогаем. {@code SashForm} создаётся ВНУТРИ {@code fViewerContainer},
+     * дерево (единственный текущий потомок) переносится в неё — оба уровня {@code PageBook.showPage()}
+     * продолжают работать как раньше, ручной вызов {@code showPage} через рефлексию был нужен только
+     * из-за ошибочного репарентинга и теперь не требуется.
+     */
+    private static void installSplitLayout(TreeViewer treeViewer, Composite viewerContainer, Object page, IViewPart view)
     {
         Tree tree = treeViewer.getTree();
         log("installSplitLayout: tree.parent=" + tree.getParent()
-            + " pagebook=" + pagebook + " pagebook.children=" + pagebook.getChildren().length);
+            + " viewerContainer=" + viewerContainer + " viewerContainer.children=" + viewerContainer.getChildren().length);
 
-        Composite parent = pagebook.getParent();
-        if (parent == null || parent.isDisposed())
+        Control[] children = viewerContainer.getChildren();
+        if (children.length != 1)
         {
-            log("installSplitLayout: parent is null or disposed, aborting");
+            log("installSplitLayout: неожиданное число потомков viewerContainer=" + children.length);
             return;
         }
-        log("installSplitLayout: pagebook.parent=" + parent);
+        Control nativeTree = children[0];
 
-        // Create SashForm in pagebook's parent, at the same level as pagebook
-        SashForm sashForm = new SashForm(parent, SWT.HORIZONTAL);
+        // Create SashForm INSIDE viewerContainer — viewerContainer сам никуда не переносится
+        // (см. javadoc метода), только его единственный потомок (дерево) переносится в SashForm.
+        SashForm sashForm = new SashForm(viewerContainer, SWT.HORIZONTAL);
         sashForm.setSashWidth(3);
-
-        // Reparent pagebook itself (not the tree!) into the left side of the SashForm.
-        // Pagebook's children (tree, busyLabel) remain intact, and showControl still works.
-        pagebook.setParent(sashForm);
-        log("installSplitLayout: pagebook reparented, pagebook.parent=" + pagebook.getParent()
-            + " parent.children=" + parent.getChildren().length
-            + " sashForm.children=" + sashForm.getChildren().length);
+        nativeTree.setParent(sashForm);
 
         // Create the table on the right side
         TableViewer tableViewer = createResultTable(sashForm);
@@ -296,10 +350,7 @@ public final class FileSearchResultsHook implements IStartup
             ComfortSettings.getFileSearchSashWeight("right", 40)
         });
 
-        // EDT's PageBook uses showPage(Control) — NOT showControl(Control)
-        boolean shown = Global.invokeVoid(parent, "showPage", sashForm);
-        log("installSplitLayout: showPage=" + shown);
-
+        viewerContainer.layout(true, true);
         sashForm.layout();
 
         // Persist sash weights on resize (debounced)

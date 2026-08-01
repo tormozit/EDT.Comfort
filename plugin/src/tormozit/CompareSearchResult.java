@@ -46,14 +46,27 @@ public class CompareSearchResult implements ISearchResult
         return editorPart;
     }
 
+    /** Единый формат подписей глобального поиска — {@code "<строка>" в сравнении <представление> - <N> совпадений}. */
     @Override
     public String getLabel()
     {
         int count = matches != null ? matches.size() : 0;
         String q = queryText != null ? queryText.trim() : "";
-        if (!q.isEmpty())
-            return "Результаты поиска по дереву сравнения «" + q + "» — " + count;
-        return "Результаты поиска по дереву сравнения — " + count;
+        String comparisonTitle = editorPart != null ? editorPart.getTitle() : null;
+        // Заголовок редактора сравнения сам начинается с "Сравнение/объединение (...)" — не дублируем
+        // это слово после нашего "в сравнении", оставляем только скобочную часть (см. репорт: было
+        // "в сравнении Сравнение/объединение (...)"; предыдущая попытка через regex.replaceFirst с
+        // (?i) не сработала — (?i) без флага UNICODE_CASE не сворачивает регистр кириллицы).
+        if (comparisonTitle != null)
+        {
+            int paren = comparisonTitle.indexOf('(');
+            if (paren >= 0)
+                comparisonTitle = comparisonTitle.substring(paren);
+        }
+        if (comparisonTitle == null || comparisonTitle.isEmpty())
+            comparisonTitle = "конфигураций";
+        String quoted = !q.isEmpty() ? "'" + q + "'" : ""; // одинарные кавычки — как в штатных поисках //$NON-NLS-1$ //$NON-NLS-2$
+        return quoted + " в сравнении " + comparisonTitle + " - " + count + " совпадений";
     }
 
     @Override

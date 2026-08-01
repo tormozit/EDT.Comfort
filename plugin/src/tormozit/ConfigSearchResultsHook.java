@@ -26,12 +26,14 @@ import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelP
 import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.ILabelProviderListener;
 import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.LabelProvider;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.jface.viewers.TableViewer;
 import org.eclipse.jface.viewers.TableViewerColumn;
 import org.eclipse.jface.viewers.TreeViewer;
+import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.search.ui.IQueryListener;
 import org.eclipse.search.ui.ISearchQuery;
 import org.eclipse.search.ui.ISearchResultPage;
@@ -146,6 +148,7 @@ public final class ConfigSearchResultsHook implements IStartup
     private static final boolean NATIVE_TABLE_ENABLED = false;
 
     private static final String HOOKED_KEY = "tormozit.searchAggregationHooked"; //$NON-NLS-1$
+    private static final String INPUT_WATCH_HOOKED_KEY = "tormozit.searchTreeInputWatchHooked"; //$NON-NLS-1$
     private static final String TREE_COUNT_LABEL_HOOKED_KEY = "tormozit.searchTreeCountLabelHooked"; //$NON-NLS-1$
     /** Как {@code Messages.IMatchItem_Total_matches_count_pattern__0} в search.ui. */
     private static final String MATCH_COUNT_SUFFIX_PATTERN = " ({0} \u0441\u043E\u043E\u0442\u0432\u0435\u0442\u0441\u0442\u0432\u0438\u0439)"; //$NON-NLS-1$
@@ -176,15 +179,37 @@ public final class ConfigSearchResultsHook implements IStartup
             // открыта до выполнения нового поиска и не получила ни одного part-события.
             NewSearchUI.addQueryListener(new IQueryListener()
             {
-                @Override public void queryAdded(ISearchQuery query)     { onQueryEvent("queryAdded"); } //$NON-NLS-1$
+                @Override public void queryAdded(ISearchQuery query)
+                {
+                    Global.tempLog("search-tree-empty", "config.queryAdded: " + describeQuery(query)); //$NON-NLS-1$ //$NON-NLS-2$
+                    onQueryEvent("queryAdded"); //$NON-NLS-1$
+                }
                 @Override public void queryRemoved(ISearchQuery query)
                 {
                     log("onQueryEvent: queryRemoved " + (query != null ? query.getClass().getSimpleName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
                 }
-                @Override public void queryStarting(ISearchQuery query)   { onSearchStarting(); }
-                @Override public void queryFinished(ISearchQuery query)   { onSearchFinished(); onQueryEvent("queryFinished"); } //$NON-NLS-1$
+                @Override public void queryStarting(ISearchQuery query)
+                {
+                    Global.tempLog("search-tree-empty", "config.queryStarting: " + describeQuery(query)); //$NON-NLS-1$ //$NON-NLS-2$
+                    onSearchStarting();
+                }
+                @Override public void queryFinished(ISearchQuery query)
+                {
+                    Global.tempLog("search-tree-empty", "config.queryFinished: " + describeQuery(query)); //$NON-NLS-1$ //$NON-NLS-2$
+                    onSearchFinished(); onQueryEvent("queryFinished"); //$NON-NLS-1$
+                }
             });
         });
+    }
+
+    private static String describeQuery(ISearchQuery query)
+    {
+        if (query == null)
+            return "null"; //$NON-NLS-1$
+        return query.getClass().getName() + "@" + System.identityHashCode(query) //$NON-NLS-1$
+            + " result=" + (query.getSearchResult() != null //$NON-NLS-1$
+                ? query.getSearchResult().getClass().getName() + "@" + System.identityHashCode(query.getSearchResult()) //$NON-NLS-1$
+                : "null"); //$NON-NLS-1$
     }
 
     private static void onQueryEvent(String source)
@@ -1654,6 +1679,83 @@ public final class ConfigSearchResultsHook implements IStartup
         return true;
     }
 
+    /**
+     * Переключение на уже готовый (ранее выполненный) поиск из выпадающей истории панели поиска
+     * НЕ порождает {@code queryStarting}/{@code queryFinished} ({@link IQueryListener}) — штатный
+     * {@code SearchView} лишь подменяет {@code ISearchResult} через
+     * {@code AbstractTextSearchViewPage.setInput(ISearchResult, Object)}, которая вызывает
+     * {@code fViewer.setInput(search)} на дереве (декомпиляция/исходники search-ui,
+     * {@code .tmp/bundles/search-ui-source/org/eclipse/search/ui/text/AbstractTextSearchViewPage.java}).
+     * Поэтому наш watch первой корневой строки ({@link #startFirstRootWatch}), запускаемый из
+     * {@link #onSearchStarting}/{@link #onSearchFinished}, для этого случая не срабатывал — корень
+     * не выделялся, наша таблица вхождений оставалась пустой.
+     *
+     * <p>Ловим смену input напрямую на {@code TreeViewer} — оборачиваем штатный
+     * {@code ITreeContentProvider} прозрачным делегатом, который форвардит все вызовы оригиналу и
+     * дополнительно реагирует на {@code inputChanged(viewer, oldInput, newInput)} (см.
+     * {@link #installTreeInputChangeWatch}). Это единственная универсальная точка: она срабатывает
+     * как при переключении из истории, так и при обычном старте нового поиска — во втором случае
+     * {@code guardFirstRootSelection}/{@code searchQueryRunning} уже выставлены {@code onSearchStarting}
+     * (тот вызывается раньше — по {@code queryStarting}, до фактической подмены input на странице),
+     * поэтому здесь достаточно проверить, что оба флага ещё не взведены, чтобы не дублировать запуск.
+     */
+    private static void onTreeInputChanged()
+    {
+        Global.tempLog("search-tree-empty", "config.onTreeInputChanged: guard=" + guardFirstRootSelection //$NON-NLS-1$ //$NON-NLS-2$
+            + " running=" + searchQueryRunning); //$NON-NLS-1$
+        if (guardFirstRootSelection || searchQueryRunning)
+            return; // уже обрабатывается обычным стартом поиска (onSearchStarting)
+        guardFirstRootSelection = true;
+        searchGeneration++;
+        SAVED_TABLE_SELECTION_BY_VIEWER.clear();
+        log("onTreeInputChanged: watch first root (переключение поиска из истории), gen=" + searchGeneration); //$NON-NLS-1$
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() -> startFirstRootWatch(0));
+    }
+
+    /** См. {@link #onTreeInputChanged}. Устанавливается один раз на {@code TreeViewer} (флаг на {@code Tree}). */
+    private static void installTreeInputChangeWatch(TreeViewer treeViewer)
+    {
+        Tree tree = treeViewer.getTree();
+        if (tree == null || tree.isDisposed() || tree.getData(INPUT_WATCH_HOOKED_KEY) != null)
+            return;
+        Object contentProviderObj = treeViewer.getContentProvider();
+        if (!(contentProviderObj instanceof ITreeContentProvider original))
+        {
+            log("installTreeInputChangeWatch: contentProvider не ITreeContentProvider: " + contentProviderObj); //$NON-NLS-1$
+            return;
+        }
+        treeViewer.setContentProvider(new ITreeContentProvider()
+        {
+            @Override
+            public Object[] getElements(Object inputElement) { return original.getElements(inputElement); }
+
+            @Override
+            public Object[] getChildren(Object parentElement) { return original.getChildren(parentElement); }
+
+            @Override
+            public Object getParent(Object element) { return original.getParent(element); }
+
+            @Override
+            public boolean hasChildren(Object element) { return original.hasChildren(element); }
+
+            @Override
+            public void inputChanged(Viewer viewer, Object oldInput, Object newInput)
+            {
+                original.inputChanged(viewer, oldInput, newInput);
+                if (newInput != null && newInput != oldInput)
+                    onTreeInputChanged();
+            }
+
+            @Override
+            public void dispose() { original.dispose(); }
+        });
+        tree.setData(INPUT_WATCH_HOOKED_KEY, Boolean.TRUE);
+        log("installTreeInputChangeWatch: OK"); //$NON-NLS-1$
+    }
+
     private static void onSearchStarting()
     {
         searchQueryRunning = true;
@@ -1992,6 +2094,8 @@ public final class ConfigSearchResultsHook implements IStartup
             if (!(view instanceof ISearchResultViewPart))
                 return false;
             ISearchResultPage activePage = ((ISearchResultViewPart) view).getActivePage();
+            Global.tempLog("search-tree-empty", "config.tryPatch: activePage=" //$NON-NLS-1$ //$NON-NLS-2$
+                + (activePage != null ? activePage.getClass().getName() + "@" + System.identityHashCode(activePage) : "null")); //$NON-NLS-1$ //$NON-NLS-2$
             if (activePage == null)
             {
                 log("tryPatch: activePage=null"); //$NON-NLS-1$
@@ -2043,8 +2147,12 @@ public final class ConfigSearchResultsHook implements IStartup
                     TreeSoleChildAutoExpand.Target.SEARCH_CONFIG, treeViewer);
             installMatchTableSplitPane(view, activePage, treeLayout, treeViewer);
             CreateDebuggerBreakpoints.installToolbarAction(view);
+            installTreeInputChangeWatch(treeViewer);
 
             treeViewer.getTree().setData(HOOKED_KEY, Boolean.TRUE);
+            Global.tempLog("search-tree-empty", "config.tryPatch: PATCH OK treeItems=" //$NON-NLS-1$ //$NON-NLS-2$
+                + treeViewer.getTree().getItemCount() + " input=" //$NON-NLS-1$
+                + (treeViewer.getInput() != null ? treeViewer.getInput().getClass().getName() : "null")); //$NON-NLS-1$
             log("tryPatch: PATCH OK для " + activePage.getClass().getName()); //$NON-NLS-1$
             return true;
         }

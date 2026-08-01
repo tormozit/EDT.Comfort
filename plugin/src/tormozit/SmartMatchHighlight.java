@@ -155,12 +155,38 @@ public final class SmartMatchHighlight
         CellTextOrigin origin = tableCellTextOrigin(e.gc, table, item, e.index, e, text);
         MatchStyle style = resolveMatchStyle(table);
         drawMatchFragments(e.gc, text, matcher, origin.x, origin.y, origin.availableWidth, table.getFont(), style,
-            false);
+            false, true);
     }
 
     /** @param backgroundOnly {@code true} — только фон совпадений (текст уже нарисован). */
     public static void paintTableCellMatchOverlay(Event e, Table table, TableItem item, SmartMatcher matcher,
             boolean backgroundOnly)
+    {
+        paintTableCellMatchOverlay(e, table, item, matcher, backgroundOnly, 0, true);
+    }
+
+    /**
+     * Как {@link #paintTableCellMatchOverlay(Event, Table, TableItem, SmartMatcher, boolean)}, но с
+     * поправкой по X в пикселях ({@code xAdjustPx}) — на некоторых {@code Table} с колонкой-иконкой
+     * {@code item.getTextBounds().x} на Windows на 2px правее реально нарисованного текста (диагностика
+     * пиксельным сканом подтвердила это для диалога "Выбрать картинку", см. {@code PictureDialogHook});
+     * для остальных потребителей поправка не подтверждена диагностикой — оставлена {@code 0}.
+     */
+    public static void paintTableCellMatchOverlay(Event e, Table table, TableItem item, SmartMatcher matcher,
+            boolean backgroundOnly, int xAdjustPx)
+    {
+        paintTableCellMatchOverlay(e, table, item, matcher, backgroundOnly, xAdjustPx, true);
+    }
+
+    /**
+     * Как выше, но с флагом {@code bold} — жирный overlay поверх уже нарисованного нативного
+     * (нежирного) текста ячейки шире оригинала, а всё, что идёт правее совпадения, платформа уже
+     * отрисовала на позиции, рассчитанной под нежирную ширину — сдвинуть эти символы overlay не
+     * может, отсюда наезд/сдвоенность. При {@code bold=false} подсветка красится тем же шрифтом,
+     * что и остальной текст, — ширина не меняется, эффект пропадает (см. диалог "Выбрать картинку").
+     */
+    public static void paintTableCellMatchOverlay(Event e, Table table, TableItem item, SmartMatcher matcher,
+            boolean backgroundOnly, int xAdjustPx, boolean bold)
     {
         if (e == null || e.gc == null || table == null || table.isDisposed() || item == null
                 || item.isDisposed() || matcher == null || matcher.isEmpty)
@@ -175,8 +201,8 @@ public final class SmartMatchHighlight
             return;
         CellTextOrigin origin = tableCellTextOrigin(e.gc, table, item, e.index, e, text);
         MatchStyle style = resolveMatchStyle(table);
-        drawMatchFragments(e.gc, text, matcher, origin.x, origin.y, origin.availableWidth, table.getFont(), style,
-            backgroundOnly);
+        drawMatchFragments(e.gc, text, matcher, origin.x + xAdjustPx, origin.y, origin.availableWidth, table.getFont(),
+            style, backgroundOnly, bold);
     }
 
     /** Жирный синий overlay поверх уже отрисованного SWT-текста (Label и др.). */
@@ -394,7 +420,7 @@ public final class SmartMatchHighlight
     private static void drawMatchFragments(GC gc, String text, SmartMatcher matcher,
             int baseX, int baseY, Font baseFont, MatchStyle style, boolean backgroundOnly)
     {
-        drawMatchFragments(gc, text, matcher, baseX, baseY, -1, baseFont, style, backgroundOnly);
+        drawMatchFragments(gc, text, matcher, baseX, baseY, -1, baseFont, style, backgroundOnly, true);
     }
 
     /**
@@ -402,9 +428,12 @@ public final class SmartMatchHighlight
      * таблицы обрезает лишний текст многоточием силами платформы, а мы рисуем поверх уже
      * нарисованного, поэтому вхождение, попавшее в обрезанную часть, надо не дорисовывать (иначе
      * оно будет видно поверх "...", хотя реально уже не отображается).
+     * @param bold {@code false} — подсветка тем же (не увеличенным по ширине) шрифтом, что и
+     * остальной текст ячейки; нужно там, где overlay рисуется поверх уже нативно отрисованного
+     * текста и не может сдвинуть то, что находится правее совпадения (см. вызовы с {@code xAdjustPx}).
      */
     private static void drawMatchFragments(GC gc, String text, SmartMatcher matcher,
-            int baseX, int baseY, int maxWidth, Font baseFont, MatchStyle style, boolean backgroundOnly)
+            int baseX, int baseY, int maxWidth, Font baseFont, MatchStyle style, boolean backgroundOnly, boolean bold)
     {
         List<SmartMatcher.HighlightRange> ranges = matcher.getHighlightRanges(text);
         if (ranges.isEmpty())
@@ -414,8 +443,10 @@ public final class SmartMatchHighlight
         Color prevFg = gc.getForeground();
         Color prevBg = gc.getBackground();
         Font measureFont = baseFont != null && !baseFont.isDisposed() ? baseFont : prevFont;
-        Font bold = boldFontFrom(measureFont);
-        Font matchFont = style.font != null && !style.font.isDisposed() ? style.font : bold;
+        Font boldFont = bold ? boldFontFrom(measureFont) : null;
+        Font matchFont = bold
+            ? (style.font != null && !style.font.isDisposed() ? style.font : boldFont)
+            : measureFont;
         int effectiveMaxWidth = maxWidth;
         if (maxWidth >= 0)
         {
@@ -473,8 +504,8 @@ public final class SmartMatchHighlight
             gc.setFont(prevFont);
             gc.setForeground(prevFg);
             gc.setBackground(prevBg);
-            if (bold != cachedBoldFont && bold != null && !bold.isDisposed())
-                bold.dispose();
+            if (boldFont != cachedBoldFont && boldFont != null && !boldFont.isDisposed())
+                boldFont.dispose();
         }
     }
 
