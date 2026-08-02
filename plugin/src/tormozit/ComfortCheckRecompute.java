@@ -32,6 +32,9 @@ import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.metadata.mdclass.AbstractForm;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
 import com._1c.g5.v8.dt.ui.util.OpenHelper;
+import com._1c.g5.v8.dt.validation.marker.IMarkerManager;
+import com._1c.g5.v8.dt.validation.marker.Marker;
+import com._1c.g5.v8.dt.validation.marker.MarkerSeverity;
 import com.e1c.g5.v8.dt.check.settings.CheckUid;
 import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
 
@@ -168,7 +171,7 @@ public final class ComfortCheckRecompute
                     + ", isComputed(сразу после applyForcedUpdates)=" //$NON-NLS-1$
                     + manager.isComputed(bmObject.bmGetId(), checkIds));
             }
-            notifyWhenComplete(manager, objectsLabel, objects);
+            notifyWhenComplete(manager, project, objectsLabel, objects, targets);
         }
         catch (RuntimeException e)
         {
@@ -180,8 +183,8 @@ public final class ComfortCheckRecompute
      * Ждёт в фоне завершения текущего цикла перепроверки и сообщает об этом тостом — иначе
      * пользователь не видит, когда можно смотреть на обновлённый результат в панели.
      */
-    private static void notifyWhenComplete(IDerivedDataManager manager, String objectsLabel,
-        Collection<? extends EObject> objects)
+    private static void notifyWhenComplete(IDerivedDataManager manager, IProject project, String objectsLabel,
+        Collection<? extends EObject> objects, List<IBmObject> targets)
     {
         Job waitJob = Job.create("Комфорт: перепроверка конфигурации", monitor -> //$NON-NLS-1$
         {
@@ -192,7 +195,9 @@ public final class ComfortCheckRecompute
                 Global.tempLog(LOG_TOPIC, "ожидание завершения: completed=" + completed); //$NON-NLS-1$
                 if (completed)
                 {
-                    toastWithAction("Проверить", "Завершена проверка объекта " + objectsLabel + ".", //$NON-NLS-1$
+                    int errorCount = countErrors(project, targets);
+                    toastWithAction("Проверить", "Завершена проверка объекта " + objectsLabel //$NON-NLS-1$
+                        + ". Обнаружено " + errorCount + " ошибок.", //$NON-NLS-1$ //$NON-NLS-2$
                         () -> showResults(objects), "Показать результаты"); //$NON-NLS-1$
                 }
                 else
@@ -212,6 +217,33 @@ public final class ComfortCheckRecompute
             return org.eclipse.core.runtime.Status.OK_STATUS;
         });
         waitJob.schedule();
+    }
+
+    /**
+     * Считает маркеры уровня {@link MarkerSeverity#ERRORS} для проверенных объектов, включая
+     * вложенные (формы, модули и т.п.) — через {@link IMarkerManager#getNestedMarkers}.
+     */
+    private static int countErrors(IProject project, List<IBmObject> targets)
+    {
+        IMarkerManager markerManager = Global.getOsgiService(IMarkerManager.class);
+        if (markerManager == null)
+        {
+            Global.tempLog(LOG_TOPIC, "IMarkerManager недоступен — подсчёт ошибок пропущен"); //$NON-NLS-1$
+            return 0;
+        }
+        int count = 0;
+        for (IBmObject bmObject : targets)
+        {
+            Marker[] markers = markerManager.getNestedMarkers(project, bmObject.bmGetId());
+            if (markers == null)
+                continue;
+            for (Marker marker : markers)
+            {
+                if (marker.getSeverity() == MarkerSeverity.ERRORS)
+                    count++;
+            }
+        }
+        return count;
     }
 
     /**
