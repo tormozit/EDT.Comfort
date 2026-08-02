@@ -21,12 +21,15 @@ import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
+import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Tree;
+import org.eclipse.swt.widgets.Widget;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IWorkbenchPage;
@@ -37,9 +40,12 @@ import com._1c.g5.v8.dt.form.model.AbstractDataPath;
 import com._1c.g5.v8.dt.form.model.AbstractFormAttribute;
 import com._1c.g5.v8.dt.form.model.AbstractFormDataSourceInfo;
 import com._1c.g5.v8.dt.form.model.DataPathReferredObject;
+import com._1c.g5.v8.dt.form.model.Form;
+import com._1c.g5.v8.dt.form.model.FormItem;
 import com._1c.g5.v8.dt.form.model.PropertyInfo;
 import com._1c.g5.v8.dt.form.model.PropertyInfo.PropertyInfoType;
 import com._1c.g5.v8.dt.form.ui.editor.FormEditor;
+import com._1c.g5.v8.dt.form.ui.editor.FormEditorComponent;
 import com._1c.g5.v8.dt.form.ui.editor.FormEditorPage;
 import com._1c.g5.v8.dt.form.ui.editor.item.FormItemActionsGroup;
 import com._1c.g5.v8.dt.mcore.TypeDescription;
@@ -57,9 +63,14 @@ import com._1c.g5.v8.dt.ui.commands.ShowPropertiesHandler;
 import com._1c.g5.v8.dt.ui.util.ContentUtil;
 
 /**
- * Объединяет три поведения редактора форм EDT:
+ * Объединяет поведения редактора форм EDT:
  *
  * <ol>
+ *   <li><b>Клик по заголовку эскиза формы (WYSIWYG).</b>
+ *       Верхняя полоса эскиза не принадлежит ни одному элементу, и клик по ней штатно
+ *       ничего не делает; вместо этого выделяется корневой узел «Форма» —
+ *       см. {@link WysiwygHeaderClick}.
+ *
  *   <li><b>Правый клик в области предпросмотра (WYSIWYG).</b>
  *       На {@link SWT#MouseDown} посылает синтетический левый клик,
  *       чтобы EDT выбрал элемент формы под курсором до открытия контекстного меню.
@@ -197,6 +208,219 @@ public class FormEditorHook implements IStartup
         display.addFilter(SWT.MouseDown, FormEditorHook::handleMouseDown);
         display.addFilter(SWT.MouseDoubleClick, FormEditorHook::handleMouseDoubleClick);
         display.addFilter(SWT.MenuDetect, FormEditorHook::handleMenuDetect);
+        WysiwygHeaderClick.install(display);
+    }
+
+    // -----------------------------------------------------------------------
+    // Клик по заголовку эскиза формы (WYSIWYG)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Клик по верхней полосе эскиза формы выделяет корневой узел «Форма» в дереве элементов.
+     *
+     * <p><b>Почему по геометрии, а не по ответу рендера.</b> В нативном режиме hit-тест целиком
+     * внутри процесса-визуализатора, и при промахе он <b>сохраняет прежнее выделение</b>,
+     * возвращая его же id. Поэтому «клик мимо» и «повторный клик по уже выделенному элементу»
+     * из Java неотличимы, а LWT-дерево эскиза пустое, и {@code getControlUnderPoint} всегда
+     * даёт {@code null}. Единственная надёжная опора — координаты клика: полоса заголовка
+     * лежит выше содержимого формы, отсчёт от её верхнего края, потому что эскиз рисуется
+     * от точки (0,0) своего {@code WysiwygNativeComposite}.
+     *
+     * <p><b>Граница вычисляется, а не задаётся.</b> Высота заголовка динамическая: её рисует
+     * сам визуализатор, зависит от масштаба, темы и состава формы, и в модели раскладки её
+     * нет — у {@code HippoLayElementBase} только grid-ограничения без координат. Поэтому
+     * граница берётся как наименьший {@code y} фактических прямоугольников элементов верхнего
+     * уровня ({@link #contentTop}); если границы недоступны, обработчик не делает ничего.
+     *
+     * <p>Корень выделяется безусловно: полоса входит в область верхнего элемента, поэтому
+     * «пустоты» не бывает. Чтобы в дереве не мигал элемент до переключения на корень,
+     * обработчик перед {@code setSelection} вызывает {@code rebuild(false)} у эскиза —
+     * перестроение без события снимает выделение элемента с эскиза и не трогает дерево
+     * (у события нет id, {@code notifySelection} не вызывается).
+     */
+    private static final class WysiwygHeaderClick
+    {
+        /** Сдвиг мыши между нажатием и отпусканием, выше которого это перетаскивание. */
+        private static final int DRAG_THRESHOLD_PX = 3;
+
+        /**
+         * Высота полосы заголовка от верхнего края эскиза. Значение подобрано для масштаба
+         * 100%: вычислить настоящую высоту нельзя — её рисует нативный визуализатор, в модели
+         * раскладки координат нет, а LWT-дерево эскиза в этом режиме пустое, поэтому
+         * {@code getRelatedControl}/{@code getBoundsRelativeWysiwygRoot} возвращают
+         * {@code null} для всех элементов. При крупном масштабе полоса окажется занижена —
+         * клик по нижней части заголовка тогда просто ничего не сделает.
+         */
+        private static final int HEADER_BAND_PX = 32;
+
+        /** Шаг опроса и предельное время ожидания асинхронного перестроения эскиза. */
+        private static final int POLL_INTERVAL_MS = 25;
+        private static final int POLL_TIMEOUT_MS = 3000;
+
+        /**
+         * Сколько опросов подряд {@code hippoSession} должна держаться без изменений, чтобы считать
+         * перестроение завершённым. Клик по эскизу запускает два перестроения
+         * (см. {@code WysiwygNativeHandler.mouseUp}); реакция на первое даёт «через раз» —
+         * второе перестроение перекрывает выделение корня элементом.
+         */
+        private static final int STABLE_POLLS = 4;
+
+        /** Точка нажатия ЛКМ в эскизе; {@code null} — подходящего нажатия не было. */
+        private static Point downPoint;
+
+        /** Номер последнего клика: обработка более раннего прекращается. */
+        private static int clickGeneration;
+
+        private WysiwygHeaderClick() {}
+
+        static void install(Display display)
+        {
+            display.addFilter(SWT.MouseDown, WysiwygHeaderClick::onMouseDown);
+            display.addFilter(SWT.MouseUp, WysiwygHeaderClick::onMouseUp);
+        }
+
+        private static void onMouseDown(Event e)
+        {
+            downPoint = e.button == 1 && isWysiwyg(e.widget) ? new Point(e.x, e.y) : null;
+        }
+
+        private static void onMouseUp(Event e)
+        {
+            Point down = downPoint;
+            downPoint = null;
+
+            if (e.button != 1 || down == null || !isWysiwyg(e.widget))
+                return;
+            if (Math.abs(e.x - down.x) > DRAG_THRESHOLD_PX
+                    || Math.abs(e.y - down.y) > DRAG_THRESHOLD_PX)
+                return; // перетаскивание, а не клик
+            if (e.y >= HEADER_BAND_PX)
+                return; // ниже полосы заголовка
+
+            FormEditorPage page = FormEditor.getActiveFormEditorPage();
+            Object representation = getRepresentation(page);
+            Display display = e.display;
+            if (representation == null || display == null || display.isDisposed())
+                return;
+
+            // Display-фильтр отрабатывает до слушателя WysiwygNativeHandler, поэтому здесь
+            // ещё видно состояние «до клика». Перестроение асинхронно
+            // (rebuild -> MappingController.getMappingRootAsync), поэтому результат клика
+            // читается не сразу, а после смены hippoSession: её переприсваивает задача рендера.
+            Object sessionBefore = Global.getField(representation, "hippoSession"); //$NON-NLS-1$
+            int generation = ++clickGeneration;
+            awaitRebuild(page, representation, sessionBefore, display, generation, 0,
+                    sessionBefore, 0, () -> onClickProcessed(page, representation));
+        }
+
+        private static void onClickProcessed(FormEditorPage page, Object representation)
+        {
+            // Нативный рендер относит клик по полосе заголовка к верхнему элементу формы
+            // (полоса входит в его область), поэтому «пустоты» здесь не бывает — выделяем корень
+            // безусловно. Плата: верхние пиксели самого верхнего элемента тоже попадают под полосу.
+            //
+            // Сначала перестроение без события снимает выделение элемента с эскиза
+            // (rebuild(false) не трогает дерево: у события нет id, notifySelection не вызывается),
+            // чтобы в дереве не мигал элемент до переключения на корень.
+            Global.invokeVoid(representation, "rebuild", false); //$NON-NLS-1$
+            Form form = page.getModel();
+            if (form != null)
+                page.setSelection(FormEditorComponent.ITEMS, false, form);
+        }
+
+        /**
+         * Ждёт, пока асинхронное перестроение эскиза завершится: {@code hippoSession} сменится и
+         * продержится без изменений {@value #STABLE_POLLS} опросов подряд. Клик по эскизу вызывает
+         * два перестроения (см. {@code WysiwygNativeHandler.mouseUp}), поэтому реакция на первое
+         * перестроение ненадёжна — второе перекроет выделение.
+         */
+        private static void awaitRebuild(FormEditorPage page, Object representation,
+                Object sessionBefore, Display display, int generation, int elapsedMs,
+                Object prevSession, int stablePolls, Runnable onFinished)
+        {
+            if (generation != clickGeneration || display.isDisposed() || page.getSite() == null)
+                return; // подоспел более свежий клик либо редактор уже закрыт
+
+            Object session = Global.getField(representation, "hippoSession"); //$NON-NLS-1$
+            if (session == sessionBefore)
+            {
+                if (elapsedMs >= POLL_TIMEOUT_MS)
+                    return;
+                display.timerExec(POLL_INTERVAL_MS, () -> awaitRebuild(page, representation,
+                        sessionBefore, display, generation, elapsedMs + POLL_INTERVAL_MS,
+                        session, 0, onFinished));
+                return;
+            }
+            if (stablePolls >= STABLE_POLLS)
+            {
+                onFinished.run();
+                return;
+            }
+            if (elapsedMs >= POLL_TIMEOUT_MS)
+                return;
+            int nextStable = session == prevSession ? stablePolls + 1 : 0;
+            display.timerExec(POLL_INTERVAL_MS, () -> awaitRebuild(page, representation,
+                    sessionBefore, display, generation, elapsedMs + POLL_INTERVAL_MS,
+                    session, nextStable, onFinished));
+        }
+
+        /**
+         * Верхняя граница содержимого эскиза: наименьший {@code y} среди прямоугольников
+         * элементов верхнего уровня. Всё, что выше, — полоса заголовка. Высоту заголовка
+         * рисует сам визуализатор, в модели раскладки её нет (у {@code HippoLayElementBase}
+         * только grid-ограничения), поэтому она и вычисляется от фактических границ.
+         *
+         * @return граница в координатах эскиза, либо {@code -1}, если границы недоступны
+         */
+        private static int contentTop(FormEditorPage page, Object representation)
+        {
+            Form form = page.getModel();
+            if (form == null)
+                return -1;
+
+            int top = Integer.MAX_VALUE;
+            for (FormItem item : topLevelItems(form))
+            {
+                Rectangle bounds = itemBounds(representation, item);
+                if (bounds != null && bounds.height > 0)
+                    top = Math.min(top, bounds.y);
+            }
+            return top == Integer.MAX_VALUE ? -1 : top;
+        }
+
+        /** Элементы верхнего уровня формы, включая автоматическую командную панель. */
+        private static List<FormItem> topLevelItems(Form form)
+        {
+            List<FormItem> items = new ArrayList<>(form.getItems());
+            if (form.getAutoCommandBar() != null)
+                items.add(form.getAutoCommandBar());
+            return items;
+        }
+
+        /** Прямоугольник элемента в координатах эскиза, либо {@code null}. */
+        private static Rectangle itemBounds(Object representation, FormItem item)
+        {
+            Object control = Global.invoke(representation, "getRelatedControl", item); //$NON-NLS-1$
+            if (control == null)
+                return null;
+            Object bounds = Global.invoke(representation, "getBoundsRelativeWysiwygRoot", control); //$NON-NLS-1$
+            return bounds instanceof Rectangle rect ? rect : null;
+        }
+
+        /** Представление WYSIWYG активной страницы редактора формы, либо {@code null}. */
+        private static Object getRepresentation(FormEditorPage page)
+        {
+            if (page == null)
+                return null;
+            Object viewer = Global.getField(page, "wysiwygViewer"); //$NON-NLS-1$
+            return viewer == null ? null : Global.getField(viewer, "wysiwygRepresentation"); //$NON-NLS-1$
+        }
+
+        private static boolean isWysiwyg(Widget widget)
+        {
+            return widget instanceof Composite
+                    && WYSIWYG_CLASS.equals(widget.getClass().getSimpleName());
+        }
     }
 
     // -----------------------------------------------------------------------
