@@ -24,13 +24,13 @@
 
 ## История
 
-В списке файлов коммита — колонка **«Путь»** с полным именем объекта метаданных и поле [фильтра](obshchie-mekhanizmy.md#filtry-po-podstroke-v-spiskah) с раскраской вхождений ([#184](https://github.com/tormozit/EDT.Comfort/issues/184)).
+В списке файлов коммита — колонки **«Тип»** и **«Путь»** с полным именем объекта метаданных и поле [фильтра](obshchie-mekhanizmy.md#filtry-po-podstroke-v-spiskah) с раскраской вхождений ([#184](https://github.com/tormozit/EDT.Comfort/issues/184), [#230](https://github.com/tormozit/EDT.Comfort/issues/230)).
 
 В контекстном меню списка **коммитов** — команда **«Сравнить рабочий каталог с коммитом»** ([#21](https://github.com/tormozit/EDT.Comfort/issues/21)).
 
 ## Индексирование Git
 
-В списке файлов панели отображается полное имя метаданных; фильтр заменён на многословный с историей и раскраской ([#183](https://github.com/tormozit/EDT.Comfort/issues/183)).
+В списке файлов панели отображается колонка **«Тип»**, полное имя метаданных; фильтр заменён на многословный с историей и раскраской ([#183](https://github.com/tormozit/EDT.Comfort/issues/183), [#230](https://github.com/tormozit/EDT.Comfort/issues/230)).
 
 ## См. также
 
