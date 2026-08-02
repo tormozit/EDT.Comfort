@@ -171,6 +171,12 @@ public final class ComfortSettings
     /** Панель «Текущая строка» показывается по умолчанию. */
     public static final boolean DEFAULT_COMPARE_CURRENT_LINES_VISIBLE = true;
 
+    /** Ключ: показ панели «Структура» в попарном {@code CompareDialog} ({@link CompareDialogCurrentLinesHook}). */
+    public static final String PREF_COMPARE_STRUCTURE_VISIBLE = "comfort.compare.structureVisible"; //$NON-NLS-1$
+
+    /** Панель «Структура» выключена по умолчанию. */
+    public static final boolean DEFAULT_COMPARE_STRUCTURE_VISIBLE = false;
+
     // ---- Spell checking ----
 
     /**
@@ -453,6 +459,65 @@ public final class ComfortSettings
         catch (Exception ex)
         {
             Global.log("ComfortSettings save error (compareCurrentLinesVisible): " + ex); //$NON-NLS-1$
+        }
+    }
+
+    /** Показывать ли панель «Структура» в попарном {@code CompareDialog} — запоминается между запусками EDT. */
+    public static boolean isCompareStructureVisible()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_COMPARE_STRUCTURE_VISIBLE;
+        return settings.preferenceStore.getBoolean(PREF_COMPARE_STRUCTURE_VISIBLE);
+    }
+
+    /** Сохранить состояние переключателя «Структура» в попарном {@code CompareDialog}. */
+    public static void setCompareStructureVisible(boolean visible)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        settings.preferenceStore.setValue(PREF_COMPARE_STRUCTURE_VISIBLE, visible);
+        try
+        {
+            settings.preferenceStore.save();
+        }
+        catch (Exception ex)
+        {
+            Global.log("ComfortSettings save error (compareStructureVisible): " + ex); //$NON-NLS-1$
+        }
+    }
+
+    private static final String PREF_COMPARE_STRUCTURE_HEIGHT_PREFIX = "comfort.compare.structureHeight."; //$NON-NLS-1$
+
+    /**
+     * Высота панели «Структура» (px), отдельно для каждого вида окна сравнения ({@code contextId} —
+     * например {@code "2way"}/{@code "git"}/{@code "paste"}/{@code "3way"}, см. использующие хуки).
+     * {@code defaultValue}, если для этого вида окна ещё ничего не сохранено.
+     */
+    public static int getCompareStructureHeight(String contextId, int defaultValue)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return defaultValue;
+        int value = settings.preferenceStore.getInt(PREF_COMPARE_STRUCTURE_HEIGHT_PREFIX + contextId);
+        return value > 0 ? value : defaultValue;
+    }
+
+    /** Сохранить высоту панели «Структура» для конкретного вида окна сравнения (см. {@link #getCompareStructureHeight}). */
+    public static void setCompareStructureHeight(String contextId, int height)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        settings.preferenceStore.setValue(PREF_COMPARE_STRUCTURE_HEIGHT_PREFIX + contextId, height);
+        try
+        {
+            settings.preferenceStore.save();
+        }
+        catch (Exception ex)
+        {
+            Global.log("ComfortSettings save error (compareStructureHeight): " + ex); //$NON-NLS-1$
         }
     }
 

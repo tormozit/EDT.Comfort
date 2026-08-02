@@ -381,8 +381,13 @@ public final class GitCompareCurrentLinesHook
             : rightIsWorkingCopy ? resolveTypedElementFile(editorInput, false)
             : null;
 
+        StructureToggleController structureController =
+            new StructureToggleController(wrapper, viewerControl, leftText, rightText, leftLabel, rightLabel,
+                "git"); //$NON-NLS-1$
+        structureController.setSourceViewers(MergeViewerReflection.extractSourceViewer(viewer, "fLeft"), //$NON-NLS-1$
+            MergeViewerReflection.extractSourceViewer(viewer, "fRight")); //$NON-NLS-1$
         addCompareInIrToolbarAction(pane, panel, editorInput, workingCopyFile, workingCopyText, editor,
-            viewer, config, rawLeftLabel, leftLabel, rightLabel);
+            viewer, config, rawLeftLabel, leftLabel, rightLabel, structureController);
 
         TwoSideCurrentLinesSync.hook(panel, leftText, rightText, viewer, config, leftLabel, rightLabel);
 
@@ -521,7 +526,7 @@ public final class GitCompareCurrentLinesHook
     private static void addCompareInIrToolbarAction(CompareViewerPane pane, CompareCurrentLinesPanel panel,
         CompareEditorInput editorInput, IFile workingCopyFile, StyledText workingCopyText, IEditorPart editor,
         TextMergeViewer viewer, CompareConfiguration config, String rawLeftLabel, String leftLabel,
-        String rightLabel)
+        String rightLabel, StructureToggleController structureController)
     {
         IToolBarManager toolBarManager = CompareViewerPane.getToolBarManager(pane);
         if (toolBarManager == null)
@@ -532,6 +537,19 @@ public final class GitCompareCurrentLinesHook
 
         ITypedElement left = resolveTypedElement(editorInput, true);
         ITypedElement right = resolveTypedElement(editorInput, false);
+
+        /*
+         * НЕ placeToggleButtonAtViewFormTopLeft (как в 3-way) — CompareViewerPane.setText()
+         * декомпилирован: делает getTopLeft() и БЕЗУСЛОВНЫЙ checkcast на CLabel (см.
+         * .tmp/bundles/ecompare/CompareViewerPane.javap-c.txt). Если topLeft подменить своей
+         * обёрткой, любой последующий вызов pane.setText(...)/setImage(...) (заголовок
+         * обновляется при смене входа) кидает ClassCastException — что и снесло штатный тулбар
+         * при реальном тесте. Первым в toolBarManager — компромисс (дальше от заголовка, зато
+         * не ломает pane).
+         */
+        if (StructureToggleController.isBslCompare(left, right))
+            toolBarManager.add(structureController.createToggleAction());
+
         if (CompareTabularDocumentsInIr.isMxlxTypedElement(left)
             || CompareTabularDocumentsInIr.isMxlxTypedElement(right)
             || isMxlxFile(workingCopyFile)
@@ -598,6 +616,16 @@ public final class GitCompareCurrentLinesHook
             toolBarManager.add(item);
 
         toolBarManager.update(true);
+
+        // Безусловный лог фактического порядка — проверять по нему, а не гадать.
+        StringBuilder order = new StringBuilder();
+        for (IContributionItem item : toolBarManager.getItems())
+            order.append('[').append(item.getId() != null ? item.getId() : item.getClass().getSimpleName())
+                .append(item instanceof org.eclipse.jface.action.ActionContributionItem aci
+                    ? " text=" + aci.getAction().getText() : "") //$NON-NLS-1$ //$NON-NLS-2$
+                .append("] "); //$NON-NLS-1$
+        Global.tempLog("CompareDialogStructure", "GitCompareCurrentLinesHook.addCompareInIrToolbarAction: " //$NON-NLS-1$ //$NON-NLS-2$
+            + "фактический порядок тулбара = " + order); //$NON-NLS-1$
     }
 
     private static boolean isMxlxFile(IFile file)

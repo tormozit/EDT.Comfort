@@ -26,9 +26,11 @@ import org.eclipse.core.resources.IFile;
 import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.jface.action.Action;
+import org.eclipse.jface.action.ActionContributionItem;
 import org.eclipse.jface.action.IContributionItem;
 import org.eclipse.jface.action.IToolBarManager;
 import org.eclipse.jface.action.Separator;
+import org.eclipse.jface.action.ToolBarManager;
 import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.viewers.Viewer;
@@ -39,6 +41,7 @@ import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
+import org.eclipse.swt.widgets.Display;
 import org.eclipse.ui.IWorkbenchPage;
 
 /**
@@ -140,6 +143,11 @@ public final class PasteWithCompareActions
         /** {@code StyledText} панелей сравнения текущего {@link TextMergeViewer} (для отслеживания каретки). */
         private StyledText leftEditorText;
         private StyledText rightEditorText;
+        /** Для разовой активации подсветки текущей строки — см. {@code StructureToggleController.setSourceViewers}. */
+        private org.eclipse.jface.text.source.SourceViewer leftSourceViewer;
+        private org.eclipse.jface.text.source.SourceViewer rightSourceViewer;
+        /** Control текущего вьюера — см. {@link #hookCurrentLineTracking}/{@link #addCompareInIrToolbarAction}. */
+        private Control mergeViewerControl;
         /** Пункт «Сравнить ИР» в тулбаре добавляется один раз (см. {@link #addCompareInIrToolbarActionOnce}). */
         private boolean toolbarActionAdded;
 
@@ -238,7 +246,8 @@ public final class PasteWithCompareActions
 
             leftEditorText = MergeViewerReflection.extractStyledText(mergeViewer, "fLeft"); //$NON-NLS-1$
             rightEditorText = MergeViewerReflection.extractStyledText(mergeViewer, "fRight"); //$NON-NLS-1$
-
+            leftSourceViewer = MergeViewerReflection.extractSourceViewer(mergeViewer, "fLeft"); //$NON-NLS-1$
+            rightSourceViewer = MergeViewerReflection.extractSourceViewer(mergeViewer, "fRight"); //$NON-NLS-1$
             CompareConfiguration config = getCompareConfiguration();
             String semanticLeft = config != null ? config.getLeftLabel(null) : null;
             String semanticRight = config != null ? config.getRightLabel(null) : null;
@@ -271,6 +280,18 @@ public final class PasteWithCompareActions
 
             IContributionItem[] existingItems = toolBarManager.getItems();
             toolBarManager.removeAll();
+
+            /*
+             * НЕ placeToggleButtonAtViewFormTopLeft (как в 3-way) — CompareViewerPane.setText()
+             * декомпилирован: делает getTopLeft() и БЕЗУСЛОВНЫЙ checkcast на CLabel (см.
+             * .tmp/bundles/ecompare/CompareViewerPane.javap-c.txt). Если topLeft подменить своей
+             * обёрткой, любой последующий вызов pane.setText(...)/setImage(...) (заголовок
+             * обновляется при смене входа) кидает ClassCastException — что и снесло штатный
+             * тулбар при реальном тесте (см. GitCompareCurrentLinesHook). Первым в toolBarManager —
+             * компромисс (дальше от заголовка, зато не ломает pane).
+             */
+            installStructureToggleLater(pane, toolBarManager);
+
             Action compareInIrAction = new Action(IrCompareValuesHandler.MENU_LABEL)
             {
                 @Override
@@ -298,6 +319,7 @@ public final class PasteWithCompareActions
             showInModuleAction.setToolTipText(
                 ShowInModuleHandler.MENU_LABEL + " — " + ShowInModuleHandler.TOOLTIP + Global.pluginSignForTooltip()); //$NON-NLS-1$
             toolBarManager.add(showInModuleAction);
+
             toolBarManager.add(currentLinesPanel.createVisibilityToggleAction());
             toolBarManager.add(new Separator());
             for (IContributionItem item : existingItems)
@@ -305,6 +327,59 @@ public final class PasteWithCompareActions
 
             toolBarManager.update(true);
             return true;
+        }
+
+        /**
+         * Панель «Структура» — ПОСЛЕ того, как фреймворк закончит создавать вьюер, а не внутри
+         * {@code findContentViewer}. Причина конкретная: репарентинг control'а вьюера
+         * ({@code setParent}) и подмена {@code pane.setContent(...)} прямо посреди его создания
+         * ломали конструкцию ({@code SWTException: Widget is disposed}), а {@code pane.getContent()}
+         * на тот момент ещё не указывал на новый вьюер. В {@code asyncExec} оба условия уже
+         * выполнены — тот же приём, что и для прочих гонок в этой задаче.
+         *
+         * <p>Кнопку добавляем в тулбар через {@code insert(0, …)} — тулбар к этому моменту уже
+         * собран, пересобирать его повторно не нужно.
+         */
+        private void installStructureToggleLater(CompareViewerPane pane, IToolBarManager toolBarManager)
+        {
+            if (!"bsl".equalsIgnoreCase(compareViewerType)) //$NON-NLS-1$
+                return;
+            Display display = pane.getDisplay();
+            if (display == null || display.isDisposed())
+                return;
+            display.asyncExec(() ->
+            {
+                if (pane.isDisposed() || leftEditorText == null || leftEditorText.isDisposed()
+                    || rightEditorText == null || rightEditorText.isDisposed())
+                    return;
+                Control content = pane.getContent();
+                // ViewForm.setContent требует, чтобы control был ПРЯМЫМ ребёнком самого pane.
+                if (content == null || content.isDisposed() || content.getParent() != pane)
+                {
+                    Global.tempLog("CompareDialogStructure", "installStructureToggleLater: content недоступен " //$NON-NLS-1$ //$NON-NLS-2$
+                        + "(content=" + content + ")"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
+
+                Composite wrapper = new Composite(pane, SWT.NONE);
+                GridLayout wrapperLayout = new GridLayout(1, false);
+                wrapperLayout.marginWidth = 0;
+                wrapperLayout.marginHeight = 0;
+                wrapper.setLayout(wrapperLayout);
+                content.setParent(wrapper);
+                content.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+                pane.setContent(wrapper);
+                pane.layout(true, true);
+
+                StructureToggleController structureController = new StructureToggleController(wrapper,
+                    content, leftEditorText, rightEditorText,
+                    getCompareConfiguration().getLeftLabel(null), getCompareConfiguration().getRightLabel(null),
+                    "paste"); //$NON-NLS-1$
+                structureController.setSourceViewers(leftSourceViewer, rightSourceViewer);
+                ((ToolBarManager) toolBarManager).insert(0, 
+                    new ActionContributionItem(structureController.createToggleAction()));
+                toolBarManager.update(true);
+            });
         }
 
         private void addCompareInIrToolbarActionOnce()

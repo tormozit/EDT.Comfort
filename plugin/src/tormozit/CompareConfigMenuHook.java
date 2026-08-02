@@ -281,6 +281,7 @@ public class CompareConfigMenuHook implements IStartup
     {
         attachMenuListener(editor, tree);
         CompareConfigOpenModuleMergeHandler.attachDoubleClickListener(editor, tree);
+        CompareModuleStructureColumnHook.install(tree);
     }
 
     private void wireTreeViewerToListener(IEditorPart editor, CompareConfigSelectionListener listener)

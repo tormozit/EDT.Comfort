@@ -308,6 +308,19 @@ public final class ThreeSideMergeCurrentLinesHook
 
         ActivePair activePair = new ActivePair();
         panel.setCompareInIrSupplier(() -> supplyFullTextsForIr(panel, activePair));
+        /*
+         * «Структура» — только у диалога «Объединение» (plain, без встроенного дерева секций).
+         * У «Настройка объединения модулей» (structured) уже есть штатная панель структуры —
+         * дублировать её не нужно. Тот же признак structured/plain, что и в showInModule
+         * (поле {@code node} — IPartialModelNode — есть только у structured-диалога).
+         */
+        boolean structured = Global.getField(provider, "node") != null; //$NON-NLS-1$
+        if (!structured && leftText != null && rightText != null)
+        {
+            String[] sideLabels = extractSideLabels(provider, viewer);
+            createStructureController(viewFormControl, viewer, leftText, rightText, resultText, sideLabels[0],
+                sideLabels[1]);
+        }
         addCompareInIrToolbarAction(provider, viewer, panel, activePair);
 
         hookStyledText(leftText, panel, provider, viewer, leftText, rightText, resultText, activePair);
@@ -343,6 +356,73 @@ public final class ThreeSideMergeCurrentLinesHook
                     scheduleAttach(shell, provider, 0);
             });
         }
+    }
+
+    /**
+     * Панель структуры нужна МЕЖДУ штатным тулбаром {@code ViewForm} («Объединение встроенного
+     * языка» — topLeft/topCenter самого {@code viewFormControl}) и текстом, а не НАД всем
+     * {@code ViewForm} целиком (что было бы, просто добавь панель соседом в
+     * {@code mergeViewerComposite}, как «Текущая строка») — оборачиваем текущее содержимое
+     * {@code ViewForm} (сам вьюер, {@code viewer.getControl()}) в свой composite и подставляем
+     * его через {@code ViewForm.setContent(...)}, как это уже делает
+     * {@link CompareDialogCurrentLinesHook}/{@link GitCompareCurrentLinesHook} с
+     * {@code CompareViewerSwitchingPane}.
+     */
+    private static void createStructureController(Control viewFormControl,
+        ThreeSideTextMergeViewer viewer, StyledText leftText, StyledText rightText, StyledText resultText,
+        String leftLabel, String rightLabel)
+    {
+        if (!(viewFormControl instanceof ViewForm viewForm))
+        {
+            Global.tempLog("CompareDialogStructure", "createStructureController: viewFormControl не ViewForm, " //$NON-NLS-1$ //$NON-NLS-2$
+                + "class=" + (viewFormControl != null ? viewFormControl.getClass().getName() : null)); //$NON-NLS-1$
+            return;
+        }
+        Control viewerControl = viewer.getControl();
+        if (viewerControl == null || viewerControl.isDisposed())
+        {
+            Global.tempLog("CompareDialogStructure", "createStructureController: viewerControl недоступен"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        Control existingTopLeft = viewForm.getTopLeft();
+        Control existingContent = viewForm.getContent();
+        Global.tempLog("CompareDialogStructure", "createStructureController: topLeft=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (existingTopLeft != null ? existingTopLeft.getClass().getName() : null)
+            + " content=" + (existingContent != null ? existingContent.getClass().getName() : null) //$NON-NLS-1$
+            + " content==viewerControl=" + (existingContent == viewerControl)); //$NON-NLS-1$
+
+        Composite contentWrapper = new Composite(viewForm, SWT.NONE);
+        GridLayout wrapperLayout = new GridLayout(1, false);
+        wrapperLayout.marginWidth = 0;
+        wrapperLayout.marginHeight = 0;
+        contentWrapper.setLayout(wrapperLayout);
+
+        viewerControl.setParent(contentWrapper);
+        viewerControl.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+        viewForm.setContent(contentWrapper);
+        contentWrapper.getParent().layout(true, true);
+
+        Global.tempLog("CompareDialogStructure", "createStructureController: после setContent topLeft=" //$NON-NLS-1$ //$NON-NLS-2$
+            + (viewForm.getTopLeft() != null ? viewForm.getTopLeft().getClass().getName() : null)
+            + " newContent==contentWrapper=" + (viewForm.getContent() == contentWrapper)); //$NON-NLS-1$
+
+        StructureToggleController controller = new StructureToggleController(contentWrapper, viewerControl,
+            leftText, rightText, leftLabel, rightLabel, "3way"); //$NON-NLS-1$
+        controller.setResultText(resultText);
+        controller.setSourceViewers(MergeViewerReflection.extractSourceViewer(viewer, "leftViewer"), //$NON-NLS-1$
+            MergeViewerReflection.extractSourceViewer(viewer, "rightViewer")); //$NON-NLS-1$
+        /*
+         * ПРОВЕРЕНО и ОШИБОЧНО: ThreeSideTextMergeViewer.leftToolBarManager/rightToolBarManager
+         * (декомпилировано в .tmp/bundles/compare-ui/ThreeSideTextMergeViewer.javap-c.txt,
+         * buildControls()) — это ДВЕ половины НИЖНЕЙ панели значков (та же строка, что и
+         * «Сравнить ИР» из addCompareInIrToolbarAction ниже), а НЕ тулбар дропдауна
+         * «Объединение встроенного языка» — это подтвердилось регрессией при реальном тесте
+         * (кнопка уехала в нижнюю строку вместо места рядом с дропдауном). Дропдаун — это
+         * ViewForm.topLeft самого viewFormControl, отдельно от ThreeSideTextMergeViewer.
+         * Используем общий приём (см. StructureToggleController.placeToggleButtonAtViewFormTopLeft) —
+         * оборачиваем topLeft вместе со своим ToolBar в общий composite.
+         */
+        StructureToggleController.placeToggleButtonAtViewFormTopLeft(viewForm, controller);
     }
 
     /**
@@ -654,6 +734,26 @@ public final class ThreeSideMergeCurrentLinesHook
      */
     private static void refreshLabels(CompareCurrentLinesPanel panel, Object dialog, ThreeSideTextMergeViewer viewer)
     {
+        String[] sideLabels = extractSideLabels(dialog, viewer);
+        String resultLabel = CompareCurrentLinesPanel.sideLabelForCurrentLines(
+            MergeViewerReflection.extractLabelText(viewer, "resultLabel")); //$NON-NLS-1$
+
+        panel.setLabelText(LEFT, labelOrDefault(withColon(sideLabels[0]), DEFAULT_LEFT_LABEL));
+        panel.setLabelText(RIGHT, labelOrDefault(withColon(sideLabels[1]), DEFAULT_RIGHT_LABEL));
+        panel.setLabelText(RESULT, labelOrDefault(withColon(resultLabel), DEFAULT_RESULT_LABEL));
+    }
+
+    /**
+     * Реальные названия сторон («Конфигурация»/«Конфигурация1» и т.п.), те же, что в заголовках
+     * колонок дерева объектов / панели «Текущая строка» — см. {@link #refreshLabels}. Общий
+     * для неё и для {@link #createStructureController} (комбо «Показывать только …» в
+     * {@link CompareDialogStructurePanel} должно называть стороны так же, как везде в этом окне,
+     * а не своими generic-подписями наподобие {@link #DEFAULT_LEFT_LABEL}).
+     *
+     * @return {@code {leftLabel, rightLabel}}, элементы могут быть {@code null}
+     */
+    private static String[] extractSideLabels(Object dialog, ThreeSideTextMergeViewer viewer)
+    {
         String leftFromDialog = asNonBlankString(Global.getField(dialog, "mainComparisonSideName")); //$NON-NLS-1$
         String rightFromDialog = asNonBlankString(Global.getField(dialog, "otherComparisonSideName")); //$NON-NLS-1$
 
@@ -663,12 +763,7 @@ public final class ThreeSideMergeCurrentLinesHook
         String rightLabel = rightFromDialog != null ? rightFromDialog
             : CompareCurrentLinesPanel.sideLabelForCurrentLines(
                 MergeViewerReflection.extractLabelText(viewer, "rightLabel")); //$NON-NLS-1$
-        String resultLabel = CompareCurrentLinesPanel.sideLabelForCurrentLines(
-            MergeViewerReflection.extractLabelText(viewer, "resultLabel")); //$NON-NLS-1$
-
-        panel.setLabelText(LEFT, labelOrDefault(withColon(leftLabel), DEFAULT_LEFT_LABEL));
-        panel.setLabelText(RIGHT, labelOrDefault(withColon(rightLabel), DEFAULT_RIGHT_LABEL));
-        panel.setLabelText(RESULT, labelOrDefault(withColon(resultLabel), DEFAULT_RESULT_LABEL));
+        return new String[] { leftLabel, rightLabel };
     }
 
     private static String asNonBlankString(Object value)

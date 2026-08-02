@@ -25,13 +25,26 @@ public final class MergeViewerReflection
 
     public static StyledText extractStyledText(Object mergeViewer, String fieldName)
     {
+        SourceViewer sv = extractSourceViewer(mergeViewer, fieldName);
+        return sv != null ? sv.getTextWidget() : null;
+    }
+
+    /**
+     * Сам {@link SourceViewer} (не только его виджет) — нужен там, где важно провести изменение
+     * через штатный JFace API ({@code setSelectedRange}/{@code revealRange}), а не напрямую через
+     * {@link StyledText} — например, чтобы разово "включить" {@code CursorLinePainter}
+     * (см. {@code StructureToggleController.primeLineHighlightOnce}: он подписывается как
+     * {@code LineBackgroundListener} только после первого проведённого через сам вьюер изменения
+     * выделения — обращение напрямую к {@code StyledText.setSelectionRange} этот путь не
+     * задействует).
+     */
+    public static SourceViewer extractSourceViewer(Object mergeViewer, String fieldName)
+    {
         Object mergeSourceViewer = Global.getField(mergeViewer, fieldName);
         if (mergeSourceViewer == null)
             return null;
         Object sourceViewer = Global.invoke(mergeSourceViewer, "getSourceViewer"); //$NON-NLS-1$
-        if (sourceViewer instanceof SourceViewer sv)
-            return sv.getTextWidget();
-        return null;
+        return sourceViewer instanceof SourceViewer sv ? sv : null;
     }
 
     /**

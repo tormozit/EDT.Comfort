@@ -90,6 +90,8 @@ public final class CompareDialogCurrentLinesHook
         if (!name.contains("CompareDialog") && !name.contains("NonModalDialog")) //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         Object input = Global.getField(data, "fCompareEditorInput"); //$NON-NLS-1$
+        Global.tempLog("CompareDialogStructure", "extractCompareEditorInput: shellDataClass=" + name //$NON-NLS-1$ //$NON-NLS-2$
+            + " inputClass=" + (input != null ? input.getClass().getName() : null)); //$NON-NLS-1$
         return input instanceof CompareEditorInput editorInput ? editorInput : null;
     }
 
@@ -149,7 +151,21 @@ public final class CompareDialogCurrentLinesHook
         if (Boolean.TRUE.equals(pane.getData(PANEL_ATTACHED_KEY)))
             return;
         pane.setData(PANEL_ATTACHED_KEY, Boolean.TRUE);
+        Global.tempLog("CompareDialogStructure", "attach: start"); //$NON-NLS-1$ //$NON-NLS-2$
+        try
+        {
+            attachImpl(pane, viewerControl, editorInput, viewer, shell);
+        }
+        catch (RuntimeException e)
+        {
+            Global.tempLogException("CompareDialogStructure", "attach: exception", e); //$NON-NLS-1$ //$NON-NLS-2$
+            throw e;
+        }
+    }
 
+    private static void attachImpl(CompareViewerSwitchingPane pane, Control viewerControl,
+        CompareEditorInput editorInput, TextMergeViewer viewer, Shell shell)
+    {
         Composite wrapper = new Composite(pane, SWT.NONE);
         GridLayout wrapperLayout = new GridLayout(1, false);
         wrapperLayout.marginWidth = 0;
@@ -192,7 +208,12 @@ public final class CompareDialogCurrentLinesHook
                 CompareTabularDocumentsInIr.resolveWorkspaceFile(resolveRight(editorInput)));
         });
 
-        addToolbarActions(pane, panel, editorInput, viewer, semanticLeft, semanticRight);
+        StructureToggleController structureController =
+            new StructureToggleController(wrapper, viewerControl, leftText, rightText, semanticLeft, semanticRight,
+                "2way"); //$NON-NLS-1$
+        structureController.setSourceViewers(MergeViewerReflection.extractSourceViewer(viewer, "fLeft"), //$NON-NLS-1$
+            MergeViewerReflection.extractSourceViewer(viewer, "fRight")); //$NON-NLS-1$
+        addToolbarActions(pane, panel, editorInput, viewer, semanticLeft, semanticRight, structureController);
 
         TwoSideCurrentLinesSync.hook(panel, leftText, rightText, viewer, config, semanticLeft, semanticRight);
 
@@ -224,7 +245,8 @@ public final class CompareDialogCurrentLinesHook
     }
 
     private static void addToolbarActions(CompareViewerPane pane, CompareCurrentLinesPanel panel,
-        CompareEditorInput editorInput, TextMergeViewer viewer, String semanticLeft, String semanticRight)
+        CompareEditorInput editorInput, TextMergeViewer viewer, String semanticLeft, String semanticRight,
+        StructureToggleController structureController)
     {
         IToolBarManager toolBarManager = CompareViewerPane.getToolBarManager(pane);
         if (toolBarManager == null)
@@ -237,6 +259,18 @@ public final class CompareDialogCurrentLinesHook
         ITypedElement right = resolveRight(editorInput);
         boolean mxlx = CompareTabularDocumentsInIr.isMxlxTypedElement(left)
             || CompareTabularDocumentsInIr.isMxlxTypedElement(right);
+
+        /*
+         * НЕ placeToggleButtonAtViewFormTopLeft (как в 3-way) — CompareViewerPane.setText()
+         * декомпилирован: делает getTopLeft() и БЕЗУСЛОВНЫЙ checkcast на CLabel (см.
+         * .tmp/bundles/ecompare/CompareViewerPane.javap-c.txt). Если topLeft подменить своей
+         * обёрткой, любой последующий вызов pane.setText(...)/setImage(...) (заголовок
+         * обновляется при смене входа) кидает ClassCastException — что и снесло штатный тулбар при
+         * реальном тесте. Первым в toolBarManager — компромисс (дальше от заголовка, зато
+         * не ломает pane).
+         */
+        if (StructureToggleController.isBslCompare(left, right))
+            toolBarManager.add(structureController.createToggleAction());
 
         if (mxlx)
         {

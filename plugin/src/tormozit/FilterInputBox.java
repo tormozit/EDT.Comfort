@@ -99,7 +99,10 @@ final class FilterInputBox
             "comfort.filteredListDialog.filter.history."), //$NON-NLS-1$
         INFOBASES(
             "comfort.infobasesView.filter.history.count", //$NON-NLS-1$
-            "comfort.infobasesView.filter.history."); //$NON-NLS-1$
+            "comfort.infobasesView.filter.history."), //$NON-NLS-1$
+        COMPARE_STRUCTURE(
+            "comfort.compareStructure.filter.history.count", //$NON-NLS-1$
+            "comfort.compareStructure.filter.history."); //$NON-NLS-1$
 
         final String prefCountKey;
         final String prefItemPrefix;
@@ -221,6 +224,17 @@ final class FilterInputBox
         return create(parent, opts, onSearch);
     }
 
+    /** Фильтр дерева структуры в панели сравнения (см. {@code CompareDialogStructurePanel}) — компактный, не на всю ширину. */
+    static FilterInputBox forCompareStructure(Composite parent, Runnable onSearch)
+    {
+        Options opts = new Options();
+        opts.scope = Scope.COMPARE_STRUCTURE;
+        opts.layoutData = compactLayoutData();
+        opts.message = "Фильтр (можно несколько слов)"; //$NON-NLS-1$
+        opts.tooltip = FLAT_FILTER_TOOLTIP;
+        return create(parent, opts, onSearch);
+    }
+
     /** Замена штатного поля в {@code FilteredList}-диалогах (см. {@code FilteredListDialogFilterHook}) — на всю ширину. */
     static FilterInputBox forFilteredListDialog(Composite parent, Runnable onSearch)
     {
@@ -294,6 +308,7 @@ final class FilterInputBox
             case RIGHTS_DIALOG -> throw new IllegalStateException("RIGHTS_DIALOG: use attachHistory(SearchBox, Scope.RIGHTS_DIALOG)"); //$NON-NLS-1$
             case FILTER_BY_SUBSYSTEMS -> throw new IllegalStateException("FILTER_BY_SUBSYSTEMS: use attachHistory(SearchBox, Scope.FILTER_BY_SUBSYSTEMS)"); //$NON-NLS-1$
             case INFOBASES -> throw new IllegalStateException("INFOBASES: use attachHistory(SearchBox, Scope.INFOBASES)"); //$NON-NLS-1$
+            case COMPARE_STRUCTURE -> forCompareStructure(parent, onSearch);
         };
     }
 
