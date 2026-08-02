@@ -102,7 +102,10 @@ final class FilterInputBox
             "comfort.infobasesView.filter.history."), //$NON-NLS-1$
         COMPARE_STRUCTURE(
             "comfort.compareStructure.filter.history.count", //$NON-NLS-1$
-            "comfort.compareStructure.filter.history."); //$NON-NLS-1$
+            "comfort.compareStructure.filter.history."), //$NON-NLS-1$
+        VALIDATION_CHECKS(
+            "comfort.validationChecks.filter.history.count", //$NON-NLS-1$
+            "comfort.validationChecks.filter.history."); //$NON-NLS-1$
 
         final String prefCountKey;
         final String prefItemPrefix;
@@ -309,6 +312,7 @@ final class FilterInputBox
             case FILTER_BY_SUBSYSTEMS -> throw new IllegalStateException("FILTER_BY_SUBSYSTEMS: use attachHistory(SearchBox, Scope.FILTER_BY_SUBSYSTEMS)"); //$NON-NLS-1$
             case INFOBASES -> throw new IllegalStateException("INFOBASES: use attachHistory(SearchBox, Scope.INFOBASES)"); //$NON-NLS-1$
             case COMPARE_STRUCTURE -> forCompareStructure(parent, onSearch);
+            case VALIDATION_CHECKS -> throw new IllegalStateException("VALIDATION_CHECKS: use attachHistory(SearchBox, Scope.VALIDATION_CHECKS)"); //$NON-NLS-1$
         };
     }
 

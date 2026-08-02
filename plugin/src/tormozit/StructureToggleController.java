@@ -199,25 +199,14 @@ final class StructureToggleController
             if (panel != null && !panel.getControl().isDisposed())
                 return;
             if (leftText == null || leftText.isDisposed() || rightText == null || rightText.isDisposed())
-            {
-                Global.tempLog("CompareDialogStructure", "setVisible: leftText/rightText недоступен " //$NON-NLS-1$ //$NON-NLS-2$
-                    + "(leftText=" + leftText + " rightText=" + rightText + ")"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 return;
-            }
             primeLineHighlightOnce();
             String leftContent = leftText.getText();
             String rightContent = rightText.getText();
-            Global.tempLog("CompareDialogStructure", "setVisible: leftChars=" + leftContent.length() //$NON-NLS-1$ //$NON-NLS-2$
-                + " rightChars=" + rightContent.length()); //$NON-NLS-1$
             panel = CompareDialogStructurePanel.create(wrapper, leftContent, rightContent,
                 labelOrDefault(leftLabel, "Слева"), labelOrDefault(rightLabel, "Справа"), //$NON-NLS-1$ //$NON-NLS-2$
                 this::onNodeSelected, this::onNodeDoubleClicked);
-            Global.tempLog("CompareDialogStructure", "setVisible: viewerControl=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (viewerControl != null ? System.identityHashCode(viewerControl) : "null") //$NON-NLS-1$
-                + " wrapperChildrenBeforeMoveAbove=" + describeWrapperChildren()); //$NON-NLS-1$
             panel.getControl().moveAbove(viewerControl);
-            Global.tempLog("CompareDialogStructure", //$NON-NLS-1$
-                "setVisible: wrapperChildrenAfterMoveAbove=" + describeWrapperChildren()); //$NON-NLS-1$ //$NON-NLS-2$
             panelLayoutData = new GridData(SWT.FILL, SWT.FILL, true, false);
             panelLayoutData.heightHint = ComfortSettings.getCompareStructureHeight(contextId, computeDefaultHeight());
             panel.getControl().setLayoutData(panelLayoutData);
@@ -240,18 +229,6 @@ final class StructureToggleController
         }
         if (!wrapper.isDisposed())
             wrapper.layout(true, true);
-    }
-
-    /** Диагностика — класс+identityHashCode прямых детей {@link #wrapper}, по порядку. */
-    private String describeWrapperChildren()
-    {
-        if (wrapper == null || wrapper.isDisposed())
-            return "(disposed)"; //$NON-NLS-1$
-        StringBuilder sb = new StringBuilder();
-        for (Control child : wrapper.getChildren())
-            sb.append('[').append(child.getClass().getSimpleName()).append(' ')
-                .append(System.identityHashCode(child)).append("] "); //$NON-NLS-1$
-        return sb.toString();
     }
 
     private void onSashDragged(Event event)
@@ -316,23 +293,21 @@ final class StructureToggleController
             return;
         display.asyncExec(() ->
         {
-            boolean leftPrimed = primeSourceViewer(leftSourceViewer, leftText);
-            boolean rightPrimed = primeSourceViewer(rightSourceViewer, rightText);
-            Global.tempLog("CompareDialogStructure", "primeLineHighlightOnce (asyncExec): " //$NON-NLS-1$ //$NON-NLS-2$
-                + "leftPrimed=" + leftPrimed + " rightPrimed=" + rightPrimed); //$NON-NLS-1$ //$NON-NLS-2$
+            primeSourceViewer(leftSourceViewer, leftText);
+            primeSourceViewer(rightSourceViewer, rightText);
         });
     }
 
-    /** @return {@code true}, если удалось провести активацию (через SourceViewer или запасной setFocus) */
-    private static boolean primeSourceViewer(SourceViewer sourceViewer, StyledText fallbackText)
+    private static void primeSourceViewer(SourceViewer sourceViewer, StyledText fallbackText)
     {
         if (sourceViewer != null && sourceViewer.getTextWidget() != null && !sourceViewer.getTextWidget().isDisposed())
         {
             Point range = sourceViewer.getSelectedRange();
             sourceViewer.setSelectedRange(range.x, range.y);
-            return true;
+            return;
         }
-        return fallbackText != null && !fallbackText.isDisposed() && fallbackText.setFocus();
+        if (fallbackText != null && !fallbackText.isDisposed())
+            fallbackText.setFocus();
     }
 
     private void onNodeSelected(BslModuleStructureDiff.DiffNode node)
@@ -385,7 +360,7 @@ final class StructureToggleController
         }
         catch (Exception e)
         {
-            Global.tempLog("CompareDialogStructure", "onNodeDoubleClicked: selectNextChange failed: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            // Команда навигации недоступна в контексте — не критично, просто не переходим дальше.
         }
     }
 
@@ -469,25 +444,7 @@ final class StructureToggleController
 
         int lineStartOffset = text.getOffsetAtLine(line);
         text.setSelectionRange(lineStartOffset, 0); // только каретка, без выделения текста
-        int targetTopIndex = Math.max(0, line - topOffsetLines);
-        text.setTopIndex(targetTopIndex);
-        Global.tempLog("CompareDialogStructure", "activateFirstLine: line=" + line //$NON-NLS-1$ //$NON-NLS-2$
-            + " topOffsetLines=" + topOffsetLines + " targetTopIndex=" + targetTopIndex //$NON-NLS-1$ //$NON-NLS-2$
-            + " topIndexRightAfterSet=" + text.getTopIndex() //$NON-NLS-1$
-            + " lineCount=" + text.getLineCount() + " clientHeight=" + text.getClientArea().height //$NON-NLS-1$ //$NON-NLS-2$
-            + " lineHeight=" + text.getLineHeight() + " visible=" + text.isVisible() //$NON-NLS-1$ //$NON-NLS-2$
-            + " enabled=" + text.isEnabled() + " widget=" + System.identityHashCode(text)); //$NON-NLS-1$ //$NON-NLS-2$
-        Display display = text.getDisplay();
-        int finalLine = line;
-        if (display != null && !display.isDisposed())
-        {
-            display.asyncExec(() ->
-            {
-                if (!text.isDisposed())
-                    Global.tempLog("CompareDialogStructure", "activateFirstLine: line=" + finalLine //$NON-NLS-1$ //$NON-NLS-2$
-                        + " topIndexAfterAsyncExec=" + text.getTopIndex()); //$NON-NLS-1$
-            });
-        }
+        text.setTopIndex(Math.max(0, line - topOffsetLines));
     }
 
     private static final String[] HEADER_KEYWORDS = { "Процедура", "Функция", "Область" }; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$

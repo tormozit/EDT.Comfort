@@ -90,8 +90,6 @@ public final class CompareDialogCurrentLinesHook
         if (!name.contains("CompareDialog") && !name.contains("NonModalDialog")) //$NON-NLS-1$ //$NON-NLS-2$
             return null;
         Object input = Global.getField(data, "fCompareEditorInput"); //$NON-NLS-1$
-        Global.tempLog("CompareDialogStructure", "extractCompareEditorInput: shellDataClass=" + name //$NON-NLS-1$ //$NON-NLS-2$
-            + " inputClass=" + (input != null ? input.getClass().getName() : null)); //$NON-NLS-1$
         return input instanceof CompareEditorInput editorInput ? editorInput : null;
     }
 
@@ -151,16 +149,7 @@ public final class CompareDialogCurrentLinesHook
         if (Boolean.TRUE.equals(pane.getData(PANEL_ATTACHED_KEY)))
             return;
         pane.setData(PANEL_ATTACHED_KEY, Boolean.TRUE);
-        Global.tempLog("CompareDialogStructure", "attach: start"); //$NON-NLS-1$ //$NON-NLS-2$
-        try
-        {
-            attachImpl(pane, viewerControl, editorInput, viewer, shell);
-        }
-        catch (RuntimeException e)
-        {
-            Global.tempLogException("CompareDialogStructure", "attach: exception", e); //$NON-NLS-1$ //$NON-NLS-2$
-            throw e;
-        }
+        attachImpl(pane, viewerControl, editorInput, viewer, shell);
     }
 
     private static void attachImpl(CompareViewerSwitchingPane pane, Control viewerControl,

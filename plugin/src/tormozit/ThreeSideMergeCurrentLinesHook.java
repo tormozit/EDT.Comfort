@@ -373,23 +373,10 @@ public final class ThreeSideMergeCurrentLinesHook
         String leftLabel, String rightLabel)
     {
         if (!(viewFormControl instanceof ViewForm viewForm))
-        {
-            Global.tempLog("CompareDialogStructure", "createStructureController: viewFormControl не ViewForm, " //$NON-NLS-1$ //$NON-NLS-2$
-                + "class=" + (viewFormControl != null ? viewFormControl.getClass().getName() : null)); //$NON-NLS-1$
             return;
-        }
         Control viewerControl = viewer.getControl();
         if (viewerControl == null || viewerControl.isDisposed())
-        {
-            Global.tempLog("CompareDialogStructure", "createStructureController: viewerControl недоступен"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
-        Control existingTopLeft = viewForm.getTopLeft();
-        Control existingContent = viewForm.getContent();
-        Global.tempLog("CompareDialogStructure", "createStructureController: topLeft=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (existingTopLeft != null ? existingTopLeft.getClass().getName() : null)
-            + " content=" + (existingContent != null ? existingContent.getClass().getName() : null) //$NON-NLS-1$
-            + " content==viewerControl=" + (existingContent == viewerControl)); //$NON-NLS-1$
 
         Composite contentWrapper = new Composite(viewForm, SWT.NONE);
         GridLayout wrapperLayout = new GridLayout(1, false);
@@ -401,10 +388,6 @@ public final class ThreeSideMergeCurrentLinesHook
         viewerControl.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
         viewForm.setContent(contentWrapper);
         contentWrapper.getParent().layout(true, true);
-
-        Global.tempLog("CompareDialogStructure", "createStructureController: после setContent topLeft=" //$NON-NLS-1$ //$NON-NLS-2$
-            + (viewForm.getTopLeft() != null ? viewForm.getTopLeft().getClass().getName() : null)
-            + " newContent==contentWrapper=" + (viewForm.getContent() == contentWrapper)); //$NON-NLS-1$
 
         StructureToggleController controller = new StructureToggleController(contentWrapper, viewerControl,
             leftText, rightText, leftLabel, rightLabel, "3way"); //$NON-NLS-1$

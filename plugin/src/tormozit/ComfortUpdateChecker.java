@@ -76,15 +76,15 @@ public final class ComfortUpdateChecker
     }
 
     /**
-     * Запускает планировщик: при старте EDT — проверка, если прошло больше суток;
-     * далее — повтор раз в сутки, пока EDT открыт.
+     * Запускает планировщик: при старте EDT — проверка немедленно, без учёта
+     * даты последней проверки; далее — повтор раз в сутки, пока EDT открыт.
      */
     public static synchronized void startDailyScheduler()
     {
         if (schedulerStarted)
             return;
         schedulerStarted = true;
-        scheduleNextCheck(millisUntilNextCheck());
+        scheduleNextCheck(0, true);
     }
 
     /**
@@ -120,28 +120,20 @@ public final class ComfortUpdateChecker
         }).schedule();
     }
 
-    private static synchronized void scheduleNextCheck(long delayMs)
+    private static synchronized void scheduleNextCheck(long delayMs, boolean force)
     {
         if (!schedulerStarted)
             return;
         if (scheduledCheckJob != null)
             scheduledCheckJob.cancel();
         scheduledCheckJob = Job.create("Планировщик проверки EDT Comfort", monitor -> { //$NON-NLS-1$
-            if (isCheckDue())
+            if (force || isCheckDue())
                 performCheck();
-            scheduleNextCheck(CHECK_INTERVAL_MS);
+            scheduleNextCheck(CHECK_INTERVAL_MS, false);
             return org.eclipse.core.runtime.Status.OK_STATUS;
         });
         scheduledCheckJob.setSystem(true);
         scheduledCheckJob.schedule(delayMs);
-    }
-
-    private static long millisUntilNextCheck()
-    {
-        long lastCheck = ComfortSettings.getInstance().getPreferenceStore()
-            .getLong(ComfortSettings.PREF_LAST_UPDATE_CHECK_MS);
-        long elapsed = System.currentTimeMillis() - lastCheck;
-        return Math.max(0, CHECK_INTERVAL_MS - elapsed);
     }
 
     private static void performCheck()
@@ -177,6 +169,7 @@ public final class ComfortUpdateChecker
         var store = ComfortSettings.getInstance().getPreferenceStore();
         store.setValue(ComfortSettings.PREF_LAST_UPDATE_CHECK_MS,
             System.currentTimeMillis());
+        savePreferenceStore(store);
     }
 
     private static synchronized void cacheLatestVersion(ComfortVersionInfo latest)
@@ -186,6 +179,20 @@ public final class ComfortUpdateChecker
         store.setValue(ComfortSettings.PREF_LATEST_VERSION, latest.getDisplayVersion());
         store.setValue(ComfortSettings.PREF_LATEST_VERSION_DATE,
             latest.getDisplayDate());
+        savePreferenceStore(store);
+    }
+
+    private static void savePreferenceStore(
+        org.eclipse.jface.preference.IPersistentPreferenceStore store)
+    {
+        try
+        {
+            store.save();
+        }
+        catch (IOException ex)
+        {
+            Global.log("ComfortUpdateChecker save error: " + ex); //$NON-NLS-1$
+        }
     }
 
     private static void maybeShowUpdateToast(ComfortVersionInfo latest)
@@ -200,6 +207,7 @@ public final class ComfortUpdateChecker
             return;
 
         store.setValue(ComfortSettings.PREF_LAST_NOTIFIED_VERSION, latestKey);
+        savePreferenceStore(store);
 
         String message = "Обнаружена новая версия " + latestKey; //$NON-NLS-1$
         runOnDisplayThread(() -> ToastNotification.show(

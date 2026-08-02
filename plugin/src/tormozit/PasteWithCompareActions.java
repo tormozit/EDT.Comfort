@@ -146,8 +146,6 @@ public final class PasteWithCompareActions
         /** Для разовой активации подсветки текущей строки — см. {@code StructureToggleController.setSourceViewers}. */
         private org.eclipse.jface.text.source.SourceViewer leftSourceViewer;
         private org.eclipse.jface.text.source.SourceViewer rightSourceViewer;
-        /** Control текущего вьюера — см. {@link #hookCurrentLineTracking}/{@link #addCompareInIrToolbarAction}. */
-        private Control mergeViewerControl;
         /** Пункт «Сравнить ИР» в тулбаре добавляется один раз (см. {@link #addCompareInIrToolbarActionOnce}). */
         private boolean toolbarActionAdded;
 
@@ -355,11 +353,7 @@ public final class PasteWithCompareActions
                 Control content = pane.getContent();
                 // ViewForm.setContent требует, чтобы control был ПРЯМЫМ ребёнком самого pane.
                 if (content == null || content.isDisposed() || content.getParent() != pane)
-                {
-                    Global.tempLog("CompareDialogStructure", "installStructureToggleLater: content недоступен " //$NON-NLS-1$ //$NON-NLS-2$
-                        + "(content=" + content + ")"); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
-                }
 
                 Composite wrapper = new Composite(pane, SWT.NONE);
                 GridLayout wrapperLayout = new GridLayout(1, false);

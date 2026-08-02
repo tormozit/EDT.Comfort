@@ -105,14 +105,6 @@ final class BslModuleStructureDiff
                 "Неполная структура " + labelOrDefault(rightLabel, "справа") + ": " + right.syntaxErrorMessage, //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 Kind.SYNTAX_ERROR, -1, -1, Math.max(0, right.syntaxErrorOffset), 1));
         matchChildren(root, left.root.children, right.root.children, leftText, rightText);
-        StringBuilder labels = new StringBuilder();
-        for (int i = 0; i < root.children.size() && i < 8; i++)
-        {
-            DiffNode child = root.children.get(i);
-            labels.append('[').append(child.kind).append(' ').append(child.label).append(" ch=") //$NON-NLS-1$
-                .append(child.children.size()).append("] "); //$NON-NLS-1$
-        }
-        Global.tempLog("CompareDialogStructure", "diff: topChildren=" + root.children.size() + " labels=" + labels); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         return new Result(root, null, null);
     }
 

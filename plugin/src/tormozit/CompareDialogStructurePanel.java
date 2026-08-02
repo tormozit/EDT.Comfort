@@ -102,8 +102,6 @@ final class CompareDialogStructurePanel
             Result result = BslModuleStructureDiff.diff(leftText, rightText, leftLabel, rightLabel);
             if (result.root == null)
             {
-                Global.tempLog("CompareDialogStructure", "create: leftError=" + result.leftError //$NON-NLS-1$ //$NON-NLS-2$
-                    + " rightError=" + result.rightError); //$NON-NLS-1$
                 return new CompareDialogStructurePanel(
                     createErrorArea(parent, result, leftLabel, rightLabel), null);
             }
@@ -111,13 +109,10 @@ final class CompareDialogStructurePanel
             Tree[] treeHolder = new Tree[1];
             Composite container =
                 createTreeContainer(parent, result.root, leftLabel, rightLabel, onSelect, onDoubleClick, treeHolder);
-            CompareDialogStructurePanel panel = new CompareDialogStructurePanel(container, treeHolder[0]);
-            Global.tempLog("CompareDialogStructure", "create: OK, topChildren=" + result.root.children.size()); //$NON-NLS-1$ //$NON-NLS-2$
-            return panel;
+            return new CompareDialogStructurePanel(container, treeHolder[0]);
         }
         catch (RuntimeException e)
         {
-            Global.tempLogException("CompareDialogStructure", "create: exception", e); //$NON-NLS-1$ //$NON-NLS-2$
             return new CompareDialogStructurePanel(createMessageArea(parent,
                 "Не удалось построить панель структуры: " + e), null); //$NON-NLS-1$
         }
@@ -404,17 +399,12 @@ final class CompareDialogStructurePanel
     private static void handlePossibleTreeCopy(String taggedCommandId)
     {
         int colon = taggedCommandId.indexOf(':');
-        String phase = colon >= 0 ? taggedCommandId.substring(0, colon) : taggedCommandId;
         String commandId = colon >= 0 ? taggedCommandId.substring(colon + 1) : taggedCommandId;
-        // Временно: любой commandId — чтобы увидеть, доходит ли Ctrl+C вообще до ICommandService в 3-way окне.
-        Global.tempLog("CompareDialogStructure", "handlePossibleTreeCopy: phase=" + phase + " commandId=" + commandId //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " treesTracked=" + copyTargetTrees.size()); //$NON-NLS-1$
         if (!"org.eclipse.ui.edit.copy".equals(commandId)) //$NON-NLS-1$
             return;
         for (Tree tree : copyTargetTrees)
         {
             boolean focused = !tree.isDisposed() && tree.getDisplay().getFocusControl() == tree;
-            Global.tempLog("CompareDialogStructure", "handlePossibleTreeCopy: tree focused=" + focused); //$NON-NLS-1$ //$NON-NLS-2$
             if (!focused)
                 continue;
             TreeItem[] selection = tree.getSelection();
@@ -429,8 +419,6 @@ final class CompareDialogStructurePanel
             try
             {
                 clipboard.setContents(new Object[] { text }, new Transfer[] { TextTransfer.getInstance() });
-                Global.tempLog("CompareDialogStructure", "handlePossibleTreeCopy: записано в буфер (" + phase + "): " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                    + text); //$NON-NLS-1$
             }
             finally
             {

@@ -123,26 +123,14 @@ final class BslModuleStructureParser
         {
             Object parseResult = parseBslModuleContent(text);
             if (parseResult == null)
-            {
-                tempLog("parse: parseBslModuleContent вернул null"); //$NON-NLS-1$
                 return ParseOutcome.fatal("Не удалось разобрать модуль"); //$NON-NLS-1$
-            }
 
             SyntaxErrorInfo syntaxError = extractSyntaxError(parseResult);
-            if (syntaxError != null)
-            {
-                int ctxStart = Math.max(0, syntaxError.offset - 40);
-                int ctxEnd = Math.min(text.length(), syntaxError.offset + 40);
-                String context = text.substring(ctxStart, ctxEnd).replace("\r", "\\r").replace("\n", "\\n"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-                tempLog("parse: syntaxError=" + syntaxError.message + " offset=" + syntaxError.offset //$NON-NLS-1$ //$NON-NLS-2$
-                    + " textLength=" + text.length() + " context=[" + context + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            }
 
             Object module = Global.call(parseResult, "getRootASTElement"); //$NON-NLS-1$
             Class<?> moduleClass = Class.forName(MODULE_CLASS);
             if (module == null || !moduleClass.isInstance(module))
             {
-                tempLog("parse: getRootASTElement вернул " + module); //$NON-NLS-1$
                 // AST недоступен вовсе — структуру показывать не из чего, но ошибку — можно.
                 if (syntaxError != null)
                     return ParseOutcome.ok(new SectionNode("Модуль", 0, text.length()), syntaxError); //$NON-NLS-1$
@@ -161,26 +149,15 @@ final class BslModuleStructureParser
                 if (descriptions != null)
                     for (Object description : descriptions)
                         root.children.add(toSectionNode(description));
-                StringBuilder labels = new StringBuilder();
-                for (int i = 0; i < root.children.size() && i < 8; i++)
-                {
-                    SectionNode child = root.children.get(i);
-                    labels.append('[').append(child.label).append(" off=").append(child.offset) //$NON-NLS-1$
-                        .append(" len=").append(child.length).append(" ch=").append(child.children.size()) //$NON-NLS-1$ //$NON-NLS-2$
-                        .append("] "); //$NON-NLS-1$
-                }
-                tempLog("parse: OK, sections=" + (descriptions != null ? descriptions.size() : -1) //$NON-NLS-1$
-                    + " syntaxError=" + (syntaxError != null) + " labels=" + labels); //$NON-NLS-1$ //$NON-NLS-2$
             }
             catch (Exception | LinkageError e)
             {
-                Global.tempLogException("CompareDialogStructure", "parse: getSectionDescriptions exception", e); //$NON-NLS-1$ //$NON-NLS-2$
+                // остаёмся с пустым деревом + узел ошибки (если есть)
             }
             return ParseOutcome.ok(root, syntaxError);
         }
         catch (Exception | LinkageError e)
         {
-            Global.tempLogException("CompareDialogStructure", "parse: exception", e); //$NON-NLS-1$ //$NON-NLS-2$
             return ParseOutcome.fatal(e.toString());
         }
     }
@@ -230,10 +207,7 @@ final class BslModuleStructureParser
                 Object message = errorMessage != null ? Global.call(errorMessage, "getMessage") : null; //$NON-NLS-1$
                 String text = message instanceof String s && !s.isBlank() ? s : "Синтаксическая ошибка"; //$NON-NLS-1$
                 if (isBenignMissingSemicolonBeforeBlockEnd(text))
-                {
-                    tempLog("extractSyntaxError: пропущена доброкачественная 'нет ; перед Конец...' " + text); //$NON-NLS-1$
                     continue;
-                }
                 Object offset = Global.call(node, "getOffset"); //$NON-NLS-1$
                 return new SyntaxErrorInfo(text, offset instanceof Integer off ? off : 0);
             }
@@ -395,11 +369,5 @@ final class BslModuleStructureParser
         if (minOffset < 0)
             return new int[] { 0, 0, 0 };
         return new int[] { minOffset, Math.max(0, maxEnd - minOffset), count };
-    }
-
-    /** Временное безусловное логирование при отладке фичи — не связано с флажком «Общее логирование». */
-    private static void tempLog(String msg)
-    {
-        Global.tempLog("CompareDialogStructure", msg); //$NON-NLS-1$
     }
 }

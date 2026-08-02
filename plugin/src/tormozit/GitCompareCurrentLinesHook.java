@@ -616,16 +616,6 @@ public final class GitCompareCurrentLinesHook
             toolBarManager.add(item);
 
         toolBarManager.update(true);
-
-        // Безусловный лог фактического порядка — проверять по нему, а не гадать.
-        StringBuilder order = new StringBuilder();
-        for (IContributionItem item : toolBarManager.getItems())
-            order.append('[').append(item.getId() != null ? item.getId() : item.getClass().getSimpleName())
-                .append(item instanceof org.eclipse.jface.action.ActionContributionItem aci
-                    ? " text=" + aci.getAction().getText() : "") //$NON-NLS-1$ //$NON-NLS-2$
-                .append("] "); //$NON-NLS-1$
-        Global.tempLog("CompareDialogStructure", "GitCompareCurrentLinesHook.addCompareInIrToolbarAction: " //$NON-NLS-1$ //$NON-NLS-2$
-            + "фактический порядок тулбара = " + order); //$NON-NLS-1$
     }
 
     private static boolean isMxlxFile(IFile file)
