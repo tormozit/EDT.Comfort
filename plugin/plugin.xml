@@ -469,7 +469,7 @@
         id="tormozit.GoToParentInTree"
         name="Перейти к родителю в дереве"
         categoryId="tormozit.commands.global"
-        description="Выбрать родительский элемент текущего выделения в дереве с фокусом. По умолчанию Ctrl+Up; сочетание настраивается в Клавиши, контекст «В окнах» (Комфорт)"/>
+        description="Перейти к родительскому элементу текущего выделения в дереве с фокусом (Комфорт)"/>
   </extension>
 
   <extension point="org.eclipse.ui.handlers">
