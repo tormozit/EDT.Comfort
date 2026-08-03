@@ -224,6 +224,20 @@ powershell -NoProfile -File "C:\VC\EDT.Comfort\.cursor\scripts\repair-double-eol
 
 Фильтр коллекции: `DebugCollectionFilterEraseSupport` (`filterSkipItem`).
 
+## Подключение фильтра (SearchBox/FilterInputBox) — история обязательна и персистентна
+
+При любом подключении многословного фильтра ({@link SmartMatcher}) к штатному или новому `SearchBox` — история поиска **обязательна** и должна **переживать закрытие окна/диалога** (`ScopedPreferenceStore`, не память процесса). Голый `new InMemorySearchHistory()` — история живёт только пока открыт текущий диалог, теряется при закрытии.
+
+Обязательно одно из:
+
+- Новый `SearchBox` создаётся с нуля → `FilterInputBox.create(...)` / готовая фабрика `FilterInputBox.forXxx(...)`.
+- Штатный `Text` заменяется на `SearchBox` → `FilterInputBox.replacePatternText(oldText, scope, onSearch)`.
+- Штатный `SearchBox` уже есть, меняется только слушатель/фильтрация (наш случай чаще всего) → `FilterInputBox.attachHistory(searchBox, scope)` — **не** `searchBox.setHistory(new InMemorySearchHistory())` и не оставлять штатную историю, если она привязана к объекту, который патч выводит из игры.
+
+Для нового места — завести новую константу в `FilterInputBox.Scope` (ключи `comfort.<место>.filter.history.count` / `comfort.<место>.filter.history.`), при необходимости — `case XXX -> throw new IllegalStateException(...)` в `createForScope`, если `SearchBox` штатный и через `create()` не создаётся (см. `RIGHTS_DIALOG`/`FILTER_BY_SUBSYSTEMS`/`INFOBASES`/`VALIDATION_CHECKS`).
+
+Проверка перед сдачей: закрыть окно/диалог с фильтром → открыть заново → набрать первую букву запроса → всплывает история прошлых запросов (Ctrl+↓ или клик по стрелке). Если история пуста после переоткрытия — фильтр подключён неправильно.
+
 ## SWT: Ctrl+<буква> не долетает до KeyDown (нативный акселератор Win32)
 
 Повторяется (`KeyBindingToastHook`/Ctrl+Shift+F, `PreferenceSearchFilterAugmenter.wireTreeCopy`/Ctrl+C): `SWT.KeyDown`, даже `Display.addFilter(SWT.KeyDown, …)`, не видит букву при зажатом Ctrl (только «чистые» модификаторы) — если сочетание совпадает с нативным Win32-акселератором меню (в т.ч. штатный Edit → Copy), Windows транслирует его в `WM_COMMAND` до создания SWT-события. Это системное ограничение, не баг конкретного хука — доп. диагностика через SWT-хуки бесполезна.
