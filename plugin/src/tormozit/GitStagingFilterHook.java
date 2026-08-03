@@ -327,6 +327,7 @@ public final class GitStagingFilterHook implements IStartup
             if (filterText.isDisposed())
                 return;
             String text = filterText.getText();
+            Debug.log("onModify text=\"" + text + "\""); //$NON-NLS-1$ //$NON-NLS-2$
             if (text.isEmpty())
             {
                 activeGeneration++;
@@ -346,6 +347,7 @@ public final class GitStagingFilterHook implements IStartup
                 return;
 
             int generation = ++activeGeneration;
+            Debug.log("fireDebounced generation=" + generation + " text=\"" + text + "\""); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             cancelActiveJob();
             startBackgroundJob(generation, text);
         }
@@ -400,6 +402,8 @@ public final class GitStagingFilterHook implements IStartup
                 @Override
                 protected IStatus run(IProgressMonitor monitor)
                 {
+                    long tStart = System.currentTimeMillis();
+                    Debug.log("job START generation=" + generation); //$NON-NLS-1$
                     try
                     {
                         SmartMatcher matcher = new SmartMatcher(text);
@@ -419,20 +423,36 @@ public final class GitStagingFilterHook implements IStartup
                                 computeMatches(root, unstagedCp, matcher, unstagedResults, unstagedLeaves,
                                     visited, generation, () -> activeGeneration, monitor);
 
+                        long tComputed = System.currentTimeMillis();
+                        Debug.log("job COMPUTED generation=" + generation + " visited=" + visited[0] //$NON-NLS-1$ //$NON-NLS-2$
+                            + " stagedLeaves=" + stagedLeaves.size() + " unstagedLeaves=" + unstagedLeaves.size() //$NON-NLS-1$ //$NON-NLS-2$
+                            + " computeMs=" + (tComputed - tStart)); //$NON-NLS-1$
+
                         Display.getDefault().asyncExec(() ->
                         {
                             if (generation != activeGeneration || filterText.isDisposed())
+                            {
+                                Debug.log("asyncExec SKIP (stale) generation=" + generation //$NON-NLS-1$
+                                    + " activeGeneration=" + activeGeneration); //$NON-NLS-1$
                                 return;
-                            applyPrecomputed(stagedViewer, stagedFilter, text, stagedResults, stagedLeaves);
-                            applyPrecomputed(unstagedViewer, unstagedFilter, text, unstagedResults, unstagedLeaves);
+                            }
+                            long tUiStart = System.currentTimeMillis();
+                            Debug.log("asyncExec START generation=" + generation //$NON-NLS-1$
+                                + " uiWaitMs=" + (tUiStart - tComputed)); //$NON-NLS-1$
+                            applyPrecomputed(stagedViewer, stagedFilter, "stagedViewer", text, stagedResults, //$NON-NLS-1$
+                                stagedLeaves);
+                            applyPrecomputed(unstagedViewer, unstagedFilter, "unstagedViewer", text, //$NON-NLS-1$
+                                unstagedResults, unstagedLeaves);
+                            Debug.log("asyncExec DONE generation=" + generation //$NON-NLS-1$
+                                + " totalUiMs=" + (System.currentTimeMillis() - tUiStart)); //$NON-NLS-1$
                         });
 
-                        Debug.log("job OK generation=" + generation + " visited=" + visited[0]); //$NON-NLS-1$ //$NON-NLS-2$
                         return Status.OK_STATUS;
                     }
                     catch (FilterCancelledException cancelled)
                     {
-                        Debug.log("job CANCELLED generation=" + generation); //$NON-NLS-1$
+                        Debug.log("job CANCELLED generation=" + generation //$NON-NLS-1$
+                            + " afterMs=" + (System.currentTimeMillis() - tStart)); //$NON-NLS-1$
                         return Status.CANCEL_STATUS;
                     }
                 }
@@ -442,11 +462,14 @@ public final class GitStagingFilterHook implements IStartup
             job.schedule();
         }
 
-        private void applyPrecomputed(TreeViewer viewer, GitStagingSearchFilter filter, String text,
-            Map<Object, Boolean> results, List<Object> matchedLeaves)
+        private void applyPrecomputed(TreeViewer viewer, GitStagingSearchFilter filter, String viewerField,
+            String text, Map<Object, Boolean> results, List<Object> matchedLeaves)
         {
             if (viewer == null || viewer.getControl().isDisposed())
+            {
+                Debug.log("applyPrecomputed " + viewerField + ": viewer unavailable"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
+            }
             filter.installPrecomputed(text, results);
             IBaseLabelProvider lp = viewer.getLabelProvider();
             if (lp instanceof GitStagingLabelWrapper wrapper)
@@ -454,8 +477,14 @@ public final class GitStagingFilterHook implements IStartup
             viewer.getTree().setRedraw(false);
             try
             {
+                long t0 = System.currentTimeMillis();
                 viewer.refresh();
+                long tRefresh = System.currentTimeMillis();
                 viewer.setExpandedElements(matchedLeaves.toArray());
+                long tExpand = System.currentTimeMillis();
+                Debug.log("applyPrecomputed " + viewerField + ": items=" + results.size() //$NON-NLS-1$ //$NON-NLS-2$
+                    + " leaves=" + matchedLeaves.size() + " refreshMs=" + (tRefresh - t0) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " expandMs=" + (tExpand - tRefresh)); //$NON-NLS-1$
             }
             finally
             {

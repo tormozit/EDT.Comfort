@@ -7,6 +7,8 @@ import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeColumn;
 
 import com._1c.g5.v8.dt.bsl.compare.BslModuleComparisonNode;
+import com._1c.g5.v8.dt.compare.core.IComparisonProcessSettings;
+import com._1c.g5.v8.dt.compare.core.IComparisonSession;
 import com._1c.g5.v8.dt.compare.model.ComparisonNode;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.IPartialModelNode;
 
@@ -16,6 +18,15 @@ import com._1c.g5.v8.dt.compare.ui.partialmodel.node.IPartialModelNode;
  * откатывается к текстовому сравнению, см. декомпилированный
  * {@code BslModuleComparisonParticipant.compareBslModuleNode}), в ячейках сторон дерева
  * сравнения для этого модуля показываем «Структура недоступна» вместо обычной подписи.
+ *
+ * <p>{@code isParseModuleStructure() == false} — состояние не только сбоя парсинга: тем же
+ * значением узел создаётся, если сам флажок «Сравнивать модули с учётом структуры» выключен
+ * ({@code session.getSettings().isParseBslModuleStructure()} — см. декомпилированный
+ * {@code BslModuleComparisonParticipant}, лямбда создания узла), либо если узел односторонний
+ * ({@code TopComparisonNode.isOneSideNode()} — объект есть только на одной стороне, сравнивать
+ * структуру нечего). Оба этих случая — норма, не ошибка, текст в них не показываем; показываем
+ * только когда флажок включён, узел двусторонний, а {@code isParseModuleStructure()} всё равно
+ * {@code false} — то есть парсинг реально не удался.
  *
  * <p>{@code isParseModuleStructure()} — единый флаг на весь узел, EDT не хранит (и сама не
  * знает — см. лог-сообщение в {@code compareBslModuleNode}, берущее {@code mainSymlink ?:
@@ -80,7 +91,18 @@ public final class CompareModuleStructureColumnHook
         if (!(element instanceof IPartialModelNode node))
             return false;
         ComparisonNode comparisonNode = node.retrieveComparisonNode();
-        return comparisonNode instanceof BslModuleComparisonNode module && !module.isParseModuleStructure();
+        if (!(comparisonNode instanceof BslModuleComparisonNode module))
+            return false;
+        if (module.isParseModuleStructure() || module.isOneSideNode())
+            return false; // структура доступна либо объект односторонний — не ошибка
+
+        // isParseModuleStructure()==false здесь ещё не значит "сбой парсинга" — тем же значением
+        // узел создаётся при выключенном флажке "Сравнивать модули с учётом структуры". Отличаем
+        // по настройке сессии: если флажок был включён, а итоговое значение всё равно false —
+        // это реальный сбой разбора AST.
+        IComparisonSession session = node.getComparisonSession();
+        IComparisonProcessSettings settings = session != null ? session.getSettings() : null;
+        return settings != null && settings.isParseBslModuleStructure();
     }
 
     private static void log(String msg)

@@ -135,4 +135,29 @@ public final class NavigatorResourceResolver
     {
         return resource != null && resource.exists() && resource.getLocation() != null;
     }
+
+    /**
+     * {@code .mdo}-файл среди прямых членов папки объекта метаданных, либо {@code null}.
+     * Используется там, где элемент дерева навигатора — обычный {@link IFolder} (не модельная
+     * обёртка) и нужно перейти к самому файлу объекта, например для последующего
+     * {@link GitChangedFileMenuHook#resolveEObject}.
+     */
+    public static IFile findMdoFileInFolder(IFolder folder)
+    {
+        if (folder == null || !folder.exists())
+            return null;
+        try
+        {
+            for (IResource member : folder.members())
+            {
+                if (member instanceof IFile file && "mdo".equalsIgnoreCase(file.getFileExtension())) //$NON-NLS-1$
+                    return file;
+            }
+        }
+        catch (org.eclipse.core.runtime.CoreException ex)
+        {
+            Global.log("NavigatorResourceResolver findMdoFileInFolder error: " + ex); //$NON-NLS-1$
+        }
+        return null;
+    }
 }

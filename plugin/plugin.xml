@@ -30,6 +30,7 @@
     <startup class="tormozit.GlobalListCopyHook"/>
     <startup class="tormozit.SmartOutlineHook"/>
     <startup class="tormozit.TemplateTypeSuffixDecorator"/>
+    <startup class="tormozit.MdObjectUsageDecorator"/>
     <!-- ГЛОБАЛЬНЫЙ СКАН ОТКЛЮЧЁН ОКОНЧАТЕЛЬНО (issue #165), 2026-07-20. История фиксов: v1
          (guard+debounce SWT.Show), v2 (исключить редакторы из partOpened/partVisible), v3
          (debounce и для part-триггеров тоже), v4 (defer FocusIn/FocusOut через asyncExec —
@@ -49,6 +50,8 @@
     <!-- <startup class="tormozit.ListSelectionThemeHook"/> -->
     <startup class="tormozit.NavigatorFilterHook"/>
     <startup class="tormozit.NavigatorShowInExplorerMenuHook"/>
+    <startup class="tormozit.NavigatorOpenObjectMenuHook"/>
+    <startup class="tormozit.FileSearchShowInProjectStructureMenuHook"/>
     <startup class="tormozit.InfobasesViewHook"/>
     <startup class="tormozit.InfobaseActiveProjectApplicationMenuHook"/>
     <startup class="tormozit.OpenMdObjectHook"/>
@@ -61,6 +64,7 @@
     <startup class="tormozit.NavigatorCopyProjectMenuHook"/>
     <startup class="tormozit.NavigatorRecomputeChecksMenuHook"/>
     <startup class="tormozit.NavigatorAttributePropertiesHook"/>
+    <startup class="tormozit.NavigatorCopyTextAugmentHook"/>
     <startup class="tormozit.PropertySheetHook"/>
     <startup class="tormozit.ChoiceParametersHook"/>
     <startup class="tormozit.PredefinedSelectionDialogHook"/>
@@ -969,6 +973,16 @@
           <objectClass name="com._1c.g5.v8.dt.metadata.mdclass.Template"/>
           <objectClass name="com._1c.g5.v8.dt.metadata.mdclass.CommonTemplate"/>
         </or>
+      </enablement>
+    </decorator>
+    <decorator
+        id="tormozit.mdObjectUsageDecorator"
+        label="Признак интегрированного объекта (Комфорт)"
+        lightweight="true"
+        state="true"
+        class="tormozit.MdObjectUsageDecorator">
+      <enablement>
+        <objectClass name="org.eclipse.core.runtime.IAdaptable"/>
       </enablement>
     </decorator>
   </extension>

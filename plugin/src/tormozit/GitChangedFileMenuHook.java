@@ -1,6 +1,8 @@
 package tormozit;
 
+import java.io.InputStream;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -19,6 +21,7 @@ import org.eclipse.core.runtime.MultiStatus;
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.egit.core.op.DiscardChangesOperation;
+import org.eclipse.egit.core.project.RepositoryMapping;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.dialogs.MessageDialog;
@@ -26,7 +29,11 @@ import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.ISelectionProvider;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.StructuredSelection;
+import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.Repository;
+import org.eclipse.jgit.revwalk.RevCommit;
+import org.eclipse.jgit.revwalk.RevWalk;
+import org.eclipse.jgit.treewalk.TreeWalk;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
@@ -73,7 +80,7 @@ import org.eclipse.e4.ui.model.application.ui.basic.MPart;
 import org.eclipse.ui.handlers.IHandlerService;
 
 /**
- * Добавляет «Открыть в Навигаторе» и «Открыть объект» в подменю «Комфорт»
+ * Добавляет «Показать в навигаторе», «Показать в структуре проекта» и «Открыть объект» в подменю «Комфорт»
  * контекстного меню изменённых файлов в EGit/EDT-представлениях
  * ({@code StagingView}, {@code RepositoryExplorerView}, {@code GenericHistoryView}).
  */
@@ -89,7 +96,8 @@ public final class GitChangedFileMenuHook implements IStartup
     private static final String EGIT_HISTORY_VIEW_ID  = "org.eclipse.egit.ui.HistoryView"; //$NON-NLS-1$
     private static final String TEAM_HISTORY_VIEW_ID   = "org.eclipse.team.ui.GenericHistoryView"; //$NON-NLS-1$
 
-    private static final String NAV_ITEM_TEXT = "Открыть в Навигаторе"; //$NON-NLS-1$
+    private static final String NAV_ITEM_TEXT = "Показать в навигаторе"; //$NON-NLS-1$
+    private static final String STRUCTURE_ITEM_TEXT = "Показать в структуре проекта"; //$NON-NLS-1$
     private static final String OBJ_ITEM_TEXT = "Открыть объект";       //$NON-NLS-1$
     /** Для файлов коммита (панель «История») — уточняем, что открывается рабочая версия, а не версия из коммита. */
     private static final String OBJ_ITEM_TEXT_COMMIT = "Открыть рабочий объект"; //$NON-NLS-1$
@@ -117,6 +125,14 @@ public final class GitChangedFileMenuHook implements IStartup
      * Чанкинг ограничивает время одного удержания и делает отмену возможной.
      */
     private static final int REPLACE_WITH_HEAD_CHUNK_SIZE = 100;
+
+    private static final String EGIT_UI_BUNDLE_ID = "org.eclipse.egit.ui"; //$NON-NLS-1$
+    private static final String EGIT_UITEXT_CLASS = "org.eclipse.egit.ui.internal.UIText"; //$NON-NLS-1$
+    private static final String EGIT_UITEXT_REPLACE_FIELD = "StagingView_replaceWithHeadRevision"; //$NON-NLS-1$
+    private static final String CONFIGURATION_MDO_NAME = "Configuration.mdo"; //$NON-NLS-1$
+    private static final String ORPHANED_MDO_WARNING =
+        "В переданных изменениях есть создание отвязанных от конфигурации объектов метаданных (mdo), "
+        + "что может привести к их невидимости при объединении с конфигурацией, где они связаны (ошибка EDT)."; //$NON-NLS-1$
 
     private static final String COMPARE_WITH_COMMIT_TEXT =
         "Сравнить рабочий каталог с коммитом"; //$NON-NLS-1$
@@ -555,10 +571,41 @@ public final class GitChangedFileMenuHook implements IStartup
     {
         return new MenuAdapter()
         {
+            /** Наш пункт «Заменить на HEAD-ревизию», вставленный на место штатного EGit. */
+            private final List<MenuItem> replaceItems = new ArrayList<>(1);
+
             @Override
             public void menuShown(MenuEvent e)
             {
                 Menu contextMenu = (Menu) e.widget;
+
+                ISelection clickedSelection = selectionOfClickedControl(contextMenu);
+                ISelection selection = clickedSelection instanceof IStructuredSelection cs && !cs.isEmpty()
+                    ? clickedSelection : selectionOf(view);
+                if (selection instanceof IStructuredSelection structured && !structured.isEmpty())
+                {
+                    List<IFile> headReplaceFiles = computeHeadReplaceFiles(structured, view);
+                    if (!headReplaceFiles.isEmpty())
+                    {
+                        int nativeIndex = hideNativeReplaceWithHeadItem(contextMenu);
+                        MenuItem replaceItem = new MenuItem(contextMenu, SWT.PUSH,
+                            nativeIndex >= 0 ? nativeIndex : contextMenu.getItemCount());
+                        replaceItem.setText(REPLACE_WITH_HEAD_ITEM_TEXT);
+                        replaceItem.setToolTipText(
+                            "Заменить содержимое выбранных файлов на состояние из HEAD (текущего коммита)"
+                                + Global.pluginSignForTooltip());
+                        replaceItem.addSelectionListener(new SelectionAdapter()
+                        {
+                            @Override
+                            public void widgetSelected(SelectionEvent ev)
+                            {
+                                replaceWithHeadRevision(headReplaceFiles, contextMenu.getShell());
+                            }
+                        });
+                        replaceItems.add(replaceItem);
+                    }
+                }
+
                 Menu comfortSub = ComfortSubmenuHelper.findOrCreateComfortSubmenu(
                     contextMenu, contextMenu.getShell());
                 if (comfortSub == null || comfortSub.isDisposed())
@@ -575,8 +622,88 @@ public final class GitChangedFileMenuHook implements IStartup
             @Override
             public void menuHidden(MenuEvent e)
             {
+                List<MenuItem> snapshot = new ArrayList<>(replaceItems);
+                replaceItems.clear();
+                ((Menu) e.widget).getDisplay().asyncExec(() ->
+                {
+                    for (MenuItem mi : snapshot)
+                    {
+                        if (!mi.isDisposed())
+                            mi.dispose();
+                    }
+                });
             }
         };
+    }
+
+    /**
+     * Удаляет штатный пункт EGit «Replace with HEAD Revision» ({@code StagingView$53.menuAboutToShow},
+     * {@code StagingView$ReplaceAction}) из переданного контекстного меню, чтобы на его месте показать
+     * свой пункт с дополнительной проверкой отвязанных mdo. У {@code MenuItem} в SWT нет
+     * {@code setVisible} (в отличие от {@code Menu}) — единственный способ убрать пункт — dispose.
+     * Текст штатного пункта берётся из {@code UIText.StagingView_replaceWithHeadRevision} бандла
+     * {@code org.eclipse.egit.ui} — не хардкодится, чтобы не зависеть от локализации.
+     *
+     * @return индекс, на котором стоял штатный пункт (для вставки нашего на то же место), или
+     *         {@code -1}, если штатный пункт не найден (другая версия EGit / другое меню) —
+     *         в этом случае наш пункт добавляется в конец меню.
+     */
+    private static int hideNativeReplaceWithHeadItem(Menu contextMenu)
+    {
+        String nativeText = nativeReplaceWithHeadRevisionText();
+        if (nativeText == null)
+            return -1;
+        MenuItem[] items = contextMenu.getItems();
+        for (int i = 0; i < items.length; i++)
+        {
+            MenuItem item = items[i];
+            if (!item.isDisposed() && nativeText.equals(item.getText()))
+            {
+                item.dispose();
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static String nativeReplaceWithHeadRevisionText()
+    {
+        try
+        {
+            Bundle bundle = Platform.getBundle(EGIT_UI_BUNDLE_ID);
+            if (bundle == null)
+                return null;
+            Class<?> uiTextCls = bundle.loadClass(EGIT_UITEXT_CLASS);
+            Object value = uiTextCls.getField(EGIT_UITEXT_REPLACE_FIELD).get(null);
+            return value instanceof String s ? s : null;
+        }
+        catch (Exception e)
+        {
+            Global.log("GitChangedFileMenu: nativeReplaceWithHeadRevisionText error: " + e); //$NON-NLS-1$
+            return null;
+        }
+    }
+
+    /**
+     * Файлы из выделения, для которых штатное действие EGit «Заменить на HEAD-ревизию»
+     * доступно (см. {@link #REPLACE_WITH_HEAD_STATES}).
+     */
+    private static List<IFile> computeHeadReplaceFiles(IStructuredSelection structured, IWorkbenchPart view)
+    {
+        List<IFile> headReplaceFiles = new ArrayList<>();
+        for (Object element : structured.toList())
+        {
+            if (!STAGING_ENTRY_CLASS.equals(element.getClass().getName()))
+                continue;
+            Object state = Global.call(element, "getState"); //$NON-NLS-1$
+            String stateName = state != null ? (String) Global.call(state, "name") : null; //$NON-NLS-1$
+            if (stateName == null || !REPLACE_WITH_HEAD_STATES.contains(stateName))
+                continue;
+            IFile f = resolveFile(view, element);
+            if (f != null)
+                headReplaceFiles.add(f);
+        }
+        return headReplaceFiles;
     }
 
     // ========================================================================
@@ -636,16 +763,21 @@ public final class GitChangedFileMenuHook implements IStartup
     }
 
     /** @return full selection (all items) from the widget's own Table/Tree, or null */
-    private static ISelection selectionOfClickedControl(Widget submenuWidget)
+    private static ISelection selectionOfClickedControl(Widget menuWidget)
     {
-        if (!(submenuWidget instanceof Menu submenu))
+        if (!(menuWidget instanceof Menu menu))
             return null;
-        MenuItem parentItem = submenu.getParentItem();
-        if (parentItem == null)
-            return null;
-        Menu rootMenu = parentItem.getParent();
-        if (rootMenu == null)
-            return null;
+        // Поднимаемся до корневого контекстного меню (у него нет parentItem) — там хранится
+        // control, из которого реально вызвано меню (см. tryAttachMenuListener). Для самого
+        // корневого меню цикл не выполняется ни разу.
+        Menu rootMenu = menu;
+        for (MenuItem parentItem = rootMenu.getParentItem(); parentItem != null;
+            parentItem = rootMenu.getParentItem())
+        {
+            rootMenu = parentItem.getParent();
+            if (rootMenu == null)
+                return null;
+        }
         Object data = rootMenu.getData("menuControl"); //$NON-NLS-1$
         if (!(data instanceof Control control) || control.isDisposed())
             return null;
@@ -708,7 +840,7 @@ public final class GitChangedFileMenuHook implements IStartup
                 Menu submenu = (Menu) e.widget;
                 Shell shell = submenu.getShell();
 
-                // === Одиночное выделение: "Открыть в Навигаторе" и "Открыть объект" ===
+                // === Одиночное выделение: "Показать в навигаторе", "Показать в структуре проекта" и "Открыть объект" ===
                 if (structured.size() == 1)
                 {
                     Object element = structured.getFirstElement();
@@ -740,6 +872,20 @@ public final class GitChangedFileMenuHook implements IStartup
                             });
                             addedItems.add(navItem);
 
+                            MenuItem structureItem = new MenuItem(submenu, SWT.PUSH);
+                            structureItem.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
+                                STRUCTURE_ITEM_TEXT, "tormozit.git.showInProjectStructure", GIT_CONTEXT_ID));
+                            structureItem.addSelectionListener(new SelectionAdapter()
+                            {
+                                @Override
+                                public void widgetSelected(SelectionEvent ev)
+                                {
+                                    NavigatorShowInProjectStructureHandler.showInProjectStructure(
+                                        new StructuredSelection(capturedFile));
+                                }
+                            });
+                            addedItems.add(structureItem);
+
                             MenuItem objItem = new MenuItem(submenu, SWT.PUSH);
                             String objItemText = isHistoryView(view) ? OBJ_ITEM_TEXT_COMMIT : OBJ_ITEM_TEXT;
                             objItem.setText(ComfortSubmenuHelper.menuItemTextWithKeyBinding(
@@ -762,42 +908,6 @@ public final class GitChangedFileMenuHook implements IStartup
                     {
                         addCompareWithCommitItem(submenu, view, element, addedItems);
                     }
-                }
-
-                // === Любое выделение: "Заменить на HEAD-ревизию" для совместимых файлов ===
-                // Штатный пункт EGit (StagingView$53.menuAboutToShow) добавляется только если
-                // действие доступно у ВСЕХ выделенных элементов (пересечение через retainAll,
-                // см. .tmp/bundles/egit-ui/StagingView.53.javap.txt) — при смешанном выделении
-                // пункт не появляется вовсе. Здесь — свой пункт, фильтрующий выделение сам.
-                List<IFile> headReplaceFiles = new ArrayList<>();
-                for (Object element : structured.toList())
-                {
-                    if (!STAGING_ENTRY_CLASS.equals(element.getClass().getName()))
-                        continue;
-                    Object state = Global.call(element, "getState"); //$NON-NLS-1$
-                    String stateName = state != null ? (String) Global.call(state, "name") : null; //$NON-NLS-1$
-                    if (stateName == null || !REPLACE_WITH_HEAD_STATES.contains(stateName))
-                        continue;
-                    IFile f = resolveFile(view, element);
-                    if (f != null)
-                        headReplaceFiles.add(f);
-                }
-                if (!headReplaceFiles.isEmpty())
-                {
-                    MenuItem replaceItem = new MenuItem(submenu, SWT.PUSH);
-                    replaceItem.setText(REPLACE_WITH_HEAD_ITEM_TEXT);
-                    replaceItem.setToolTipText(
-                        "Заменить содержимое выбранных файлов на состояние из HEAD (текущего коммита)"
-                            + Global.pluginSignForTooltip());
-                    replaceItem.addSelectionListener(new SelectionAdapter()
-                    {
-                        @Override
-                        public void widgetSelected(SelectionEvent ev)
-                        {
-                            replaceWithHeadRevision(headReplaceFiles, shell);
-                        }
-                    });
-                    addedItems.add(replaceItem);
                 }
 
                 // === Любое выделение: "Добавить в набор" ===
@@ -892,11 +1002,19 @@ public final class GitChangedFileMenuHook implements IStartup
         if (files.isEmpty())
             return;
 
-        String message = "Заменить содержимое " + files.size() + " файл(ов) на состояние из HEAD?\n"
-            + "Несохранённые изменения будут потеряны без возможности восстановления.";
+        StringBuilder messageBuilder = new StringBuilder();
+        List<String> orphaned = findOrphanedObjectNames(files);
+        if (!orphaned.isEmpty())
+        {
+            messageBuilder.append(ORPHANED_MDO_WARNING)
+                .append("\nОбъекты: ").append(String.join(", ", orphaned)).append("\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        messageBuilder.append("Заменить содержимое " + files.size() + " файл(ов) на состояние из HEAD?\n"
+            + "Несохранённые изменения будут потеряны без возможности восстановления.");
         if (files.size() > REPLACE_WITH_HEAD_CHUNK_SIZE)
-            message += "\nБольшое количество файлов — операция будет выполняться по частям "
-                + "и может занять продолжительное время.";
+            messageBuilder.append("\nБольшое количество файлов — операция будет выполняться по частям "
+                + "и может занять продолжительное время.");
+        String message = messageBuilder.toString();
 
         boolean confirmed = MessageDialog.openQuestion(shell, REPLACE_WITH_HEAD_ITEM_TEXT, message);
         if (!confirmed)
@@ -912,6 +1030,183 @@ public final class GitChangedFileMenuHook implements IStartup
         };
         job.setUser(true);
         job.schedule();
+    }
+
+    /**
+     * Объекты (mdo), которые операция «Заменить на HEAD-ревизию» создаст на диске
+     * (файл сейчас отсутствует — состояние REMOVED/MISSING), но которые не упомянуты
+     * в финальной версии {@code Configuration.mdo} — после checkout такой mdo окажется
+     * на диске, но не привязанным к конфигурации. Финальная версия {@code Configuration.mdo} —
+     * это его HEAD-содержимое, если он сам входит в этот же батч замены, иначе — текущее
+     * содержимое рабочей копии (эта операция его не тронет).
+     *
+     * @return русские полные имена отвязанных объектов (для текста предупреждения)
+     */
+    private static List<String> findOrphanedObjectNames(List<IFile> files)
+    {
+        List<String> orphaned = new ArrayList<>();
+        Map<IFile, String> configurationContentCache = new HashMap<>();
+
+        for (IFile file : files)
+        {
+            if (file.exists())
+                continue; // операция не создаёт файл заново — не наш случай
+            if (!"mdo".equalsIgnoreCase(file.getFileExtension())) //$NON-NLS-1$
+                continue;
+            if (CONFIGURATION_MDO_NAME.equalsIgnoreCase(file.getName()))
+                continue;
+
+            String relPath = file.getProjectRelativePath().toString().replace('\\', '/');
+            String ruFullName = GetRef.pathToFullName(relPath);
+            if (ruFullName == null)
+                continue;
+            int dot = ruFullName.indexOf('.');
+            if (dot < 0)
+                continue;
+            String typeEn = MdTypeMapping.ruToEnSingRequired(ruFullName.substring(0, dot));
+            if (typeEn == null)
+                continue;
+            String enFullName = typeEn + "." + ruFullName.substring(dot + 1); //$NON-NLS-1$
+
+            IFile configurationMdo = findConfigurationMdo(file);
+            if (configurationMdo == null)
+                continue;
+
+            String configurationContent = configurationContentCache.computeIfAbsent(configurationMdo, cfg ->
+                files.contains(cfg) ? readHeadContent(cfg) : readWorkingCopyContent(cfg));
+            if (configurationContent == null)
+                continue; // не удалось прочитать — не блокируем операцию нашей проверкой
+
+            if (!configurationContent.contains(">" + enFullName + "<")) //$NON-NLS-1$ //$NON-NLS-2$
+                orphaned.add(ruFullName);
+        }
+        return orphaned;
+    }
+
+    /**
+     * Привязан ли mdo-объект к конфигурации: его полное имя (EN-тип из пути + имя из FQN,
+     * см. {@link GetRef#pathToFullName}) должно встречаться в {@code Configuration.mdo}
+     * рабочей копии как {@code >Тип.Имя<} — тот же признак, что и в
+     * {@link #findOrphanedObjectNames}. {@code Configuration.mdo} и неопределимые случаи
+     * считаются привязанными (без уверенности «отвязан» не показываем).
+     */
+    public static boolean isAttachedToConfiguration(IFile mdoFile)
+    {
+        if (mdoFile == null || !"mdo".equalsIgnoreCase(mdoFile.getFileExtension())) //$NON-NLS-1$
+            return true;
+        if (CONFIGURATION_MDO_NAME.equalsIgnoreCase(mdoFile.getName()))
+            return true;
+
+        String relPath = mdoFile.getProjectRelativePath().toString().replace('\\', '/');
+        String ruFullName = GetRef.pathToFullName(relPath);
+        if (ruFullName == null)
+            return true;
+        int dot = ruFullName.indexOf('.');
+        if (dot < 0)
+            return true;
+        String typeEn = MdTypeMapping.ruToEnSingRequired(ruFullName.substring(0, dot));
+        if (typeEn == null)
+            return true;
+        String enFullName = typeEn + "." + ruFullName.substring(dot + 1); //$NON-NLS-1$
+
+        IFile configurationMdo = findConfigurationMdo(mdoFile);
+        if (configurationMdo == null)
+            return true;
+        String content = readConfigurationMdoCached(configurationMdo);
+        if (content == null)
+            return true;
+        return content.contains(">" + enFullName + "<"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /** Кэш содержимого {@code Configuration.mdo} по штампу модификации (декоратор зовёт часто). */
+    private static final Map<IFile, String> CONFIGURATION_MDO_CACHE = new HashMap<>();
+    private static final Map<IFile, Long> CONFIGURATION_MDO_STAMP = new HashMap<>();
+
+    private static String readConfigurationMdoCached(IFile configurationMdo)
+    {
+        long stamp = configurationMdo.exists() ? configurationMdo.getModificationStamp() : Long.MIN_VALUE;
+        Long cachedStamp = CONFIGURATION_MDO_STAMP.get(configurationMdo);
+        if (cachedStamp != null && cachedStamp.longValue() == stamp)
+            return CONFIGURATION_MDO_CACHE.get(configurationMdo);
+        String content = readWorkingCopyContent(configurationMdo);
+        CONFIGURATION_MDO_STAMP.put(configurationMdo, stamp);
+        CONFIGURATION_MDO_CACHE.put(configurationMdo, content);
+        return content;
+    }
+
+    /**
+     * {@code src/Configuration/Configuration.mdo} проекта, либо
+     * {@code src/ext/<расширение>/Configuration/Configuration.mdo}. Корневой описатель лежит
+     * ВНУТРИ папки {@code Configuration} (не рядом с ней) — проверено на реальных проектах
+     * (например {@code runtime-EclipseApplication/Конфигурация1/src/Configuration/Configuration.mdo}).
+     */
+    private static IFile findConfigurationMdo(IFile referenceFile)
+    {
+        IProject project = referenceFile.getProject();
+        String rel = referenceFile.getProjectRelativePath().toString().replace('\\', '/');
+        if (rel.startsWith("src/ext/")) //$NON-NLS-1$
+        {
+            String rest = rel.substring("src/ext/".length()); //$NON-NLS-1$
+            int slash = rest.indexOf('/');
+            if (slash < 0)
+                return null;
+            return project.getFile(
+                "src/ext/" + rest.substring(0, slash) + "/Configuration/Configuration.mdo"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        if (rel.startsWith("src/")) //$NON-NLS-1$
+            return project.getFile("src/Configuration/Configuration.mdo"); //$NON-NLS-1$
+        return null;
+    }
+
+    private static String readWorkingCopyContent(IFile file)
+    {
+        if (!file.exists())
+            return null;
+        try (InputStream in = file.getContents())
+        {
+            return new String(in.readAllBytes(), StandardCharsets.UTF_8);
+        }
+        catch (Exception e)
+        {
+            Global.log("GitChangedFileMenu: readWorkingCopyContent(" + file.getFullPath() + "): " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+    }
+
+    /** HEAD-содержимое файла через JGit blob по его репозиторному пути ({@link RepositoryMapping}). */
+    private static String readHeadContent(IFile file)
+    {
+        try
+        {
+            RepositoryMapping mapping = RepositoryMapping.getMapping(file);
+            if (mapping == null)
+                return null;
+            Repository repository = mapping.getRepository();
+            String repoPath = mapping.getRepoRelativePath(file);
+            if (repository == null || repoPath == null)
+                return null;
+
+            try (RevWalk walk = new RevWalk(repository))
+            {
+                ObjectId headId = repository.resolve("HEAD"); //$NON-NLS-1$
+                if (headId == null)
+                    return null;
+                RevCommit commit = walk.parseCommit(headId);
+                try (TreeWalk treeWalk = TreeWalk.forPath(repository, repoPath, commit.getTree()))
+                {
+                    if (treeWalk == null)
+                        return null;
+                    ObjectId blobId = treeWalk.getObjectId(0);
+                    byte[] bytes = repository.open(blobId).getBytes();
+                    return new String(bytes, StandardCharsets.UTF_8);
+                }
+            }
+        }
+        catch (Exception e)
+        {
+            Global.log("GitChangedFileMenu: readHeadContent(" + file.getFullPath() + "): " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
     }
 
     /**

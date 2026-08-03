@@ -14,6 +14,7 @@ import org.eclipse.core.resources.IResource;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.MenuManager;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
+import org.eclipse.jface.viewers.DecoratingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
@@ -1394,10 +1395,24 @@ public final class FileSearchResultsHook implements IStartup
             @Override
             public void removeListener(ILabelProviderListener listener) { innerStyled.removeListener(listener); }
         };
-        treeViewer.setLabelProvider(new DelegatingStyledCellLabelProvider(wrapper));
+        treeViewer.setLabelProvider(new DecoratingStyledCellLabelProvider(
+            wrapper, PlatformUI.getWorkbench().getDecoratorManager().getLabelDecorator(), null));
         treeViewer.refresh();
     }
 
+    /**
+     * {@code DelegatingStyledCellLabelProvider.getStyledStringProvider()} (JFace, декомпиляция
+     * {@code .tmp/bundles/jface}) отдаёт исходный, НЕ декорированный провайдер — им изначально
+     * оборачивается {@code DecoratingStyledCellLabelProvider} (стандартная обёртка Eclipse Search
+     * для всех штатных декораторов, включая наш {@code MdObjectUsageDecorator}). Раньше здесь
+     * подменялся весь label provider на голый {@code DelegatingStyledCellLabelProvider} без
+     * декоратора — декорирование пропадало для ВСЕХ элементов дерева поиска по файлам. Ручной
+     * вызов {@code ILabelDecorator.decorateText()} не помог: штатный декоратор EDT реализует
+     * {@code IDelayedLabelDecorator} (асинхронно, через {@code prepareDecoration()} + отложенное
+     * обновление) — простой синхронный вызов всегда возвращал недекорированный текст (подтверждено
+     * логом). Поэтому здесь используется штатная {@link DecoratingStyledCellLabelProvider} —
+     * она сама умеет ждать асинхронную декорацию и обновлять дерево по готовности.
+     */
     private static String stripCountSuffix(String text)
     {
         String result = text.replaceAll("\\s*\\([^)]*\\)\\s*$", "").trim();

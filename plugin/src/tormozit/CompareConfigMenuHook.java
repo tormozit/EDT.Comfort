@@ -4,6 +4,7 @@ package tormozit;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
@@ -48,11 +49,13 @@ import org.eclipse.swt.events.SelectionEvent;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
@@ -62,6 +65,7 @@ import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.swt.widgets.TypedListener;
 import org.eclipse.swt.widgets.Widget;
+import org.eclipse.ui.IActionBars;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
@@ -72,6 +76,7 @@ import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.actions.ActionFactory;
 import org.eclipse.ui.contexts.IContextService;
 import org.eclipse.ui.dialogs.ElementListSelectionDialog;
 import org.eclipse.ui.plugin.AbstractUIPlugin;
@@ -135,6 +140,9 @@ import org.eclipse.compare.internal.CompareEditorSelectionProvider;
 import org.eclipse.core.commands.AbstractHandler;
 import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
+import org.eclipse.swt.dnd.Clipboard;
+import org.eclipse.swt.dnd.TextTransfer;
+import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IPath;
 import org.eclipse.core.runtime.IProgressMonitor;
@@ -180,6 +188,8 @@ public class CompareConfigMenuHook implements IStartup
     private static final String ITEM_TEXT_OpenObject      = "Открыть объект \tF2";
     private static final String ITEM_TEXT_showInNavigator = "Показать в навигаторе \tCTRL+T";
     private static final String ITEM_TEXT_compareInIR = "Сравнить в приложении ИР";
+    private static final String ITEM_TEXT_setMarks     = "Установить пометки";
+    private static final String ITEM_TEXT_clearMarks   = "Снять пометки";
 
     // ---- IStartup ----
 
@@ -282,6 +292,7 @@ public class CompareConfigMenuHook implements IStartup
         attachMenuListener(editor, tree);
         CompareConfigOpenModuleMergeHandler.attachDoubleClickListener(editor, tree);
         CompareModuleStructureColumnHook.install(tree);
+        CompareConfigMultiMarkSupport.install(editor, tree);
     }
 
     private void wireTreeViewerToListener(IEditorPart editor, CompareConfigSelectionListener listener)
@@ -488,6 +499,40 @@ public class CompareConfigMenuHook implements IStartup
                     });
                     addedItems.add(item3);
                 }
+
+                CompareConfigMultiMarkSupport multiMark = CompareConfigMultiMarkSupport.get(tree);
+                if (multiMark != null && multiMark.getSelected().size() > 1)
+                {
+                    addedItems.add(new MenuItem(menu, SWT.SEPARATOR));
+
+                    MenuItem itemMark = new MenuItem(menu, SWT.PUSH);
+                    itemMark.setText(ITEM_TEXT_setMarks);
+                    itemMark.addSelectionListener(new SelectionAdapter()
+                    {
+                        @Override
+                        public void widgetSelected(SelectionEvent e)
+                        {
+                            AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
+                            if (viewer instanceof CheckboxTreeViewer ctv)
+                                multiMark.applyMark(ctv, true);
+                        }
+                    });
+                    addedItems.add(itemMark);
+
+                    MenuItem itemUnmark = new MenuItem(menu, SWT.PUSH);
+                    itemUnmark.setText(ITEM_TEXT_clearMarks);
+                    itemUnmark.addSelectionListener(new SelectionAdapter()
+                    {
+                        @Override
+                        public void widgetSelected(SelectionEvent e)
+                        {
+                            AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
+                            if (viewer instanceof CheckboxTreeViewer ctv)
+                                multiMark.applyMark(ctv, false);
+                        }
+                    });
+                    addedItems.add(itemUnmark);
+                }
             }
 
             @Override
@@ -549,6 +594,338 @@ public class CompareConfigMenuHook implements IStartup
         if (element instanceof MatchedObjectsComparisonNode)
             return (MatchedObjectsComparisonNode) element;
         return null;
+    }
+
+    /**
+     * Псевдо-мультивыделение веток в дереве сравнения (штатный {@code Tree} создан
+     * EDT со стилем {@code SWT.SINGLE} — сменить на {@code MULTI} после создания
+     * контрола нельзя). Ctrl/Shift+клик копят набор выбранных узлов независимо от
+     * штатного {@code tree.getSelection()}; подсветка — через {@code SWT.EraseItem}.
+     *
+     * <p>Команды «Установить/Снять пометки» ({@link #applyMark(boolean)}) поглощают
+     * потомков, чей предок уже есть в наборе, и для каждого оставшегося верхнего узла
+     * симулируют штатный клик по чекбоксу — прогоняют {@link CheckStateChangedEvent}
+     * через уже зарегистрированные {@link ICheckStateListener} (то же поле
+     * {@code checkStateListeners}, что и в {@link SubsystemFilterFix}), не дублируя
+     * логику каскада {@code setMustBeMerged}.
+     */
+    private static final class CompareConfigMultiMarkSupport
+    {
+        private static final String DATA_KEY = "tormozit.compareConfigMultiMark"; //$NON-NLS-1$
+
+        private final Tree tree;
+        private final Set<IPartialModelNode> selected =
+            Collections.newSetFromMap(new IdentityHashMap<>());
+        private IPartialModelNode anchor;
+        private Color ownedBg;
+
+        private CompareConfigMultiMarkSupport(Tree tree)
+        {
+            this.tree = tree;
+        }
+
+        static void install(IEditorPart editor, Tree tree)
+        {
+            if (tree == null || tree.isDisposed()) return;
+            if (tree.getData(DATA_KEY) != null) return;
+
+            CompareConfigMultiMarkSupport support = new CompareConfigMultiMarkSupport(tree);
+            tree.setData(DATA_KEY, support);
+            tree.addListener(SWT.MouseDown, support::onMouseDown);
+            tree.addListener(SWT.EraseItem, support::onEraseItem);
+            tree.addListener(SWT.PaintItem, support::onPaintItem);
+            tree.addDisposeListener(e ->
+            {
+                if (support.ownedBg != null && !support.ownedBg.isDisposed())
+                    support.ownedBg.dispose();
+            });
+            installCopyActionOverride(editor, support);
+        }
+
+        static CompareConfigMultiMarkSupport get(Tree tree)
+        {
+            if (tree == null || tree.isDisposed()) return null;
+            Object data = tree.getData(DATA_KEY);
+            return data instanceof CompareConfigMultiMarkSupport support ? support : null;
+        }
+
+        // ---- Ctrl+C — копирование текстов выделенных строк ----
+
+        /**
+         * Ctrl+C на дереве сравнения не долетает как {@code SWT.KeyDown} (нативный
+         * Win32-акселератор Edit → Copy съедает букву раньше), а перехват через
+         * {@code ICommandService.addExecutionListener} не годится: команда
+         * {@code org.eclipse.ui.edit.copy} в этом редакторе ДЕЙСТВИТЕЛЬНО обрабатывается
+         * штатным обработчиком EDT, который выполняется сразу после нашего {@code preExecute}
+         * и перезаписывает буфер обратно на одиночное native-выделение (проверено логом).
+         * Нужна подмена самого обработчика —
+         * {@code IActionBars.setGlobalActionHandler(ActionFactory.COPY.getId(), ...)}
+         * (эталон концепции — {@code DebugInspectorTreeEnhancement.hookGlobalCopyAction()},
+         * но там модальный диалог и reflection на {@code globalActions}, здесь — обычный
+         * редактор со штатным {@code IActionBars}).
+         */
+        private static void installCopyActionOverride(IEditorPart editor, CompareConfigMultiMarkSupport support)
+        {
+            if (editor == null || editor.getEditorSite() == null) return;
+            IActionBars bars = editor.getEditorSite().getActionBars();
+            if (bars == null) return;
+
+            IAction original = bars.getGlobalActionHandler(ActionFactory.COPY.getId());
+            IAction wrapper = new Action()
+            {
+                @Override
+                public void run()
+                {
+                    Control focus = support.tree.getDisplay().getFocusControl();
+                    if (focus == support.tree && !support.selected.isEmpty())
+                    {
+                        support.copySelectedText();
+                        return;
+                    }
+                    if (original != null)
+                        original.run();
+                }
+            };
+            bars.setGlobalActionHandler(ActionFactory.COPY.getId(), wrapper);
+            bars.updateActionBars();
+        }
+
+        /** Тексты выделенных строк в видимом порядке, через разделитель строки. */
+        private void copySelectedText()
+        {
+            if (selected.isEmpty()) return;
+
+            List<TreeItem> visible = new ArrayList<>();
+            collectVisibleItems(tree.getItems(), visible);
+
+            List<String> lines = new ArrayList<>();
+            for (TreeItem item : visible)
+            {
+                if (item.getData() instanceof IPartialModelNode n && selected.contains(n))
+                {
+                    String text = item.getText();
+                    if (text != null && !text.isBlank())
+                        lines.add(text);
+                }
+            }
+            if (lines.isEmpty()) return;
+
+            String joined = String.join(System.lineSeparator(), lines);
+            Clipboard clipboard = new Clipboard(tree.getDisplay());
+            try
+            {
+                clipboard.setContents(new Object[] { joined }, new Transfer[] { TextTransfer.getInstance() });
+            }
+            finally
+            {
+                clipboard.dispose();
+            }
+        }
+
+        Set<IPartialModelNode> getSelected()
+        {
+            return selected;
+        }
+
+        // ---- Ctrl/Shift+клик — накопление набора ----
+
+        private void onMouseDown(Event e)
+        {
+            if (e.button != 1) return;
+            TreeItem item = tree.getItem(new Point(e.x, e.y));
+            if (item == null || item.isDisposed()) return;
+            if (!(item.getData() instanceof IPartialModelNode node)) return;
+
+            boolean ctrl = (e.stateMask & SWT.MOD1) != 0;
+            boolean shift = (e.stateMask & SWT.SHIFT) != 0;
+
+            if (shift && anchor != null)
+            {
+                selectRange(anchor, node);
+            }
+            else if (ctrl)
+            {
+                if (!selected.remove(node))
+                    selected.add(node);
+                anchor = node;
+            }
+            else
+            {
+                selected.clear();
+                selected.add(node);
+                anchor = node;
+            }
+            tree.redraw();
+        }
+
+        /** Диапазон по видимому порядку строк дерева (развёрнутые узлы). */
+        private void selectRange(IPartialModelNode from, IPartialModelNode to)
+        {
+            List<TreeItem> visible = new ArrayList<>();
+            collectVisibleItems(tree.getItems(), visible);
+
+            int i1 = indexOfNode(visible, from);
+            int i2 = indexOfNode(visible, to);
+            if (i1 < 0 || i2 < 0) return;
+
+            int lo = Math.min(i1, i2);
+            int hi = Math.max(i1, i2);
+            selected.clear();
+            for (int i = lo; i <= hi; i++)
+            {
+                if (visible.get(i).getData() instanceof IPartialModelNode n)
+                    selected.add(n);
+            }
+        }
+
+        private static void collectVisibleItems(TreeItem[] items, List<TreeItem> out)
+        {
+            for (TreeItem item : items)
+            {
+                if (item == null || item.isDisposed()) continue;
+                out.add(item);
+                if (item.getExpanded())
+                    collectVisibleItems(item.getItems(), out);
+            }
+        }
+
+        private static int indexOfNode(List<TreeItem> items, IPartialModelNode node)
+        {
+            for (int i = 0; i < items.size(); i++)
+                if (items.get(i).getData() == node)
+                    return i;
+            return -1;
+        }
+
+        // ---- Подсветка ----
+
+        private void onEraseItem(Event e)
+        {
+            if (!(e.item instanceof TreeItem item) || item.isDisposed()) return;
+            if (!(item.getData() instanceof IPartialModelNode node) || !selected.contains(node)) return;
+            // Узел под штатным native-выделением уже подсвечен системой — не мешаем.
+            if (isNativelySelected(item)) return;
+
+            Color bg = highlightBackground();
+            if (bg == null) return;
+            e.gc.setBackground(bg);
+            e.gc.fillRectangle(e.x, e.y, e.width, e.height);
+            e.detail &= ~SWT.BACKGROUND;
+        }
+
+        private boolean isNativelySelected(TreeItem item)
+        {
+            for (TreeItem s : tree.getSelection())
+                if (s == item) return true;
+            return false;
+        }
+
+        /** Тёмная тема — акцент от {@link ListSelectionThemeColors}; светлая — свой slightlyDarker. */
+        private Color highlightBackground()
+        {
+            if (ownedBg != null && !ownedBg.isDisposed())
+                return ownedBg;
+            if (ListSelectionThemeColors.isDarkList(tree))
+            {
+                ownedBg = ListSelectionThemeColors.listSelectionBackground(tree, false);
+                return ownedBg;
+            }
+            Color base = tree.getBackground();
+            if (base == null || base.isDisposed())
+                base = tree.getDisplay().getSystemColor(SWT.COLOR_LIST_BACKGROUND);
+            ownedBg = slightlyDarker(base, 0.16);
+            return ownedBg;
+        }
+
+        /**
+         * Рамка поверх строки (система, {@code COLOR_LIST_SELECTION}) — в отличие от
+         * фонового оттенка не тонет на цветных строках добавленных/удалённых объектов
+         * (там текст/фон часто уже подкрашен label-провайдером сравнения).
+         */
+        private void onPaintItem(Event e)
+        {
+            if (!(e.item instanceof TreeItem item) || item.isDisposed()) return;
+            if (!(item.getData() instanceof IPartialModelNode node) || !selected.contains(node)) return;
+            if (isNativelySelected(item)) return;
+
+            // getBounds() без индекса — только колонка 0; растягиваем на всю ширину
+            // клиентской области (в дереве сравнения несколько колонок,
+            // см. CompareModuleStructureColumnHook), а не только на первую.
+            Rectangle bounds = item.getBounds(0);
+            if (bounds == null || bounds.isEmpty()) return;
+
+            Color border = tree.getDisplay().getSystemColor(SWT.COLOR_LIST_SELECTION);
+            e.gc.setForeground(border);
+            e.gc.drawRectangle(0, bounds.y,
+                Math.max(0, tree.getClientArea().width - 1), Math.max(0, bounds.height - 1));
+        }
+
+        private static Color slightlyDarker(Color base, double factor)
+        {
+            RGB rgb = base.getRGB();
+            int r = clampChannel((int) (rgb.red * (1.0 - factor)));
+            int g = clampChannel((int) (rgb.green * (1.0 - factor)));
+            int b = clampChannel((int) (rgb.blue * (1.0 - factor)));
+            return new Color(base.getDevice(), r, g, b);
+        }
+
+        private static int clampChannel(int value)
+        {
+            return Math.max(0, Math.min(255, value));
+        }
+
+        // ---- Команды «Установить/Снять пометки» ----
+
+        /** Отбрасывает узлы, чей предок уже присутствует в наборе (поглощение). */
+        private List<IPartialModelNode> absorbDescendants()
+        {
+            List<IPartialModelNode> top = new ArrayList<>();
+            for (IPartialModelNode node : selected)
+            {
+                boolean hasAncestorInSet = false;
+                for (IPartialModelNode p = node.getParent(); p != null; p = p.getParent())
+                {
+                    if (selected.contains(p))
+                    {
+                        hasAncestorInSet = true;
+                        break;
+                    }
+                }
+                if (!hasAncestorInSet)
+                    top.add(node);
+            }
+            return top;
+        }
+
+        void applyMark(CheckboxTreeViewer ctv, boolean checked)
+        {
+            if (ctv == null) return;
+
+            for (IPartialModelNode node : absorbDescendants())
+            {
+                if (!node.isCheckable()) continue;
+                ctv.setChecked(node, checked);
+                fireCheckStateChanged(ctv, node, checked);
+            }
+        }
+
+        /**
+         * Прогоняет синтетическое событие через уже зарегистрированные
+         * {@link ICheckStateListener} — тот же путь, что и обычный клик по чекбоксу
+         * (включая штатный EDT-каскад {@code setMustBeMerged}).
+         */
+        private static void fireCheckStateChanged(CheckboxTreeViewer ctv, Object element, boolean checked)
+        {
+            Object listObj = Global.getField(ctv, "checkStateListeners"); //$NON-NLS-1$
+            if (listObj == null) return;
+            Object raw = Global.invoke(listObj, "getListeners"); //$NON-NLS-1$
+            if (!(raw instanceof Object[] listeners)) return;
+
+            CheckStateChangedEvent event = new CheckStateChangedEvent(ctv, element, checked);
+            for (Object l : listeners)
+                if (l instanceof ICheckStateListener listener)
+                    listener.checkStateChanged(event);
+        }
     }
 
     /**

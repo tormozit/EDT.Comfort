@@ -6,10 +6,14 @@ import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
 import org.eclipse.core.commands.IExecutionListener;
 import org.eclipse.core.commands.NotHandledException;
+import org.eclipse.core.runtime.jobs.IJobChangeEvent;
+import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.core.runtime.jobs.JobChangeAdapter;
 import org.eclipse.jface.preference.IPreferenceNode;
 import org.eclipse.jface.preference.IPreferencePage;
 import org.eclipse.jface.preference.PreferenceDialog;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
+import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.LabelProvider;
 import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.jface.viewers.StyledString.Styler;
@@ -136,6 +140,7 @@ final class PreferenceSearchFilterAugmenter
             augmented.setPattern(filterControl.getText());
             filterControl.addModifyListener(e -> augmented.setPattern(filterControl.getText()));
             filterControl.addModifyListener(e -> applyContentOverlay(dialog, filterControl));
+            wireRevealSelectionOnClear(filteredTree, viewer, filterControl);
             // Обе кнопки — в одном узком ряду (одна колонка в GridLayout
             // родителя вместо двух), иначе суммарная ширина заметно растёт.
             Composite buttonsRow = FilterHistoryUi.createButtonsRow(filterControl.getParent());
@@ -508,6 +513,165 @@ final class PreferenceSearchFilterAugmenter
             control.setForeground(fg);
         // Если контрол никогда не подсвечивался (originalFg == null) — вообще
         // не трогаем его, чтобы не срывать CSS-стилизацию темы.
+    }
+
+    /**
+     * При очистке фильтра {@link FilteredTree} (крестик в поле или Backspace до
+     * пустой строки) штатно сворачивает все узлы дерева ({@code narrowingDown ==
+     * false}, т.к. "" не начинается с прежнего текста) — выбранная страница
+     * остаётся выбранной в модели, но визуально прячется внутри свёрнутого
+     * родителя. Запоминаем выделение на момент очистки и после отработки
+     * {@code refreshJob} (задержка 200 мс, см. {@code FilteredTree}) раскрываем
+     * путь к нему через {@link TreeViewer#reveal(Object)} — без смены самого
+     * выделения, только видимость текущей строки.
+     */
+    private static final String REVEAL_LOG_TOPIC = "prefSearchRevealOnClear"; //$NON-NLS-1$
+
+    private static final String REFRESH_JOB_FIELD = "refreshJob"; //$NON-NLS-1$
+
+    /**
+     * Первая версия (фиксированные {@code timerExec(0/100/250/500)}) логами
+     * подтверждённо давала ложный "OK": {@code reveal()} успевал отработать
+     * ДО того, как реально завершался {@code FilteredTree.refreshJob}
+     * ({@code Job.schedule(200)} — это постановка в очередь планировщика, а не
+     * гарантия исполнения через 200 мс), поэтому job затем сворачивал дерево
+     * уже ПОСЛЕ нашего reveal, и разворот пропадал у пользователя, хотя лог
+     * писал "visible=true". Правильно — не гадать с задержкой, а слушать сам
+     * приватный {@code refreshJob} ({@code Job}, найден по имени поля в
+     * декомпилированном {@code FilteredTree} из {@code .tmp/bundles}) и
+     * выполнять {@code reveal()} строго после его завершения ({@code done()}).
+     */
+    private static void wireRevealSelectionOnClear(FilteredTree filteredTree, TreeViewer viewer, Text filterControl)
+    {
+        String[] previousText = {filterControl.getText()};
+        Global.tempLog(REVEAL_LOG_TOPIC, "wireRevealSelectionOnClear: initial text=[" + previousText[0] + "]"); //$NON-NLS-1$ //$NON-NLS-2$
+        filterControl.addModifyListener(e ->
+        {
+            String now = filterControl.getText();
+            boolean wasFilled = previousText[0] != null && !previousText[0].isBlank();
+            boolean nowEmpty = now == null || now.isBlank();
+            Global.tempLog(REVEAL_LOG_TOPIC, "modify: previous=[" + previousText[0] + "] now=[" + now //$NON-NLS-1$ //$NON-NLS-2$
+                    + "] wasFilled=" + wasFilled + " nowEmpty=" + nowEmpty); //$NON-NLS-1$ //$NON-NLS-2$
+            if (wasFilled && nowEmpty)
+                scheduleRevealAfterRefreshJob(filteredTree, viewer);
+            previousText[0] = now;
+        });
+    }
+
+    private static void scheduleRevealAfterRefreshJob(FilteredTree filteredTree, TreeViewer viewer)
+    {
+        Tree tree = viewer.getTree();
+        if (tree.isDisposed())
+        {
+            Global.tempLog(REVEAL_LOG_TOPIC, "scheduleRevealAfterRefreshJob: tree disposed, abort"); //$NON-NLS-1$
+            return;
+        }
+        if (!(viewer.getSelection() instanceof IStructuredSelection selection) || selection.isEmpty())
+        {
+            Global.tempLog(REVEAL_LOG_TOPIC,
+                    "scheduleRevealAfterRefreshJob: no structured/non-empty selection, selection=" //$NON-NLS-1$
+                            + viewer.getSelection());
+            return;
+        }
+        Object element = selection.getFirstElement();
+        String elementLabel = element instanceof IPreferenceNode node ? node.getLabelText() : String.valueOf(element);
+
+        Object jobObj = Global.getField(filteredTree, REFRESH_JOB_FIELD);
+        if (!(jobObj instanceof Job job))
+        {
+            Global.tempLog(REVEAL_LOG_TOPIC,
+                    "scheduleRevealAfterRefreshJob: field '" + REFRESH_JOB_FIELD + "' is not a Job: " + jobObj); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        Global.tempLog(REVEAL_LOG_TOPIC, "scheduleRevealAfterRefreshJob: captured element=" + elementLabel //$NON-NLS-1$
+                + " jobState=" + job.getState() + " jobClass=" + job.getClass().getName() //$NON-NLS-1$ //$NON-NLS-2$
+                + " jobThread=" + job.getThread()); //$NON-NLS-1$
+
+        job.addJobChangeListener(new JobChangeAdapter()
+        {
+            @Override
+            public void scheduled(IJobChangeEvent event)
+            {
+                Global.tempLog(REVEAL_LOG_TOPIC, "refreshJob.scheduled: element=" + elementLabel //$NON-NLS-1$
+                        + " delay=" + event.getDelay() + " state=" + job.getState()); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+
+            @Override
+            public void aboutToRun(IJobChangeEvent event)
+            {
+                Global.tempLog(REVEAL_LOG_TOPIC, "refreshJob.aboutToRun: element=" + elementLabel); //$NON-NLS-1$
+            }
+
+            @Override
+            public void running(IJobChangeEvent event)
+            {
+                Global.tempLog(REVEAL_LOG_TOPIC,
+                        "refreshJob.running: element=" + elementLabel + " thread=" + Thread.currentThread()); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+
+            @Override
+            public void done(IJobChangeEvent event)
+            {
+                job.removeJobChangeListener(this);
+                Global.tempLog(REVEAL_LOG_TOPIC, "refreshJob.done: element=" + elementLabel //$NON-NLS-1$
+                        + " result=" + event.getResult()); //$NON-NLS-1$
+                Display display = tree.getDisplay();
+                if (display.isDisposed())
+                    return;
+                display.asyncExec(() ->
+                {
+                    if (tree.isDisposed())
+                    {
+                        Global.tempLog(REVEAL_LOG_TOPIC, "asyncExec after refreshJob.done: tree disposed"); //$NON-NLS-1$
+                        return;
+                    }
+                    viewer.reveal(element);
+                    TreeItem[] sel = tree.getSelection();
+                    String selLabel = sel.length > 0 ? sel[0].getText() : "<none>"; //$NON-NLS-1$
+                    boolean visible = sel.length > 0 && isTreeItemVisible(sel[0]);
+                    Global.tempLog(REVEAL_LOG_TOPIC,
+                            "asyncExec after refreshJob.done: reveal done, element=" + elementLabel //$NON-NLS-1$
+                                    + " treeSelection=" + selLabel + " visible=" + visible); //$NON-NLS-1$ //$NON-NLS-2$
+                });
+            }
+        });
+
+        startHeartbeat(job, tree.getDisplay(), elementLabel);
+    }
+
+    /**
+     * Печатает состояние job раз в 300 мс, пока он не завершится (макс. 30 с) —
+     * без этого непонятно, ГДЕ теряется время между schedule() и done(): в
+     * очереди планировщика (state остаётся SLEEPING/WAITING) или в самом
+     * выполнении на UI-потоке (state == RUNNING подолгу).
+     */
+    private static void startHeartbeat(Job job, Display display, String elementLabel)
+    {
+        long start = System.currentTimeMillis();
+        Runnable[] tickHolder = new Runnable[1];
+        tickHolder[0] = () ->
+        {
+            long elapsed = System.currentTimeMillis() - start;
+            int state = job.getState();
+            Global.tempLog(REVEAL_LOG_TOPIC,
+                    "heartbeat: element=" + elementLabel + " elapsedMs=" + elapsed + " state=" + state); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            if (state == Job.NONE || elapsed > 30000 || display.isDisposed())
+                return;
+            display.timerExec(300, tickHolder[0]);
+        };
+        display.timerExec(300, tickHolder[0]);
+    }
+
+    private static boolean isTreeItemVisible(TreeItem item)
+    {
+        TreeItem parent = item.getParentItem();
+        while (parent != null)
+        {
+            if (!parent.getExpanded())
+                return false;
+            parent = parent.getParentItem();
+        }
+        return true;
     }
 
     private static void wireHighlighting(TreeViewer viewer, Text filterControl)

@@ -34,6 +34,17 @@ public final class MdTypeMapping
     /** RU мн.ч. → RU ед.ч. для offline-резолва прямых имён менеджеров. */
     private static final Map<String, String> RU_PLURAL_TO_RU = new LinkedHashMap<>();
 
+    /** Инверсия {@link #TREE_GROUP_LABEL_TO_RU}: RU ед.ч. → подпись группы (с пробелами, как в EDT). */
+    private static final Map<String, String> RU_TO_GROUP_LABEL = new LinkedHashMap<>();
+
+    /**
+     * RU мн.ч. для дочерних типов без своей папки верхнего уровня (форма, макет, команда…) —
+     * их нет ни в {@link #RU_TO_RU_PLURAL} (только «крупные» типы), ни в {@link #TREE_GROUP_LABEL_TO_RU}
+     * (только группы в дереве поиска). Используется декоратором папок-групп внутри объекта
+     * ({@code MdObjectUsageDecorator}), например «Forms» → «Формы».
+     */
+    private static final Map<String, String> SUB_OBJECT_RU_PLURAL = new LinkedHashMap<>();
+
     /**
      * Подписи узлов-групп в дереве панели глобального поиска ({@code ConfigurationSearchViewPage})
      * → RU ед.ч. типа МД. В отличие от {@link #RU_PLURAL_TO_RU} (без пробелов, для имён менеджеров
@@ -107,6 +118,8 @@ public final class MdTypeMapping
         add("Форма", "Form", "Forms");
         add("Команда", "Command", "Commands");
         add("Макет", "Template", "Templates");
+        add("Элемент", "Item", "Items");
+        add("Справка", "Help", "Help");
 
         addAlias("ОбщийМодульПовторногоИспользования", "ОбщийМодуль");
 
@@ -127,8 +140,8 @@ public final class MdTypeMapping
 
         // ── Под-объекты (BM FQN) ─────────────────────────────────────────────
         add("Макет",               "Template",        null);
-        add("ТабличнаяЧасть",      "TabularSection",  null);
-        add("Реквизит",            "Attribute",       null);
+        add("ТабличнаяЧасть",      "TabularSection",  "TabularSections");
+        add("Реквизит",            "Attribute",       "Attributes");
         add("Измерение",           "Dimension",       null);
         add("Ресурс",              "Resource",        null);
         add("Перерасчет",          "Recalculation",   null);
@@ -164,6 +177,18 @@ public final class MdTypeMapping
 
         for (Map.Entry<String, String> entry : RU_TO_RU_PLURAL.entrySet())
             RU_PLURAL_TO_RU.put(entry.getValue(), entry.getKey());
+
+        SUB_OBJECT_RU_PLURAL.put("Команда",              "Команды"); //$NON-NLS-1$ //$NON-NLS-2$
+        SUB_OBJECT_RU_PLURAL.put("Форма",                "Формы"); //$NON-NLS-1$ //$NON-NLS-2$
+        SUB_OBJECT_RU_PLURAL.put("Макет",                "Макеты"); //$NON-NLS-1$ //$NON-NLS-2$
+        SUB_OBJECT_RU_PLURAL.put("ТабличнаяЧасть",       "ТабличныеЧасти"); //$NON-NLS-1$ //$NON-NLS-2$
+        SUB_OBJECT_RU_PLURAL.put("Реквизит",             "Реквизиты"); //$NON-NLS-1$ //$NON-NLS-2$
+        SUB_OBJECT_RU_PLURAL.put("Измерение",            "Измерения"); //$NON-NLS-1$ //$NON-NLS-2$
+        SUB_OBJECT_RU_PLURAL.put("Ресурс",               "Ресурсы"); //$NON-NLS-1$ //$NON-NLS-2$
+        SUB_OBJECT_RU_PLURAL.put("Перерасчет",           "Перерасчеты"); //$NON-NLS-1$ //$NON-NLS-2$
+        SUB_OBJECT_RU_PLURAL.put("ПризнакУчета",         "ПризнакиУчета"); //$NON-NLS-1$ //$NON-NLS-2$
+        SUB_OBJECT_RU_PLURAL.put("ЗначениеПеречисления", "ЗначенияПеречисления"); //$NON-NLS-1$ //$NON-NLS-2$
+        SUB_OBJECT_RU_PLURAL.put("Элемент",              "Элементы"); //$NON-NLS-1$ //$NON-NLS-2$
 
         // ── Подписи узлов-групп в дереве поиска (с пробелами, как в UI EDT) ─────────────────
         // Подтверждено логом: «Общие формы», «Регистры сведений», «Документы», «Планы обмена».
@@ -212,6 +237,9 @@ public final class MdTypeMapping
         TREE_GROUP_LABEL_TO_RU.put("Стили",                              "СтильОформления");
         TREE_GROUP_LABEL_TO_RU.put("Интерфейсы",                         "Интерфейс");
         TREE_GROUP_LABEL_TO_RU.put("Внешние источники данных",           "ВнешнийИсточникДанных");
+
+        for (Map.Entry<String, String> entry : TREE_GROUP_LABEL_TO_RU.entrySet())
+            RU_TO_GROUP_LABEL.put(entry.getValue(), entry.getKey());
     }
 
     // =========================================================================
@@ -252,6 +280,28 @@ public final class MdTypeMapping
     public static String treeGroupLabelToRu(String label)
     {
         return TREE_GROUP_LABEL_TO_RU.get(label);
+    }
+
+    /**
+     * RU ед.ч. типа МД → отображаемое RU мн.ч. для декорации папок-групп в дереве
+     * (например, {@code MdObjectUsageDecorator}: «Tasks» → «Задача» → «Задачи»).
+     * Порядок поиска: подпись группы дерева поиска (с пробелами, как в EDT) →
+     * «менеджерское» мн.ч. ({@link #RU_TO_RU_PLURAL}) → мн.ч. дочерних типов без
+     * своей папки ({@link #SUB_OBJECT_RU_PLURAL}).
+     *
+     * @return RU мн.ч., или {@code null}, если тип неизвестен
+     */
+    public static String ruSingularToGroupPlural(String ruSingular)
+    {
+        if (ruSingular == null)
+            return null;
+        String fromTreeLabel = RU_TO_GROUP_LABEL.get(ruSingular);
+        if (fromTreeLabel != null)
+            return fromTreeLabel;
+        String fromManager = RU_TO_RU_PLURAL.get(ruSingular);
+        if (fromManager != null)
+            return fromManager;
+        return SUB_OBJECT_RU_PLURAL.get(ruSingular);
     }
 
     /**
