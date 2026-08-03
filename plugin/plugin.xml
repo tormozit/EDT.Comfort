@@ -253,6 +253,12 @@
         schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
         sequence="M1+M2+F3">
     </key>
+    <key
+        commandId="tormozit.GoToParentInTree"
+        contextId="org.eclipse.ui.contexts.window"
+        schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
+        sequence="M1+ARROW_UP">
+    </key>
   </extension>
 
   <extension point="org.eclipse.ui.commands">
@@ -459,6 +465,11 @@
         name="Проверить"
         categoryId="tormozit.commands.global"
         description="Перепроверить объекты, попадающие под текущий отбор панели «Ошибки конфигурации» (Комфорт)"/>
+    <command
+        id="tormozit.GoToParentInTree"
+        name="Перейти к родителю в дереве"
+        categoryId="tormozit.commands.global"
+        description="Выбрать родительский элемент текущего выделения в дереве с фокусом. По умолчанию Ctrl+Up; сочетание настраивается в Клавиши, контекст «В окнах» (Комфорт)"/>
   </extension>
 
   <extension point="org.eclipse.ui.handlers">
@@ -747,6 +758,10 @@
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.ProblemViewRecomputeChecksHandler"
         commandId="tormozit.problemView.recomputeChecks">
+    </handler>
+    <handler
+        class="tormozit.GoToParentInTreeHandler"
+        commandId="tormozit.GoToParentInTree">
     </handler>
   </extension>
 
