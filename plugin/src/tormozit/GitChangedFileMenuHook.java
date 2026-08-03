@@ -1,6 +1,7 @@
 package tormozit;
 
 import java.io.InputStream;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -24,6 +25,7 @@ import org.eclipse.egit.core.op.DiscardChangesOperation;
 import org.eclipse.egit.core.project.RepositoryMapping;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.jface.dialogs.IDialogConstants;
 import org.eclipse.jface.dialogs.MessageDialog;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.ISelectionProvider;
@@ -137,6 +139,15 @@ public final class GitChangedFileMenuHook implements IStartup
     private static final String COMPARE_WITH_COMMIT_TEXT =
         "Сравнить рабочий каталог с коммитом"; //$NON-NLS-1$
     private static final String COMPARE_UI_BUNDLE_ID = "com._1c.g5.v8.dt.compare.ui"; //$NON-NLS-1$
+    private static final String COMPARE_DIALOG_CLASS =
+        "com._1c.g5.v8.dt.internal.compare.git.ui.dialogs.DtCommitSelectionDialog"; //$NON-NLS-1$
+    /**
+     * Заголовок окна «Select a Commit» без перевода (у поставщика в
+     * {@code uitext_ru.properties} ключа {@code CommitSelectionDialog_WindowTitle} нет).
+     */
+    private static final String COMMIT_DIALOG_ENGLISH_TITLE = "Select a Commit"; //$NON-NLS-1$
+    /** Русский заголовок окна, когда поставщик не перевёл {@value #COMMIT_DIALOG_ENGLISH_TITLE}. */
+    private static final String COMMIT_DIALOG_RUSSIAN_TITLE = "Выбор коммита"; //$NON-NLS-1$
     private static final String COMPARE_UTILS_CLASS =
         "com._1c.g5.v8.dt.internal.compare.git.ui.handler.Utils"; //$NON-NLS-1$
     private static final String COMPARE_UI_PLUGIN_CLASS =
@@ -1286,8 +1297,8 @@ public final class GitChangedFileMenuHook implements IStartup
     // ========================================================================
     // HistoryView: «Сравнить рабочий каталог с коммитом» — полное сравнение
     // конфигурации (как «Групповая разработка / Сравнить / Коммит...» в
-    // Навигаторе), но без диалога выбора коммита — коммит уже известен из
-    // выбранной строки панели «История».
+    // Навигаторе). Открывает окно «Select a Commit» с активацией в нём коммита
+    // из выбранной строки панели «История»; сравнение запускается по «Открыть».
     // ========================================================================
 
     /**
@@ -1321,13 +1332,6 @@ public final class GitChangedFileMenuHook implements IStartup
     }
 
     /**
-     * Повторяет поведение EDT-обработчика {@code DtCompareWithCommitHandler}
-     * («Групповая разработка / Сравнить / Коммит...» в Навигаторе) после
-     * закрытия диалога выбора коммита — вызывает ту же готовую функцию
-     * {@code Utils.performCompareWith(...)} бандла {@code com._1c.g5.v8.dt.compare.ui},
-     * но с уже известным коммитом вместо показа {@code DtCommitSelectionDialog}.
-     */
-    /**
      * Репозиторий, с которым сейчас работает панель «История»
      * ({@code GenericHistoryView}/{@code HistoryView}), через рефлексию к его
      * {@code IHistoryPage.currentRepo}.
@@ -1347,6 +1351,13 @@ public final class GitChangedFileMenuHook implements IStartup
         return null;
     }
 
+    /**
+     * Повторяет поведение EDT-обработчика {@code DtCompareWithCommitHandler}
+     * («Групповая разработка / Сравнить / Коммит...» в Навигаторе): открывает
+     * {@code DtCommitSelectionDialog} с активированным в нём коммитом из строки
+     * панели «История», а по «Открыть» вызывает ту же готовую функцию
+     * {@code Utils.performCompareWith(...)} бандла {@code com._1c.g5.v8.dt.compare.ui}.
+     */
     private static void performCompareWithCommit(IViewPart view, Object commitElement, Shell shell)
     {
         try
@@ -1378,7 +1389,34 @@ public final class GitChangedFileMenuHook implements IStartup
                 Global.log("CompareWithCommit: бандл " + COMPARE_UI_BUNDLE_ID + " не найден"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
+            Class<?> dialogCls = compareUiBundle.loadClass(COMPARE_DIALOG_CLASS);
             Class<?> utilsCls = compareUiBundle.loadClass(COMPARE_UTILS_CLASS);
+
+            Constructor<?> ctor = dialogCls.getConstructor(
+                Shell.class, Repository.class, IResource[].class);
+            Object dialog = ctor.newInstance(shell, repository, new IResource[] { project });
+
+            // create() до open(): строит диалог и запускает фоновую загрузку
+            // списка коммитов (updateUi() выполнится уже в event loop окна).
+            Global.invoke(dialog, "create"); //$NON-NLS-1$
+            translateCommitDialogTitle(dialog);
+            preselectCommit(dialog, repository, sha);
+
+            if ((int) Global.call(dialog, "open") != IDialogConstants.OK_ID) //$NON-NLS-1$
+                return;
+
+            Object commitIdObj = Global.call(dialog, "getCommitId"); //$NON-NLS-1$
+            if (!(commitIdObj instanceof ObjectId commitId))
+            {
+                Global.log("CompareWithCommit: коммит не выбран"); //$NON-NLS-1$
+                return;
+            }
+            String chosenSha = commitId.name();
+            MatchingStrategy strategy = (MatchingStrategy) Global.call(dialog, "getMatchingStrategy"); //$NON-NLS-1$
+            boolean parseBsl = (boolean) Global.call(dialog, "isParseBslModuleStructure"); //$NON-NLS-1$
+            boolean readOnly = (boolean) Global.call(dialog, "isReadOnlyModeComparison"); //$NON-NLS-1$
+            String mergeSettingsFileName = (String) Global.call(dialog, "getMergeSettingsFileName"); //$NON-NLS-1$
+
             Class<?> pluginCls = compareUiBundle.loadClass(COMPARE_UI_PLUGIN_CLASS);
             Class<?> helperCls = compareUiBundle.loadClass(COMPARISON_EDITOR_OPEN_HELPER_CLASS);
             Class<?> monitoringCls = compareUiBundle.loadClass(MONITORING_EVENT_DISPATCHER_CLASS);
@@ -1411,24 +1449,24 @@ public final class GitChangedFileMenuHook implements IStartup
                 fileSystemSupportProvider = injector.getInstance(IProjectFileSystemSupportProvider.class);
 
             Object commitDisplayRepr = Global.invoke(utilsCls, "getCommitUserRepresentation", //$NON-NLS-1$
-                repository, sha);
-            String displayRepr = commitDisplayRepr instanceof String s ? s : sha;
+                repository, chosenSha);
+            String displayRepr = commitDisplayRepr instanceof String s ? s : chosenSha;
 
             Map<IProject, List<Object>> projectsToPathFilter = new HashMap<>();
             projectsToPathFilter.put(project, new ArrayList<>());
 
             Global.invoke(utilsCls, "performCompareWith", //$NON-NLS-1$
                 repository,
-                sha,
+                chosenSha,
                 displayRepr,
                 "Team.CompareWithCommit", //$NON-NLS-1$
-                MatchingStrategy.UUID_THEN_NAME,
-                Boolean.FALSE,
-                Boolean.FALSE,
+                strategy,
+                Boolean.valueOf(readOnly),
+                Boolean.valueOf(parseBsl),
                 projectsToPathFilter,
                 shell,
                 COMPARE_WITH_COMMIT_TEXT,
-                null,
+                mergeSettingsFileName,
                 filePathConverter,
                 v8ProjectManager,
                 comparisonManager,
@@ -1439,6 +1477,47 @@ public final class GitChangedFileMenuHook implements IStartup
         catch (Exception ex)
         {
             Global.log("CompareWithCommit: " + ex); //$NON-NLS-1$
+        }
+    }
+
+    /**
+     * Заголовок окна диалога — только если поставщик (EGit {@code nl_ru}) его
+     * не перевёл: в {@code uitext_ru.properties} ключа
+     * {@code CommitSelectionDialog_WindowTitle} нет, поэтому даже в русском EDT
+     * окно называется «Select a Commit».
+     */
+    private static void translateCommitDialogTitle(Object dialog)
+    {
+        Shell dialogShell = (Shell) Global.call(dialog, "getShell"); //$NON-NLS-1$
+        if (dialogShell == null || dialogShell.isDisposed())
+            return;
+        if (COMMIT_DIALOG_ENGLISH_TITLE.equals(dialogShell.getText()))
+            dialogShell.setText(COMMIT_DIALOG_RUSSIAN_TITLE);
+    }
+
+    /**
+     * Активирует (выделяет) коммит {@code sha} в списке окна «Select a Commit».
+     * Через {@code CommitGraphTable.selectCommitStored(...)}: коммит сразу
+     * сохраняется в поле {@code commitToShow}, поэтому когда фоновая загрузка
+     * закончится и {@code CommitSelectionDialog.updateUi()} выполнит
+     * {@code setInput(...)}, строка коммита будет автоматически выделена.
+     */
+    private static void preselectCommit(Object dialog, Repository repository, String sha)
+    {
+        try
+        {
+            Object table = Global.getField(dialog, "table"); //$NON-NLS-1$
+            if (table == null)
+                return;
+            try (RevWalk walk = new RevWalk(repository))
+            {
+                RevCommit commit = walk.parseCommit(ObjectId.fromString(sha));
+                Global.invoke(table, "selectCommitStored", commit); //$NON-NLS-1$
+            }
+        }
+        catch (Exception ex)
+        {
+            Global.log("CompareWithCommit: preselect: " + ex); //$NON-NLS-1$
         }
     }
 
