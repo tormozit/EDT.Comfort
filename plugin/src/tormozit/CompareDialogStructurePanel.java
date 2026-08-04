@@ -2,13 +2,8 @@ package tormozit;
 
 import java.util.ArrayList;
 import java.util.List;
-import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
 
-import org.eclipse.core.commands.ExecutionEvent;
-import org.eclipse.core.commands.ExecutionException;
-import org.eclipse.core.commands.IExecutionListener;
-import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.LabelProvider;
@@ -31,8 +26,6 @@ import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
-import org.eclipse.ui.PlatformUI;
-import org.eclipse.ui.commands.ICommandService;
 
 import tormozit.BslModuleStructureDiff.DiffNode;
 import tormozit.BslModuleStructureDiff.Kind;
@@ -341,90 +334,33 @@ final class CompareDialogStructurePanel
      * сработает: нативная Win32-трансляция Ctrl+C в акселератор диалога съедает событие раньше,
      * чем SWT создаст {@code KeyDown} (тот же архитектурный потолок, что и
      * {@code PreferenceSearchFilterAugmenter.wireTreeCopy}, у которой этот приём подсмотрен) —
-     * перехватываем команду {@code org.eclipse.ui.edit.copy} через {@code ICommandService},
-     * а не клавишу. В отличие от прообраза — поддержка НЕСКОЛЬКИХ одновременно открытых деревьев
-     * структуры (разные окна сравнения), не только одного статического экземпляра.
+     * перехватываем команду {@code org.eclipse.ui.edit.copy} через общий {@link CopyCommandSupport}.
      */
-    private static final List<Tree> copyTargetTrees = new CopyOnWriteArrayList<>();
-    private static volatile boolean copyExecutionListenerInstalled;
-
     private static void wireTreeCopy(Tree tree)
     {
-        copyTargetTrees.add(tree);
-        tree.addDisposeListener(e -> copyTargetTrees.remove(tree));
-        installCopyExecutionListener();
+        CopyCommandSupport.wireCopyOverride(tree, () -> copyTreeSelection(tree));
     }
 
-    private static void installCopyExecutionListener()
+    private static void copyTreeSelection(Tree tree)
     {
-        if (copyExecutionListenerInstalled || PlatformUI.getWorkbench() == null)
+        if (tree.isDisposed())
             return;
-        ICommandService commandService = PlatformUI.getWorkbench().getService(ICommandService.class);
-        if (commandService == null)
+        TreeItem[] selection = tree.getSelection();
+        if (selection.length == 0)
             return;
-        commandService.addExecutionListener(new IExecutionListener()
+        // Не selection[0].getText() — там наш декоративный префикс (+/−/⚠/~), копируем чистое имя.
+        Object data = selection[0].getData();
+        String text = data instanceof DiffNode node ? node.label : selection[0].getText();
+        if (text == null || text.isBlank())
+            return;
+        Clipboard clipboard = new Clipboard(tree.getDisplay());
+        try
         {
-            @Override
-            public void preExecute(String commandId, ExecutionEvent event)
-            {
-                handlePossibleTreeCopy("preExecute:" + commandId); //$NON-NLS-1$
-            }
-
-            /*
-             * Если у команды org.eclipse.ui.edit.copy НАШЁЛСЯ реальный обработчик (например,
-             * глобальный Copy активной части workbench позади модального 3-way диалога) — он
-             * выполняется ПОСЛЕ preExecute и может перезаписать буфер обмена своим (возможно,
-             * пустым) содержимым. Пишем сюда же ЕЩЁ РАЗ, чтобы наша запись была последней.
-             */
-            @Override
-            public void postExecuteSuccess(String commandId, Object returnValue)
-            {
-                handlePossibleTreeCopy("postExecuteSuccess:" + commandId); //$NON-NLS-1$
-            }
-
-            @Override
-            public void notHandled(String commandId, NotHandledException exception)
-            {
-                handlePossibleTreeCopy("notHandled:" + commandId); //$NON-NLS-1$
-            }
-
-            @Override
-            public void postExecuteFailure(String commandId, ExecutionException exception)
-            {
-            }
-        });
-        copyExecutionListenerInstalled = true;
-    }
-
-    private static void handlePossibleTreeCopy(String taggedCommandId)
-    {
-        int colon = taggedCommandId.indexOf(':');
-        String commandId = colon >= 0 ? taggedCommandId.substring(colon + 1) : taggedCommandId;
-        if (!"org.eclipse.ui.edit.copy".equals(commandId)) //$NON-NLS-1$
-            return;
-        for (Tree tree : copyTargetTrees)
+            clipboard.setContents(new Object[] { text }, new Transfer[] { TextTransfer.getInstance() });
+        }
+        finally
         {
-            boolean focused = !tree.isDisposed() && tree.getDisplay().getFocusControl() == tree;
-            if (!focused)
-                continue;
-            TreeItem[] selection = tree.getSelection();
-            if (selection.length == 0)
-                return;
-            // Не selection[0].getText() — там наш декоративный префикс (+/−/⚠/~), копируем чистое имя.
-            Object data = selection[0].getData();
-            String text = data instanceof DiffNode node ? node.label : selection[0].getText();
-            if (text == null || text.isBlank())
-                return;
-            Clipboard clipboard = new Clipboard(tree.getDisplay());
-            try
-            {
-                clipboard.setContents(new Object[] { text }, new Transfer[] { TextTransfer.getInstance() });
-            }
-            finally
-            {
-                clipboard.dispose();
-            }
-            return;
+            clipboard.dispose();
         }
     }
 

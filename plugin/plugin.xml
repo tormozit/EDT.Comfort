@@ -13,6 +13,7 @@
     <startup class="tormozit.BslModulePositionMemoryHook"/>
     <startup class="tormozit.HorizontalScrollBarPositionFixHook"/>
     <startup class="tormozit.BslEditorRevealScrollFixHook"/>
+    <startup class="tormozit.BlameHyperlinkOpenFixHook"/>
     <startup class="tormozit.TextEditorRightClickCaretHook"/>
     <startup class="tormozit.TextEditorIdentifierSelectionHook"/>
     <startup class="tormozit.TextEditorMenuHook"/>

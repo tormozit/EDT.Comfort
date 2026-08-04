@@ -280,12 +280,15 @@ public final class BslModuleSpellCheckHook implements IStartup
             @Override
             public void preExecute(String commandId, ExecutionEvent event)
             {
-                handlePossibleHoverCopy(commandId);
+                // Намеренно пусто — писать в буфер здесь нельзя, штатный обработчик edit.copy
+                // (если он есть в этом контексте) выполнится следом и перезапишет буфер обратно,
+                // см. CopyCommandSupport.
             }
 
             @Override
             public void postExecuteSuccess(String commandId, Object returnValue)
             {
+                handlePossibleHoverCopy(commandId);
             }
 
             @Override
@@ -297,6 +300,7 @@ public final class BslModuleSpellCheckHook implements IStartup
             @Override
             public void postExecuteFailure(String commandId, ExecutionException exception)
             {
+                handlePossibleHoverCopy(commandId);
             }
         });
         hoverCopyListenerInstalled = true;

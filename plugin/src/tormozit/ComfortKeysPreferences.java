@@ -7,10 +7,6 @@ import java.util.Collections;
 import java.util.List;
 
 import org.eclipse.core.commands.Category;
-import org.eclipse.core.commands.ExecutionEvent;
-import org.eclipse.core.commands.ExecutionException;
-import org.eclipse.core.commands.IExecutionListener;
-import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Status;
@@ -996,21 +992,11 @@ public final class ComfortKeysPreferences
         }
     }
 
-    /** Дерево привязок, для которого сейчас нужно перехватывать команду Copy. */
-    private static volatile FilteredTree copyTargetBindingsTree;
-
-    /** Поле «Описание», для которого сейчас нужно перехватывать команду Copy. */
-    private static volatile Text copyTargetDescriptionText;
-
-    private static boolean copyExecutionListenerInstalled;
-
     /**
      * Ctrl+C на дереве привязок и в поле «Описание» на Windows не порождает
      * {@code SWT.KeyDown} — тот же архитектурный потолок, что и для
-     * {@code KeyBindingToastHook}/Ctrl+Shift+F и {@code PreferenceSearchFilterAugmenter.
-     * wireTreeCopy}: нативная Win32-трансляция акселератора съедает клавишу раньше, чем до
-     * неё доходит SWT. Перехват — через {@code ICommandService.addExecutionListener} на
-     * команде {@code org.eclipse.ui.edit.copy}, общий для обоих виджетов страницы.
+     * {@code KeyBindingToastHook}/Ctrl+Shift+F. Перехват — через общий
+     * {@link CopyCommandSupport}.
      */
     private static void wireBindingsTreeCopy(IPreferencePage page)
     {
@@ -1030,12 +1016,7 @@ public final class ComfortKeysPreferences
             return;
         swtTree.setData(BINDINGS_TREE_COPY_KEY, Boolean.TRUE);
 
-        copyTargetBindingsTree = filteredTree;
-        swtTree.addDisposeListener(e -> {
-            if (copyTargetBindingsTree == filteredTree)
-                copyTargetBindingsTree = null;
-        });
-        installCopyExecutionListener();
+        CopyCommandSupport.wireCopyOverride(swtTree, () -> copyBindingsTreeSelection(filteredTree));
     }
 
     private static void wireDescriptionTextCopy(IPreferencePage page)
@@ -1047,64 +1028,7 @@ public final class ComfortKeysPreferences
             return;
         descriptionText.setData(BINDINGS_TREE_COPY_KEY, Boolean.TRUE);
 
-        copyTargetDescriptionText = descriptionText;
-        descriptionText.addDisposeListener(e -> {
-            if (copyTargetDescriptionText == descriptionText)
-                copyTargetDescriptionText = null;
-        });
-        installCopyExecutionListener();
-    }
-
-    private static void installCopyExecutionListener()
-    {
-        if (copyExecutionListenerInstalled || PlatformUI.getWorkbench() == null)
-            return;
-        ICommandService commandService = PlatformUI.getWorkbench().getService(ICommandService.class);
-        if (commandService == null)
-            return;
-        commandService.addExecutionListener(new IExecutionListener()
-        {
-            @Override
-            public void preExecute(String commandId, ExecutionEvent event)
-            {
-                handlePossibleCopy(commandId);
-            }
-
-            @Override
-            public void postExecuteSuccess(String commandId, Object returnValue)
-            {
-            }
-
-            @Override
-            public void notHandled(String commandId, NotHandledException exception)
-            {
-                handlePossibleCopy(commandId);
-            }
-
-            @Override
-            public void postExecuteFailure(String commandId, ExecutionException exception)
-            {
-            }
-        });
-        copyExecutionListenerInstalled = true;
-    }
-
-    private static void handlePossibleCopy(String commandId)
-    {
-        if (!"org.eclipse.ui.edit.copy".equals(commandId)) //$NON-NLS-1$
-            return;
-
-        FilteredTree filteredTree = copyTargetBindingsTree;
-        if (filteredTree != null && !filteredTree.isDisposed()
-                && filteredTree.getDisplay().getFocusControl() == filteredTree.getViewer().getTree())
-        {
-            copyBindingsTreeSelection(filteredTree);
-            return;
-        }
-
-        Text descriptionText = copyTargetDescriptionText;
-        if (descriptionText != null && !descriptionText.isDisposed()
-                && descriptionText.getDisplay().getFocusControl() == descriptionText)
+        CopyCommandSupport.wireCopyOverride(descriptionText, () ->
         {
             String sel = descriptionText.getSelectionText();
             if (sel == null || sel.isEmpty())
@@ -1118,7 +1042,7 @@ public final class ComfortKeysPreferences
             {
                 clipboard.dispose();
             }
-        }
+        });
     }
 
     private static boolean copyBindingsTreeSelection(FilteredTree filteredTree)

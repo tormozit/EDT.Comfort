@@ -1,13 +1,21 @@
 package tormozit;
 
+import java.io.IOException;
 import java.io.InputStream;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.text.MessageFormat;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.prefs.InvalidPreferencesFormatException;
 
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
@@ -20,13 +28,18 @@ import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.MultiStatus;
 import org.eclipse.core.runtime.Platform;
+import org.eclipse.core.runtime.OperationCanceledException;
 import org.eclipse.core.runtime.Status;
+import org.eclipse.core.runtime.SubMonitor;
+import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.egit.core.op.DiscardChangesOperation;
 import org.eclipse.egit.core.project.RepositoryMapping;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.dialogs.IDialogConstants;
 import org.eclipse.jface.dialogs.MessageDialog;
+import org.eclipse.jface.layout.GridDataFactory;
+import org.eclipse.jface.viewers.AbstractTreeViewer;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.ISelectionProvider;
 import org.eclipse.jface.viewers.IStructuredSelection;
@@ -41,6 +54,8 @@ import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
 import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.events.SelectionEvent;
+import org.eclipse.swt.widgets.Button;
+import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
@@ -62,15 +77,34 @@ import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.contexts.IContextActivation;
 import org.eclipse.ui.contexts.IContextService;
+import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IWindowListener;
 import org.osgi.framework.Bundle;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.ServiceReference;
 
+import com._1c.g5.v8.bm.core.IBmTransaction;
+import com._1c.g5.v8.bm.integration.AbstractBmTask;
+import com._1c.g5.v8.dt.compare.core.CompareMergeProcessBatch;
+import com._1c.g5.v8.dt.compare.core.CompareMergeProcessDescriptor;
+import com._1c.g5.v8.dt.compare.core.ComparisonProcessHandle;
+import com._1c.g5.v8.dt.compare.core.ComparisonProcessSettings;
+import com._1c.g5.v8.dt.compare.core.ComparisonProcessStatus;
+import com._1c.g5.v8.dt.compare.core.ComparisonScope;
 import com._1c.g5.v8.dt.compare.core.IComparisonManager;
+import com._1c.g5.v8.dt.compare.core.IComparisonSession;
+import com._1c.g5.v8.dt.compare.datasource.GitComparisonDataSourceDescriptor;
+import com._1c.g5.v8.dt.compare.datasource.V8ProjectComparisonDataSourceDescriptor;
+import com._1c.g5.v8.dt.compare.git.FileDiff;
+import com._1c.g5.v8.dt.compare.git.GitCompareUtils;
 import com._1c.g5.v8.dt.compare.matching.MatchingStrategy;
-import com._1c.g5.v8.dt.core.filesystem.IProjectFileSystemSupportProvider;
+import com._1c.g5.v8.dt.compare.model.ComparisonNode;
+import com._1c.g5.v8.dt.compare.model.ComparisonSide;
+import com._1c.g5.v8.dt.compare.model.MergeSettings;
+import com._1c.g5.v8.dt.compare.settings.model.RestoredMergeSettings;
+import com._1c.g5.v8.dt.compare.ui.editor.DtComparisonView;
+import com._1c.g5.v8.dt.compare.ui.util.CompareUiUtils;
 import com._1c.g5.v8.dt.core.filesystem.IQualifiedNameFilePathConverter;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
@@ -132,9 +166,9 @@ public final class GitChangedFileMenuHook implements IStartup
     private static final String EGIT_UITEXT_CLASS = "org.eclipse.egit.ui.internal.UIText"; //$NON-NLS-1$
     private static final String EGIT_UITEXT_REPLACE_FIELD = "StagingView_replaceWithHeadRevision"; //$NON-NLS-1$
     private static final String CONFIGURATION_MDO_NAME = "Configuration.mdo"; //$NON-NLS-1$
-    private static final String ORPHANED_MDO_WARNING =
-        "В переданных изменениях есть создание отвязанных от конфигурации объектов метаданных (mdo), "
-        + "что может привести к их невидимости при объединении с конфигурацией, где они связаны (ошибка EDT)."; //$NON-NLS-1$
+    private static final String ORPHANED_MDO_NOTICE =
+        "Среди восстанавливаемых объектов есть отсутствующие в Configuration.mdo — ссылки на них будут "
+        + "автоматически добавлены в Configuration.mdo (неявная правка файла)."; //$NON-NLS-1$
 
     private static final String COMPARE_WITH_COMMIT_TEXT =
         "Сравнить рабочий каталог с коммитом"; //$NON-NLS-1$
@@ -142,11 +176,11 @@ public final class GitChangedFileMenuHook implements IStartup
     private static final String COMPARE_DIALOG_CLASS =
         "com._1c.g5.v8.dt.internal.compare.git.ui.dialogs.DtCommitSelectionDialog"; //$NON-NLS-1$
     /**
-     * Заголовок окна «Select a Commit» без перевода (у поставщика в
-     * {@code uitext_ru.properties} ключа {@code CommitSelectionDialog_WindowTitle} нет).
+     * Русский заголовок окна «Выбор коммита». Поставщик (EGit {@code nl_ru})
+     * его не переводит: в {@code uitext_ru.properties} ключа
+     * {@code CommitSelectionDialog_WindowTitle} нет, поэтому даже в русском EDT
+     * окно называется «Select a Commit».
      */
-    private static final String COMMIT_DIALOG_ENGLISH_TITLE = "Select a Commit"; //$NON-NLS-1$
-    /** Русский заголовок окна, когда поставщик не перевёл {@value #COMMIT_DIALOG_ENGLISH_TITLE}. */
     private static final String COMMIT_DIALOG_RUSSIAN_TITLE = "Выбор коммита"; //$NON-NLS-1$
     private static final String COMPARE_UTILS_CLASS =
         "com._1c.g5.v8.dt.internal.compare.git.ui.handler.Utils"; //$NON-NLS-1$
@@ -154,8 +188,32 @@ public final class GitChangedFileMenuHook implements IStartup
         "com._1c.g5.v8.dt.internal.compare.ui.CompareUiPlugin"; //$NON-NLS-1$
     private static final String COMPARISON_EDITOR_OPEN_HELPER_CLASS =
         "com._1c.g5.v8.dt.internal.compare.ui.editor.IComparisonEditorOpenHelper"; //$NON-NLS-1$
-    private static final String MONITORING_EVENT_DISPATCHER_CLASS =
-        "com._1c.g5.ides.monitoring.IMonitoringEventDispatcher"; //$NON-NLS-1$
+
+    /** Русский текст чекбокса диалога (как {@code DataSourcesAndStrategyPage_Main_side_objects_deletion_allowed_checkbox_text}). */
+    private static final String MAIN_SIDE_OBJECTS_DELETION_ALLOWED_TEXT =
+        "Разрешить удаление объектов главного источника"; //$NON-NLS-1$
+    /** Подсказка чекбокса: по умолчанию включён — без этого плагин блокирует такие удаления. */
+    private static final String MAIN_SIDE_OBJECTS_DELETION_ALLOWED_TOOLTIP =
+        "При выключении слияние объектов, присутствующих только в главном источнике " //$NON-NLS-1$
+        + "(рабочем каталоге), будет запрещено"; //$NON-NLS-1$
+    /** Окно «изменения не найдены» (как у {@code CompareWithPerformer}). */
+    private static final String NOTHING_TO_COMPARE_TITLE = "Синхронизация с Git завершена"; //$NON-NLS-1$
+    private static final String NOTHING_TO_COMPARE_MESSAGE = "Синхронизация с Git: изменения не найдены."; //$NON-NLS-1$
+    /** Имя стороны «рабочий каталог» и подтверждение запуска слияния (как у {@code CompareWithPerformer}). */
+    private static final String WORKING_TREE_NAME = "Рабочий каталог"; //$NON-NLS-1$
+    private static final String NO_MERGE_CONFIRM_MESSAGE =
+        "По завершении объединения не будет создан коммит слияния. Запустить процедуру объединения?"; //$NON-NLS-1$
+    /** Задача поиска изменений в проекте (как {@code Messages.AbstractCompareCommitsPerformer_Search_changes_in_project__0}). */
+    private static final String SEARCH_CHANGES_TASK_NAME = "Поиск изменений в проекте {0}"; //$NON-NLS-1$
+    /**
+     * Максимальное ожидание завершения сравнения перед блокировкой удаления объектов
+     * главного источника (мс). Для больших конфигураций сравнение может идти дольше
+     * минуты, поэтому запас большой — реальным ограничителем служит закрытие
+     * редактора сравнения (проверка disposed в цикле опроса).
+     */
+    private static final long SESSION_WAIT_TIMEOUT_MILLIS = 30 * 60_000L;
+    /** Период опроса готовности сессии сравнения (мс). */
+    private static final long SESSION_WAIT_POLL_MILLIS = 200L;
 
     /**
      * Snapshot мультивыделения, сохранённый при открытии меню.
@@ -1014,11 +1072,14 @@ public final class GitChangedFileMenuHook implements IStartup
             return;
 
         StringBuilder messageBuilder = new StringBuilder();
-        List<String> orphaned = findOrphanedObjectNames(files);
+        List<OrphanedMdo> orphaned = findOrphanedMdo(files);
+        Global.tempLog("orphanedMdoFix", "replaceWithHeadRevision: files=" + files.size() //$NON-NLS-1$ //$NON-NLS-2$
+            + " orphaned=" + orphaned.stream().map(OrphanedMdo::enFullName).toList()); //$NON-NLS-1$
         if (!orphaned.isEmpty())
         {
-            messageBuilder.append(ORPHANED_MDO_WARNING)
-                .append("\nОбъекты: ").append(String.join(", ", orphaned)).append("\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
+            List<String> names = orphaned.stream().map(OrphanedMdo::ruFullName).toList();
+            messageBuilder.append(ORPHANED_MDO_NOTICE)
+                .append("\nОбъекты: ").append(String.join(", ", names)).append("\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
         }
         messageBuilder.append("Заменить содержимое " + files.size() + " файл(ов) на состояние из HEAD?\n"
             + "Несохранённые изменения будут потеряны без возможности восстановления.");
@@ -1036,11 +1097,33 @@ public final class GitChangedFileMenuHook implements IStartup
             @Override
             public IStatus runInWorkspace(IProgressMonitor monitor)
             {
-                return discardInChunks(files, monitor);
+                IStatus discardStatus = discardInChunks(files, monitor);
+                if (monitor.isCanceled())
+                    return discardStatus;
+
+                MultiStatus fixErrors = new MultiStatus(Activator.PLUGIN_ID, IStatus.ERROR,
+                    "Не удалось привязать все восстановленные объекты к Configuration.mdo", null); //$NON-NLS-1$
+                applyOrphanFixes(orphaned, fixErrors);
+
+                if (discardStatus.isOK())
+                    return fixErrors.isOK() ? Status.OK_STATUS : fixErrors;
+                if (fixErrors.isOK())
+                    return discardStatus;
+                MultiStatus combined = new MultiStatus(Activator.PLUGIN_ID, IStatus.ERROR,
+                    REPLACE_WITH_HEAD_ITEM_TEXT, null);
+                combined.merge(discardStatus);
+                combined.merge(fixErrors);
+                return combined;
             }
         };
         job.setUser(true);
         job.schedule();
+    }
+
+    /** Объектный mdo, отсутствующий в {@code Configuration.mdo} — данные для автопривязки. */
+    private record OrphanedMdo(IFile objectFile, String ruFullName, String typeEn, String enFullName,
+        IFile configurationMdo)
+    {
     }
 
     /**
@@ -1050,12 +1133,10 @@ public final class GitChangedFileMenuHook implements IStartup
      * на диске, но не привязанным к конфигурации. Финальная версия {@code Configuration.mdo} —
      * это его HEAD-содержимое, если он сам входит в этот же батч замены, иначе — текущее
      * содержимое рабочей копии (эта операция его не тронет).
-     *
-     * @return русские полные имена отвязанных объектов (для текста предупреждения)
      */
-    private static List<String> findOrphanedObjectNames(List<IFile> files)
+    private static List<OrphanedMdo> findOrphanedMdo(List<IFile> files)
     {
-        List<String> orphaned = new ArrayList<>();
+        List<OrphanedMdo> orphaned = new ArrayList<>();
         Map<IFile, String> configurationContentCache = new HashMap<>();
 
         for (IFile file : files)
@@ -1070,35 +1151,224 @@ public final class GitChangedFileMenuHook implements IStartup
             String relPath = file.getProjectRelativePath().toString().replace('\\', '/');
             String ruFullName = GetRef.pathToFullName(relPath);
             if (ruFullName == null)
+            {
+                Global.tempLog("orphanedMdoFix", "findOrphanedMdo: pathToFullName(null) для " + relPath); //$NON-NLS-1$ //$NON-NLS-2$
                 continue;
+            }
             int dot = ruFullName.indexOf('.');
             if (dot < 0)
                 continue;
             String typeEn = MdTypeMapping.ruToEnSingRequired(ruFullName.substring(0, dot));
             if (typeEn == null)
+            {
+                Global.tempLog("orphanedMdoFix", "findOrphanedMdo: ruToEnSingRequired(null) для " //$NON-NLS-1$ //$NON-NLS-2$
+                    + ruFullName.substring(0, dot));
                 continue;
+            }
             String enFullName = typeEn + "." + ruFullName.substring(dot + 1); //$NON-NLS-1$
 
             IFile configurationMdo = findConfigurationMdo(file);
             if (configurationMdo == null)
+            {
+                Global.tempLog("orphanedMdoFix", "findOrphanedMdo: findConfigurationMdo(null) для " //$NON-NLS-1$ //$NON-NLS-2$
+                    + file.getFullPath());
                 continue;
+            }
 
             String configurationContent = configurationContentCache.computeIfAbsent(configurationMdo, cfg ->
                 files.contains(cfg) ? readHeadContent(cfg) : readWorkingCopyContent(cfg));
             if (configurationContent == null)
+            {
+                Global.tempLog("orphanedMdoFix", "findOrphanedMdo: не удалось прочитать " //$NON-NLS-1$ //$NON-NLS-2$
+                    + configurationMdo.getFullPath() + " (headBatch=" + files.contains(configurationMdo) + ")"); //$NON-NLS-1$ //$NON-NLS-2$
                 continue; // не удалось прочитать — не блокируем операцию нашей проверкой
+            }
 
-            if (!configurationContent.contains(">" + enFullName + "<")) //$NON-NLS-1$ //$NON-NLS-2$
-                orphaned.add(ruFullName);
+            boolean alreadyPresent = configurationContent.contains(">" + enFullName + "<"); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.tempLog("orphanedMdoFix", "findOrphanedMdo: file=" + file.getFullPath() //$NON-NLS-1$ //$NON-NLS-2$
+                + " enFullName=" + enFullName + " configurationMdo=" + configurationMdo.getFullPath() //$NON-NLS-1$ //$NON-NLS-2$
+                + " alreadyPresent=" + alreadyPresent); //$NON-NLS-1$
+            if (!alreadyPresent)
+                orphaned.add(new OrphanedMdo(file, ruFullName, typeEn, enFullName, configurationMdo));
         }
         return orphaned;
+    }
+
+    /**
+     * Привязывает восстановленные объекты из {@code orphaned} к их {@code Configuration.mdo}
+     * через BM-транзакцию записи ({@code Configuration.get<Тип>().add(...)} через рефлексию —
+     * прямое добавление в ту же коллекцию, которая сериализуется в плоские теги вида
+     * {@code <reports>Report.Имя</reports>}). Применяется только к объектам, чей файл
+     * реально существует на диске после checkout (защита от файлов из неудачного чанка).
+     * Один объект {@code Configuration.mdo} обновляется одной транзакцией на все свои объекты
+     * из батча. Ошибки не прерывают обработку остальных — собираются в {@code errors}.
+     */
+    private static void applyOrphanFixes(List<OrphanedMdo> orphaned, MultiStatus errors)
+    {
+        if (orphaned.isEmpty())
+            return;
+        Map<IFile, List<OrphanedMdo>> byConfig = new HashMap<>();
+        for (OrphanedMdo o : orphaned)
+        {
+            if (!o.objectFile().exists())
+                continue; // checkout не восстановил файл (сбой чанка) — не привязываем несуществующее
+            byConfig.computeIfAbsent(o.configurationMdo(), k -> new ArrayList<>()).add(o);
+        }
+        for (Map.Entry<IFile, List<OrphanedMdo>> entry : byConfig.entrySet())
+            applyOrphanFixesToOneConfiguration(entry.getKey(), entry.getValue(), errors);
+    }
+
+    /**
+     * Привязывает объекты из {@code fixes} к {@code configurationMdo} текстовой правкой XML —
+     * BM write-транзакция (см. историю разработки) не сработала: свежевосстановленный git
+     * checkout'ом объект не резолвится через {@code IBmPlatformTransaction.getTopObjectByFqn}
+     * даже после {@code refreshLocal}+{@code waitModelSynchronization} (курица-и-яйцо: top-object
+     * не индексируется, пока не привязан к Configuration — а привязать не через что, раз не резолвится).
+     * Текстовая вставка — та же самая проверка на чтение уже используется и проверена
+     * ({@link #findOrphanedMdo}, {@link #isAttachedToConfiguration}): плоские теги вида
+     * {@code <reports>Report.Имя</reports>}, одна запись — один тег, без вложенности.
+     */
+    private static void applyOrphanFixesToOneConfiguration(IFile configurationMdo, List<OrphanedMdo> fixes,
+        MultiStatus errors)
+    {
+        String topic = "orphanedMdoFix"; //$NON-NLS-1$
+        Global.tempLog(topic, "applyOrphanFixesToOneConfiguration: start configurationMdo=" //$NON-NLS-1$ //$NON-NLS-2$
+            + configurationMdo.getFullPath() + " fixes=" //$NON-NLS-1$
+            + fixes.stream().map(OrphanedMdo::enFullName).toList());
+        try
+        {
+            configurationMdo.refreshLocal(IResource.DEPTH_ZERO, null);
+            String content = readWorkingCopyContent(configurationMdo);
+            if (content == null)
+            {
+                errors.add(new Status(IStatus.ERROR, Activator.PLUGIN_ID,
+                    "Не удалось привязать к Configuration.mdo (" + configurationMdo.getFullPath() //$NON-NLS-1$
+                        + "): не удалось прочитать файл")); //$NON-NLS-1$
+                return;
+            }
+            String eol = content.contains("\r\n") ? "\r\n" : "\n"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            List<String> lines = new ArrayList<>(Arrays.asList(content.split("\r\n|\n", -1))); //$NON-NLS-1$
+            Set<String> insertedNow = new HashSet<>();
+            boolean changed = false;
+
+            for (OrphanedMdo fix : fixes)
+            {
+                if (content.contains(">" + fix.enFullName() + "<") || !insertedNow.add(fix.enFullName())) //$NON-NLS-1$ //$NON-NLS-2$
+                {
+                    Global.tempLog(topic, "пропущен (уже есть): " + fix.enFullName()); //$NON-NLS-1$ //$NON-NLS-2$
+                    continue;
+                }
+                String folder = MdTypeMapping.enSingToFolder(fix.typeEn());
+                if (folder == null || folder.isEmpty())
+                {
+                    errors.add(new Status(IStatus.WARNING, Activator.PLUGIN_ID,
+                        "Не удалось определить тег Configuration.mdo для типа " + fix.typeEn() //$NON-NLS-1$
+                            + " (" + fix.ruFullName() + ") — не привязан к Configuration.mdo")); //$NON-NLS-1$ //$NON-NLS-2$
+                    continue;
+                }
+                String tag = Character.toLowerCase(folder.charAt(0)) + folder.substring(1);
+                String openTag = "<" + tag + ">"; //$NON-NLS-1$ //$NON-NLS-2$
+                String closeTag = "</" + tag + ">"; //$NON-NLS-1$ //$NON-NLS-2$
+
+                int insertAt = -1;
+                String indent = "  "; //$NON-NLS-1$ (запасной отступ — как у остальных полей верхнего уровня)
+                for (int i = 0; i < lines.size(); i++)
+                {
+                    String trimmed = lines.get(i).trim();
+                    if (trimmed.startsWith(openTag) && trimmed.endsWith(closeTag))
+                    {
+                        insertAt = i + 1;
+                        int firstAngle = lines.get(i).indexOf('<');
+                        if (firstAngle > 0)
+                            indent = lines.get(i).substring(0, firstAngle);
+                    }
+                }
+                if (insertAt < 0)
+                {
+                    for (int i = 0; i < lines.size(); i++)
+                    {
+                        if (lines.get(i).trim().equals("</mdclass:Configuration>")) //$NON-NLS-1$
+                        {
+                            insertAt = i;
+                            break;
+                        }
+                    }
+                }
+                if (insertAt < 0)
+                {
+                    errors.add(new Status(IStatus.WARNING, Activator.PLUGIN_ID,
+                        "Не найдено место вставки в " + configurationMdo.getFullPath() //$NON-NLS-1$
+                            + " для " + fix.ruFullName())); //$NON-NLS-1$
+                    continue;
+                }
+
+                String newLine = indent + openTag + fix.enFullName() + closeTag;
+                lines.add(insertAt, newLine);
+                changed = true;
+                Global.tempLog(topic, "вставлено на позицию " + insertAt + ": " + newLine); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+
+            if (!changed)
+            {
+                Global.tempLog(topic, "нет изменений для записи"); //$NON-NLS-1$
+                return;
+            }
+
+            String newContent = String.join(eol, lines);
+            if (!isWellFormedXml(newContent))
+            {
+                Global.tempLog(topic, "валидация XML провалена — запись отменена, файл не тронут"); //$NON-NLS-1$ //$NON-NLS-2$
+                errors.add(new Status(IStatus.ERROR, Activator.PLUGIN_ID,
+                    "Автопривязка отменена: результат текстовой вставки в " + configurationMdo.getFullPath() //$NON-NLS-1$
+                        + " не прошёл проверку на валидность XML — файл НЕ изменён")); //$NON-NLS-1$
+                return;
+            }
+
+            try (java.io.ByteArrayInputStream in =
+                new java.io.ByteArrayInputStream(newContent.getBytes(StandardCharsets.UTF_8)))
+            {
+                configurationMdo.setContents(in, IResource.FORCE, null);
+            }
+            Global.tempLog(topic, "записано: modificationStamp=" + configurationMdo.getModificationStamp() //$NON-NLS-1$ //$NON-NLS-2$
+                + " length=" + newContent.length()); //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+            Global.tempLog(topic, "исключение: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            errors.add(new Status(IStatus.ERROR, Activator.PLUGIN_ID,
+                "Ошибка автопривязки к Configuration.mdo (" + configurationMdo.getFullPath() + "): " + e, e)); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /**
+     * Проверка на валидность XML настоящим парсером — последняя страховка перед записью
+     * результата текстовой вставки строки в {@code Configuration.mdo}. DOCTYPE запрещён
+     * (защита от XXE) — самому файлу он не нужен, у него только XML-декларация.
+     */
+    private static boolean isWellFormedXml(String content)
+    {
+        try
+        {
+            javax.xml.parsers.DocumentBuilderFactory factory =
+                javax.xml.parsers.DocumentBuilderFactory.newInstance();
+            factory.setNamespaceAware(true);
+            factory.setFeature("http://apache.org/xml/features/disallow-doctype-decl", true); //$NON-NLS-1$
+            javax.xml.parsers.DocumentBuilder builder = factory.newDocumentBuilder();
+            builder.parse(new org.xml.sax.InputSource(new java.io.StringReader(content)));
+            return true;
+        }
+        catch (Exception e)
+        {
+            Global.log("GitChangedFileMenu: isWellFormedXml: " + e); //$NON-NLS-1$
+            return false;
+        }
     }
 
     /**
      * Привязан ли mdo-объект к конфигурации: его полное имя (EN-тип из пути + имя из FQN,
      * см. {@link GetRef#pathToFullName}) должно встречаться в {@code Configuration.mdo}
      * рабочей копии как {@code >Тип.Имя<} — тот же признак, что и в
-     * {@link #findOrphanedObjectNames}. {@code Configuration.mdo} и неопределимые случаи
+     * {@link #findOrphanedMdo}. {@code Configuration.mdo} и неопределимые случаи
      * считаются привязанными (без уверенности «отвязан» не показываем).
      */
     public static boolean isAttachedToConfiguration(IFile mdoFile)
@@ -1402,6 +1672,23 @@ public final class GitChangedFileMenuHook implements IStartup
             translateCommitDialogTitle(dialog);
             preselectCommit(dialog, repository, sha);
 
+            // Чекбокс «Разрешить удаление объектов главного источника» — до open(),
+            // в сетку диалога под штатными настройками (после create()).
+            Button deletionAllowedCheckBox = createMainSideObjectsDeletionAllowedCheckBox(dialog);
+            // По умолчанию включён (см. setSelection(true) в createMainSideObjectsDeletionAllowedCheckBox).
+            boolean[] mainSideObjectsDeletionAllowedHolder = { true };
+            if (deletionAllowedCheckBox != null)
+            {
+                deletionAllowedCheckBox.addSelectionListener(new SelectionAdapter()
+                {
+                    @Override
+                    public void widgetSelected(SelectionEvent e)
+                    {
+                        mainSideObjectsDeletionAllowedHolder[0] = deletionAllowedCheckBox.getSelection();
+                    }
+                });
+            }
+
             if ((int) Global.call(dialog, "open") != IDialogConstants.OK_ID) //$NON-NLS-1$
                 return;
 
@@ -1419,7 +1706,6 @@ public final class GitChangedFileMenuHook implements IStartup
 
             Class<?> pluginCls = compareUiBundle.loadClass(COMPARE_UI_PLUGIN_CLASS);
             Class<?> helperCls = compareUiBundle.loadClass(COMPARISON_EDITOR_OPEN_HELPER_CLASS);
-            Class<?> monitoringCls = compareUiBundle.loadClass(MONITORING_EVENT_DISPATCHER_CLASS);
 
             Object plugin = Global.invoke(pluginCls, "getDefault"); //$NON-NLS-1$
             Object injectorObj = plugin != null ? Global.invoke(plugin, "getInjector") : null; //$NON-NLS-1$
@@ -1430,7 +1716,6 @@ public final class GitChangedFileMenuHook implements IStartup
             }
 
             Object comparisonEditorOpenHelper = injector.getInstance(helperCls);
-            Object monitoringEventDispatcher = injector.getInstance(monitoringCls);
 
             BundleContext ctx = Global.ourContext();
             ServiceReference<IComparisonManager> comparisonManagerRef =
@@ -1443,36 +1728,18 @@ public final class GitChangedFileMenuHook implements IStartup
             IV8ProjectManager v8ProjectManager =
                 (IV8ProjectManager) Global.getServiceByClass(IV8ProjectManager.class);
 
-            IProjectFileSystemSupportProvider fileSystemSupportProvider =
-                Global.getOsgiService(IProjectFileSystemSupportProvider.class);
-            if (fileSystemSupportProvider == null)
-                fileSystemSupportProvider = injector.getInstance(IProjectFileSystemSupportProvider.class);
-
             Object commitDisplayRepr = Global.invoke(utilsCls, "getCommitUserRepresentation", //$NON-NLS-1$
                 repository, chosenSha);
             String displayRepr = commitDisplayRepr instanceof String s ? s : chosenSha;
 
-            Map<IProject, List<Object>> projectsToPathFilter = new HashMap<>();
-            projectsToPathFilter.put(project, new ArrayList<>());
+            boolean mainSideObjectsDeletionAllowed = mainSideObjectsDeletionAllowedHolder[0];
+            Global.log("CompareWithCommit: флажок \"" + MAIN_SIDE_OBJECTS_DELETION_ALLOWED_TEXT //$NON-NLS-1$
+                + "\"=" + mainSideObjectsDeletionAllowed); //$NON-NLS-1$
 
-            Global.invoke(utilsCls, "performCompareWith", //$NON-NLS-1$
-                repository,
-                chosenSha,
-                displayRepr,
-                "Team.CompareWithCommit", //$NON-NLS-1$
-                strategy,
-                Boolean.valueOf(readOnly),
-                Boolean.valueOf(parseBsl),
-                projectsToPathFilter,
-                shell,
-                COMPARE_WITH_COMMIT_TEXT,
-                mergeSettingsFileName,
-                filePathConverter,
-                v8ProjectManager,
-                comparisonManager,
-                comparisonEditorOpenHelper,
-                fileSystemSupportProvider,
-                monitoringEventDispatcher);
+            new CompareWithCommitWorker(repository, project, chosenSha, displayRepr, strategy,
+                readOnly, parseBsl, mergeSettingsFileName, filePathConverter, v8ProjectManager,
+                comparisonManager, comparisonEditorOpenHelper, helperCls, shell,
+                mainSideObjectsDeletionAllowed).schedule();
         }
         catch (Exception ex)
         {
@@ -1481,18 +1748,18 @@ public final class GitChangedFileMenuHook implements IStartup
     }
 
     /**
-     * Заголовок окна диалога — только если поставщик (EGit {@code nl_ru}) его
-     * не перевёл: в {@code uitext_ru.properties} ключа
+     * Русский заголовок окна «Выбор коммита». Поставщик (EGit {@code nl_ru}) его
+     * не переводит — в {@code uitext_ru.properties} ключа
      * {@code CommitSelectionDialog_WindowTitle} нет, поэтому даже в русском EDT
-     * окно называется «Select a Commit».
+     * окно называется «Select a Commit». Заголовок принудительно заменяется на
+     * русский всегда.
      */
     private static void translateCommitDialogTitle(Object dialog)
     {
         Shell dialogShell = (Shell) Global.call(dialog, "getShell"); //$NON-NLS-1$
         if (dialogShell == null || dialogShell.isDisposed())
             return;
-        if (COMMIT_DIALOG_ENGLISH_TITLE.equals(dialogShell.getText()))
-            dialogShell.setText(COMMIT_DIALOG_RUSSIAN_TITLE);
+        dialogShell.setText(COMMIT_DIALOG_RUSSIAN_TITLE);
     }
 
     /**
@@ -1866,5 +2133,400 @@ public final class GitChangedFileMenuHook implements IStartup
     {
         ISelectionProvider provider = view.getSite().getSelectionProvider();
         return provider != null ? provider.getSelection() : null;
+    }
+
+    /**
+     * Чекбокс «Разрешить удаление объектов главного источника» под штатными
+     * настройками диалога «Выбор коммита». Родитель берётся у
+     * {@code matchingStrategySelectionControl} (появляется только после
+     * {@code create()}); сетка у него — из одной колонки, как у соседних
+     * элементов диалога.
+     *
+     * @return созданный чекбокс или {@code null}, если добавить не удалось
+     */
+    private static Button createMainSideObjectsDeletionAllowedCheckBox(Object dialog)
+    {
+        try
+        {
+            Object strategyControl = Global.getField(dialog, "matchingStrategySelectionControl"); //$NON-NLS-1$
+            if (!(strategyControl instanceof Control control))
+                return null;
+            Composite parent = control.getParent();
+            if (parent == null || parent.isDisposed())
+                return null;
+            Button button = new Button(parent, SWT.CHECK);
+            button.setText(MAIN_SIDE_OBJECTS_DELETION_ALLOWED_TEXT);
+            button.setToolTipText(MAIN_SIDE_OBJECTS_DELETION_ALLOWED_TOOLTIP + Global.pluginSignForTooltip());
+            // По умолчанию включён — без участия плагина сравнение с коммитом ведёт себя штатно.
+            button.setSelection(true);
+            GridDataFactory.fillDefaults().applyTo(button);
+            // Под штатным чекбоксом «Сравнить без объединения» (ReadOnlyModeComparisonComposite),
+            // а не в конец списка контролов.
+            Object readOnlyComposite = Global.getField(dialog, "readOnlyModeComparisonComposite"); //$NON-NLS-1$
+            if (readOnlyComposite instanceof Control readOnlyControl
+                && !readOnlyControl.isDisposed()
+                && readOnlyControl.getParent() == parent)
+                button.moveBelow(readOnlyControl);
+            parent.layout();
+            Shell dialogShell = (Shell) Global.call(dialog, "getShell"); //$NON-NLS-1$
+            if (dialogShell != null && !dialogShell.isDisposed())
+                dialogShell.pack();
+            return button;
+        }
+        catch (Exception ex)
+        {
+            Global.log("CompareWithCommit: checkbox: " + ex); //$NON-NLS-1$
+            return null;
+        }
+    }
+
+    /**
+     * Повторяет конвейер {@code Utils.performCompareWith(...)} → {@code CompareWithPerformer}
+     * бандла {@code com._1c.g5.v8.dt.compare.ui} (декомпиляция — {@code .tmp/bundles/compare-ui/}):
+     * находит изменения между выбранным коммитом и рабочим каталогом, строит
+     * {@code CompareMergeProcessDescriptor} с настройками и запускает сравнение.
+     * В отличие от штатного конвейера умеет передать флаг «Разрешить удаление объектов
+     * главного источника» в настройки процесса.
+     */
+    private static final class CompareWithCommitWorker extends Job
+    {
+        private final Repository repository;
+        private final IProject project;
+        private final String revisionToCompareWith;
+        private final String revisionToCompareWithName;
+        private final MatchingStrategy matchingStrategy;
+        private final boolean noMerge;
+        private final boolean parseBslModuleStructure;
+        private final String mergeSettingsFileName;
+        private final IQualifiedNameFilePathConverter filePathConverter;
+        private final IV8ProjectManager v8ProjectManager;
+        private final IComparisonManager comparisonManager;
+        private final Object comparisonEditorOpenHelper;
+        private final Class<?> helperCls;
+        private final Shell shell;
+        private final boolean mainSideObjectsDeletionAllowed;
+
+        CompareWithCommitWorker(Repository repository, IProject project, String revisionToCompareWith,
+            String revisionToCompareWithName, MatchingStrategy matchingStrategy, boolean noMerge,
+            boolean parseBslModuleStructure, String mergeSettingsFileName,
+            IQualifiedNameFilePathConverter filePathConverter, IV8ProjectManager v8ProjectManager,
+            IComparisonManager comparisonManager, Object comparisonEditorOpenHelper, Class<?> helperCls,
+            Shell shell, boolean mainSideObjectsDeletionAllowed)
+        {
+            super(COMPARE_WITH_COMMIT_TEXT);
+            this.repository = repository;
+            this.project = project;
+            this.revisionToCompareWith = revisionToCompareWith;
+            this.revisionToCompareWithName = revisionToCompareWithName;
+            this.matchingStrategy = matchingStrategy;
+            this.noMerge = noMerge;
+            this.parseBslModuleStructure = parseBslModuleStructure;
+            this.mergeSettingsFileName = mergeSettingsFileName;
+            this.filePathConverter = filePathConverter;
+            this.v8ProjectManager = v8ProjectManager;
+            this.comparisonManager = comparisonManager;
+            this.comparisonEditorOpenHelper = comparisonEditorOpenHelper;
+            this.helperCls = helperCls;
+            this.shell = shell;
+            this.mainSideObjectsDeletionAllowed = mainSideObjectsDeletionAllowed;
+        }
+
+        @Override
+        protected IStatus run(IProgressMonitor monitor)
+        {
+            try
+            {
+                RevCommit commitToCompareWith = null;
+                RevCommit baseCommit = null;
+                try (RevWalk walk = new RevWalk(repository))
+                {
+                    RevCommit headCommit =
+                        walk.parseCommit(repository.findRef("HEAD").getObjectId()); //$NON-NLS-1$
+                    commitToCompareWith =
+                        GitCompareUtils.getRevCommit(repository, walk, revisionToCompareWith, true);
+                    if (commitToCompareWith != null)
+                        baseCommit = GitCompareUtils.getBaseCommit(headCommit, commitToCompareWith, walk);
+                }
+
+                List<CompareMergeProcessDescriptor> descriptors = new ArrayList<>(1);
+                SubMonitor subMonitor = SubMonitor.convert(monitor, 1);
+                descriptors.add(buildDescriptor(project, commitToCompareWith, baseCommit, subMonitor.split(1)));
+                CompareMergeProcessBatch batch = new CompareMergeProcessBatch(descriptors);
+
+                if (descriptors.stream()
+                    .map(CompareMergeProcessDescriptor::getHandle)
+                    .allMatch(this::hasNothingToCompare))
+                {
+                    onNothingToCompare();
+                    return Status.OK_STATUS;
+                }
+
+                runComparison(batch);
+                return Status.OK_STATUS;
+            }
+            catch (OperationCanceledException ex)
+            {
+                return Status.CANCEL_STATUS;
+            }
+            catch (Exception ex)
+            {
+                return new Status(IStatus.ERROR, "tormozit.comfort", "CompareWithCommit: " + ex, ex); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        private boolean hasNothingToCompare(ComparisonProcessHandle handle)
+        {
+            return handle.getScope(ComparisonSide.MAIN).isEmpty()
+                && handle.getScope(ComparisonSide.OTHER).isEmpty();
+        }
+
+        private void onNothingToCompare()
+        {
+            CompareUiUtils.syncExec(() -> MessageDialog.openInformation(
+                shell, NOTHING_TO_COMPARE_TITLE, NOTHING_TO_COMPARE_MESSAGE));
+        }
+
+        private void runComparison(CompareMergeProcessBatch batch)
+        {
+            final IEditorPart[] openedEditor = new IEditorPart[1];
+            CompareUiUtils.syncExec(() -> {
+                try
+                {
+                    Method open = helperCls.getMethod("openComparisonEditor", //$NON-NLS-1$
+                        List.class, boolean.class, String.class, String.class, String.class);
+                    Object result = open.invoke(comparisonEditorOpenHelper, batch.getDescriptors(),
+                        Boolean.valueOf(noMerge), WORKING_TREE_NAME, revisionToCompareWithName,
+                        NO_MERGE_CONFIRM_MESSAGE);
+                    if (result instanceof IEditorPart editorPart)
+                        openedEditor[0] = editorPart;
+                }
+                catch (Exception ex)
+                {
+                    Global.log("CompareWithCommit: openComparisonEditor: " + ex); //$NON-NLS-1$
+                }
+            });
+            if (!mainSideObjectsDeletionAllowed)
+                disableMainSideDeletions(openedEditor[0]);
+        }
+
+        /**
+         * При выключенном «Разрешить удаление объектов главного источника» запрещает
+         * слияние узлам, где объект есть только в главном источнике (рабочий каталог), —
+         * применение коммита удалило бы такой объект. Вендорский флаг
+         * {@code mainSideObjectsDeletionAllowed} в сравнении с коммитом (всегда
+         * трёхстороннее) не используется, поэтому блокировка делается здесь: после
+         * завершения сравнения по дереву сессии отключается слияние таких узлов.
+         */
+        private void disableMainSideDeletions(IEditorPart editor)
+        {
+            if (editor == null)
+                return;
+            Job disableJob = new Job("CompareWithCommit: блокировка удаления объектов главного источника") //$NON-NLS-1$
+            {
+                @Override
+                protected IStatus run(IProgressMonitor monitor)
+                {
+                    long startTime = System.currentTimeMillis();
+                    long deadline = startTime + SESSION_WAIT_TIMEOUT_MILLIS;
+                    IComparisonSession session = null;
+                    while (System.currentTimeMillis() < deadline)
+                    {
+                        if (editor.getSite() == null || editor.getSite().getPage() == null
+                            || editor.getSite().getShell().isDisposed())
+                        {
+                            Global.log("CompareWithCommit: редактор сравнения закрыт до завершения " //$NON-NLS-1$
+                                + "сравнения, блокировка удаления отменена"); //$NON-NLS-1$
+                            return Status.CANCEL_STATUS;
+                        }
+                        session = CompareConfigSelectionListener.getSession(editor);
+                        if (session != null)
+                        {
+                            ComparisonProcessStatus status = session.getStatus();
+                            if (status == ComparisonProcessStatus.COMPARISON_PROCESS_FINISHED)
+                                break;
+                            if (status == ComparisonProcessStatus.COMPARISON_MERGE_PROCESS_CANCELLED)
+                            {
+                                Global.log("CompareWithCommit: сравнение отменено пользователем, " //$NON-NLS-1$
+                                    + "блокировка удаления не выполняется"); //$NON-NLS-1$
+                                return Status.CANCEL_STATUS;
+                            }
+                        }
+                        try
+                        {
+                            Thread.sleep(SESSION_WAIT_POLL_MILLIS);
+                        }
+                        catch (InterruptedException ex)
+                        {
+                            return Status.CANCEL_STATUS;
+                        }
+                    }
+                    long waitedMillis = System.currentTimeMillis() - startTime;
+                    if (session == null || session.getStatus() != ComparisonProcessStatus.COMPARISON_PROCESS_FINISHED)
+                    {
+                        Global.log("CompareWithCommit: не удалось дождаться завершения сравнения за " //$NON-NLS-1$
+                            + waitedMillis + " мс (таймаут " + SESSION_WAIT_TIMEOUT_MILLIS //$NON-NLS-1$
+                            + " мс), блокировка удаления не выполнена, статус=" //$NON-NLS-1$
+                            + (session != null ? session.getStatus() : null)); //$NON-NLS-1$
+                    }
+                    else
+                    {
+                        Global.log("CompareWithCommit: сравнение завершено за " + waitedMillis + " мс"); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                    final IComparisonSession finishedSession = session;
+                    CompareUiUtils.syncExec(() -> {
+                        try
+                        {
+                            if (finishedSession == null
+                                || finishedSession.getStatus() != ComparisonProcessStatus.COMPARISON_PROCESS_FINISHED)
+                                return;
+                            Object comparisonManager = Global.getField(finishedSession, "comparisonManager"); //$NON-NLS-1$
+                            int[] disabledHolder = { 0 };
+                            if (comparisonManager != null)
+                            {
+                                AbstractBmTask<Object> task = new AbstractBmTask<>(
+                                    "CompareWithCommit: блокировка удаления объектов главного источника") //$NON-NLS-1$
+                                {
+                                    @Override
+                                    public Object execute(IBmTransaction transaction, IProgressMonitor progressMonitor)
+                                    {
+                                        disabledHolder[0] = disableDeletionNodes(finishedSession.getRootNode());
+                                        return null;
+                                    }
+                                };
+                                Global.invoke(comparisonManager, "runComparisonTreeBmModelTask", //$NON-NLS-1$
+                                    finishedSession, task);
+                            }
+                            int disabled = disabledHolder[0];
+                            Global.log("CompareWithCommit: заблокировано слияние для " //$NON-NLS-1$
+                                + disabled + " узлов удаления объектов главного источника"); //$NON-NLS-1$
+                            if (editor.getSite() != null && !editor.getSite().getShell().isDisposed())
+                                refreshComparisonTree(editor);
+                        }
+                        catch (Exception ex)
+                        {
+                            Global.log("CompareWithCommit: блокировка удаления: " + ex); //$NON-NLS-1$
+                        }
+                    });
+                    return Status.OK_STATUS;
+                }
+            };
+            disableJob.setSystem(true);
+            disableJob.schedule();
+        }
+
+        /**
+         * Обновляет дерево редактора сравнения (у {@link IEditorPart} нет метода
+         * {@code refresh()} — обновлять нужно tree viewer панели сравнения).
+         */
+        private static void refreshComparisonTree(IEditorPart editor)
+        {
+            Object view = Global.getField(editor, "comparisonView"); //$NON-NLS-1$
+            if (!(view instanceof DtComparisonView))
+                return;
+            Object treeControl = ((DtComparisonView) view).getTreeControl();
+            if (treeControl == null)
+                return;
+            Object viewer = Global.call(treeControl, "getTreeViewer"); //$NON-NLS-1$
+            if (viewer instanceof AbstractTreeViewer)
+                ((AbstractTreeViewer) viewer).refresh();
+        }
+
+        /**
+         * Проходит по дереву сессии и запрещает слияние узлам, где объект присутствует
+         * только в главном источнике (односторонние узлы главной стороны). Каскадом
+         * блокирует и узел-контейнер, если этим же проходом заблокированы все его дети
+         * (иначе у контейнера остаётся «пустой» чекбокс, хотя внутри нечего сливать).
+         * Возвращает число заблокированных узлов.
+         */
+        private static int disableDeletionNodes(ComparisonNode root)
+        {
+            if (root == null)
+                return 0;
+            int[] disabled = { 0 };
+            disableDeletionNodesRecursive(root, disabled);
+            return disabled[0];
+        }
+
+        /** @return {@code true}, если узел заблокирован этим проходом (сам или каскадом от детей). */
+        private static boolean disableDeletionNodesRecursive(ComparisonNode node, int[] disabled)
+        {
+            boolean isLeafDeletion = node.isOneSideNode() && ComparisonSide.MAIN.equals(node.getNodeSide());
+            if (isLeafDeletion)
+                blockMergeSettings(node, disabled);
+
+            List<ComparisonNode> children = node.getChildren();
+            boolean allChildrenBlocked = !children.isEmpty();
+            for (ComparisonNode child : children)
+            {
+                if (!disableDeletionNodesRecursive(child, disabled))
+                    allChildrenBlocked = false;
+            }
+
+            if (isLeafDeletion)
+                return true;
+            if (allChildrenBlocked)
+            {
+                blockMergeSettings(node, disabled);
+                return true;
+            }
+            return false;
+        }
+
+        private static void blockMergeSettings(ComparisonNode node, int[] disabled)
+        {
+            MergeSettings settings = node.getMergeSettings();
+            if (settings != null && settings.isCanBeMerged())
+            {
+                settings.setCanBeMerged(false);
+                if (settings.isMustBeMerged())
+                    settings.setMustBeMerged(false);
+                disabled[0]++;
+            }
+        }
+
+        private CompareMergeProcessDescriptor buildDescriptor(IProject project,
+            RevCommit commitToCompareWith, RevCommit baseCommit, IProgressMonitor monitor)
+            throws IOException, InvalidPreferencesFormatException
+        {
+            Path workTree = repository.getWorkTree().toPath();
+            monitor.setTaskName(MessageFormat.format(SEARCH_CHANGES_TASK_NAME, project.getName()));
+            Path projectDir = project.getLocation().toFile().toPath();
+            String projectRelativePath =
+                GitCompareUtils.replaceBackslash(workTree.relativize(projectDir).toString());
+            boolean isIndex = "Index".equals(revisionToCompareWith); //$NON-NLS-1$
+            List<FileDiff> projectDiffs = GitCompareUtils.findProjectDiffs(repository, null,
+                commitToCompareWith, isIndex, projectRelativePath, Collections.emptyList(), monitor);
+            ComparisonScope scope = GitCompareUtils.buildComparisonScope(projectRelativePath,
+                projectDiffs, filePathConverter, true);
+            IV8Project v8project = v8ProjectManager.getProject(project);
+            if (v8project == null)
+                throw new IllegalStateException("Не найден IV8Project для " + project.getName()); //$NON-NLS-1$
+            V8ProjectComparisonDataSourceDescriptor v8DataSource =
+                new V8ProjectComparisonDataSourceDescriptor(v8project);
+            GitComparisonDataSourceDescriptor gitDataSource =
+                new GitComparisonDataSourceDescriptor(workTree, revisionToCompareWith, projectDir);
+            GitComparisonDataSourceDescriptor baseDataSource = baseCommit != null
+                ? new GitComparisonDataSourceDescriptor(workTree, baseCommit.getName(), projectDir) : null;
+            ComparisonProcessHandle handle =
+                new ComparisonProcessHandle(v8DataSource, gitDataSource, baseDataSource, scope);
+            ComparisonProcessSettings settings = createSettings(
+                comparisonManager.deserializeMergeSettings(handle, mergeSettingsFileName));
+            return new CompareMergeProcessDescriptor(handle, settings);
+        }
+
+        private ComparisonProcessSettings createSettings(RestoredMergeSettings restored)
+        {
+            ComparisonProcessSettings.ComparisonSettingsBuilder builder =
+                ComparisonProcessSettings.builder(matchingStrategy)
+                    .mergeObjectsContent(true)
+                    .parseBslModuleStructure(parseBslModuleStructure);
+            if (mainSideObjectsDeletionAllowed)
+                builder = builder.mainSideObjectsDeletionAllowed(true);
+            if (restored != null)
+                builder = builder
+                    .correspondences(restored.getComparedObjectsCorrespondences())
+                    .mergeSettingsModel(restored.getMergeSettingsModel());
+            return builder.build();
+        }
     }
 }

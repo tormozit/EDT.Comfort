@@ -125,6 +125,8 @@ public final class KeyBindingToastHook implements IStartup
             return;
         }
         String message = buildToastMessage(command);
+        Global.tempLog("keybinding-toast", "maybeShowToast: commandId=" + commandId //$NON-NLS-1$ //$NON-NLS-2$
+            + ", message=" + (message != null ? message.replace("\n", " | ") : null)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         if (message == null)
         {
             return;

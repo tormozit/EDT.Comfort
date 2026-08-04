@@ -515,7 +515,7 @@ public class CompareConfigSearchDialogHook
      * EDT может бросить на getChildren (напр. табличные части с разным числом строк на сторонах) —
      * такой узел считаем листом, обход остального дерева продолжается.
      */
-    private static Object[] getChildrenSafe(ITreeContentProvider provider, Object parent)
+    static Object[] getChildrenSafe(ITreeContentProvider provider, Object parent)
     {
         try
         {
@@ -1228,7 +1228,7 @@ public class CompareConfigSearchDialogHook
         return false;
     }
 
-    private static String extractNodeLabel(Object node)
+    static String extractNodeLabel(Object node)
     {
         try
         {
@@ -1251,7 +1251,7 @@ public class CompareConfigSearchDialogHook
         return ""; //$NON-NLS-1$
     }
 
-    private static String buildPathForNode(Object element)
+    static String buildPathForNode(Object element)
     {
         java.util.List<String> parts = new java.util.ArrayList<>();
         for (Object cur = element; cur != null; )
@@ -1317,7 +1317,7 @@ public class CompareConfigSearchDialogHook
         return Character.isLetterOrDigit(c) || c == '_';
     }
 
-    private static final class ComparisonStatusInfo
+    static final class ComparisonStatusInfo
     {
         final String status;
         final CompareSearchMatch.RowColorKind rowColorKind;
@@ -1370,7 +1370,7 @@ public class CompareConfigSearchDialogHook
      * (напр. "Different count of objects to build equal nodes for..." для табличных частей
      * с разным числом строк на сторонах) — в findAll такой узел не должен обрывать весь поиск.
      */
-    private static ComparisonStatusInfo computeComparisonStatusSafe(Object element)
+    static ComparisonStatusInfo computeComparisonStatusSafe(Object element)
     {
         try
         {
@@ -1557,7 +1557,7 @@ public class CompareConfigSearchDialogHook
         return null;
     }
 
-    private static String getObjectColumnHeader(IEditorPart editor)
+    static String getObjectColumnHeader(IEditorPart editor)
     {
         AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
         if (viewer == null) return "\u041E\u0431\u044A\u0435\u043A\u0442";
@@ -1670,6 +1670,22 @@ public class CompareConfigSearchDialogHook
             String propB = b.getPropertyName() != null ? b.getPropertyName() : ""; //$NON-NLS-1$
             return propA.compareToIgnoreCase(propB);
         });
+    }
+
+    /**
+     * Общий запуск результатов поиска по дереву сравнения в панели поиска.
+     * Используется диалогом поиска ({@link CompareConfigSearchSession#doShowFindAllResults})
+     * и командой «Найти нижние настраиваемые» ({@code CompareConfigMenuHook}).
+     */
+    static void showFindAllResults(IEditorPart editorPart, List<CompareSearchMatch> matches, String query)
+    {
+        sortCompareSearchMatches(matches);
+        CompareSearchResult result = new CompareSearchResult(matches, editorPart);
+        result.setQueryText(query);
+        CompareSearchQuery searchQuery = new CompareSearchQuery();
+        result.setQuery(searchQuery);
+        searchQuery.setSearchResult(result);
+        NewSearchUI.runQueryInBackground(searchQuery);
     }
 
     /**
@@ -2330,13 +2346,7 @@ public class CompareConfigSearchDialogHook
 
         private void doShowFindAllResults(List<CompareSearchMatch> matches, String query)
         {
-            sortCompareSearchMatches(matches);
-            CompareSearchResult result = new CompareSearchResult(matches, editorPart);
-            result.setQueryText(query);
-            CompareSearchQuery searchQuery = new CompareSearchQuery();
-            result.setQuery(searchQuery);
-            searchQuery.setSearchResult(result);
-            NewSearchUI.runQueryInBackground(searchQuery);
+            showFindAllResults(editorPart, matches, query);
         }
 
         private List<Object> collectAllItems(ITreeContentProvider provider, Object input, AbstractTreeViewer viewer)

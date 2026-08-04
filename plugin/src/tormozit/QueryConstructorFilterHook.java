@@ -538,69 +538,21 @@ public final class QueryConstructorFilterHook implements IStartup
         searchBox.forceFocus();
     }
 
-    /** Дерево, для которого сейчас нужно перехватывать команду Copy (см. {@link #wireTreeCopy}). */
-    private static volatile Tree copyTargetTree;
-    private static boolean copyExecutionListenerInstalled;
-
     /**
      * Ctrl+C при фокусе на дереве копирует текст выделенной строки. Тот же архитектурный потолок,
      * что и в {@code PreferenceSearchFilterAugmenter.wireTreeCopy}/{@code KeyBindingToastHook}:
      * буква C при зажатом Ctrl не порождает {@code SWT.KeyDown} в модальном диалоге — нативная
-     * Win32-трансляция акселератора съедает её раньше. Перехват — через
-     * {@code ICommandService.addExecutionListener} на {@code org.eclipse.ui.edit.copy}, а не
-     * KeyDown — срабатывание команды долетает независимо от пути.
+     * Win32-трансляция акселератора съедает её раньше. Перехват — через общий
+     * {@link CopyCommandSupport}.
      */
     private static void wireTreeCopy(Tree tree)
     {
-        copyTargetTree = tree;
-        tree.addDisposeListener(e ->
-        {
-            if (copyTargetTree == tree)
-                copyTargetTree = null;
-        });
-        installCopyExecutionListener();
+        CopyCommandSupport.wireCopyOverride(tree, () -> copyTreeSelection(tree));
     }
 
-    private static void installCopyExecutionListener()
+    private static void copyTreeSelection(Tree tree)
     {
-        if (copyExecutionListenerInstalled || PlatformUI.getWorkbench() == null)
-            return;
-        ICommandService commandService = PlatformUI.getWorkbench().getService(ICommandService.class);
-        if (commandService == null)
-            return;
-        commandService.addExecutionListener(new IExecutionListener()
-        {
-            @Override
-            public void preExecute(String commandId, ExecutionEvent event)
-            {
-                handlePossibleTreeCopy(commandId);
-            }
-
-            @Override
-            public void postExecuteSuccess(String commandId, Object returnValue)
-            {
-            }
-
-            @Override
-            public void notHandled(String commandId, NotHandledException exception)
-            {
-                handlePossibleTreeCopy(commandId);
-            }
-
-            @Override
-            public void postExecuteFailure(String commandId, ExecutionException exception)
-            {
-            }
-        });
-        copyExecutionListenerInstalled = true;
-    }
-
-    private static void handlePossibleTreeCopy(String commandId)
-    {
-        Tree tree = copyTargetTree;
-        if (tree == null || tree.isDisposed() || tree.getDisplay().getFocusControl() != tree)
-            return;
-        if (!"org.eclipse.ui.edit.copy".equals(commandId)) //$NON-NLS-1$
+        if (tree.isDisposed())
             return;
         TreeItem[] selection = tree.getSelection();
         if (selection.length == 0)

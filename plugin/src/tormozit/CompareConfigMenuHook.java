@@ -147,7 +147,9 @@ import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IPath;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.core.runtime.NullProgressMonitor;
+import org.eclipse.core.runtime.Status;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.dialogs.MessageDialog;
@@ -190,6 +192,7 @@ public class CompareConfigMenuHook implements IStartup
     private static final String ITEM_TEXT_compareInIR = "Сравнить в приложении ИР";
     private static final String ITEM_TEXT_setMarks     = "Установить пометки";
     private static final String ITEM_TEXT_clearMarks   = "Снять пометки";
+    private static final String ITEM_TEXT_findLowestCheckable = "Найти нижние настраиваемые";
 
     // ---- IStartup ----
 
@@ -328,7 +331,7 @@ public class CompareConfigMenuHook implements IStartup
                 TreeAutoExpand.Target.COMPARE_CONFIG, viewer);
     }
 
-    private AbstractTreeViewer getTreeViewerFromEditor(IEditorPart editor)
+    private static AbstractTreeViewer getTreeViewerFromEditor(IEditorPart editor)
     {
         Object view = Global.getField(editor, "comparisonView"); //$NON-NLS-1$
         if (!(view instanceof DtComparisonView)) return null;
@@ -454,7 +457,31 @@ public class CompareConfigMenuHook implements IStartup
             @Override
             public void menuShown(MenuEvent e)
             {
-                if (getSelectedMatchedNode(editor) == null) return;
+                CompareConfigMultiMarkSupport multiMark = CompareConfigMultiMarkSupport.get(tree);
+                boolean hasMultiMark = multiMark != null && !multiMark.getSelected().isEmpty();
+                boolean hasNative = getSelectedMatchedNode(editor) != null;
+                Object nativeElement = getSelectedTreeElement(editor);
+
+                if (hasMultiMark || hasNative)
+                {
+                    addedItems.add(new MenuItem(menu, SWT.SEPARATOR));
+
+                    MenuItem findLowest = new MenuItem(menu, SWT.PUSH);
+                    findLowest.setText(ITEM_TEXT_findLowestCheckable);
+                    findLowest.addSelectionListener(new SelectionAdapter()
+                    {
+                        @Override
+                        public void widgetSelected(SelectionEvent e)
+                        {
+                            CompareConfigLowestCheckableFinder.run(editor, tree.getShell(),
+                                CompareConfigLowestCheckableFinder.resolveRoots(
+                                    hasMultiMark ? multiMark.getSelected() : null, nativeElement));
+                        }
+                    });
+                    addedItems.add(findLowest);
+                }
+
+                if (!hasNative) return;
 
                 addedItems.add(new MenuItem(menu, SWT.SEPARATOR));
 
@@ -500,7 +527,6 @@ public class CompareConfigMenuHook implements IStartup
                     addedItems.add(item3);
                 }
 
-                CompareConfigMultiMarkSupport multiMark = CompareConfigMultiMarkSupport.get(tree);
                 if (multiMark != null && multiMark.getSelected().size() > 1)
                 {
                     addedItems.add(new MenuItem(menu, SWT.SEPARATOR));
@@ -594,6 +620,17 @@ public class CompareConfigMenuHook implements IStartup
         if (element instanceof MatchedObjectsComparisonNode)
             return (MatchedObjectsComparisonNode) element;
         return null;
+    }
+
+    /** Первый элемент штатного выделения дерева (узел под курсором), если это {@code IPartialModelNode}. */
+    private Object getSelectedTreeElement(IEditorPart editor)
+    {
+        AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
+        if (viewer == null) return null;
+        Object sel = viewer.getSelection();
+        if (!(sel instanceof IStructuredSelection ss)) return null;
+        Object element = ss.getFirstElement();
+        return element instanceof IPartialModelNode ? element : null;
     }
 
     /**
@@ -1482,8 +1519,13 @@ public class CompareConfigMenuHook implements IStartup
             private final Object namedFilter;
             private final Object coreFilter;
             private final IQualifiedNameProvider qnProvider;
+            /** Ключ режима «чёрный список» — {@code ViewerFilterBySubsystemsSettings}, тот же
+             *  объект, которым владеет диалог отбора ({@link FilterBySubsystemsDialogHook}). */
+            private final Object blacklistSettingsKey;
             private int decideLogsLeft = 80;
             private boolean verifiedAttached;
+            /** Штатный EDT-фильтр подсистем отсоединён от дерева ради режима «чёрный список». */
+            private boolean nativeSubsystemFilterDetached;
             private String lastDetail = ""; //$NON-NLS-1$
 
             CorrectionViewerFilter(Object namedFilter)
@@ -1493,8 +1535,39 @@ public class CompareConfigMenuHook implements IStartup
                 this.qnProvider = coreFilter == null
                         ? null
                         : (IQualifiedNameProvider) Global.getField(coreFilter, "qualifiedNameProvider"); //$NON-NLS-1$
+                this.blacklistSettingsKey = Global.getField(namedFilter, "filterBySubsystemSettings"); //$NON-NLS-1$
                 Global.tempLog(LOG, "ctor coreFilter=" + (coreFilter != null) //$NON-NLS-1$
                         + " qnProvider=" + (qnProvider != null)); //$NON-NLS-1$
+            }
+
+            private boolean isBlacklistMode()
+            {
+                return FilterBySubsystemsDialogHook.isBlacklistMode(blacklistSettingsKey);
+            }
+
+            /**
+             * В режиме «чёрный список» штатный {@code ViewerFilterBySubsystems} должен быть
+             * отсоединён от дерева: {@link ViewerFilter}'ы комбинируются через AND, поэтому
+             * добавочный фильтр может только сильнее скрывать, но не «показать» то, что штатный
+             * (белый список) уже спрятал. При выключении режима — вернуть штатный фильтр обратно.
+             */
+            private void syncNativeFilterAttachment(AbstractTreeViewer treeViewer, boolean blacklist)
+            {
+                if (blacklist == nativeSubsystemFilterDetached)
+                    return;
+                Object nativeFilterObj = Global.invoke(namedFilter, "getViewerFilter"); //$NON-NLS-1$
+                if (!(nativeFilterObj instanceof ViewerFilter nativeViewerFilter))
+                    return;
+                // Флаг — до addFilter/removeFilter: они синхронно вызывают refresh() → select()
+                // реентерабельно, и при устаревшем флаге это уходит в бесконечную рекурсию
+                // (переполнение стека).
+                nativeSubsystemFilterDetached = blacklist;
+                if (blacklist)
+                    treeViewer.removeFilter(nativeViewerFilter);
+                else
+                    treeViewer.addFilter(nativeViewerFilter);
+                Global.tempLog(LOG, "blacklist: native filter " //$NON-NLS-1$
+                        + (blacklist ? "detached" : "reattached")); //$NON-NLS-1$ //$NON-NLS-2$
             }
 
 
@@ -2618,12 +2691,21 @@ public class CompareConfigMenuHook implements IStartup
                 else if (viewer instanceof CheckboxTreeViewer ctv)
                     syncCheckHooksToFilterState(ctv);
 
-                // Если EDT/Combo сбросил фильтры через setFilters — вернуть коррекцию
-                if (viewer instanceof AbstractTreeViewer treeViewer)
-                    ensureAttached(treeViewer);
+                boolean blacklist = isBlacklistMode();
 
-                // Манифест / Настройки проекта — вне состава подсистем
-                if (isNonSubsystemStructuralBranch(element))
+                // Если EDT/Combo сбросил фильтры через setFilters — вернуть коррекцию;
+                // в режиме «чёрный список» штатный фильтр подсистем должен быть отсоединён
+                // (ViewerFilter'ы комбинируются через AND — добавочный фильтр не может «показать»
+                // то, что штатный белый список уже спрятал).
+                if (viewer instanceof AbstractTreeViewer treeViewer)
+                {
+                    ensureAttached(treeViewer);
+                    syncNativeFilterAttachment(treeViewer, blacklist);
+                }
+
+                // Манифест / Настройки проекта — вне состава подсистем; в чёрном списке не трогаем —
+                // он только про объекты выбранных подсистем.
+                if (!blacklist && isNonSubsystemStructuralBranch(element))
                     return false;
 
                 // Как ViewerFilterBySubsystems$1: папка видна, только если есть видимый потомок
@@ -2657,7 +2739,7 @@ public class CompareConfigMenuHook implements IStartup
                     {
                         if (!(childObj instanceof ComparisonNode childCn))
                             continue;
-                        if (isComparisonNodeVisible(childCn, session))
+                        if (isComparisonNodeVisible(childCn, session, blacklist))
                             return true;
                     }
                     return false;
@@ -2669,29 +2751,43 @@ public class CompareConfigMenuHook implements IStartup
                 IDirectPartialModelNode node = (IDirectPartialModelNode) element;
                 ComparisonNode cn = node.retrieveComparisonNode();
                 IComparisonSession session = node.getComparisonSession();
-                if (cn == null || session == null || !cn.isOneSideNode())
+                if (cn == null || session == null)
                     return true;
 
                 // Свойства (модули, реквизиты-фичи…) — не объекты подсистемы;
-                // видимость от родителя. Остальные односторонние объекты — через trie.
+                // видимость от родителя.
                 if (cn instanceof FeatureComparisonNode)
                     return true;
 
-                boolean visible = checkOneSideNode(cn, session);
+                boolean visible;
+                if (cn.isOneSideNode())
+                {
+                    // Односторонние объекты EDT пропускает (checkNodeIsSelectedForSide → true
+                    // для отсутствующей стороны) — коррекция через trie, как и раньше.
+                    visible = checkOneSideNode(cn, session, blacklist);
+                }
+                else if (!blacklist)
+                {
+                    // Двусторонние объекты в режиме белого списка — целиком штатный фильтр.
+                    return true;
+                }
+                else
+                {
+                    // Штатный фильтр отсоединён (см. syncNativeFilterAttachment) — считаем сами.
+                    visible = checkTwoSideNode(cn, session, true);
+                }
                 logDecision(element, cn, visible, lastDetail);
                 return visible;
             }
 
-            private boolean isComparisonNodeVisible(ComparisonNode cn, IComparisonSession session)
+            private boolean isComparisonNodeVisible(ComparisonNode cn, IComparisonSession session,
+                    boolean blacklist)
             {
-                if (!cn.isOneSideNode())
-                {
-                    Object selected = Global.invoke(coreFilter, "checkNodeIsSelected", cn, session); //$NON-NLS-1$
-                    return !Boolean.FALSE.equals(selected);
-                }
                 if (cn instanceof FeatureComparisonNode)
                     return true;
-                return checkOneSideNode(cn, session);
+                if (!cn.isOneSideNode())
+                    return checkTwoSideNode(cn, session, blacklist);
+                return checkOneSideNode(cn, session, blacklist);
             }
 
             private void ensureAttached(AbstractTreeViewer treeViewer)
@@ -2742,7 +2838,7 @@ public class CompareConfigMenuHook implements IStartup
                         + " " + detail); //$NON-NLS-1$
             }
 
-            private boolean checkOneSideNode(ComparisonNode cn, IComparisonSession session)
+            private boolean checkOneSideNode(ComparisonNode cn, IComparisonSession session, boolean blacklist)
             {
                 ComparisonSide side = cn.getNodeSide();
                 if (side == null)
@@ -2758,9 +2854,10 @@ public class CompareConfigMenuHook implements IStartup
                 QualifiedName qn = resolveQualifiedName(cn, side, ds, symlink);
                 if (qn == null)
                 {
-                    Global.tempLog(LOG, "qn=null → hide cn=" + cn.getClass().getSimpleName() //$NON-NLS-1$
+                    Global.tempLog(LOG, "qn=null → " + (blacklist ? "show" : "hide") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                            + " cn=" + cn.getClass().getSimpleName() //$NON-NLS-1$
                             + " symlink=" + symlink); //$NON-NLS-1$
-                    return false;
+                    return blacklist;
                 }
 
                 try
@@ -2775,8 +2872,9 @@ public class CompareConfigMenuHook implements IStartup
                     {
                         lastDetail = "checkedIds=0 projectChecked=" + projectChecked //$NON-NLS-1$
                                 + " includeOrphans=" + includeOrphans //$NON-NLS-1$
-                                + " qn=" + qn + " → hide (no explicit subsystems on side)"; //$NON-NLS-1$
-                        return false;
+                                + " qn=" + qn + " → " + (blacklist ? "show" : "hide") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+                                + " (no explicit subsystems on side)"; //$NON-NLS-1$
+                        return blacklist;
                     }
 
                     EObjectTrie included = getTrie("includedInSelectedSubsystemsTrieMap", ds); //$NON-NLS-1$
@@ -2784,12 +2882,12 @@ public class CompareConfigMenuHook implements IStartup
                     boolean isTop = allTop != null && allTop.belongsTo(qn);
                     boolean inIncluded = included != null && included.belongsTo(qn);
                     // Как EDT isIncludedInSelectedSubsystems: не top → не фильтруем;
-                    // top → только входящие в выбранные подсистемы.
+                    // top → только входящие в выбранные подсистемы (в чёрном списке — наоборот).
                     boolean visible;
                     if (included == null && allTop == null)
                         visible = true;
                     else
-                        visible = !isTop || inIncluded;
+                        visible = !isTop || (blacklist ? !inIncluded : inIncluded);
                     lastDetail = "qn=" + qn //$NON-NLS-1$
                             + " symlink=" + symlink //$NON-NLS-1$
                             + " checkedIds=" + checkedIds //$NON-NLS-1$
@@ -2797,6 +2895,7 @@ public class CompareConfigMenuHook implements IStartup
                             + " includeOrphans=" + includeOrphans //$NON-NLS-1$
                             + " isTop=" + isTop //$NON-NLS-1$
                             + " inIncluded=" + inIncluded //$NON-NLS-1$
+                            + " blacklist=" + blacklist //$NON-NLS-1$
                             + " hasIncluded=" + (included != null) //$NON-NLS-1$
                             + " hasAllTop=" + (allTop != null); //$NON-NLS-1$
                     return visible;
@@ -2807,6 +2906,41 @@ public class CompareConfigMenuHook implements IStartup
                     lastDetail = "error"; //$NON-NLS-1$
                     return true;
                 }
+            }
+
+            /**
+             * Двусторонние объекты: воспроизводит штатную {@code ComparisonFilterBySubsystems
+             * .checkNodeIsSelected} (AND по обеим сторонам через trie), но с инверсией для чёрного
+             * списка. Используется только когда штатный фильтр отсоединён от дерева
+             * ({@link #syncNativeFilterAttachment}) — иначе штатный уже посчитал то же самое.
+             */
+            private boolean checkTwoSideNode(ComparisonNode cn, IComparisonSession session, boolean blacklist)
+            {
+                return checkTwoSideNodeForSide(cn, session, ComparisonSide.MAIN, blacklist)
+                        && checkTwoSideNodeForSide(cn, session, ComparisonSide.OTHER, blacklist);
+            }
+
+            private boolean checkTwoSideNodeForSide(ComparisonNode cn, IComparisonSession session,
+                    ComparisonSide side, boolean blacklist)
+            {
+                String symlink = cn instanceof SymlinkComparisonNode
+                        ? ((SymlinkComparisonNode) cn).getSymlink(side)
+                        : null;
+                if (symlink == null || symlink.isEmpty())
+                    return true;
+
+                IComparisonDataSource ds = session.getDataSource(side);
+                if (ds == null)
+                    return true;
+
+                QualifiedName qn = QualifiedName.create(symlink.split("\\.")); //$NON-NLS-1$
+                EObjectTrie allTop = getTrie("allTopObjectsToFilterTrieMap", ds); //$NON-NLS-1$
+                if (allTop == null || !allTop.belongsTo(qn))
+                    return true;
+
+                EObjectTrie included = getTrie("includedInSelectedSubsystemsTrieMap", ds); //$NON-NLS-1$
+                boolean inIncluded = included != null && included.belongsTo(qn);
+                return blacklist ? !inIncluded : inIncluded;
             }
 
             private int countCheckedSubsystemIds(IComparisonDataSource ds)
@@ -4080,4 +4214,159 @@ public class CompareConfigMenuHook implements IStartup
         }
     }
 
+    /**
+     * «Найти нижние настраиваемые»: собирает листовые узлы в поддеревьях выделенных строк —
+     * те, у которых есть чекбокс ({@code isCheckable()}), но ни один узел в поддереве потомков
+     * чекбокса не имеет. Область — Ctrl/Shift-выделение ({@link CompareConfigMultiMarkSupport})
+     * или, при пустом наборе, узел под курсором. Поиск идёт только по видимой части дерева —
+     * скрытые активными фильтрами узлы (в т.ч. подсистемный фильтр) не учитываются. Результат
+     * выводится в панель результатов поиска через общий механизм {@code CompareSearchResult}
+     * (аналогично команде «Найти все»), откуда пометки можно ставить/снимать — как по обычным
+     * результатам поиска.
+     */
+    private static final class CompareConfigLowestCheckableFinder
+    {
+        private static final String LOG = "CompareLowestCheckable"; //$NON-NLS-1$
+        private static final String QUERY_TEXT = "нижние настраиваемые"; //$NON-NLS-1$
+
+        /**
+         * Корни обхода: при непустом наборе Ctrl/Shift-выделения — его «верхние» узлы
+         * (без потомков, чей предок уже в наборе); иначе — узел под курсором (нативный single).
+         */
+        static List<Object> resolveRoots(Set<IPartialModelNode> multiSelected, Object nativeElement)
+        {
+            if (multiSelected != null && !multiSelected.isEmpty())
+            {
+                List<Object> roots = new ArrayList<>();
+                for (IPartialModelNode node : multiSelected)
+                {
+                    boolean hasAncestorInSet = false;
+                    for (IPartialModelNode p = node.getParent(); p != null; p = p.getParent())
+                    {
+                        if (multiSelected.contains(p))
+                        {
+                            hasAncestorInSet = true;
+                            break;
+                        }
+                    }
+                    if (!hasAncestorInSet)
+                        roots.add(node);
+                }
+                return roots;
+            }
+            if (nativeElement != null)
+            {
+                List<Object> roots = new ArrayList<>(1);
+                roots.add(nativeElement);
+                return roots;
+            }
+            return new ArrayList<>(0);
+        }
+
+        static void run(IEditorPart editor, Shell shell, List<Object> roots)
+        {
+            if (editor == null || roots == null || roots.isEmpty()) return;
+            AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
+            if (viewer == null) return;
+            Object cp = viewer.getContentProvider();
+            if (!(cp instanceof ITreeContentProvider provider)) return;
+            String objectColumn = CompareConfigSearchDialogHook.getObjectColumnHeader(editor);
+
+            Job job = new Job("Поиск нижних настраиваемых...") //$NON-NLS-1$
+            {
+                @Override
+                protected IStatus run(IProgressMonitor monitor)
+                {
+                    List<Object> leaves = new ArrayList<>();
+                    try
+                    {
+                        for (Object root : roots)
+                        {
+                            if (CompareConfigSearchDialogHook.isNodeMatchFilters(root, viewer))
+                                collectLeaves(root, provider, viewer, leaves);
+                        }
+                    }
+                    catch (Throwable t)
+                    {
+                        Global.logError(LOG, "collection failed", t); //$NON-NLS-1$
+                    }
+
+                    List<CompareSearchMatch> matches = buildMatches(leaves, objectColumn);
+
+                    Display.getDefault().asyncExec(() ->
+                    {
+                        if (matches.isEmpty())
+                        {
+                            if (shell != null && !shell.isDisposed())
+                                MessageDialog.openInformation(shell,
+                                    Global.withPluginWindowTitle("Найти нижние настраиваемые"), //$NON-NLS-1$
+                                    "Нижние настраиваемые узлы не найдены"); //$NON-NLS-1$
+                        }
+                        else
+                        {
+                            CompareConfigSearchDialogHook.showFindAllResults(editor, matches, QUERY_TEXT);
+                        }
+                    });
+                    return Status.OK_STATUS;
+                }
+            };
+            job.setSystem(true);
+            job.schedule();
+        }
+
+        /**
+         * Post-order обход по видимой части дерева: вглубь идём только в узлы, проходящие
+         * активные фильтры ({@link CompareConfigSearchDialogHook#isNodeMatchFilters}). Узел —
+         * лист, если сам {@code isCheckable()} и ни в одном ВИДИМОМ узле его поддерева чекбокса
+         * нет. Возвращает {@code true}, если в поддереве есть чекбокс (включая сам узел) —
+         * родитель с таким потомком листом не считается.
+         */
+        private static boolean collectLeaves(
+            Object node,
+            ITreeContentProvider provider,
+            AbstractTreeViewer viewer,
+            List<Object> leaves)
+        {
+            boolean selfCheckable = node instanceof IPartialModelNode partial && partial.isCheckable();
+            boolean descendantCheckable = false;
+            Object[] children = CompareConfigSearchDialogHook.getChildrenSafe(provider, node);
+            if (children != null)
+            {
+                for (Object child : children)
+                {
+                    if (!CompareConfigSearchDialogHook.isNodeMatchFilters(child, viewer))
+                        continue;
+                    if (collectLeaves(child, provider, viewer, leaves))
+                        descendantCheckable = true;
+                }
+            }
+            if (selfCheckable && !descendantCheckable)
+                leaves.add(node);
+            return selfCheckable || descendantCheckable;
+        }
+
+        private static List<CompareSearchMatch> buildMatches(List<Object> leaves, String objectColumn)
+        {
+            List<CompareSearchMatch> matches = new ArrayList<>(leaves.size());
+            for (Object leaf : leaves)
+            {
+                try
+                {
+                    String label = CompareConfigSearchDialogHook.extractNodeLabel(leaf);
+                    Object parent = Global.invoke(leaf, "getParent"); //$NON-NLS-1$
+                    String path = parent != null
+                        ? CompareConfigSearchDialogHook.buildPathForNode(parent) : ""; //$NON-NLS-1$
+                    CompareConfigSearchDialogHook.ComparisonStatusInfo status =
+                        CompareConfigSearchDialogHook.computeComparisonStatusSafe(leaf);
+                    matches.add(new CompareSearchMatch(leaf, path, label, objectColumn, label,
+                        status.status, status.rowColorKind, status.checkable));
+                }
+                catch (Throwable t)
+                {
+                    Global.logError(LOG, "match build failed", t); //$NON-NLS-1$
+                }
+            }
+            return matches;
+        }
+    }
 }

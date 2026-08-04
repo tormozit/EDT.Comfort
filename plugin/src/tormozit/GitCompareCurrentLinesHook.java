@@ -6,6 +6,8 @@ import org.eclipse.compare.CompareViewerPane;
 import org.eclipse.compare.CompareViewerSwitchingPane;
 import org.eclipse.compare.ITypedElement;
 import org.eclipse.compare.contentmergeviewer.TextMergeViewer;
+import org.eclipse.compare.internal.CompareUIPlugin;
+import org.eclipse.compare.internal.ViewerDescriptor;
 import org.eclipse.compare.structuremergeviewer.ICompareInput;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.jface.action.Action;
@@ -91,6 +93,19 @@ public final class GitCompareCurrentLinesHook
     {
     }
 
+    /**
+     * {@code tryHandleEditor} вызывается для одного и того же редактора несколько раз (начальный
+     * обход открытых редакторов + {@code partOpened} + {@code partActivated}) — без дедупликации
+     * это запускает НЕСКОЛЬКО независимых цепочек {@code scheduleAttach} для одного
+     * {@code editorInput}. Раньше это было безвредно ({@code PANEL_ATTACHED_KEY} идемпотентен),
+     * но после добавления {@code switchToBslViewerIfNeeded} (пересоздаёт viewer) одна цепочка
+     * успевает вызвать {@code attach()} на viewer, который вот-вот пересоздаст другая — из-за
+     * этого терялся {@link #pendingLineReveal} (подтверждено логом {@code blame-compare-reveal}:
+     * {@code attach()} вызывается раньше переключения варианта, а не после).
+     */
+    private static final java.util.Set<CompareEditorInput> scheduledEditorInputs =
+        java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
+
     private GitCompareCurrentLinesHook()
     {
     }
@@ -164,6 +179,8 @@ public final class GitCompareCurrentLinesHook
             return;
         if (!isSupportedGitCompareInput(input))
             return;
+        if (!scheduledEditorInputs.add(editorInput))
+            return; // уже запланировано другим вызовом (partOpened/partActivated/начальный обход)
         scheduleAttach(editorInput, editor, 0, false);
     }
 
@@ -295,8 +312,174 @@ public final class GitCompareCurrentLinesHook
         if (viewerControl.getParent() != pane)
             return ATTACH_WAIT;
 
+        /*
+         * Для BSL — сразу переключаем вариант "Сравнение встроенного языка" (пункт выпадающего
+         * меню, см. switchToBslViewerIfNeeded), иначе по умолчанию открывается plain-текстовое
+         * сравнение. Переключение уничтожает и пересоздаёт этот же viewer/control (тот же
+         * механизм, что штатная смена варианта пользователем — см. комментарий в attach() про
+         * wrapper.addDisposeListener) — поэтому ATTACH_WAIT, а не attach() сейчас: следующий
+         * повтор tryAttach подхватит уже новый (встроенный язык) viewer.
+         */
+        if (switchToBslViewerIfNeeded(editorInput, pane, mergeViewer))
+            return ATTACH_WAIT;
+
         attach(pane, viewerControl, editorInput, mergeViewer, editor);
         return ATTACH_DONE;
+    }
+
+    private static final String BSL_VIEWER_APPLIED_KEY = "tormozit.gitCompareBslViewerApplied"; //$NON-NLS-1$
+    /** id из {@code plugin.xml} бандла {@code com._1c.g5.v8.dt.bsl.ui} — см. {@code PasteWithCompareActions}. */
+    private static final String BSL_XTEXT_VIEWER_ID =
+        "com._1c.g5.v8.dt.bsl.Bsl.compare.contentMergeViewers"; //$NON-NLS-1$
+
+    /**
+     * Один раз на попап (маркер {@link #BSL_VIEWER_APPLIED_KEY}) — по просьбе пользователя,
+     * сравнение BSL-файла, открытое из редактора модуля (в т.ч. из blame-попапа —
+     * https://github.com/1C-Company/1c-edt-issues/issues/1952), должно сразу открываться в
+     * варианте "Сравнение встроенного языка", а не в текстовом по умолчанию.
+     *
+     * <p>Точная копия того, что делает штатный пункт выпадающего меню варианта сравнения (см.
+     * декомпилированный {@code CompareContentViewerSwitchingPane$6.widgetSelected} —
+     * {@code .tmp/bundles/compare-core/CompareContentViewerSwitchingPane$6.javap-c.txt}):
+     * {@code pane.fSelectedViewerDescriptor = vd; pane.setInput(oldViewer.getInput());} —
+     * {@code fSelectedViewerDescriptor} приватное, отсюда рефлексия.
+     *
+     * @return true, если переключение запущено (viewer будет пересоздан — вызывающий код должен
+     *         подождать следующего повтора, а не продолжать attach() на уже устаревшем viewer)
+     */
+    private static boolean switchToBslViewerIfNeeded(CompareEditorInput editorInput,
+        CompareViewerSwitchingPane pane, TextMergeViewer viewer)
+    {
+        if (Boolean.TRUE.equals(pane.getData(BSL_VIEWER_APPLIED_KEY)))
+            return false;
+        pane.setData(BSL_VIEWER_APPLIED_KEY, Boolean.TRUE);
+
+        ITypedElement left = resolveTypedElement(editorInput, true);
+        ITypedElement right = resolveTypedElement(editorInput, false);
+        if (!StructureToggleController.isBslCompare(left, right))
+            return false;
+
+        try
+        {
+            CompareUIPlugin plugin = CompareUIPlugin.getDefault();
+            if (plugin == null)
+                return false;
+            Object input = viewer.getInput();
+            ViewerDescriptor[] descriptors =
+                plugin.findContentViewerDescriptor(viewer, input, editorInput.getCompareConfiguration());
+            if (descriptors == null || descriptors.length == 0)
+                return false;
+            ViewerDescriptor preferred = findViewerDescriptorById(descriptors, BSL_XTEXT_VIEWER_ID);
+            if (preferred == null)
+                return false;
+            Global.setField(pane, "fSelectedViewerDescriptor", preferred); //$NON-NLS-1$
+            pane.setInput(input);
+            return true;
+        }
+        catch (Exception e)
+        {
+            Global.log("GitCompareCurrentLinesHook.switchToBslViewerIfNeeded: " + e); //$NON-NLS-1$
+            return false;
+        }
+    }
+
+    private static ViewerDescriptor findViewerDescriptorById(ViewerDescriptor[] descriptors, String viewerId)
+    {
+        for (ViewerDescriptor descriptor : descriptors)
+        {
+            Object config = Global.getField(descriptor, "fConfiguration"); //$NON-NLS-1$
+            if (config == null)
+                continue;
+            Object id = Global.invoke(config, "getAttribute", "id"); //$NON-NLS-1$ //$NON-NLS-2$
+            if (viewerId.equals(id))
+                return descriptor;
+        }
+        return null;
+    }
+
+    /**
+     * Строка, на которую нужно перейти в следующем двухпанельном сравнении, открытом
+     * {@link BlameHyperlinkOpenFixHook} (ссылка «Открыть двухпанельное сравнение» из
+     * blame-попапа — https://github.com/1C-Company/1c-edt-issues/issues/1952). {@code lineNo} —
+     * 0-based номер строки в СТАРОЙ (если {@code oldSide}) либо НОВОЙ версии файла (тот же
+     * номер, что и у соответствующей штатной ссылки {@code OpenLink}, см.
+     * {@code BlameHyperlinkOpenFixHook.resolvePendingReveal}) — вторая сторона находится через
+     * {@link CompareLineRangeMatcher#findMatchedLine}.
+     */
+    record PendingLineReveal(int lineNo, boolean oldSide, long createdAtMs)
+    {
+    }
+
+    private static final long PENDING_LINE_REVEAL_TTL_MS = 5000;
+    private static volatile PendingLineReveal pendingLineReveal;
+
+    static void setPendingLineReveal(int lineNo, boolean oldSide)
+    {
+        pendingLineReveal = new PendingLineReveal(lineNo, oldSide, System.currentTimeMillis());
+    }
+
+    /** Разовое потребление — следующий {@code attach()}, что бы он ни открыл, и не позже. */
+    private static PendingLineReveal takePendingLineReveal()
+    {
+        PendingLineReveal reveal = pendingLineReveal;
+        pendingLineReveal = null;
+        if (reveal == null || System.currentTimeMillis() - reveal.createdAtMs() > PENDING_LINE_REVEAL_TTL_MS)
+            return null;
+        return reveal;
+    }
+
+    private static final int PENDING_LINE_REVEAL_MAX_ATTEMPTS = 40;
+    private static final int PENDING_LINE_REVEAL_RETRY_DELAY_MS = 50;
+
+    private static void applyPendingLineRevealIfAny(StyledText leftText, StyledText rightText)
+    {
+        if (pendingLineReveal == null || leftText == null || leftText.isDisposed()
+            || rightText == null || rightText.isDisposed())
+            return;
+        scheduleApplyPendingLineReveal(leftText, rightText, 0);
+    }
+
+    /**
+     * Содержимое сторон подгружается асинхронно (та же гонка, что и в
+     * {@code StructureToggleController.createToggleAction} — "реальный текст документа может ещё
+     * не быть загружен") — ждём, пока в известной стороне реально появится строка с нужным
+     * номером, иначе {@link #activateLine} молча обрежет её до последней имеющейся (строка 0 при
+     * ещё пустом тексте).
+     */
+    private static void scheduleApplyPendingLineReveal(StyledText leftText, StyledText rightText, int attempt)
+    {
+        if (leftText.isDisposed() || rightText.isDisposed())
+            return;
+        PendingLineReveal reveal = pendingLineReveal;
+        if (reveal == null)
+            return;
+        StyledText knownText = reveal.oldSide() ? leftText : rightText;
+        if (knownText.getLineCount() <= reveal.lineNo() && attempt < PENDING_LINE_REVEAL_MAX_ATTEMPTS)
+        {
+            Display display = knownText.getDisplay();
+            if (display == null || display.isDisposed())
+                return;
+            display.timerExec(PENDING_LINE_REVEAL_RETRY_DELAY_MS,
+                () -> scheduleApplyPendingLineReveal(leftText, rightText, attempt + 1));
+            return;
+        }
+        takePendingLineReveal();
+        StyledText otherText = reveal.oldSide() ? rightText : leftText;
+        int knownLine = Math.max(0, Math.min(reveal.lineNo(), Math.max(0, knownText.getLineCount() - 1)));
+        activateLine(knownText, knownLine);
+        int matchedLine = CompareLineRangeMatcher.findMatchedLine(knownText, knownLine, otherText);
+        if (matchedLine >= 0)
+            activateLine(otherText, matchedLine);
+    }
+
+    private static void activateLine(StyledText text, int line)
+    {
+        if (text == null || text.isDisposed() || line < 0 || line >= text.getLineCount())
+            return;
+        int offset = text.getOffsetAtLine(line);
+        text.setSelectionRange(offset, 0);
+        int visibleLines = Math.max(1, text.getClientArea().height / Math.max(1, text.getLineHeight()));
+        text.setTopIndex(Math.max(0, line - visibleLines / 3));
     }
 
     private static void attach(CompareViewerSwitchingPane pane, Control viewerControl,
@@ -353,6 +536,7 @@ public final class GitCompareCurrentLinesHook
 
         StyledText leftText = MergeViewerReflection.extractStyledText(viewer, "fLeft"); //$NON-NLS-1$
         StyledText rightText = MergeViewerReflection.extractStyledText(viewer, "fRight"); //$NON-NLS-1$
+        applyPendingLineRevealIfAny(leftText, rightText);
 
         String irSyntaxVariant = IrCompareValuesHandler.syntaxVariantFor(resolveCompareType(editorInput));
         final String semLeft = leftLabel;

@@ -13,10 +13,6 @@ import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.core.runtime.Adapters;
 import org.eclipse.core.runtime.IProgressMonitor;
-import org.eclipse.core.commands.ExecutionEvent;
-import org.eclipse.core.commands.ExecutionException;
-import org.eclipse.core.commands.IExecutionListener;
-import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.viewers.CheckboxTreeViewer;
 import org.eclipse.jface.viewers.CheckStateChangedEvent;
@@ -68,7 +64,6 @@ import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
-import org.eclipse.ui.commands.ICommandService;
 
 import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
 import com._1c.g5.v8.dt.compare.model.ComparisonSide;
@@ -128,9 +123,22 @@ public final class FilterBySubsystemsDialogHook implements IStartup
     private static final Map<Object, ComparisonSide> SIDE_BY_COMPARISON_SESSION =
         Collections.synchronizedMap(new WeakHashMap<>());
 
-    /** Дерево, для которого сейчас нужно перехватывать команду Copy (см. {@link #installTreeCellCopy}). */
-    private static volatile Tree copyTargetTree;
-    private static boolean copyExecutionListenerInstalled;
+    /**
+     * Режим «чёрный список» (скрывать объекты выбранных подсистем вместо показа только их) —
+     * на жизнь {@code ViewerFilterBySubsystemsSettings} редактора сравнения (тот же объект,
+     * что {@code namedFilter.filterBySubsystemSettings} в {@code CompareConfigMenuHook}).
+     */
+    private static final Map<Object, Boolean> BLACKLIST_BY_SUBSYSTEMS_SETTINGS =
+        Collections.synchronizedMap(new WeakHashMap<>());
+
+    private static final String BLACKLIST_CHECKBOX_KEY = "tormozit.filterBySubsystemsBlacklistCheckbox"; //$NON-NLS-1$
+    private static final String BLACKLIST_CHECKBOX_LABEL =
+        "Скрывать объекты выбранных подсистем (чёрный список)"; //$NON-NLS-1$
+
+    private static final String INCLUDE_LABELS_KEY = "tormozit.filterBySubsystemsIncludeLabels"; //$NON-NLS-1$
+    private static final String INCLUDE_SUBORDINATE_LABEL = "Включать подчинённые подсистемы"; //$NON-NLS-1$
+    private static final String INCLUDE_PARENT_LABEL = "Включать родительские подсистемы"; //$NON-NLS-1$
+    private static final String OUR_CHECKBOX_KEY = "tormozit.filterBySubsystemsOwnCheckbox"; //$NON-NLS-1$
 
     @Override
     public void earlyStartup()
@@ -207,6 +215,8 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         installDeselectAllAlwaysEnabled(dialog, panel, viewer);
         installComparisonSideMemory(shell, dialog, panel);
         installGrayMarkHint(panel);
+        installBlacklistCheckbox(dialog, panel);
+        installStandardCheckboxLabels(shell, panel);
         expandNavigatorProject(viewer, attempt);
         return installSmartFilter(panel, viewer);
     }
@@ -393,13 +403,64 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         FilterBySubsystemsDialogDebug.log("grayMarkHint: надпись добавлена"); //$NON-NLS-1$
     }
 
+    /** Режим «чёрный список» включён для данной сессии сравнения (см. {@link #BLACKLIST_BY_SUBSYSTEMS_SETTINGS}). */
+    static boolean isBlacklistMode(Object subsystemsSettings)
+    {
+        if (subsystemsSettings == null)
+            return false;
+        return Boolean.TRUE.equals(BLACKLIST_BY_SUBSYSTEMS_SETTINGS.get(subsystemsSettings));
+    }
+
+    /**
+     * Чекбокс «чёрный список» — только для диалога сравнения ({@code filterSettings} есть только
+     * у {@code com._1c.g5.v8.dt.internal.compare.ui.dialogs.FilterBySubsystemsDialog}). Ключ хранения
+     * состояния — тот же {@code ViewerFilterBySubsystemsSettings}, которым в
+     * {@link CompareConfigMenuHook} владеет {@code namedFilter.filterBySubsystemSettings} —
+     * это позволяет {@code CorrectionViewerFilter} прочитать актуальный режим без прямой связи с диалогом.
+     */
+    private static void installBlacklistCheckbox(Object dialog, Object panel)
+    {
+        if (!(panel instanceof Composite panelComposite) || panelComposite.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(panelComposite.getData(BLACKLIST_CHECKBOX_KEY)))
+            return;
+        Object settings = Global.getField(dialog, "filterSettings"); //$NON-NLS-1$
+        if (settings == null)
+            return;
+        panelComposite.setData(BLACKLIST_CHECKBOX_KEY, Boolean.TRUE);
+
+        Composite host = panelComposite.getParent();
+        if (host == null || host.isDisposed() || !(host.getLayout() instanceof GridLayout))
+            host = panelComposite;
+
+        Button checkbox = new Button(host, SWT.CHECK);
+        checkbox.setText(BLACKLIST_CHECKBOX_LABEL);
+        checkbox.setToolTipText(
+            "Инвертирует отбор: объекты выбранных подсистем скрываются в дереве сравнения, остальные показываются" //$NON-NLS-1$
+                + Global.pluginSignForTooltip());
+        checkbox.setSelection(isBlacklistMode(settings));
+        checkbox.setData(OUR_CHECKBOX_KEY, Boolean.TRUE);
+        GridData checkboxData = new GridData(SWT.FILL, SWT.CENTER, true, false);
+        checkboxData.verticalIndent = 3;
+        checkbox.setLayoutData(checkboxData);
+        checkbox.addSelectionListener(new SelectionAdapter()
+        {
+            @Override public void widgetSelected(SelectionEvent e)
+            {
+                BLACKLIST_BY_SUBSYSTEMS_SETTINGS.put(settings, checkbox.getSelection());
+                FilterBySubsystemsDialogDebug.step("blacklist", "checked=" + checkbox.getSelection()); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        });
+        host.layout(true, true);
+        FilterBySubsystemsDialogDebug.log("blacklist: чекбокс добавлен"); //$NON-NLS-1$
+    }
+
     /**
      * Ctrl+C при фокусе на дереве копирует текст активной ячейки. Тот же архитектурный потолок,
      * что и в {@code PreferenceSearchFilterAugmenter.wireTreeCopy}/{@code KeyBindingToastHook}:
      * буква C при зажатом Ctrl не порождает {@code SWT.KeyDown} в модальном диалоге — нативная
-     * Win32-трансляция акселератора съедает её раньше. Перехват — через
-     * {@code ICommandService.addExecutionListener} на {@code org.eclipse.ui.edit.copy}, а не
-     * KeyDown — срабатывание команды долетает независимо от пути.
+     * Win32-трансляция акселератора съедает её раньше. Перехват — через общий
+     * {@link CopyCommandSupport}.
      */
     private static void installTreeCellCopy(CheckboxTreeViewer viewer)
     {
@@ -409,12 +470,6 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         if (Boolean.TRUE.equals(tree.getData(COPY_HOOKED_KEY)))
             return;
         tree.setData(COPY_HOOKED_KEY, Boolean.TRUE);
-        copyTargetTree = tree;
-        tree.addDisposeListener(e ->
-        {
-            if (copyTargetTree == tree)
-                copyTargetTree = null;
-        });
         // Активная колонка запоминается кликом по дереву (см. таблицы/деревья в кастомных окнах).
         tree.addListener(SWT.MouseDown, e ->
         {
@@ -425,7 +480,7 @@ public final class FilterBySubsystemsDialogHook implements IStartup
                 return;
             tree.setData(COPY_ACTIVE_COLUMN_KEY, columnAt(tree, e.x, e.y, item));
         });
-        installCopyExecutionListener();
+        CopyCommandSupport.wireCopyOverride(tree, () -> copyActiveCellText(tree));
         FilterBySubsystemsDialogDebug.log("cellCopy: hook установлен"); //$NON-NLS-1$
     }
 
@@ -440,46 +495,9 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         return 0;
     }
 
-    private static void installCopyExecutionListener()
+    private static void copyActiveCellText(Tree tree)
     {
-        if (copyExecutionListenerInstalled || PlatformUI.getWorkbench() == null)
-            return;
-        ICommandService commandService = PlatformUI.getWorkbench().getService(ICommandService.class);
-        if (commandService == null)
-            return;
-        commandService.addExecutionListener(new IExecutionListener()
-        {
-            @Override
-            public void preExecute(String commandId, ExecutionEvent event)
-            {
-                handlePossibleTreeCopy(commandId);
-            }
-
-            @Override
-            public void postExecuteSuccess(String commandId, Object returnValue)
-            {
-            }
-
-            @Override
-            public void notHandled(String commandId, NotHandledException exception)
-            {
-                handlePossibleTreeCopy(commandId);
-            }
-
-            @Override
-            public void postExecuteFailure(String commandId, ExecutionException exception)
-            {
-            }
-        });
-        copyExecutionListenerInstalled = true;
-    }
-
-    private static void handlePossibleTreeCopy(String commandId)
-    {
-        Tree tree = copyTargetTree;
-        if (tree == null || tree.isDisposed() || tree.getDisplay().getFocusControl() != tree)
-            return;
-        if (!"org.eclipse.ui.edit.copy".equals(commandId)) //$NON-NLS-1$
+        if (tree.isDisposed())
             return;
         TreeItem[] selection = tree.getSelection();
         if (selection.length == 0)
@@ -548,6 +566,47 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         if (!(buttonObj instanceof Button button) || button.isDisposed())
             return;
         button.addSelectionListener(afterSelection(keepEnabled));
+    }
+
+    /**
+     * Штатные подписи «Включать объекты подчинённых/родительских подсистем» короче и меньше
+     * противоречат новому флажку «чёрный список» («Скрывать объекты выбранных подсистем»).
+     *
+     * <p>Полей {@code includeFromSubordinateCheckbox}/{@code includeFromParentCheckbox} в классе
+     * диалога нет (проверено декомпиляцией {@code FilterBySubsystemsDialog}) — кнопки ищем по
+     * дереву виджетов: они лежат в том же родителе, что и {@code subsystemsPanel}
+     * (см. {@link #installGrayMarkHint}/{@link #installBlacklistCheckbox}), созданы раньше нашего
+     * чекбокса чёрного списка (который помечен {@link #OUR_CHECKBOX_KEY}) и идут в порядке
+     * «подчинённые», затем «родительские» ({@code createIncludeFromSubordinateButton} перед
+     * {@code createIncludeFromParentButton} в {@code createDialogArea}).
+     */
+    private static void installStandardCheckboxLabels(Shell shell, Object panel)
+    {
+        if (shell == null || shell.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(shell.getData(INCLUDE_LABELS_KEY)))
+            return;
+        if (!(panel instanceof Composite panelComposite) || panelComposite.isDisposed())
+            return;
+        Composite host = panelComposite.getParent();
+        if (host == null || host.isDisposed())
+            return;
+        shell.setData(INCLUDE_LABELS_KEY, Boolean.TRUE);
+
+        List<Button> nativeChecks = new ArrayList<>();
+        for (Control child : host.getChildren())
+        {
+            if (child instanceof Button button && !button.isDisposed()
+                    && (button.getStyle() & SWT.CHECK) != 0
+                    && !Boolean.TRUE.equals(button.getData(OUR_CHECKBOX_KEY)))
+                nativeChecks.add(button);
+        }
+        if (nativeChecks.size() > 0)
+            nativeChecks.get(0).setText(INCLUDE_SUBORDINATE_LABEL);
+        if (nativeChecks.size() > 1)
+            nativeChecks.get(1).setText(INCLUDE_PARENT_LABEL);
+        host.layout(true, true);
+        FilterBySubsystemsDialogDebug.step("labels", "renamed=" + nativeChecks.size()); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static SelectionAdapter afterSelection(Runnable action)

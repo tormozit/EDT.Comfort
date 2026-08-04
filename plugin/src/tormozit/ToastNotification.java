@@ -574,12 +574,15 @@ public final class ToastNotification
             @Override
             public void preExecute(String commandId, ExecutionEvent event)
             {
-                handlePossibleTextCopy(commandId);
             }
 
             @Override
             public void postExecuteSuccess(String commandId, Object returnValue)
             {
+                // Выполняется ПОСЛЕ штатного обработчика edit.copy — если тот для READ_ONLY
+                // Text затирает буфер (лог сессии подтвердил ровно это), наша запись здесь
+                // останется последней. См. handlePossibleTextCopy.
+                handlePossibleTextCopy(commandId);
             }
 
             @Override
@@ -591,6 +594,7 @@ public final class ToastNotification
             @Override
             public void postExecuteFailure(String commandId, ExecutionException exception)
             {
+                handlePossibleTextCopy(commandId);
             }
         });
         copyExecutionListenerInstalled = true;

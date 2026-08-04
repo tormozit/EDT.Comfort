@@ -2,10 +2,6 @@ package tormozit;
 
 import java.util.List;
 
-import org.eclipse.core.commands.ExecutionEvent;
-import org.eclipse.core.commands.ExecutionException;
-import org.eclipse.core.commands.IExecutionListener;
-import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.core.runtime.jobs.IJobChangeEvent;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.core.runtime.jobs.JobChangeAdapter;
@@ -15,6 +11,7 @@ import org.eclipse.jface.preference.PreferenceDialog;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.LabelProvider;
+import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.jface.viewers.StyledString.Styler;
 import org.eclipse.jface.viewers.TreeViewer;
@@ -43,8 +40,6 @@ import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
-import org.eclipse.ui.PlatformUI;
-import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.ui.dialogs.FilteredTree;
 import org.eclipse.ui.dialogs.PatternFilter;
 
@@ -100,6 +95,7 @@ final class PreferenceSearchFilterAugmenter
         tree.setData(WIRED_KEY, Boolean.TRUE);
 
         wireTreeCopy(tree);
+        bumpRefreshJobPriority(filteredTree);
 
         ViewerFilter[] existing = viewer.getFilters();
         PatternFilter original = findPatternFilter(existing);
@@ -171,6 +167,31 @@ final class PreferenceSearchFilterAugmenter
                     viewer.refresh();
             });
         });
+    }
+
+    /**
+     * Дерево категорий — то, на что пользователь смотрит в момент ввода/очистки
+     * фильтра, поэтому {@code refreshJob} поднимается до {@link Job#INTERACTIVE}
+     * (выше штатного {@link Job#LONG} по умолчанию) — это влияет только на
+     * порядок выбора СРЕДИ уже проснувшихся ({@code WAITING}) джобов при
+     * ограниченном пуле воркеров, план "разбудить" по истечении задержки
+     * {@code schedule(200)} не трогает и от того зависания, что видели в логах
+     * ({@code SLEEPING} по 20-30 c), не спасает — но там, где узкое место
+     * именно в очереди на воркер, должно помочь.
+     */
+    private static void bumpRefreshJobPriority(FilteredTree filteredTree)
+    {
+        Object jobObj = Global.getField(filteredTree, REFRESH_JOB_FIELD);
+        if (!(jobObj instanceof Job job))
+        {
+            Global.tempLog(REVEAL_LOG_TOPIC,
+                    "bumpRefreshJobPriority: field '" + REFRESH_JOB_FIELD + "' is not a Job: " + jobObj); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        int oldPriority = job.getPriority();
+        job.setPriority(Job.INTERACTIVE);
+        Global.tempLog(REVEAL_LOG_TOPIC,
+                "bumpRefreshJobPriority: priority " + oldPriority + " -> " + job.getPriority()); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /** scopeId для {@link FilterHistoryStore} — отдельный от фильтра страницы «Клавиши». */
@@ -625,12 +646,17 @@ final class PreferenceSearchFilterAugmenter
                         Global.tempLog(REVEAL_LOG_TOPIC, "asyncExec after refreshJob.done: tree disposed"); //$NON-NLS-1$
                         return;
                     }
-                    viewer.reveal(element);
+                    // reveal() только прокручивает/разворачивает узел до видимости — он НЕ
+                    // восстанавливает выделение. Логами подтверждено: сам refreshJob (collapse +
+                    // refresh(true)) сбрасывает виджетное выделение на другой узел (пересоздаёт
+                    // TreeItem при сворачивании родителя) — поэтому нужно явно восстановить
+                    // выделение через setSelection(reveal=true), а не полагаться на reveal().
+                    viewer.setSelection(new StructuredSelection(element), true);
                     TreeItem[] sel = tree.getSelection();
                     String selLabel = sel.length > 0 ? sel[0].getText() : "<none>"; //$NON-NLS-1$
                     boolean visible = sel.length > 0 && isTreeItemVisible(sel[0]);
                     Global.tempLog(REVEAL_LOG_TOPIC,
-                            "asyncExec after refreshJob.done: reveal done, element=" + elementLabel //$NON-NLS-1$
+                            "asyncExec after refreshJob.done: setSelection done, element=" + elementLabel //$NON-NLS-1$
                                     + " treeSelection=" + selLabel + " visible=" + visible); //$NON-NLS-1$ //$NON-NLS-2$
                 });
             }
@@ -786,73 +812,22 @@ final class PreferenceSearchFilterAugmenter
         return null;
     }
 
-    /** Дерево, для которого сейчас нужно перехватывать команду Copy (см. {@link #wireTreeCopy}). */
-    private static volatile Tree copyTargetTree;
-    private static boolean copyExecutionListenerInstalled;
-
     /**
      * Ctrl+C при фокусе на дереве категорий копирует название выбранной
-     * страницы. Диагностикой в этом же чате доказано (лог {@code preferenceTreeCopy.log}):
-     * буква {@code C} при зажатом Ctrl НЕ порождает {@code SWT.KeyDown} вообще нигде
-     * в {@code Display} — нативная Win32-трансляция акселератора съедает её раньше,
-     * чем SWT успевает создать событие (тот же архитектурный потолок, что раскопан для
-     * {@code KeyBindingToastHook}/Ctrl+Shift+F). Поэтому перехват — не через
-     * {@code SWT.KeyDown}, а через {@code ICommandService.addExecutionListener} на команде
-     * {@code org.eclipse.ui.edit.copy}: срабатывание команды долетает независимо от пути
-     * (обычный KeyDown или нативный акселератор), см. {@code ExecutionEvent.getTrigger()}
-     * в {@code KeyBindingToastHook}.
+     * страницы. Диагностикой доказано: буква {@code C} при зажатом Ctrl НЕ порождает
+     * {@code SWT.KeyDown} вообще нигде в {@code Display} — нативная Win32-трансляция
+     * акселератора съедает её раньше, чем SWT успевает создать событие (тот же архитектурный
+     * потолок, что раскопан для {@code KeyBindingToastHook}/Ctrl+Shift+F). Перехват — через
+     * общий {@link CopyCommandSupport}.
      */
     private static void wireTreeCopy(Tree tree)
     {
-        copyTargetTree = tree;
-        tree.addDisposeListener(e ->
-        {
-            if (copyTargetTree == tree)
-                copyTargetTree = null;
-        });
-        installCopyExecutionListener();
+        CopyCommandSupport.wireCopyOverride(tree, () -> copyTreeSelection(tree));
     }
 
-    private static void installCopyExecutionListener()
+    private static void copyTreeSelection(Tree tree)
     {
-        if (copyExecutionListenerInstalled || PlatformUI.getWorkbench() == null)
-            return;
-        ICommandService commandService = PlatformUI.getWorkbench().getService(ICommandService.class);
-        if (commandService == null)
-            return;
-        commandService.addExecutionListener(new IExecutionListener()
-        {
-            @Override
-            public void preExecute(String commandId, ExecutionEvent event)
-            {
-                handlePossibleTreeCopy(commandId);
-            }
-
-            @Override
-            public void postExecuteSuccess(String commandId, Object returnValue)
-            {
-            }
-
-            @Override
-            public void notHandled(String commandId, NotHandledException exception)
-            {
-                handlePossibleTreeCopy(commandId);
-            }
-
-            @Override
-            public void postExecuteFailure(String commandId, ExecutionException exception)
-            {
-            }
-        });
-        copyExecutionListenerInstalled = true;
-    }
-
-    private static void handlePossibleTreeCopy(String commandId)
-    {
-        Tree tree = copyTargetTree;
-        if (tree == null || tree.isDisposed() || tree.getDisplay().getFocusControl() != tree)
-            return;
-        if (!"org.eclipse.ui.edit.copy".equals(commandId)) //$NON-NLS-1$
+        if (tree.isDisposed())
             return;
         TreeItem[] selection = tree.getSelection();
         if (selection.length == 0)
