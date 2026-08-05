@@ -1622,7 +1622,7 @@ public class CompareConfigMenuHook implements IStartup
 
         private static final String FILTER_AWARE_CHECKBOX_LABEL =
             "Каскадный пересчет пометок с учетом фильтра (экспериментально)"; //$NON-NLS-1$
-        private static final String FILTER_AWARE_CHECKBOX_TOOLTIP =
+        private static final String FILTER_AWARE_CHECKBOX_TOOLTIP = 
             "При активном отборе по подсистемам или combo «Показывать…»\n"
                 + "пометки и серые предки — только по видимым узлам;\n"
                 + "«Отметить все»/клик по папке не трогают скрытые.\n"
