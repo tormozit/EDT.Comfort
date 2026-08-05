@@ -165,6 +165,8 @@ public final class ExportConfigurationXmlFixHook implements IStartup
             String targetDir = null;
             try
             {
+                // Дубли Configuration.mdo — всегда до штатной выгрузки (не от флажка Form.xml).
+                ConfigurationMdoFix.fixBeforeUnload(shell);
                 shouldFix = ourCheckbox != null && !ourCheckbox.isDisposed() && ourCheckbox.getSelection();
                 Global.tempLog(TEMP_LOG_TOPIC, "finish clicked, shouldFix=" + shouldFix); //$NON-NLS-1$
                 if (shouldFix)

@@ -324,8 +324,23 @@ public final class FilterBySubsystemsDialogHook implements IStartup
             }
         }
         clearViewerMarkCaches(panel, viewer);
-        invokeGrayNodes(panel);
-        reapplyTreeChecksFromProvider(viewer);
+        // Без grayNodes: полный обход getChildren на большой конфигурации — секунды.
+        for (TreeItem item : viewer.getTree().getItems())
+        {
+            if (item == null || item.isDisposed())
+                continue;
+            Object data = item.getData();
+            IDtProject dt = toDtProjectElement(data);
+            if (dt == null || !roots.contains(dt))
+                continue;
+            item.setChecked(true);
+            item.setGrayed(false);
+            if (data != null)
+            {
+                viewer.setChecked(data, true);
+                viewer.setGrayed(data, false);
+            }
+        }
     }
 
     /**
@@ -1650,20 +1665,14 @@ public final class FilterBySubsystemsDialogHook implements IStartup
                     Global.setField(dialog, "side", //$NON-NLS-1$
                             savedSide != null ? savedSide : ComparisonSide.OTHER);
             }
-            // Корни должны быть unchecked до grayNodes: иначе штатный grayNodes
-            // видит getChecked(root) и зовёт setState(root) → setProjectChecked(true)
-            // → полная ✓ вместо серой динамики от детей.
+            // Корни unchecked: иначе grayNodes/setState(root) → setProjectChecked.
+            // Не зовём штатный grayNodes: он обходит всё дерево через getChildren и
+            // setSubtreeCheckGrayed — секунды и раскрытие узлов на больших конфигурациях.
             uncheckTreeRoots(viewer);
             clearProjectFullChecks(settings);
             if (dialogSettings != null && dialogSettings != settings)
                 clearProjectFullChecks(dialogSettings);
-
-            invokeGrayNodes(panel);
-            clearProjectFullChecks(settings);
-            if (dialogSettings != null && dialogSettings != settings)
-                clearProjectFullChecks(dialogSettings);
-            // Provider выставит корням checked+grayed (частичная), без checkedProjects.
-            reapplyTreeChecksFromProvider(viewer);
+            markStaticAncestorsPartial(viewer);
             forcePartialRootMarks(viewer, settings);
         }
         Global.invokeVoid(panel, "changeActionEnable"); //$NON-NLS-1$
@@ -1793,8 +1802,43 @@ public final class FilterBySubsystemsDialogHook implements IStartup
     }
 
     /**
+     * Частичная пометка предков статических узлов (checked+grayed) без
+     * {@code setSubtreeCheckGrayed} / обхода потомков.
+     */
+    private static void markStaticAncestorsPartial(CheckboxTreeViewer viewer)
+    {
+        if (viewer == null || viewer.getTree() == null || viewer.getTree().isDisposed())
+            return;
+        for (TreeItem root : viewer.getTree().getItems())
+            markStaticAncestorsPartialRec(viewer, root);
+    }
+
+    private static void markStaticAncestorsPartialRec(CheckboxTreeViewer viewer, TreeItem item)
+    {
+        if (item == null || item.isDisposed())
+            return;
+        if (item.getChecked() && !item.getGrayed())
+        {
+            for (TreeItem parent = item.getParentItem(); parent != null && !parent.isDisposed();
+                    parent = parent.getParentItem())
+            {
+                parent.setChecked(true);
+                parent.setGrayed(true);
+                Object data = parent.getData();
+                if (data != null)
+                {
+                    viewer.setChecked(data, true);
+                    viewer.setGrayed(data, true);
+                }
+            }
+        }
+        for (TreeItem child : item.getItems())
+            markStaticAncestorsPartialRec(viewer, child);
+    }
+
+    /**
      * Если у корня есть статические id подсистем и нет {@code isProjectChecked} —
-     * принудительно частичная (checked+grayed). Страховка после grayNodes/reapply.
+     * принудительно частичная (checked+grayed). Страховка после load.
      */
     private static void forcePartialRootMarks(CheckboxTreeViewer viewer, Object settings)
     {
@@ -1855,22 +1899,43 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         String[] segments = path.split("\\.", -1); //$NON-NLS-1$
         if (segments.length == 0)
             return null;
+        // Раскрываем только чтобы получить TreeItem; после поиска сворачиваем обратно.
+        List<Object> expandedForLookup = new ArrayList<>();
         TreeItem[] level = tree.getItems();
         TreeItem match = null;
         for (int i = 0; i < segments.length; i++)
         {
             match = findTreeItemMatchingSegment(dialog, viewer, level, segments[i], i == 0);
             if (match == null)
+            {
+                collapseExpandedForLookup(viewer, expandedForLookup);
                 return null;
+            }
             if (i < segments.length - 1)
             {
                 Object data = match.getData();
-                if (data != null)
+                if (data != null && !viewer.getExpandedState(data))
+                {
                     viewer.setExpandedState(data, true);
+                    expandedForLookup.add(data);
+                }
                 level = match.getItems();
             }
         }
+        collapseExpandedForLookup(viewer, expandedForLookup);
         return match;
+    }
+
+    private static void collapseExpandedForLookup(CheckboxTreeViewer viewer, List<Object> expanded)
+    {
+        if (viewer == null || expanded == null || expanded.isEmpty())
+            return;
+        for (int i = expanded.size() - 1; i >= 0; i--)
+        {
+            Object data = expanded.get(i);
+            if (data != null)
+                viewer.setExpandedState(data, false);
+        }
     }
 
     private static Object findTreeElementByMarkPath(
@@ -3414,7 +3479,7 @@ public final class FilterBySubsystemsDialogHook implements IStartup
                 if (top != null)
                     return top.booleanValue();
             }
-            Boolean byRoot = checkedByTreeRoot(element);
+            Boolean byRoot = elementValueByTreeRoot(element, true);
             if (byRoot != null)
                 return byRoot.booleanValue();
             return delegate != null && delegate.isChecked(element);
@@ -3434,11 +3499,9 @@ public final class FilterBySubsystemsDialogHook implements IStartup
                     return true;
                 return delegate != null && delegate.isGrayed(element);
             }
-            IDtProject root = findRootDtForElement(element);
-            Object settings = settings();
-            if (root != null && settings != null && Boolean.TRUE.equals(
-                    Global.invoke(settings, "isProjectChecked", root))) //$NON-NLS-1$
-                return true; // динамика под полной статической пометкой проекта
+            Boolean byRoot = elementValueByTreeRoot(element, false);
+            if (byRoot != null)
+                return byRoot.booleanValue();
             return delegate != null && delegate.isGrayed(element);
         }
 
@@ -3470,7 +3533,12 @@ public final class FilterBySubsystemsDialogHook implements IStartup
             return s;
         }
 
-        private Boolean checkedByTreeRoot(Object element)
+        /**
+         * Как штатный {@code getSubsystemElementValue}/{@code getAttachedElementValue}:
+         * {@code forChecked=true} → isChecked, {@code false} → isGrayed.
+         * Статика (id в settings) — checked без gray; наследники при include* — оба true.
+         */
+        private Boolean elementValueByTreeRoot(Object element, boolean forChecked)
         {
             if (element == null)
                 return null;
@@ -3483,33 +3551,84 @@ public final class FilterBySubsystemsDialogHook implements IStartup
             Object settings = settings();
             if (settings == null)
                 return null;
-            // Полная статическая пометка проекта (после drop) — все потомки checked.
             if (Boolean.TRUE.equals(Global.invoke(settings, "isProjectChecked", root))) //$NON-NLS-1$
                 return Boolean.TRUE;
             if (cn.contains("AttachedNavigatorAdapter")) //$NON-NLS-1$
             {
-                return Boolean.valueOf(Boolean.TRUE.equals(Global.invoke(settings,
-                        "isIncludeNotIncludedInSubsystems", root))); //$NON-NLS-1$
+                boolean includeNot = Boolean.TRUE.equals(Global.invoke(settings,
+                        "isIncludeNotIncludedInSubsystems", root)); //$NON-NLS-1$
+                if (!includeNot)
+                    return Boolean.FALSE;
+                // includeNot — как статика на адаптере: checked, не gray.
+                return Boolean.valueOf(forChecked);
             }
             if (cn.contains("Adapter") && !cn.contains("Subsystem")) //$NON-NLS-1$ //$NON-NLS-2$
                 return null;
             if (!cn.contains("Subsystem") && Global.invoke(element, "bmGetId") == null) //$NON-NLS-1$ //$NON-NLS-2$
                 return null;
+
             Object idsObj = Global.invoke(settings, "getCheckedSubsystemIds", root); //$NON-NLS-1$
-            if (!(idsObj instanceof Set<?> ids) || ids.isEmpty())
+            Set<?> ids = idsObj instanceof Set<?> set ? set : null;
+            boolean includeOn = Boolean.TRUE.equals(Global.invoke(settings,
+                    "isIncludeObjectsFromSubordinateSubsystems")) //$NON-NLS-1$
+                    || Boolean.TRUE.equals(Global.invoke(settings,
+                            "isIncludeObjectsFromParentSubsystems")); //$NON-NLS-1$
+
+            if (ids == null || ids.isEmpty())
                 return Boolean.FALSE;
+
+            if (idInCheckedSet(element, ids))
+                return Boolean.valueOf(forChecked); // статика: grayed=false
+
+            if (!includeOn)
+                return Boolean.FALSE;
+
+            // Динамика: только предки со статической пометкой (O(глубина)).
+            // Потомков не обходим через getChildren — это секунды на больших деревьях;
+            // серых предков после load выставляет markStaticAncestorsPartial.
+            if (hasStaticMarkedAncestor(element, ids, root, settings))
+                return Boolean.TRUE;
+            return Boolean.FALSE;
+        }
+
+        private boolean idInCheckedSet(Object element, Set<?> ids)
+        {
             Object idObj = Global.invoke(element, "bmGetId"); //$NON-NLS-1$
             if (idObj instanceof Number number)
                 idObj = Long.valueOf(number.longValue());
             if (idObj == null)
-                return Boolean.FALSE;
+                return false;
             for (Object id : ids)
             {
                 Object normalized = id instanceof Number n ? Long.valueOf(n.longValue()) : id;
                 if (idObj.equals(normalized))
-                    return Boolean.TRUE;
+                    return true;
             }
-            return Boolean.FALSE;
+            return false;
+        }
+
+        private boolean hasStaticMarkedAncestor(
+                Object element, Set<?> ids, IDtProject root, Object settings)
+        {
+            if (viewer == null || viewer.getTree() == null || viewer.getTree().isDisposed())
+                return false;
+            TreeItem item = findTreeItem(viewer.getTree().getItems(), element);
+            if (item == null)
+                return false;
+            for (TreeItem parent = item.getParentItem(); parent != null && !parent.isDisposed();
+                    parent = parent.getParentItem())
+            {
+                Object data = parent.getData();
+                if (data instanceof IDtProject dt)
+                {
+                    return Boolean.TRUE.equals(
+                            Global.invoke(settings, "isProjectChecked", dt)); //$NON-NLS-1$
+                }
+                if (data != null && idInCheckedSet(data, ids))
+                    return true;
+            }
+            return Boolean.TRUE.equals(
+                    Global.invoke(settings, "isProjectChecked", root)); //$NON-NLS-1$
         }
 
         private IDtProject findRootDtForElement(Object element)

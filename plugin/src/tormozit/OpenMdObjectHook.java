@@ -2,6 +2,9 @@ package tormozit;
 
 import org.eclipse.core.commands.AbstractHandler;
 import org.eclipse.core.commands.ExecutionEvent;
+import org.eclipse.core.runtime.IProgressMonitor;
+import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.IJobChangeEvent;
 import org.eclipse.core.runtime.jobs.JobChangeAdapter;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
@@ -33,9 +36,13 @@ import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.dialogs.FilteredItemsSelectionDialog;
 import org.eclipse.ui.handlers.IHandlerActivation;
 import org.eclipse.ui.handlers.IHandlerService;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicLong;
 import org.eclipse.jface.viewers.LabelProvider;
 import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.swt.graphics.Image;
@@ -44,6 +51,15 @@ import java.lang.reflect.Field;
 
 public class OpenMdObjectHook implements IStartup {
 
+    private static final String PATCHED_KEY = "tormozit.mdObjectPatched";
+    private static final String COPY_HOOK_KEY = "tormozit.openMdObjectCopyHook"; //$NON-NLS-1$
+    private static final String FILTER_GEN_KEY = "tormozit.openMdObject.filterGen"; //$NON-NLS-1$
+    private static final String COMFORT_FILTER_JOB_KEY = "tormozit.openMdObject.comfortFilterJob"; //$NON-NLS-1$
+    private static final String DEDUPE_HOOK_KEY = "tormozit.openMdObject.dedupeHook"; //$NON-NLS-1$
+
+    private static final String OBJECT_PAIR_CLASS =
+            "com._1c.g5.v8.dt.md.ui.dialogs.OpenMdObjectSelectionDialog$ObjectDescriptionPair"; //$NON-NLS-1$
+
     @Override
     public void earlyStartup()
     {
@@ -51,12 +67,6 @@ public class OpenMdObjectHook implements IStartup {
             install(Display.getDefault());
         });
     }
-
-    private static final String PATCHED_KEY = "tormozit.mdObjectPatched";
-    private static final String COPY_HOOK_KEY = "tormozit.openMdObjectCopyHook"; //$NON-NLS-1$
-
-    private static final String OBJECT_PAIR_CLASS =
-            "com._1c.g5.v8.dt.md.ui.dialogs.OpenMdObjectSelectionDialog$ObjectDescriptionPair"; //$NON-NLS-1$
 
     public static void install(Display display) {
         if (display == null || display.isDisposed()) return;
@@ -143,6 +153,7 @@ public class OpenMdObjectHook implements IStartup {
 
             OpenMdObjectComparator comparator = new OpenMdObjectComparator(smartLp);
             installLazyListSortHook(dialog, comparator);
+            installDedupeHooks(shell, dialog, comparator);
 
             // --- Убираем штатные слушатели старого поля ---
             for (Listener l : patternText.getListeners(SWT.Modify)) {
@@ -194,7 +205,14 @@ public class OpenMdObjectHook implements IStartup {
                     pendingFilterTask[0] = new Runnable() {
                         @Override
                         public void run() {
-                            applySmartFilter(dialog, smartFilterRef[0], smartLp, comparator, pattern);
+                            try
+                            {
+                                applySmartFilter(dialog, smartFilterRef, smartLp, comparator, pattern);
+                            }
+                            catch (Exception ex)
+                            {
+                                Global.tempLogException("OpenMdObject", "modifyTimer", ex); //$NON-NLS-1$ //$NON-NLS-2$
+                            }
                         }
                     };
 
@@ -225,7 +243,14 @@ public class OpenMdObjectHook implements IStartup {
 
             installCopySupport(shell, dialog);
 
-            applySmartFilter(dialog, smartFilterRef[0], smartLp, comparator, filterInput.getText(), true);
+            try
+            {
+                applySmartFilter(dialog, smartFilterRef, smartLp, comparator, filterInput.getText(), true);
+            }
+            catch (Exception ex)
+            {
+                Global.tempLogException("OpenMdObject", "initialApply", ex); //$NON-NLS-1$ //$NON-NLS-2$
+            }
 
             filterControl.getDisplay().asyncExec(() -> {
                 if (filterControl.isDisposed())
@@ -282,33 +307,34 @@ public class OpenMdObjectHook implements IStartup {
     }
 
     /**
-     * Запуск фильтрации без {@code applyFilter}/{@code createFilter} — один экземпляр
-     * {@link org.eclipse.ui.dialogs.OpenMdObjectItemsFilter} на весь цикл EDT jobs.
+     * Запуск фильтрации без {@code applyFilter}/{@code createFilter}.
+     * На каждый schedule — новый {@link org.eclipse.ui.dialogs.OpenMdObjectItemsFilter}:
+     * штатный {@code ContentProvider.add} отбрасывает чужие джобы через
+     * {@code filter == dialog.filter}; мутация одного экземпляра ломала эту защиту
+     * (старый FilterJob продолжал писать после reset → дубли/затроения с задержкой).
      */
     private static void applySmartFilter(Object dialog,
-            org.eclipse.ui.dialogs.OpenMdObjectItemsFilter smartFilter,
+            org.eclipse.ui.dialogs.OpenMdObjectItemsFilter[] smartFilterRef,
             OpenMdObjectLabelProvider smartLp,
             OpenMdObjectComparator comparator,
             String pattern) {
-        applySmartFilter(dialog, smartFilter, smartLp, comparator, pattern, false);
+        applySmartFilter(dialog, smartFilterRef, smartLp, comparator, pattern, false);
     }
 
     private static void applySmartFilter(Object dialog,
-            org.eclipse.ui.dialogs.OpenMdObjectItemsFilter smartFilter,
+            org.eclipse.ui.dialogs.OpenMdObjectItemsFilter[] smartFilterRef,
             OpenMdObjectLabelProvider smartLp,
             OpenMdObjectComparator comparator,
             String pattern,
             boolean forceSchedule) {
+        Shell shell = dialogShell(dialog);
+        org.eclipse.ui.dialogs.OpenMdObjectItemsFilter smartFilter = smartFilterRef[0];
         Object currentFilter = Global.getField(dialog, "filter");
         boolean skip = smartFilter.shouldSkipSchedule(pattern, currentFilter);
         boolean filterHandoff = currentFilter != smartFilter;
 
         OpenMdObjectDebug.log("applySmartFilter text=\"" + pattern + "\" smartPatBefore=\"" + smartFilter.getPattern() //$NON-NLS-1$
                 + "\" current=" + OpenMdObjectDebug.filterDesc(currentFilter) + " skip=" + skip); //$NON-NLS-1$
-
-        smartFilter.setPattern(pattern);
-        smartLp.setPattern(pattern);
-        comparator.setMatcher(new SmartMatcher(pattern));
 
         if (skip && !filterHandoff && !forceSchedule) {
             OpenMdObjectDebug.log("applySmartFilter SKIP schedule (pattern unchanged for EDT)");
@@ -326,27 +352,209 @@ public class OpenMdObjectHook implements IStartup {
         Job filterJob = getJobField(dialog, "filterJob", "fFilterJob");
         OpenMdObjectDebug.log("applySmartFilter cancel jobs fh=" + OpenMdObjectDebug.jobState(filterHistoryJob) //$NON-NLS-1$
                 + " fj=" + OpenMdObjectDebug.jobState(filterJob)); //$NON-NLS-1$
+        // Сначала инвалидируем in-flight comfortJob (проверка gen перед reset).
+        bumpFilterGeneration(shell);
         if (filterHistoryJob != null) filterHistoryJob.cancel();
         if (filterJob != null) filterJob.cancel();
+        cancelComfortFilterJob(shell);
+        Object cpStop = Global.getField(dialog, "contentProvider"); //$NON-NLS-1$
+        if (cpStop != null)
+            Global.invoke(cpStop, "stopReloadingCache"); //$NON-NLS-1$
 
-        Global.setField(dialog, "filter", smartFilter);
-        setFieldExactClass(dialog, FilteredItemsSelectionDialog.class, "filter", smartFilter);
+        // Новый экземпляр — как штатный createFilter(): старые FilterJob не пройдут
+        // проверку filter == dialog.filter в ContentProvider.add.
+        // ItemsFilter.<init> читает dialog.pattern (Text); после replacePatternText
+        // тот Text уже disposed → SWTException. На время ctor обнуляем поле.
+        org.eclipse.ui.dialogs.OpenMdObjectItemsFilter nextFilter;
+        try
+        {
+            nextFilter = createSmartFilter((FilteredItemsSelectionDialog) dialog, smartLp, pattern);
+        }
+        catch (Exception e)
+        {
+            Global.tempLog("OpenMdObject", "createSmartFilter FAIL pat=\"" + pattern + "\": " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.tempLogException("OpenMdObject", "createSmartFilter", e); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        smartFilterRef[0] = nextFilter;
+        smartLp.setPattern(pattern);
+        comparator.setMatcher(new SmartMatcher(pattern));
+
+        Global.setField(dialog, "filter", nextFilter);
+        setFieldExactClass(dialog, FilteredItemsSelectionDialog.class, "filter", nextFilter);
 
         if (pattern.isEmpty())
         {
             clearSearchCache(dialog);
-            refreshHistoryOnUiThread(dialog, smartFilter, comparator);
+            refreshHistoryOnUiThread(dialog, nextFilter, comparator);
+            Global.tempLog("OpenMdObject", "applySmartFilter history-only"); //$NON-NLS-1$
             return;
         }
 
-        clearSearchCache(dialog);
+        // Не schedule штатный filterHistoryJob: даже после cancel() он может
+        // добежать до reset()+filterJob.schedule() → второй fill без reset → дубли.
+        scheduleComfortFilterJob(shell, dialog, nextFilter);
+    }
 
-        if (filterHistoryJob != null) {
-            filterHistoryJob.schedule();
-            OpenMdObjectDebug.log("applySmartFilter SCHEDULED filterHistoryJob smartPat=\"" //$NON-NLS-1$
-                    + smartFilter.getPattern() + "\""); //$NON-NLS-1$
-        } else {
-            OpenMdObjectDebug.log("applySmartFilter WARN filterHistoryJob not found");
+    private static Shell dialogShell(Object dialog)
+    {
+        if (dialog instanceof FilteredItemsSelectionDialog)
+            return ((FilteredItemsSelectionDialog) dialog).getShell();
+        Object shell = Global.invoke(dialog, "getShell"); //$NON-NLS-1$
+        return shell instanceof Shell ? (Shell) shell : null;
+    }
+
+    /** Счётчик поколения фильтра на Shell (AtomicLong — чтение из Job без UI-потока). */
+    private static AtomicLong filterGeneration(Shell shell)
+    {
+        if (shell == null || shell.isDisposed())
+            return null;
+        Object existing = shell.getData(FILTER_GEN_KEY);
+        if (existing instanceof AtomicLong)
+            return (AtomicLong) existing;
+        AtomicLong created = new AtomicLong(0L);
+        shell.setData(FILTER_GEN_KEY, created);
+        return created;
+    }
+
+    private static long bumpFilterGeneration(Shell shell)
+    {
+        AtomicLong gen = filterGeneration(shell);
+        return gen == null ? -1L : gen.incrementAndGet();
+    }
+
+    private static boolean isFilterGenerationStale(AtomicLong genCounter, long gen)
+    {
+        return genCounter == null || gen < 0L || genCounter.get() != gen;
+    }
+
+    private static void cancelComfortFilterJob(Shell shell)
+    {
+        if (shell == null || shell.isDisposed())
+            return;
+        Object prev = shell.getData(COMFORT_FILTER_JOB_KEY);
+        if (prev instanceof Job)
+            ((Job) prev).cancel();
+    }
+
+    /**
+     * Свой history→filterJob pipeline с generation-gate вместо штатного
+     * {@code FilterHistoryJob} (тот после cancel всё равно зовёт reset+schedule).
+     */
+    private static void scheduleComfortFilterJob(Shell shell, Object dialog,
+            org.eclipse.ui.dialogs.OpenMdObjectItemsFilter filter)
+    {
+        if (shell == null || shell.isDisposed())
+            return;
+        AtomicLong genCounter = filterGeneration(shell);
+        long gen = bumpFilterGeneration(shell);
+        Job prev = (Job) shell.getData(COMFORT_FILTER_JOB_KEY);
+        if (prev != null)
+            prev.cancel();
+
+        Job comfortJob = new Job("Comfort OpenMdObject filter") //$NON-NLS-1$
+        {
+            @Override
+            protected IStatus run(IProgressMonitor monitor)
+            {
+                Object cp = Global.getField(dialog, "contentProvider"); //$NON-NLS-1$
+                if (cp == null)
+                    return Status.CANCEL_STATUS;
+                try
+                {
+                    // AtomicLong — без shell.getData() из worker (иначе SWT Invalid thread access).
+                    if (isFilterGenerationStale(genCounter, gen) || monitor.isCanceled())
+                        return Status.CANCEL_STATUS;
+                    Global.invoke(cp, "reset"); //$NON-NLS-1$
+                    if (isFilterGenerationStale(genCounter, gen) || monitor.isCanceled())
+                        return Status.CANCEL_STATUS;
+                    Global.invoke(cp, "addHistoryItems", filter); //$NON-NLS-1$
+                    if (isFilterGenerationStale(genCounter, gen) || monitor.isCanceled())
+                        return Status.CANCEL_STATUS;
+                    Global.invoke(cp, "refresh"); //$NON-NLS-1$
+                    if (isFilterGenerationStale(genCounter, gen) || monitor.isCanceled())
+                        return Status.CANCEL_STATUS;
+                    Job filterJob = getJobField(dialog, "filterJob", "fFilterJob"); //$NON-NLS-1$ //$NON-NLS-2$
+                    if (filterJob != null)
+                        filterJob.schedule();
+                    Global.tempLog("OpenMdObject", "comfortJob OK gen=" + gen //$NON-NLS-1$
+                            + " pat=\"" + filter.getPattern() + "\""); //$NON-NLS-1$ //$NON-NLS-2$
+                    return Status.OK_STATUS;
+                }
+                catch (Exception e)
+                {
+                    Global.tempLogException("OpenMdObject", "comfortJob", e); //$NON-NLS-1$ //$NON-NLS-2$
+                    return Status.CANCEL_STATUS;
+                }
+            }
+        };
+        comfortJob.setSystem(true);
+        shell.setData(COMFORT_FILTER_JOB_KEY, comfortJob);
+        comfortJob.schedule();
+    }
+
+    private static void installDedupeHooks(Shell shell, Object dialog, OpenMdObjectComparator comparator)
+    {
+        if (shell == null || Boolean.TRUE.equals(shell.getData(DEDUPE_HOOK_KEY)))
+            return;
+        shell.setData(DEDUPE_HOOK_KEY, Boolean.TRUE);
+        Job filterJob = getJobField(dialog, "filterJob", "fFilterJob"); //$NON-NLS-1$ //$NON-NLS-2$
+        if (filterJob == null)
+            return;
+        filterJob.addJobChangeListener(new JobChangeAdapter()
+        {
+            @Override
+            public void done(IJobChangeEvent event)
+            {
+                Display display = Display.getDefault();
+                if (display == null || display.isDisposed())
+                    return;
+                display.asyncExec(() -> {
+                    if (shell.isDisposed())
+                        return;
+                    int removed = dedupeContentProviderItems(dialog);
+                    if (removed > 0)
+                    {
+                        resortDialogLists(dialog, comparator);
+                        refreshLazyTable(dialog);
+                    }
+                });
+            }
+        });
+    }
+
+
+    /**
+     * Создаёт фильтр без обращения к disposed {@code Text} в поле {@code pattern}.
+     */
+    private static org.eclipse.ui.dialogs.OpenMdObjectItemsFilter createSmartFilter(
+            FilteredItemsSelectionDialog dialog,
+            OpenMdObjectLabelProvider smartLp,
+            String pattern)
+    {
+        Object savedPattern = getFieldExactClass(dialog, FilteredItemsSelectionDialog.class, "pattern"); //$NON-NLS-1$
+        setFieldExactClass(dialog, FilteredItemsSelectionDialog.class, "pattern", null); //$NON-NLS-1$
+        try
+        {
+            return new org.eclipse.ui.dialogs.OpenMdObjectItemsFilter(dialog, smartLp, pattern);
+        }
+        finally
+        {
+            setFieldExactClass(dialog, FilteredItemsSelectionDialog.class, "pattern", savedPattern); //$NON-NLS-1$
+        }
+    }
+
+    private static Object getFieldExactClass(Object obj, Class<?> exactClass, String fieldName)
+    {
+        try
+        {
+            Field f = exactClass.getDeclaredField(fieldName);
+            f.setAccessible(true);
+            return f.get(obj);
+        }
+        catch (Exception e)
+        {
+            return null;
         }
     }
 
@@ -398,9 +606,96 @@ public class OpenMdObjectHook implements IStartup {
                 Display display = Display.getDefault();
                 if (display == null || display.isDisposed())
                     return;
-                display.syncExec(() -> resortDialogLists(dialog, comparator));
+                display.syncExec(() -> {
+                    dedupeContentProviderItems(dialog);
+                    resortDialogLists(dialog, comparator);
+                });
             }
         });
+    }
+
+    /** Схлопывает дубли ObjectDescriptionPair с одним EObjectURI (identity Set их не ловит). */
+    @SuppressWarnings("unchecked")
+    private static int dedupeContentProviderItems(Object dialog)
+    {
+        Object cp = Global.getField(dialog, "contentProvider"); //$NON-NLS-1$
+        if (cp == null)
+            return 0;
+        Object itemsObj = Global.getField(cp, "items"); //$NON-NLS-1$
+        if (!(itemsObj instanceof Set))
+            return 0;
+        Set<Object> items = (Set<Object>) itemsObj;
+        List<Object> snapshot;
+        synchronized (items)
+        {
+            snapshot = new ArrayList<>(items);
+        }
+        Map<String, Object> unique = new LinkedHashMap<>();
+        int anon = 0;
+        for (Object item : snapshot)
+        {
+            String key = itemDedupeKey(item);
+            if (key == null)
+                key = "anon-" + (++anon) + "-" + System.identityHashCode(item); //$NON-NLS-1$ //$NON-NLS-2$
+            unique.putIfAbsent(key, item);
+        }
+        int removed = snapshot.size() - unique.size();
+        if (removed <= 0)
+            return 0;
+        synchronized (items)
+        {
+            items.clear();
+            items.addAll(unique.values());
+        }
+        dedupeProviderListByKey(cp, "lastFilteredItems"); //$NON-NLS-1$
+        dedupeProviderListByKey(cp, "lastSortedItems"); //$NON-NLS-1$
+        Global.tempLog("OpenMdObject", "dedupe removed=" + removed + " left=" + unique.size()); //$NON-NLS-1$ //$NON-NLS-2$
+        return removed;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void dedupeProviderListByKey(Object cp, String fieldName)
+    {
+        Object listObj = Global.getField(cp, fieldName);
+        if (!(listObj instanceof List))
+            return;
+        List<Object> list = (List<Object>) listObj;
+        synchronized (list)
+        {
+            Map<String, Object> unique = new LinkedHashMap<>();
+            int anon = 0;
+            for (Object item : list)
+            {
+                String key = itemDedupeKey(item);
+                if (key == null)
+                    key = "anon-" + (++anon) + "-" + System.identityHashCode(item); //$NON-NLS-1$ //$NON-NLS-2$
+                unique.putIfAbsent(key, item);
+            }
+            if (unique.size() == list.size())
+                return;
+            list.clear();
+            list.addAll(unique.values());
+        }
+    }
+
+    private static String itemDedupeKey(Object item)
+    {
+        if (item == null)
+            return null;
+        try
+        {
+            Object desc = Global.getField(item, "description"); //$NON-NLS-1$
+            if (desc == null)
+                desc = Global.getField(item, "descriptionRu"); //$NON-NLS-1$
+            if (desc == null)
+                return null;
+            Object uri = Global.invoke(desc, "getEObjectURI"); //$NON-NLS-1$
+            return uri != null ? uri.toString() : null;
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
     }
 
     @SuppressWarnings("unchecked")

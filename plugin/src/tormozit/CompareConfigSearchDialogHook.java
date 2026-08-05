@@ -56,6 +56,8 @@ import org.eclipse.ui.IPartService;
 import org.eclipse.ui.IWorkbenchPart;
 
 import com._1c.g5.v8.dt.compare.model.ComparisonSide;
+import com._1c.g5.v8.dt.compare.model.MatchedObjectsComparisonNode;
+import com._1c.g5.v8.dt.compare.model.TopComparisonNode;
 import com._1c.g5.v8.dt.compare.ui.editor.DtComparisonView;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.AbstractDirectPartialModelNode;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.AbstractNodeWithLabels;
@@ -227,7 +229,8 @@ public class CompareConfigSearchDialogHook
                 session.cancel();
                 return;
             }
-            session.findAndShowAll(cbSearchAllColumns.getSelection(), cbWholeWord.getSelection());
+            session.findAndShowAll(cbSearchAllRows.getSelection(), cbSearchAllColumns.getSelection(),
+                cbWholeWord.getSelection());
             session.focusComparisonTree();
         });
         shell.setData(SESSION_KEY, session);
@@ -619,10 +622,12 @@ public class CompareConfigSearchDialogHook
     }
 
     /**
-     * Параллельный сбор всех узлов дерева сравнения через общую очередь BFS-обхода.
+     * Параллельный сбор узлов дерева сравнения через общую очередь BFS-обхода.
      * Корень один — воркеры делят между собой узлы из очереди, а не «по корням».
      *
-     * @param progressPercent грубая оценка % по формуле processed/(processed+queue+inFlight); может быть {@code null}
+     * @param objectsOnly {@code true} — не спускаться в объекты МД (как «До объектов»),
+     *                    в индекс попадают только {@link #isConfigurationObjectNode}
+     * @param progressPercent монотонный %: high-water(done+rem) + clamp вверх; может быть {@code null}
      */
     private static CollectTreeResult collectTreeItems(
         Object[] roots,
@@ -634,7 +639,8 @@ public class CompareConfigSearchDialogHook
         AtomicInteger collectedCounter,
         AtomicInteger processedCounter,
         AtomicInteger activeCollectThreads,
-        AtomicInteger progressPercent)
+        AtomicInteger progressPercent,
+        boolean objectsOnly)
     {
         if (roots == null || roots.length == 0)
         {
@@ -654,6 +660,7 @@ public class CompareConfigSearchDialogHook
 
         // worked() только с потока Job (монитор не thread-safe); воркеры пишут только AtomicInteger.
         AtomicInteger monitorReported = new AtomicInteger(0);
+        AtomicInteger highWaterTotal = new AtomicInteger(0);
         if (monitor != null)
             monitor.beginTask("Подготовка индекса поиска по сравнению", 100); //$NON-NLS-1$
 
@@ -662,8 +669,12 @@ public class CompareConfigSearchDialogHook
         AtomicInteger queueSize = new AtomicInteger(0);
         for (Object root : roots)
         {
-            items.add(root);
-            collectedCounter.incrementAndGet();
+            if (!objectsOnly || isConfigurationObjectNode(root))
+            {
+                items.add(root);
+                collectedCounter.incrementAndGet();
+            }
+            // Вглубь корня идём всегда (конфигурация/проект — контейнеры).
             queue.offer(root);
             queueSize.incrementAndGet();
         }
@@ -686,7 +697,7 @@ public class CompareConfigSearchDialogHook
                     {
                         collectTreeWorker(queue, queueSize, items, provider, viewer, generation,
                             activeGeneration, monitor, collectedCounter, processedCounter, cancelled,
-                            inFlight, progressPercent);
+                            inFlight, progressPercent, highWaterTotal, objectsOnly);
                     }
                     finally
                     {
@@ -743,14 +754,18 @@ public class CompareConfigSearchDialogHook
         return new CollectTreeResult(new ArrayList<>(items), cancelled.get());
     }
 
-    /** Грубая оценка прогресса BFS: processed / (processed + очередь + inFlight). */
+    /**
+     * Монотонная оценка прогресса BFS: totalEst = max(totalEst, done+rem),
+     * raw = done*100/totalEst, display = max(prev, min(99, raw)). При rem==0 → 100.
+     */
     private static void publishCollectPercent(
         AtomicInteger progressPercent,
         AtomicInteger processedCounter,
         AtomicInteger queueSize,
-        AtomicInteger inFlight)
+        AtomicInteger inFlight,
+        AtomicInteger highWaterTotal)
     {
-        if (progressPercent == null)
+        if (progressPercent == null || highWaterTotal == null)
             return;
         int done = processedCounter.get();
         int rem = queueSize.get() + inFlight.get();
@@ -764,7 +779,11 @@ public class CompareConfigSearchDialogHook
             progressPercent.set(100);
             return;
         }
-        progressPercent.set((int)Math.min(99L, done * 100L / (done + rem)));
+        int totalEst = highWaterTotal.updateAndGet(prev -> Math.max(prev, done + rem));
+        if (totalEst <= 0)
+            return;
+        int raw = (int)Math.min(99L, done * 100L / totalEst);
+        progressPercent.updateAndGet(prev -> Math.max(prev, raw));
     }
 
     /** Перенос % в IProgressMonitor с потока Job (не из воркеров). */
@@ -797,7 +816,9 @@ public class CompareConfigSearchDialogHook
         AtomicInteger processedCounter,
         AtomicBoolean cancelled,
         AtomicInteger inFlight,
-        AtomicInteger progressPercent)
+        AtomicInteger progressPercent,
+        AtomicInteger highWaterTotal,
+        boolean objectsOnly)
     {
         CollectProgress progress = new CollectProgress(generation, activeGeneration, monitor,
             collectedCounter::incrementAndGet, processedCounter::incrementAndGet);
@@ -813,7 +834,7 @@ public class CompareConfigSearchDialogHook
                 if (++idleYields >= COLLECT_QUEUE_IDLE_YIELDS)
                 {
                     idleYields = 0;
-                    publishCollectPercent(progressPercent, processedCounter, queueSize, inFlight);
+                    publishCollectPercent(progressPercent, processedCounter, queueSize, inFlight, highWaterTotal);
                     if (generation != activeGeneration.getAsInt()
                         || (monitor != null && monitor.isCanceled()))
                     {
@@ -841,21 +862,26 @@ public class CompareConfigSearchDialogHook
                         cancelled.set(true);
                         return;
                     }
-                    if (isNodeMatchFilters(child, viewer))
+                    boolean objectNode = isConfigurationObjectNode(child);
+                    if (isNodeMatchFilters(child, viewer) && (!objectsOnly || objectNode))
                     {
                         items.add(child);
                         progress.nodeAdded();
                     }
-                    queue.offer(child);
-                    queueSize.incrementAndGet();
+                    // Как «До объектов»: в лист с ObjectId не спускаемся.
+                    if (!objectsOnly || !isExpandLeafObjectNode(child))
+                    {
+                        queue.offer(child);
+                        queueSize.incrementAndGet();
+                    }
                     if ((processedCounter.get() & 63) == 0)
-                        publishCollectPercent(progressPercent, processedCounter, queueSize, inFlight);
+                        publishCollectPercent(progressPercent, processedCounter, queueSize, inFlight, highWaterTotal);
                 }
             }
             finally
             {
                 inFlight.decrementAndGet();
-                publishCollectPercent(progressPercent, processedCounter, queueSize, inFlight);
+                publishCollectPercent(progressPercent, processedCounter, queueSize, inFlight, highWaterTotal);
             }
         }
     }
@@ -1251,6 +1277,55 @@ public class CompareConfigSearchDialogHook
         return ""; //$NON-NLS-1$
     }
 
+    /**
+     * Верхний объект конфигурации (как штатный поиск EDT / NodeFlattener):
+     * {@link TopComparisonNode} (= MdObjectComparisonNode и др.), не свойства/фичи.
+     */
+    static boolean isConfigurationObjectNode(Object element)
+    {
+        Object cn = Global.call(element, "retrieveComparisonNode"); //$NON-NLS-1$
+        if (cn == null)
+            cn = element;
+        if (cn instanceof TopComparisonNode)
+            return true;
+        // запасной путь: ObjectId как в «До объектов»
+        return hasConfigurationObjectId(cn instanceof MatchedObjectsComparisonNode m ? m
+            : CompareConfigSelectionListener.resolveMatchedNode(element));
+    }
+
+    /**
+     * Лист для обхода «до объектов» (как ExpandHandler.isObject): есть ObjectId ≠ -1.
+     * Папки/конфигурация без id — не лист, в них спускаемся.
+     */
+    private static boolean isExpandLeafObjectNode(Object element)
+    {
+        MatchedObjectsComparisonNode matched = CompareConfigSelectionListener.resolveMatchedNode(element);
+        return hasConfigurationObjectId(matched);
+    }
+
+    private static boolean hasConfigurationObjectId(MatchedObjectsComparisonNode matched)
+    {
+        if (matched == null)
+            return false;
+        Long mainId = matched.getMainObjectId();
+        Long otherId = matched.getOtherObjectId();
+        return (mainId != null && mainId != -1L) || (otherId != null && otherId != -1L);
+    }
+
+    /** Оставляет только верхние объекты МД — для «Найти все» без «По всем строкам». */
+    private static List<Object> filterConfigurationObjectNodes(List<Object> items)
+    {
+        if (items == null || items.isEmpty())
+            return items != null ? items : List.of();
+        List<Object> out = new ArrayList<>(Math.min(items.size(), 1024));
+        for (Object item : items)
+        {
+            if (isConfigurationObjectNode(item))
+                out.add(item);
+        }
+        return out;
+    }
+
     static String buildPathForNode(Object element)
     {
         java.util.List<String> parts = new java.util.ArrayList<>();
@@ -1457,7 +1532,7 @@ public class CompareConfigSearchDialogHook
         catch (Exception ignored) {}
     }
 
-    /** Компактная строка прогресса сбора — грубый % по фронту BFS. */
+    /** Компактная строка прогресса сбора — монотонный % (high-water + clamp). */
     private static String formatCollectProgressStatus(int percent)
     {
         return "Подготовка индекса " + Math.max(0, Math.min(100, percent)) + "%"; //$NON-NLS-1$ //$NON-NLS-2$
@@ -1906,7 +1981,7 @@ public class CompareConfigSearchDialogHook
                         Object[] roots = treeProvider.getElements(input);
                         CollectTreeResult collectResult = collectTreeItems(roots, treeProvider, treeViewer,
                             generation, () -> prefetchGeneration, monitor, prefetchCollected,
-                            prefetchProcessed, prefetchThreads, prefetchProgressPercent);
+                            prefetchProcessed, prefetchThreads, prefetchProgressPercent, false);
                         if (collectResult.cancelled || generation != prefetchGeneration
                             || (monitor != null && monitor.isCanceled()))
                             return Status.CANCEL_STATUS;
@@ -2168,7 +2243,7 @@ public class CompareConfigSearchDialogHook
             job.schedule();
         }
 
-        void findAndShowAll(boolean searchAllColumns, boolean wholeWord)
+        void findAndShowAll(boolean searchAllRows, boolean searchAllColumns, boolean wholeWord)
         {
             cancel();
 
@@ -2211,6 +2286,7 @@ public class CompareConfigSearchDialogHook
             activeGeneration++;
             final int generation = activeGeneration;
             running = true;
+            // Без «По всем строкам» полный prefetch не ждём — лёгкий обход до объектов.
             collecting = !hasCachedItems;
             searchError = false;
             scanned = 0;
@@ -2220,7 +2296,7 @@ public class CompareConfigSearchDialogHook
             activeSearchThreads.set(0);
             collectProgressPercent.set(0);
             Job pfEarly = prefetchJob;
-            reportPrefetchProgress = !hasCachedItems
+            reportPrefetchProgress = searchAllRows && !hasCachedItems
                 && pfEarly != null && pfEarly.getState() != Job.NONE
                 && prefetchInput == input && prefetchFilterHash == filterHash;
             setSearchButtonsToCancelMode();
@@ -2237,7 +2313,35 @@ public class CompareConfigSearchDialogHook
                             return Status.CANCEL_STATUS;
 
                         List<Object> items;
-                        if (hasCachedItems)
+                        if (!searchAllRows)
+                        {
+                            if (hasCachedItems)
+                            {
+                                items = filterConfigurationObjectNodes(cachedItems);
+                            }
+                            else
+                            {
+                                if (generation != activeGeneration
+                                    || (monitor != null && monitor.isCanceled()))
+                                    return Status.CANCEL_STATUS;
+
+                                collecting = true;
+                                collected.set(0);
+                                totalProcessed.set(0);
+                                collectProgressPercent.set(0);
+
+                                Object[] roots = provider.getElements(input);
+                                CollectTreeResult collectResult = collectTreeItems(roots, provider, viewer,
+                                    generation, () -> activeGeneration, monitor, collected, totalProcessed,
+                                    activeSearchThreads, collectProgressPercent, true);
+                                items = collectResult.items;
+                                if (collectResult.cancelled)
+                                    return Status.CANCEL_STATUS;
+                                // Не saveCache: это неполный индекс, не должен подменять полный.
+                                collecting = false;
+                            }
+                        }
+                        else if (hasCachedItems)
                         {
                             items = cachedItems;
                         }
@@ -2260,7 +2364,7 @@ public class CompareConfigSearchDialogHook
                             Object[] roots = provider.getElements(input);
                             CollectTreeResult collectResult = collectTreeItems(roots, provider, viewer,
                                 generation, () -> activeGeneration, monitor, collected, totalProcessed,
-                                activeSearchThreads, collectProgressPercent);
+                                activeSearchThreads, collectProgressPercent, false);
                             items = collectResult.items;
                             if (collectResult.cancelled)
                                 return Status.CANCEL_STATUS;
@@ -2274,8 +2378,10 @@ public class CompareConfigSearchDialogHook
                         scanned = 0;
                         monitor.beginTask("Фильтрация...", n); //$NON-NLS-1$
 
+                        // Без «По всем строкам» штатный EDT ищет имена объектов → колонка «Объект».
+                        boolean matchObjectColumn = searchAllColumns || !searchAllRows;
                         List<CompareSearchMatch> matches = buildFindAllMatches(items, effectiveQuery,
-                            caseSensitive, searchAllColumns, wholeWord, headerMain, headerOther,
+                            caseSensitive, matchObjectColumn, wholeWord, headerMain, headerOther,
                             headerAncestor, headerObject, generation, monitor);
 
                         if (generation != activeGeneration)

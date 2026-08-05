@@ -180,6 +180,8 @@ public final class DeployConfigurationFixHook implements IStartup
             FormXmlFixWatcher watcher = null;
             try
             {
+                // Дубли Configuration.mdo — всегда до штатной выгрузки (не от флажка Form.xml).
+                ConfigurationMdoFix.fixBeforeUnload(finishButton.getShell());
                 boolean shouldFix = ourCheckbox != null && !ourCheckbox.isDisposed() && ourCheckbox.getSelection();
                 Global.tempLog(TEMP_LOG_TOPIC, "finish clicked, shouldFix=" + shouldFix); //$NON-NLS-1$
                 if (shouldFix)

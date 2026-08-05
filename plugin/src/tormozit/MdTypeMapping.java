@@ -107,12 +107,17 @@ public final class MdTypeMapping
         add("Бот",                          "Bot",                          "Bots");
 
         add("ВнешнийИсточникДанных",        "ExternalDataSource",           "ExternalDataSources");
+        add("ВнешняяОбработка",             "ExternalDataProcessor",        "ExternalDataProcessors");
+        add("ВнешнийОтчет",                 "ExternalReport",               "ExternalReports");
         add("ПакетXDTO",                    "XDTOPackage",                  "XDTOPackages");
         add("WebСервис",                    "WebService",                   "WebServices");
         add("HTTPСервис",                   "HTTPService",                  "HTTPServices");
+        add("WSСсылка",                     "WSReference",                  "WSReferences");
         add("IntegrationService",           "IntegrationService",           "IntegrationServices");
-        add("СтильОформления",              "StyleItem",                    "StyleItems");
+        add("ЭлементСтиля",                 "StyleItem",                    "StyleItems");
+        add("Стиль",                        "Style",                        "Styles");
         add("Интерфейс",                    "Interface",                    "Interfaces");
+        addAlias("СтильОформления", "ЭлементСтиля");
         
         // Дочерние
         add("Форма", "Form", "Forms");
@@ -234,9 +239,14 @@ public final class MdTypeMapping
         TREE_GROUP_LABEL_TO_RU.put("XDTO-пакеты",                        "ПакетXDTO");
         TREE_GROUP_LABEL_TO_RU.put("Web-сервисы",                        "WebСервис");
         TREE_GROUP_LABEL_TO_RU.put("HTTP-сервисы",                       "HTTPСервис");
-        TREE_GROUP_LABEL_TO_RU.put("Стили",                              "СтильОформления");
+        TREE_GROUP_LABEL_TO_RU.put("WS-ссылки",                          "WSСсылка");
+        TREE_GROUP_LABEL_TO_RU.put("Элементы стиля",                     "ЭлементСтиля");
+        TREE_GROUP_LABEL_TO_RU.put("Стили",                              "Стиль");
         TREE_GROUP_LABEL_TO_RU.put("Интерфейсы",                         "Интерфейс");
         TREE_GROUP_LABEL_TO_RU.put("Внешние источники данных",           "ВнешнийИсточникДанных");
+        TREE_GROUP_LABEL_TO_RU.put("Внешние обработки",                  "ВнешняяОбработка");
+        TREE_GROUP_LABEL_TO_RU.put("Внешние отчеты",                     "ВнешнийОтчет");
+        TREE_GROUP_LABEL_TO_RU.put("Константы",                          "Константа");
 
         for (Map.Entry<String, String> entry : TREE_GROUP_LABEL_TO_RU.entrySet())
             RU_TO_GROUP_LABEL.put(entry.getValue(), entry.getKey());

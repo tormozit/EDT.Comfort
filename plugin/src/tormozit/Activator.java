@@ -81,6 +81,9 @@ public class Activator extends AbstractUIPlugin
         settings.getPreferenceStore().setDefault(
             ComfortSettings.PREF_SPELLING_CHECK_IDENTIFIERS_VISIBLE,
             ComfortSettings.DEFAULT_SPELLING_CHECK_IDENTIFIERS_VISIBLE);
+        settings.getPreferenceStore().setDefault(
+            ComfortSettings.PREF_COMPARE_FILTER_AWARE_CHECKS,
+            ComfortSettings.DEFAULT_COMPARE_FILTER_AWARE_CHECKS);
         ContentAssistManager.init(settings);
         ComfortSettings.init(PLUGIN_ID);
         settings.getPreferenceStore().addPropertyChangeListener(event -> {

@@ -19,10 +19,13 @@ import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.emf.common.util.URI;
+import org.eclipse.emf.ecore.EClass;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.EReference;
 import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.emf.ecore.util.EcoreUtil;
+import org.eclipse.core.runtime.IPath;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
@@ -64,6 +67,9 @@ import com._1c.g5.v8.dt.form.model.FormAttribute;
 import com._1c.g5.v8.dt.form.model.FormCommand;
 import com._1c.g5.v8.dt.form.model.FormField;
 import com._1c.g5.v8.dt.form.model.FormParameter;
+import com._1c.g5.v8.dt.mcore.Help;
+import com._1c.g5.v8.dt.mcore.HelpPage;
+import com._1c.g5.v8.dt.mcore.McorePackage;
 import com._1c.g5.v8.dt.moxel.Cell;
 import com._1c.g5.v8.dt.moxel.Row;
 import com._1c.g5.v8.dt.moxel.SpreadsheetDocument;
@@ -74,6 +80,7 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorEmbeddedEditorPage;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicFeature;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
+import com._1c.g5.v8.dt.ui.util.OpenHelper;
 import com._1c.g5.v8.dt.search.core.BmObjectMatch;
 import com._1c.g5.v8.dt.search.core.refs.BmReferenceMatch;
 import com._1c.g5.v8.dt.search.core.text.TextSearchFileMatch;
@@ -111,6 +118,7 @@ import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.texteditor.ITextEditor;
 
 /**
  * Доработка панели глобального поиска по метаданным (см. также {@link FileSearchResultsHook} для поиска по файлам).
@@ -604,11 +612,7 @@ public final class ConfigSearchResultsHook implements IStartup
                 file = fm.getFile();
                 lineNumber = fm.getLineNumber();
             }
-            String path = bmTopObjectPathFromTableItem(tableItem);
-            if (path == null || path.isEmpty())
-                path = modulePathFromTableItem(tableItem);
-            if (path == null || path.isEmpty())
-                path = mdPathFromTableItemFile(tableItem);
+            String path = formatPathForTableItem(tableItem, null);
             rows.add(new MatchRow(path, extractPropertyText(tableItem), lineNumber,
                 extractMatchStyledText(tableItem), file, tableItem));
         }
@@ -879,6 +883,11 @@ public final class ConfigSearchResultsHook implements IStartup
         try
         {
             Object matchObj = Global.invoke(tableItem, "getData"); //$NON-NLS-1$
+            // Справочная информация: штатный handleOpen открывает владельца (журнал/справочник…),
+            // а нужен MdHelpContentEditor — тот же вызов, что OpenMdHelpContentAction:
+            // OpenHelper.openEditor(mdObject, helpFeature).
+            if (openHelpContentMatch(matchObj, workbenchPage))
+                return true;
             if (!(matchObj instanceof TextSearchModelMatch match))
             {
                 // BmReferenceMatch («Найти ссылки на объект») внутри формы: штатный handleOpen
@@ -1805,6 +1814,193 @@ public final class ConfigSearchResultsHook implements IStartup
             if (cur instanceof SpreadsheetDocument)
                 return true;
         return false;
+    }
+
+    /**
+     * Открывает редактор справочной информации ({@code MdHelpContentEditor}) вместо редактора
+     * объекта-владельца. Тот же вызов, что {@code OpenMdHelpContentAction}:
+     * {@code OpenHelper.openEditor(mdObject, helpFeature)} — маршрутизация через
+     * {@code objectEditorInformation feature="help"} в {@code md.help.ui}.
+     *
+     * @return {@code true}, если совпадение — справочная информация и редактор открыт
+     */
+    private static boolean openHelpContentMatch(Object matchObj, IWorkbenchPage workbenchPage)
+    {
+        if (matchObj == null || workbenchPage == null)
+            return false;
+        try
+        {
+            MdObject mdObject = null;
+            TextSearchFileMatch fileMatch = null;
+            if (matchObj instanceof TextSearchFileMatch fm)
+            {
+                if (!isHelpContentFile(fm.getFile()))
+                    return false;
+                mdObject = resolveMatchTopAsMdObject(matchObj);
+                fileMatch = fm;
+            }
+            else
+            {
+                EObject leaf = resolveMatchLeaf(matchObj);
+                if (leaf == null || !isInsideHelp(leaf))
+                    return false;
+                mdObject = resolveMatchTopAsMdObject(matchObj);
+                if (mdObject == null)
+                    mdObject = GoToDefinition.findContainingMdObject(leaf);
+            }
+            IEditorPart editor = openMdHelpEditor(mdObject, workbenchPage);
+            if (editor == null)
+                return false;
+            if (fileMatch != null)
+                scheduleRevealInHelpEditor(workbenchPage, editor,
+                    fileMatch.getFileOffset(), Math.max(fileMatch.getTextLength(), 1), 0);
+            return true;
+        }
+        catch (Exception e)
+        {
+            log("openHelpContentMatch: " + e); //$NON-NLS-1$
+            return false;
+        }
+    }
+
+    /** Файл справочной информации: {@code …/Help/<lang>.html}. */
+    private static boolean isHelpContentFile(IFile file)
+    {
+        if (file == null)
+            return false;
+        IPath path = file.getProjectRelativePath();
+        if (path == null || path.segmentCount() < 2)
+            return false;
+        if (!"html".equalsIgnoreCase(path.getFileExtension())) //$NON-NLS-1$
+            return false;
+        return "Help".equalsIgnoreCase(path.segment(path.segmentCount() - 2)); //$NON-NLS-1$
+    }
+
+    private static boolean isInsideHelp(EObject leaf)
+    {
+        for (EObject cur = leaf; cur != null; cur = cur.eContainer())
+            if (cur instanceof Help || cur instanceof HelpPage)
+                return true;
+        return false;
+    }
+
+    private static MdObject resolveMatchTopAsMdObject(Object match)
+    {
+        EObject top = resolveMatchTopMdObject(match);
+        return top instanceof MdObject md ? md : null;
+    }
+
+    /**
+     * Как {@code OpenMdHelpContentAction.run()}: feature типа {@code Help} + 2-arg
+     * {@link OpenHelper#openEditor(EObject, EStructuralFeature)}.
+     *
+     * @return открытый редактор или {@code null}
+     */
+    private static IEditorPart openMdHelpEditor(MdObject mdObject, IWorkbenchPage workbenchPage)
+    {
+        if (mdObject == null)
+            return null;
+        EReference helpFeature = findHelpFeature(mdObject.eClass());
+        if (helpFeature == null)
+            return null;
+        try
+        {
+            return new OpenHelper(workbenchPage).openEditor(mdObject, helpFeature);
+        }
+        catch (RuntimeException e)
+        {
+            log("openMdHelpEditor: " + e.getMessage()); //$NON-NLS-1$
+            return null;
+        }
+    }
+
+    /**
+     * Переключает {@code HtmlMultiPageEditor} на вкладку исходника HTML и выделяет вхождение
+     * ({@code selectAndReveal}) — как {@code FileSearchResultsHook.revealMatchInEditor}.
+     * Редактор/страницы поднимаются асинхронно — повтор до готовности {@code ITextEditor}.
+     */
+    private static void scheduleRevealInHelpEditor(IWorkbenchPage workbenchPage, IEditorPart opened,
+            int offset, int length, int attempt)
+    {
+        if (workbenchPage == null || offset < 0)
+            return;
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        int delay = attempt == 0 ? 50 : 100;
+        display.timerExec(delay, () -> {
+            if (display.isDisposed())
+                return;
+            IEditorPart editor = opened;
+            if (editor == null || editor.getSite() == null)
+                editor = workbenchPage.getActiveEditor();
+            ITextEditor textEditor = resolveHelpTextEditor(editor);
+            if (textEditor == null)
+            {
+                if (attempt < 15)
+                    scheduleRevealInHelpEditor(workbenchPage, opened, offset, length, attempt + 1);
+                return;
+            }
+            activateHelpHtmlSourcePage(editor, textEditor);
+            try
+            {
+                textEditor.selectAndReveal(offset, length);
+                Object widgetObj = textEditor.getAdapter(Control.class);
+                if (widgetObj instanceof StyledText widget)
+                    SearchMatchScrollSupport.applyLeftmost(widget, offset, offset + Math.max(0, length));
+            }
+            catch (Exception e)
+            {
+                if (attempt < 15)
+                    scheduleRevealInHelpEditor(workbenchPage, opened, offset, length, attempt + 1);
+                else
+                    log("scheduleRevealInHelpEditor: " + e.getMessage()); //$NON-NLS-1$
+            }
+        });
+    }
+
+    /** {@code HtmlMultiPageEditor.getAdapter(ITextEditor)} → встроенный {@code StructuredTextEditor}. */
+    private static ITextEditor resolveHelpTextEditor(IEditorPart editor)
+    {
+        if (editor == null)
+            return null;
+        ITextEditor adapted = editor.getAdapter(ITextEditor.class);
+        if (adapted != null)
+            return adapted;
+        return TextEditor.resolveTextEditor(editor);
+    }
+
+    /** Вкладки: WYSIWYG → HTML (StructuredTextEditor) → Preview — активируем страницу исходника. */
+    private static void activateHelpHtmlSourcePage(IEditorPart multiPage, ITextEditor textEditor)
+    {
+        if (multiPage == null || textEditor == null)
+            return;
+        Object countObj = Global.invoke(multiPage, "getPageCount"); //$NON-NLS-1$
+        if (!(countObj instanceof Integer count))
+            return;
+        for (int i = 0; i < count; i++)
+        {
+            Object page = Global.invoke(multiPage, "getEditor", Integer.valueOf(i)); //$NON-NLS-1$
+            if (page == textEditor)
+            {
+                Global.invoke(multiPage, "setActivePage", Integer.valueOf(i)); //$NON-NLS-1$
+                return;
+            }
+        }
+    }
+
+    /** Как {@code MdHelpUtil.findHelpFeature}: ссылка на {@link McorePackage.Literals#HELP}. */
+    private static EReference findHelpFeature(EClass eClass)
+    {
+        if (eClass == null)
+            return null;
+        EClass helpClass = McorePackage.Literals.HELP;
+        for (EReference ref : eClass.getEAllReferences())
+        {
+            if (ref.getEType() == helpClass)
+                return ref;
+        }
+        return null;
     }
 
     /**
@@ -2938,35 +3134,28 @@ public final class ConfigSearchResultsHook implements IStartup
                 sb.append('.');
             sb.append(part);
         }
-        return ensureFormContextSuffix(sb.toString());
-    }
-
-    /** Контекст формы: {@code …Форма.ИмяФормы.Форма}. */
-    private static String ensureFormContextSuffix(String path)
-    {
-        if (path == null || path.isEmpty())
-            return ""; //$NON-NLS-1$
-        if (path.endsWith(".Форма")) //$NON-NLS-1$
-            return path;
-        int lastDot = path.lastIndexOf('.');
-        if (lastDot >= 0)
-        {
-            String last = path.substring(lastDot + 1);
-            if (MdTypeMapping.isModuleTypeSuffix(last))
-                return path;
-        }
-        if (path.contains(".Форма.")) //$NON-NLS-1$
-            return path + ".Форма"; //$NON-NLS-1$
-        return path;
+        return sb.toString();
     }
 
     /** Путь для колонки «Путь» — короткий MD-путь без дублирования колонки «Свойство». */
     private static String formatPathForTableItem(Object tableItem, Object ownerNode)
     {
         String source;
-        String path = bmTopObjectPathFromTableItem(tableItem);
-        if (path != null && !path.isEmpty())
+        String fileFullName = fullNameFromTableItemFile(tableItem);
+        String bmPath = bmTopObjectPathFromTableItem(tableItem);
+        String path;
+        // Файл → полное имя МД, как FileSearchResultsHook.resolveMdPath — но только когда
+        // оно уточняет вложенный объект (Форма/Макет/…), а не суффикс модуля того же топа.
+        if (preferFileFullName(fileFullName, bmPath))
+        {
+            path = fileFullName;
+            source = "fileFullName"; //$NON-NLS-1$
+        }
+        else if (bmPath != null && !bmPath.isEmpty())
+        {
+            path = bmPath;
             source = "bmObject"; //$NON-NLS-1$
+        }
         else
         {
             path = modulePathFromTableItem(tableItem);
@@ -2985,16 +3174,53 @@ public final class ConfigSearchResultsHook implements IStartup
                 }
             }
         }
-        String result = canonicalizeMdPath(path);
+        String result = GetRef.stripLowValueModuleSuffix(canonicalizeMdPath(path));
         if (result == null || result.isEmpty())
         {
             log("formatPathForTableItem: EMPTY source=" + source //$NON-NLS-1$
                 + " ownerLabel=" + extractLabel(ownerNode)); //$NON-NLS-1$
         }
-        return result;
+        return result != null ? result : ""; //$NON-NLS-1$
     }
 
-    /** Убирает суффикс {@code :...} — он показывается в колонке «Свойство». */
+    /**
+     * Полное имя МД по {@code Match.getFile()} — тот же резолв, что колонка «Путь»
+     * в результатах поиска по файлам ({@link GetRef#resolveFullNameOrNull}).
+     */
+    private static String fullNameFromTableItemFile(Object tableItem)
+    {
+        String rel = projectRelativePathFromTableItem(tableItem);
+        if (rel == null || rel.isEmpty())
+            return null;
+        return GetRef.resolveFullNameOrNull(rel);
+    }
+
+    /**
+     * {@code true}, если файловый путь задаёт вложенный МД-объект относительно BM-топа
+     * ({@code Справочник.Валюты} → {@code Справочник.Валюты.Форма.ФормаЭлемента}), а не только
+     * вид модуля того же объекта ({@code …МодульОбъекта}/{@code …МодульМенеджера}).
+     */
+    private static boolean preferFileFullName(String fileFullName, String bmPath)
+    {
+        if (fileFullName == null || fileFullName.isEmpty())
+            return false;
+        if (bmPath == null || bmPath.isEmpty())
+            return true;
+        String fileCanon = GetRef.stripLowValueModuleSuffix(canonicalizeMdPath(fileFullName));
+        String bmCanon = GetRef.stripLowValueModuleSuffix(canonicalizeMdPath(bmPath));
+        if (fileCanon == null || fileCanon.isEmpty())
+            return false;
+        if (bmCanon == null || bmCanon.isEmpty())
+            return true;
+        if (fileCanon.equals(bmCanon))
+            return true;
+        if (!fileCanon.startsWith(bmCanon + ".")) //$NON-NLS-1$
+            return fileCanon.length() > bmCanon.length();
+        String rest = fileCanon.substring(bmCanon.length() + 1);
+        return rest.indexOf('.') > 0;
+    }
+
+    /** Убирает суффикс {@code :...} (номер строки штатной подписи) из MD-пути. */
     private static String stripColonFragment(String value)
     {
         if (value == null || value.isEmpty())
@@ -3315,10 +3541,29 @@ public final class ConfigSearchResultsHook implements IStartup
         {
             Object styled = Global.invoke(tableItem, "getPropertyText"); //$NON-NLS-1$
             if (styled instanceof StyledString)
-                return ((StyledString) styled).getString();
+                return stripLineNumberSuffix(((StyledString) styled).getString());
         }
         catch (Exception ignored) {}
         return ""; //$NON-NLS-1$
+    }
+
+    /** Убирает хвостовой {@code :123} — номер строки уже в колонке «Строка». */
+    private static String stripLineNumberSuffix(String value)
+    {
+        if (value == null || value.isEmpty())
+            return ""; //$NON-NLS-1$
+        int colon = value.lastIndexOf(':');
+        if (colon <= 0 || colon >= value.length() - 1)
+            return value.trim();
+        String after = value.substring(colon + 1).trim();
+        if (after.isEmpty())
+            return value.trim();
+        for (int i = 0; i < after.length(); i++)
+        {
+            if (!Character.isDigit(after.charAt(i)))
+                return value.trim();
+        }
+        return value.substring(0, colon).trim();
     }
 
     /** Технические обёртки EMF, не показываемые отдельным сегментом пути (одна голая ссылка без смысловой нагрузки). */

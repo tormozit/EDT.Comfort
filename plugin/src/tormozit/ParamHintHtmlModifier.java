@@ -109,13 +109,20 @@ public final class ParamHintHtmlModifier
     /** Маркер ProgressListener только для Find-miss browser. */
     private static final String FIND_MISS_COMFORT_PROGRESS =
         "tormozit.findMissComfortProgress"; //$NON-NLS-1$
+    /** Маркер ProgressListener основного SWT.Show фильтра (один на browser). */
+    private static final String SHOW_COMFORT_PROGRESS =
+        "tormozit.paramHintShowProgress"; //$NON-NLS-1$
     /** Маркер кнопки закрытия на нижней панели ParametersHoverInfoControl. */
     private static final String CLOSE_TOOLBAR_MARK = "tormozit.paramHintClose"; //$NON-NLS-1$
-    /** Автовыбор сигнатуры: только при открытии или при сильном совпадении типа после смены текста. */
+    /** Автовыбор сигнатуры: только при открытии (не на каждый Progress). */
     private static final int SIG_PICK_STRONG_SCORE = 10;
     private static final String SIG_PICK_DONE_MARK = "tormozit.sigPickDone"; //$NON-NLS-1$
+    /** Уже патчили HTML этого browser — не трогать до смены документа EDT. */
+    private static final String HTML_PATCHED_MARK = "tormozit.paramHintHtmlPatched"; //$NON-NLS-1$
     private static final AtomicBoolean sigPickOnOpenPending = new AtomicBoolean(false);
-    private static volatile String sigPickLastFingerprint = ""; //$NON-NLS-1$
+    /** Реентрабельность tryModifyBrowserHtml (setText → Progress → снова modify). */
+    private static final ThreadLocal<Boolean> MODIFY_IN_PROGRESS =
+        ThreadLocal.withInitial(() -> Boolean.FALSE);
 
     private static volatile boolean installed;
     private static IExecutionListener paramHoverCommandListener;
@@ -149,20 +156,25 @@ public final class ParamHintHtmlModifier
 
             ensureParamHintCloseButton(browser);
 
-            browser.addProgressListener(new ProgressListener()
+            if (browser.getData(SHOW_COMFORT_PROGRESS) == null
+                && browser.getData(FIND_MISS_COMFORT_PROGRESS) == null)
             {
-                @Override
-                public void completed(ProgressEvent event)
+                browser.setData(SHOW_COMFORT_PROGRESS, Boolean.TRUE);
+                browser.addProgressListener(new ProgressListener()
                 {
-                    tryModifyBrowserHtml(browser);
-                }
+                    @Override
+                    public void completed(ProgressEvent event)
+                    {
+                        tryModifyBrowserHtml(browser);
+                    }
 
-                @Override
-                public void changed(ProgressEvent event)
-                {
-                    // не используется
-                }
-            });
+                    @Override
+                    public void changed(ProgressEvent event)
+                    {
+                        // не используется
+                    }
+                });
+            }
 
             tryModifyBrowserHtml(browser);
         });
@@ -1230,50 +1242,80 @@ public final class ParamHintHtmlModifier
     {
         if (browser == null || browser.isDisposed())
             return;
-
-        ensureParamHintCloseButton(browser);
-
-        String html = browser.getText();
-        if (html == null || html.isBlank())
-            return;
-        if (html.indexOf(HEADING_CLASS) < 0)
+        if (Boolean.TRUE.equals(MODIFY_IN_PROGRESS.get()))
             return;
 
-        HoverContext ctx = resolveHoverContext(browser);
-        if (ctx != null && ctx.pages != null && ctx.pages.size() > 1)
+        MODIFY_IN_PROGRESS.set(Boolean.TRUE);
+        try
         {
-            SigPickResult pick = pickBestSignature(ctx);
-            String fp = signaturePickFingerprint(ctx);
-            boolean browserFirst = !Boolean.TRUE.equals(browser.getData(SIG_PICK_DONE_MARK));
-            boolean onOpen = sigPickOnOpenPending.get() || browserFirst;
-            boolean strongChanged = pick.score >= SIG_PICK_STRONG_SCORE
-                && !fp.equals(sigPickLastFingerprint);
-            if (onOpen || strongChanged)
+            ensureParamHintCloseButton(browser);
+
+            String html = browser.getText();
+            if (html == null || html.isBlank())
+                return;
+            if (html.indexOf(HEADING_CLASS) < 0)
+                return;
+
+            // Уже патчили этот browser / HTML — не резолвить ctx и не showPage (иначе цикл Progress).
+            if (Boolean.TRUE.equals(browser.getData(HTML_PATCHED_MARK))
+                || html.indexOf(COMFORT_META_MARKER) >= 0
+                || html.indexOf("data-comfort=\"1\"") >= 0 //$NON-NLS-1$
+                || isHeadingAlreadyRewritten(html))
+                return;
+
+            HoverContext ctx = resolveHoverContext(browser);
+
+            // Автовыбор сигнатуры — ТОЛЬКО при реальном открытии команды, не на Progress.
+            // strongChanged на Progress давал цикл: setInput → Progress → showPage → …
+            boolean onOpen = sigPickOnOpenPending.getAndSet(false);
+            if (onOpen && ctx != null && ctx.pages != null && ctx.pages.size() > 1
+                && !Boolean.TRUE.equals(browser.getData(SIG_PICK_DONE_MARK)))
             {
-                sigPickOnOpenPending.set(false);
                 browser.setData(SIG_PICK_DONE_MARK, Boolean.TRUE);
-                sigPickLastFingerprint = fp;
-                if (pick.index >= 0 && pick.index != ctx.pageIndex)
+                if (ctx.pages.size() <= 50)
                 {
-                    boolean shown = Global.invokeVoid(ctx.parametersHover, "showPage", //$NON-NLS-1$
-                        ctx.pages, Integer.valueOf(pick.index), Integer.valueOf(ctx.paramIndex));
-                    if (shown)
-                        return;
+                    SigPickResult pick = pickBestSignature(ctx);
+                    if (pick.index >= 0 && pick.index != ctx.pageIndex)
+                    {
+                        boolean shown = Global.invokeVoid(ctx.parametersHover, "showPage", //$NON-NLS-1$
+                            ctx.pages, Integer.valueOf(pick.index),
+                            Integer.valueOf(ctx.paramIndex));
+                        if (shown)
+                            return;
+                    }
                 }
             }
-        }
-        else
-            sigPickOnOpenPending.set(false);
 
-        String modified = modifyHtml(html, ctx);
-        if (modified == null || modified.equals(html))
+            String modified = modifyHtml(html, ctx);
+            if (modified == null || modified.equals(html))
+            {
+                browser.setData(HTML_PATCHED_MARK, Boolean.TRUE);
+                return;
+            }
+
+            browser.setData(HTML_PATCHED_MARK, Boolean.TRUE);
+            browser.setText(modified);
+            scheduleScrollParamNameIntoView(browser);
+        }
+        finally
         {
-            return;
+            MODIFY_IN_PROGRESS.set(Boolean.FALSE);
         }
+    }
 
-        browser.setText(modified);
-        scheduleScrollParamNameIntoView(browser);
-
+    /** Заголовок уже с {@code <br>(} — повторный modifyHeading не нужен. */
+    private static boolean isHeadingAlreadyRewritten(String html)
+    {
+        if (html == null)
+            return false;
+        String marker = "<span class=\"" + HEADING_CLASS + "\">"; //$NON-NLS-1$ //$NON-NLS-2$
+        int spanStart = html.indexOf(marker);
+        if (spanStart < 0)
+            return false;
+        int contentStart = spanStart + marker.length();
+        int brPos = html.indexOf("<br>", contentStart); //$NON-NLS-1$
+        int firstParen = html.indexOf('(', contentStart);
+        return brPos >= 0 && (firstParen < 0 || brPos < firstParen);
     }
 
     /** После setText — прокрутить к {@code <b>} имени текущего параметра. */
@@ -2790,14 +2832,6 @@ public final class ParamHintHtmlModifier
         int resultIdx = bestScore > 0 ? bestIdx : preferWildcardSignatureIndex(candidates, ctx.pages);
         int resultScore = bestScore > 0 ? bestScore : 1;
         return new SigPickResult(resultIdx, resultScore);
-    }
-
-    private static String signaturePickFingerprint(HoverContext ctx)
-    {
-        if (ctx == null)
-            return ""; //$NON-NLS-1$
-        return ctx.actualArgCount + "|" //$NON-NLS-1$
-            + String.valueOf(ctx.actualArgTypeNames);
     }
 
     private static final class SigPickResult

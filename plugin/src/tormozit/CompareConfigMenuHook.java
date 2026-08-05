@@ -37,9 +37,11 @@ import org.eclipse.jface.viewers.ComboViewer;
 import org.eclipse.jface.viewers.ICheckStateListener;
 import org.eclipse.jface.viewers.ICheckStateProvider;
 import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.ITreeViewerListener;
 import org.eclipse.jface.viewers.StructuredViewer;
 import org.eclipse.jface.viewers.LabelProvider;
 import org.eclipse.jface.viewers.StructuredSelection;
+import org.eclipse.jface.viewers.TreeExpansionEvent;
 import org.eclipse.jface.window.Window;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.MenuAdapter;
@@ -51,6 +53,7 @@ import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.graphics.Rectangle;
+import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
@@ -65,6 +68,7 @@ import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.swt.widgets.TypedListener;
 import org.eclipse.swt.widgets.Widget;
+import org.eclipse.swt.layout.GridData;
 import org.eclipse.ui.IActionBars;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
@@ -559,6 +563,41 @@ public class CompareConfigMenuHook implements IStartup
                     addedItems.add(findLowest);
                 }
 
+                // Пометки — до early-return по hasNative: папки разделов («Регистры» и т.п.)
+                // часто без MatchedObjectsComparisonNode, но Ctrl/Shift-набор уже есть.
+                if (multiMark != null && multiMark.getSelected().size() > 1)
+                {
+                    addedItems.add(new MenuItem(menu, SWT.SEPARATOR));
+
+                    MenuItem itemMark = new MenuItem(menu, SWT.PUSH);
+                    itemMark.setText(ITEM_TEXT_setMarks);
+                    itemMark.addSelectionListener(new SelectionAdapter()
+                    {
+                        @Override
+                        public void widgetSelected(SelectionEvent e)
+                        {
+                            AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
+                            if (viewer instanceof CheckboxTreeViewer ctv)
+                                multiMark.applyMark(ctv, true);
+                        }
+                    });
+                    addedItems.add(itemMark);
+
+                    MenuItem itemUnmark = new MenuItem(menu, SWT.PUSH);
+                    itemUnmark.setText(ITEM_TEXT_clearMarks);
+                    itemUnmark.addSelectionListener(new SelectionAdapter()
+                    {
+                        @Override
+                        public void widgetSelected(SelectionEvent e)
+                        {
+                            AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
+                            if (viewer instanceof CheckboxTreeViewer ctv)
+                                multiMark.applyMark(ctv, false);
+                        }
+                    });
+                    addedItems.add(itemUnmark);
+                }
+
                 if (!hasNative) return;
 
                 addedItems.add(new MenuItem(menu, SWT.SEPARATOR));
@@ -603,39 +642,6 @@ public class CompareConfigMenuHook implements IStartup
                         }
                     });
                     addedItems.add(item3);
-                }
-
-                if (multiMark != null && multiMark.getSelected().size() > 1)
-                {
-                    addedItems.add(new MenuItem(menu, SWT.SEPARATOR));
-
-                    MenuItem itemMark = new MenuItem(menu, SWT.PUSH);
-                    itemMark.setText(ITEM_TEXT_setMarks);
-                    itemMark.addSelectionListener(new SelectionAdapter()
-                    {
-                        @Override
-                        public void widgetSelected(SelectionEvent e)
-                        {
-                            AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
-                            if (viewer instanceof CheckboxTreeViewer ctv)
-                                multiMark.applyMark(ctv, true);
-                        }
-                    });
-                    addedItems.add(itemMark);
-
-                    MenuItem itemUnmark = new MenuItem(menu, SWT.PUSH);
-                    itemUnmark.setText(ITEM_TEXT_clearMarks);
-                    itemUnmark.addSelectionListener(new SelectionAdapter()
-                    {
-                        @Override
-                        public void widgetSelected(SelectionEvent e)
-                        {
-                            AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
-                            if (viewer instanceof CheckboxTreeViewer ctv)
-                                multiMark.applyMark(ctv, false);
-                        }
-                    });
-                    addedItems.add(itemUnmark);
                 }
             }
 
@@ -1467,6 +1473,60 @@ public class CompareConfigMenuHook implements IStartup
     }
 
     /**
+     * Логи каскадных пометок сравнения → журнал «Комфорт».
+     * Включение: Параметры → Комфорт → «Общее логирование».
+     */
+    private static final class CompareChecksDebug
+    {
+        private static final String TAG = "CompareChecks"; //$NON-NLS-1$
+        /** Безусловный файл: {@code .tmp/temp-logs/CompareChecks.log}. */
+        private static final String TEMP_TOPIC = "CompareChecks"; //$NON-NLS-1$
+
+        private CompareChecksDebug()
+        {
+        }
+
+        static boolean isEnabled()
+        {
+            return Global.isLogEnabled();
+        }
+
+        static void log(String msg)
+        {
+            Global.tempLog(TEMP_TOPIC, msg);
+            if (isEnabled())
+                Global.log(TAG, msg);
+        }
+
+        static void step(String phase, String detail)
+        {
+            String line = phase + ": " + detail; //$NON-NLS-1$
+            Global.tempLog(TEMP_TOPIC, line);
+            if (isEnabled())
+                Global.log(TAG, line);
+        }
+
+        static String nodeLabel(Object el)
+        {
+            if (el == null)
+                return "null"; //$NON-NLS-1$
+            String simple = el.getClass().getSimpleName();
+            if (el instanceof ProjectPartialModelNode)
+                return simple + "(root)"; //$NON-NLS-1$
+            return simple;
+        }
+
+        static String aggLabel(boolean checked, boolean grayed)
+        {
+            if (grayed)
+                return "gray"; //$NON-NLS-1$
+            if (checked)
+                return "checked"; //$NON-NLS-1$
+            return "empty"; //$NON-NLS-1$
+        }
+    }
+
+    /**
      * Коррекция EDT-фильтра по подсистемам: односторонние не-{@link SymlinkComparisonNode}
      * узлы EDT пропускает ({@code checkNodeIsSelectedForSide} → true). Добавляем свой
      * {@link ViewerFilter}, используя те же trie через {@code ViewerFilterBySubsystems}.
@@ -1481,6 +1541,8 @@ public class CompareConfigMenuHook implements IStartup
     private static class SubsystemFilterFix
     {
         private static final String FILTER_FLAG = "tormozit.subsystemFilterFix"; //$NON-NLS-1$
+        private static final String CORRECTION_DATA_KEY = "tormozit.correctionViewerFilter"; //$NON-NLS-1$
+        private static final String FILTER_AWARE_CHECKBOX_FLAG = "tormozit.filterAwareChecksCheckbox"; //$NON-NLS-1$
         private static final String LOG = "SubsystemFilterFix"; //$NON-NLS-1$
         private static final int MAX_ATTEMPTS = 60;
         private static final int RETRY_MS = 250;
@@ -1494,15 +1556,19 @@ public class CompareConfigMenuHook implements IStartup
         {
             if (editor == null)
                 return;
-            if (!ComfortSettings.isReplaceListFiltersEnabled())
-            {
-                Global.tempLog(LOG, "skip: replaceListFilters disabled"); //$NON-NLS-1$
-                return;
-            }
 
             Display display = Display.getDefault();
             Runnable body = () ->
             {
+                // Флажок у combo «Фильтр» — независимо от «Улучшать списки».
+                installFilterAwareChecksCheckbox(editor, attempt);
+
+                if (!ComfortSettings.isReplaceListFiltersEnabled())
+                {
+                    Global.tempLog(LOG, "skip filter fix: replaceListFilters disabled"); //$NON-NLS-1$
+                    return;
+                }
+
                 AbstractTreeViewer viewer = resolveTreeViewer(editor);
                 Object namedFilter = Global.getField(editor, "filterBySubsystems"); //$NON-NLS-1$
                 Global.tempLog(LOG, "attempt=" + attempt //$NON-NLS-1$
@@ -1531,10 +1597,16 @@ public class CompareConfigMenuHook implements IStartup
                             : null;
                     CorrectionViewerFilter correction = new CorrectionViewerFilter(namedFilter);
                     viewer.addFilter(correction);
-                    if (viewer instanceof CheckboxTreeViewer ctv && treeControl != null)
+                    viewer.setData(CORRECTION_DATA_KEY, correction);
+                    if (viewer instanceof CheckboxTreeViewer ctv && treeControl != null
+                            && ComfortSettings.isCompareFilterAwareChecksEnabled())
                         correction.installCheckHooks(ctv, treeControl, editor);
                     viewer.setData(FILTER_FLAG, Boolean.TRUE);
-                    Global.tempLog(LOG, "CorrectionViewerFilter installed"); //$NON-NLS-1$
+                    Global.tempLog(LOG, "CorrectionViewerFilter installed" //$NON-NLS-1$
+                            + " checkHooks=" + ComfortSettings.isCompareFilterAwareChecksEnabled()); //$NON-NLS-1$
+                    CompareChecksDebug.step("install", //$NON-NLS-1$
+                            "filterOk checkHooks=" //$NON-NLS-1$
+                                    + ComfortSettings.isCompareFilterAwareChecksEnabled());
                 }
                 catch (Exception e)
                 {
@@ -1546,6 +1618,113 @@ public class CompareConfigMenuHook implements IStartup
                 body.run();
             else
                 display.asyncExec(body);
+        }
+
+        private static final String FILTER_AWARE_CHECKBOX_LABEL =
+            "Каскадный пересчет пометок с учетом фильтра (экспериментально)"; //$NON-NLS-1$
+        private static final String FILTER_AWARE_CHECKBOX_TOOLTIP =
+            "При активном отборе по подсистемам или combo «Показывать…»\n"
+                + "пометки и серые предки — только по видимым узлам;\n"
+                + "«Отметить все»/клик по папке не трогают скрытые.\n"
+                + "Выключено — штатное поведение EDT."; //$NON-NLS-1$
+
+        /**
+         * Checkbox справа от combo «Фильтр» в {@code DtComparisonView.filterControl}.
+         * Состояние — глобальный PreferenceStore ({@link ComfortSettings}).
+         */
+        private static void installFilterAwareChecksCheckbox(IEditorPart editor, int attempt)
+        {
+            Object viewObj = Global.getField(editor, "comparisonView"); //$NON-NLS-1$
+            if (!(viewObj instanceof DtComparisonView dcv) || dcv.isDisposed())
+            {
+                if (attempt < MAX_ATTEMPTS)
+                    Display.getDefault().timerExec(RETRY_MS,
+                            () -> installFilterAwareChecksCheckbox(editor, attempt + 1));
+                return;
+            }
+            Object filterControlObj = Global.getField(dcv, "filterControl"); //$NON-NLS-1$
+            if (!(filterControlObj instanceof Composite filterControl) || filterControl.isDisposed())
+            {
+                if (attempt < MAX_ATTEMPTS)
+                    Display.getDefault().timerExec(RETRY_MS,
+                            () -> installFilterAwareChecksCheckbox(editor, attempt + 1));
+                return;
+            }
+            if (Boolean.TRUE.equals(filterControl.getData(FILTER_AWARE_CHECKBOX_FLAG)))
+                return;
+
+            Combo combo = ThreeWayOnlyPresentFiltersFix.findCombo(filterControl);
+            if (combo == null || combo.isDisposed())
+            {
+                if (attempt < MAX_ATTEMPTS)
+                    Display.getDefault().timerExec(RETRY_MS,
+                            () -> installFilterAwareChecksCheckbox(editor, attempt + 1));
+                return;
+            }
+
+            Composite host = combo.getParent();
+            if (host == null || host.isDisposed())
+                return;
+            if (Boolean.TRUE.equals(host.getData(FILTER_AWARE_CHECKBOX_FLAG)))
+                return;
+
+            Button check = new Button(host, SWT.CHECK);
+            check.setText(FILTER_AWARE_CHECKBOX_LABEL);
+            check.setToolTipText(FILTER_AWARE_CHECKBOX_TOOLTIP + Global.pluginSignForTooltip());
+            check.setSelection(ComfortSettings.isCompareFilterAwareChecksEnabled());
+            Object layoutData = combo.getLayoutData();
+            if (layoutData instanceof GridData)
+            {
+                GridData gd = new GridData(SWT.BEGINNING, SWT.CENTER, false, false);
+                gd.horizontalIndent = 8;
+                check.setLayoutData(gd);
+            }
+            check.moveBelow(combo);
+            host.layout(true, true);
+            Composite outer = host.getParent();
+            if (outer != null && !outer.isDisposed())
+                outer.layout(true, true);
+
+            check.addListener(SWT.Selection, e ->
+            {
+                boolean on = check.getSelection();
+                ComfortSettings.setCompareFilterAwareChecksEnabled(on);
+                applyFilterAwareChecksToggle(editor, on);
+                CompareChecksDebug.step("filterAwareCheckbox", "on=" + on); //$NON-NLS-1$ //$NON-NLS-2$
+            });
+            host.setData(FILTER_AWARE_CHECKBOX_FLAG, Boolean.TRUE);
+            filterControl.setData(FILTER_AWARE_CHECKBOX_FLAG, Boolean.TRUE);
+            Global.tempLog(LOG, "filter-aware checks checkbox installed"); //$NON-NLS-1$
+        }
+
+        private static void applyFilterAwareChecksToggle(IEditorPart editor, boolean enabled)
+        {
+            AbstractTreeViewer viewer = resolveTreeViewer(editor);
+            if (!(viewer instanceof CheckboxTreeViewer ctv))
+                return;
+            Object view = Global.getField(editor, "comparisonView"); //$NON-NLS-1$
+            Object treeControl = view instanceof DtComparisonView
+                    ? ((DtComparisonView) view).getTreeControl()
+                    : null;
+            Object corrObj = viewer.getData(CORRECTION_DATA_KEY);
+            if (enabled)
+            {
+                if (corrObj instanceof CorrectionViewerFilter correction && treeControl != null)
+                {
+                    if (Boolean.TRUE.equals(ctv.getData("tormozit.subsystemFilterCheckHook"))) //$NON-NLS-1$
+                    {
+                        correction.syncCheckHooksAfterPrefOn(ctv);
+                    }
+                    else
+                    {
+                        correction.installCheckHooks(ctv, treeControl, editor);
+                    }
+                }
+            }
+            else if (corrObj instanceof CorrectionViewerFilter correction)
+            {
+                correction.deactivateCheckHooks(ctv);
+            }
         }
 
         private static AbstractTreeViewer resolveTreeViewer(IEditorPart editor)
@@ -1662,12 +1841,18 @@ public class CompareConfigMenuHook implements IStartup
             {
                 if (Boolean.TRUE.equals(ctv.getData(CHECK_HOOK_FLAG)))
                     return;
+                if (!ComfortSettings.isCompareFilterAwareChecksEnabled())
+                {
+                    CompareChecksDebug.step("installCheckHooks", "skip: pref off"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
 
                 if (!wrapCheckStateListeners(ctv))
                 {
                     Global.tempLog(LOG, "check hooks: CheckStateListeners wrap failed" //$NON-NLS-1$
                             + " treeControl=" + (treeControl == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$
                                     : treeControl.getClass().getSimpleName()));
+                    CompareChecksDebug.step("installCheckHooks", "wrap listeners failed"); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
                 }
                 wrapToolbarSelectAllActions(editor, ctv);
@@ -1682,15 +1867,361 @@ public class CompareConfigMenuHook implements IStartup
                 // CheckStateProvider — при любом скрывающем отборе (см. syncCheckHooksToFilterState).
                 hookedEditor = editor;
                 hookedCtv = ctv;
+                // Штатный EDT на старте массово расставляет mustBeMerged — не мешаем.
+                beginStartupSettle();
                 syncCheckHooksToFilterState(ctv);
                 ctv.setData(CHECK_HOOK_FLAG, Boolean.TRUE);
+                installRootRepaintOnTreeExpand(ctv);
+                scheduleStartupAggregateRepaint(ctv, 0);
+                CompareChecksDebug.step("installCheckHooks", //$NON-NLS-1$
+                        "ok settleUntil=+" + (startupSettleUntilMs - System.currentTimeMillis()) //$NON-NLS-1$
+                                + "ms restrict=" + shouldRestrictChecksToVisible()); //$NON-NLS-1$
             }
+
+            /** Флажок снят: вернуть штатный CheckStateProvider, сбросить кэш агрегатов. */
+            void deactivateCheckHooks(CheckboxTreeViewer ctv)
+            {
+                if (ctv == null || ctv.getControl() == null || ctv.getControl().isDisposed())
+                    return;
+                ourCheckStateProviderActive = false;
+                if (edtCheckStateProvider != null)
+                    ctv.setCheckStateProvider(edtCheckStateProvider);
+                clearAggregateUiCache();
+                CompareChecksDebug.step("deactivateCheckHooks", "ok"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+
+            /**
+             * Флажок снова включён на уже установленном хуке.
+             * Без startupSettle/startupRepaint(+2.6с): дерево уже построено, а отложенный
+             * wipe кэша красил родителей в full при kids=1 (Clip_854591).
+             */
+            void syncCheckHooksAfterPrefOn(CheckboxTreeViewer ctv)
+            {
+                syncCheckHooksToFilterState(ctv);
+                clearAggregateUiCache();
+                paintVisibleAggregateTreeItems(ctv);
+                CompareChecksDebug.step("syncCheckHooksAfterPrefOn", //$NON-NLS-1$
+                        "restrict=" + shouldRestrictChecksToVisible() //$NON-NLS-1$
+                                + " immediatePaint"); //$NON-NLS-1$
+            }
+
+            private static final String ROOT_EXPAND_HOOK_FLAG = "tormozit.compareRootExpandRepaint"; //$NON-NLS-1$
+
+            /**
+             * Когда под корнем появляются/раскрываются дети — пересчитать корень
+             * (иначе kids=1 empty залипает в кэше).
+             */
+            private void installRootRepaintOnTreeExpand(CheckboxTreeViewer ctv)
+            {
+                if (Boolean.TRUE.equals(ctv.getData(ROOT_EXPAND_HOOK_FLAG)))
+                    return;
+                ctv.addTreeListener(new ITreeViewerListener()
+                {
+                    @Override
+                    public void treeExpanded(TreeExpansionEvent event)
+                    {
+                        Object el = event.getElement();
+                        IPartialModelNode from = el instanceof IPartialModelNode n ? n : null;
+                        scheduleAggregateRepaintSoon(ctv, from);
+                    }
+
+                    @Override
+                    public void treeCollapsed(TreeExpansionEvent event)
+                    {
+                        // no-op
+                    }
+                });
+                Tree tree = ctv.getTree();
+                if (tree != null && !tree.isDisposed())
+                {
+                    // Догрузка детей без Expand (lazy) — SetData у VIRTUAL нет,
+                    // слушаем Resize/Paint редко; основной догон — startup retries.
+                    tree.addListener(SWT.Show, e -> scheduleAggregateRepaintSoon(ctv, null));
+                }
+                ctv.setData(ROOT_EXPAND_HOOK_FLAG, Boolean.TRUE);
+            }
+
+            /**
+             * После Expand/Show: пересчитать агрегат раскрытого узла и предков
+             * по TreeItem (не только корень — иначе «Справочники» остаётся empty
+             * после раннего paint loaded→empty, Clip_854577).
+             */
+            private void scheduleAggregateRepaintSoon(CheckboxTreeViewer ctv, IPartialModelNode from)
+            {
+                if (ctv == null || ctv.getControl() == null || ctv.getControl().isDisposed())
+                    return;
+                if (!shouldRestrictChecksToVisible() || isStartupSettleActive())
+                    return;
+                // Задержка: после Expand дети/provider ещё не готовы (Clip_854585).
+                ctv.getControl().getDisplay().timerExec(80, () ->
+                {
+                    if (ctv.getControl() == null || ctv.getControl().isDisposed())
+                        return;
+                    if (!shouldRestrictChecksToVisible())
+                        return;
+                    CompareChecksDebug.step("aggRepaint", //$NON-NLS-1$
+                            from != null ? CompareChecksDebug.nodeLabel(from) : "roots"); //$NON-NLS-1$
+                    if (from != null)
+                    {
+                        for (IPartialModelNode p = from; p != null; p = p.getParent())
+                        {
+                            if (!isFilterAwareAggregateUi(p))
+                                continue;
+                            aggregateCheckedUi.remove(p);
+                            aggregateGrayedUi.remove(p);
+                            paintAggregateFromChildren(ctv, p);
+                        }
+                        return;
+                    }
+                    for (TreeItem rootItem : ctv.getTree().getItems())
+                    {
+                        if (rootItem == null || rootItem.isDisposed())
+                            continue;
+                        Object data = rootItem.getData();
+                        if (data instanceof ProjectPartialModelNode root)
+                        {
+                            aggregateCheckedUi.remove(root);
+                            aggregateGrayedUi.remove(root);
+                            paintAggregateFromChildren(ctv, root);
+                        }
+                    }
+                });
+            }
+
+
 
             private IEditorPart hookedEditor;
             private CheckboxTreeViewer hookedCtv;
             private ICheckStateProvider edtCheckStateProvider;
             private boolean ourCheckStateProviderActive;
             private boolean filterWasActive;
+            /** До этого момента — только EDT delegates/provider, без нашего агрегата. */
+            private long startupSettleUntilMs;
+
+            private void beginStartupSettle()
+            {
+                startupSettleUntilMs = System.currentTimeMillis() + 2500L;
+            }
+
+            private boolean isStartupSettleActive()
+            {
+                return System.currentTimeMillis() < startupSettleUntilMs;
+            }
+
+            /**
+             * После штатной расстановки — пересчёт видимых агрегатов (как смена
+             * combo-фильтра). Много попыток: на ранних тиках у корня kids=1
+             * (дерево ещё грузится) — пустой кэш залипал до клика.
+             */
+            private void scheduleStartupAggregateRepaint(CheckboxTreeViewer ctv, int attempt)
+            {
+                if (ctv == null || ctv.getControl() == null || ctv.getControl().isDisposed())
+                    return;
+                int delay = attempt == 0 ? 2600 : 500;
+                ctv.getControl().getDisplay().timerExec(delay, () ->
+                {
+                    if (ctv.getControl() == null || ctv.getControl().isDisposed())
+                        return;
+                    if (!shouldRestrictChecksToVisible())
+                    {
+                        CompareChecksDebug.step("startupRepaint", //$NON-NLS-1$
+                                "attempt=" + attempt + " skip: no restrict filter"); //$NON-NLS-1$ //$NON-NLS-2$
+                        return;
+                    }
+                    clearAggregateUiCache();
+                    CompareChecksDebug.step("startupRepaint", //$NON-NLS-1$
+                            "attempt=" + attempt + " settleActive=" + isStartupSettleActive()); //$NON-NLS-1$ //$NON-NLS-2$
+                    ensureProjectRootExpanded(ctv);
+                    syncRootChildTreeItemChecksFromModel(ctv);
+                    boolean rootReady = paintVisibleAggregateTreeItems(ctv);
+                    // Пустой корень / мало детей — EDT ещё не доставил пометки. Не
+                    // останавливаемся на kids>1 + empty (см. Clip_854571).
+                    if (!rootReady && attempt < 40)
+                        scheduleStartupAggregateRepaint(ctv, attempt + 1);
+                    else if (rootReady && attempt < 6)
+                        scheduleStartupAggregateRepaint(ctv, attempt + 1);
+                });
+            }
+
+            /**
+             * Уже созданные TreeItem — только куда красить. Значение агрегата из
+             * отфильтрованной модели ({@link #computeAggregateFromFilteredChildren}),
+             * не из развёрнутости.
+             */
+            private boolean paintVisibleAggregateTreeItems(CheckboxTreeViewer ctv)
+            {
+                if (ctv == null || ctv.getControl() == null || ctv.getControl().isDisposed())
+                    return false;
+                Tree tree = ctv.getTree();
+                if (tree == null || tree.isDisposed())
+                    return false;
+                ArrayList<IPartialModelNode> nodes = new ArrayList<>();
+                collectAggregateNodesFromTreeItems(tree.getItems(), nodes);
+                nodes.sort((a, b) -> Integer.compare(depthOf(b), depthOf(a)));
+                CompareChecksDebug.step("paintVisible", "aggregates=" + nodes.size()); //$NON-NLS-1$ //$NON-NLS-2$
+                for (IPartialModelNode node : nodes)
+                    paintAggregateFromChildren(ctv, node);
+                // Warning/merge overlays (UID и т.п.) — из LabelProvider, не из TreeItem.
+                refreshNodeImages(ctv, nodes);
+                return isProjectRootAggregateReady(ctv);
+            }
+
+            private boolean isProjectRootAggregateReady(CheckboxTreeViewer ctv)
+            {
+                Tree tree = ctv.getTree();
+                if (tree == null || tree.isDisposed())
+                    return false;
+                for (TreeItem rootItem : tree.getItems())
+                {
+                    if (rootItem == null || rootItem.isDisposed())
+                        continue;
+                    Object data = rootItem.getData();
+                    if (!(data instanceof ProjectPartialModelNode))
+                        continue;
+                    TreeItem[] kids = rootItem.getItems();
+                    int kidCount = kids != null ? kids.length : 0;
+                    boolean hasGray = rootItem.getGrayed()
+                            || Boolean.TRUE.equals(aggregateGrayedUi.get(data));
+                    boolean hasFull = (rootItem.getChecked() && !rootItem.getGrayed())
+                            || (Boolean.TRUE.equals(aggregateCheckedUi.get(data))
+                                    && !Boolean.TRUE.equals(aggregateGrayedUi.get(data)));
+                    boolean anyChildMark = hasAnyChildMark(kids);
+                    // Не ready при kids=2 (Clip_854585): дерево ещё не догрузило
+                    // Справочники/Перечисления — иначе stop и папки без пометок.
+                    boolean ready = hasGray && kidCount >= 8;
+                    CompareChecksDebug.step("rootReady", //$NON-NLS-1$
+                            "kids=" + kidCount + " gray=" + hasGray //$NON-NLS-1$ //$NON-NLS-2$
+                                    + " full=" + hasFull + " childMark=" + anyChildMark //$NON-NLS-1$ //$NON-NLS-2$
+                                    + " ready=" + ready); //$NON-NLS-1$
+                    return ready;
+                }
+                return false;
+            }
+
+            private static boolean hasAnyChildMark(TreeItem[] kids)
+            {
+                if (kids == null)
+                    return false;
+                for (TreeItem kid : kids)
+                {
+                    if (kid == null || kid.isDisposed())
+                        continue;
+                    if (kid.getGrayed() || kid.getChecked())
+                        return true;
+                }
+                return false;
+            }
+
+            private static boolean hasMixedChildMarks(TreeItem[] kids)
+            {
+                if (kids == null)
+                    return false;
+                boolean anyChecked = false;
+                boolean anyEmpty = false;
+                for (TreeItem kid : kids)
+                {
+                    if (kid == null || kid.isDisposed())
+                        continue;
+                    if (kid.getGrayed() || kid.getChecked())
+                        anyChecked = true;
+                    else
+                        anyEmpty = true;
+                }
+                return anyChecked && anyEmpty;
+            }
+
+            /**
+             * Подтянуть checked/grayed прямых детей корня из модели — TreeItem часто
+             * ещё пустой, пока EDT не дорисовал, а isChecked уже есть.
+             */
+            private void syncRootChildTreeItemChecksFromModel(CheckboxTreeViewer ctv)
+            {
+                Tree tree = ctv.getTree();
+                if (tree == null || tree.isDisposed())
+                    return;
+                for (TreeItem rootItem : tree.getItems())
+                {
+                    if (rootItem == null || rootItem.isDisposed())
+                        continue;
+                    if (!(rootItem.getData() instanceof ProjectPartialModelNode))
+                        continue;
+                    TreeItem[] kids = rootItem.getItems();
+                    if (kids == null)
+                        return;
+                    int synced = 0;
+                    for (TreeItem kid : kids)
+                    {
+                        if (kid == null || kid.isDisposed())
+                            continue;
+                        Object data = kid.getData();
+                        if (!(data instanceof IPartialModelNode node))
+                            continue;
+                        boolean checked = node.isChecked();
+                        boolean grayed = node.isGrayed();
+                        if (!checked && !grayed)
+                            continue;
+                        kid.setChecked(checked);
+                        kid.setGrayed(grayed);
+                        synced++;
+                    }
+                    if (synced > 0)
+                        CompareChecksDebug.step("syncRootKids", "synced=" + synced); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
+            }
+
+            /** Раскрыть только корень на 1 уровень. Детей второго уровня не трогаем. */
+            private void ensureProjectRootExpanded(CheckboxTreeViewer ctv)
+            {
+                if (ctv == null || ctv.getControl() == null || ctv.getControl().isDisposed())
+                    return;
+                Tree tree = ctv.getTree();
+                if (tree == null || tree.isDisposed())
+                    return;
+                for (TreeItem rootItem : tree.getItems())
+                {
+                    if (rootItem == null || rootItem.isDisposed())
+                        continue;
+                    Object data = rootItem.getData();
+                    if (!(data instanceof ProjectPartialModelNode))
+                        continue;
+                    TreeItem[] kids = rootItem.getItems();
+                    int kidCount = kids != null ? kids.length : 0;
+                    try
+                    {
+                        if (kidCount <= 1 || !rootItem.getExpanded())
+                        {
+                            ctv.expandToLevel(data, 1);
+                            kids = rootItem.getItems();
+                            kidCount = kids != null ? kids.length : 0;
+                            CompareChecksDebug.step("expandRoot", //$NON-NLS-1$
+                                    "expandToLevel(1) kids=" + kidCount); //$NON-NLS-1$
+                        }
+                    }
+                    catch (RuntimeException ex)
+                    {
+                        CompareChecksDebug.step("expandRoot", "fail " + ex.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                    return;
+                }
+            }
+
+            private static void collectAggregateNodesFromTreeItems(TreeItem[] items,
+                    ArrayList<IPartialModelNode> out)
+            {
+                if (items == null)
+                    return;
+                for (TreeItem item : items)
+                {
+                    if (item == null || item.isDisposed())
+                        continue;
+                    Object data = item.getData();
+                    if (data instanceof IPartialModelNode node
+                            && isFilterAwareAggregateUi(node))
+                        out.add(node);
+                    collectAggregateNodesFromTreeItems(item.getItems(), out);
+                }
+            }
 
             private void scheduleSelectAllWrap(IEditorPart editor, CheckboxTreeViewer ctv, int attempt)
             {
@@ -1998,7 +2529,8 @@ public class CompareConfigMenuHook implements IStartup
                 {
                     clearAggregateUiCache();
                     syncCheckHooksToFilterState(ctv);
-                    Global.tempLog(LOG, "recalc checks: skip (no cached aggregates)"); //$NON-NLS-1$
+                    // Как после смены combo: пересчитать уже видимые папки.
+                    paintVisibleAggregateTreeItems(ctv);
                     return;
                 }
                 // Предки тоже могли показывать «полную» из‑за кэша / UI.
@@ -2030,21 +2562,37 @@ public class CompareConfigMenuHook implements IStartup
                 return d;
             }
 
+            /**
+             * Красит уже существующий TreeItem. Значение агрегата — только из
+             * отфильтрованных узлов модели ({@link #computeAggregateFromFilteredChildren}),
+             * развёрнутость дерева не влияет.
+             */
             private void paintAggregateFromChildren(CheckboxTreeViewer ctv, IPartialModelNode node)
             {
-                if (!(isAggregateCheckNode(node) || isVisibleOnlyClickTarget(node)))
+                if (!isFilterAwareAggregateUi(node))
                     return;
-                AggregateCheck agg = computeAggregateFromLoadedChildren(node);
+                AggregateCheck agg = computeAggregateFromFilteredChildren(ctv, node);
                 if (agg == null)
-                    return;
-                if (!(node instanceof VirtualFolderPartialModelNode))
                 {
-                    node.setChecked(agg.checked);
-                    Global.invoke(node, "setGrayed", Boolean.valueOf(agg.grayed)); //$NON-NLS-1$
+                    CompareChecksDebug.step("paintAggregate", //$NON-NLS-1$
+                            CompareChecksDebug.nodeLabel(node) + " → skip(null)"); //$NON-NLS-1$
+                    return;
                 }
-                // Не ctv.setGrayed/setChecked — они делают internalExpand и на
-                // «Справочники» с фильтром отличий подвешивают UI (тысячи BM getChildren).
+                if (!agg.checked && !agg.grayed)
+                {
+                    // Кэш «пусто» оставляем — иначе provider пересчитает и снова
+                    // подхватит own mustBeMerged контейнера.
+                    putAggregateUi(node, false, false);
+                    paintTreeItemCheckNoExpand(ctv, node, false, false);
+                    CompareChecksDebug.step("paintAggregate", //$NON-NLS-1$
+                            CompareChecksDebug.nodeLabel(node) + " → empty"); //$NON-NLS-1$
+                    return;
+                }
+                putAggregateUi(node, agg.checked, agg.grayed);
                 paintTreeItemCheckNoExpand(ctv, node, agg.checked, agg.grayed);
+                CompareChecksDebug.step("paintAggregate", //$NON-NLS-1$
+                        CompareChecksDebug.nodeLabel(node)
+                                + " → " + CompareChecksDebug.aggLabel(agg.checked, agg.grayed)); //$NON-NLS-1$
             }
 
             private static final class AggregateCheck
@@ -2059,37 +2607,194 @@ public class CompareConfigMenuHook implements IStartup
                 }
             }
 
-            private AggregateCheck computeAggregateFromLoadedChildren(IPartialModelNode node)
+            private static final int AGGREGATE_MAX_DEPTH = 64;
+
+            /**
+             * Агрегат только по детям, видимым при активном отборе (фильтры viewer).
+             * Дети — через {@link #resolveChildren} (content provider), не через TreeItem:
+             * свёрнутый узел даёт тот же результат, что развёрнутый.
+             */
+            private AggregateCheck computeAggregateFromFilteredChildren(
+                    CheckboxTreeViewer ctv, IPartialModelNode node)
             {
-                Collection<IPartialModelNode> children = node.getChildren();
-                if (children == null || children.isEmpty())
+                return computeAggregateFromFilteredChildren(ctv, node, 0,
+                        Collections.newSetFromMap(new IdentityHashMap<>()));
+            }
+
+            /** @deprecated имя для старых вызовов — то же, что filtered. */
+            private AggregateCheck computeAggregateFromLoadedChildren(
+                    CheckboxTreeViewer ctv, IPartialModelNode node)
+            {
+                return computeAggregateFromFilteredChildren(ctv, node);
+            }
+
+            private AggregateCheck computeAggregateFromFilteredChildren(
+                    CheckboxTreeViewer ctv, IPartialModelNode node, int depth,
+                    Set<IPartialModelNode> visiting)
+            {
+                if (node == null || depth > AGGREGATE_MAX_DEPTH || !visiting.add(node))
                     return null;
-                boolean anyChecked = false;
-                boolean anyUnchecked = false;
-                boolean anyGrayed = false;
-                int considered = 0;
-                for (IPartialModelNode child : children)
+                try
                 {
-                    boolean consider = child.isCheckable()
-                            || isAggregateCheckNode(child)
-                            || isVisibleOnlyClickTarget(child);
-                    if (!consider)
-                        continue;
-                    considered++;
-                    if (child.isGrayed())
-                        anyGrayed = true;
-                    if (child.isChecked())
-                        anyChecked = true;
+                    Collection<IPartialModelNode> children = ctv != null
+                            ? resolveChildren(ctv, node)
+                            : node.getChildren();
+                    if (children == null || children.isEmpty())
+                    {
+                        // Нет детей в модели: checkable + видим → своя галка;
+                        // иначе null (не участвует в родителе).
+                        return aggregateWhenNoConsideredChildren(ctv, node,
+                                shouldRestrictChecksToVisible());
+                    }
+                    boolean restrictVisible = shouldRestrictChecksToVisible();
+                    boolean anyChecked = false;
+                    boolean anyUnchecked = false;
+                    boolean anyGrayed = false;
+                    int considered = 0;
+                    int nChecked = 0;
+                    int nGrayed = 0;
+                    int nEmpty = 0;
+                    for (IPartialModelNode child : children)
+                    {
+                        boolean childIsAggregate = isFilterAwareAggregateUi(child);
+                        // !checkable UI-папка («Свойства») без флага aggregate — всё равно спуск.
+                        if (!childIsAggregate && !child.isCheckable()
+                                && (isPropertiesVirtualFolderNode(child)
+                                        || hasContainmentChildren(child)))
+                            childIsAggregate = true;
+                        boolean recurseLikeFolder = childIsAggregate
+                                || (restrictVisible && child.isCheckable()
+                                        && hasContainmentChildren(child));
+                        if (!child.isCheckable() && !childIsAggregate)
+                            continue;
+                        if (recurseLikeFolder)
+                        {
+                            // Как setMark: скрытый фильтром checkable-агрегат
+                            // (Манифест/Отчеты…) не входит в родителя — иначе при
+                            // отборе по подсистемам корень серый, хотя в дереве
+                            // все видимые ☑. «Свойства» не режем select'ом.
+                            if (restrictVisible && ctv != null
+                                    && child.isCheckable()
+                                    && !isPropertiesVirtualFolderNode(child)
+                                    && !isVisibleForCheck(ctv, node, child))
+                                continue;
+                            AggregateCheck nested = computeAggregateFromFilteredChildren(
+                                    ctv, child, depth + 1, visiting);
+                            // null = нет содержимого под фильтром — не mixed у родителя.
+                            // (false,false) = реально снят (Свойства□) — участвует.
+                            if (nested == null)
+                                continue;
+                            if (!nested.checked && !nested.grayed)
+                            {
+                                if (!child.isCheckable())
+                                    continue;
+                                considered++;
+                                anyUnchecked = true;
+                                nEmpty++;
+                                continue;
+                            }
+                            considered++;
+                            if (nested.grayed)
+                            {
+                                anyGrayed = true;
+                                nGrayed++;
+                            }
+                            if (nested.checked)
+                            {
+                                anyChecked = true;
+                                nChecked++;
+                            }
+                            else
+                            {
+                                anyUnchecked = true;
+                                nEmpty++;
+                            }
+                            continue;
+                        }
+                        if (restrictVisible && ctv != null
+                                && !isVisibleForCheck(ctv, node, child))
+                            continue;
+                        considered++;
+                        if (isNodeMustBeMergedFlag(child))
+                        {
+                            anyChecked = true;
+                            nChecked++;
+                        }
+                        else
+                        {
+                            anyUnchecked = true;
+                            nEmpty++;
+                        }
+                    }
+                    AggregateCheck result;
+                    if (considered == 0)
+                    {
+                        result = aggregateWhenNoConsideredChildren(ctv, node, restrictVisible);
+                    }
+                    else if (anyGrayed || (anyChecked && anyUnchecked))
+                        result = new AggregateCheck(true, true);
+                    else if (anyChecked)
+                        result = new AggregateCheck(true, false);
                     else
-                        anyUnchecked = true;
+                        result = new AggregateCheck(false, false);
+                    CompareChecksDebug.step("aggFiltered", //$NON-NLS-1$
+                            CompareChecksDebug.nodeLabel(node)
+                                    + " kids=" + considered //$NON-NLS-1$
+                                    + " checked=" + nChecked //$NON-NLS-1$
+                                    + " grayed=" + nGrayed //$NON-NLS-1$
+                                    + " empty=" + nEmpty //$NON-NLS-1$
+                                    + " → " + (result == null //$NON-NLS-1$
+                                            ? "skip" //$NON-NLS-1$
+                                            : CompareChecksDebug.aggLabel(result.checked,
+                                                    result.grayed)));
+                    return result;
                 }
-                if (considered == 0)
+                finally
+                {
+                    visiting.remove(node);
+                }
+            }
+
+            /**
+             * Нет учтённых детей: {@code null} — не участвует в родителе (скрытая
+             * пустая папка без TreeItem); иначе галка самого checkable-узла.
+             * «Справочники»☑ при «Справочник1» без checkbox (kids=0) должны
+             * участвовать — иначе корень□.
+             */
+            private AggregateCheck aggregateWhenNoConsideredChildren(CheckboxTreeViewer ctv,
+                    IPartialModelNode node, boolean restrictVisible)
+            {
+                if (node == null || !node.isCheckable())
                     return null;
-                if (anyGrayed || (anyChecked && anyUnchecked))
-                    return new AggregateCheck(true, true);
-                if (anyChecked)
-                    return new AggregateCheck(true, false);
-                return new AggregateCheck(false, false);
+                if (restrictVisible && ctv != null)
+                {
+                    IPartialModelNode parent = node.getParent();
+                    Object visParent = parent != null ? parent : ctv.getInput();
+                    if (!isVisibleForCheck(ctv, visParent, node))
+                        return null;
+                }
+                // «Свойства» / Configuration — галка узла в UI даже без учтённых детей.
+                if (isPropertiesVirtualFolderNode(node)
+                        || isConfigurationPartialModelNode(node))
+                    return new AggregateCheck(isNodeMustBeMergedFlag(node), false);
+                // Коллекция/папка: если уже в дереве — своя галка TreeItem/модели;
+                // без TreeItem и без mark — не участвует (скрытый Манифест).
+                if (isAggregateCheckNode(node) || shouldRecurseOnly(node))
+                {
+                    if (ctv != null)
+                    {
+                        Widget w = ctv.testFindItem(node);
+                        if (w instanceof TreeItem item && !item.isDisposed())
+                            return new AggregateCheck(item.getChecked(), item.getGrayed());
+                    }
+                    if (isNodeMustBeMergedFlag(node))
+                        return new AggregateCheck(true, false);
+                    return null;
+                }
+                // MD с Формы/Реквизиты в модели, но они не учлись — не own BM.
+                if (hasContainmentChildren(node) && hasNonPropertiesCheckableChild(ctv, node))
+                    return new AggregateCheck(false, false);
+                return new AggregateCheck(isNodeMustBeMergedFlag(node), false);
             }
 
             /**
@@ -2152,6 +2857,17 @@ public class CompareConfigMenuHook implements IStartup
                 aggregateGrayedUi.put(node, Boolean.valueOf(grayed));
             }
 
+            /** Сброс кэша только у узла и предков — соседей не трогаем (иначе
+             * CheckStateProvider отдаёт серый из модели со скрытыми mustBeMerged). */
+            private void invalidateAggregateUiAncestors(IPartialModelNode from)
+            {
+                for (IPartialModelNode p = from; p != null; p = p.getParent())
+                {
+                    aggregateCheckedUi.remove(p);
+                    aggregateGrayedUi.remove(p);
+                }
+            }
+
             /**
              * После массовой отметки видимых: все затронутые агрегаты = checked, не gray.
              * Только уже загруженные дети (getChildren), без content provider.
@@ -2167,7 +2883,7 @@ public class CompareConfigMenuHook implements IStartup
                             markAggregatesUiAfterBulk(child, checked);
                     }
                 }
-                if (isAggregateCheckNode(node) || isVisibleOnlyClickTarget(node))
+                if (isFilterAwareAggregateUi(node))
                     putAggregateUi(node, checked, false);
             }
 
@@ -2187,7 +2903,7 @@ public class CompareConfigMenuHook implements IStartup
             private void paintAggregateChecks(CheckboxTreeViewer ctv, IPartialModelNode node,
                     boolean checked)
             {
-                if (isAggregateCheckNode(node) || isVisibleOnlyClickTarget(node))
+                if (isFilterAwareAggregateUi(node))
                     paintTreeItemCheckNoExpand(ctv, node, checked, false);
                 Collection<IPartialModelNode> children = node.getChildren();
                 if (children == null)
@@ -2215,13 +2931,19 @@ public class CompareConfigMenuHook implements IStartup
                 item.setGrayed(grayed);
             }
 
-            private void invalidateAggregateUiAncestors(IPartialModelNode from)
+            /**
+             * UI-агрегат при filter-aware: папки/коллекции/«Конфигурация» плюс
+             * MD с детьми (Справочник…) — их галка = видимые потомки, не сырой
+             * {@code isChecked()}. Клик bulk по-прежнему только
+             * {@link #isVisibleOnlyClickTarget} (без needsOwnMergeFlag).
+             */
+            private static boolean isFilterAwareAggregateUi(Object el)
             {
-                for (IPartialModelNode p = from; p != null; p = p.getParent())
-                {
-                    aggregateCheckedUi.remove(p);
-                    aggregateGrayedUi.remove(p);
-                }
+                if (isAggregateCheckNode(el) || isVisibleOnlyClickTarget(el))
+                    return true;
+                if (!(el instanceof IPartialModelNode node))
+                    return false;
+                return node.isCheckable() && hasContainmentChildren(node);
             }
 
             /**
@@ -2231,7 +2953,19 @@ public class CompareConfigMenuHook implements IStartup
             {
                 return el instanceof ProjectPartialModelNode
                         || el instanceof VirtualFolderPartialModelNode
-                        || el instanceof ICollectionPartialNode;
+                        || el instanceof ICollectionPartialNode
+                        || isPropertiesVirtualFolderNode(el);
+            }
+
+            /**
+             * «Свойства» — отдельный класс EDT, не {@link VirtualFolderPartialModelNode}.
+             * hasChildren() у модели часто false при уже созданных TreeItem-детях →
+             * Роль1 kidsRaw=1 checkable=0 → skip, полная галка при серых Свойствах.
+             */
+            private static boolean isPropertiesVirtualFolderNode(Object el)
+            {
+                return el != null
+                        && "PropertiesVirtualFolderNode".equals(el.getClass().getSimpleName()); //$NON-NLS-1$
             }
 
             /**
@@ -2245,6 +2979,8 @@ public class CompareConfigMenuHook implements IStartup
                     return true;
                 if (!(el instanceof IPartialModelNode node))
                     return false;
+                if (isPropertiesVirtualFolderNode(node))
+                    return true;
                 if (needsOwnMergeFlag(node))
                     return false;
                 if (isConfigurationPartialModelNode(node))
@@ -2341,6 +3077,28 @@ public class CompareConfigMenuHook implements IStartup
                     this.delegate = delegate;
                 }
 
+                /**
+                 * При отборе агрегат без кэша — visible-only пересчёт, не
+                 * {@code VirtualFolder.isGrayed()} модели (скрытые mustBeMerged).
+                 * {@code null} — ещё рано (гонка со штатной расстановкой): без кэша,
+                 * отдаём delegate.
+                 */
+                private AggregateCheck aggregateUiForProvider(IPartialModelNode node)
+                {
+                    if (isStartupSettleActive())
+                        return null;
+                    Boolean cachedChecked = aggregateCheckedUi.get(node);
+                    Boolean cachedGrayed = aggregateGrayedUi.get(node);
+                    if (cachedChecked != null && cachedGrayed != null)
+                        return new AggregateCheck(cachedChecked.booleanValue(),
+                                cachedGrayed.booleanValue());
+                    AggregateCheck agg = computeAggregateFromLoadedChildren(hookedCtv, node);
+                    if (agg == null)
+                        return null;
+                    putAggregateUi(node, agg.checked, agg.grayed);
+                    return agg;
+                }
+
                 @Override
                 public boolean isChecked(Object element)
                 {
@@ -2348,11 +3106,12 @@ public class CompareConfigMenuHook implements IStartup
                     if (!shouldRestrictChecksToVisible())
                         return delegate != null ? delegate.isChecked(element)
                                 : element instanceof IPartialModelNode n && n.isChecked();
-                    if (element instanceof IPartialModelNode node && isAggregateCheckNode(node))
+                    if (element instanceof IPartialModelNode node
+                            && isFilterAwareAggregateUi(node))
                     {
-                        Boolean cached = aggregateCheckedUi.get(node);
-                        if (cached != null)
-                            return cached.booleanValue();
+                        AggregateCheck agg = aggregateUiForProvider(node);
+                        if (agg != null)
+                            return agg.checked;
                     }
                     return delegate != null ? delegate.isChecked(element)
                             : element instanceof IPartialModelNode n && n.isChecked();
@@ -2364,11 +3123,12 @@ public class CompareConfigMenuHook implements IStartup
                     if (!shouldRestrictChecksToVisible())
                         return delegate != null ? delegate.isGrayed(element)
                                 : element instanceof IPartialModelNode n && n.isGrayed();
-                    if (element instanceof IPartialModelNode node && isAggregateCheckNode(node))
+                    if (element instanceof IPartialModelNode node
+                            && isFilterAwareAggregateUi(node))
                     {
-                        Boolean cached = aggregateGrayedUi.get(node);
-                        if (cached != null)
-                            return cached.booleanValue();
+                        AggregateCheck agg = aggregateUiForProvider(node);
+                        if (agg != null)
+                            return agg.grayed;
                     }
                     return delegate != null ? delegate.isGrayed(element)
                             : element instanceof IPartialModelNode n && n.isGrayed();
@@ -2426,8 +3186,7 @@ public class CompareConfigMenuHook implements IStartup
                     Object rootObj = Global.invoke(pm, "getRoot"); //$NON-NLS-1$
                     if (!(rootObj instanceof ProjectPartialModelNode root))
                         continue;
-                    total += applyCheckVisibleOnly(ctv, root, checked);
-                    applyAggregateTreeCheckUi(ctv, root, checked);
+                    total += applyFilterAwareCheckCascade(ctv, root, checked);
                 }
                 return total;
             }
@@ -2447,19 +3206,31 @@ public class CompareConfigMenuHook implements IStartup
                 @Override
                 public void checkStateChanged(CheckStateChangedEvent event)
                 {
-                    // Без скрывающих отборов — только штатный EDT.
-                    if (!shouldRestrictChecksToVisible())
+                    Object el = event.getElement();
+                    boolean checked = event.getChecked();
+
+                    // Старт сравнения: штатный расстановщик — не пересчитываем агрегаты.
+                    if (isStartupSettleActive())
                     {
-                        syncCheckHooksToFilterState(ctv);
                         for (ICheckStateListener delegate : delegates)
                             delegate.checkStateChanged(event);
                         return;
                     }
 
+                    // Без скрывающих отборов: EDT ставит mustBeMerged; серые предков
+                    // всё равно рисуем мы (видимы все → как EDT, единый путь).
+                    if (!shouldRestrictChecksToVisible())
+                    {
+                        syncCheckHooksToFilterState(ctv);
+                        for (ICheckStateListener delegate : delegates)
+                            delegate.checkStateChanged(event);
+                        if (el instanceof IPartialModelNode node)
+                            repaintAncestorAggregates(ctv, node);
+                        return;
+                    }
+
                     syncCheckHooksToFilterState(ctv);
 
-                    Object el = event.getElement();
-                    boolean checked = event.getChecked();
                     boolean bulk = isVisibleOnlyClickTarget(el);
                     Global.tempLog(LOG, "checkState: el=" //$NON-NLS-1$
                             + (el == null ? "null" : el.getClass().getSimpleName()) //$NON-NLS-1$
@@ -2467,29 +3238,508 @@ public class CompareConfigMenuHook implements IStartup
                             + " subsystemFilterEmpty=" + isFilterEmpty() //$NON-NLS-1$
                             + " namedFilterActive=" + isNamedComparisonFilterActive() //$NON-NLS-1$
                             + " bulk=" + bulk); //$NON-NLS-1$
+                    CompareChecksDebug.step("checkState", //$NON-NLS-1$
+                            CompareChecksDebug.nodeLabel(el)
+                                    + " checked=" + checked //$NON-NLS-1$
+                                    + " bulk=" + bulk //$NON-NLS-1$
+                                    + " namedFilter=" + isNamedComparisonFilterActive() //$NON-NLS-1$
+                                    + " subsystemEmpty=" + isFilterEmpty()); //$NON-NLS-1$
 
-                    // С отбором: фильтр только на top-MD; каскад внутрь объекта — штатный.
-                    if (bulk && el instanceof IPartialModelNode node)
+                    // Filter-aware: (1) та же пометка на всех отфильтрованных
+                    // потомках; (2) 3-состояние родителей снизу вверх только по
+                    // отфильтрованным потомкам.
+                    if (el instanceof IPartialModelNode node)
                     {
                         applyLogLeft = 30;
                         long t0 = System.nanoTime();
-                        int applied = applyCheckVisibleOnly(ctv, node, checked);
-                        syncAncestorsCheckCacheFromMergeSettings(node);
-                        applyAggregateTreeCheckUi(ctv, node, checked);
-                        for (IPartialModelNode p = node.getParent(); p != null; p = p.getParent())
-                            ctv.update(p, null);
-                        Global.tempLog(LOG, "check visible-only: applied=" + applied //$NON-NLS-1$
-                                + " checked=" + checked //$NON-NLS-1$
+                        int applied = applyFilterAwareCheckCascade(ctv, node, checked);
+                        CompareChecksDebug.step("checkCascade", //$NON-NLS-1$
+                                CompareChecksDebug.nodeLabel(node)
+                                        + " want=" + checked //$NON-NLS-1$
+                                        + " applied=" + applied //$NON-NLS-1$
+                                        + " bulk=" + bulk //$NON-NLS-1$
+                                        + " ms=" + ((System.nanoTime() - t0) / 1_000_000L)); //$NON-NLS-1$
+                        Global.tempLog(LOG, "check cascade: el=" //$NON-NLS-1$
+                                + node.getClass().getSimpleName()
+                                + " want=" + checked //$NON-NLS-1$
+                                + " applied=" + applied //$NON-NLS-1$
                                 + " ms=" + ((System.nanoTime() - t0) / 1_000_000L)); //$NON-NLS-1$
                         return;
                     }
 
-                    if (el instanceof IPartialModelNode leaf)
-                        invalidateAggregateUiAncestors(leaf);
-
                     for (ICheckStateListener delegate : delegates)
                         delegate.checkStateChanged(event);
                 }
+            }
+
+            /**
+             * Каскад при активном отборе:
+             * <ol>
+             * <li>на кликнутом и всех отфильтрованных потомках — та же пометка;</li>
+             * <li>у предков по цепочке — 3-состояние только по отфильтрованным
+             * детям (непосредственный родитель, затем выше).</li>
+             * </ol>
+             */
+            private int applyFilterAwareCheckCascade(CheckboxTreeViewer ctv,
+                    IPartialModelNode clicked, boolean want)
+            {
+                if (ctv == null || clicked == null)
+                    return 0;
+                int applied;
+                // Снятие BM на MD-корнях и при want=false: иначе mustBeMerged
+                // остаётся, агрегат снова ☑ и клик по «Справочники» «не работает».
+                clearBmOnMdRootsInFilteredSubtree(ctv, clicked);
+                applied = setMarkOnAllFilteredCheckable(ctv, clicked, want);
+                clearAggregateUiUnder(clicked);
+                paintFilteredSubtreeLeafChecks(ctv, clicked);
+                paintAggregatesBottomUpUnder(ctv, clicked);
+                if (isFilterAwareAggregateUi(clicked))
+                    paintAggregateFromChildren(ctv, clicked);
+                else
+                    paintPlainCheckUi(ctv, clicked, want && applied > 0);
+                // Предки: сначала непосредственный, затем выше.
+                recalculateAncestorAggregatesUpward(ctv, clicked);
+                return applied;
+            }
+
+            /** Галочки листьев из модели (агрегаты красит {@link #paintAggregatesBottomUpUnder}). */
+            private void paintFilteredSubtreeLeafChecks(CheckboxTreeViewer ctv,
+                    IPartialModelNode node)
+            {
+                if (ctv == null || node == null)
+                    return;
+                if (node.isCheckable() && !isFilterAwareAggregateUi(node))
+                {
+                    Widget w = ctv.testFindItem(node);
+                    if (w instanceof TreeItem item && !item.isDisposed())
+                    {
+                        item.setChecked(node.isChecked());
+                        item.setGrayed(false);
+                    }
+                }
+                for (IPartialModelNode child : resolveChildren(ctv, node))
+                {
+                    if (isStructuralFolderForFilterWalk(child))
+                    {
+                        paintFilteredSubtreeLeafChecks(ctv, child);
+                        continue;
+                    }
+                    if (!isVisibleForCheck(ctv, node, child))
+                        continue;
+                    paintFilteredSubtreeLeafChecks(ctv, child);
+                }
+            }
+
+            /** setMustBeMerged(false) на MD с containment в отфильтрованном поддереве. */
+            private void clearBmOnMdRootsInFilteredSubtree(CheckboxTreeViewer ctv,
+                    IPartialModelNode node)
+            {
+                if (node == null)
+                    return;
+                if (node.isCheckable() && hasContainmentChildren(node))
+                {
+                    IComparisonSession session = node.getComparisonSession();
+                    long id = node.getNodeId();
+                    if (session != null && id != -1L)
+                    {
+                        session.setMustBeMerged(id, false, true);
+                        node.setChecked(false);
+                        Global.invoke(node, "setGrayed", Boolean.FALSE); //$NON-NLS-1$
+                    }
+                }
+                for (IPartialModelNode child : resolveChildren(ctv, node))
+                {
+                    if (isStructuralFolderForFilterWalk(child))
+                    {
+                        clearBmOnMdRootsInFilteredSubtree(ctv, child);
+                        continue;
+                    }
+                    if (!isVisibleForCheck(ctv, node, child))
+                        continue;
+                    clearBmOnMdRootsInFilteredSubtree(ctv, child);
+                }
+            }
+
+            /**
+             * Та же пометка на узле и всех отфильтрованных checkable-потомках.
+             */
+            private int setMarkOnAllFilteredCheckable(CheckboxTreeViewer ctv,
+                    IPartialModelNode node, boolean want)
+            {
+                if (node == null)
+                    return 0;
+                int applied = 0;
+                if (node.isCheckable() && setNodeFilteredMark(ctv, node, want))
+                    applied++;
+                for (IPartialModelNode child : resolveChildren(ctv, node))
+                {
+                    // Коллекции/MD с детьми — всегда спускаемся (Формы свёрнуты,
+                    // но resolveChildren отдаёт ФормаЭлемента). Фильтр — на листьях
+                    // и объектах без containment через isVisibleForCheck.
+                    if (isStructuralFolderForFilterWalk(child) || isFilterAwareAggregateUi(child))
+                    {
+                        if (isFilterAwareAggregateUi(child) && !isStructuralFolderForFilterWalk(child)
+                                && !isVisibleForCheck(ctv, node, child))
+                            continue;
+                        applied += setMarkOnAllFilteredCheckable(ctv, child, want);
+                        continue;
+                    }
+                    if (!isVisibleForCheck(ctv, node, child))
+                        continue;
+                    applied += setMarkOnAllFilteredCheckable(ctv, child, want);
+                }
+                return applied;
+            }
+
+            /**
+             * Пометка одного узла в BM/MergeSettings — не «uiOnly» {@code setChecked}
+             * (иначе Справочники☑ при Справочник□: кэш без mustBeMerged).
+             * <p>
+             * «ФормаЭлемента» с containment «Свойства» — не контейнер для каскада:
+             * ToTree через session допустим. Catalog/коллекция с checkable-потомками —
+             * только MergeSettings или обход детей (ToTree зальёт скрытых).
+             */
+            private boolean setNodeFilteredMark(CheckboxTreeViewer ctv, IPartialModelNode node,
+                    boolean want)
+            {
+                if (node == null || !node.isCheckable())
+                    return false;
+                if (setMergeSettingsOnNode(node, want))
+                    return true;
+                long id = node.getNodeId();
+                IComparisonSession session = node.getComparisonSession();
+                boolean noCheckableKids = !hasFilteredCheckableDescendants(ctv, node);
+                // Нет checkable-потомков → «лист» (в т.ч. «Справочники» при
+                // «Справочник1» без checkbox).
+                if (noCheckableKids && session != null && id != -1L)
+                {
+                    if (setMergeFlagOnLeaf(node, want))
+                    {
+                        CompareChecksDebug.step("setMark", //$NON-NLS-1$
+                                CompareChecksDebug.nodeLabel(node)
+                                        + " want=" + want + " leafSession"); //$NON-NLS-1$ //$NON-NLS-2$
+                        return true;
+                    }
+                }
+                if (noCheckableKids && (isAggregateCheckNode(node)
+                        || isFilterAwareAggregateUi(node)))
+                {
+                    node.setChecked(want);
+                    Global.invoke(node, "setGrayed", Boolean.FALSE); //$NON-NLS-1$
+                    CompareChecksDebug.step("setMark", //$NON-NLS-1$
+                            CompareChecksDebug.nodeLabel(node)
+                                    + " want=" + want + " collectionOwn"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return true;
+                }
+                // Контейнер с checkable-детьми: обход детей; сбросить артефакт клика.
+                if (hasContainmentChildren(node) || isAggregateCheckNode(node)
+                        || isFilterAwareAggregateUi(node))
+                {
+                    node.setChecked(false);
+                    Global.invoke(node, "setGrayed", Boolean.FALSE); //$NON-NLS-1$
+                    CompareChecksDebug.step("setMark", //$NON-NLS-1$
+                            CompareChecksDebug.nodeLabel(node)
+                                    + " want=" + want + " skipParentToTree id=" + id); //$NON-NLS-1$ //$NON-NLS-2$
+                    return true;
+                }
+                CompareChecksDebug.step("setMark", //$NON-NLS-1$
+                        CompareChecksDebug.nodeLabel(node)
+                                + " want=" + want + " FAIL noSettings id=" + id); //$NON-NLS-1$ //$NON-NLS-2$
+                return false;
+            }
+
+            /**
+             * Есть ли под узлом checkable-потомки, которые нужно метить отдельно
+             * (иначе ToTree на родителе затронет скрытых фильтром).
+             * «Свойства» не считаем — это часть объекта, FormElement = leafSession.
+             */
+            private boolean hasFilteredCheckableDescendants(CheckboxTreeViewer ctv,
+                    IPartialModelNode node)
+            {
+                if (ctv == null || node == null)
+                    return hasContainmentChildren(node);
+                for (IPartialModelNode child : resolveChildren(ctv, node))
+                {
+                    if (isPropertiesVirtualFolderNode(child))
+                        continue;
+                    if (isStructuralFolderForFilterWalk(child) || isFilterAwareAggregateUi(child))
+                    {
+                        if (isFilterAwareAggregateUi(child) && !isStructuralFolderForFilterWalk(child)
+                                && !isVisibleForCheck(ctv, node, child))
+                            continue;
+                        if (child.isCheckable() && !isAggregateCheckNode(child))
+                            return true;
+                        if (hasFilteredCheckableDescendants(ctv, child))
+                            return true;
+                        continue;
+                    }
+                    if (!isVisibleForCheck(ctv, node, child))
+                        continue;
+                    if (child.isCheckable())
+                        return true;
+                    if (hasFilteredCheckableDescendants(ctv, child))
+                        return true;
+                }
+                return false;
+            }
+
+            /**
+             * Среди детей есть checkable/агрегат кроме «Свойства» (Формы, Реквизиты…).
+             */
+            private boolean hasNonPropertiesCheckableChild(CheckboxTreeViewer ctv,
+                    IPartialModelNode node)
+            {
+                if (node == null)
+                    return false;
+                Collection<IPartialModelNode> children = ctv != null
+                        ? resolveChildren(ctv, node)
+                        : node.getChildren();
+                if (children == null)
+                    return false;
+                for (IPartialModelNode child : children)
+                {
+                    if (isPropertiesVirtualFolderNode(child))
+                        continue;
+                    if (child.isCheckable() || isFilterAwareAggregateUi(child)
+                            || isStructuralFolderForFilterWalk(child))
+                        return true;
+                }
+                return false;
+            }
+
+            /**
+             * Пишет mustBeMerged в MergeSettings без setMustBeMergedToTree.
+             * cn — через retrieveComparisonNode или {@code session.getNode(id)}.
+             * one-side: при необходимости {@code setCanBeMerged(true)}.
+             */
+            private static boolean setMergeSettingsOnNode(IPartialModelNode node, boolean want)
+            {
+                if (node == null)
+                    return false;
+                try
+                {
+                    ComparisonNode cn = resolveComparisonNode(node);
+                    long id = node.getNodeId();
+                    if (cn == null)
+                    {
+                        CompareChecksDebug.step("setMark", //$NON-NLS-1$
+                                CompareChecksDebug.nodeLabel(node)
+                                        + " want=" + want + " noComparisonNode id=" + id); //$NON-NLS-1$ //$NON-NLS-2$
+                        return false;
+                    }
+                    MergeSettings ms = cn.getMergeSettings();
+                    if (ms == null)
+                    {
+                        CompareChecksDebug.step("setMark", //$NON-NLS-1$
+                                CompareChecksDebug.nodeLabel(node)
+                                        + " want=" + want + " noMergeSettings id=" + id); //$NON-NLS-1$ //$NON-NLS-2$
+                        return false;
+                    }
+                    if (want && !ms.isCanBeMerged())
+                        ms.setCanBeMerged(true);
+                    ms.setMustBeMerged(want);
+                    if (!want)
+                        ms.setHaveChildrenExcludedFromMerge(false);
+                    node.setChecked(want);
+                    if (!want)
+                        Global.invoke(node, "setGrayed", Boolean.FALSE); //$NON-NLS-1$
+                    CompareChecksDebug.step("setMark", //$NON-NLS-1$
+                            CompareChecksDebug.nodeLabel(node)
+                                    + " want=" + want + " mergeSettings OK"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return true;
+                }
+                catch (RuntimeException ex)
+                {
+                    CompareChecksDebug.step("setMark", //$NON-NLS-1$
+                            CompareChecksDebug.nodeLabel(node)
+                                    + " want=" + want + " EX " + ex.getClass().getSimpleName()); //$NON-NLS-1$ //$NON-NLS-2$
+                    return false;
+                }
+            }
+
+            /** ComparisonNode: retrieveComparisonNode, иначе session.getNode(id). */
+            private static ComparisonNode resolveComparisonNode(IPartialModelNode node)
+            {
+                if (node == null)
+                    return null;
+                try
+                {
+                    ComparisonNode cn = node.retrieveComparisonNode();
+                    if (cn != null)
+                        return cn;
+                }
+                catch (RuntimeException ignored)
+                {
+                    // fall through
+                }
+                IComparisonSession session = node.getComparisonSession();
+                long id = node.getNodeId();
+                if (session != null && id != -1L)
+                    return session.getNode(id);
+                return null;
+            }
+
+            /**
+             * Реальный mustBeMerged (не артефакт клика TreeViewer на isChecked).
+             */
+            private static boolean isNodeMustBeMergedFlag(IPartialModelNode node)
+            {
+                if (node == null)
+                    return false;
+                try
+                {
+                    ComparisonNode cn = resolveComparisonNode(node);
+                    if (cn != null)
+                    {
+                        MergeSettings ms = cn.getMergeSettings();
+                        if (ms != null)
+                            return ms.isMustBeMerged();
+                    }
+                }
+                catch (RuntimeException ignored)
+                {
+                    // fall through
+                }
+                return node.isChecked();
+            }
+
+            /** @deprecated см. {@link #setMergeSettingsOnNode}. */
+            private static boolean setMergeSettingsDirectForced(IPartialModelNode node,
+                    boolean want)
+            {
+                return setMergeSettingsOnNode(node, want);
+            }
+
+            private static boolean isStructuralFolderForFilterWalk(IPartialModelNode node)
+            {
+                if (node == null)
+                    return false;
+                if (shouldRecurseOnly(node) || isPropertiesVirtualFolderNode(node))
+                    return true;
+                if (!node.isCheckable() && (node.hasChildren() || hasContainmentChildren(node)))
+                    return true;
+                return false;
+            }
+
+            private static void paintPlainCheckUi(CheckboxTreeViewer ctv, IPartialModelNode node,
+                    boolean checked)
+            {
+                Widget w = ctv.testFindItem(node);
+                if (w instanceof TreeItem item && !item.isDisposed())
+                {
+                    item.setChecked(checked);
+                    item.setGrayed(false);
+                }
+                node.setChecked(checked);
+                Global.invoke(node, "setGrayed", Boolean.FALSE); //$NON-NLS-1$
+            }
+
+            /** Агрегаты поддерева снизу вверх (отфильтрованная модель). */
+            private void paintAggregatesBottomUpUnder(CheckboxTreeViewer ctv,
+                    IPartialModelNode node)
+            {
+                if (ctv == null || node == null)
+                    return;
+                ArrayList<IPartialModelNode> painted = new ArrayList<>();
+                for (IPartialModelNode child : resolveChildren(ctv, node))
+                {
+                    if (isStructuralFolderForFilterWalk(child)
+                            || isFilterAwareAggregateUi(child)
+                            || isVisibleForCheck(ctv, node, child))
+                    {
+                        paintAggregatesBottomUpUnder(ctv, child);
+                        if (isFilterAwareAggregateUi(child))
+                        {
+                            paintAggregateFromChildren(ctv, child);
+                            painted.add(child);
+                        }
+                    }
+                }
+                if (!painted.isEmpty())
+                    refreshNodeImages(ctv, painted);
+            }
+
+            /** @deprecated имя — см. {@link #paintAggregatesBottomUpUnder}. */
+            private void paintFilterAwareAggregatesUnder(CheckboxTreeViewer ctv,
+                    IPartialModelNode node)
+            {
+                paintAggregatesBottomUpUnder(ctv, node);
+            }
+
+            /**
+             * 3-состояние предков: непосредственный родитель, затем его родитель…
+             * только по отфильтрованным потомкам.
+             */
+            private void recalculateAncestorAggregatesUpward(CheckboxTreeViewer ctv,
+                    IPartialModelNode from)
+            {
+                if (ctv == null || from == null)
+                    return;
+                paintAncestorChainUpward(ctv, from);
+                Control control = ctv.getControl();
+                if (control == null || control.isDisposed())
+                    return;
+                control.getDisplay().asyncExec(() -> {
+                    if (ctv.getControl() == null || ctv.getControl().isDisposed())
+                        return;
+                    paintAncestorChainUpward(ctv, from);
+                });
+            }
+
+            private void paintAncestorChainUpward(CheckboxTreeViewer ctv, IPartialModelNode from)
+            {
+                ArrayList<IPartialModelNode> toRefresh = new ArrayList<>();
+                for (IPartialModelNode p = from.getParent(); p != null; p = p.getParent())
+                {
+                    if (isFilterAwareAggregateUi(p))
+                        paintAggregateFromChildren(ctv, p);
+                    toRefresh.add(p);
+                }
+                refreshNodeImages(ctv, toRefresh);
+            }
+
+            /**
+             * Пересчёт динамических пометок всех предков снизу вверх
+             * (только отфильтрованные / видимые дети).
+             * Повтор в asyncExec — EDT после listener может перерисовать
+             * TreeItem из модели (скрытые mustBeMerged).
+             */
+            private void repaintAncestorAggregates(CheckboxTreeViewer ctv, IPartialModelNode from)
+            {
+                recalculateAncestorAggregatesUpward(ctv, from);
+            }
+
+            private void paintAncestorChain(CheckboxTreeViewer ctv, IPartialModelNode from)
+            {
+                paintAncestorChainUpward(ctv, from);
+            }
+
+            /**
+             * {@code ObjectColumnLabelProvider}: warning (hasPotentialMergeProblems /
+             * смена UID) и merge-action зависят от модели; {@link #paintTreeItemCheckNoExpand}
+             * галки TreeItem не трогает Image — нужен {@link CheckboxTreeViewer#update}.
+             */
+            private void refreshNodeImages(CheckboxTreeViewer ctv,
+                    Collection<? extends Object> elements)
+            {
+                if (ctv == null || elements == null || elements.isEmpty())
+                    return;
+                Control control = ctv.getControl();
+                if (control == null || control.isDisposed())
+                    return;
+                ArrayList<Object> present = new ArrayList<>(elements.size());
+                for (Object el : elements)
+                {
+                    if (el == null)
+                        continue;
+                    Widget w = ctv.testFindItem(el);
+                    if (w instanceof TreeItem item && !item.isDisposed())
+                        present.add(el);
+                }
+                if (present.isEmpty())
+                    return;
+                ctv.update(present.toArray(), null);
+                CompareChecksDebug.step("refreshImages", "n=" + present.size()); //$NON-NLS-1$ //$NON-NLS-2$
             }
 
             /** Отбор по подсистемам пуст (не путать со штатным combo-фильтром). */
@@ -2505,6 +3755,8 @@ public class CompareConfigMenuHook implements IStartup
              */
             private boolean shouldRestrictChecksToVisible()
             {
+                if (!ComfortSettings.isCompareFilterAwareChecksEnabled())
+                    return false;
                 return !isFilterEmpty() || isNamedComparisonFilterActive();
             }
 
@@ -2561,9 +3813,318 @@ public class CompareConfigMenuHook implements IStartup
             }
 
             /**
-             * Скрывающие отборы (подсистемы / combo): только видимые top-MD
-             * (Справочник, Обработка, …). Для каждого — штатный каскад EDT на всё
-             * его поддерево, без повторной фильтрации внутри объекта.
+             * MD при активном отборе.
+             * <p>
+             * Важно: {@code IComparisonSession.setMustBeMerged(id, want, force)} —
+             * третий аргумент это {@code force}, НЕ cascade. Вызов ВСЕГДА делает
+             * {@code setMustBeMergedToTree} по containment-детям BM. Поэтому:
+             * 1) сначала {@code setMustBeMerged(md, false)} — снять всё поддерево;
+             * 2) затем {@code setMustBeMerged(true)} только на видимых листьях
+             *    (без детей) — родители пересчитаются EDT сами.
+             */
+            private int applyVisibleOnlyInsideMdObject(CheckboxTreeViewer ctv,
+                    IPartialModelNode leaf, boolean checked)
+            {
+                IComparisonSession session = leaf.getComparisonSession();
+                long rootId = leaf.getNodeId();
+                // Полный сброс BM-поддерева (единственный надёжный способ убрать
+                // скрытых — они часто не в resolveChildren при активном фильтре).
+                if (session != null && rootId != -1L)
+                {
+                    session.setMustBeMerged(rootId, false, true);
+                    leaf.setChecked(false);
+                    Global.invoke(leaf, "setGrayed", Boolean.FALSE); //$NON-NLS-1$
+                }
+                else
+                {
+                    leaf.check(false);
+                }
+                int applied = 0;
+                if (checked)
+                {
+                    applied = markVisibleLeavesOnly(ctv, leaf);
+                    // Односторонний объект / нечего раскрыть — только флаг на себе,
+                    // без setMustBeMerged (он снова зальёт containment-детей).
+                    if (applied == 0 && leaf.isCheckable())
+                    {
+                        if (setMergeSettingsDirect(leaf, true))
+                            applied = 1;
+                        else if (setMergeFlagOnLeaf(leaf, true))
+                        {
+                            // canBeMerged=false / нет MergeSettings — всё же BM-флаг.
+                            applied = 1;
+                            CompareChecksDebug.step("visibleOnlyMd", //$NON-NLS-1$
+                                    CompareChecksDebug.nodeLabel(leaf)
+                                            + " fallback setMustBeMerged"); //$NON-NLS-1$
+                        }
+                        else
+                        {
+                            CompareChecksDebug.step("visibleOnlyMd", //$NON-NLS-1$
+                                    CompareChecksDebug.nodeLabel(leaf)
+                                            + " FAIL mark checkable"); //$NON-NLS-1$
+                        }
+                    }
+                }
+                else
+                {
+                    applied = 1; // сброс корня уже сделан
+                }
+                CompareChecksDebug.step("visibleOnlyMd", //$NON-NLS-1$
+                        CompareChecksDebug.nodeLabel(leaf)
+                                + " want=" + checked //$NON-NLS-1$
+                                + " visibleLeaves=" + applied); //$NON-NLS-1$
+                // Сбросить кэш агрегатов под MD — иначе Properties держит checked.
+                clearAggregateUiUnder(leaf);
+                syncSubtreeCheckCacheFromMergeSettings(leaf);
+                syncAncestorsCheckCacheFromMergeSettings(leaf);
+                paintVisibleSubtreeChecksOnly(ctv, leaf);
+                paintAggregateFoldersUnder(ctv, leaf);
+                // Не item.setGrayed(false): Роль1 при Права□ должна быть серой,
+                // иначе bulk по «Роли» оставляет full поверх gray Properties.
+                if (isFilterAwareAggregateUi(leaf))
+                {
+                    paintAggregateFromChildren(ctv, leaf);
+                    refreshNodeImages(ctv, List.of(leaf));
+                }
+                else
+                {
+                    boolean uiChecked = checked && applied > 0;
+                    Widget w = ctv.testFindItem(leaf);
+                    if (w instanceof TreeItem item && !item.isDisposed())
+                    {
+                        item.setChecked(uiChecked);
+                        item.setGrayed(false);
+                    }
+                    leaf.setChecked(uiChecked);
+                    Global.invoke(leaf, "setGrayed", Boolean.FALSE); //$NON-NLS-1$
+                }
+                return applied;
+            }
+
+            private void clearAggregateUiUnder(IPartialModelNode node)
+            {
+                if (node == null)
+                    return;
+                aggregateCheckedUi.remove(node);
+                aggregateGrayedUi.remove(node);
+                Collection<IPartialModelNode> children = node.getChildren();
+                if (children == null)
+                    return;
+                for (IPartialModelNode child : children)
+                    clearAggregateUiUnder(child);
+            }
+
+            /**
+             * Пометить только видимые листья (нет containment-детей). Узлы с детьми
+             * — только спуск: {@code setMustBeMerged} на них заново зальёт поддерево.
+             */
+            private int markVisibleLeavesOnly(CheckboxTreeViewer ctv, IPartialModelNode node)
+            {
+                int applied = 0;
+                Collection<IPartialModelNode> children = resolveChildren(ctv, node);
+                for (IPartialModelNode child : children)
+                {
+                    boolean folder = shouldRecurseOnly(child) || isAggregateCheckNode(child)
+                            || isVisibleOnlyClickTarget(child);
+                    if (folder)
+                    {
+                        applied += markVisibleLeavesOnly(ctv, child);
+                        continue;
+                    }
+                    if (!child.isCheckable())
+                        continue;
+                    IPartialModelNode visParent = child.getParent() != null ? child.getParent() : node;
+                    if (!isVisibleForCheck(ctv, visParent, child))
+                        continue;
+                    if (hasContainmentChildren(child))
+                    {
+                        int sub = markVisibleLeavesOnly(ctv, child);
+                        if (sub == 0 && setMergeSettingsDirect(child, true))
+                        {
+                            // Видимый контейнер без видимых листьев (дети скрыты фильтром).
+                            applied++;
+                            CompareChecksDebug.step("visibleNodeDirect", //$NON-NLS-1$
+                                    CompareChecksDebug.nodeLabel(child)
+                                            + " id=" + child.getNodeId()); //$NON-NLS-1$
+                        }
+                        else
+                        {
+                            applied += sub;
+                        }
+                        continue;
+                    }
+                    if (setMergeFlagOnLeaf(child, true))
+                    {
+                        applied++;
+                        if (applyLogLeft > 0)
+                        {
+                            applyLogLeft--;
+                            Global.tempLog(LOG, "visible leaf id=" + child.getNodeId() //$NON-NLS-1$
+                                    + " el=" + child.getClass().getSimpleName()); //$NON-NLS-1$
+                            CompareChecksDebug.step("visibleLeaf", //$NON-NLS-1$
+                                    CompareChecksDebug.nodeLabel(child)
+                                            + " id=" + child.getNodeId()); //$NON-NLS-1$
+                        }
+                    }
+                }
+                // Сам node — лист (клик по свойству без детей).
+                if (children.isEmpty() && node.isCheckable() && !hasContainmentChildren(node))
+                {
+                    if (setMergeFlagOnLeaf(node, true))
+                        applied++;
+                }
+                return applied;
+            }
+
+            private static boolean hasContainmentChildren(IPartialModelNode node)
+            {
+                try
+                {
+                    ComparisonNode cn = node.retrieveComparisonNode();
+                    if (cn != null)
+                        return cn.hasChildren();
+                }
+                catch (RuntimeException ignored)
+                {
+                    // fall through
+                }
+                Collection<IPartialModelNode> ch = node.getChildren();
+                return ch != null && !ch.isEmpty();
+            }
+
+            /**
+             * {@code setMustBeMerged} только для листа. 3-й аргумент = force
+             * (не cascade) — на листе ToTree затрагивает только его.
+             */
+            private static boolean setMergeFlagOnLeaf(IPartialModelNode node, boolean want)
+            {
+                if (node == null)
+                    return false;
+                IComparisonSession session = node.getComparisonSession();
+                long id = node.getNodeId();
+                if (session != null && id != -1L)
+                {
+                    session.setMustBeMerged(id, want, true);
+                    node.setChecked(want);
+                    if (!want)
+                        Global.invoke(node, "setGrayed", Boolean.FALSE); //$NON-NLS-1$
+                    return true;
+                }
+                node.check(want);
+                return node.isChecked() == want;
+            }
+
+            /**
+             * Флаг только на узле через {@link MergeSettings} — без
+             * {@code setMustBeMergedToTree}. Для видимых контейнеров, у которых
+             * все дети скрыты фильтром.
+             */
+            private static boolean setMergeSettingsDirect(IPartialModelNode node, boolean want)
+            {
+                return setMergeSettingsOnNode(node, want);
+            }
+
+            /** Галочки только на видимых уже созданных TreeItem (без скрытых из модели). */
+            private void paintVisibleSubtreeChecksOnly(CheckboxTreeViewer ctv, IPartialModelNode node)
+            {
+                if (ctv == null || node == null)
+                    return;
+                Widget w = ctv.testFindItem(node);
+                if (!(w instanceof TreeItem item) || item.isDisposed())
+                    return;
+                paintVisibleSubtreeChecksOnlyItem(ctv, item, node);
+                ArrayList<Object> elems = new ArrayList<>();
+                collectPartialNodesFromTreeItem(item, elems);
+                refreshNodeImages(ctv, elems);
+            }
+
+            private static void collectPartialNodesFromTreeItem(TreeItem item, List<Object> out)
+            {
+                if (item == null || item.isDisposed() || out == null)
+                    return;
+                Object data = item.getData();
+                if (data instanceof IPartialModelNode)
+                    out.add(data);
+                TreeItem[] kids = item.getItems();
+                if (kids == null)
+                    return;
+                for (TreeItem kid : kids)
+                    collectPartialNodesFromTreeItem(kid, out);
+            }
+
+            private void paintVisibleSubtreeChecksOnlyItem(CheckboxTreeViewer ctv, TreeItem item,
+                    IPartialModelNode parentNode)
+            {
+                TreeItem[] kids = item.getItems();
+                if (kids == null)
+                    return;
+                for (TreeItem childItem : kids)
+                {
+                    if (childItem == null || childItem.isDisposed())
+                        continue;
+                    Object data = childItem.getData();
+                    if (!(data instanceof IPartialModelNode child))
+                        continue;
+                    boolean folder = shouldRecurseOnly(child) || isAggregateCheckNode(child)
+                            || isVisibleOnlyClickTarget(child);
+                    if (folder)
+                    {
+                        paintVisibleSubtreeChecksOnlyItem(ctv, childItem, child);
+                        continue;
+                    }
+                    if (!isVisibleForCheck(ctv, parentNode, child))
+                    {
+                        childItem.setChecked(false);
+                        childItem.setGrayed(false);
+                        continue;
+                    }
+                    childItem.setChecked(child.isChecked());
+                    // При отборе не тащим BM-gray (excluded hidden).
+                    childItem.setGrayed(!shouldRestrictChecksToVisible()
+                            && child.isChecked() && child.isGrayed());
+                    paintVisibleSubtreeChecksOnlyItem(ctv, childItem, child);
+                }
+            }
+
+            /** Серые/полные пометки папок под MD после visible-only каскада. */
+            private void paintAggregateFoldersUnder(CheckboxTreeViewer ctv, IPartialModelNode node)
+            {
+                Collection<IPartialModelNode> children = node.getChildren();
+                if (children == null)
+                    return;
+                boolean restrict = shouldRestrictChecksToVisible();
+                for (IPartialModelNode child : children)
+                {
+                    boolean folderish = shouldRecurseOnly(child) || isAggregateCheckNode(child)
+                            || isVisibleOnlyClickTarget(child)
+                            || (restrict && child.isCheckable() && hasContainmentChildren(child));
+                    if (!folderish)
+                        continue;
+                    paintAggregateFoldersUnder(ctv, child);
+                    if (isAggregateCheckNode(child) || isVisibleOnlyClickTarget(child))
+                        paintAggregateFromChildren(ctv, child);
+                    else if (restrict && child.isCheckable() && hasContainmentChildren(child))
+                    {
+                        // Источник и т.п.: UI full/gray только по видимым детям.
+                        AggregateCheck agg = computeAggregateFromLoadedChildren(ctv, child);
+                        if (agg == null || (!agg.checked && !agg.grayed))
+                            continue;
+                        Widget w = ctv.testFindItem(child);
+                        if (w instanceof TreeItem item && !item.isDisposed())
+                        {
+                            item.setChecked(agg.checked);
+                            item.setGrayed(agg.grayed);
+                        }
+                        child.setChecked(agg.checked);
+                        Global.invoke(child, "setGrayed", Boolean.valueOf(agg.grayed)); //$NON-NLS-1$
+                    }
+                }
+            }
+
+            /**
+             * Скрывающие отборы (подсистемы / combo): только видимые top-MD.
+             * Внутрь каждого — {@link #applyVisibleOnlyInsideMdObject} (сброс BM-дерева
+             * + пометка только видимых листьев; {@code setMustBeMerged} всегда ToTree).
              */
             private int applyCheckVisibleOnly(CheckboxTreeViewer ctv, IPartialModelNode parent,
                     boolean checked)
@@ -2586,9 +4147,7 @@ public class CompareConfigMenuHook implements IStartup
                     visible++;
                     if (!child.isCheckable())
                         continue;
-                    if (!applyStockTopObjectCascade(ctv, child, checked))
-                        continue;
-                    applied++;
+                    applied += applyVisibleOnlyInsideMdObject(ctv, child, checked);
                 }
                 if (parent instanceof ICollectionPartialNode || parent instanceof VirtualFolderPartialModelNode)
                 {
@@ -2670,8 +4229,11 @@ public class CompareConfigMenuHook implements IStartup
             }
 
             /**
-             * Видимость для каскада флажков: без {@code ViewerFilter.select} по папкам
-             * (дорого) и без oneSide-логов во время bulk.
+             * Видимость для каскада флажков: без oneSide-логов во время bulk.
+             * Уже созданный {@link TreeItem} = узел на экране (не доверяем одному
+             * {@code ViewerFilter.select} по папкам: у коллекций {@code getChildren()}
+             * часто пуст, а дерево уже показало узел через content provider →
+             * select=false → корень□ при «Справочники»☑).
              */
             private boolean isVisibleForCheck(Viewer viewer, Object parent, Object element)
             {
@@ -2679,6 +4241,12 @@ public class CompareConfigMenuHook implements IStartup
                 suppressDecideLogs = true;
                 try
                 {
+                    if (viewer instanceof CheckboxTreeViewer ctv && element != null)
+                    {
+                        Widget w = ctv.testFindItem(element);
+                        if (w instanceof TreeItem item && !item.isDisposed())
+                            return true;
+                    }
                     return isVisibleInViewer(viewer, parent, element);
                 }
                 finally
@@ -2725,26 +4293,39 @@ public class CompareConfigMenuHook implements IStartup
 
             private boolean syncCheckCacheFromMergeSettings(IPartialModelNode node)
             {
-                ComparisonNode cn;
-                try
-                {
-                    cn = node.retrieveComparisonNode();
-                }
-                catch (RuntimeException e)
-                {
-                    return false;
-                }
+                ComparisonNode cn = resolveComparisonNode(node);
                 if (cn == null)
                     return false;
                 MergeSettings ms = cn.getMergeSettings();
                 if (ms == null)
                     return false;
                 boolean must = ms.isMustBeMerged();
-                boolean excl = ms.isHaveChildrenExcludedFromMerge();
+                // При активном отборе isHaveChildrenExcludedFromMerge=true из‑за
+                // скрытых (мы их сняли) — UI должен быть full/empty по видимым,
+                // серость считает только наш агрегат.
+                boolean excl = !shouldRestrictChecksToVisible()
+                        && ms.isHaveChildrenExcludedFromMerge();
                 node.setChecked(must);
-                // setGrayed есть на AbstractNodeWithLabels*, не на IPartialModelNode
                 Global.invoke(node, "setGrayed", Boolean.valueOf(excl)); //$NON-NLS-1$
                 return true;
+            }
+
+            /**
+             * Дети папки для {@link #select}: сначала модель, иначе content
+             * provider (как {@link #resolveChildren}) — иначе пустой
+             * {@code getChildren()} → select=false при уже видимом TreeItem.
+             */
+            private Collection<IPartialModelNode> folderChildrenForSelect(Viewer viewer,
+                    IPartialModelNode folder)
+            {
+                if (folder == null)
+                    return List.of();
+                Collection<IPartialModelNode> children = folder.getChildren();
+                if (children != null && !children.isEmpty())
+                    return children;
+                if (viewer instanceof CheckboxTreeViewer ctv)
+                    return resolveChildren(ctv, folder);
+                return children != null ? children : List.of();
             }
 
             @Override
@@ -2800,10 +4381,8 @@ public class CompareConfigMenuHook implements IStartup
                                 && collection.hasChildren()))
                 {
                     IPartialModelNode folder = (IPartialModelNode) element;
-                    if (!folder.hasChildren())
-                        return false;
-                    Collection<IPartialModelNode> children = folder.getChildren();
-                    if (children == null)
+                    Collection<IPartialModelNode> children = folderChildrenForSelect(viewer, folder);
+                    if (children.isEmpty())
                         return false;
                     for (IPartialModelNode child : children)
                     {

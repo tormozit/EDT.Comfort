@@ -427,7 +427,7 @@ public class GetRef extends AbstractHandler implements IElementUpdater
         java.util.Set.of("Модуль", "Форма", "МодульКоманды"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
 
     /** Срезает последний сегмент полного имени, если это малозначащий суффикс вида модуля (см. {@link #LOW_VALUE_MODULE_SUFFIXES}). */
-    private static String stripLowValueModuleSuffix(String fullName)
+    static String stripLowValueModuleSuffix(String fullName)
     {
         if (fullName == null)
             return null;

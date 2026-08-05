@@ -74,6 +74,7 @@ public class BSLEditorMenuHook implements IStartup
     private static final String ITEM_TEXT_ModuleCheck = IrModuleCheckHandler.MENU_LABEL;
     private static final String ITEM_TEXT_ModuleCheckClear = IrModuleCheckClearHandler.MENU_LABEL;
     private static final String ITEM_TEXT_DeclareExpressionType = IrDeclareExpressionTypeHandler.MENU_LABEL;
+    private static final String ITEM_TEXT_HoverHints = "Подсказки при наведении без Ctrl"; //$NON-NLS-1$
 
     private static final String SURROUND_HINT =
         "\nЭто же можно сделать для выделенного блока через CTRL+Space при подключенном ИР.";
@@ -523,6 +524,22 @@ public class BSLEditorMenuHook implements IStartup
                         }
                     });
                     addedItems.add(declareTypeItem);
+
+                    MenuItem hoverHintsItem =
+                        ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.CHECK, ITEM_TEXT_HoverHints);
+                    hoverHintsItem.setToolTipText(
+                        "Включено — подсказки при наведении указателя. Выключено — требуется нажатый Ctrl"
+                            + Global.pluginSignForTooltip());
+                    hoverHintsItem.setSelection(BslHoverHintState.isEnabled());
+                    hoverHintsItem.addSelectionListener(new SelectionAdapter()
+                    {
+                        @Override
+                        public void widgetSelected(SelectionEvent ev)
+                        {
+                            BslHoverHintState.setEnabled(hoverHintsItem.getSelection());
+                        }
+                    });
+                    addedItems.add(hoverHintsItem);
                 }
 
                 Menu surroundSub = findExistingSurroundSubmenu(menu);

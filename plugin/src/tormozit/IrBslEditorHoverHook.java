@@ -144,6 +144,9 @@ public final class IrBslEditorHoverHook implements IStartup
         ISourceViewer viewer = editor.getInternalSourceViewer();
         if (!(viewer instanceof SourceViewer sourceViewer))
             return;
+        // Глобальный тумблер «Подсказки при наведении» применяется и к новым,
+        // и к уже обёрнутым редакторам (повторные вызовы при активации/смене страницы).
+        BslHoverHintState.applyToViewer(sourceViewer);
         if (Boolean.TRUE.equals(sourceViewer.getData(HOOK_MARKER)))
             return;
         boolean wrappedText = wrapTextHovers(sourceViewer, editor);

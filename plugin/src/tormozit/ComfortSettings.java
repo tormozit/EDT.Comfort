@@ -126,6 +126,14 @@ public final class ComfortSettings
     /** Минимальное число строк по умолчанию — 50. */
     public static final int DEFAULT_BRACKET_CONTENT_HINT_MIN_LINES = 50;
 
+    // ---- Hover hints (подсказки при наведении) ----
+
+    /** Ключ: показывать ли всплывающие подсказки при удержании мыши на слове в модуле. */
+    public static final String PREF_ENABLE_HOVER_HINTS = "comfort.enableHoverHints"; //$NON-NLS-1$
+
+    /** Подсказки при наведении включены по умолчанию. */
+    public static final boolean DEFAULT_ENABLE_HOVER_HINTS = true;
+
     /** Prefix for file search sash weights. */
     private static final String PREF_FILE_SEARCH_SASH_PREFIX = "comfort.fileSearch.sash."; //$NON-NLS-1$
 
@@ -176,6 +184,16 @@ public final class ComfortSettings
 
     /** Панель «Структура» выключена по умолчанию. */
     public static final boolean DEFAULT_COMPARE_STRUCTURE_VISIBLE = false;
+
+    /**
+     * Ключ: каскадный пересчёт пометок в сравнении конфигураций с учётом фильтров
+     * (visible-only SelectAll/клик по папке, серые предки только по видимым).
+     */
+    public static final String PREF_COMPARE_FILTER_AWARE_CHECKS =
+        "comfort.compare.filterAwareChecks"; //$NON-NLS-1$
+
+    /** Каскадный пересчёт пометок с учётом фильтров выключен по умолчанию. */
+    public static final boolean DEFAULT_COMPARE_FILTER_AWARE_CHECKS = false;
 
     // ---- Spell checking ----
 
@@ -469,6 +487,35 @@ public final class ComfortSettings
         if (settings == null)
             return DEFAULT_COMPARE_STRUCTURE_VISIBLE;
         return settings.preferenceStore.getBoolean(PREF_COMPARE_STRUCTURE_VISIBLE);
+    }
+
+    /**
+     * Каскадный пересчёт пометок в сравнении конфигураций с учётом фильтров
+     * (подсистемы / combo «Показывать…»).
+     */
+    public static boolean isCompareFilterAwareChecksEnabled()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_COMPARE_FILTER_AWARE_CHECKS;
+        return settings.preferenceStore.getBoolean(PREF_COMPARE_FILTER_AWARE_CHECKS);
+    }
+
+    /** Глобально сохранить «каскадный пересчёт пометок с учётом фильтра». */
+    public static void setCompareFilterAwareChecksEnabled(boolean enabled)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        settings.preferenceStore.setValue(PREF_COMPARE_FILTER_AWARE_CHECKS, enabled);
+        try
+        {
+            settings.preferenceStore.save();
+        }
+        catch (Exception ex)
+        {
+            Global.log("ComfortSettings save error (compareFilterAwareChecks): " + ex); //$NON-NLS-1$
+        }
     }
 
     /** Сохранить состояние переключателя «Структура» в попарном {@code CompareDialog}. */
@@ -1064,7 +1111,34 @@ public final class ComfortSettings
         return settings.preferenceStore.getInt(PREF_BRACKET_CONTENT_HINT_MIN_LINES);
     }
 
+    /**
+     * Показывать ли подсказки при удержании мыши на слове в модуле
+     * (штатный doc-hover, ИР-обогащение).
+     */
+    public static boolean isHoverHintsEnabled()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_ENABLE_HOVER_HINTS;
+        return settings.preferenceStore.getBoolean(PREF_ENABLE_HOVER_HINTS);
+    }
 
+    /** Запомнить выбор флажка «Подсказки при наведении». */
+    public static void setHoverHintsEnabled(boolean enabled)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        settings.preferenceStore.setValue(PREF_ENABLE_HOVER_HINTS, enabled);
+        try
+        {
+            settings.preferenceStore.save();
+        }
+        catch (Exception ex)
+        {
+            Global.log("ComfortSettings save error (enableHoverHints): " + ex); //$NON-NLS-1$
+        }
+    }
 
     private static boolean getPerInfobaseBoolean(String prefPrefix, String infobaseUuid, boolean defaultValue)
     {

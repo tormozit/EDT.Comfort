@@ -3214,6 +3214,10 @@ public final class BslModuleSpellCheckHook implements IStartup
     {
         if (viewer == null)
             return;
+        // Уважать глобальный тумблер «Подсказки при наведении»: если он выключен,
+        // после закрытия собственного presenter-а text-hover не включаем обратно
+        // (fInformationPresenter — Ctrl+hover/Ctrl+F2, он под тумблер не попадает).
+        boolean textHoverEnabled = BslHoverHintState.isHoverHintsCurrentlyEnabled();
         for (String field : new String[] { "fTextHoverManager", "fInformationPresenter" }) //$NON-NLS-1$ //$NON-NLS-2$
         {
             Object mgr = Global.getField(viewer, field);
@@ -3221,7 +3225,8 @@ public final class BslModuleSpellCheckHook implements IStartup
                 continue;
             try
             {
-                aim.setEnabled(true);
+                boolean enable = "fTextHoverManager".equals(field) ? textHoverEnabled : true; //$NON-NLS-1$
+                aim.setEnabled(enable);
             }
             catch (Exception ignored)
             {

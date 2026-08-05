@@ -55,6 +55,9 @@ public class ComfortInitializer extends AbstractPreferenceInitializer
             ComfortSettings.PREF_COMPARE_CURRENT_LINES_VISIBLE,
             ComfortSettings.DEFAULT_COMPARE_CURRENT_LINES_VISIBLE);
         store.setDefault(
+            ComfortSettings.PREF_COMPARE_FILTER_AWARE_CHECKS,
+            ComfortSettings.DEFAULT_COMPARE_FILTER_AWARE_CHECKS);
+        store.setDefault(
             ComfortSettings.PREF_SPELLING_DICT_BASE_PATHS,
             ComfortSettings.DEFAULT_SPELLING_DICT_BASE_PATHS);
         store.setDefault(
@@ -78,5 +81,8 @@ public class ComfortInitializer extends AbstractPreferenceInitializer
         store.setDefault(
             ComfortSettings.PREF_SPELLING_COMMON_MORPH_PATH,
             ComfortSettings.DEFAULT_SPELLING_COMMON_MORPH_PATH);
+        store.setDefault(
+            ComfortSettings.PREF_ENABLE_HOVER_HINTS,
+            ComfortSettings.DEFAULT_ENABLE_HOVER_HINTS);
     }
 }

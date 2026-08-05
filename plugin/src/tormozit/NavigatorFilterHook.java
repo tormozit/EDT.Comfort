@@ -57,6 +57,8 @@ public final class NavigatorFilterHook implements IStartup
     private static final String INJECT_HIGHLIGHT_KEY = "tormozit.navigatorInjectHighlight"; //$NON-NLS-1$
     private static final String REQUESTED_PATTERN_KEY = "tormozit.navigatorRequestedPattern"; //$NON-NLS-1$
     private static final String FILTER_ACTIVE_KEY = "tormozit.navigatorFilterActive"; //$NON-NLS-1$
+    private static final String NATIVE_RECOVERY_HOLDER_KEY = "tormozit.navigatorNativeRecoveryHolder"; //$NON-NLS-1$
+    private static final String CLEAR_IN_PROGRESS_KEY = "tormozit.navigatorSearchClearInProgress"; //$NON-NLS-1$
     private static volatile String lastGiveUpReason = ""; //$NON-NLS-1$
 
     @Override
@@ -313,6 +315,7 @@ public final class NavigatorFilterHook implements IStartup
         final SearchBoxFilterAccess input = searchInput;
         Control focusControl = searchInput.focusControl();
         final Runnable[] nativeRecoveryPending = { null };
+        tree.setData(NATIVE_RECOVERY_HOLDER_KEY, nativeRecoveryPending);
         boolean listenerOk = searchInput.attachPatternListener(navigator, pattern -> {
             String safePattern = pattern != null ? pattern : ""; //$NON-NLS-1$
             tree.setData(REQUESTED_PATTERN_KEY, safePattern);
@@ -322,7 +325,7 @@ public final class NavigatorFilterHook implements IStartup
             // ФИЛЬТРАЦИЯ НЕ ДОЛЖНА БЛОКИРОВАТЬ ВВОД: фильтр — штатный SearchJob; здесь только подсветка.
             applyHighlightState(viewer, tree, highlight, searchCache, safePattern);
             if (safePattern.isEmpty() && searchInput.isWidgetSearchEmpty())
-                onSearchCleared(navigator, viewer, tree);
+                onSearchCleared(navigator, viewer, tree, nativeRecoveryPending);
             else if (!safePattern.isEmpty())
                 NavigatorNativeSearchBridge.scheduleNativeFilterRecovery(navigator, viewer, nativeRecoveryPending);
         });
@@ -333,8 +336,7 @@ public final class NavigatorFilterHook implements IStartup
             FilterInputBoxListNavigation.installTreeNavigation(focusControl, tree);
             focusControl.addDisposeListener(e -> {
                 Display display = focusControl.getDisplay();
-                if (nativeRecoveryPending[0] != null && display != null && !display.isDisposed())
-                    display.timerExec(-1, nativeRecoveryPending[0]);
+                NavigatorNativeSearchBridge.cancelNativeFilterRecovery(display, nativeRecoveryPending);
             });
         }
 
@@ -547,17 +549,75 @@ public final class NavigatorFilterHook implements IStartup
         return lp;
     }
 
-    private static void onSearchCleared(IViewPart navigator, CommonViewer viewer, Tree tree)
+    private static void onSearchCleared(IViewPart navigator, CommonViewer viewer, Tree tree,
+            Runnable[] nativeRecoveryPending)
     {
-        triggerNativeSearchClear(navigator);
-        if (viewer != null && tree != null)
+        Display display = tree != null && !tree.isDisposed() ? tree.getDisplay() : Display.getDefault();
+        // Иначе отложенный recovery после истории/ввода снова activateFilter уже после очистки.
+        NavigatorNativeSearchBridge.cancelNativeFilterRecovery(display, nativeRecoveryPending);
+
+        if (tree != null && Boolean.TRUE.equals(tree.getData(CLEAR_IN_PROGRESS_KEY)))
+            return;
+        if (tree != null)
+            tree.setData(CLEAR_IN_PROGRESS_KEY, Boolean.TRUE);
+        try
         {
-            NavigatorNativeSearchBridge.restoreStoredNativeFilters(viewer, tree);
-            NavigatorNativeSearchBridge.install(navigator, viewer, tree);
+            // Не звать performSearch(""): Modify уже от пустого текста, штатный SearchBox
+            // сам дочистит поиск (searchDelay). Повторный performSearch давал реэнтрантность
+            // и подвисания UI на секунды.
+            //
+            // Не делать viewer.refresh(), пока search-filter ещё active: refresh при живом
+            // NavigatorSearchFilter и уже пустом/полуочищенном trie даёт пустое дерево.
+            if (viewer != null && tree != null)
+                NavigatorNativeSearchBridge.reinstallComfortEngineOnly(navigator, viewer, tree);
+            ObjectSetSubsystemsFilterBridge.adoptNativeAfterFilterUiChange(navigator,
+                    "navigatorSearchCleared"); //$NON-NLS-1$
+            NavigatorFilterDebug.log("searchCleared " + NavigatorFilterDebug.filtersDesc(viewer)); //$NON-NLS-1$
+
+            // После searchDelay штатной очистки — rebind+refresh и при необходимости force-clear.
+            scheduleAfterNativeSearchClear(navigator, viewer, tree, display);
         }
-        // Очистка поиска трогает filters viewer — вернуть обёртку чёрного списка подсистем.
-        ObjectSetSubsystemsFilterBridge.rebindNavigatorBridge(navigator, "navigatorSearchCleared"); //$NON-NLS-1$
-        NavigatorFilterDebug.log("searchCleared " + NavigatorFilterDebug.filtersDesc(viewer)); //$NON-NLS-1$
+        finally
+        {
+            if (tree != null && !tree.isDisposed())
+                tree.setData(CLEAR_IN_PROGRESS_KEY, null);
+        }
+    }
+
+    /**
+     * Дождаться штатного searchDelay/SearchJob после очистки текста, затем вернуть обёртку
+     * подсистем с refresh. Если фильтр завис — один force {@code performSearch("")}.
+     */
+    private static void scheduleAfterNativeSearchClear(IViewPart navigator, CommonViewer viewer, Tree tree,
+            Display display)
+    {
+        if (display == null || display.isDisposed() || navigator == null || tree == null)
+            return;
+        display.timerExec(700, () -> {
+            if (tree.isDisposed())
+                return;
+            Object searchBox = Global.getField(navigator, "searchBox"); //$NON-NLS-1$
+            SearchBoxFilterAccess input = SearchBoxFilterAccess.resolveQuiet(navigator, searchBox);
+            if (input == null || !input.isWidgetSearchEmpty())
+                return;
+            boolean active = Boolean.TRUE.equals(Global.invoke(navigator, "isSearchFilterActive")); //$NON-NLS-1$
+            String nativePattern = readNativeActivePattern(navigator);
+            if (Boolean.TRUE.equals(tree.getData(CLEAR_IN_PROGRESS_KEY)))
+                return;
+            tree.setData(CLEAR_IN_PROGRESS_KEY, Boolean.TRUE);
+            try
+            {
+                if (active || (nativePattern != null && !nativePattern.isEmpty()))
+                    triggerNativeSearchClear(navigator);
+                // Теперь search должен быть снят — можно refresh.
+                ObjectSetSubsystemsFilterBridge.rebindNavigatorBridge(navigator, "navigatorSearchClearedDeferred"); //$NON-NLS-1$
+            }
+            finally
+            {
+                if (!tree.isDisposed())
+                    tree.setData(CLEAR_IN_PROGRESS_KEY, null);
+            }
+        });
     }
 
     /** Сброс штатного SearchPerformer / SearchBox. */
@@ -686,6 +746,15 @@ public final class NavigatorFilterHook implements IStartup
 
         private NavigatorNativeSearchBridge() {}
 
+        static void cancelNativeFilterRecovery(Display display, Runnable[] holder)
+        {
+            if (holder == null || holder[0] == null)
+                return;
+            if (display != null && !display.isDisposed())
+                display.timerExec(-1, holder[0]);
+            holder[0] = null;
+        }
+
         /**
          * После паузы ввода: штатный SearchJob делает {@code collapseAll}, trie строится, но
          * {@code expandTreeViewerStepByStep} часто пропускается (отмена job) — дерево остаётся
@@ -696,8 +765,7 @@ public final class NavigatorFilterHook implements IStartup
             Display display = Display.getDefault();
             if (display == null || display.isDisposed() || holder == null)
                 return;
-            if (holder[0] != null)
-                display.timerExec(-1, holder[0]);
+            cancelNativeFilterRecovery(display, holder);
             holder[0] = () -> syncNativeSearchUiAfterTyping(navigator, viewer, holder, 0);
             display.timerExec(NATIVE_SEARCH_RECOVERY_DELAY_MS, holder[0]);
         }
@@ -705,6 +773,8 @@ public final class NavigatorFilterHook implements IStartup
         static void syncNativeSearchUiAfterTyping(IViewPart navigator, CommonViewer viewer, Runnable[] holder,
                 int attempt)
         {
+            if (holder != null)
+                holder[0] = null;
             if (!(navigator instanceof CommonNavigator commonNavigator) || viewer == null)
                 return;
             Tree tree = viewer.getTree();
@@ -738,6 +808,36 @@ public final class NavigatorFilterHook implements IStartup
                     "navigatorSearchActivated"); //$NON-NLS-1$
             viewer.refresh();
             expandFilteredTree(viewer);
+        }
+
+        /** Переустановка comfortEngine без {@code addFilter} на viewer (после очистки поиска). */
+        static void reinstallComfortEngineOnly(IViewPart navigator, CommonViewer viewer, Tree tree)
+        {
+            if (navigator == null || viewer == null || tree == null || tree.isDisposed())
+                return;
+            Object navFilter = resolveNavigatorSearchFilter(navigator);
+            if (navFilter == null)
+                return;
+            if (tree.getData(COMFORT_ENGINE_KEY) != null)
+            {
+                Object current = Global.getField(navFilter, "searchEngine"); //$NON-NLS-1$
+                if (current instanceof ComfortNavigatorSearchEngine)
+                    return;
+            }
+            IModelObjectTreeSearchEngine nativeDelegate = resolveNativeDelegate(navFilter, tree);
+            if (nativeDelegate == null)
+                return;
+            Object v8ProjectManager = Global.getField(navFilter, "v8ProjectManager"); //$NON-NLS-1$
+            IV8ProjectManager projectManager = v8ProjectManager instanceof IV8ProjectManager
+                    ? (IV8ProjectManager) v8ProjectManager : null;
+            Object bmModelManager = Global.getField(navFilter, "modelManager"); //$NON-NLS-1$
+            IBmModelManager modelManager = bmModelManager instanceof IBmModelManager
+                    ? (IBmModelManager) bmModelManager : Global.getOsgiService(IBmModelManager.class);
+            ComfortNavigatorSearchEngine comfortEngine =
+                    new ComfortNavigatorSearchEngine(nativeDelegate, projectManager, modelManager);
+            Global.setField(navFilter, "searchEngine", comfortEngine); //$NON-NLS-1$
+            tree.setData(NATIVE_ENGINE_KEY, nativeDelegate);
+            tree.setData(COMFORT_ENGINE_KEY, comfortEngine);
         }
 
         private static void invokeNavigatorUtil(String method, CommonNavigator navigator, String filterId)
