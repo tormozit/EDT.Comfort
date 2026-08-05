@@ -555,6 +555,8 @@ public final class NavigatorFilterHook implements IStartup
             NavigatorNativeSearchBridge.restoreStoredNativeFilters(viewer, tree);
             NavigatorNativeSearchBridge.install(navigator, viewer, tree);
         }
+        // Очистка поиска трогает filters viewer — вернуть обёртку чёрного списка подсистем.
+        ObjectSetSubsystemsFilterBridge.rebindNavigatorBridge(navigator, "navigatorSearchCleared"); //$NON-NLS-1$
         NavigatorFilterDebug.log("searchCleared " + NavigatorFilterDebug.filtersDesc(viewer)); //$NON-NLS-1$
     }
 
@@ -731,6 +733,9 @@ public final class NavigatorFilterHook implements IStartup
             invokeNavigatorUtil("applyFilterNonBlockingUi", commonNavigator, NATIVE_FILTER_ID); //$NON-NLS-1$
             if (needActivate)
                 invokeNavigatorUtil("activateFilterNonBlockingUi", commonNavigator, NATIVE_FILTER_ID); //$NON-NLS-1$
+            // Активация поиска снова addFilter'ит штатный фильтр подсистем — вернуть обёртку.
+            ObjectSetSubsystemsFilterBridge.adoptNativeAfterFilterUiChange(navigator,
+                    "navigatorSearchActivated"); //$NON-NLS-1$
             viewer.refresh();
             expandFilteredTree(viewer);
         }

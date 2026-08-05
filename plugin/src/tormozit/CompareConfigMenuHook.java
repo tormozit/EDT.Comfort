@@ -157,7 +157,10 @@ import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.ISelectionChangedListener;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.ui.handlers.CollapseAllHandler;
+import org.eclipse.ui.handlers.ExpandAllHandler;
 import org.eclipse.ui.handlers.HandlerUtil;
+import org.eclipse.ui.handlers.IHandlerService;
 import org.osgi.framework.BundleContext;
 import org.osgi.framework.ServiceReference;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.AbstractDirectPartialModelNode;
@@ -193,6 +196,15 @@ public class CompareConfigMenuHook implements IStartup
     private static final String ITEM_TEXT_setMarks     = "Установить пометки";
     private static final String ITEM_TEXT_clearMarks   = "Снять пометки";
     private static final String ITEM_TEXT_findLowestCheckable = "Найти нижние настраиваемые";
+    /** Маркер: на дереве уже активированы Collapse All / Expand All. */
+    private static final String COLLAPSE_EXPAND_HANDLERS_KEY =
+            "tormozit.compareConf.collapseExpandHandlers"; //$NON-NLS-1$
+    /** Id contribution item кнопки «Свернуть всё» в тулбаре редактора сравнения. */
+    private static final String TOOLBAR_COLLAPSE_ID =
+            "tormozit.compareConf.toolbar.collapseAll"; //$NON-NLS-1$
+    private static final String NAVIGATOR_BUNDLE_ID = "org.eclipse.ui.navigator"; //$NON-NLS-1$
+    private static final String COLLAPSE_ALL_ICON_PATH =
+            "icons/full/elcl16/collapseall.png"; //$NON-NLS-1$
 
     // ---- IStartup ----
 
@@ -310,18 +322,19 @@ public class CompareConfigMenuHook implements IStartup
                     AbstractTreeViewer v = getTreeViewerFromEditor(editor);
                     if (v != null)
                     {
-                        onCompareTreeViewerReady(listener, v);
+                        onCompareTreeViewerReady(editor, listener, v);
                         ThreeWayOnlyPresentFiltersFix.install(editor);
                     }
                 });
                 return;
             }
-            onCompareTreeViewerReady(listener, viewer);
+            onCompareTreeViewerReady(editor, listener, viewer);
             ThreeWayOnlyPresentFiltersFix.install(editor);
         });
     }
 
-    private static void onCompareTreeViewerReady(CompareConfigSelectionListener listener, AbstractTreeViewer viewer)
+    private static void onCompareTreeViewerReady(
+            IEditorPart editor, CompareConfigSelectionListener listener, AbstractTreeViewer viewer)
     {
         listener.setTreeViewer(viewer);
         // Разворот единственного корня и цепочек единственных потомков — общий механизм,
@@ -329,6 +342,53 @@ public class CompareConfigMenuHook implements IStartup
         // scheduleExpandCompareRoot, теперь вынесено и обобщено на все деревья из белого списка).
         TreeAutoExpand.installWhitelisted(
                 TreeAutoExpand.Target.COMPARE_CONFIG, viewer);
+        installCollapseExpandHandlers(editor, viewer);
+    }
+
+    /**
+     * Штатные {@code org.eclipse.ui.navigate.collapseAll}/{@code expandAll} не имеют
+     * defaultHandler — их вешают view/editor через {@link IHandlerService}. EDT-редактор
+     * сравнения этого не делает, поэтому Ctrl+Shift+/ (numpad) только вызывал команду
+     * (тост), но дерево не трогал. Активируем на site редактора, пока он в фокусе.
+     */
+    private static void installCollapseExpandHandlers(IEditorPart editor, AbstractTreeViewer viewer)
+    {
+        if (editor == null || viewer == null)
+            return;
+        Control control = viewer.getControl();
+        if (!(control instanceof Tree tree) || tree.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(tree.getData(COLLAPSE_EXPAND_HANDLERS_KEY)))
+            return;
+        IHandlerService handlerService = editor.getSite().getService(IHandlerService.class);
+        if (handlerService == null)
+            return;
+
+        // Свернуть всё, затем снова применить правила авторазворота (единственный корень /
+        // цепочки sole-child) — как resetExpansionAfterReveal в результатах поиска.
+        handlerService.activateHandler(CollapseAllHandler.COMMAND_ID, new AbstractHandler()
+        {
+            @Override
+            public Object execute(ExecutionEvent event)
+            {
+                collapseCompareTree(editor);
+                return null;
+            }
+        });
+        handlerService.activateHandler(ExpandAllHandler.COMMAND_ID, new ExpandAllHandler(viewer));
+        tree.setData(COLLAPSE_EXPAND_HANDLERS_KEY, Boolean.TRUE);
+    }
+
+    /**
+     * Свернуть дерево сравнения и заново применить {@link TreeAutoExpand}
+     * (единственный корень / sole-child). Общее действие для команды Collapse All и кнопки тулбара.
+     */
+    private static void collapseCompareTree(IEditorPart editor)
+    {
+        AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
+        if (viewer == null)
+            return;
+        TreeAutoExpand.resetExpansionAfterReveal(viewer, true);
     }
 
     private static AbstractTreeViewer getTreeViewerFromEditor(IEditorPart editor)
@@ -363,7 +423,25 @@ public class CompareConfigMenuHook implements IStartup
      */
     private void fillToolbar(IToolBarManager toolbar, IEditorPart editor)
     {
-        toolbar.add(new Separator());
+        if (toolbar.find(TOOLBAR_COLLAPSE_ID) == null)
+        {
+            ImageDescriptor collapseIcon = AbstractUIPlugin.imageDescriptorFromPlugin(
+                    NAVIGATOR_BUNDLE_ID, COLLAPSE_ALL_ICON_PATH);
+            Action collapseAction = new Action(null, collapseIcon)
+            {
+                @Override
+                public void run()
+                {
+                    collapseCompareTree(editor);
+                }
+            };
+            collapseAction.setId(TOOLBAR_COLLAPSE_ID);
+            collapseAction.setToolTipText(
+                    "Свернуть всё" + Global.pluginSignForTooltip()); //$NON-NLS-1$
+            collapseAction.setActionDefinitionId(CollapseAllHandler.COMMAND_ID);
+            toolbar.add(new Separator());
+            toolbar.add(collapseAction);
+        }
         toolbar.add(new ContributionItem()
         {
             @Override
@@ -1755,7 +1833,7 @@ public class CompareConfigMenuHook implements IStartup
                     if (!apply && !drop)
                         continue;
                     FilterAwareSubsystemFilterAction wrapper =
-                            new FilterAwareSubsystemFilterAction(editor, ctv, action);
+                            new FilterAwareSubsystemFilterAction(editor, ctv, action, drop);
                     if (!Global.setFieldForce(aci, "action", wrapper)) //$NON-NLS-1$
                     {
                         Global.tempLog(LOG, "filterAction hooks: setField action failed " + cn); //$NON-NLS-1$
@@ -1774,15 +1852,17 @@ public class CompareConfigMenuHook implements IStartup
                 private final IEditorPart editor;
                 private final CheckboxTreeViewer ctv;
                 private final IAction original;
+                private final boolean dropAction;
 
                 FilterAwareSubsystemFilterAction(IEditorPart editor, CheckboxTreeViewer ctv,
-                        IAction original)
+                        IAction original, boolean dropAction)
                 {
                     super(original.getText() != null ? original.getText() : "", //$NON-NLS-1$
                             original.getStyle());
                     this.editor = editor;
                     this.ctv = ctv;
                     this.original = original;
+                    this.dropAction = dropAction;
                     setImageDescriptor(original.getImageDescriptor());
                     setDisabledImageDescriptor(original.getDisabledImageDescriptor());
                     setHoverImageDescriptor(original.getHoverImageDescriptor());
@@ -1796,6 +1876,12 @@ public class CompareConfigMenuHook implements IStartup
                 {
                     Object saved = firstSelectedElement(ctv);
                     original.run();
+                    if (dropAction)
+                    {
+                        // drop() чистит только EDT-пометки; наш «чёрный список» — отдельно.
+                        FilterBySubsystemsDialogHook.clearBlacklistMode(blacklistSettingsKey);
+                        syncNativeFilterAttachment(ctv, false);
+                    }
                     syncApplyFilterCheckedFromEditor(editor);
                     recalculateCheckStatesAfterFilterChange(ctv);
                     restoreSelectionOrParent(ctv, saved);
@@ -2931,6 +3017,13 @@ public class CompareConfigMenuHook implements IStartup
 
                 IComparisonDataSource ds = session.getDataSource(side);
                 if (ds == null)
+                    return true;
+
+                // Чёрный список: сторона без явных checkedSubsystemIds не ограничивает.
+                // Иначе projectChecked без ID (частый артефакт git-сравнения) заполняет trie
+                // всеми подсистемами → AND-инверсия прячет почти все двусторонние узлы,
+                // и в дереве остаётся в основном односторонняя «часть без приёмника».
+                if (blacklist && countCheckedSubsystemIds(ds) == 0)
                     return true;
 
                 QualifiedName qn = QualifiedName.create(symlink.split("\\.")); //$NON-NLS-1$

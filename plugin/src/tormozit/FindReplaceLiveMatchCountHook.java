@@ -31,6 +31,10 @@ import org.eclipse.ui.texteditor.ITextEditor;
  * ({@link Job}), не блокируя ввод; во время подсчёта в статусной строке диалога показывается
  * «Поиск…». Также переименовывает кнопку «Выбрать всё» в «Выделить все».
  *
+ * <p>Документ берётся из {@code fTarget} диалога (viewer, для которого открыт поиск) — так счётчик
+ * работает для любого {@link ITextViewer} (BSL, XML, язык запросов, вложенные EmbeddedEditor),
+ * а не только для {@code ITextEditor} активного редактора Workbench.
+ *
  * <p>Прокрутка/выделение первого совпадения по мере ввода намеренно не реализованы — это уже
  * делает штатный флажок «Инкрементный» диалога.
  *
@@ -162,8 +166,24 @@ public final class FindReplaceLiveMatchCountHook implements IStartup
             checkBox.addSelectionListener(SelectionListener.widgetSelectedAdapter(e -> onModify()));
         }
 
+        /**
+         * Viewer, по которому ищет диалог: сначала {@code fTarget} → enclosing {@link ITextViewer}
+         * ({@code TextViewer$FindReplaceTarget.this$0}), иначе fallback через активный {@link ITextEditor}.
+         */
         private void resolveViewer()
         {
+            viewer = null;
+
+            Object target = Global.getField(dialog, "fTarget"); //$NON-NLS-1$
+            if (target != null)
+            {
+                Object enclosing = Global.getField(target, "this$0"); //$NON-NLS-1$
+                if (enclosing instanceof ITextViewer textViewer)
+                    viewer = textViewer;
+            }
+            if (viewer != null)
+                return;
+
             IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
             IWorkbenchPage page = window != null ? window.getActivePage() : null;
             IEditorPart editorPart = page != null ? page.getActiveEditor() : null;

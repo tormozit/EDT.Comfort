@@ -135,7 +135,7 @@ public final class KeyBindingToastHook implements IStartup
         lastToastAt = now;
         String finalCommandId = commandId;
         ToastNotification.show(
-                "Выполнена команда", //$NON-NLS-1$
+                "Вызвана команда", //$NON-NLS-1$
                 message,
                 4000,
                 () -> ComfortKeysPreferences.openKeysPageForCommand(finalCommandId),

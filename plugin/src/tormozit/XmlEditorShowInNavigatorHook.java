@@ -118,28 +118,11 @@ public class XmlEditorShowInNavigatorHook implements IStartup
 
     private static StyledText resolveTextWidget(IEditorPart editor)
     {
-        ITextEditor textEditor = resolveTextEditor(editor);
+        ITextEditor textEditor = TextEditor.resolveTextEditor(editor);
         if (textEditor == null)
             return null;
         ISourceViewer viewer = TextEditor.getSourceViewer(textEditor);
         return viewer != null ? viewer.getTextWidget() : null;
-    }
-
-    /**
-     * Страница исходного текста: сам редактор, если он текстовый, либо вложенный
-     * {@code StructuredTextEditor} multipage-редактора XML.
-     */
-    private static ITextEditor resolveTextEditor(IEditorPart editor)
-    {
-        if (editor instanceof ITextEditor textEditor)
-            return textEditor;
-        ITextEditor adapted = editor.getAdapter(ITextEditor.class);
-        if (adapted != null)
-            return adapted;
-        // XMLMultiPageEditorPart.getTextEditor() — package-private, без зависимости от бандла WST
-        return Global.invoke(editor, "getTextEditor") instanceof ITextEditor nested //$NON-NLS-1$
-            ? nested
-            : null;
     }
 
     private static MenuAdapter buildMenuListener(IEditorPart editor)

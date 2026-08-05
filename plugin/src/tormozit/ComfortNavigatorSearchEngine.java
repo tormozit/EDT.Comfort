@@ -123,7 +123,7 @@ public final class ComfortNavigatorSearchEngine implements IModelObjectTreeSearc
         {
             if (monitor != null && monitor.isCanceled())
                 return trie;
-            matched += scanTypeIndex(indexProvider, type, matcher, trie, monitor);
+            matched += scanTypeIndex(indexProvider, type, matcher, trie, monitor, project);
         }
 
         attachResolvedObjects(indexProvider, scanTypes, trie, monitor);
@@ -155,7 +155,7 @@ public final class ComfortNavigatorSearchEngine implements IModelObjectTreeSearc
 
     /** BM-индекс MD_OBJECT — парами записей, как в {@code ModelObjectTreeSearchEngine}. */
     private static int scanTypeIndex(IBmEmfIndexProvider indexProvider, EClass type, SmartMatcher matcher,
-            EObjectTrie trie, IProgressMonitor monitor)
+            EObjectTrie trie, IProgressMonitor monitor, IProject project)
     {
         Iterable<IEObjectDescription> index = indexProvider.getEObjectIndexByType(type);
         if (index == null)
@@ -171,14 +171,14 @@ public final class ComfortNavigatorSearchEngine implements IModelObjectTreeSearc
             if (!iterator.hasNext())
                 break;
             IEObjectDescription secondary = iterator.next();
-            if (tryAddMatch(matcher, primary, secondary, trie))
+            if (tryAddMatch(matcher, primary, secondary, trie, project))
                 matched++;
         }
         return matched;
     }
 
     private static boolean tryAddMatch(SmartMatcher matcher, IEObjectDescription primary,
-            IEObjectDescription secondary, EObjectTrie trie)
+            IEObjectDescription secondary, EObjectTrie trie, IProject project)
     {
         if (primary == null || secondary == null)
             return false;
@@ -202,6 +202,10 @@ public final class ComfortNavigatorSearchEngine implements IModelObjectTreeSearc
             if (!matcher.matches(searchText))
                 return false;
         }
+
+        // Чёрный список подсистем: не класть совпадение в trie — иначе поиск раскроет ветку.
+        if (ObjectSetSubsystemsFilterBridge.isHiddenBySubsystemBlacklist(project, path))
+            return false;
 
         trie.addPath(path);
         EObject eObject = primary.getEObjectOrProxy();

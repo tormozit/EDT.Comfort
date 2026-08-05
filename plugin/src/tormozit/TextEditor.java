@@ -32,8 +32,8 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorEmbeddedEditorPage;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
 
 /**
- * Поиск активного текстового редактора (в т.ч. вложенного в {@link DtGranularEditor})
- * и замена выделенного фрагмента.
+ * Поиск активного текстового редактора (в т.ч. вложенного в {@link DtGranularEditor}
+ * или multipage XML WST) и замена выделенного фрагмента.
  */
 public final class TextEditor
 {
@@ -365,7 +365,13 @@ public final class TextEditor
             return textEditor;
         if (part instanceof DtGranularEditor<?> granular)
             return embeddedTextEditor(granular);
-        return null;
+        ITextEditor adapted = part != null ? part.getAdapter(ITextEditor.class) : null;
+        if (adapted != null)
+            return adapted;
+        // XMLMultiPageEditorPart.getTextEditor() — package-private, без зависимости от бандла WST
+        return Global.invoke(part, "getTextEditor") instanceof ITextEditor nested //$NON-NLS-1$
+            ? nested
+            : null;
     }
 
     private static ITextEditor embeddedTextEditor(DtGranularEditor<?> granular)
