@@ -540,7 +540,7 @@ public class BSLEditorMenuHook implements IStartup
                         }
                     });
                     addedItems.add(hoverHintsItem);
-                }
+                } 
 
                 Menu surroundSub = findExistingSurroundSubmenu(menu);
                 if (surroundSub != null && !Boolean.TRUE.equals(surroundSub.getData("tormozit.surroundHooked")))
