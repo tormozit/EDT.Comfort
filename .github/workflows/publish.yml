@@ -15,6 +15,10 @@ on:
           - republish
           - new
 
+concurrency:
+  group: gh-pages-publish
+  cancel-in-progress: false
+
 permissions:
   contents: write
 

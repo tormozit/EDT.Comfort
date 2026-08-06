@@ -4,6 +4,10 @@ name: Publish docs
 on:
   workflow_dispatch:
 
+concurrency:
+  group: gh-pages-publish
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
@@ -13,16 +17,11 @@ jobs:
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
-
-      - name: Checkout gh-pages into deploy
-        uses: actions/checkout@v4
         with:
-          ref: gh-pages
-          path: deploy
+          fetch-depth: 0
 
-      - name: Verify gh-pages layout
-        run: |
-          test -f deploy/p2.index || (echo "ERROR: deploy/p2.index missing — run Publish p2 site first" && exit 1)
+      - name: Sync deploy from latest gh-pages
+        run: bash .github/workflows/sync_gh_pages_deploy.sh prepare
 
       - name: Update help site
         env:
@@ -30,6 +29,9 @@ jobs:
           REPO_ROOT: .
           DEPLOY_DIR: deploy
         run: python3 .github/workflows/generate_composite.py
+
+      - name: Verify deploy is not stale
+        run: bash .github/workflows/sync_gh_pages_deploy.sh ensure-not-stale
 
       - name: Push to gh-pages branch
         uses: peaceiris/actions-gh-pages@v4

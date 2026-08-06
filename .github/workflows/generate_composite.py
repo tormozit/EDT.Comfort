@@ -501,6 +501,12 @@ def main() -> None:
 
     if not docs_only:
         publish_p2_site(children)
+    else:
+        if not children:
+            raise SystemExit(
+                "ERROR: no version folders in deploy — run Publish p2 site first"
+            )
+        verify_root_aggregated_repository(children)
 
     publish_help_site(repo_root)
     write_root_index_html(children)
