@@ -58,6 +58,9 @@ function Should-KeepBlankLine {
     if ($n -match '^/\*\*') { return $true }
     if ($p -match '^\s*}\s*$' -and $n -match '^\s*(public|private|protected|class|interface|enum|@)') { return $true }
     if ($n -match '^\s*\*/') { return $false }
+    # Markdown: пустая строка закрывает список — иначе абзац/заголовок «прилипает» к <li>
+    $listItem = '^\s*([-*+]|\d+\.)\s'
+    if ($p -match $listItem -and $n -notmatch $listItem) { return $true }
     return $false
 }
 
