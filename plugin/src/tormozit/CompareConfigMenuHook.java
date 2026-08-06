@@ -105,6 +105,8 @@ import com._1c.g5.v8.dt.compare.ui.editor.DtComparisonViewContext;
 import com._1c.g5.v8.dt.compare.ui.editor.LightweightCompareMergeProcessDescriptor;
 import com._1c.g5.v8.dt.compare.ui.editor.LightweightComparisonProcessHandle;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.INamedViewerFilter;
+import com._1c.g5.v8.bm.core.IBmTransaction;
+import com._1c.g5.v8.bm.integration.AbstractBmTask;
 import com._1c.g5.v8.dt.compare.core.ComparisonUtils;
 import com._1c.g5.v8.dt.compare.core.IComparisonManager;
 import com._1c.g5.v8.dt.compare.core.IComparisonSession;
@@ -2760,6 +2762,8 @@ public class CompareConfigMenuHook implements IStartup
              * пустая папка без TreeItem); иначе галка самого checkable-узла.
              * «Справочники»☑ при «Справочник1» без checkbox (kids=0) должны
              * участвовать — иначе корень□.
+             * Не читать сырой TreeItem раньше кэша/модели: при каскадном снятии
+             * с родителя TreeItem коллекции ещё ☑, и агрегат «воскрешал» пометку.
              */
             private AggregateCheck aggregateWhenNoConsideredChildren(CheckboxTreeViewer ctv,
                     IPartialModelNode node, boolean restrictVisible)
@@ -2777,10 +2781,17 @@ public class CompareConfigMenuHook implements IStartup
                 if (isPropertiesVirtualFolderNode(node)
                         || isConfigurationPartialModelNode(node))
                     return new AggregateCheck(isNodeMustBeMergedFlag(node), false);
-                // Коллекция/папка: если уже в дереве — своя галка TreeItem/модели;
-                // без TreeItem и без mark — не участвует (скрытый Манифест).
+                // Коллекция/папка без помечаемых детей — своя галка (collectionOwn).
+                // Кэш после seedCollectionOwnMarksUi важнее сырого TreeItem:
+                // иначе каскадное снятие с родителя видит ещё ☑ на коллекции.
                 if (isAggregateCheckNode(node) || shouldRecurseOnly(node))
                 {
+                    Boolean cached = aggregateCheckedUi.get(node);
+                    if (cached != null)
+                    {
+                        boolean g = Boolean.TRUE.equals(aggregateGrayedUi.get(node));
+                        return new AggregateCheck(cached.booleanValue(), g);
+                    }
                     if (ctv != null)
                     {
                         Widget w = ctv.testFindItem(node);
@@ -3273,33 +3284,158 @@ public class CompareConfigMenuHook implements IStartup
             }
 
             /**
-             * Каскад при активном отборе:
+             * Каскад при активном отборе (постановка пользователя):
              * <ol>
-             * <li>на кликнутом и всех отфильтрованных потомках — та же пометка;</li>
-             * <li>у предков по цепочке — 3-состояние только по отфильтрованным
-             * детям (непосредственный родитель, затем выше).</li>
+             * <li>та же пометка только на кликнутом и отфильтрованных потомках;</li>
+             * <li>пометки узлов вне фильтра — не трогать (ни ставить, ни снимать);</li>
+             * <li>у предков — 3-состояние только по отфильтрованным детям.</li>
              * </ol>
+             * BM-запись — в {@code asyncExec}: в listener уже может быть транзакция
+             * («Cannot open more than one transaction»). ToTree на контейнерах запрещён.
              */
             private int applyFilterAwareCheckCascade(CheckboxTreeViewer ctv,
                     IPartialModelNode clicked, boolean want)
             {
                 if (ctv == null || clicked == null)
                     return 0;
-                int applied;
-                // Снятие BM на MD-корнях и при want=false: иначе mustBeMerged
-                // остаётся, агрегат снова ☑ и клик по «Справочники» «не работает».
-                clearBmOnMdRootsInFilteredSubtree(ctv, clicked);
-                applied = setMarkOnAllFilteredCheckable(ctv, clicked, want);
+                ArrayList<IPartialModelNode> targets = new ArrayList<>();
+                collectFilteredCheckable(ctv, clicked, targets);
+                for (IPartialModelNode t : targets)
+                {
+                    boolean ownUi = isCollectionOwnMarkTarget(ctv, t)
+                            || !isFilterAwareAggregateUi(t);
+                    t.setChecked(ownUi && want);
+                    Global.invoke(t, "setGrayed", Boolean.FALSE); //$NON-NLS-1$
+                }
                 clearAggregateUiUnder(clicked);
+                // «Справочники» без помечаемых детей: зафиксировать свою галку в
+                // TreeItem+кэше до пересчёта агрегатов (иначе stale TreeItem☑).
+                seedCollectionOwnMarksUi(ctv, targets, want);
                 paintFilteredSubtreeLeafChecks(ctv, clicked);
                 paintAggregatesBottomUpUnder(ctv, clicked);
                 if (isFilterAwareAggregateUi(clicked))
                     paintAggregateFromChildren(ctv, clicked);
                 else
-                    paintPlainCheckUi(ctv, clicked, want && applied > 0);
-                // Предки: сначала непосредственный, затем выше.
+                    paintPlainCheckUi(ctv, clicked, want && !targets.isEmpty());
                 recalculateAncestorAggregatesUpward(ctv, clicked);
-                return applied;
+
+                IComparisonSession session = null;
+                for (IPartialModelNode t : targets)
+                {
+                    session = t.getComparisonSession();
+                    if (session != null)
+                        break;
+                }
+                if (session == null || targets.isEmpty())
+                    return targets.size();
+                IComparisonSession sessionFinal = session;
+                ArrayList<IPartialModelNode> targetsFinal = new ArrayList<>(targets);
+                boolean wantFinal = want;
+                IPartialModelNode clickedFinal = clicked;
+                Display display = ctv.getControl().getDisplay();
+                display.asyncExec(() ->
+                {
+                    if (ctv.getControl() == null || ctv.getControl().isDisposed())
+                        return;
+                    commitFilteredMarksBm(ctv, clickedFinal, wantFinal, targetsFinal,
+                            sessionFinal);
+                });
+                return targets.size();
+            }
+
+            /**
+             * Запись mustBeMerged только на отфильтрованных узлах (после listener).
+             */
+            private void commitFilteredMarksBm(CheckboxTreeViewer ctv,
+                    IPartialModelNode clicked, boolean want,
+                    List<IPartialModelNode> targets, IComparisonSession session)
+            {
+                ArrayList<IPartialModelNode> leafFallback = new ArrayList<>();
+                int[] merged = { 0 };
+                boolean wrote = runComparisonTreeWrite(session, () ->
+                {
+                    for (IPartialModelNode t : targets)
+                    {
+                        if (setMergeSettingsOnNode(t, want))
+                            merged[0]++;
+                        else if (!hasContainmentChildren(t))
+                            leafFallback.add(t);
+                    }
+                });
+                CompareChecksDebug.step("setMark", //$NON-NLS-1$
+                        "bmCommit wrote=" + wrote //$NON-NLS-1$
+                                + " mergeSettings=" + merged[0] //$NON-NLS-1$
+                                + " leaves=" + leafFallback.size() //$NON-NLS-1$
+                                + " want=" + want); //$NON-NLS-1$
+                for (IPartialModelNode leaf : leafFallback)
+                {
+                    if (setMergeFlagOnLeaf(leaf, want))
+                    {
+                        CompareChecksDebug.step("setMark", //$NON-NLS-1$
+                                CompareChecksDebug.nodeLabel(leaf)
+                                        + " want=" + want + " leafSession"); //$NON-NLS-1$ //$NON-NLS-2$
+                    }
+                }
+                clearAggregateUiUnder(clicked);
+                seedCollectionOwnMarksUi(ctv, targets, want);
+                paintFilteredSubtreeLeafChecks(ctv, clicked);
+                paintAggregatesBottomUpUnder(ctv, clicked);
+                if (isFilterAwareAggregateUi(clicked))
+                    paintAggregateFromChildren(ctv, clicked);
+                recalculateAncestorAggregatesUpward(ctv, clicked);
+            }
+
+            /**
+             * Коллекция/папка без видимых checkable-детей — своя галка (не ToTree).
+             * Каскад с родителя должен ставить/снимать её явно.
+             */
+            private boolean isCollectionOwnMarkTarget(CheckboxTreeViewer ctv,
+                    IPartialModelNode node)
+            {
+                return node != null && isFilterAwareAggregateUi(node)
+                        && !hasFilteredCheckableDescendants(ctv, node);
+            }
+
+            /**
+             * После clearAggregateUi: TreeItem + кэш для collectionOwn, чтобы
+             * {@link #aggregateWhenNoConsideredChildren} не поднял старый ☑.
+             */
+            private void seedCollectionOwnMarksUi(CheckboxTreeViewer ctv,
+                    List<IPartialModelNode> targets, boolean want)
+            {
+                if (ctv == null || targets == null)
+                    return;
+                for (IPartialModelNode t : targets)
+                {
+                    if (!isCollectionOwnMarkTarget(ctv, t))
+                        continue;
+                    putAggregateUi(t, want, false);
+                    paintTreeItemCheckNoExpand(ctv, t, want, false);
+                    t.setChecked(want);
+                    Global.invoke(t, "setGrayed", Boolean.FALSE); //$NON-NLS-1$
+                }
+            }
+
+            /**
+             * @deprecated см. {@link #applyFilterAwareCheckCascade} / commitFilteredMarksBm.
+             */
+            private int setMarkOnAllFilteredCheckable(CheckboxTreeViewer ctv,
+                    IPartialModelNode node, boolean want)
+            {
+                ArrayList<IPartialModelNode> targets = new ArrayList<>();
+                collectFilteredCheckable(ctv, node, targets);
+                if (targets.isEmpty())
+                    return 0;
+                IComparisonSession session = null;
+                for (IPartialModelNode t : targets)
+                {
+                    session = t.getComparisonSession();
+                    if (session != null)
+                        break;
+                }
+                if (session != null)
+                    commitFilteredMarksBm(ctv, node, want, targets, session);
+                return targets.size();
             }
 
             /** Галочки листьев из модели (агрегаты красит {@link #paintAggregatesBottomUpUnder}). */
@@ -3360,44 +3496,83 @@ public class CompareConfigMenuHook implements IStartup
                 }
             }
 
-            /**
-             * Та же пометка на узле и всех отфильтрованных checkable-потомках.
-             */
-            private int setMarkOnAllFilteredCheckable(CheckboxTreeViewer ctv,
-                    IPartialModelNode node, boolean want)
+            private void collectFilteredCheckable(CheckboxTreeViewer ctv,
+                    IPartialModelNode node, List<IPartialModelNode> out)
             {
                 if (node == null)
-                    return 0;
-                int applied = 0;
-                if (node.isCheckable() && setNodeFilteredMark(ctv, node, want))
-                    applied++;
+                    return;
+                if (node.isCheckable())
+                    out.add(node);
                 for (IPartialModelNode child : resolveChildren(ctv, node))
                 {
-                    // Коллекции/MD с детьми — всегда спускаемся (Формы свёрнуты,
-                    // но resolveChildren отдаёт ФормаЭлемента). Фильтр — на листьях
-                    // и объектах без containment через isVisibleForCheck.
-                    if (isStructuralFolderForFilterWalk(child) || isFilterAwareAggregateUi(child))
+                    // Checkable (в т.ч. «Конфигурация», коллекции, MD) — только
+                    // видимые фильтром. Иначе при отборе по подсистемам скрытая
+                    // «Конфигурация» помечалась вместе с корнем.
+                    if (child.isCheckable())
                     {
-                        if (isFilterAwareAggregateUi(child) && !isStructuralFolderForFilterWalk(child)
-                                && !isVisibleForCheck(ctv, node, child))
+                        if (!isVisibleForCheck(ctv, node, child))
                             continue;
-                        applied += setMarkOnAllFilteredCheckable(ctv, child, want);
+                        collectFilteredCheckable(ctv, child, out);
+                        continue;
+                    }
+                    // Неcheckable «Свойства»/папки — спуск искать видимых детей.
+                    if (isStructuralFolderForFilterWalk(child)
+                            || isPropertiesVirtualFolderNode(child))
+                    {
+                        collectFilteredCheckable(ctv, child, out);
                         continue;
                     }
                     if (!isVisibleForCheck(ctv, node, child))
                         continue;
-                    applied += setMarkOnAllFilteredCheckable(ctv, child, want);
+                    collectFilteredCheckable(ctv, child, out);
                 }
-                return applied;
             }
 
             /**
-             * Пометка одного узла в BM/MergeSettings — не «uiOnly» {@code setChecked}
-             * (иначе Справочники☑ при Справочник□: кэш без mustBeMerged).
-             * <p>
-             * «ФормаЭлемента» с containment «Свойства» — не контейнер для каскада:
-             * ToTree через session допустим. Catalog/коллекция с checkable-потомками —
-             * только MergeSettings или обход детей (ToTree зальёт скрытых).
+             * Запись MergeSettings в BM-транзакции сравнения (как EDT /
+             * {@code ComparisonManager.runComparisonTreeBmModelTask}).
+             */
+            private static boolean runComparisonTreeWrite(IComparisonSession session,
+                    Runnable body)
+            {
+                if (session == null || body == null)
+                    return false;
+                Object comparisonManager = Global.getField(session, "comparisonManager"); //$NON-NLS-1$
+                if (comparisonManager == null)
+                {
+                    CompareChecksDebug.step("setMark", "no comparisonManager"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return false;
+                }
+                try
+                {
+                    AbstractBmTask<Object> task = new AbstractBmTask<>(
+                            "Comfort: filter-aware checkmarks") //$NON-NLS-1$
+                    {
+                        @Override
+                        public Object execute(IBmTransaction transaction,
+                                IProgressMonitor progressMonitor)
+                        {
+                            body.run();
+                            return null;
+                        }
+                    };
+                    Global.invoke(comparisonManager, "runComparisonTreeBmModelTask", //$NON-NLS-1$
+                            session, task);
+                    return true;
+                }
+                catch (RuntimeException ex)
+                {
+                    CompareChecksDebug.step("setMark", //$NON-NLS-1$
+                            "bmTxn EX " + ex.getClass().getSimpleName() //$NON-NLS-1$
+                                    + " " + ex.getMessage()); //$NON-NLS-1$
+                    return false;
+                }
+            }
+
+            /**
+             * Пометка одного отфильтрованного узла (без общей транзакции — fallback).
+             * Только {@link MergeSettings} на ЭТОМ узле (без ToTree).
+             * {@code session.setMustBeMerged} — лишь для BM-листа без детей.
              */
             private boolean setNodeFilteredMark(CheckboxTreeViewer ctv, IPartialModelNode node,
                     boolean want)
@@ -3407,11 +3582,7 @@ public class CompareConfigMenuHook implements IStartup
                 if (setMergeSettingsOnNode(node, want))
                     return true;
                 long id = node.getNodeId();
-                IComparisonSession session = node.getComparisonSession();
-                boolean noCheckableKids = !hasFilteredCheckableDescendants(ctv, node);
-                // Нет checkable-потомков → «лист» (в т.ч. «Справочники» при
-                // «Справочник1» без checkbox).
-                if (noCheckableKids && session != null && id != -1L)
+                if (!hasContainmentChildren(node))
                 {
                     if (setMergeFlagOnLeaf(node, want))
                     {
@@ -3421,25 +3592,17 @@ public class CompareConfigMenuHook implements IStartup
                         return true;
                     }
                 }
-                if (noCheckableKids && (isAggregateCheckNode(node)
-                        || isFilterAwareAggregateUi(node)))
+                if (isAggregateCheckNode(node) || isFilterAwareAggregateUi(node)
+                        || hasContainmentChildren(node))
                 {
-                    node.setChecked(want);
+                    boolean ownUi = !hasFilteredCheckableDescendants(ctv, node);
+                    node.setChecked(ownUi && want);
                     Global.invoke(node, "setGrayed", Boolean.FALSE); //$NON-NLS-1$
                     CompareChecksDebug.step("setMark", //$NON-NLS-1$
                             CompareChecksDebug.nodeLabel(node)
-                                    + " want=" + want + " collectionOwn"); //$NON-NLS-1$ //$NON-NLS-2$
-                    return true;
-                }
-                // Контейнер с checkable-детьми: обход детей; сбросить артефакт клика.
-                if (hasContainmentChildren(node) || isAggregateCheckNode(node)
-                        || isFilterAwareAggregateUi(node))
-                {
-                    node.setChecked(false);
-                    Global.invoke(node, "setGrayed", Boolean.FALSE); //$NON-NLS-1$
-                    CompareChecksDebug.step("setMark", //$NON-NLS-1$
-                            CompareChecksDebug.nodeLabel(node)
-                                    + " want=" + want + " skipParentToTree id=" + id); //$NON-NLS-1$ //$NON-NLS-2$
+                                    + " want=" + want
+                                    + (ownUi ? " collectionOwn" : " skipParentNoToTree") //$NON-NLS-1$ //$NON-NLS-2$
+                                    + " id=" + id); //$NON-NLS-1$
                     return true;
                 }
                 CompareChecksDebug.step("setMark", //$NON-NLS-1$
@@ -3449,9 +3612,8 @@ public class CompareConfigMenuHook implements IStartup
             }
 
             /**
-             * Есть ли под узлом checkable-потомки, которые нужно метить отдельно
-             * (иначе ToTree на родителе затронет скрытых фильтром).
-             * «Свойства» не считаем — это часть объекта, FormElement = leafSession.
+             * Есть ли под узлом видимые checkable-потомки (для UI-агрегата).
+             * Скрытые фильтром (в т.ч. «Конфигурация») не считаются.
              */
             private boolean hasFilteredCheckableDescendants(CheckboxTreeViewer ctv,
                     IPartialModelNode node)
@@ -3460,23 +3622,26 @@ public class CompareConfigMenuHook implements IStartup
                     return hasContainmentChildren(node);
                 for (IPartialModelNode child : resolveChildren(ctv, node))
                 {
-                    if (isPropertiesVirtualFolderNode(child))
-                        continue;
-                    if (isStructuralFolderForFilterWalk(child) || isFilterAwareAggregateUi(child))
+                    if (isPropertiesVirtualFolderNode(child) && !child.isCheckable())
                     {
-                        if (isFilterAwareAggregateUi(child) && !isStructuralFolderForFilterWalk(child)
-                                && !isVisibleForCheck(ctv, node, child))
-                            continue;
-                        if (child.isCheckable() && !isAggregateCheckNode(child))
+                        if (hasFilteredCheckableDescendants(ctv, child))
                             return true;
+                        continue;
+                    }
+                    if (child.isCheckable())
+                    {
+                        if (!isVisibleForCheck(ctv, node, child))
+                            continue;
+                        return true;
+                    }
+                    if (isStructuralFolderForFilterWalk(child))
+                    {
                         if (hasFilteredCheckableDescendants(ctv, child))
                             return true;
                         continue;
                     }
                     if (!isVisibleForCheck(ctv, node, child))
                         continue;
-                    if (child.isCheckable())
-                        return true;
                     if (hasFilteredCheckableDescendants(ctv, child))
                         return true;
                 }
@@ -3813,92 +3978,13 @@ public class CompareConfigMenuHook implements IStartup
             }
 
             /**
-             * MD при активном отборе.
-             * <p>
-             * Важно: {@code IComparisonSession.setMustBeMerged(id, want, force)} —
-             * третий аргумент это {@code force}, НЕ cascade. Вызов ВСЕГДА делает
-             * {@code setMustBeMergedToTree} по containment-детям BM. Поэтому:
-             * 1) сначала {@code setMustBeMerged(md, false)} — снять всё поддерево;
-             * 2) затем {@code setMustBeMerged(true)} только на видимых листьях
-             *    (без детей) — родители пересчитаются EDT сами.
+             * @deprecated каскад — {@link #setMarkOnAllFilteredCheckable}; ToTree-сброс
+             * запрещён (меняет пометки вне фильтра).
              */
             private int applyVisibleOnlyInsideMdObject(CheckboxTreeViewer ctv,
                     IPartialModelNode leaf, boolean checked)
             {
-                IComparisonSession session = leaf.getComparisonSession();
-                long rootId = leaf.getNodeId();
-                // Полный сброс BM-поддерева (единственный надёжный способ убрать
-                // скрытых — они часто не в resolveChildren при активном фильтре).
-                if (session != null && rootId != -1L)
-                {
-                    session.setMustBeMerged(rootId, false, true);
-                    leaf.setChecked(false);
-                    Global.invoke(leaf, "setGrayed", Boolean.FALSE); //$NON-NLS-1$
-                }
-                else
-                {
-                    leaf.check(false);
-                }
-                int applied = 0;
-                if (checked)
-                {
-                    applied = markVisibleLeavesOnly(ctv, leaf);
-                    // Односторонний объект / нечего раскрыть — только флаг на себе,
-                    // без setMustBeMerged (он снова зальёт containment-детей).
-                    if (applied == 0 && leaf.isCheckable())
-                    {
-                        if (setMergeSettingsDirect(leaf, true))
-                            applied = 1;
-                        else if (setMergeFlagOnLeaf(leaf, true))
-                        {
-                            // canBeMerged=false / нет MergeSettings — всё же BM-флаг.
-                            applied = 1;
-                            CompareChecksDebug.step("visibleOnlyMd", //$NON-NLS-1$
-                                    CompareChecksDebug.nodeLabel(leaf)
-                                            + " fallback setMustBeMerged"); //$NON-NLS-1$
-                        }
-                        else
-                        {
-                            CompareChecksDebug.step("visibleOnlyMd", //$NON-NLS-1$
-                                    CompareChecksDebug.nodeLabel(leaf)
-                                            + " FAIL mark checkable"); //$NON-NLS-1$
-                        }
-                    }
-                }
-                else
-                {
-                    applied = 1; // сброс корня уже сделан
-                }
-                CompareChecksDebug.step("visibleOnlyMd", //$NON-NLS-1$
-                        CompareChecksDebug.nodeLabel(leaf)
-                                + " want=" + checked //$NON-NLS-1$
-                                + " visibleLeaves=" + applied); //$NON-NLS-1$
-                // Сбросить кэш агрегатов под MD — иначе Properties держит checked.
-                clearAggregateUiUnder(leaf);
-                syncSubtreeCheckCacheFromMergeSettings(leaf);
-                syncAncestorsCheckCacheFromMergeSettings(leaf);
-                paintVisibleSubtreeChecksOnly(ctv, leaf);
-                paintAggregateFoldersUnder(ctv, leaf);
-                // Не item.setGrayed(false): Роль1 при Права□ должна быть серой,
-                // иначе bulk по «Роли» оставляет full поверх gray Properties.
-                if (isFilterAwareAggregateUi(leaf))
-                {
-                    paintAggregateFromChildren(ctv, leaf);
-                    refreshNodeImages(ctv, List.of(leaf));
-                }
-                else
-                {
-                    boolean uiChecked = checked && applied > 0;
-                    Widget w = ctv.testFindItem(leaf);
-                    if (w instanceof TreeItem item && !item.isDisposed())
-                    {
-                        item.setChecked(uiChecked);
-                        item.setGrayed(false);
-                    }
-                    leaf.setChecked(uiChecked);
-                    Global.invoke(leaf, "setGrayed", Boolean.FALSE); //$NON-NLS-1$
-                }
-                return applied;
+                return setMarkOnAllFilteredCheckable(ctv, leaf, checked);
             }
 
             private void clearAggregateUiUnder(IPartialModelNode node)
@@ -3993,12 +4079,12 @@ public class CompareConfigMenuHook implements IStartup
             }
 
             /**
-             * {@code setMustBeMerged} только для листа. 3-й аргумент = force
-             * (не cascade) — на листе ToTree затрагивает только его.
+             * {@code setMustBeMerged} только для BM-листа без детей.
+             * Иначе ToTree меняет пометки скрытых дочек — запрещено постановкой.
              */
             private static boolean setMergeFlagOnLeaf(IPartialModelNode node, boolean want)
             {
-                if (node == null)
+                if (node == null || hasContainmentChildren(node))
                     return false;
                 IComparisonSession session = node.getComparisonSession();
                 long id = node.getNodeId();
