@@ -918,13 +918,13 @@ public final class ConfigSearchResultsHook implements IStartup
                             return true;
                         }
                     }
-                    // Обычный реквизит/измерение/ресурс объекта (не форма/СКД/табл. документ):
-                    // штатный handleOpen сам открывает редактор объекта и выделяет найденный
-                    // элемент — как и для isInsideForm ниже, здесь только показываем панель
-                    // «Свойства» (выделение штатно подхватит её через ISelectionListener) и
-                    // активируем в ней поле, на которое указывает вхождение.
+                    // Обычный реквизит/измерение/ресурс объекта (не форма/СКД/табл. документ).
+                    // Вложенные leaf (Синоним.ru / Подсказка.ru) — см. openNestedMdObjectMemberMatch;
+                    // совпадение прямо по реквизиту (Комментарий) — штатный handleOpen + фокус поля.
                     else if (leaf != null && isInsideMdObjectMember(leaf))
                     {
+                        if (openNestedMdObjectMemberMatch(leaf, workbenchPage, resolveMatchFeature(matchObj)))
+                            return true;
                         try
                         {
                             workbenchPage.showView(IPageLayout.ID_PROP_SHEET);
@@ -952,6 +952,13 @@ public final class ConfigSearchResultsHook implements IStartup
             // хотя бы стабильно открывает форму и выделяет реквизит.
             if (!insideDcs && !insideSpreadsheet)
             {
+                // Вложенное свойство реквизита МД (Синоним.ru / Подсказка.ru / Тип.Типы…): штатный
+                // handleOpen → OpenHelper.openEditor(leaf, feature) поднимается до MdObject с
+                // feature=attributes и selection=leaf (не реквизит) — редактор кратко выделяет
+                // реквизит, затем активирует группу «Реквизиты». Для плоских свойств самого
+                // реквизита (Комментарий) leaf уже BasicFeature — штатный путь корректен.
+                if (openNestedMdObjectMemberMatch(matchedObject, workbenchPage, match.getFeature()))
+                    return true;
                 // Штатная обработка EDT (handleOpen) сама корректно открывает форму и выделяет
                 // найденный элемент (реквизит/команду/элемент формы) — это уже подтверждено и трогать
                 // не нужно (попытка сделать выделение самим сломала штатную активацию, см. откат
@@ -1784,10 +1791,94 @@ public final class ConfigSearchResultsHook implements IStartup
      */
     private static boolean isInsideMdObjectMember(EObject leaf)
     {
+        return findNearestMdObjectMember(leaf) != null;
+    }
+
+    /**
+     * Ближайший к {@code leaf} (включая сам {@code leaf}) реквизит/измерение/ресурс МД-объекта.
+     */
+    private static EObject findNearestMdObjectMember(EObject leaf)
+    {
         for (EObject cur = leaf; cur != null; cur = cur.eContainer())
             if (cur instanceof BasicFeature)
-                return true;
-        return false;
+                return cur;
+        return null;
+    }
+
+    /**
+     * Вхождение внутри реквизита МД, но не в самом реквизите (Синоним.ru, Подсказка.ru, Тип.Типы…):
+     * открывает ближайший {@code BasicFeature} через 1-arg {@code OpenHelper.openEditor} (как
+     * {@link GoToDefinition#openTopLevelFormElement}) и фокусирует поле панели «Свойства».
+     * Штатный {@code handleOpen} здесь не вызываем — иначе OpenHelper поднимает selection=leaf до
+     * MdObject с feature={@code attributes} и редактор активирует группу «Реквизиты».
+     *
+     * <p>Порядок как у рабочего плоского случая (Комментарий): сначала {@code showView} +
+     * {@link PropertyFieldFocus#schedule}, затем {@code openEditor} — панель подхватывает
+     * выделение асинхронно, а цикл ожидания уже крутится. Если планировать фокус после
+     * {@code openEditor}, палитра часто ещё не переключена на реквизит.
+     *
+     * @return {@code true}, если открытие обработано здесь (штатный {@code handleOpen} не нужен)
+     */
+    private static boolean openNestedMdObjectMemberMatch(EObject leaf, IWorkbenchPage workbenchPage,
+            EStructuralFeature matchFeature)
+    {
+        EObject member = findNearestMdObjectMember(leaf);
+        if (member == null || member == leaf)
+            return false;
+        Global.tempLog(PropertyFieldFocus.LOG_TOPIC, "openNested start leaf=" //$NON-NLS-1$
+                + describeEObject(leaf) + " member=" + describeEObject(member) //$NON-NLS-1$
+                + " matchFeature=" + featureName(matchFeature)); //$NON-NLS-1$
+        try
+        {
+            workbenchPage.showView(IPageLayout.ID_PROP_SHEET);
+        }
+        catch (Exception e)
+        {
+            Global.tempLog(PropertyFieldFocus.LOG_TOPIC, "openNested showView: " + e); //$NON-NLS-1$
+        }
+        // Ждём палитру ДО openEditor — тот же порядок, что showView+schedule → handleOpen
+        // для «Комментарий»; иначе первые попытки фокуса идут в ещё старую палитру.
+        PropertyFieldFocus.schedule(workbenchPage, leaf, matchFeature);
+        try
+        {
+            if (new OpenHelper(workbenchPage).openEditor(member) == null)
+            {
+                Global.tempLog(PropertyFieldFocus.LOG_TOPIC, "openNested openEditor=null, cancel focus"); //$NON-NLS-1$
+                PropertyFieldFocus.cancel();
+                return false;
+            }
+        }
+        catch (RuntimeException e)
+        {
+            Global.tempLog(PropertyFieldFocus.LOG_TOPIC, "openNested openEditor: " + e.getMessage()); //$NON-NLS-1$
+            PropertyFieldFocus.cancel();
+            return false;
+        }
+        Global.tempLog(PropertyFieldFocus.LOG_TOPIC, "openNested openEditor ok, focus loop running"); //$NON-NLS-1$
+        return true;
+    }
+
+    private static String describeEObject(EObject obj)
+    {
+        if (obj == null)
+            return "null"; //$NON-NLS-1$
+        String name = null;
+        try
+        {
+            Object n = Global.invoke(obj, "getName"); //$NON-NLS-1$
+            if (n != null)
+                name = String.valueOf(n);
+        }
+        catch (Exception e)
+        {
+        }
+        return obj.eClass().getName() + (name != null ? "(" + name + ")" : "") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + "@" + Integer.toHexString(System.identityHashCode(obj)); //$NON-NLS-1$
+    }
+
+    private static String featureName(EStructuralFeature feature)
+    {
+        return feature != null ? feature.getName() : "null"; //$NON-NLS-1$
     }
 
     /**
@@ -4701,6 +4792,8 @@ public final class ConfigSearchResultsHook implements IStartup
         /** Панель наполняется асинхронно (MdPropertySheetPage ведёт свой прогресс) — ждём до ~6с. */
         private static final int MAX_ATTEMPTS = 40;
         private static final int RETRY_DELAY_MS = 150;
+        /** Тема {@link Global#tempLog} — см. {@code .tmp/temp-logs/propfocus.log}. */
+        static final String LOG_TOPIC = "propfocus"; //$NON-NLS-1$
 
         /**
          * Метка текущего цикла ожидания. Каждое новое открытие вхождения обесценивает предыдущий
@@ -4712,6 +4805,13 @@ public final class ConfigSearchResultsHook implements IStartup
 
         private PropertyFieldFocus() {}
 
+        /** Обесценить текущий цикл ожидания (открытие сорвалось / заменено). */
+        static void cancel()
+        {
+            activeToken = new Object();
+            Global.tempLog(LOG_TOPIC, "cancel"); //$NON-NLS-1$
+        }
+
         /**
          * Запуск ожидания и активации поля.
          *
@@ -4721,11 +4821,21 @@ public final class ConfigSearchResultsHook implements IStartup
         static void schedule(IWorkbenchPage workbenchPage, EObject leaf, EStructuralFeature matchFeature)
         {
             if (workbenchPage == null || leaf == null)
+            {
+                Global.tempLog(LOG_TOPIC, "schedule skip: page/leaf null"); //$NON-NLS-1$
                 return;
+            }
             EObject member = nearestMember(leaf);
             EStructuralFeature feature = targetFeature(leaf, matchFeature);
+            Global.tempLog(LOG_TOPIC, "schedule leaf=" + describeEObject(leaf) //$NON-NLS-1$
+                    + " member=" + describeEObject(member) //$NON-NLS-1$
+                    + " matchFeature=" + featureName(matchFeature) //$NON-NLS-1$
+                    + " targetFeature=" + featureName(feature)); //$NON-NLS-1$
             if (member == null || feature == null)
+            {
+                Global.tempLog(LOG_TOPIC, "schedule skip: member/feature null"); //$NON-NLS-1$
                 return;
+            }
             Object token = new Object();
             activeToken = token;
             retry(workbenchPage, member, feature, 0, token);
@@ -4781,31 +4891,46 @@ public final class ConfigSearchResultsHook implements IStartup
                 return;
             display.timerExec(RETRY_DELAY_MS, () -> {
                 if (token != activeToken)
-                    return; // цикл обесценен более свежим открытием вхождения
+                {
+                    Global.tempLog(LOG_TOPIC, "retry aborted stale token attempt=" + attempt); //$NON-NLS-1$
+                    return;
+                }
                 try
                 {
-                    if (tryFocus(workbenchPage, member, feature))
+                    if (tryFocus(workbenchPage, member, feature, attempt))
                         return;
                 }
                 catch (Throwable t)
                 {
+                    Global.tempLog(LOG_TOPIC, "tryFocus throw attempt=" + attempt + " " + t); //$NON-NLS-1$ //$NON-NLS-2$
                     Global.logError("ConfigSearchResults", "PropertyFieldFocus.tryFocus", t); //$NON-NLS-1$ //$NON-NLS-2$
                 }
                 if (attempt + 1 < MAX_ATTEMPTS)
                     retry(workbenchPage, member, feature, attempt + 1, token);
+                else
+                    Global.tempLog(LOG_TOPIC, "give up after " + MAX_ATTEMPTS + " attempts feature=" //$NON-NLS-1$ //$NON-NLS-2$
+                            + featureName(feature) + " member=" + describeEObject(member)); //$NON-NLS-1$
             });
         }
 
         private static boolean tryFocus(IWorkbenchPage workbenchPage, EObject member,
-                EStructuralFeature feature)
+                EStructuralFeature feature, int attempt)
         {
             IViewPart view = findPropertySheetView(workbenchPage);
             Object page = view != null ? PropertyNameIdentifierHook.resolvePropertySheetPage(view) : null;
             if (page == null)
+            {
+                Global.tempLog(LOG_TOPIC, "attempt=" + attempt + " no property sheet page view=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + (view != null ? view.getClass().getSimpleName() : "null")); //$NON-NLS-1$
                 return false;
+            }
             // Панель ещё может показывать ПРЕДЫДУЩИЙ объект — тогда нужное поле найдётся, но не то.
             if (!paletteShowsObject(page, member))
+            {
+                Global.tempLog(LOG_TOPIC, "attempt=" + attempt + " palette not yet on member=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + describeEObject(member) + " palette=" + describePaletteObjects(page)); //$NON-NLS-1$
                 return false;
+            }
 
             // Поле «Тип» в панели «Свойства» перекрыто нашим же SWT-оверлеем (TypeComboOverlayHook):
             // видимый ввод — его Text, а штатный LightCombo под ним только визуально закрыт.
@@ -4816,15 +4941,53 @@ public final class ConfigSearchResultsHook implements IStartup
             // вовсе), то фокусировать и нечего.
             String label = rawFeatureLabel(feature);
             if (TypeComboOverlayHook.coversProperty(label))
-                return TypeComboOverlayHook.focusPropertyOverlay(view, label);
+            {
+                boolean overlayFocused = TypeComboOverlayHook.focusPropertyOverlay(view, label);
+                Global.tempLog(LOG_TOPIC, "attempt=" + attempt + " typeOverlay label=" + label //$NON-NLS-1$ //$NON-NLS-2$
+                        + " ok=" + overlayFocused); //$NON-NLS-1$
+                return overlayFocused;
+            }
 
             Object scene = Global.invoke(page, "getScene"); //$NON-NLS-1$
             if (scene == null)
+            {
+                Global.tempLog(LOG_TOPIC, "attempt=" + attempt + " scene=null"); //$NON-NLS-1$ //$NON-NLS-2$
                 return false;
+            }
             Object fieldComponent = findFieldComponent(scene, feature);
             if (fieldComponent == null)
+            {
+                Global.tempLog(LOG_TOPIC, "attempt=" + attempt + " field not found feature=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + featureName(feature) + " label=" + label); //$NON-NLS-1$
                 return false;
-            return focusFieldComponent(scene, fieldComponent);
+            }
+            boolean focused = focusFieldComponent(scene, fieldComponent);
+            Global.tempLog(LOG_TOPIC, "attempt=" + attempt + " focus feature=" + featureName(feature) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " label=" + label + " component=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + fieldComponent.getClass().getSimpleName() + " ok=" + focused); //$NON-NLS-1$
+            return focused;
+        }
+
+        private static String describePaletteObjects(Object page)
+        {
+            Object paletteModel = Global.invoke(page, "getPaletteModel"); //$NON-NLS-1$
+            Object objects = paletteModel != null ? Global.invoke(paletteModel, "getObjects") : null; //$NON-NLS-1$
+            if (!(objects instanceof Iterable<?> iterable))
+                return "none"; //$NON-NLS-1$
+            StringBuilder sb = new StringBuilder();
+            int n = 0;
+            for (Object obj : iterable)
+            {
+                if (n > 0)
+                    sb.append(',');
+                sb.append(obj instanceof EObject eObj ? describeEObject(eObj) : String.valueOf(obj));
+                if (++n >= 3)
+                {
+                    sb.append(",…"); //$NON-NLS-1$
+                    break;
+                }
+            }
+            return n == 0 ? "empty" : sb.toString(); //$NON-NLS-1$
         }
 
         /**

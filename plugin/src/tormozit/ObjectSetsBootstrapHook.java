@@ -50,13 +50,20 @@ public final class ObjectSetsBootstrapHook implements IStartup
             IResourceDelta root = event.getDelta();
             if (root == null)
                 return;
-            List<String> projectNames = new ArrayList<>();
-            collectNewOrOpenedProjects(root, projectNames);
-            for (String projectName : projectNames)
+            List<String> openedProjectNames = new ArrayList<>();
+            List<String> removedProjectNames = new ArrayList<>();
+            collectProjectChanges(root, openedProjectNames, removedProjectNames);
+            for (String projectName : removedProjectNames)
+                ObjectSets.getInstance().removeSetsForProject(projectName);
+            for (String projectName : openedProjectNames)
+            {
                 ObjectSets.getInstance().ensureDefaultSetForProject(projectName);
+                ObjectSets.getInstance().ensureSystemSetForProject(projectName);
+            }
         }
 
-        private static void collectNewOrOpenedProjects(IResourceDelta delta, List<String> out)
+        private static void collectProjectChanges(
+                IResourceDelta delta, List<String> opened, List<String> removed)
         {
             if (delta == null)
                 return;
@@ -64,15 +71,19 @@ public final class ObjectSetsBootstrapHook implements IStartup
             if (resource instanceof IProject project)
             {
                 int kind = delta.getKind();
-                if (project.isOpen()
+                if (kind == IResourceDelta.REMOVED)
+                {
+                    removed.add(project.getName());
+                }
+                else if (project.isOpen()
                     && (kind == IResourceDelta.ADDED
                         || (kind == IResourceDelta.CHANGED && (delta.getFlags() & IResourceDelta.OPEN) != 0)))
                 {
-                    out.add(project.getName());
+                    opened.add(project.getName());
                 }
             }
             for (IResourceDelta child : delta.getAffectedChildren())
-                collectNewOrOpenedProjects(child, out);
+                collectProjectChanges(child, opened, removed);
         }
     }
 }

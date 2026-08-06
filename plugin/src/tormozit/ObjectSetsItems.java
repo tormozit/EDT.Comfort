@@ -7,13 +7,18 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
+import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.StructuredViewer;
 import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.swt.widgets.Shell;
+
+import org.eclipse.egit.core.project.RepositoryMapping;
+import org.eclipse.jgit.lib.Repository;
 
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
@@ -410,6 +415,8 @@ final class ObjectSetsItems
             ObjectSets.SetDef set = ObjectSetsAddTargetState.getInstance().getAddTargetSet(projectName);
             if (set == null)
                 return new ArrayList<>();
+            if (set.system)
+                return collectGitChangedRefs(projectName);
             for (ObjectSets.Item item : set.items)
             {
                 String ref = RecentPlacesKeys.mdObjectRefFromKey(item.key);
@@ -421,6 +428,115 @@ final class ObjectSetsItems
             }
             return new ArrayList<>(result);
         }
+    }
+
+    /**
+     * Полные имена владеющих объектов МД по изменённым файлам рабочего каталога проекта
+     * (JGit status: modified/added/changed/untracked). Репозиторий проекта — через
+     * {@link RepositoryMapping}; файлы вне проекта пропускаются.
+     */
+    static List<String> collectGitChangedRefs(String projectName)
+    {
+        Set<String> result = new LinkedHashSet<>();
+        if (projectName == null || projectName.isBlank())
+            return new ArrayList<>();
+        IProject project = ResourcesPlugin.getWorkspace().getRoot().getProject(projectName);
+        if (project == null || !project.isOpen())
+            return new ArrayList<>();
+        try
+        {
+            RepositoryMapping mapping = RepositoryMapping.getMapping(project);
+            if (mapping == null)
+                return new ArrayList<>();
+            Repository repository = mapping.getRepository();
+            if (repository == null)
+                return new ArrayList<>();
+            org.eclipse.jgit.api.Status status =
+                org.eclipse.jgit.api.Git.wrap(repository).status().call();
+            String projectRepoPath = mapping.getRepoRelativePath(project);
+            collectGitChangedRefsFromPaths(project, result, projectRepoPath, status.getModified());
+            collectGitChangedRefsFromPaths(project, result, projectRepoPath, status.getAdded());
+            collectGitChangedRefsFromPaths(project, result, projectRepoPath, status.getChanged());
+            collectGitChangedRefsFromPaths(project, result, projectRepoPath, status.getUntracked());
+        }
+        catch (Exception e)
+        {
+            ObjectSetsDebug.problem("collectGitChangedRefs: " + e); //$NON-NLS-1$
+        }
+        return new ArrayList<>(result);
+    }
+
+    private static void collectGitChangedRefsFromPaths(
+            IProject project, Set<String> result, String projectRepoPath, Set<String> paths)
+    {
+        if (paths == null || paths.isEmpty())
+            return;
+        for (String repoPath : paths)
+        {
+            if (repoPath == null || repoPath.isBlank())
+                continue;
+            String rel = repoPathToProjectRelative(repoPath, projectRepoPath);
+            if (rel == null)
+                continue;
+            if (GetRef.isConfigurationRootPath(rel))
+                continue;
+            IFile file = project.getFile(rel);
+            if (file == null || !file.exists())
+                continue;
+            String fullName = GetRef.pathToFullName(rel);
+            if (fullName == null || fullName.isBlank())
+                fullName = GoToDefinition.fullNameFromFile(file);
+            if (fullName == null || fullName.isBlank())
+                continue;
+            String ownerRef = MdTypeMapping.toOwnerMdObjectRef(fullName);
+            if (ownerRef != null && !ownerRef.isBlank())
+                result.add(ownerRef);
+        }
+    }
+
+    private static String repoPathToProjectRelative(String repoPath, String projectRepoPath)
+    {
+        String normalized = repoPath.replace('\\', '/');
+        if (projectRepoPath == null || projectRepoPath.isBlank())
+            return normalized;
+        String prefix = projectRepoPath.replace('\\', '/');
+        if (!normalized.startsWith(prefix + "/")) //$NON-NLS-1$
+            return null;
+        return normalized.substring(prefix.length() + 1);
+    }
+
+    /** Проект привязан к git-репозиторию (EGit mapping). */
+    static boolean isProjectUnderGit(String projectName)
+    {
+        if (projectName == null || projectName.isBlank())
+            return false;
+        IProject project = ResourcesPlugin.getWorkspace().getRoot().getProject(projectName);
+        if (project == null || !project.isOpen())
+            return false;
+        try
+        {
+            return RepositoryMapping.getMapping(project) != null;
+        }
+        catch (Exception e)
+        {
+            ObjectSetsDebug.problem("isProjectUnderGit: " + e.getMessage()); //$NON-NLS-1$
+            return false;
+        }
+    }
+
+    /**
+     * Элементы набора «&lt;Измененные&gt;»: динамический состав по git-изменениям проекта.
+     */
+    static List<ObjectSets.Item> collectGitChangedItems(String projectName)
+    {
+        List<String> refs = collectGitChangedRefs(projectName);
+        if (refs == null || refs.isEmpty())
+            return List.of();
+        List<ObjectSets.Item> items = new ArrayList<>(refs.size());
+        for (String ref : refs)
+            items.add(new ObjectSets.Item(ref, ref, ref, lastSegment(ref)));
+        items.sort(ObjectSets.ItemSort.COMPARATOR);
+        return items;
     }
 
     static String projectNameFromNavigatorSelection(IStructuredSelection selection)

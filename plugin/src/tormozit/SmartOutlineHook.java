@@ -481,8 +481,6 @@ public class SmartOutlineHook implements IStartup {
             aef.bindContext(smartFilter);
             aef.apply(viewer, patchedShell);
         }
-        // ПРИОРИТЕТ 1: Рейтинг Имени (от большего к меньшему)
-        viewer.setComparator(new SmartOutlineComparator(smartFilter.getNamePremiumCache(), smartFilter.getParamPremiumCache(), baseLp, flatContentProvider, smartFilter));
 
         // --- Замена поля фильтра для диалогов выбора типа ---
         final Control fc;
@@ -535,6 +533,13 @@ public class SmartOutlineHook implements IStartup {
         } else {
             fc = filterControl;
         }
+
+        // ПРИОРИТЕТ 1: Рейтинг Имени (от большего к меньшему). setComparator вызывает refresh()
+        // (см. StructuredViewer) — это последний рендер при открытии окна, поэтому он должен идти
+        // ПОСЛЕ installOnlyMarkedCheckbox: иначе флажок «Только помеченные» (setMarkedOnly) был бы
+        // установлен уже после этого рендера, его результат «затирался» и дерево открывалось
+        // без фильтра, хотя флажок стоял (гонка при открытии).
+        viewer.setComparator(new SmartOutlineComparator(smartFilter.getNamePremiumCache(), smartFilter.getParamPremiumCache(), baseLp, flatContentProvider, smartFilter));
 
         // Раскрытость дерева при открытии окна мы не трогаем вообще: нативный диалог сам
         // открывается в нужном состоянии — свёрнут, кроме пути к уже выбранному типу (который

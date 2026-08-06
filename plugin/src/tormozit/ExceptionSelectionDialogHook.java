@@ -56,6 +56,7 @@ public final class ExceptionSelectionDialogHook implements IStartup
     private static final String DIALOG_TITLE = "Остановка по ошибке"; //$NON-NLS-1$
     private static final String TITLE_SUFFIX = " (Новая)"; //$NON-NLS-1$
     private static final String PATCHED_KEY = "tormozit.exceptionSelectionDialogPatched"; //$NON-NLS-1$
+    private static final String SHADOW_PATTERN_KEY = "tormozit.exceptionSelectionShadowPattern"; //$NON-NLS-1$
     private static final String PASTE_BUTTON_LABEL = "Вставить из буфера"; //$NON-NLS-1$
     private static final String PASTE_BUTTON_TOOLTIP =
             "Извлечь причину ошибки из буфера обмена и подставить в поле фильтра"; //$NON-NLS-1$
@@ -141,13 +142,17 @@ public final class ExceptionSelectionDialogHook implements IStartup
         Control filterControl = filterInput.inputControl();
         if (filterControl == null)
             filterControl = filterInput.widget();
-        updatePatternControlReference(dialog, filterControl);
+        // Штатный okPressed() делает ((Text) getPatternControl()).getText() — SearchBox/
+        // StyledText туда ставить нельзя (ClassCastException → OK «ничего не делает», #255).
+        // Оставляем скрытый Text как pattern и синхронизируем его с полем фильтра.
+        Text shadowPattern = installShadowPatternText(shell, filterInput.getText());
+        updatePatternControlReference(dialog, shadowPattern);
 
-        Button pasteButton = installPasteButton(buttonBarComposite, filterInput);
+        Button pasteButton = installPasteButton(buttonBarComposite, filterInput, shadowPattern);
         if (pasteButton == null)
             return false;
 
-        installFilterModifyListener(filterControl, dialog, smartFilter);
+        installFilterModifyListener(filterControl, dialog, smartFilter, shadowPattern);
         FilterInputBoxListNavigation.installTableNavigation(filterControl, table, null);
 
         shell.setText(DIALOG_TITLE + TITLE_SUFFIX);
@@ -155,12 +160,26 @@ public final class ExceptionSelectionDialogHook implements IStartup
 
         applySmartFilter(dialog, smartFilter, filterInput.getText());
         filterInput.scheduleFocusWhenReady();
-        fillOnOpen(filterInput, shell);
+        fillOnOpen(filterInput, shell, shadowPattern);
         return true;
     }
 
+    /**
+     * Скрытый {@link Text}, который остаётся в {@code dialog.pattern}: штатный
+     * {@code BslExceptionSelectionDialog.okPressed} читает текст только через каст к Text.
+     */
+    private static Text installShadowPatternText(Shell shell, String initial)
+    {
+        Text shadow = new Text(shell, SWT.NONE);
+        shadow.setVisible(false);
+        shadow.setBounds(0, 0, 0, 0);
+        shadow.setText(initial != null ? initial : ""); //$NON-NLS-1$
+        shell.setData(SHADOW_PATTERN_KEY, shadow);
+        return shadow;
+    }
+
     /** Доверенная причина ({@link #setPendingReason}), иначе — как обычная кнопка, из буфера. */
-    private static void fillOnOpen(FilterInputBox filterInput, Shell shell)
+    private static void fillOnOpen(FilterInputBox filterInput, Shell shell, Text shadowPattern)
     {
         String trusted = pendingReason;
         pendingReason = null;
@@ -168,16 +187,18 @@ public final class ExceptionSelectionDialogHook implements IStartup
         if (trusted != null && !trusted.isEmpty())
         {
             filterInput.setText(trusted);
+            syncShadowPattern(shadowPattern, trusted);
             return;
         }
-        pasteFromClipboard(filterInput, shell);
+        pasteFromClipboard(filterInput, shell, shadowPattern);
     }
 
     // -----------------------------------------------------------------------
     // Кнопка «Вставить из буфера»
     // -----------------------------------------------------------------------
 
-    private static Button installPasteButton(Composite buttonBarComposite, FilterInputBox filterInput)
+    private static Button installPasteButton(Composite buttonBarComposite, FilterInputBox filterInput,
+            Text shadowPattern)
     {
         if (!(buttonBarComposite.getLayout() instanceof GridLayout layout))
             return null;
@@ -192,12 +213,13 @@ public final class ExceptionSelectionDialogHook implements IStartup
         if (siblings.length > 1)
             button.moveAbove(siblings[0]);
 
-        button.addListener(SWT.Selection, e -> pasteFromClipboard(filterInput, buttonBarComposite.getShell()));
+        button.addListener(SWT.Selection, e -> pasteFromClipboard(filterInput, buttonBarComposite.getShell(),
+                shadowPattern));
         buttonBarComposite.layout(true, true);
         return button;
     }
 
-    private static void pasteFromClipboard(FilterInputBox filterInput, Shell shell)
+    private static void pasteFromClipboard(FilterInputBox filterInput, Shell shell, Text shadowPattern)
     {
         if (filterInput.isDisposed())
             return;
@@ -210,6 +232,16 @@ public final class ExceptionSelectionDialogHook implements IStartup
         if (reason.isEmpty())
             return;
         filterInput.setText(reason);
+        syncShadowPattern(shadowPattern, reason);
+    }
+
+    private static void syncShadowPattern(Text shadowPattern, String text)
+    {
+        if (shadowPattern == null || shadowPattern.isDisposed())
+            return;
+        String value = text != null ? text : ""; //$NON-NLS-1$
+        if (!value.equals(shadowPattern.getText()))
+            shadowPattern.setText(value);
     }
 
     // -----------------------------------------------------------------------
@@ -288,11 +320,13 @@ public final class ExceptionSelectionDialogHook implements IStartup
     }
 
     private static void installFilterModifyListener(Control filterControl, FilteredItemsSelectionDialog dialog,
-            BslExceptionSmartFilter smartFilter)
+            BslExceptionSmartFilter smartFilter, Text shadowPattern)
     {
         Runnable[] pending = { null };
         ModifyListener listener = e ->
         {
+            // Синхрон сразу: OK может нажать до срабатывания debounce фильтра.
+            syncShadowPattern(shadowPattern, getFilterPattern(filterControl));
             Display display = filterControl.getDisplay();
             if (pending[0] != null)
                 display.timerExec(-1, pending[0]);

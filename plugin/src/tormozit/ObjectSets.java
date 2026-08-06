@@ -23,7 +23,9 @@ public final class ObjectSets
 {
     private static final String PREF_KEY = "objectSets.data"; //$NON-NLS-1$
     private static final String SET_MARKER = "@SET"; //$NON-NLS-1$
-    private static final String DEFAULT_SET_NAME = "Основной"; //$NON-NLS-1$
+    private static final String DEFAULT_SET_NAME = "<Основной>"; //$NON-NLS-1$
+    private static final String SYSTEM_CHANGED_SET_NAME = "<Измененные>"; //$NON-NLS-1$
+    private static final String SYSTEM_CHANGED_ID_PREFIX = "@changed:"; //$NON-NLS-1$
     private static final char SEP = '\t';
 
     private static final ObjectSets INSTANCE = new ObjectSets();
@@ -54,13 +56,27 @@ public final class ObjectSets
         public final String id;
         public String name;
         public final String projectName;
+        /** Системный набор (например, «<Измененные>»): состав не редактируется. */
+        public final boolean system;
         public final List<Item> items = new ArrayList<>();
 
+        /** Имя фиксировано: системный набор или набор «<Основной>» — переименование запрещено. */
+        public boolean isFixed()
+        {
+            return system || DEFAULT_SET_NAME.equals(name);
+        }
+
         SetDef(String id, String name, String projectName)
+        {
+            this(id, name, projectName, false);
+        }
+
+        SetDef(String id, String name, String projectName, boolean system)
         {
             this.id = id;
             this.name = name;
             this.projectName = projectName != null ? projectName : ""; //$NON-NLS-1$
+            this.system = system;
         }
     }
 
@@ -105,7 +121,7 @@ public final class ObjectSets
     public synchronized boolean renameSet(String setId, String newName)
     {
         SetDef set = setsById.get(setId);
-        if (set == null || newName == null || newName.isBlank())
+        if (set == null || set.isFixed() || newName == null || newName.isBlank())
             return false;
         set.name = newName.trim();
         save();
@@ -115,15 +131,63 @@ public final class ObjectSets
 
     public synchronized boolean deleteSet(String setId)
     {
+        SetDef set = setsById.get(setId);
+        if (set == null || set.system)
+            return false;
         SetDef removed = setsById.remove(setId);
         if (removed == null)
             return false;
-        ObjectSetsAddTargetState.getInstance().onSetDeleted(setId, removed.projectName);
-        if (getSetsForProject(removed.projectName).isEmpty())
-            createDefaultSet(removed.projectName);
+        if (projectExistsInWorkspace(removed.projectName))
+        {
+            if (!hasUserSets(removed.projectName))
+                createDefaultSet(removed.projectName);
+            ObjectSetsAddTargetState.getInstance().onSetDeleted(setId, removed.projectName);
+        }
+        else
+        {
+            ObjectSetsAddTargetState.getInstance().removeProjectMapping(removed.projectName);
+        }
         save();
         notifyChanged();
         return true;
+    }
+
+    /**
+     * Удалить все наборы проекта (например, при удалении проекта из workspace).
+     * @return число удалённых наборов
+     */
+    public synchronized int removeSetsForProject(String projectName)
+    {
+        if (projectName == null || projectName.isBlank())
+            return 0;
+        List<String> removedIds = new ArrayList<>();
+        for (SetDef set : setsById.values())
+        {
+            if (projectName.equals(set.projectName))
+                removedIds.add(set.id);
+        }
+        if (removedIds.isEmpty())
+            return 0;
+        for (String setId : removedIds)
+            setsById.remove(setId);
+        ObjectSetsAddTargetState.getInstance().removeProjectMapping(projectName);
+        save();
+        notifyChanged();
+        return removedIds.size();
+    }
+
+    /** Проект ещё существует в workspace (удалённый проект — {@code false}). */
+    private boolean projectExistsInWorkspace(String projectName)
+    {
+        try
+        {
+            return ResourcesPlugin.getWorkspace().getRoot().getProject(projectName).exists();
+        }
+        catch (Exception e)
+        {
+            ObjectSetsDebug.problem("projectExistsInWorkspace: " + e.getMessage()); //$NON-NLS-1$
+            return false;
+        }
     }
 
     /**
@@ -134,7 +198,7 @@ public final class ObjectSets
     {
         if (projectName == null || projectName.isBlank())
             return null;
-        if (!getSetsForProject(projectName).isEmpty())
+        if (hasUserSets(projectName))
             return null;
         SetDef set = createDefaultSet(projectName);
         save();
@@ -157,6 +221,8 @@ public final class ObjectSets
                     continue;
                 if (ensureDefaultSetForProjectNoNotify(project.getName()) != null)
                     created++;
+                if (ensureSystemSetForProjectNoNotify(project.getName()) != null)
+                    created++;
             }
         }
         catch (Exception e)
@@ -175,9 +241,66 @@ public final class ObjectSets
     {
         if (projectName == null || projectName.isBlank())
             return null;
-        if (!getSetsForProject(projectName).isEmpty())
+        if (hasUserSets(projectName))
             return null;
         return createDefaultSet(projectName);
+    }
+
+    /**
+     * Системный набор «<Измененные>» для проекта (если ещё не создан).
+     * @return созданный набор или {@code null}
+     */
+    public synchronized SetDef ensureSystemSetForProject(String projectName)
+    {
+        SetDef created = ensureSystemSetForProjectNoNotify(projectName);
+        if (created != null)
+        {
+            save();
+            notifyChanged();
+        }
+        return created;
+    }
+
+    private SetDef ensureSystemSetForProjectNoNotify(String projectName)
+    {
+        if (projectName == null || projectName.isBlank())
+            return null;
+        if (!ObjectSetsItems.isProjectUnderGit(projectName))
+            return null;
+        String id = systemSetId(projectName);
+        if (setsById.containsKey(id))
+            return null;
+        SetDef set = new SetDef(id, SYSTEM_CHANGED_SET_NAME, projectName.trim(), true);
+        setsById.put(id, set);
+        return set;
+    }
+
+    /** Привести имя к каноническому виду: системные наборы и старые «Основной» (без скобок). */
+    private static String normalizeSetName(String name, boolean system)
+    {
+        if (system)
+            return SYSTEM_CHANGED_SET_NAME;
+        if ("Основной".equals(name)) //$NON-NLS-1$
+            return DEFAULT_SET_NAME;
+        return name;
+    }
+
+    static String systemSetId(String projectName)
+    {
+        return SYSTEM_CHANGED_ID_PREFIX + projectName;
+    }
+
+    /** Есть ли у проекта хоть один несистемный (пользовательский) набор. */
+    private boolean hasUserSets(String projectName)
+    {
+        if (projectName == null || projectName.isBlank())
+            return false;
+        for (SetDef set : setsById.values())
+        {
+            if (projectName.equals(set.projectName) && !set.system)
+                return true;
+        }
+        return false;
     }
 
     private SetDef createDefaultSet(String projectName)
@@ -203,7 +326,7 @@ public final class ObjectSets
     public synchronized int addItems(String setId, List<Item> items)
     {
         SetDef set = setsById.get(setId);
-        if (set == null || items == null || items.isEmpty())
+        if (set == null || set.system || items == null || items.isEmpty())
             return 0;
         int added = 0;
         for (Item item : items)
@@ -227,7 +350,7 @@ public final class ObjectSets
     public synchronized int removeItems(String setId, Iterable<String> keys)
     {
         SetDef set = setsById.get(setId);
-        if (set == null || keys == null)
+        if (set == null || set.system || keys == null)
             return 0;
         int removed = 0;
         for (String key : keys)
@@ -289,6 +412,8 @@ public final class ObjectSets
         SetDef set = setsById.get(setId);
         if (set == null)
             return List.of();
+        if (set.system)
+            return ObjectSetsItems.collectGitChangedItems(set.projectName);
         List<Item> copy = new ArrayList<>(set.items);
         copy.sort(ItemSort.COMPARATOR);
         return copy;
@@ -327,7 +452,8 @@ public final class ObjectSets
             if (sb.length() > 0)
                 sb.append('\n');
             sb.append(SET_MARKER).append(SEP).append(escape(set.name))
-                .append(SEP).append(escape(set.projectName)).append(SEP).append(escape(set.id));
+                .append(SEP).append(escape(set.projectName)).append(SEP).append(escape(set.id))
+                .append(SEP).append(set.system ? "1" : "0"); //$NON-NLS-1$ //$NON-NLS-2$
             sortItemsInPlace(set);
             for (Item item : set.items)
             {
@@ -352,15 +478,16 @@ public final class ObjectSets
                 continue;
             if (line.startsWith(SET_MARKER))
             {
-                String[] parts = line.split(String.valueOf(SEP), 4);
+                String[] parts = line.split(String.valueOf(SEP), 5);
                 if (parts.length < 3)
                     continue;
                 String name = unescape(parts[1]);
                 String projectName = unescape(parts[2]);
                 String id = parts.length >= 4 ? unescape(parts[3]) : UUID.randomUUID().toString();
+                boolean system = parts.length >= 5 && "1".equals(unescape(parts[4])); //$NON-NLS-1$ //$NON-NLS-2$
                 if (name.isBlank() || projectName.isBlank())
                     continue;
-                current = findOrCreateSet(name, projectName, id, merge);
+                current = findOrCreateSet(name, projectName, id, merge, system);
                 imported++;
                 continue;
             }
@@ -371,7 +498,7 @@ public final class ObjectSets
                 continue;
             Item item = new Item(unescape(parts[0]), unescape(parts[1]),
                 unescape(parts[2]), unescape(parts[3]));
-            if (item.key.isBlank())
+            if (item.key.isBlank() || current.system)
                 continue;
             if (!containsKey(current, item.key))
                 current.items.add(item);
@@ -383,8 +510,9 @@ public final class ObjectSets
         return imported;
     }
 
-    private SetDef findOrCreateSet(String name, String projectName, String id, boolean merge)
+    private SetDef findOrCreateSet(String name, String projectName, String id, boolean merge, boolean system)
     {
+        name = normalizeSetName(name, system);
         if (merge)
         {
             for (SetDef set : setsById.values())
@@ -393,7 +521,7 @@ public final class ObjectSets
                     return set;
             }
         }
-        SetDef set = new SetDef(id.isBlank() ? UUID.randomUUID().toString() : id, name, projectName);
+        SetDef set = new SetDef(id.isBlank() ? UUID.randomUUID().toString() : id, name, projectName, system);
         setsById.put(set.id, set);
         return set;
     }
@@ -452,16 +580,18 @@ public final class ObjectSets
                 continue;
             if (line.startsWith(SET_MARKER))
             {
-                String[] parts = line.split(String.valueOf(SEP), 4);
+                String[] parts = line.split(String.valueOf(SEP), 5);
                 if (parts.length < 3)
                     continue;
                 String name = unescape(parts[1]);
                 String projectName = unescape(parts[2]);
                 String id = parts.length >= 4 && !unescape(parts[3]).isBlank()
                     ? unescape(parts[3]) : UUID.randomUUID().toString();
+                boolean system = parts.length >= 5 && "1".equals(unescape(parts[4])); //$NON-NLS-1$ //$NON-NLS-2$
                 if (name.isBlank() || projectName.isBlank())
                     continue;
-                current = new SetDef(id, name, projectName);
+                name = normalizeSetName(name, system);
+                current = new SetDef(id, name, projectName, system);
                 setsById.put(id, current);
                 continue;
             }
@@ -472,7 +602,7 @@ public final class ObjectSets
                 continue;
             Item item = new Item(unescape(parts[0]), unescape(parts[1]),
                 unescape(parts[2]), unescape(parts[3]));
-            if (!item.key.isBlank())
+            if (!item.key.isBlank() && !current.system)
                 current.items.add(item);
         }
         for (SetDef set : setsById.values())

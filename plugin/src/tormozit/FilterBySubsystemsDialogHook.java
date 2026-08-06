@@ -590,10 +590,38 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         return persisted;
     }
 
-    /** Сбросить режим «чёрный список» (кнопка «Сбросить» / выключение фильтра). */
+    /** Сбросить режим «чёрный список» (кнопка «Сбросить» / сброс фильтра в тулбаре). */
     static void clearBlacklistMode(Object subsystemsSettings)
     {
-        setBlacklistMode(subsystemsSettings, false);
+        if (subsystemsSettings != null)
+            setBlacklistMode(subsystemsSettings, false);
+        syncAllOpenDialogBlacklistUi(false);
+    }
+
+    /** Снять/выставить флажок «чёрный список» во всех открытых окнах «Фильтр по подсистемам». */
+    private static void syncAllOpenDialogBlacklistUi(boolean enabled)
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        for (Shell shell : display.getShells())
+        {
+            if (shell == null || shell.isDisposed())
+                continue;
+            if (!Boolean.TRUE.equals(shell.getData(HOOKED_KEY)))
+                continue;
+            Object dialog = resolveDialog(shell);
+            if (dialog == null)
+                continue;
+            setBlacklistModeOnDialog(dialog, enabled);
+            Object panel = Global.getField(dialog, "subsystemsPanel"); //$NON-NLS-1$
+            if (panel instanceof Composite panelComposite && !panelComposite.isDisposed())
+            {
+                Button box = findBlacklistCheckbox(panelComposite);
+                if (box != null && !box.isDisposed())
+                    box.setSelection(enabled);
+            }
+        }
     }
 
     private static void setBlacklistMode(Object subsystemsSettings, boolean enabled)
@@ -751,9 +779,7 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         {
             @Override public void widgetSelected(SelectionEvent e)
             {
-                setBlacklistModeOnDialog(dialog, false);
-                if (!checkbox.isDisposed())
-                    checkbox.setSelection(false);
+                clearBlacklistMode(settings);
                 FilterBySubsystemsDialogDebug.step("blacklist", "cleared by Reset"); //$NON-NLS-1$ //$NON-NLS-2$
             }
         });

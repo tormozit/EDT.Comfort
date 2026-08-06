@@ -61,7 +61,7 @@ public final class ObjectSetsAddTargetState
         return ObjectSets.getInstance().getSetById(setId);
     }
 
-    /** Все активные (●) наборы по проектам пусты. */
+    /** Все активные (●) наборы по проектам пусты. Системный набор считается «непустым» (фильтр по нему значим). */
     public synchronized boolean areAllAddTargetSetsEmpty()
     {
         for (String setId : addTargetByProject.values())
@@ -69,10 +69,25 @@ public final class ObjectSetsAddTargetState
             if (setId == null || setId.isBlank())
                 continue;
             ObjectSets.SetDef set = ObjectSets.getInstance().getSetById(setId);
-            if (set != null && !set.items.isEmpty())
+            if (set != null && ((set.system && ObjectSetsItems.isProjectUnderGit(set.projectName))
+                    || !set.items.isEmpty()))
                 return false;
         }
         return true;
+    }
+
+    /** Есть ли среди активных (●) наборов системный (например, «<Измененные>»). */
+    public synchronized boolean isAnyAddTargetSystemSet()
+    {
+        for (String setId : addTargetByProject.values())
+        {
+            if (setId == null || setId.isBlank())
+                continue;
+            ObjectSets.SetDef set = ObjectSets.getInstance().getSetById(setId);
+            if (set != null && set.system && ObjectSetsItems.isProjectUnderGit(set.projectName))
+                return true;
+        }
+        return false;
     }
 
     public synchronized boolean isAddTarget(String setId)
@@ -123,6 +138,19 @@ public final class ObjectSetsAddTargetState
 
     }
 
+    /**
+     * Удалить add-target проект целиком (например, проект удалён из workspace).
+     */
+    public synchronized void removeProjectMapping(String projectName)
+    {
+        if (projectName == null || projectName.isBlank())
+            return;
+        if (addTargetByProject.remove(projectName) == null)
+            return;
+        save();
+        notifyChanged();
+    }
+
     public synchronized void onSetDeleted(String setId, String projectName)
     {
         if (setId == null)
@@ -160,14 +188,19 @@ public final class ObjectSetsAddTargetState
         List<ObjectSets.SetDef> sets = ObjectSets.getInstance().getSetsForProject(projectName);
         if (sets.isEmpty())
             return null;
+        ObjectSets.SetDef fallback = null;
         for (ObjectSets.SetDef set : sets)
         {
 
-            if ("Основной".equals(set.name)) //$NON-NLS-1$
+            if (set.system)
+                continue;
+            if (set.isFixed())
                 return set;
+            if (fallback == null)
+                fallback = set;
         }
 
-        return sets.get(0);
+        return fallback != null ? fallback : sets.get(0);
     }
 
     private void migrateFromLegacyFilterState()

@@ -1,10 +1,12 @@
 package tormozit;
 
 
+import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
@@ -1083,7 +1085,6 @@ public class CompareConfigMenuHook implements IStartup
     private static class ThreeWayOnlyPresentFiltersFix
     {
         private static final String FLAG = "tormozit.threeWayOnlyPresentFilters"; //$NON-NLS-1$
-        private static final String LOG = "ThreeWayOnlyPresentFilters"; //$NON-NLS-1$
         /** Сравнение может идти минуты — ждём появление view/combo дольше. */
         private static final int MAX_ATTEMPTS = 480;
         private static final int RETRY_MS = 250;
@@ -1108,13 +1109,12 @@ public class CompareConfigMenuHook implements IStartup
                     Object viewObj = Global.getField(editor, "comparisonView"); //$NON-NLS-1$
                     if (!(viewObj instanceof DtComparisonView))
                     {
-                        retryOrGiveUp(editor, attempt, "no comparisonView"); //$NON-NLS-1$
+                        retryOrGiveUp(editor, attempt);
                         return;
                     }
                     DtComparisonView view = (DtComparisonView) viewObj;
                     if (view.isDisposed())
                     {
-                        Global.tempLog(LOG, "skip: view disposed"); //$NON-NLS-1$
                         return;
                     }
                     if (Boolean.TRUE.equals(view.getData(FLAG)))
@@ -1123,7 +1123,7 @@ public class CompareConfigMenuHook implements IStartup
                     Object filtersObj = Global.getField(editor, "filters"); //$NON-NLS-1$
                     if (!(filtersObj instanceof INamedViewerFilter[]))
                     {
-                        retryOrGiveUp(editor, attempt, "no filters"); //$NON-NLS-1$
+                        retryOrGiveUp(editor, attempt);
                         return;
                     }
                     INamedViewerFilter[] current = (INamedViewerFilter[]) filtersObj;
@@ -1131,12 +1131,11 @@ public class CompareConfigMenuHook implements IStartup
                     Object editorInput = Global.getField(editor, "dtComparisonEditorInput"); //$NON-NLS-1$
                     if (editorInput == null)
                     {
-                        retryOrGiveUp(editor, attempt, "no editorInput"); //$NON-NLS-1$
+                        retryOrGiveUp(editor, attempt);
                         return;
                     }
                     if (!isThreeWay(editorInput))
                     {
-                        Global.tempLog(LOG, "skip: not three-way"); //$NON-NLS-1$
                         view.setData(FLAG, Boolean.TRUE);
                         return;
                     }
@@ -1145,7 +1144,6 @@ public class CompareConfigMenuHook implements IStartup
                     String otherName = (String) Global.call(editorInput, "getOtherComparisonSideName"); //$NON-NLS-1$
                     if (mainName == null || otherName == null)
                     {
-                        Global.tempLog(LOG, "skip: side names null"); //$NON-NLS-1$
                         return;
                     }
 
@@ -1157,7 +1155,6 @@ public class CompareConfigMenuHook implements IStartup
                         ComparisonSide.OTHER, ComparisonSide.MAIN, otherName);
                     if (onlyMain == null || onlyOther == null)
                     {
-                        Global.tempLog(LOG, "skip: twoWayOnlyOnOneSide returned null"); //$NON-NLS-1$
                         return;
                     }
 
@@ -1165,8 +1162,6 @@ public class CompareConfigMenuHook implements IStartup
                         onlyMain, onlyOther);
                     if (patched == current)
                     {
-                        Global.tempLog(LOG, "skip: already present or insert point missing"
-                            + " count=" + current.length); //$NON-NLS-1$
                         view.setData(FLAG, Boolean.TRUE);
                         return;
                     }
@@ -1174,10 +1169,7 @@ public class CompareConfigMenuHook implements IStartup
                     ComboViewer comboViewer = findFilterComboViewer(view);
                     if (comboViewer == null)
                     {
-                        if (attempt == 0 || attempt % 20 == 0)
-                            Global.tempLog(LOG, "no ComboViewer yet attempt=" + attempt //$NON-NLS-1$
-                                + " " + describeFilterControl(view)); //$NON-NLS-1$
-                        retryOrGiveUp(editor, attempt, "no ComboViewer"); //$NON-NLS-1$
+                        retryOrGiveUp(editor, attempt);
                         return;
                     }
 
@@ -1185,12 +1177,7 @@ public class CompareConfigMenuHook implements IStartup
 
                     Object contextObj = Global.getField(view, "context"); //$NON-NLS-1$
                     if (contextObj instanceof DtComparisonViewContext)
-                    {
-                        if (!Global.setFieldForce(contextObj, "filters", patched)) //$NON-NLS-1$
-                            Global.tempLog(LOG, "warn: context.filters setFieldForce failed"); //$NON-NLS-1$
-                    }
-                    else
-                        Global.tempLog(LOG, "warn: no DtComparisonViewContext"); //$NON-NLS-1$
+                        Global.setFieldForce(contextObj, "filters", patched); //$NON-NLS-1$
 
                     INamedViewerFilter selected = view.getCurrentNamedViewerFilter();
                     comboViewer.setInput(patched);
@@ -1198,14 +1185,9 @@ public class CompareConfigMenuHook implements IStartup
                         comboViewer.setSelection(new StructuredSelection(selected), true);
 
                     view.setData(FLAG, Boolean.TRUE);
-                    Global.tempLog(LOG, "installed only-present filters"
-                        + " main=" + mainName //$NON-NLS-1$
-                        + " other=" + otherName //$NON-NLS-1$
-                        + " count=" + patched.length); //$NON-NLS-1$
                 }
                 catch (Exception e)
                 {
-                    Global.tempLog(LOG, "error: " + e); //$NON-NLS-1$
                     if (attempt < MAX_ATTEMPTS)
                         Display.getDefault().timerExec(RETRY_MS, () -> install(editor, attempt + 1));
                 }
@@ -1217,13 +1199,11 @@ public class CompareConfigMenuHook implements IStartup
                 display.asyncExec(body);
         }
 
-        private static void retryOrGiveUp(IEditorPart editor, int attempt, String reason)
+        private static void retryOrGiveUp(IEditorPart editor, int attempt)
         {
             Display display = Display.getDefault();
             if (attempt < MAX_ATTEMPTS)
                 display.timerExec(RETRY_MS, () -> install(editor, attempt + 1));
-            else
-                Global.tempLog(LOG, "give up after " + attempt + " attempts reason=" + reason); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         private static boolean isThreeWay(Object editorInput)
@@ -1474,59 +1454,6 @@ public class CompareConfigMenuHook implements IStartup
         }
     }
 
-    /**
-     * Логи каскадных пометок сравнения → журнал «Комфорт».
-     * Включение: Параметры → Комфорт → «Общее логирование».
-     */
-    private static final class CompareChecksDebug
-    {
-        private static final String TAG = "CompareChecks"; //$NON-NLS-1$
-        /** Безусловный файл: {@code .tmp/temp-logs/CompareChecks.log}. */
-        private static final String TEMP_TOPIC = "CompareChecks"; //$NON-NLS-1$
-
-        private CompareChecksDebug()
-        {
-        }
-
-        static boolean isEnabled()
-        {
-            return Global.isLogEnabled();
-        }
-
-        static void log(String msg)
-        {
-            Global.tempLog(TEMP_TOPIC, msg);
-            if (isEnabled())
-                Global.log(TAG, msg);
-        }
-
-        static void step(String phase, String detail)
-        {
-            String line = phase + ": " + detail; //$NON-NLS-1$
-            Global.tempLog(TEMP_TOPIC, line);
-            if (isEnabled())
-                Global.log(TAG, line);
-        }
-
-        static String nodeLabel(Object el)
-        {
-            if (el == null)
-                return "null"; //$NON-NLS-1$
-            String simple = el.getClass().getSimpleName();
-            if (el instanceof ProjectPartialModelNode)
-                return simple + "(root)"; //$NON-NLS-1$
-            return simple;
-        }
-
-        static String aggLabel(boolean checked, boolean grayed)
-        {
-            if (grayed)
-                return "gray"; //$NON-NLS-1$
-            if (checked)
-                return "checked"; //$NON-NLS-1$
-            return "empty"; //$NON-NLS-1$
-        }
-    }
 
     /**
      * Коррекция EDT-фильтра по подсистемам: односторонние не-{@link SymlinkComparisonNode}
@@ -1545,8 +1472,9 @@ public class CompareConfigMenuHook implements IStartup
         private static final String FILTER_FLAG = "tormozit.subsystemFilterFix"; //$NON-NLS-1$
         private static final String CORRECTION_DATA_KEY = "tormozit.correctionViewerFilter"; //$NON-NLS-1$
         private static final String FILTER_AWARE_CHECKBOX_FLAG = "tormozit.filterAwareChecksCheckbox"; //$NON-NLS-1$
-        private static final String LOG = "SubsystemFilterFix"; //$NON-NLS-1$
         private static final int MAX_ATTEMPTS = 60;
+        /** Без viewer и namedFilter — editor не поднимается; не крутить полные 60. */
+        private static final int MAX_STUCK_ATTEMPTS = 12;
         private static final int RETRY_MS = 250;
 
         static void install(IEditorPart editor)
@@ -1554,40 +1482,52 @@ public class CompareConfigMenuHook implements IStartup
             install(editor, 0);
         }
 
-        private static void install(IEditorPart editor, int attempt)
+        private static boolean isEditorGone(IEditorPart editor)
         {
             if (editor == null)
+                return true;
+            try
+            {
+                return editor.getSite() == null;
+            }
+            catch (Exception ex)
+            {
+                return true;
+            }
+        }
+
+        private static void install(IEditorPart editor, int attempt)
+        {
+            if (isEditorGone(editor))
                 return;
 
             Display display = Display.getDefault();
             Runnable body = () ->
             {
+                if (isEditorGone(editor))
+                    return;
+
                 // Флажок у combo «Фильтр» — независимо от «Улучшать списки».
                 installFilterAwareChecksCheckbox(editor, attempt);
 
                 if (!ComfortSettings.isReplaceListFiltersEnabled())
                 {
-                    Global.tempLog(LOG, "skip filter fix: replaceListFilters disabled"); //$NON-NLS-1$
                     return;
                 }
 
                 AbstractTreeViewer viewer = resolveTreeViewer(editor);
                 Object namedFilter = Global.getField(editor, "filterBySubsystems"); //$NON-NLS-1$
-                Global.tempLog(LOG, "attempt=" + attempt //$NON-NLS-1$
-                        + " editor=" + editor.getClass().getSimpleName() //$NON-NLS-1$
-                        + "@" + System.identityHashCode(editor) //$NON-NLS-1$
-                        + " viewer=" + (viewer != null) //$NON-NLS-1$
-                        + " namedFilter=" + (namedFilter != null ? namedFilter.getClass().getSimpleName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
 
                 if (viewer != null && Boolean.TRUE.equals(viewer.getData(FILTER_FLAG)))
                     return;
 
                 if (viewer == null || namedFilter == null)
                 {
-                    if (attempt < MAX_ATTEMPTS)
+                    boolean stuck = viewer == null && namedFilter == null;
+                    int limit = stuck ? MAX_STUCK_ATTEMPTS : MAX_ATTEMPTS;
+                    if (attempt < limit && !isEditorGone(editor))
                         display.timerExec(RETRY_MS, () -> install(editor, attempt + 1));
                     else
-                        Global.tempLog(LOG, "give up after " + attempt + " attempts"); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
                 }
 
@@ -1604,15 +1544,9 @@ public class CompareConfigMenuHook implements IStartup
                             && ComfortSettings.isCompareFilterAwareChecksEnabled())
                         correction.installCheckHooks(ctv, treeControl, editor);
                     viewer.setData(FILTER_FLAG, Boolean.TRUE);
-                    Global.tempLog(LOG, "CorrectionViewerFilter installed" //$NON-NLS-1$
-                            + " checkHooks=" + ComfortSettings.isCompareFilterAwareChecksEnabled()); //$NON-NLS-1$
-                    CompareChecksDebug.step("install", //$NON-NLS-1$
-                            "filterOk checkHooks=" //$NON-NLS-1$
-                                    + ComfortSettings.isCompareFilterAwareChecksEnabled());
                 }
                 catch (Exception e)
                 {
-                    Global.tempLog(LOG, "install error: " + e); //$NON-NLS-1$
                 }
             };
 
@@ -1636,10 +1570,12 @@ public class CompareConfigMenuHook implements IStartup
          */
         private static void installFilterAwareChecksCheckbox(IEditorPart editor, int attempt)
         {
+            if (isEditorGone(editor))
+                return;
             Object viewObj = Global.getField(editor, "comparisonView"); //$NON-NLS-1$
             if (!(viewObj instanceof DtComparisonView dcv) || dcv.isDisposed())
             {
-                if (attempt < MAX_ATTEMPTS)
+                if (attempt < MAX_STUCK_ATTEMPTS && !isEditorGone(editor))
                     Display.getDefault().timerExec(RETRY_MS,
                             () -> installFilterAwareChecksCheckbox(editor, attempt + 1));
                 return;
@@ -1647,7 +1583,7 @@ public class CompareConfigMenuHook implements IStartup
             Object filterControlObj = Global.getField(dcv, "filterControl"); //$NON-NLS-1$
             if (!(filterControlObj instanceof Composite filterControl) || filterControl.isDisposed())
             {
-                if (attempt < MAX_ATTEMPTS)
+                if (attempt < MAX_ATTEMPTS && !isEditorGone(editor))
                     Display.getDefault().timerExec(RETRY_MS,
                             () -> installFilterAwareChecksCheckbox(editor, attempt + 1));
                 return;
@@ -1658,7 +1594,7 @@ public class CompareConfigMenuHook implements IStartup
             Combo combo = ThreeWayOnlyPresentFiltersFix.findCombo(filterControl);
             if (combo == null || combo.isDisposed())
             {
-                if (attempt < MAX_ATTEMPTS)
+                if (attempt < MAX_ATTEMPTS && !isEditorGone(editor))
                     Display.getDefault().timerExec(RETRY_MS,
                             () -> installFilterAwareChecksCheckbox(editor, attempt + 1));
                 return;
@@ -1692,11 +1628,9 @@ public class CompareConfigMenuHook implements IStartup
                 boolean on = check.getSelection();
                 ComfortSettings.setCompareFilterAwareChecksEnabled(on);
                 applyFilterAwareChecksToggle(editor, on);
-                CompareChecksDebug.step("filterAwareCheckbox", "on=" + on); //$NON-NLS-1$ //$NON-NLS-2$
             });
             host.setData(FILTER_AWARE_CHECKBOX_FLAG, Boolean.TRUE);
             filterControl.setData(FILTER_AWARE_CHECKBOX_FLAG, Boolean.TRUE);
-            Global.tempLog(LOG, "filter-aware checks checkbox installed"); //$NON-NLS-1$
         }
 
         private static void applyFilterAwareChecksToggle(IEditorPart editor, boolean enabled)
@@ -1781,11 +1715,9 @@ public class CompareConfigMenuHook implements IStartup
             /** Ключ режима «чёрный список» — {@code ViewerFilterBySubsystemsSettings}, тот же
              *  объект, которым владеет диалог отбора ({@link FilterBySubsystemsDialogHook}). */
             private final Object blacklistSettingsKey;
-            private int decideLogsLeft = 80;
             private boolean verifiedAttached;
             /** Штатный EDT-фильтр подсистем отсоединён от дерева ради режима «чёрный список». */
             private boolean nativeSubsystemFilterDetached;
-            private String lastDetail = ""; //$NON-NLS-1$
 
             CorrectionViewerFilter(Object namedFilter)
             {
@@ -1795,8 +1727,6 @@ public class CompareConfigMenuHook implements IStartup
                         ? null
                         : (IQualifiedNameProvider) Global.getField(coreFilter, "qualifiedNameProvider"); //$NON-NLS-1$
                 this.blacklistSettingsKey = Global.getField(namedFilter, "filterBySubsystemSettings"); //$NON-NLS-1$
-                Global.tempLog(LOG, "ctor coreFilter=" + (coreFilter != null) //$NON-NLS-1$
-                        + " qnProvider=" + (qnProvider != null)); //$NON-NLS-1$
             }
 
             private boolean isBlacklistMode()
@@ -1825,12 +1755,7 @@ public class CompareConfigMenuHook implements IStartup
                     treeViewer.removeFilter(nativeViewerFilter);
                 else
                     treeViewer.addFilter(nativeViewerFilter);
-                Global.tempLog(LOG, "blacklist: native filter " //$NON-NLS-1$
-                        + (blacklist ? "detached" : "reattached")); //$NON-NLS-1$ //$NON-NLS-2$
             }
-
-
-
 
 
             /**
@@ -1845,16 +1770,11 @@ public class CompareConfigMenuHook implements IStartup
                     return;
                 if (!ComfortSettings.isCompareFilterAwareChecksEnabled())
                 {
-                    CompareChecksDebug.step("installCheckHooks", "skip: pref off"); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
                 }
 
                 if (!wrapCheckStateListeners(ctv))
                 {
-                    Global.tempLog(LOG, "check hooks: CheckStateListeners wrap failed" //$NON-NLS-1$
-                            + " treeControl=" + (treeControl == null ? "null" //$NON-NLS-1$ //$NON-NLS-2$
-                                    : treeControl.getClass().getSimpleName()));
-                    CompareChecksDebug.step("installCheckHooks", "wrap listeners failed"); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
                 }
                 wrapToolbarSelectAllActions(editor, ctv);
@@ -1875,9 +1795,6 @@ public class CompareConfigMenuHook implements IStartup
                 ctv.setData(CHECK_HOOK_FLAG, Boolean.TRUE);
                 installRootRepaintOnTreeExpand(ctv);
                 scheduleStartupAggregateRepaint(ctv, 0);
-                CompareChecksDebug.step("installCheckHooks", //$NON-NLS-1$
-                        "ok settleUntil=+" + (startupSettleUntilMs - System.currentTimeMillis()) //$NON-NLS-1$
-                                + "ms restrict=" + shouldRestrictChecksToVisible()); //$NON-NLS-1$
             }
 
             /** Флажок снят: вернуть штатный CheckStateProvider, сбросить кэш агрегатов. */
@@ -1889,7 +1806,6 @@ public class CompareConfigMenuHook implements IStartup
                 if (edtCheckStateProvider != null)
                     ctv.setCheckStateProvider(edtCheckStateProvider);
                 clearAggregateUiCache();
-                CompareChecksDebug.step("deactivateCheckHooks", "ok"); //$NON-NLS-1$ //$NON-NLS-2$
             }
 
             /**
@@ -1902,9 +1818,6 @@ public class CompareConfigMenuHook implements IStartup
                 syncCheckHooksToFilterState(ctv);
                 clearAggregateUiCache();
                 paintVisibleAggregateTreeItems(ctv);
-                CompareChecksDebug.step("syncCheckHooksAfterPrefOn", //$NON-NLS-1$
-                        "restrict=" + shouldRestrictChecksToVisible() //$NON-NLS-1$
-                                + " immediatePaint"); //$NON-NLS-1$
             }
 
             private static final String ROOT_EXPAND_HOOK_FLAG = "tormozit.compareRootExpandRepaint"; //$NON-NLS-1$
@@ -1961,8 +1874,6 @@ public class CompareConfigMenuHook implements IStartup
                         return;
                     if (!shouldRestrictChecksToVisible())
                         return;
-                    CompareChecksDebug.step("aggRepaint", //$NON-NLS-1$
-                            from != null ? CompareChecksDebug.nodeLabel(from) : "roots"); //$NON-NLS-1$
                     if (from != null)
                     {
                         for (IPartialModelNode p = from; p != null; p = p.getParent())
@@ -1989,7 +1900,6 @@ public class CompareConfigMenuHook implements IStartup
                     }
                 });
             }
-
 
 
             private IEditorPart hookedEditor;
@@ -2026,13 +1936,9 @@ public class CompareConfigMenuHook implements IStartup
                         return;
                     if (!shouldRestrictChecksToVisible())
                     {
-                        CompareChecksDebug.step("startupRepaint", //$NON-NLS-1$
-                                "attempt=" + attempt + " skip: no restrict filter"); //$NON-NLS-1$ //$NON-NLS-2$
                         return;
                     }
                     clearAggregateUiCache();
-                    CompareChecksDebug.step("startupRepaint", //$NON-NLS-1$
-                            "attempt=" + attempt + " settleActive=" + isStartupSettleActive()); //$NON-NLS-1$ //$NON-NLS-2$
                     ensureProjectRootExpanded(ctv);
                     syncRootChildTreeItemChecksFromModel(ctv);
                     boolean rootReady = paintVisibleAggregateTreeItems(ctv);
@@ -2060,7 +1966,6 @@ public class CompareConfigMenuHook implements IStartup
                 ArrayList<IPartialModelNode> nodes = new ArrayList<>();
                 collectAggregateNodesFromTreeItems(tree.getItems(), nodes);
                 nodes.sort((a, b) -> Integer.compare(depthOf(b), depthOf(a)));
-                CompareChecksDebug.step("paintVisible", "aggregates=" + nodes.size()); //$NON-NLS-1$ //$NON-NLS-2$
                 for (IPartialModelNode node : nodes)
                     paintAggregateFromChildren(ctv, node);
                 // Warning/merge overlays (UID и т.п.) — из LabelProvider, не из TreeItem.
@@ -2091,10 +1996,6 @@ public class CompareConfigMenuHook implements IStartup
                     // Не ready при kids=2 (Clip_854585): дерево ещё не догрузило
                     // Справочники/Перечисления — иначе stop и папки без пометок.
                     boolean ready = hasGray && kidCount >= 8;
-                    CompareChecksDebug.step("rootReady", //$NON-NLS-1$
-                            "kids=" + kidCount + " gray=" + hasGray //$NON-NLS-1$ //$NON-NLS-2$
-                                    + " full=" + hasFull + " childMark=" + anyChildMark //$NON-NLS-1$ //$NON-NLS-2$
-                                    + " ready=" + ready); //$NON-NLS-1$
                     return ready;
                 }
                 return false;
@@ -2114,23 +2015,6 @@ public class CompareConfigMenuHook implements IStartup
                 return false;
             }
 
-            private static boolean hasMixedChildMarks(TreeItem[] kids)
-            {
-                if (kids == null)
-                    return false;
-                boolean anyChecked = false;
-                boolean anyEmpty = false;
-                for (TreeItem kid : kids)
-                {
-                    if (kid == null || kid.isDisposed())
-                        continue;
-                    if (kid.getGrayed() || kid.getChecked())
-                        anyChecked = true;
-                    else
-                        anyEmpty = true;
-                }
-                return anyChecked && anyEmpty;
-            }
 
             /**
              * Подтянуть checked/grayed прямых детей корня из модели — TreeItem часто
@@ -2150,7 +2034,6 @@ public class CompareConfigMenuHook implements IStartup
                     TreeItem[] kids = rootItem.getItems();
                     if (kids == null)
                         return;
-                    int synced = 0;
                     for (TreeItem kid : kids)
                     {
                         if (kid == null || kid.isDisposed())
@@ -2164,10 +2047,7 @@ public class CompareConfigMenuHook implements IStartup
                             continue;
                         kid.setChecked(checked);
                         kid.setGrayed(grayed);
-                        synced++;
                     }
-                    if (synced > 0)
-                        CompareChecksDebug.step("syncRootKids", "synced=" + synced); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
                 }
             }
@@ -2192,17 +2072,11 @@ public class CompareConfigMenuHook implements IStartup
                     try
                     {
                         if (kidCount <= 1 || !rootItem.getExpanded())
-                        {
                             ctv.expandToLevel(data, 1);
-                            kids = rootItem.getItems();
-                            kidCount = kids != null ? kids.length : 0;
-                            CompareChecksDebug.step("expandRoot", //$NON-NLS-1$
-                                    "expandToLevel(1) kids=" + kidCount); //$NON-NLS-1$
-                        }
                     }
-                    catch (RuntimeException ex)
+                    catch (RuntimeException ignored)
                     {
-                        CompareChecksDebug.step("expandRoot", "fail " + ex.getMessage()); //$NON-NLS-1$ //$NON-NLS-2$
+                        // expand may fail while tree is still loading
                     }
                     return;
                 }
@@ -2294,8 +2168,6 @@ public class CompareConfigMenuHook implements IStartup
                 }
                 Global.invoke(listObj, "clear"); //$NON-NLS-1$
                 Global.invoke(listObj, "add", new FilterAwareCheckStateListener(ctv, originals)); //$NON-NLS-1$
-                Global.tempLog(LOG, "check hooks: CheckStateListeners wrapped n=" //$NON-NLS-1$
-                        + originals.length);
                 return true;
             }
 
@@ -2306,7 +2178,6 @@ public class CompareConfigMenuHook implements IStartup
                 Object tbmObj = Global.getField(editor, "toolBarManager"); //$NON-NLS-1$
                 if (!(tbmObj instanceof ToolBarManager tbm))
                 {
-                    Global.tempLog(LOG, "selectAll hooks: toolBarManager missing"); //$NON-NLS-1$
                     return;
                 }
                 int wrapped = 0;
@@ -2326,7 +2197,6 @@ public class CompareConfigMenuHook implements IStartup
                             new FilterAwareSelectAllAction(editor, ctv, action, selectAll);
                     if (!Global.setFieldForce(aci, "action", wrapper)) //$NON-NLS-1$
                     {
-                        Global.tempLog(LOG, "selectAll hooks: setField action failed " + cn); //$NON-NLS-1$
                         continue;
                     }
                     wrapped++;
@@ -2334,7 +2204,6 @@ public class CompareConfigMenuHook implements IStartup
                 if (wrapped > 0)
                     tbm.update(true);
                 ctv.setData(SELECT_ALL_HOOK_FLAG, Boolean.TRUE);
-                Global.tempLog(LOG, "selectAll hooks: wrapped n=" + wrapped); //$NON-NLS-1$
             }
 
             /**
@@ -2348,7 +2217,6 @@ public class CompareConfigMenuHook implements IStartup
                 Object tbmObj = Global.getField(editor, "toolBarManager"); //$NON-NLS-1$
                 if (!(tbmObj instanceof ToolBarManager tbm))
                 {
-                    Global.tempLog(LOG, "filterAction hooks: toolBarManager missing"); //$NON-NLS-1$
                     return;
                 }
                 int wrapped = 0;
@@ -2369,7 +2237,6 @@ public class CompareConfigMenuHook implements IStartup
                             new FilterAwareSubsystemFilterAction(editor, ctv, action, drop);
                     if (!Global.setFieldForce(aci, "action", wrapper)) //$NON-NLS-1$
                     {
-                        Global.tempLog(LOG, "filterAction hooks: setField action failed " + cn); //$NON-NLS-1$
                         continue;
                     }
                     wrapped++;
@@ -2377,7 +2244,6 @@ public class CompareConfigMenuHook implements IStartup
                 if (wrapped > 0)
                     tbm.update(true);
                 ctv.setData(FILTER_ACTION_HOOK_FLAG, Boolean.TRUE);
-                Global.tempLog(LOG, "filterAction hooks: wrapped n=" + wrapped); //$NON-NLS-1$
             }
 
             private final class FilterAwareSubsystemFilterAction extends Action
@@ -2482,14 +2348,10 @@ public class CompareConfigMenuHook implements IStartup
                             && candidate.equals(ss.getFirstElement()))
                     {
                         ctv.reveal(candidate);
-                        Global.tempLog(LOG, "filter selection restored el=" //$NON-NLS-1$
-                                + candidate.getClass().getSimpleName()
-                                + (candidate == element ? " (same)" : " (parent)")); //$NON-NLS-1$ //$NON-NLS-2$
                         return;
                     }
                     candidate = candidate instanceof IPartialModelNode n ? n.getParent() : null;
                 }
-                Global.tempLog(LOG, "filter selection: no visible ancestor"); //$NON-NLS-1$
             }
 
             /**
@@ -2514,7 +2376,6 @@ public class CompareConfigMenuHook implements IStartup
                             () -> recalculateCheckStatesAfterFilterChange(ctv));
                 });
                 ctv.setData(NAMED_FILTER_HOOK_FLAG, Boolean.TRUE);
-                Global.tempLog(LOG, "namedFilter combo: recalc hook installed"); //$NON-NLS-1$
             }
 
             /**
@@ -2552,8 +2413,6 @@ public class CompareConfigMenuHook implements IStartup
                 ordered.sort((a, b) -> Integer.compare(depthOf(b), depthOf(a)));
                 for (IPartialModelNode node : ordered)
                     paintAggregateFromChildren(ctv, node);
-                Global.tempLog(LOG, "recalc checks after filter change n=" + ordered.size() //$NON-NLS-1$
-                        + " (cachedAggregates=" + affected.size() + ")"); //$NON-NLS-1$ //$NON-NLS-2$
             }
 
             private static int depthOf(IPartialModelNode node)
@@ -2575,26 +2434,17 @@ public class CompareConfigMenuHook implements IStartup
                     return;
                 AggregateCheck agg = computeAggregateFromFilteredChildren(ctv, node);
                 if (agg == null)
-                {
-                    CompareChecksDebug.step("paintAggregate", //$NON-NLS-1$
-                            CompareChecksDebug.nodeLabel(node) + " → skip(null)"); //$NON-NLS-1$
                     return;
-                }
                 if (!agg.checked && !agg.grayed)
                 {
                     // Кэш «пусто» оставляем — иначе provider пересчитает и снова
                     // подхватит own mustBeMerged контейнера.
                     putAggregateUi(node, false, false);
                     paintTreeItemCheckNoExpand(ctv, node, false, false);
-                    CompareChecksDebug.step("paintAggregate", //$NON-NLS-1$
-                            CompareChecksDebug.nodeLabel(node) + " → empty"); //$NON-NLS-1$
                     return;
                 }
                 putAggregateUi(node, agg.checked, agg.grayed);
                 paintTreeItemCheckNoExpand(ctv, node, agg.checked, agg.grayed);
-                CompareChecksDebug.step("paintAggregate", //$NON-NLS-1$
-                        CompareChecksDebug.nodeLabel(node)
-                                + " → " + CompareChecksDebug.aggLabel(agg.checked, agg.grayed)); //$NON-NLS-1$
             }
 
             private static final class AggregateCheck
@@ -2606,6 +2456,43 @@ public class CompareConfigMenuHook implements IStartup
                 {
                     this.checked = checked;
                     this.grayed = grayed;
+                }
+            }
+
+            /**
+             * Кэши одного каскада пометок (клик / SelectAll): дети через
+             * {@link #resolveChildren} и значения агрегатов. Живёт от listener до
+             * завершения async-записи BM. Дети — без обхода content provider повторно;
+             * агрегаты не переживают BM-запись — {@link #commitFilteredMarksBm}
+             * очищает их после записи.
+             */
+            private static final class CheckCascadeContext
+            {
+                final Map<IPartialModelNode, Collection<IPartialModelNode>> children =
+                        new IdentityHashMap<>();
+                final Map<IPartialModelNode, AggregateCheck> aggregates =
+                        new IdentityHashMap<>();
+                final Map<IPartialModelNode, Boolean> visible =
+                        new IdentityHashMap<>();
+
+                boolean hasAggregate(IPartialModelNode node)
+                {
+                    return aggregates.containsKey(node);
+                }
+
+                AggregateCheck aggregateOf(IPartialModelNode node)
+                {
+                    return aggregates.get(node);
+                }
+
+                void putAggregate(IPartialModelNode node, AggregateCheck agg)
+                {
+                    aggregates.put(node, agg);
+                }
+
+                void clearAggregates()
+                {
+                    aggregates.clear();
                 }
             }
 
@@ -2623,17 +2510,17 @@ public class CompareConfigMenuHook implements IStartup
                         Collections.newSetFromMap(new IdentityHashMap<>()));
             }
 
-            /** @deprecated имя для старых вызовов — то же, что filtered. */
-            private AggregateCheck computeAggregateFromLoadedChildren(
-                    CheckboxTreeViewer ctv, IPartialModelNode node)
-            {
-                return computeAggregateFromFilteredChildren(ctv, node);
-            }
 
             private AggregateCheck computeAggregateFromFilteredChildren(
                     CheckboxTreeViewer ctv, IPartialModelNode node, int depth,
                     Set<IPartialModelNode> visiting)
             {
+                CheckCascadeContext ctx = activeCascadeContext();
+                if (ctx != null)
+                {
+                    if (ctx.hasAggregate(node))
+                        return ctx.aggregateOf(node);
+                }
                 if (node == null || depth > AGGREGATE_MAX_DEPTH || !visiting.add(node))
                     return null;
                 try
@@ -2645,88 +2532,54 @@ public class CompareConfigMenuHook implements IStartup
                     {
                         // Нет детей в модели: checkable + видим → своя галка;
                         // иначе null (не участвует в родителе).
-                        return aggregateWhenNoConsideredChildren(ctv, node,
+                        AggregateCheck noKids = aggregateWhenNoConsideredChildren(ctv, node,
                                 shouldRestrictChecksToVisible());
+                        if (ctx != null)
+                            ctx.putAggregate(node, noKids);
+                        return noKids;
                     }
                     boolean restrictVisible = shouldRestrictChecksToVisible();
                     boolean anyChecked = false;
                     boolean anyUnchecked = false;
                     boolean anyGrayed = false;
                     int considered = 0;
-                    int nChecked = 0;
-                    int nGrayed = 0;
-                    int nEmpty = 0;
                     for (IPartialModelNode child : children)
                     {
-                        boolean childIsAggregate = isFilterAwareAggregateUi(child);
-                        // !checkable UI-папка («Свойства») без флага aggregate — всё равно спуск.
-                        if (!childIsAggregate && !child.isCheckable()
-                                && (isPropertiesVirtualFolderNode(child)
-                                        || hasContainmentChildren(child)))
-                            childIsAggregate = true;
-                        boolean recurseLikeFolder = childIsAggregate
-                                || (restrictVisible && child.isCheckable()
-                                        && hasContainmentChildren(child));
-                        if (!child.isCheckable() && !childIsAggregate)
+                        // Non-checkable ⇒ поддерево без пометок — не участвует в агрегате.
+                        if (!child.isCheckable())
                             continue;
-                        if (recurseLikeFolder)
-                        {
-                            // Как setMark: скрытый фильтром checkable-агрегат
-                            // (Манифест/Отчеты…) не входит в родителя — иначе при
-                            // отборе по подсистемам корень серый, хотя в дереве
-                            // все видимые ☑. «Свойства» не режем select'ом.
-                            if (restrictVisible && ctv != null
-                                    && child.isCheckable()
-                                    && !isPropertiesVirtualFolderNode(child)
-                                    && !isVisibleForCheck(ctv, node, child))
-                                continue;
-                            AggregateCheck nested = computeAggregateFromFilteredChildren(
-                                    ctv, child, depth + 1, visiting);
-                            // null = нет содержимого под фильтром — не mixed у родителя.
-                            // (false,false) = реально снят (Свойства□) — участвует.
-                            if (nested == null)
-                                continue;
-                            if (!nested.checked && !nested.grayed)
-                            {
-                                if (!child.isCheckable())
-                                    continue;
-                                considered++;
-                                anyUnchecked = true;
-                                nEmpty++;
-                                continue;
-                            }
-                            considered++;
-                            if (nested.grayed)
-                            {
-                                anyGrayed = true;
-                                nGrayed++;
-                            }
-                            if (nested.checked)
-                            {
-                                anyChecked = true;
-                                nChecked++;
-                            }
-                            else
-                            {
-                                anyUnchecked = true;
-                                nEmpty++;
-                            }
-                            continue;
-                        }
                         if (restrictVisible && ctv != null
                                 && !isVisibleForCheck(ctv, node, child))
                             continue;
+                        boolean recurseLikeFolder = isFilterAwareAggregateUi(child)
+                                || (restrictVisible && hasContainmentChildren(child));
+                        if (recurseLikeFolder)
+                        {
+                            AggregateCheck nested = computeAggregateFromFilteredChildren(
+                                    ctv, child, depth + 1, visiting);
+                            // null = нет содержимого под фильтром — не mixed у родителя.
+                            // (false,false) = реально снят — участвует.
+                            if (nested == null)
+                                continue;
+                            considered++;
+                            if (!nested.checked && !nested.grayed)
+                            {
+                                anyUnchecked = true;
+                                continue;
+                            }
+                            if (nested.grayed)
+                                anyGrayed = true;
+                            if (nested.checked)
+                                anyChecked = true;
+                            else
+                                anyUnchecked = true;
+                            continue;
+                        }
                         considered++;
                         if (isNodeMustBeMergedFlag(child))
-                        {
                             anyChecked = true;
-                            nChecked++;
-                        }
                         else
-                        {
                             anyUnchecked = true;
-                            nEmpty++;
-                        }
                     }
                     AggregateCheck result;
                     if (considered == 0)
@@ -2739,16 +2592,8 @@ public class CompareConfigMenuHook implements IStartup
                         result = new AggregateCheck(true, false);
                     else
                         result = new AggregateCheck(false, false);
-                    CompareChecksDebug.step("aggFiltered", //$NON-NLS-1$
-                            CompareChecksDebug.nodeLabel(node)
-                                    + " kids=" + considered //$NON-NLS-1$
-                                    + " checked=" + nChecked //$NON-NLS-1$
-                                    + " grayed=" + nGrayed //$NON-NLS-1$
-                                    + " empty=" + nEmpty //$NON-NLS-1$
-                                    + " → " + (result == null //$NON-NLS-1$
-                                            ? "skip" //$NON-NLS-1$
-                                            : CompareChecksDebug.aggLabel(result.checked,
-                                                    result.grayed)));
+                    if (ctx != null)
+                        ctx.putAggregate(node, result);
                     return result;
                 }
                 finally
@@ -2823,7 +2668,6 @@ public class CompareConfigMenuHook implements IStartup
                         ctv.setCheckStateProvider(edtCheckStateProvider);
                         ourCheckStateProviderActive = false;
                         clearAggregateUiCache();
-                        Global.tempLog(LOG, "filters off: restored EDT CheckStateProvider"); //$NON-NLS-1$
                     }
                     return;
                 }
@@ -2847,7 +2691,6 @@ public class CompareConfigMenuHook implements IStartup
                         existingObj instanceof ICheckStateProvider p ? p : null;
                 ctv.setCheckStateProvider(new FilterAwareCheckStateProvider(edtCheckStateProvider));
                 ourCheckStateProviderActive = true;
-                Global.tempLog(LOG, "check hooks: CheckStateProvider wrapped (cache, filter on)"); //$NON-NLS-1$
             }
 
             /** checked/grayed агрегатов при активном отборе — без обхода в paint. */
@@ -2860,6 +2703,28 @@ public class CompareConfigMenuHook implements IStartup
             {
                 aggregateCheckedUi.clear();
                 aggregateGrayedUi.clear();
+            }
+
+            /** Активные каскады (вложенность на UI-потоке: sync + async-фазы). */
+            private final Deque<CheckCascadeContext> cascadeContexts = new ArrayDeque<>();
+
+            private void beginCascadeContext(CheckCascadeContext ctx)
+            {
+                if (ctx == null)
+                    return;
+                cascadeContexts.push(ctx);
+            }
+
+            private void endCascadeContext()
+            {
+                if (cascadeContexts.isEmpty())
+                    return;
+                cascadeContexts.pop();
+            }
+
+            private CheckCascadeContext activeCascadeContext()
+            {
+                return cascadeContexts.isEmpty() ? null : cascadeContexts.peek();
             }
 
             private void putAggregateUi(IPartialModelNode node, boolean checked, boolean grayed)
@@ -2879,52 +2744,6 @@ public class CompareConfigMenuHook implements IStartup
                 }
             }
 
-            /**
-             * После массовой отметки видимых: все затронутые агрегаты = checked, не gray.
-             * Только уже загруженные дети (getChildren), без content provider.
-             */
-            private void markAggregatesUiAfterBulk(IPartialModelNode node, boolean checked)
-            {
-                Collection<IPartialModelNode> children = node.getChildren();
-                if (children != null)
-                {
-                    for (IPartialModelNode child : children)
-                    {
-                        if (shouldRecurseOnly(child))
-                            markAggregatesUiAfterBulk(child, checked);
-                    }
-                }
-                if (isFilterAwareAggregateUi(node))
-                    putAggregateUi(node, checked, false);
-            }
-
-            /**
-             * Кэш агрегатов + галочки уже существующих TreeItem (без expand).
-             * {@link CheckboxTreeViewer#setGrayed}/{@code setChecked} вызывают
-             * {@code internalExpand} → createChildren → PartialModelController.getChildren
-             * и на большой папке («Справочники» + «Показывать отличия») UI зависает.
-             */
-            private void applyAggregateTreeCheckUi(CheckboxTreeViewer ctv, IPartialModelNode node,
-                    boolean checked)
-            {
-                markAggregatesUiAfterBulk(node, checked);
-                paintAggregateChecks(ctv, node, checked);
-            }
-
-            private void paintAggregateChecks(CheckboxTreeViewer ctv, IPartialModelNode node,
-                    boolean checked)
-            {
-                if (isFilterAwareAggregateUi(node))
-                    paintTreeItemCheckNoExpand(ctv, node, checked, false);
-                Collection<IPartialModelNode> children = node.getChildren();
-                if (children == null)
-                    return;
-                for (IPartialModelNode child : children)
-                {
-                    if (shouldRecurseOnly(child))
-                        paintAggregateChecks(ctv, child, checked);
-                }
-            }
 
             /**
              * Ставит checked/grayed только если TreeItem уже создан — без
@@ -2996,8 +2815,6 @@ public class CompareConfigMenuHook implements IStartup
                     return false;
                 if (isConfigurationPartialModelNode(node))
                     return true;
-                if (!node.isCheckable() && node.hasChildren())
-                    return true;
                 return false;
             }
 
@@ -3009,7 +2826,7 @@ public class CompareConfigMenuHook implements IStartup
 
             /**
              * Только обход вниз без setMustBeMerged: проект, папки/коллекции,
-             * нечекable-контейнеры, «Конфигурация».
+             * «Конфигурация». Non-checkable не входят — их поддерево без галок.
              * Checkable MD с «Формы»/свойствами сюда НЕ входит — иначе каскад
              * resolveChildren по формам каждой (в т.ч. скрытой) обработки ×100.
              */
@@ -3021,8 +2838,6 @@ public class CompareConfigMenuHook implements IStartup
                     return true;
                 if (isConfigurationPartialModelNode(node))
                     return true;
-                if (!node.isCheckable())
-                    return node.hasChildren();
                 return false;
             }
 
@@ -3103,7 +2918,7 @@ public class CompareConfigMenuHook implements IStartup
                     if (cachedChecked != null && cachedGrayed != null)
                         return new AggregateCheck(cachedChecked.booleanValue(),
                                 cachedGrayed.booleanValue());
-                    AggregateCheck agg = computeAggregateFromLoadedChildren(hookedCtv, node);
+                    AggregateCheck agg = computeAggregateFromFilteredChildren(hookedCtv, node);
                     if (agg == null)
                         return null;
                     putAggregateUi(node, agg.checked, agg.grayed);
@@ -3175,9 +2990,7 @@ public class CompareConfigMenuHook implements IStartup
                         original.run();
                         return;
                     }
-                    int total = applyVisibleOnlyOnComparisonRoots(editor, ctv, check);
-                    Global.tempLog(LOG, "selectAll visible-only: check=" + check //$NON-NLS-1$
-                            + " applied=" + total); //$NON-NLS-1$
+                    applyVisibleOnlyOnComparisonRoots(editor, ctv, check);
                 }
             }
 
@@ -3187,7 +3000,6 @@ public class CompareConfigMenuHook implements IStartup
                 Object listObj = Global.getField(editor, "comparisonArtifactsList"); //$NON-NLS-1$
                 if (!(listObj instanceof List<?> artifacts))
                     return 0;
-                applyLogLeft = 30;
                 int total = 0;
                 for (Object artifact : artifacts)
                 {
@@ -3242,39 +3054,12 @@ public class CompareConfigMenuHook implements IStartup
 
                     syncCheckHooksToFilterState(ctv);
 
-                    boolean bulk = isVisibleOnlyClickTarget(el);
-                    Global.tempLog(LOG, "checkState: el=" //$NON-NLS-1$
-                            + (el == null ? "null" : el.getClass().getSimpleName()) //$NON-NLS-1$
-                            + " checked=" + checked //$NON-NLS-1$
-                            + " subsystemFilterEmpty=" + isFilterEmpty() //$NON-NLS-1$
-                            + " namedFilterActive=" + isNamedComparisonFilterActive() //$NON-NLS-1$
-                            + " bulk=" + bulk); //$NON-NLS-1$
-                    CompareChecksDebug.step("checkState", //$NON-NLS-1$
-                            CompareChecksDebug.nodeLabel(el)
-                                    + " checked=" + checked //$NON-NLS-1$
-                                    + " bulk=" + bulk //$NON-NLS-1$
-                                    + " namedFilter=" + isNamedComparisonFilterActive() //$NON-NLS-1$
-                                    + " subsystemEmpty=" + isFilterEmpty()); //$NON-NLS-1$
-
                     // Filter-aware: (1) та же пометка на всех отфильтрованных
                     // потомках; (2) 3-состояние родителей снизу вверх только по
                     // отфильтрованным потомкам.
                     if (el instanceof IPartialModelNode node)
                     {
-                        applyLogLeft = 30;
-                        long t0 = System.nanoTime();
-                        int applied = applyFilterAwareCheckCascade(ctv, node, checked);
-                        CompareChecksDebug.step("checkCascade", //$NON-NLS-1$
-                                CompareChecksDebug.nodeLabel(node)
-                                        + " want=" + checked //$NON-NLS-1$
-                                        + " applied=" + applied //$NON-NLS-1$
-                                        + " bulk=" + bulk //$NON-NLS-1$
-                                        + " ms=" + ((System.nanoTime() - t0) / 1_000_000L)); //$NON-NLS-1$
-                        Global.tempLog(LOG, "check cascade: el=" //$NON-NLS-1$
-                                + node.getClass().getSimpleName()
-                                + " want=" + checked //$NON-NLS-1$
-                                + " applied=" + applied //$NON-NLS-1$
-                                + " ms=" + ((System.nanoTime() - t0) / 1_000_000L)); //$NON-NLS-1$
+                        applyFilterAwareCheckCascade(ctv, node, checked);
                         return;
                     }
 
@@ -3298,49 +3083,66 @@ public class CompareConfigMenuHook implements IStartup
             {
                 if (ctv == null || clicked == null)
                     return 0;
-                ArrayList<IPartialModelNode> targets = new ArrayList<>();
-                collectFilteredCheckable(ctv, clicked, targets);
-                for (IPartialModelNode t : targets)
+                CheckCascadeContext cascadeCtx = new CheckCascadeContext();
+                beginCascadeContext(cascadeCtx);
+                try
                 {
-                    boolean ownUi = isCollectionOwnMarkTarget(ctv, t)
-                            || !isFilterAwareAggregateUi(t);
-                    t.setChecked(ownUi && want);
-                    Global.invoke(t, "setGrayed", Boolean.FALSE); //$NON-NLS-1$
-                }
-                clearAggregateUiUnder(clicked);
-                // «Справочники» без помечаемых детей: зафиксировать свою галку в
-                // TreeItem+кэше до пересчёта агрегатов (иначе stale TreeItem☑).
-                seedCollectionOwnMarksUi(ctv, targets, want);
-                paintFilteredSubtreeLeafChecks(ctv, clicked);
-                paintAggregatesBottomUpUnder(ctv, clicked);
-                if (isFilterAwareAggregateUi(clicked))
-                    paintAggregateFromChildren(ctv, clicked);
-                else
-                    paintPlainCheckUi(ctv, clicked, want && !targets.isEmpty());
-                recalculateAncestorAggregatesUpward(ctv, clicked);
+                    ArrayList<IPartialModelNode> targets = new ArrayList<>();
+                    collectFilteredCheckable(ctv, clicked, targets);
+                    for (IPartialModelNode t : targets)
+                    {
+                        boolean ownUi = isCollectionOwnMarkTarget(ctv, t)
+                                || !isFilterAwareAggregateUi(t);
+                        t.setChecked(ownUi && want);
+                        Global.invoke(t, "setGrayed", Boolean.FALSE); //$NON-NLS-1$
+                    }
+                    clearAggregateUiUnder(clicked);
+                    // «Справочники» без помечаемых детей: зафиксировать свою галку в
+                    // TreeItem+кэше до пересчёта агрегатов (иначе stale TreeItem☑).
+                    seedCollectionOwnMarksUi(ctv, targets, want);
+                    paintFilteredSubtreeLeafChecks(ctv, clicked);
+                    paintAggregatesBottomUpUnder(ctv, clicked);
+                    if (isFilterAwareAggregateUi(clicked))
+                        paintAggregateFromChildren(ctv, clicked);
+                    else
+                        paintPlainCheckUi(ctv, clicked, want && !targets.isEmpty());
+                    recalculateAncestorAggregatesUpward(ctv, clicked);
 
-                IComparisonSession session = null;
-                for (IPartialModelNode t : targets)
-                {
-                    session = t.getComparisonSession();
-                    if (session != null)
-                        break;
-                }
-                if (session == null || targets.isEmpty())
+                    IComparisonSession session = null;
+                    for (IPartialModelNode t : targets)
+                    {
+                        session = t.getComparisonSession();
+                        if (session != null)
+                            break;
+                    }
+                    if (session == null || targets.isEmpty())
+                        return targets.size();
+                    IComparisonSession sessionFinal = session;
+                    ArrayList<IPartialModelNode> targetsFinal = new ArrayList<>(targets);
+                    boolean wantFinal = want;
+                    IPartialModelNode clickedFinal = clicked;
+                    Display display = ctv.getControl().getDisplay();
+                    display.asyncExec(() ->
+                    {
+                        if (ctv.getControl() == null || ctv.getControl().isDisposed())
+                            return;
+                        beginCascadeContext(cascadeCtx);
+                        try
+                        {
+                            commitFilteredMarksBm(ctv, clickedFinal, wantFinal, targetsFinal,
+                                    sessionFinal);
+                        }
+                        finally
+                        {
+                            endCascadeContext();
+                        }
+                    });
                     return targets.size();
-                IComparisonSession sessionFinal = session;
-                ArrayList<IPartialModelNode> targetsFinal = new ArrayList<>(targets);
-                boolean wantFinal = want;
-                IPartialModelNode clickedFinal = clicked;
-                Display display = ctv.getControl().getDisplay();
-                display.asyncExec(() ->
+                }
+                finally
                 {
-                    if (ctv.getControl() == null || ctv.getControl().isDisposed())
-                        return;
-                    commitFilteredMarksBm(ctv, clickedFinal, wantFinal, targetsFinal,
-                            sessionFinal);
-                });
-                return targets.size();
+                    endCascadeContext();
+                }
             }
 
             /**
@@ -3351,31 +3153,21 @@ public class CompareConfigMenuHook implements IStartup
                     List<IPartialModelNode> targets, IComparisonSession session)
             {
                 ArrayList<IPartialModelNode> leafFallback = new ArrayList<>();
-                int[] merged = { 0 };
-                boolean wrote = runComparisonTreeWrite(session, () ->
+                runComparisonTreeWrite(session, () ->
                 {
                     for (IPartialModelNode t : targets)
                     {
-                        if (setMergeSettingsOnNode(t, want))
-                            merged[0]++;
-                        else if (!hasContainmentChildren(t))
+                        if (!setMergeSettingsOnNode(t, want)
+                                && !hasContainmentChildren(t))
                             leafFallback.add(t);
                     }
                 });
-                CompareChecksDebug.step("setMark", //$NON-NLS-1$
-                        "bmCommit wrote=" + wrote //$NON-NLS-1$
-                                + " mergeSettings=" + merged[0] //$NON-NLS-1$
-                                + " leaves=" + leafFallback.size() //$NON-NLS-1$
-                                + " want=" + want); //$NON-NLS-1$
                 for (IPartialModelNode leaf : leafFallback)
-                {
-                    if (setMergeFlagOnLeaf(leaf, want))
-                    {
-                        CompareChecksDebug.step("setMark", //$NON-NLS-1$
-                                CompareChecksDebug.nodeLabel(leaf)
-                                        + " want=" + want + " leafSession"); //$NON-NLS-1$ //$NON-NLS-2$
-                    }
-                }
+                    setMergeFlagOnLeaf(leaf, want);
+                // BM записан — sync красил по старому mustBeMerged; пересчёт UI обязателен.
+                CheckCascadeContext ctx = activeCascadeContext();
+                if (ctx != null)
+                    ctx.clearAggregates();
                 clearAggregateUiUnder(clicked);
                 seedCollectionOwnMarksUi(ctv, targets, want);
                 paintFilteredSubtreeLeafChecks(ctv, clicked);
@@ -3416,27 +3208,6 @@ public class CompareConfigMenuHook implements IStartup
                 }
             }
 
-            /**
-             * @deprecated см. {@link #applyFilterAwareCheckCascade} / commitFilteredMarksBm.
-             */
-            private int setMarkOnAllFilteredCheckable(CheckboxTreeViewer ctv,
-                    IPartialModelNode node, boolean want)
-            {
-                ArrayList<IPartialModelNode> targets = new ArrayList<>();
-                collectFilteredCheckable(ctv, node, targets);
-                if (targets.isEmpty())
-                    return 0;
-                IComparisonSession session = null;
-                for (IPartialModelNode t : targets)
-                {
-                    session = t.getComparisonSession();
-                    if (session != null)
-                        break;
-                }
-                if (session != null)
-                    commitFilteredMarksBm(ctv, node, want, targets, session);
-                return targets.size();
-            }
 
             /** Галочки листьев из модели (агрегаты красит {@link #paintAggregatesBottomUpUnder}). */
             private void paintFilteredSubtreeLeafChecks(CheckboxTreeViewer ctv,
@@ -3455,45 +3226,25 @@ public class CompareConfigMenuHook implements IStartup
                 }
                 for (IPartialModelNode child : resolveChildren(ctv, node))
                 {
-                    if (isStructuralFolderForFilterWalk(child))
-                    {
-                        paintFilteredSubtreeLeafChecks(ctv, child);
-                        continue;
-                    }
-                    if (!isVisibleForCheck(ctv, node, child))
+                    if (!shouldDescendCheckCascade(ctv, node, child))
                         continue;
                     paintFilteredSubtreeLeafChecks(ctv, child);
                 }
             }
 
-            /** setMustBeMerged(false) на MD с containment в отфильтрованном поддереве. */
-            private void clearBmOnMdRootsInFilteredSubtree(CheckboxTreeViewer ctv,
-                    IPartialModelNode node)
+
+            /**
+             * Спуск каскада пометок: только checkable. Non-checkable ⇒ всё поддерево
+             * без галок — не materialize'им и не обходим.
+             */
+            private boolean shouldDescendCheckCascade(CheckboxTreeViewer ctv,
+                    IPartialModelNode parent, IPartialModelNode child)
             {
-                if (node == null)
-                    return;
-                if (node.isCheckable() && hasContainmentChildren(node))
-                {
-                    IComparisonSession session = node.getComparisonSession();
-                    long id = node.getNodeId();
-                    if (session != null && id != -1L)
-                    {
-                        session.setMustBeMerged(id, false, true);
-                        node.setChecked(false);
-                        Global.invoke(node, "setGrayed", Boolean.FALSE); //$NON-NLS-1$
-                    }
-                }
-                for (IPartialModelNode child : resolveChildren(ctv, node))
-                {
-                    if (isStructuralFolderForFilterWalk(child))
-                    {
-                        clearBmOnMdRootsInFilteredSubtree(ctv, child);
-                        continue;
-                    }
-                    if (!isVisibleForCheck(ctv, node, child))
-                        continue;
-                    clearBmOnMdRootsInFilteredSubtree(ctv, child);
-                }
+                if (child == null || !child.isCheckable())
+                    return false;
+                if (ctv == null || !shouldRestrictChecksToVisible())
+                    return true;
+                return isVisibleForCheck(ctv, parent, child);
             }
 
             private void collectFilteredCheckable(CheckboxTreeViewer ctv,
@@ -3505,28 +3256,12 @@ public class CompareConfigMenuHook implements IStartup
                     out.add(node);
                 for (IPartialModelNode child : resolveChildren(ctv, node))
                 {
-                    // Checkable (в т.ч. «Конфигурация», коллекции, MD) — только
-                    // видимые фильтром. Иначе при отборе по подсистемам скрытая
-                    // «Конфигурация» помечалась вместе с корнем.
-                    if (child.isCheckable())
-                    {
-                        if (!isVisibleForCheck(ctv, node, child))
-                            continue;
-                        collectFilteredCheckable(ctv, child, out);
-                        continue;
-                    }
-                    // Неcheckable «Свойства»/папки — спуск искать видимых детей.
-                    if (isStructuralFolderForFilterWalk(child)
-                            || isPropertiesVirtualFolderNode(child))
-                    {
-                        collectFilteredCheckable(ctv, child, out);
-                        continue;
-                    }
-                    if (!isVisibleForCheck(ctv, node, child))
+                    if (!shouldDescendCheckCascade(ctv, node, child))
                         continue;
                     collectFilteredCheckable(ctv, child, out);
                 }
             }
+
 
             /**
              * Запись MergeSettings в BM-транзакции сравнения (как EDT /
@@ -3540,7 +3275,6 @@ public class CompareConfigMenuHook implements IStartup
                 Object comparisonManager = Global.getField(session, "comparisonManager"); //$NON-NLS-1$
                 if (comparisonManager == null)
                 {
-                    CompareChecksDebug.step("setMark", "no comparisonManager"); //$NON-NLS-1$ //$NON-NLS-2$
                     return false;
                 }
                 try
@@ -3562,58 +3296,14 @@ public class CompareConfigMenuHook implements IStartup
                 }
                 catch (RuntimeException ex)
                 {
-                    CompareChecksDebug.step("setMark", //$NON-NLS-1$
-                            "bmTxn EX " + ex.getClass().getSimpleName() //$NON-NLS-1$
-                                    + " " + ex.getMessage()); //$NON-NLS-1$
                     return false;
                 }
             }
 
-            /**
-             * Пометка одного отфильтрованного узла (без общей транзакции — fallback).
-             * Только {@link MergeSettings} на ЭТОМ узле (без ToTree).
-             * {@code session.setMustBeMerged} — лишь для BM-листа без детей.
-             */
-            private boolean setNodeFilteredMark(CheckboxTreeViewer ctv, IPartialModelNode node,
-                    boolean want)
-            {
-                if (node == null || !node.isCheckable())
-                    return false;
-                if (setMergeSettingsOnNode(node, want))
-                    return true;
-                long id = node.getNodeId();
-                if (!hasContainmentChildren(node))
-                {
-                    if (setMergeFlagOnLeaf(node, want))
-                    {
-                        CompareChecksDebug.step("setMark", //$NON-NLS-1$
-                                CompareChecksDebug.nodeLabel(node)
-                                        + " want=" + want + " leafSession"); //$NON-NLS-1$ //$NON-NLS-2$
-                        return true;
-                    }
-                }
-                if (isAggregateCheckNode(node) || isFilterAwareAggregateUi(node)
-                        || hasContainmentChildren(node))
-                {
-                    boolean ownUi = !hasFilteredCheckableDescendants(ctv, node);
-                    node.setChecked(ownUi && want);
-                    Global.invoke(node, "setGrayed", Boolean.FALSE); //$NON-NLS-1$
-                    CompareChecksDebug.step("setMark", //$NON-NLS-1$
-                            CompareChecksDebug.nodeLabel(node)
-                                    + " want=" + want
-                                    + (ownUi ? " collectionOwn" : " skipParentNoToTree") //$NON-NLS-1$ //$NON-NLS-2$
-                                    + " id=" + id); //$NON-NLS-1$
-                    return true;
-                }
-                CompareChecksDebug.step("setMark", //$NON-NLS-1$
-                        CompareChecksDebug.nodeLabel(node)
-                                + " want=" + want + " FAIL noSettings id=" + id); //$NON-NLS-1$ //$NON-NLS-2$
-                return false;
-            }
 
             /**
              * Есть ли под узлом видимые checkable-потомки (для UI-агрегата).
-             * Скрытые фильтром (в т.ч. «Конфигурация») не считаются.
+             * Non-checkable дети не обходятся — их поддерево без пометок.
              */
             private boolean hasFilteredCheckableDescendants(CheckboxTreeViewer ctv,
                     IPartialModelNode node)
@@ -3622,28 +3312,9 @@ public class CompareConfigMenuHook implements IStartup
                     return hasContainmentChildren(node);
                 for (IPartialModelNode child : resolveChildren(ctv, node))
                 {
-                    if (isPropertiesVirtualFolderNode(child) && !child.isCheckable())
-                    {
-                        if (hasFilteredCheckableDescendants(ctv, child))
-                            return true;
+                    if (!shouldDescendCheckCascade(ctv, node, child))
                         continue;
-                    }
-                    if (child.isCheckable())
-                    {
-                        if (!isVisibleForCheck(ctv, node, child))
-                            continue;
-                        return true;
-                    }
-                    if (isStructuralFolderForFilterWalk(child))
-                    {
-                        if (hasFilteredCheckableDescendants(ctv, child))
-                            return true;
-                        continue;
-                    }
-                    if (!isVisibleForCheck(ctv, node, child))
-                        continue;
-                    if (hasFilteredCheckableDescendants(ctv, child))
-                        return true;
+                    return true;
                 }
                 return false;
             }
@@ -3665,8 +3336,7 @@ public class CompareConfigMenuHook implements IStartup
                 {
                     if (isPropertiesVirtualFolderNode(child))
                         continue;
-                    if (child.isCheckable() || isFilterAwareAggregateUi(child)
-                            || isStructuralFolderForFilterWalk(child))
+                    if (child.isCheckable() || isFilterAwareAggregateUi(child))
                         return true;
                 }
                 return false;
@@ -3687,17 +3357,11 @@ public class CompareConfigMenuHook implements IStartup
                     long id = node.getNodeId();
                     if (cn == null)
                     {
-                        CompareChecksDebug.step("setMark", //$NON-NLS-1$
-                                CompareChecksDebug.nodeLabel(node)
-                                        + " want=" + want + " noComparisonNode id=" + id); //$NON-NLS-1$ //$NON-NLS-2$
                         return false;
                     }
                     MergeSettings ms = cn.getMergeSettings();
                     if (ms == null)
                     {
-                        CompareChecksDebug.step("setMark", //$NON-NLS-1$
-                                CompareChecksDebug.nodeLabel(node)
-                                        + " want=" + want + " noMergeSettings id=" + id); //$NON-NLS-1$ //$NON-NLS-2$
                         return false;
                     }
                     if (want && !ms.isCanBeMerged())
@@ -3708,16 +3372,10 @@ public class CompareConfigMenuHook implements IStartup
                     node.setChecked(want);
                     if (!want)
                         Global.invoke(node, "setGrayed", Boolean.FALSE); //$NON-NLS-1$
-                    CompareChecksDebug.step("setMark", //$NON-NLS-1$
-                            CompareChecksDebug.nodeLabel(node)
-                                    + " want=" + want + " mergeSettings OK"); //$NON-NLS-1$ //$NON-NLS-2$
                     return true;
                 }
                 catch (RuntimeException ex)
                 {
-                    CompareChecksDebug.step("setMark", //$NON-NLS-1$
-                            CompareChecksDebug.nodeLabel(node)
-                                    + " want=" + want + " EX " + ex.getClass().getSimpleName()); //$NON-NLS-1$ //$NON-NLS-2$
                     return false;
                 }
             }
@@ -3768,23 +3426,6 @@ public class CompareConfigMenuHook implements IStartup
                 return node.isChecked();
             }
 
-            /** @deprecated см. {@link #setMergeSettingsOnNode}. */
-            private static boolean setMergeSettingsDirectForced(IPartialModelNode node,
-                    boolean want)
-            {
-                return setMergeSettingsOnNode(node, want);
-            }
-
-            private static boolean isStructuralFolderForFilterWalk(IPartialModelNode node)
-            {
-                if (node == null)
-                    return false;
-                if (shouldRecurseOnly(node) || isPropertiesVirtualFolderNode(node))
-                    return true;
-                if (!node.isCheckable() && (node.hasChildren() || hasContainmentChildren(node)))
-                    return true;
-                return false;
-            }
 
             private static void paintPlainCheckUi(CheckboxTreeViewer ctv, IPartialModelNode node,
                     boolean checked)
@@ -3799,7 +3440,7 @@ public class CompareConfigMenuHook implements IStartup
                 Global.invoke(node, "setGrayed", Boolean.FALSE); //$NON-NLS-1$
             }
 
-            /** Агрегаты поддерева снизу вверх (отфильтрованная модель). */
+            /** Агрегаты поддерева снизу вверх (только checkable-ветви). */
             private void paintAggregatesBottomUpUnder(CheckboxTreeViewer ctv,
                     IPartialModelNode node)
             {
@@ -3808,28 +3449,19 @@ public class CompareConfigMenuHook implements IStartup
                 ArrayList<IPartialModelNode> painted = new ArrayList<>();
                 for (IPartialModelNode child : resolveChildren(ctv, node))
                 {
-                    if (isStructuralFolderForFilterWalk(child)
-                            || isFilterAwareAggregateUi(child)
-                            || isVisibleForCheck(ctv, node, child))
+                    if (!shouldDescendCheckCascade(ctv, node, child))
+                        continue;
+                    paintAggregatesBottomUpUnder(ctv, child);
+                    if (isFilterAwareAggregateUi(child))
                     {
-                        paintAggregatesBottomUpUnder(ctv, child);
-                        if (isFilterAwareAggregateUi(child))
-                        {
-                            paintAggregateFromChildren(ctv, child);
-                            painted.add(child);
-                        }
+                        paintAggregateFromChildren(ctv, child);
+                        painted.add(child);
                     }
                 }
                 if (!painted.isEmpty())
                     refreshNodeImages(ctv, painted);
             }
 
-            /** @deprecated имя — см. {@link #paintAggregatesBottomUpUnder}. */
-            private void paintFilterAwareAggregatesUnder(CheckboxTreeViewer ctv,
-                    IPartialModelNode node)
-            {
-                paintAggregatesBottomUpUnder(ctv, node);
-            }
 
             /**
              * 3-состояние предков: непосредственный родитель, затем его родитель…
@@ -3844,10 +3476,19 @@ public class CompareConfigMenuHook implements IStartup
                 Control control = ctv.getControl();
                 if (control == null || control.isDisposed())
                     return;
+                CheckCascadeContext ctx = activeCascadeContext();
                 control.getDisplay().asyncExec(() -> {
                     if (ctv.getControl() == null || ctv.getControl().isDisposed())
                         return;
-                    paintAncestorChainUpward(ctv, from);
+                    beginCascadeContext(ctx);
+                    try
+                    {
+                        paintAncestorChainUpward(ctv, from);
+                    }
+                    finally
+                    {
+                        endCascadeContext();
+                    }
                 });
             }
 
@@ -3904,7 +3545,6 @@ public class CompareConfigMenuHook implements IStartup
                 if (present.isEmpty())
                     return;
                 ctv.update(present.toArray(), null);
-                CompareChecksDebug.step("refreshImages", "n=" + present.size()); //$NON-NLS-1$ //$NON-NLS-2$
             }
 
             /** Отбор по подсистемам пуст (не путать со штатным combo-фильтром). */
@@ -3950,12 +3590,31 @@ public class CompareConfigMenuHook implements IStartup
                 return select(viewer, parent, element);
             }
 
+            private Collection<IPartialModelNode> resolveChildren(CheckboxTreeViewer ctv,
+                    IPartialModelNode parent)
+            {
+                CheckCascadeContext ctx = activeCascadeContext();
+                if (ctx != null)
+                {
+                    Collection<IPartialModelNode> cached = ctx.children.get(parent);
+                    if (cached != null)
+                    {
+                        return cached;
+                    }
+                    Collection<IPartialModelNode> loaded = resolveChildrenUncached(ctv,
+                            parent);
+                    ctx.children.put(parent, loaded);
+                    return loaded;
+                }
+                return resolveChildrenUncached(ctv, parent);
+            }
+
             /**
              * Дети узла с подгрузкой через content provider (иначе у свёрнутых
              * коллекций getChildren() пуст → клик «ничего не делает», applied=0).
              */
-            private Collection<IPartialModelNode> resolveChildren(CheckboxTreeViewer ctv,
-                    IPartialModelNode parent)
+            private Collection<IPartialModelNode> resolveChildrenUncached(
+                    CheckboxTreeViewer ctv, IPartialModelNode parent)
             {
                 Object cp = ctv.getContentProvider();
                 if (cp instanceof ITreeContentProvider tcp)
@@ -3977,15 +3636,6 @@ public class CompareConfigMenuHook implements IStartup
                 return children != null ? children : List.of();
             }
 
-            /**
-             * @deprecated каскад — {@link #setMarkOnAllFilteredCheckable}; ToTree-сброс
-             * запрещён (меняет пометки вне фильтра).
-             */
-            private int applyVisibleOnlyInsideMdObject(CheckboxTreeViewer ctv,
-                    IPartialModelNode leaf, boolean checked)
-            {
-                return setMarkOnAllFilteredCheckable(ctv, leaf, checked);
-            }
 
             private void clearAggregateUiUnder(IPartialModelNode node)
             {
@@ -4000,67 +3650,6 @@ public class CompareConfigMenuHook implements IStartup
                     clearAggregateUiUnder(child);
             }
 
-            /**
-             * Пометить только видимые листья (нет containment-детей). Узлы с детьми
-             * — только спуск: {@code setMustBeMerged} на них заново зальёт поддерево.
-             */
-            private int markVisibleLeavesOnly(CheckboxTreeViewer ctv, IPartialModelNode node)
-            {
-                int applied = 0;
-                Collection<IPartialModelNode> children = resolveChildren(ctv, node);
-                for (IPartialModelNode child : children)
-                {
-                    boolean folder = shouldRecurseOnly(child) || isAggregateCheckNode(child)
-                            || isVisibleOnlyClickTarget(child);
-                    if (folder)
-                    {
-                        applied += markVisibleLeavesOnly(ctv, child);
-                        continue;
-                    }
-                    if (!child.isCheckable())
-                        continue;
-                    IPartialModelNode visParent = child.getParent() != null ? child.getParent() : node;
-                    if (!isVisibleForCheck(ctv, visParent, child))
-                        continue;
-                    if (hasContainmentChildren(child))
-                    {
-                        int sub = markVisibleLeavesOnly(ctv, child);
-                        if (sub == 0 && setMergeSettingsDirect(child, true))
-                        {
-                            // Видимый контейнер без видимых листьев (дети скрыты фильтром).
-                            applied++;
-                            CompareChecksDebug.step("visibleNodeDirect", //$NON-NLS-1$
-                                    CompareChecksDebug.nodeLabel(child)
-                                            + " id=" + child.getNodeId()); //$NON-NLS-1$
-                        }
-                        else
-                        {
-                            applied += sub;
-                        }
-                        continue;
-                    }
-                    if (setMergeFlagOnLeaf(child, true))
-                    {
-                        applied++;
-                        if (applyLogLeft > 0)
-                        {
-                            applyLogLeft--;
-                            Global.tempLog(LOG, "visible leaf id=" + child.getNodeId() //$NON-NLS-1$
-                                    + " el=" + child.getClass().getSimpleName()); //$NON-NLS-1$
-                            CompareChecksDebug.step("visibleLeaf", //$NON-NLS-1$
-                                    CompareChecksDebug.nodeLabel(child)
-                                            + " id=" + child.getNodeId()); //$NON-NLS-1$
-                        }
-                    }
-                }
-                // Сам node — лист (клик по свойству без детей).
-                if (children.isEmpty() && node.isCheckable() && !hasContainmentChildren(node))
-                {
-                    if (setMergeFlagOnLeaf(node, true))
-                        applied++;
-                }
-                return applied;
-            }
 
             private static boolean hasContainmentChildren(IPartialModelNode node)
             {
@@ -4100,219 +3689,6 @@ public class CompareConfigMenuHook implements IStartup
                 return node.isChecked() == want;
             }
 
-            /**
-             * Флаг только на узле через {@link MergeSettings} — без
-             * {@code setMustBeMergedToTree}. Для видимых контейнеров, у которых
-             * все дети скрыты фильтром.
-             */
-            private static boolean setMergeSettingsDirect(IPartialModelNode node, boolean want)
-            {
-                return setMergeSettingsOnNode(node, want);
-            }
-
-            /** Галочки только на видимых уже созданных TreeItem (без скрытых из модели). */
-            private void paintVisibleSubtreeChecksOnly(CheckboxTreeViewer ctv, IPartialModelNode node)
-            {
-                if (ctv == null || node == null)
-                    return;
-                Widget w = ctv.testFindItem(node);
-                if (!(w instanceof TreeItem item) || item.isDisposed())
-                    return;
-                paintVisibleSubtreeChecksOnlyItem(ctv, item, node);
-                ArrayList<Object> elems = new ArrayList<>();
-                collectPartialNodesFromTreeItem(item, elems);
-                refreshNodeImages(ctv, elems);
-            }
-
-            private static void collectPartialNodesFromTreeItem(TreeItem item, List<Object> out)
-            {
-                if (item == null || item.isDisposed() || out == null)
-                    return;
-                Object data = item.getData();
-                if (data instanceof IPartialModelNode)
-                    out.add(data);
-                TreeItem[] kids = item.getItems();
-                if (kids == null)
-                    return;
-                for (TreeItem kid : kids)
-                    collectPartialNodesFromTreeItem(kid, out);
-            }
-
-            private void paintVisibleSubtreeChecksOnlyItem(CheckboxTreeViewer ctv, TreeItem item,
-                    IPartialModelNode parentNode)
-            {
-                TreeItem[] kids = item.getItems();
-                if (kids == null)
-                    return;
-                for (TreeItem childItem : kids)
-                {
-                    if (childItem == null || childItem.isDisposed())
-                        continue;
-                    Object data = childItem.getData();
-                    if (!(data instanceof IPartialModelNode child))
-                        continue;
-                    boolean folder = shouldRecurseOnly(child) || isAggregateCheckNode(child)
-                            || isVisibleOnlyClickTarget(child);
-                    if (folder)
-                    {
-                        paintVisibleSubtreeChecksOnlyItem(ctv, childItem, child);
-                        continue;
-                    }
-                    if (!isVisibleForCheck(ctv, parentNode, child))
-                    {
-                        childItem.setChecked(false);
-                        childItem.setGrayed(false);
-                        continue;
-                    }
-                    childItem.setChecked(child.isChecked());
-                    // При отборе не тащим BM-gray (excluded hidden).
-                    childItem.setGrayed(!shouldRestrictChecksToVisible()
-                            && child.isChecked() && child.isGrayed());
-                    paintVisibleSubtreeChecksOnlyItem(ctv, childItem, child);
-                }
-            }
-
-            /** Серые/полные пометки папок под MD после visible-only каскада. */
-            private void paintAggregateFoldersUnder(CheckboxTreeViewer ctv, IPartialModelNode node)
-            {
-                Collection<IPartialModelNode> children = node.getChildren();
-                if (children == null)
-                    return;
-                boolean restrict = shouldRestrictChecksToVisible();
-                for (IPartialModelNode child : children)
-                {
-                    boolean folderish = shouldRecurseOnly(child) || isAggregateCheckNode(child)
-                            || isVisibleOnlyClickTarget(child)
-                            || (restrict && child.isCheckable() && hasContainmentChildren(child));
-                    if (!folderish)
-                        continue;
-                    paintAggregateFoldersUnder(ctv, child);
-                    if (isAggregateCheckNode(child) || isVisibleOnlyClickTarget(child))
-                        paintAggregateFromChildren(ctv, child);
-                    else if (restrict && child.isCheckable() && hasContainmentChildren(child))
-                    {
-                        // Источник и т.п.: UI full/gray только по видимым детям.
-                        AggregateCheck agg = computeAggregateFromLoadedChildren(ctv, child);
-                        if (agg == null || (!agg.checked && !agg.grayed))
-                            continue;
-                        Widget w = ctv.testFindItem(child);
-                        if (w instanceof TreeItem item && !item.isDisposed())
-                        {
-                            item.setChecked(agg.checked);
-                            item.setGrayed(agg.grayed);
-                        }
-                        child.setChecked(agg.checked);
-                        Global.invoke(child, "setGrayed", Boolean.valueOf(agg.grayed)); //$NON-NLS-1$
-                    }
-                }
-            }
-
-            /**
-             * Скрывающие отборы (подсистемы / combo): только видимые top-MD.
-             * Внутрь каждого — {@link #applyVisibleOnlyInsideMdObject} (сброс BM-дерева
-             * + пометка только видимых листьев; {@code setMustBeMerged} всегда ToTree).
-             */
-            private int applyCheckVisibleOnly(CheckboxTreeViewer ctv, IPartialModelNode parent,
-                    boolean checked)
-            {
-                int applied = 0;
-                int visible = 0;
-                long t0 = System.nanoTime();
-                Collection<IPartialModelNode> children = resolveChildren(ctv, parent);
-                for (IPartialModelNode child : children)
-                {
-                    // Контейнеры не гоняем через ViewerFilter.select — у папок select
-                    // рекурсивно обходит всех детей (в т.ч. скрытых) → зависание.
-                    if (shouldRecurseOnly(child))
-                    {
-                        applied += applyCheckVisibleOnly(ctv, child, checked);
-                        continue;
-                    }
-                    if (!isVisibleForCheck(ctv, parent, child))
-                        continue;
-                    visible++;
-                    if (!child.isCheckable())
-                        continue;
-                    applied += applyVisibleOnlyInsideMdObject(ctv, child, checked);
-                }
-                if (parent instanceof ICollectionPartialNode || parent instanceof VirtualFolderPartialModelNode)
-                {
-                    long ms = (System.nanoTime() - t0) / 1_000_000L;
-                    Global.tempLog(LOG, "visible-only folder=" //$NON-NLS-1$
-                            + parent.getClass().getSimpleName()
-                            + " children=" + children.size() //$NON-NLS-1$
-                            + " visible=" + visible //$NON-NLS-1$
-                            + " applied=" + applied //$NON-NLS-1$
-                            + " ms=" + ms); //$NON-NLS-1$
-                }
-                return applied;
-            }
-
-            /**
-             * Штатный каскад на top-MD и всё поддерево (как {@code PartialModelController.check}):
-             * BM {@code setMustBeMergedToTree}, синхрон кэша загруженных узлов, refresh UI.
-             * Фильтр сюда не применяется.
-             */
-            private boolean applyStockTopObjectCascade(CheckboxTreeViewer ctv, IPartialModelNode node,
-                    boolean want)
-            {
-                IComparisonSession session = node.getComparisonSession();
-                long id = node.getNodeId();
-                boolean ok;
-                if (session != null && id != -1L)
-                {
-                    // Всегда BM-каскад: node.check() no-op, если кэш уже == want,
-                    // а «Формы» при этом могут быть рассинхронены.
-                    ok = session.setMustBeMerged(id, want, true);
-                    node.setChecked(want);
-                }
-                else
-                {
-                    node.check(want);
-                    ok = node.isChecked() == want;
-                }
-                if (applyLogLeft > 0)
-                {
-                    applyLogLeft--;
-                    Global.tempLog(LOG, "stock cascade id=" + id + " want=" + want //$NON-NLS-1$ //$NON-NLS-2$
-                            + " ok=" + ok + " el=" + node.getClass().getSimpleName()); //$NON-NLS-1$
-                }
-                // Кэш checked/grayed по уже загруженным потомкам (без resolveChildren).
-                syncSubtreeCheckCacheFromMergeSettings(node);
-                // Только уже созданные TreeItem — refresh(node,true) = createChildren
-                // на каждый справочник при bulk по «Справочники».
-                paintExistingSubtreeChecksFromModel(ctv, node);
-                return ok;
-            }
-
-            /**
-             * Обновляет галочки на уже материализованных TreeItem (без expand).
-             */
-            private static void paintExistingSubtreeChecksFromModel(CheckboxTreeViewer ctv,
-                    Object element)
-            {
-                if (ctv == null || element == null)
-                    return;
-                Widget w = ctv.testFindItem(element);
-                if (!(w instanceof TreeItem item) || item.isDisposed())
-                    return;
-                if (element instanceof IPartialModelNode node)
-                {
-                    item.setChecked(node.isChecked());
-                    item.setGrayed(node.isGrayed());
-                }
-                TreeItem[] kids = item.getItems();
-                if (kids == null)
-                    return;
-                for (TreeItem childItem : kids)
-                {
-                    if (childItem == null || childItem.isDisposed())
-                        continue;
-                    Object data = childItem.getData();
-                    if (data != null)
-                        paintExistingSubtreeChecksFromModel(ctv, data);
-                }
-            }
 
             /**
              * Видимость для каскада флажков: без oneSide-логов во время bulk.
@@ -4323,27 +3699,32 @@ public class CompareConfigMenuHook implements IStartup
              */
             private boolean isVisibleForCheck(Viewer viewer, Object parent, Object element)
             {
-                boolean prev = suppressDecideLogs;
-                suppressDecideLogs = true;
-                try
+                CheckCascadeContext ctx = activeCascadeContext();
+                if (ctx != null && element instanceof IPartialModelNode node)
                 {
-                    if (viewer instanceof CheckboxTreeViewer ctv && element != null)
+                    Boolean cached = ctx.visible.get(node);
+                    if (cached != null)
                     {
-                        Widget w = ctv.testFindItem(element);
-                        if (w instanceof TreeItem item && !item.isDisposed())
-                            return true;
+                        return cached.booleanValue();
                     }
-                    return isVisibleInViewer(viewer, parent, element);
+                    boolean r = isVisibleForCheckUncached(viewer, parent, element);
+                    ctx.visible.put(node, Boolean.valueOf(r));
+                    return r;
                 }
-                finally
-                {
-                    suppressDecideLogs = prev;
-                }
+                return isVisibleForCheckUncached(viewer, parent, element);
             }
 
-            private boolean suppressDecideLogs;
+            private boolean isVisibleForCheckUncached(Viewer viewer, Object parent, Object element)
+            {
+                if (viewer instanceof CheckboxTreeViewer ctv && element != null)
+                {
+                    Widget w = ctv.testFindItem(element);
+                    if (w instanceof TreeItem item && !item.isDisposed())
+                        return true;
+                }
+                return isVisibleInViewer(viewer, parent, element);
+            }
 
-            private int applyLogLeft = 30;
 
             /**
              * Как {@code MdObjectPartialModelController.refreshNode}:
@@ -4352,17 +3733,12 @@ public class CompareConfigMenuHook implements IStartup
              */
             private void syncAncestorsCheckCacheFromMergeSettings(IPartialModelNode from)
             {
-                int n = 0;
                 for (IPartialModelNode p = from; p != null; p = p.getParent())
                 {
                     if (p instanceof VirtualFolderPartialModelNode)
                         continue;
-                    if (!syncCheckCacheFromMergeSettings(p))
-                        continue;
-                    n++;
+                    syncCheckCacheFromMergeSettings(p);
                 }
-                Global.tempLog(LOG, "ancestor cache synced n=" + n //$NON-NLS-1$
-                        + " from=" + from.getClass().getSimpleName()); //$NON-NLS-1$
             }
 
             private void syncSubtreeCheckCacheFromMergeSettings(IPartialModelNode root)
@@ -4433,7 +3809,6 @@ public class CompareConfigMenuHook implements IStartup
                             recalculateCheckStatesAfterFilterChange(ctv);
                         else
                             clearAggregateUiCache();
-                        Global.tempLog(LOG, "subsystem filter off: recalc checkmarks"); //$NON-NLS-1$
                     }
                     return true;
                 }
@@ -4527,7 +3902,6 @@ public class CompareConfigMenuHook implements IStartup
                     // Штатный фильтр отсоединён (см. syncNativeFilterAttachment) — считаем сами.
                     visible = checkTwoSideNode(cn, session, true);
                 }
-                logDecision(element, cn, visible, lastDetail);
                 return visible;
             }
 
@@ -4555,39 +3929,19 @@ public class CompareConfigMenuHook implements IStartup
                         break;
                     }
                 }
-                Global.tempLog(LOG, "ensureAttached found=" + found //$NON-NLS-1$
-                        + " filters=" + treeViewer.getFilters().length); //$NON-NLS-1$
                 if (!found)
                 {
                     try
                     {
                         treeViewer.addFilter(this);
                         treeViewer.setData(FILTER_FLAG, Boolean.TRUE);
-                        Global.tempLog(LOG, "re-attached CorrectionViewerFilter"); //$NON-NLS-1$
                     }
                     catch (Exception e)
                     {
-                        Global.tempLog(LOG, "re-attach error: " + e); //$NON-NLS-1$
                     }
                 }
             }
 
-            private void logDecision(Object element, ComparisonNode cn, boolean visible,
-                    String detail)
-            {
-                if (suppressDecideLogs)
-                    return;
-                // Раньше скрытые (visible=false) логировались без лимита → зависание UI.
-                if (decideLogsLeft <= 0)
-                    return;
-                decideLogsLeft--;
-                Global.tempLog(LOG, "oneSide visible=" + visible //$NON-NLS-1$
-                        + " el=" + element.getClass().getSimpleName() //$NON-NLS-1$
-                        + " cn=" + cn.getClass().getSimpleName() //$NON-NLS-1$
-                        + " symlink=" + (cn instanceof SymlinkComparisonNode) //$NON-NLS-1$
-                        + " side=" + cn.getNodeSide() //$NON-NLS-1$
-                        + " " + detail); //$NON-NLS-1$
-            }
 
             private boolean checkOneSideNode(ComparisonNode cn, IComparisonSession session, boolean blacklist)
             {
@@ -4605,9 +3959,6 @@ public class CompareConfigMenuHook implements IStartup
                 QualifiedName qn = resolveQualifiedName(cn, side, ds, symlink);
                 if (qn == null)
                 {
-                    Global.tempLog(LOG, "qn=null → " + (blacklist ? "show" : "hide") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-                            + " cn=" + cn.getClass().getSimpleName() //$NON-NLS-1$
-                            + " symlink=" + symlink); //$NON-NLS-1$
                     return blacklist;
                 }
 
@@ -4617,16 +3968,8 @@ public class CompareConfigMenuHook implements IStartup
                     // возвращает ВСЕ подсистемы проекта (у Main было 232), хотя пользователь
                     // отметил подсистему только на Other. Смотрим явные checkedSubsystemIds.
                     int checkedIds = countCheckedSubsystemIds(ds);
-                    boolean projectChecked = isProjectChecked(ds);
-                    boolean includeOrphans = isIncludeNotIncluded(ds);
                     if (checkedIds == 0)
-                    {
-                        lastDetail = "checkedIds=0 projectChecked=" + projectChecked //$NON-NLS-1$
-                                + " includeOrphans=" + includeOrphans //$NON-NLS-1$
-                                + " qn=" + qn + " → " + (blacklist ? "show" : "hide") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-                                + " (no explicit subsystems on side)"; //$NON-NLS-1$
                         return blacklist;
-                    }
 
                     EObjectTrie included = getTrie("includedInSelectedSubsystemsTrieMap", ds); //$NON-NLS-1$
                     EObjectTrie allTop = getTrie("allTopObjectsToFilterTrieMap", ds); //$NON-NLS-1$
@@ -4639,22 +3982,10 @@ public class CompareConfigMenuHook implements IStartup
                         visible = true;
                     else
                         visible = !isTop || (blacklist ? !inIncluded : inIncluded);
-                    lastDetail = "qn=" + qn //$NON-NLS-1$
-                            + " symlink=" + symlink //$NON-NLS-1$
-                            + " checkedIds=" + checkedIds //$NON-NLS-1$
-                            + " projectChecked=" + projectChecked //$NON-NLS-1$
-                            + " includeOrphans=" + includeOrphans //$NON-NLS-1$
-                            + " isTop=" + isTop //$NON-NLS-1$
-                            + " inIncluded=" + inIncluded //$NON-NLS-1$
-                            + " blacklist=" + blacklist //$NON-NLS-1$
-                            + " hasIncluded=" + (included != null) //$NON-NLS-1$
-                            + " hasAllTop=" + (allTop != null); //$NON-NLS-1$
                     return visible;
                 }
                 catch (Exception e)
                 {
-                    Global.tempLog(LOG, "checkOneSideNode error: " + e); //$NON-NLS-1$
-                    lastDetail = "error"; //$NON-NLS-1$
                     return true;
                 }
             }
@@ -4711,25 +4042,6 @@ public class CompareConfigMenuHook implements IStartup
                 if (ids instanceof java.util.Collection<?> col)
                     return col.size();
                 return -1;
-            }
-
-            private boolean isProjectChecked(IComparisonDataSource ds)
-            {
-                Object settings = Global.getField(namedFilter, "filterBySubsystemSettings"); //$NON-NLS-1$
-                Object project = ds.getDtProject();
-                if (settings == null || project == null)
-                    return false;
-                return Boolean.TRUE.equals(Global.invoke(settings, "isProjectChecked", project)); //$NON-NLS-1$
-            }
-
-            private boolean isIncludeNotIncluded(IComparisonDataSource ds)
-            {
-                Object settings = Global.getField(namedFilter, "filterBySubsystemSettings"); //$NON-NLS-1$
-                Object project = ds.getDtProject();
-                if (settings == null || project == null)
-                    return false;
-                return Boolean.TRUE.equals(Global.invoke(settings,
-                        "isIncludeNotIncludedInSubsystems", project)); //$NON-NLS-1$
             }
 
             @SuppressWarnings("unchecked")
@@ -4904,7 +4216,6 @@ public class CompareConfigMenuHook implements IStartup
                 Files.copy(stream, tempFile, java.nio.file.StandardCopyOption.REPLACE_EXISTING);
                 return tempFile;
             } catch (IOException e) {
-                Global.log("getSideFile: не удалось записать временный файл: " + e.getMessage()); //$NON-NLS-1$
                 return null;
             } finally {
                 try { stream.close(); } catch (IOException ignored) {}
@@ -5026,7 +4337,6 @@ public class CompareConfigMenuHook implements IStartup
                     ExternalPropertyPartialModelNode moduleNode = findParentModuleNode(element);
                     if (moduleNode == null)
                     {
-                        log("doubleClick: родительский узел модуля не найден"); //$NON-NLS-1$
                         return;
                     }
                     openModuleMergeForNode(editor, moduleNode, sectionNode, tree.getShell());
@@ -5119,7 +4429,6 @@ public class CompareConfigMenuHook implements IStartup
             BslModuleComparisonNode bslModule = (BslModuleComparisonNode) moduleComparison;
             boolean selectSection = section != null && bslModule.isParseModuleStructure();
             if (section != null && !bslModule.isParseModuleStructure())
-                log("doubleClick: модуль без разбора структуры — открытие без выбора секции"); //$NON-NLS-1$
 
             pendingSection = selectSection ? section : null;
             try
@@ -5176,7 +4485,6 @@ public class CompareConfigMenuHook implements IStartup
 
             if (partialModel == null || session == null || pmc == null || view == null)
             {
-                log("openMergeSettings: не хватает partialModel/session/controller/view"); //$NON-NLS-1$
                 return;
             }
 
@@ -5227,12 +4535,8 @@ public class CompareConfigMenuHook implements IStartup
 
             Object listObj = Global.getField(editor, "comparisonArtifactsList"); //$NON-NLS-1$
             if (!(listObj instanceof List))
-            {
-                logArtifactsNotFound(node, session, 0);
                 return null;
-            }
             List<?> artifactsList = (List<?>) listObj;
-            int artifactsCount = artifactsList.size();
 
             if (session != null)
             {
@@ -5259,7 +4563,6 @@ public class CompareConfigMenuHook implements IStartup
                     return artifact;
             }
 
-            logArtifactsNotFound(node, session, artifactsCount);
             return null;
         }
 
@@ -5281,21 +4584,6 @@ public class CompareConfigMenuHook implements IStartup
             if (Global.call(artifact, "getPartialModel") != null) //$NON-NLS-1$
                 return;
             Global.invokeVoid(editor, "createPartialModelForArtifact", artifact); //$NON-NLS-1$
-        }
-
-        private static void logArtifactsNotFound(IPartialModelNode node,
-                IComparisonSession session, int artifactsCount)
-        {
-            if (!Global.isLogEnabled())
-                return;
-            long nodeId = node != null ? node.getNodeId() : -1L;
-            int sessionId = session != null ? session.getId() : -1;
-            String nodeClass = node != null ? node.getClass().getSimpleName() : "null"; //$NON-NLS-1$
-            Global.log(TAG, "openMergeSettings: артефакт не найден" //$NON-NLS-1$
-                + " artifactsCount=" + artifactsCount //$NON-NLS-1$
-                + " sessionId=" + sessionId //$NON-NLS-1$
-                + " nodeId=" + nodeId //$NON-NLS-1$
-                + " nodeClass=" + nodeClass); //$NON-NLS-1$
         }
 
         private static boolean trySelectSectionInDialog(Object dialog,
@@ -5323,7 +4611,6 @@ public class CompareConfigMenuHook implements IStartup
             viewer.setSelection(new StructuredSelection(node), true);
             viewer.reveal(node);
             Global.invokeVoid(dialog, "nodeSelectionChanged", node); //$NON-NLS-1$
-            log("selectSectionInDialog: выбрана секция"); //$NON-NLS-1$
             return true;
         }
 
@@ -5385,11 +4672,6 @@ public class CompareConfigMenuHook implements IStartup
             return null;
         }
 
-        private static void log(String msg)
-        {
-            if (Global.isLogEnabled())
-                Global.log(TAG, msg);
-        }
     }
 
     private static class CompareConfigExpandHandler extends AbstractHandler
@@ -5973,14 +5255,9 @@ public class CompareConfigMenuHook implements IStartup
     }
 
     /**
-     * «Найти нижние настраиваемые»: собирает листовые узлы в поддеревьях выделенных строк —
-     * те, у которых есть чекбокс ({@code isCheckable()}), но ни один узел в поддереве потомков
-     * чекбокса не имеет. Область — Ctrl/Shift-выделение ({@link CompareConfigMultiMarkSupport})
-     * или, при пустом наборе, узел под курсором. Поиск идёт только по видимой части дерева —
-     * скрытые активными фильтрами узлы (в т.ч. подсистемный фильтр) не учитываются. Результат
-     * выводится в панель результатов поиска через общий механизм {@code CompareSearchResult}
-     * (аналогично команде «Найти все»), откуда пометки можно ставить/снимать — как по обычным
-     * результатам поиска.
+     * «Найти нижние настраиваемые»: листовые checkable в поддеревьях выделения
+     * (нет видимого checkable-потомка). Non-checkable и их поддеревья не обходятся.
+     * Область — Ctrl/Shift-выделение или узел под курсором; результат — панель поиска.
      */
     private static final class CompareConfigLowestCheckableFinder
     {
@@ -6073,11 +5350,11 @@ public class CompareConfigMenuHook implements IStartup
         }
 
         /**
-         * Post-order обход по видимой части дерева: вглубь идём только в узлы, проходящие
-         * активные фильтры ({@link CompareConfigSearchDialogHook#isNodeMatchFilters}). Узел —
-         * лист, если сам {@code isCheckable()} и ни в одном ВИДИМОМ узле его поддерева чекбокса
-         * нет. Возвращает {@code true}, если в поддереве есть чекбокс (включая сам узел) —
-         * родитель с таким потомком листом не считается.
+         * Post-order по видимой checkable-части дерева. Non-checkable узел и всё
+         * его поддерево без галок — не обходим ({@code getChildren} не вызываем).
+         * Узел — лист, если сам {@code isCheckable()} и ни у одного видимого
+         * checkable-потомка чекбокса нет. Возвращает {@code true}, если в поддереве
+         * есть чекбокс (включая сам узел).
          */
         private static boolean collectLeaves(
             Object node,
@@ -6085,22 +5362,25 @@ public class CompareConfigMenuHook implements IStartup
             AbstractTreeViewer viewer,
             List<Object> leaves)
         {
-            boolean selfCheckable = node instanceof IPartialModelNode partial && partial.isCheckable();
+            if (!(node instanceof IPartialModelNode partial) || !partial.isCheckable())
+                return false;
             boolean descendantCheckable = false;
             Object[] children = CompareConfigSearchDialogHook.getChildrenSafe(provider, node);
             if (children != null)
             {
                 for (Object child : children)
                 {
+                    if (!(child instanceof IPartialModelNode childNode) || !childNode.isCheckable())
+                        continue;
                     if (!CompareConfigSearchDialogHook.isNodeMatchFilters(child, viewer))
                         continue;
                     if (collectLeaves(child, provider, viewer, leaves))
                         descendantCheckable = true;
                 }
             }
-            if (selfCheckable && !descendantCheckable)
+            if (!descendantCheckable)
                 leaves.add(node);
-            return selfCheckable || descendantCheckable;
+            return true;
         }
 
         private static List<CompareSearchMatch> buildMatches(List<Object> leaves, String objectColumn)

@@ -80,6 +80,7 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
     private static boolean resourceListenerInstalled;
     private static boolean competingFilterListenerInstalled;
     private static final Set<String> pendingAutoAddPaths = new HashSet<>();
+    private static boolean gitChangedRefreshPending;
 
     private static final ViewerFilter PASS_THROUGH_NATIVE = new ViewerFilter()
     {
@@ -227,6 +228,7 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
 
     private static void flushPendingAutoAdds()
     {
+        maybeRefreshGitChangedFilter();
         Set<String> batch;
         synchronized (pendingAutoAddPaths)
         {
@@ -247,6 +249,30 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
                 continue;
             ObjectSetsItems.tryAutoAddRootObjectToActiveSet(project, relPath);
         }
+    }
+
+    /**
+     * При активном фильтре навигатора и активном системном наборе («<Измененные>») —
+     * отложенное (debounce) пересчитывание фильтра после изменений ресурсов.
+     */
+    private static void maybeRefreshGitChangedFilter()
+    {
+        if (!ObjectSetsNavigatorFilterSupport.isActive())
+            return;
+        if (!ObjectSetsAddTargetState.getInstance().isAnyAddTargetSystemSet())
+            return;
+        if (gitChangedRefreshPending)
+            return;
+        gitChangedRefreshPending = true;
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.timerExec(400, () -> {
+            gitChangedRefreshPending = false;
+            if (!ObjectSetsNavigatorFilterSupport.isActive())
+                return;
+            refreshAllNavigators();
+        });
     }
 
     private static void scheduleFilterRefreshAll(int attempt, String source)
@@ -1002,9 +1028,10 @@ public final class ObjectSetSubsystemsFilterBridge implements IStartup
                 {
                     ObjectSets.SetDef set =
                         ObjectSetsAddTargetState.getInstance().getAddTargetSet(projectName);
-                    if (set != null && !set.items.isEmpty())
+                    if (set != null && (set.system || !set.items.isEmpty()))
                     {
-                        // Непустой add-target набор вытесняет фильтр подсистем (в т.ч. чёрный список).
+                        // Непустой add-target набор (или системный «<Измененные>»)
+                        // вытесняет фильтр подсистем (в т.ч. чёрный список).
                         return ObjectSetsItems.isVisibleInAddTargetSetTree(
                             viewer, element, projectName);
                     }

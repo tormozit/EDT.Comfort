@@ -3,9 +3,12 @@ package tormozit;
 import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.text.Collator;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 import org.eclipse.core.resources.IProject;
@@ -112,6 +115,31 @@ public final class ObjectSetsView extends ViewPart
 
     private static ObjectSetsView activeInstance;
 
+    /**
+     * Порядок наборов в таблице: сначала «Основной», затем системные («<Измененные>»),
+     * затем все остальные по алфавиту.
+     */
+    private static final Comparator<ObjectSets.SetDef> SETS_DISPLAY_ORDER = (a, b) ->
+    {
+        int groupA = setDisplayGroup(a);
+        int groupB = setDisplayGroup(b);
+        if (groupA != groupB)
+            return Integer.compare(groupA, groupB);
+        return Collator.getInstance(Locale.getDefault()).compare(
+            a.name != null ? a.name : "", b.name != null ? b.name : ""); //$NON-NLS-1$ //$NON-NLS-2$
+    };
+
+    private static int setDisplayGroup(ObjectSets.SetDef set)
+    {
+        if (set == null)
+            return 3;
+        if (!set.system && set.isFixed())
+            return 0;
+        if (set.system)
+            return 1;
+        return 2;
+    }
+
     private IMemento workbenchState;
 
     private FilterInputBox filterInput;
@@ -144,6 +172,13 @@ public final class ObjectSetsView extends ViewPart
     private int cachedItemsPaneWidth;
     private boolean sashSizingInstalled;
     private boolean syncingSashLayout;
+
+    private Button renameButton;
+    private Button deleteButton;
+    private Button loadButton;
+
+    /** Динамический состав системного набора («<Измененные>»); сброс при активации строки. */
+    private List<ObjectSets.Item> gitChangedItemsCache;
 
     /** Ключ объекта для восстановления после закрытия вкладки (однократно). */
     private String pendingItemKeyRestore;
@@ -561,13 +596,13 @@ public final class ObjectSetsView extends ViewPart
         buttons.setLayout(new RowLayout(SWT.HORIZONTAL));
         buttons.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
         createButton(buttons, "Добавить", this::addSet); //$NON-NLS-1$
-        createButton(buttons, "Переименовать", this::renameSet); //$NON-NLS-1$
-        createButton(buttons, "Удалить", this::deleteSet); //$NON-NLS-1$
+        renameButton = createButton(buttons, "Переименовать", this::renameSet); //$NON-NLS-1$
+        deleteButton = createButton(buttons, "Удалить", this::deleteSet); //$NON-NLS-1$
         createButton(buttons, "Выгрузить", this::exportSets); //$NON-NLS-1$
-        createButton(buttons, "Загрузить", this::importSets); //$NON-NLS-1$
+        loadButton = createButton(buttons, "Загрузить", this::importSets); //$NON-NLS-1$
     }
 
-    private static void createButton(Composite parent, String text, Runnable action)
+    private static Button createButton(Composite parent, String text, Runnable action)
     {
         Button button = new Button(parent, SWT.PUSH);
         button.setText(text);
@@ -579,6 +614,7 @@ public final class ObjectSetsView extends ViewPart
                 action.run();
             }
         });
+        return button;
     }
 
     private void refreshOnUi()
@@ -600,6 +636,8 @@ public final class ObjectSetsView extends ViewPart
             return;
         ensureDefaultSetForActiveProject();
         filteredSets = new ArrayList<>(ObjectSets.getInstance().getAllSets());
+        filteredSets.removeIf(set -> set.system && !ObjectSetsItems.isProjectUnderGit(set.projectName));
+        filteredSets.sort(SETS_DISPLAY_ORDER);
         applyFilter();
         ObjectSets.SetDef keep = selectedSet;
         setsViewer.setInput(filteredSets);
@@ -680,6 +718,7 @@ public final class ObjectSetsView extends ViewPart
             if (current != null)
             {
                 ObjectSets.getInstance().ensureDefaultSetForProject(current.getName());
+                ObjectSets.getInstance().ensureSystemSetForProject(current.getName());
                 ObjectSetsAddTargetState.getInstance().ensureForProject(current.getName());
             }
             selectAddTargetSetForActiveProject();
@@ -745,6 +784,7 @@ public final class ObjectSetsView extends ViewPart
     {
         String projectName = activeProjectNameForSelection();
         ObjectSets.getInstance().ensureDefaultSetForProject(projectName);
+        ObjectSets.getInstance().ensureSystemSetForProject(projectName);
     }
 
     void refreshItemsForSetIfSelected(String setId)
@@ -760,6 +800,7 @@ public final class ObjectSetsView extends ViewPart
     {
         if (itemsViewer == null || itemsViewer.getControl().isDisposed())
             return;
+        updateSetActionButtons();
         if (iconResolver != null)
             iconResolver.clearCache();
         if (selectedSet == null)
@@ -778,8 +819,22 @@ public final class ObjectSetsView extends ViewPart
             }
             return;
         }
+        if (selectedSet.system)
+            gitChangedItemsCache = null;
         applyFilter();
         scheduleItemIconsRefresh();
+    }
+
+    private void updateSetActionButtons()
+    {
+        boolean system = selectedSet != null && selectedSet.system;
+        boolean fixed = selectedSet != null && selectedSet.isFixed();
+        if (renameButton != null && !renameButton.isDisposed())
+            renameButton.setEnabled(!fixed);
+        if (deleteButton != null && !deleteButton.isDisposed())
+            deleteButton.setEnabled(!system);
+        if (loadButton != null && !loadButton.isDisposed())
+            loadButton.setEnabled(!system);
     }
 
     private void refreshItemIcons()
@@ -826,7 +881,17 @@ public final class ObjectSetsView extends ViewPart
         String pattern = filterInput != null ? filterInput.getText().trim() : ""; //$NON-NLS-1$
         SmartMatcher matcher = new SmartMatcher(pattern);
         nameLabelProvider.setMatcher(matcher);
-        List<ObjectSets.Item> all = ObjectSets.getInstance().getItemsForDisplay(selectedSet.id);
+        List<ObjectSets.Item> all;
+        if (selectedSet.system)
+        {
+            if (gitChangedItemsCache == null)
+                gitChangedItemsCache = ObjectSetsItems.collectGitChangedItems(selectedSet.projectName);
+            all = gitChangedItemsCache;
+        }
+        else
+        {
+            all = ObjectSets.getInstance().getItemsForDisplay(selectedSet.id);
+        }
         filteredItems = new ArrayList<>();
         for (ObjectSets.Item item : all)
         {
@@ -899,6 +964,11 @@ public final class ObjectSetsView extends ViewPart
     {
         if (target == null || dragSelection == null || dragSelection.isEmpty())
             return;
+        if (target.system)
+        {
+            showSystemSetNotEditableToast(target);
+            return;
+        }
         List<ObjectSets.Item> items;
         Object first = dragSelection.getFirstElement();
         if (first instanceof RecentPlaces.Entry)
@@ -924,6 +994,11 @@ public final class ObjectSetsView extends ViewPart
     {
         if (source == null || target == null || dragSelection == null || dragSelection.isEmpty())
             return;
+        if (source.system || target.system)
+        {
+            showSystemSetNotEditableToast(target.system ? target : source);
+            return;
+        }
         List<ObjectSets.Item> items = collectObjectSetItems(dragSelection);
         ObjectSetsItems.MoveResult result = ObjectSetsItems.moveItemsToSet(
             source, target, items, getSite().getShell());
@@ -936,9 +1011,20 @@ public final class ObjectSetsView extends ViewPart
     {
         if (target == null || dragSelection == null || dragSelection.isEmpty())
             return;
+        if (target.system)
+        {
+            showSystemSetNotEditableToast(target);
+            return;
+        }
         List<ObjectSets.Item> items = collectObjectSetItems(dragSelection);
         ObjectSetsItems.addItemsToSet(target, items, getSite().getShell());
         refreshItemsTable();
+    }
+
+    private static void showSystemSetNotEditableToast(ObjectSets.SetDef set)
+    {
+        ToastNotification.show("Наборы объектов",
+            "Набор «" + set.name + "» — состав не редактируется", 4000); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     private static boolean isObjectSetItemsDrag(IStructuredSelection selection)
@@ -969,7 +1055,8 @@ public final class ObjectSetsView extends ViewPart
     private static int objectSetItemsDropDetail(ObjectSets.SetDef source, ObjectSets.SetDef target)
     {
         if (source == null || target == null || source.id.equals(target.id)
-                || !source.projectName.equals(target.projectName))
+                || !source.projectName.equals(target.projectName)
+                || source.system || target.system)
             return DND.DROP_NONE;
         return isCtrlKeyDown() ? DND.DROP_COPY : DND.DROP_MOVE;
     }
@@ -1003,7 +1090,7 @@ public final class ObjectSetsView extends ViewPart
 
     private void renameSet()
     {
-        if (selectedSet == null)
+        if (selectedSet == null || selectedSet.isFixed())
             return;
         InputDialog dialog = new InputDialog(getSite().getShell(),
             "Переименовать набор", "Имя:", selectedSet.name, null); //$NON-NLS-1$ //$NON-NLS-2$
@@ -1013,7 +1100,7 @@ public final class ObjectSetsView extends ViewPart
 
     private void deleteSet()
     {
-        if (selectedSet == null)
+        if (selectedSet == null || selectedSet.system)
             return;
         ObjectSets.getInstance().deleteSet(selectedSet.id);
         selectedSet = null;
@@ -1059,7 +1146,7 @@ public final class ObjectSetsView extends ViewPart
 
     private void removeSelectedItems()
     {
-        if (selectedSet == null)
+        if (selectedSet == null || selectedSet.system)
             return;
         List<String> keys = new ArrayList<>();
         for (ObjectSets.Item item : getSelectedItems())
@@ -1296,7 +1383,7 @@ public final class ObjectSetsView extends ViewPart
         {
             boolean has = !getSelectedItems().isEmpty();
             showNav.setEnabled(has);
-            remove.setEnabled(has && selectedSet != null);
+            remove.setEnabled(has && selectedSet != null && !selectedSet.system);
         });
     }
 
@@ -1362,7 +1449,7 @@ public final class ObjectSetsView extends ViewPart
             @Override
             public void dragOver(DropTargetEvent event)
             {
-                if (selectedSet == null)
+                if (selectedSet == null || selectedSet.system)
                 {
                     event.detail = DND.DROP_NONE;
                     return;
@@ -1421,7 +1508,7 @@ public final class ObjectSetsView extends ViewPart
             {
                 event.feedback &= ~DND.FEEDBACK_SELECT;
                 ObjectSets.SetDef set = setAt(event);
-                if (set == null)
+                if (set == null || set.system)
                 {
                     event.detail = DND.DROP_NONE;
                     return;
