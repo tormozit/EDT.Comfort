@@ -145,7 +145,7 @@ import org.eclipse.ui.texteditor.ITextEditor;
  * {@code MatchTreeItem}, {@code TreeSearchViewTablePartModel}) — из закрытого пакета
  * {@code com._1c.g5.v8.dt.internal.search.ui.*}, поэтому весь доступ — только через
  * {@link Global#getField}/{@link Global#invoke} (см. журнал: Параметры → Комфорт → «Общее логирование»).
- *
+ * 
  * <p>Включение: Параметры → Комфорт → «Улучшать списки» ({@link ComfortSettings#PREF_REPLACE_LIST_FILTERS}).
  */
 public final class ConfigSearchResultsHook implements IStartup
