@@ -22,6 +22,7 @@
     <startup class="tormozit.QueryConstructorFilterHook"/>
     <startup class="tormozit.FormEditorHook"/>
     <startup class="tormozit.TreeAutoExpand"/>
+    <startup class="tormozit.ProblemViewPropertyFocusHook"/>
     <startup class="tormozit.IrKeyBindingHook"/>
     <startup class="tormozit.IrBslEditorHoverHook"/>
     <startup class="tormozit.PriorityGlobalKeyBindingHook"/>
@@ -81,9 +82,12 @@
     <startup class="tormozit.BreakpointListHook"/>
     <startup class="tormozit.ExceptionSelectionDialogHook"/>
     <startup class="tormozit.ErrorDialogActivateHook"/>
+    <startup class="tormozit.ErrorDialogLinksHook"/>
     <startup class="tormozit.StacktracesViewInteractionHook"/>
     <startup class="tormozit.InfobaseSyncQuestionDialogHook"/>
     <startup class="tormozit.DeployConfigurationFixHook"/>
+    <startup class="tormozit.LongOperationNotifyHook"/>
+    <startup class="tormozit.LaunchArgumentsHistoryHook"/>
     <startup class="tormozit.ExportConfigurationXmlFixHook"/>
     <startup class="tormozit.FilterBySubsystemsDialogHook"/>
     <startup class="tormozit.GitChangedFileMenuHook"/>

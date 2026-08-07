@@ -2647,10 +2647,21 @@ public class CompareConfigMenuHook implements IStartup
                         return new AggregateCheck(true, false);
                     return null;
                 }
-                // MD с Формы/Реквизиты в модели, но они не учлись — не own BM.
+                // MD с Формы/Реквизиты: дети могли не учться в агрегате (пустые
+                // папки / non-checkable). Раньше всегда □ — из‑за этого «Документ1»
+                // с Свойства+Реквизиты оставался □ при уже выставленном mustBeMerged
+                // (один ребёнок «Свойства» шёл в ветку own BM и был ОК).
+                Boolean cachedMd = aggregateCheckedUi.get(node);
+                if (cachedMd != null)
+                {
+                    boolean g = Boolean.TRUE.equals(aggregateGrayedUi.get(node));
+                    return new AggregateCheck(cachedMd.booleanValue(), g);
+                }
+                if (isNodeMustBeMergedFlag(node))
+                    return new AggregateCheck(true, false);
                 if (hasContainmentChildren(node) && hasNonPropertiesCheckableChild(ctv, node))
                     return new AggregateCheck(false, false);
-                return new AggregateCheck(isNodeMustBeMergedFlag(node), false);
+                return new AggregateCheck(false, false);
             }
 
             /**
@@ -3100,6 +3111,9 @@ public class CompareConfigMenuHook implements IStartup
                     // «Справочники» без помечаемых детей: зафиксировать свою галку в
                     // TreeItem+кэше до пересчёта агрегатов (иначе stale TreeItem☑).
                     seedCollectionOwnMarksUi(ctv, targets, want);
+                    // MD с несколькими папками (Свойства+Реквизиты): ownUi=false, BM
+                    // ещё не записан — кэш want, иначе агрегат даёт □ до async.
+                    seedMdAggregateTargetsUi(ctv, targets, want);
                     paintFilteredSubtreeLeafChecks(ctv, clicked);
                     paintAggregatesBottomUpUnder(ctv, clicked);
                     if (isFilterAwareAggregateUi(clicked))
@@ -3170,6 +3184,7 @@ public class CompareConfigMenuHook implements IStartup
                     ctx.clearAggregates();
                 clearAggregateUiUnder(clicked);
                 seedCollectionOwnMarksUi(ctv, targets, want);
+                seedMdAggregateTargetsUi(ctv, targets, want);
                 paintFilteredSubtreeLeafChecks(ctv, clicked);
                 paintAggregatesBottomUpUnder(ctv, clicked);
                 if (isFilterAwareAggregateUi(clicked))
@@ -3186,6 +3201,27 @@ public class CompareConfigMenuHook implements IStartup
             {
                 return node != null && isFilterAwareAggregateUi(node)
                         && !hasFilteredCheckableDescendants(ctv, node);
+            }
+
+            /**
+             * MD/«Конфигурация» (не VirtualFolder/коллекция): в targets с ownUi=false
+             * каскад пишет mustBeMerged на узле, но UI-агрегат от детей при
+             * Свойства+Реквизиты часто даёт □. Кэш want до пересчёта.
+             */
+            private void seedMdAggregateTargetsUi(CheckboxTreeViewer ctv,
+                    List<IPartialModelNode> targets, boolean want)
+            {
+                if (ctv == null || targets == null)
+                    return;
+                for (IPartialModelNode t : targets)
+                {
+                    if (!isFilterAwareAggregateUi(t) || isAggregateCheckNode(t))
+                        continue;
+                    if (isCollectionOwnMarkTarget(ctv, t))
+                        continue;
+                    putAggregateUi(t, want, false);
+                    paintTreeItemCheckNoExpand(ctv, t, want, false);
+                }
             }
 
             /**

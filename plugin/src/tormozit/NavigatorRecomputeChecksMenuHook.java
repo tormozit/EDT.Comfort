@@ -42,7 +42,7 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
     private static final String HOOK_MARKER = "tormozit.navigatorRecomputeChecksHook"; //$NON-NLS-1$
     private static final String ITEM_TEXT = "Проверить"; //$NON-NLS-1$
     private static final String ITEM_TOOLTIP =
-            "Пересчитать все проверки по объекту" //$NON-NLS-1$
+            "Пересчитать все проверки по объекту с вложенными" //$NON-NLS-1$
             + Global.pluginSignForTooltip();
 
     @Override
@@ -169,13 +169,9 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
                     @Override
                     public void widgetSelected(SelectionEvent ev)
                     {
-                        Global.tempLog("navigator-recompute-checks", "widgetSelected called"); //$NON-NLS-1$ //$NON-NLS-2$
                         ISelection current = viewer.getSelection();
                         if (!(current instanceof IStructuredSelection currentStructured))
-                        {
-                            Global.tempLog("navigator-recompute-checks", "STOP: selection not IStructuredSelection"); //$NON-NLS-1$ //$NON-NLS-2$
                             return;
-                        }
                         recomputeChecks(currentStructured);
                     }
                 });
@@ -207,21 +203,17 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
 
     private static void recomputeChecks(IStructuredSelection selection)
     {
-        Global.tempLog("navigator-recompute-checks", "recomputeChecks: start, selection=" + selection); //$NON-NLS-1$ //$NON-NLS-2$
         EObject model = NavigatorElementModels.resolveEObject(selection.getFirstElement());
-        Global.tempLog("navigator-recompute-checks", "recomputeChecks: model=" + model); //$NON-NLS-1$ //$NON-NLS-2$
         if (!(model instanceof IBmObject) && !(model instanceof com._1c.g5.v8.dt.metadata.mdclass.BasicForm))
         {
-            Global.tempLog("navigator-recompute-checks", "STOP: selected model is not an IBmObject/BasicForm"); //$NON-NLS-1$ //$NON-NLS-2$
+            toast("Выбранный элемент нельзя точечно перепроверить.");
             return;
         }
         IResource resource = NavigatorResourceResolver.resolveFirst(selection);
         IProject project = resource != null ? resource.getProject() : null;
-        Global.tempLog("navigator-recompute-checks", //$NON-NLS-1$
-            "recomputeChecks: resource=" + resource + ", project=" + project); //$NON-NLS-1$ //$NON-NLS-2$
         if (project == null)
         {
-            Global.tempLog("navigator-recompute-checks", "STOP: project is null"); //$NON-NLS-1$ //$NON-NLS-2$
+            toast("Не удалось определить проект выбранного объекта.");
             return;
         }
 
@@ -231,14 +223,26 @@ public final class NavigatorRecomputeChecksMenuHook implements IStartup
             {
                 resource.refreshLocal(IResource.DEPTH_INFINITE, new NullProgressMonitor());
             }
-            catch (CoreException e)
+            catch (CoreException ignored)
             {
-                Global.tempLogException("navigator-recompute-checks", "refreshLocal failed for " + resource, e); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
 
-        Global.tempLog("navigator-recompute-checks", "recomputeChecks: delegating to ComfortCheckRecompute"); //$NON-NLS-1$ //$NON-NLS-2$
-        ComfortCheckRecompute.recomputeObjects(project, List.of(model));
+        try
+        {
+            ComfortCheckRecompute.recomputeObjects(project, List.of(model));
+        }
+        catch (Throwable t)
+        {
+            toast("Ошибка при запуске проверки: " + t.getClass().getSimpleName());
+        }
+    }
+
+    private static void toast(String message)
+    {
+        Display display = Display.getDefault();
+        if (display != null && !display.isDisposed())
+            display.asyncExec(() -> ToastNotification.show(ITEM_TEXT, message, 5_000));
     }
 
     private static CommonViewer getCommonViewer(IViewPart navigator)

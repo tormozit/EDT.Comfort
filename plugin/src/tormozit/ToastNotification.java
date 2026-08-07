@@ -91,7 +91,8 @@ public final class ToastNotification
      *
      * @param title       заголовок (null = не отображать)
      * @param message     основной текст
-     * @param durationMs  время показа в мс до начала затухания
+     * @param durationMs  время показа в мс до начала затухания;
+     *                    {@code <= 0} — без автоскрытия (только крестик / клик)
      * @param actionLabel текст гиперссылки «Выполнить» (null = не отображать)
      * @param action      действие при клике на гиперссылку; произвольные параметры
      *                    передаются через замыкание лямбды (null = не отображать)
@@ -268,69 +269,78 @@ public final class ToastNotification
                 });
             }
 
-            // --- 2. Ховер ---
-            final boolean[] isHovered    = { false };
-            final boolean[] isFading     = { false };
-            final int[]     currentAlpha = { 255 };
-            final int[]     remainingMs  = { durationMs };
+            // --- 2–3. Ховер + таймер удержания/затухания (пропуск при sticky) ---
+            if (durationMs > 0)
+            {
+                final boolean[] isHovered    = { false };
+                final boolean[] isFading     = { false };
+                final int[]     currentAlpha = { 255 };
+                final int[]     remainingMs  = { durationMs };
 
-            Listener hoverListener = e ->
-            {
-                if      (e.type == SWT.MouseEnter) { isHovered[0] = true; }
-                else if (e.type == SWT.MouseExit
-                         && !shell.getBounds().contains(display.getCursorLocation()))
-                         { isHovered[0] = false; }
-            };
-            shell.addListener(SWT.MouseEnter, hoverListener);
-            shell.addListener(SWT.MouseExit,  hoverListener);
-            for (Control child : shell.getChildren())
-            {
-                child.addListener(SWT.MouseEnter, hoverListener);
-                child.addListener(SWT.MouseExit,  hoverListener);
-            }
-            if (actionLink != null)
-            {
-                actionLink.addListener(SWT.MouseEnter, hoverListener);
-                actionLink.addListener(SWT.MouseExit,  hoverListener);
-            }
-
-            // --- 3. Таймер удержания + затухание ---
-            Runnable[] loop = new Runnable[1];
-            loop[0] = () ->
-            {
-                if (shell.isDisposed()) return;
-
-                if (isHovered[0])
+                Listener hoverListener = e ->
                 {
-                    if (isFading[0] || currentAlpha[0] < 255)
+                    if (shell.isDisposed())
+                        return;
+                    if (e.type == SWT.MouseEnter)
                     {
-                        shell.setAlpha(255);
-                        currentAlpha[0] = 255;
-                        isFading[0]     = false;
+                        isHovered[0] = true;
                     }
-                    remainingMs[0] = durationMs;
-                    display.timerExec(100, loop[0]);
-                    return;
+                    else if (e.type == SWT.MouseExit
+                        && !shell.getBounds().contains(display.getCursorLocation()))
+                    {
+                        isHovered[0] = false;
+                    }
+                };
+                shell.addListener(SWT.MouseEnter, hoverListener);
+                shell.addListener(SWT.MouseExit,  hoverListener);
+                for (Control child : shell.getChildren())
+                {
+                    child.addListener(SWT.MouseEnter, hoverListener);
+                    child.addListener(SWT.MouseExit,  hoverListener);
+                }
+                if (actionLink != null)
+                {
+                    actionLink.addListener(SWT.MouseEnter, hoverListener);
+                    actionLink.addListener(SWT.MouseExit,  hoverListener);
                 }
 
-                if (remainingMs[0] > 0)
+                Runnable[] loop = new Runnable[1];
+                loop[0] = () ->
                 {
-                    remainingMs[0] -= 100;
-                    display.timerExec(100, loop[0]);
-                }
-                else
-                {
-                    isFading[0]     = true;
-                    int decrement   = Math.max(1, 255 * ANIMATION_STEP_MS / FADE_OUT_DURATION_MS);
-                    currentAlpha[0] = Math.max(0, currentAlpha[0] - decrement);
-                    shell.setAlpha(currentAlpha[0]);
-                    if (currentAlpha[0] > 0)
-                        display.timerExec(ANIMATION_STEP_MS, loop[0]);
+                    if (shell.isDisposed()) return;
+
+                    if (isHovered[0])
+                    {
+                        if (isFading[0] || currentAlpha[0] < 255)
+                        {
+                            shell.setAlpha(255);
+                            currentAlpha[0] = 255;
+                            isFading[0]     = false;
+                        }
+                        remainingMs[0] = durationMs;
+                        display.timerExec(100, loop[0]);
+                        return;
+                    }
+
+                    if (remainingMs[0] > 0)
+                    {
+                        remainingMs[0] -= 100;
+                        display.timerExec(100, loop[0]);
+                    }
                     else
-                        shell.dispose();
-                }
-            };
-            display.timerExec(SLIDE_IN_DURATION_MS + 50, loop[0]);
+                    {
+                        isFading[0]     = true;
+                        int decrement   = Math.max(1, 255 * ANIMATION_STEP_MS / FADE_OUT_DURATION_MS);
+                        currentAlpha[0] = Math.max(0, currentAlpha[0] - decrement);
+                        shell.setAlpha(currentAlpha[0]);
+                        if (currentAlpha[0] > 0)
+                            display.timerExec(ANIMATION_STEP_MS, loop[0]);
+                        else
+                            shell.dispose();
+                    }
+                };
+                display.timerExec(SLIDE_IN_DURATION_MS + 50, loop[0]);
+            }
         });
 
         return holder[0];

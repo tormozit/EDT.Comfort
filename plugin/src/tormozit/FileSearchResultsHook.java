@@ -94,7 +94,12 @@ public final class FileSearchResultsHook implements IStartup
         IWorkbenchPage.MATCH_INPUT | IWorkbenchPage.MATCH_ID | IWorkbenchPage.MATCH_IGNORE_SIZE;
 
     private static volatile boolean searchQueryRunning;
+    /** Пока true — сразу переводим выделение с первого листа на корневую строку (как ConfigSearch). */
+    private static volatile boolean guardFirstRootSelection;
     private static volatile boolean searchCoversMultipleProjects;
+    /** Минимальный интервал пересборки таблицы, пока поиск ещё идёт. */
+    private static final int TABLE_REFRESH_WHILE_SEARCHING_MS = 500;
+    private static volatile long lastTableRefreshWhileSearchingMs;
 
     private static final Map<TableViewer, TableColumn> TABLE_COLUMNS_BY_VIEWER = new IdentityHashMap<>();
     private static TableViewer cachedResultTableViewer;
@@ -123,6 +128,9 @@ public final class FileSearchResultsHook implements IStartup
                 {
                     Global.tempLog("search-tree-empty", "file.queryAdded: " + describeQuery(query));
                     searchCoversMultipleProjects = computeCoversMultipleProjects(query);
+                    // Переключение из истории не даёт queryStarting — поднимаем guard сами.
+                    if (!searchQueryRunning)
+                        guardFirstRootSelection = true;
                     onQueryEvent();
                 }
                 @Override public void queryRemoved(ISearchQuery query)    {}
@@ -130,7 +138,12 @@ public final class FileSearchResultsHook implements IStartup
                 {
                     Global.tempLog("search-tree-empty", "file.queryStarting: " + describeQuery(query));
                     searchQueryRunning = true;
+                    guardFirstRootSelection = true;
+                    lastTableRefreshWhileSearchingMs = 0L;
                     searchCoversMultipleProjects = computeCoversMultipleProjects(query);
+                    // Не ждём queryFinished: штат уже выделяет первый лист при появлении
+                    // результатов — наш watch/redirect должен стартовать сразу.
+                    onQueryEvent();
                 }
                 @Override public void queryFinished(ISearchQuery query)
                 {
@@ -200,8 +213,7 @@ public final class FileSearchResultsHook implements IStartup
             if (view != null)
             {
                 schedulePatch(view, 0);
-                if (!searchQueryRunning)
-                    selectFirstTreeResult(view, 0);
+                startFirstRootWatch(view, 0);
             }
         });
     }
@@ -427,6 +439,13 @@ public final class FileSearchResultsHook implements IStartup
         treeViewer.addPostSelectionChangedListener(event -> {
             if (!ComfortSettings.isReplaceListFiltersEnabled())
                 return;
+            // EDT при появлении результатов спускается к первому листу — сразу на корень,
+            // не дожидаясь конца поиска и таймера watch (как ConfigSearchResultsHook).
+            if (guardFirstRootSelection && redirectSelectionToFirstRoot(treeViewer))
+            {
+                updateTableFromSelection(treeViewer, tableViewer);
+                return;
+            }
             updateTableFromSelection(treeViewer, tableViewer);
         });
 
@@ -1221,64 +1240,125 @@ public final class FileSearchResultsHook implements IStartup
         return null;
     }
 
-    private static void selectFirstTreeResult(IViewPart view, int attempt)
+    /**
+     * Пока идёт поиск / активен guard — как только в дереве есть первая строка, выделяем корень
+     * (а не штатный первый лист) и обновляем таблицу. Раньше ждали {@code queryFinished}, из‑за
+     * чего между активацией листа и нашего корня была заметная пауза на всё время поиска.
+     * Паттерн — {@code ConfigSearchResultsHook.startFirstRootWatch}.
+     */
+    private static void startFirstRootWatch(IViewPart view, int attempt)
     {
         if (!ComfortSettings.isReplaceListFiltersEnabled())
+            return;
+        if (!searchQueryRunning && !guardFirstRootSelection)
             return;
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
-        int delay = attempt == 0 ? 0 : 80;
+        // Первый тик без паузы; дальше опрос корня раз в 100 мс.
+        int delay = attempt == 0 ? 0 : 100;
         display.timerExec(delay, () -> {
             if (!ComfortSettings.isReplaceListFiltersEnabled())
+                return;
+            if (!searchQueryRunning && !guardFirstRootSelection)
                 return;
             if (!(view instanceof ISearchResultViewPart))
                 return;
             ISearchResultPage activePage = ((ISearchResultViewPart) view).getActivePage();
             if (activePage == null || !activePage.getClass().getName().contains(PAGE_CLASS_MARKER))
             {
-                if (attempt < 40)
-                    selectFirstTreeResult(view, attempt + 1);
+                if (searchQueryRunning || attempt < 80)
+                    startFirstRootWatch(view, attempt + 1);
                 return;
             }
             Object viewerObj = Global.getField(activePage, "fViewer");
             if (!(viewerObj instanceof TreeViewer tv))
             {
-                if (attempt < 40)
-                    selectFirstTreeResult(view, attempt + 1);
+                if (searchQueryRunning || attempt < 80)
+                    startFirstRootWatch(view, attempt + 1);
                 return;
             }
             Tree tree = tv.getTree();
-            if (tree == null || tree.isDisposed() || tree.getItemCount() == 0)
+            if (tree == null || tree.isDisposed() || tree.getItemCount() == 0
+                || tree.getData(HOOKED_KEY) == null)
             {
-                if (attempt < 40)
-                    selectFirstTreeResult(view, attempt + 1);
-                return;
-            }
-            if (tree.getData(HOOKED_KEY) == null)
-            {
-                if (attempt < 40)
-                    selectFirstTreeResult(view, attempt + 1);
+                if (searchQueryRunning || attempt < 80)
+                    startFirstRootWatch(view, attempt + 1);
                 return;
             }
 
-            Object first = tree.getItem(0).getData();
-            if (first != null)
+            Object firstRoot = tree.getItem(0).getData();
+            if (firstRoot == null)
             {
-                tv.setSelection(new StructuredSelection(first), true);
-                log("selectFirstTreeResult: selected " + first);
+                if (searchQueryRunning || attempt < 80)
+                    startFirstRootWatch(view, attempt + 1);
+                return;
             }
 
-            // Штатное поведение панели поиска (как и у ConfigSearchResultsHook) само выделяет
-            // первый терминальный узел (совпадение), и reveal у этого выделения разворачивает путь
-            // до него независимо от наших правил — сбрасываем и разворачиваем заново по своим.
-            // Дерево этой панели переиспользуется между поисками и не виртуальное, поэтому
-            // собственный (одноразовый) ретрай TreeAutoExpand при установке хука не перепроверяет
-            // повторные поиски — нужен вызов из точки, где мы точно знаем, что результаты уже
-            // загружены. При поиске по нескольким проектам — не разворачиваем заново, второй корень
-            // может появиться позже первого.
-            TreeAutoExpand.resetExpansionAfterReveal(tv, !searchCoversMultipleProjects);
+            Object current = tv.getStructuredSelection().getFirstElement();
+            boolean redirected = false;
+            if (!firstRoot.equals(current))
+            {
+                log("watchFirstRoot: " + current + " -> " + firstRoot);
+                tv.setSelection(new StructuredSelection(firstRoot), true);
+                // reveal у setSelection развернул путь до терминального узла — сбрасываем
+                // и разворачиваем по своим правилам (как selectFirstTreeResult раньше).
+                TreeAutoExpand.resetExpansionAfterReveal(tv, !searchCoversMultipleProjects);
+                redirected = true;
+            }
+            else if (!searchCoversMultipleProjects && attempt == 0)
+            {
+                // Первый тик уже на корне — применяем правила разворота один раз.
+                TreeAutoExpand.notifyContentLoaded(tv);
+            }
+
+            TableViewer tableViewer = cachedResultTableViewer;
+            // Таблицу: сразу при редиректе/старте/финише; во время поиска — не чаще 500 мс.
+            long now = System.currentTimeMillis();
+            boolean dueWhileSearching = searchQueryRunning
+                && (now - lastTableRefreshWhileSearchingMs >= TABLE_REFRESH_WHILE_SEARCHING_MS);
+            if (tableViewer != null && !tableViewer.getTable().isDisposed()
+                && (redirected || attempt == 0 || !searchQueryRunning || dueWhileSearching))
+            {
+                updateTableFromSelection(tv, tableViewer);
+                if (searchQueryRunning)
+                    lastTableRefreshWhileSearchingMs = now;
+            }
+
+            if (searchQueryRunning)
+            {
+                startFirstRootWatch(view, attempt + 1);
+                return;
+            }
+            if (!guardFirstRootSelection)
+                return;
+            if (firstRoot.equals(tv.getStructuredSelection().getFirstElement()))
+                guardFirstRootSelection = false;
+            else if (attempt < 60)
+                startFirstRootWatch(view, attempt + 1);
+            else
+                guardFirstRootSelection = false;
         });
+    }
+
+    /**
+     * @return {@code true}, если выделение сменили на первую корневую строку
+     */
+    private static boolean redirectSelectionToFirstRoot(TreeViewer treeViewer)
+    {
+        Tree tree = treeViewer.getTree();
+        if (tree == null || tree.isDisposed() || tree.getItemCount() == 0)
+            return false;
+        Object firstRoot = tree.getItem(0).getData();
+        if (firstRoot == null)
+            return false;
+        Object current = treeViewer.getStructuredSelection().getFirstElement();
+        if (firstRoot.equals(current))
+            return false;
+        log("redirectToFirstRoot: " + current + " -> " + firstRoot);
+        treeViewer.setSelection(new StructuredSelection(firstRoot), true);
+        TreeAutoExpand.resetExpansionAfterReveal(treeViewer, !searchCoversMultipleProjects);
+        return true;
     }
 
     private static void registerGlobalCopyHandler(TableViewer tableViewer, Object page, IViewPart view)

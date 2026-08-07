@@ -66,6 +66,7 @@ import com._1c.g5.v8.dt.form.model.Form;
 import com._1c.g5.v8.dt.form.model.FormAttribute;
 import com._1c.g5.v8.dt.form.model.FormCommand;
 import com._1c.g5.v8.dt.form.model.FormField;
+import com._1c.g5.v8.dt.form.model.FormItem;
 import com._1c.g5.v8.dt.form.model.FormParameter;
 import com._1c.g5.v8.dt.mcore.Help;
 import com._1c.g5.v8.dt.mcore.HelpPage;
@@ -3470,7 +3471,7 @@ public final class ConfigSearchResultsHook implements IStartup
      * {@link #hierarchicalPropertyPath} не останавливался на объекте-владельце (полученном ЭТИМ,
      * а не {@code eContainer()}, путём) и добавлял лишний ведущий сегмент с его именем.
      */
-    private static boolean sameBmObject(EObject a, EObject b)
+    static boolean sameBmObject(EObject a, EObject b)
     {
         if (a == b)
             return true;
@@ -3691,6 +3692,12 @@ public final class ConfigSearchResultsHook implements IStartup
      * для поиска поля в панели ({@link PropertyFieldFocus}) нужен этот вариант, а не
      * {@link #dcsFeatureLabel} (тот собирает сегменты пути, где пробелы недопустимы).
      */
+    /** Подпись признака для фокуса поля панели «Свойства» ({@link PropertyFieldFocus}). */
+    static String featureLabelForFocus(EStructuralFeature feature)
+    {
+        return rawFeatureLabel(feature);
+    }
+
     private static String rawFeatureLabel(EStructuralFeature feature)
     {
         if (feature == null)
@@ -4787,7 +4794,12 @@ public final class ConfigSearchResultsHook implements IStartup
      * связи «компонент → признак» — карта {@code componentToDefinitionMap} построителя палитры
      * (см. {@link #findFieldComponent}).
      */
-    private static final class PropertyFieldFocus
+    /**
+     * Активация поля панели «Свойства». Package-visible: второй потребитель —
+     * {@link ProblemViewPropertyFocusHook} (ошибки битых ссылок на картинки).
+     * При появлении третьего потребителя — вынести в {@code PropertyFieldFocus.java}.
+     */
+    static final class PropertyFieldFocus
     {
         /** Панель наполняется асинхронно (MdPropertySheetPage ведёт свой прогресс) — ждём до ~6с. */
         private static final int MAX_ATTEMPTS = 40;
@@ -4842,17 +4854,32 @@ public final class ConfigSearchResultsHook implements IStartup
         }
 
         /**
-         * Объект, чьи свойства покажет панель: реквизит/измерение/ресурс МД-объекта
-         * ({@code BasicFeature}) либо элемент формы (те же типы, что и в
-         * {@link ConfigSearchResultsHook#findNearestFormChild} — именно они выделяются в редакторе
-         * формы и попадают в панель). Общий обход для обоих случаев: логика «поле панели = признак,
-         * которым владелец содержит ветку с вхождением» одна и та же — для
-         * «Ресурсы.ВажностьПроблемы.Тип.Типы» это {@code type}, для
-         * «Элементы.ВажностьПроблемы.ПутьКДанным.Objects.ValueType.Типы» — {@code dataPath}.
+         * Прямой фокус: объект палитры и признак уже известны (маркер проверки и т.п.),
+         * без вычисления {@link #nearestMember}/{@link #targetFeature}.
+         */
+        static void scheduleExact(IWorkbenchPage workbenchPage, EObject member, EStructuralFeature feature)
+        {
+            if (workbenchPage == null || member == null || feature == null)
+            {
+                Global.tempLog(LOG_TOPIC, "scheduleExact skip: page/member/feature null"); //$NON-NLS-1$
+                return;
+            }
+            Global.tempLog(LOG_TOPIC, "scheduleExact member=" + describeEObject(member) //$NON-NLS-1$
+                    + " feature=" + featureName(feature)); //$NON-NLS-1$
+            Object token = new Object();
+            activeToken = token;
+            retry(workbenchPage, member, feature, 0, token);
+        }
+
+        /**
+         * Объект, чьи свойства покажет панель: реквизит МД ({@code BasicFeature}), элемент формы
+         * ({@link FormItem} — группа/кнопка/поле/декорация), команда/реквизит/параметр формы.
+         * {@code FormItem} нужен для картинок на {@code PopupGroupExtInfo}: палитра показывает
+         * группу, а не ExtInfo.
          */
         private static boolean isPanelMember(EObject obj)
         {
-            return obj instanceof BasicFeature || obj instanceof FormField || obj instanceof FormAttribute
+            return obj instanceof BasicFeature || obj instanceof FormItem || obj instanceof FormAttribute
                 || obj instanceof FormCommand || obj instanceof FormParameter;
         }
 
@@ -4870,6 +4897,9 @@ public final class ConfigSearchResultsHook implements IStartup
          * лежит внутри {@code TypeDescription}, а её {@code eContainingFeature()} — как раз
          * {@code type}). Если вхождение — прямо в самом реквизите (напр. его «Имя»/«Комментарий»),
          * ветки нет и берётся признак самого вхождения.
+         * <p>
+         * Для {@code ExtInfo.picture} containment ребёнка дал бы «extInfo» — берём исходный
+         * {@code matchFeature}, если он принадлежит цепочке от leaf до member.
          */
         private static EStructuralFeature targetFeature(EObject leaf, EStructuralFeature matchFeature)
         {
@@ -4877,10 +4907,24 @@ public final class ConfigSearchResultsHook implements IStartup
             for (EObject cur = leaf; cur != null; cur = cur.eContainer())
             {
                 if (isPanelMember(cur))
+                {
+                    if (matchFeature != null && featureOwnedByChain(leaf, cur, matchFeature))
+                        return matchFeature;
                     return child != null ? child.eContainingFeature() : matchFeature;
+                }
                 child = cur;
             }
             return null;
+        }
+
+        private static boolean featureOwnedByChain(EObject from, EObject upToExclusive, EStructuralFeature feature)
+        {
+            for (EObject cur = from; cur != null && cur != upToExclusive; cur = cur.eContainer())
+            {
+                if (cur.eClass().getEAllStructuralFeatures().contains(feature))
+                    return true;
+            }
+            return false;
         }
 
         private static void retry(IWorkbenchPage workbenchPage, EObject member,
@@ -4939,7 +4983,7 @@ public final class ConfigSearchResultsHook implements IStartup
             // прекратив ожидание раньше, чем оверлей вообще успеет присоединиться. Поэтому здесь
             // либо оверлей, либо ничего: если его нет (составной тип — комбобокса под ним нет
             // вовсе), то фокусировать и нечего.
-            String label = rawFeatureLabel(feature);
+            String label = featureLabelForFocus(feature);
             if (TypeComboOverlayHook.coversProperty(label))
             {
                 boolean overlayFocused = TypeComboOverlayHook.focusPropertyOverlay(view, label);

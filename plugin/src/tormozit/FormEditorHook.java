@@ -24,6 +24,7 @@ import org.eclipse.swt.events.MenuEvent;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Menu;
@@ -83,11 +84,14 @@ import com._1c.g5.v8.dt.ui.util.ContentUtil;
  *
  *   <li><b>Сортировка подменю «События».</b>
  *       Упорядочивает пункты подменю «События» контекстного меню дерева элементов
- *       формы в соответствии с порядком конфигуратора 1С.
+ *       и предпросмотра (WYSIWYG) формы в соответствии с порядком конфигуратора 1С.
  *       Механизм: глобальный display-фильтр на {@link SWT#MenuDetect};
- *       на SWT-меню дерева вешается {@link MenuAdapter}, после построения
- *       корневого меню находим каскад «События» и подключаем {@link IMenuListener}
- *       к его JFace {@link MenuManager}.
+ *       на SWT-меню дерева / {@code WysiwygNativeComposite} вешается {@link MenuAdapter},
+ *       после построения корневого меню находим каскад «События» и подключаем
+ *       {@link IMenuListener} к его JFace {@link MenuManager}.
+ *       У предпросмотра меню своё: EDT вызывает {@code contributeToMenu} на
+ *       {@code wysiwygViewer.getControl()} при каждом {@code mouseDown}
+ *       ({@code FormEditorPage$2}), отдельно от меню дерева элементов.
  *
  *   <li><b>«Показать в навигаторе» в меню реквизитов.</b>
  *       Для полей источника данных, порождённых метаданными,
@@ -583,22 +587,43 @@ public class FormEditorHook implements IStartup
 
     private static void handleMenuDetect(Event e)
     {
-        if (!(e.widget instanceof Tree))
+        if (!(e.widget instanceof Control))
             return;
-        Tree tree = (Tree) e.widget;
-
-        Menu swtMenu = tree.getMenu();
-        if (swtMenu == null || swtMenu.isDisposed())
-            return;
+        Control control = (Control) e.widget;
 
         FormEditorPage page = FormEditor.getActiveFormEditorPage();
         Tree attrTree = page != null ? getAttributesTree(page) : null;
-        if (page != null && tree == attrTree)
+
+        if (control instanceof Tree tree)
         {
-            hookAttributesMenu(tree, swtMenu);
+            Menu swtMenu = tree.getMenu();
+            if (swtMenu == null || swtMenu.isDisposed())
+                return;
+            if (page != null && tree == attrTree)
+            {
+                hookAttributesMenu(tree, swtMenu);
+                return;
+            }
+            hookEventsOrderOnMenu(swtMenu);
             return;
         }
 
+        if (!isWysiwygControl(control))
+            return;
+
+        Menu swtMenu = resolveContextMenu(control);
+        if (swtMenu == null)
+            return;
+        hookEventsOrderOnMenu(swtMenu);
+    }
+
+    /**
+     * Навешивает listener на корневое SWT-меню: после показа ищем «События»
+     * и подключаем сортировку. Меню предпросмотра создаётся заново на каждый
+     * {@code mouseDown}, поэтому маркер ставится на конкретный экземпляр {@link Menu}.
+     */
+    private static void hookEventsOrderOnMenu(Menu swtMenu)
+    {
         if (Boolean.TRUE.equals(swtMenu.getData(HOOK_MARKER)))
             return;
         swtMenu.setData(HOOK_MARKER, Boolean.TRUE);
@@ -608,7 +633,7 @@ public class FormEditorHook implements IStartup
             @Override
             public void menuShown(MenuEvent me)
             {
-                onFormTreeMenuShown((Menu) me.widget);
+                onFormItemsMenuShown((Menu) me.widget);
             }
         });
     }
@@ -617,7 +642,7 @@ public class FormEditorHook implements IStartup
      * Корневое меню уже построено — ищем каскад «События» и подключаем сортировку
      * к его JFace MenuManager.
      */
-    private static void onFormTreeMenuShown(Menu menu)
+    private static void onFormItemsMenuShown(Menu menu)
     {
         if (menu == null || menu.isDisposed())
             return;
@@ -625,6 +650,29 @@ public class FormEditorHook implements IStartup
         MenuManager eventsMenu = findEventsMenuManager(menu);
         if (eventsMenu != null)
             hookEventsMenuManager(eventsMenu);
+    }
+
+    /** {@code WysiwygNativeComposite} или потомок (MenuDetect может прийти с дочернего). */
+    private static boolean isWysiwygControl(Control control)
+    {
+        for (Control c = control; c != null; c = c.getParent())
+        {
+            if (WYSIWYG_CLASS.equals(c.getClass().getSimpleName()))
+                return true;
+        }
+        return false;
+    }
+
+    /** Меню на контроле или ближайшем предке (как ищет SWT при MenuDetect). */
+    private static Menu resolveContextMenu(Control control)
+    {
+        for (Control c = control; c != null; c = c.getParent())
+        {
+            Menu menu = c.getMenu();
+            if (menu != null && !menu.isDisposed())
+                return menu;
+        }
+        return null;
     }
 
     /**

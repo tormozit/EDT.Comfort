@@ -79,9 +79,19 @@ final class FilterHistoryUi
      */
     static Label addHistoryButton(Composite row, Text filterControl, String scopeId)
     {
+        return addHistoryButton(row, filterControl, scopeId,
+            "История фильтров (или Ctrl+↓ в поле)" + Global.pluginSignForTooltip()); //$NON-NLS-1$
+    }
+
+    /**
+     * То же, что {@link #addHistoryButton(Composite, Text, String)}, с произвольной
+     * подсказкой (например, для поля «Параметр запуска», где слово «фильтров» неуместно).
+     */
+    static Label addHistoryButton(Composite row, Text filterControl, String scopeId, String tooltip)
+    {
         if (row == null || row.isDisposed())
             return null;
-        Label label = createGlyphButton(row, "▾", "История фильтров (или Ctrl+↓ в поле) (Комфорт)"); //$NON-NLS-1$ //$NON-NLS-2$
+        Label label = createGlyphButton(row, "▾", tooltip); //$NON-NLS-1$
         label.addListener(SWT.MouseUp, e -> showPopup(label, filterControl, scopeId));
         Composite parent = row.getParent();
         if (parent != null && !parent.isDisposed())

@@ -3,6 +3,8 @@ package tormozit;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -12,6 +14,7 @@ import org.eclipse.core.commands.Command;
 import org.eclipse.core.commands.ParameterizedCommand;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.emf.common.util.TreeIterator;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.ui.IWorkbenchPage;
@@ -31,6 +34,7 @@ import com._1c.g5.v8.dt.core.platform.IDerivedDataManagerProvider;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 import com._1c.g5.v8.dt.metadata.mdclass.AbstractForm;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicForm;
+import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.ui.util.OpenHelper;
 import com._1c.g5.v8.dt.validation.marker.IMarkerManager;
 import com._1c.g5.v8.dt.validation.marker.Marker;
@@ -50,11 +54,12 @@ import com.e1c.g5.v8.dt.check.settings.ICheckRepository;
  * Штатный {@code CheckContextCollectingSession#addFullCheck} этого недостаточно: он не снимает
  * флаг {@code inactive} у контекста, и помеченные проверки не запускаются. Эталон — путь
  * «Проверить» в меню навигатора.
+ * <p>
+ * Для объекта МД дополнительно помечаются вложенные {@link BasicForm} (у форм свой BM).
+ * {@code BasicForm.getForm()} вызывается только внутри {@code updateDerivedData}.
  */
 public final class ComfortCheckRecompute
 {
-    private static final String LOG_TOPIC = "comfort-check-recompute"; //$NON-NLS-1$
-
     /** Сегмент обычных (NORMAL) модельных проверок. */
     private static final String M_CHECKS_SEGMENT = "M_CHECKS_SEGMENT"; //$NON-NLS-1$
 
@@ -79,13 +84,30 @@ public final class ComfortCheckRecompute
      */
     public static void recomputeObjects(IProject project, Collection<? extends EObject> objects)
     {
+        try
+        {
+            recomputeObjectsBody(project, objects);
+        }
+        catch (Throwable t)
+        {
+            toast("Проверить", "Ошибка при запуске проверки: " + t.getClass().getSimpleName() //$NON-NLS-1$
+                + (t.getMessage() != null ? " — " + t.getMessage() : "")); //$NON-NLS-1$
+        }
+    }
+
+    private static void recomputeObjectsBody(IProject project, Collection<? extends EObject> objects)
+    {
         if (project == null || objects == null || objects.isEmpty())
+        {
+            toast("Проверить", "Не выбран объект для проверки."); //$NON-NLS-1$
             return;
+        }
 
         Set<String> checkIds = enabledCheckIds(project);
         if (checkIds.isEmpty())
         {
-            Global.tempLog(LOG_TOPIC, "нет включённых проверок для проекта " + project.getName()); //$NON-NLS-1$
+            toast("Проверить", //$NON-NLS-1$
+                "В профиле проекта нет включённых проверок — перепроверять нечего.");
             return;
         }
 
@@ -93,90 +115,83 @@ public final class ComfortCheckRecompute
         IDerivedDataManager manager = provider != null ? provider.get(project) : null;
         if (manager == null)
         {
-            Global.tempLog(LOG_TOPIC, "IDerivedDataManager недоступен для " + project.getName()); //$NON-NLS-1$
+            toast("Проверить", "Менеджер проверок недоступен для проекта " + project.getName() + "."); //$NON-NLS-1$
             return;
         }
 
         if (!manager.isIdle())
         {
-            Global.tempLog(LOG_TOPIC, "менеджер производных данных ещё занят предыдущим циклом" //$NON-NLS-1$
-                + " (isIdle=false) — пометка пропущена, иначе она молча не учитывается движком"); //$NON-NLS-1$
             toast("Проверить", //$NON-NLS-1$
                 "Предыдущая перепроверка ещё выполняется. Повторите через несколько секунд.");
             return;
         }
 
-        String threadName = Thread.currentThread().getName();
-        Global.tempLog(LOG_TOPIC, "перепроверка: проект=" + project.getName() //$NON-NLS-1$
-            + ", объектов=" + objects.size() + ", проверок=" + checkIds.size() //$NON-NLS-1$ //$NON-NLS-2$
-            + ", поток=" + threadName + ", isIdle=" + manager.isIdle() //$NON-NLS-1$ //$NON-NLS-2$
-            + ", status=" + manager.getDerivedDataStatus()); //$NON-NLS-1$
-
-        List<IBmObject> targets = new ArrayList<>();
+        // Источники — как пришли из UI (для формы это BasicForm/DocumentFormImpl).
+        // Form.model.Form резолвим только внутри updateDerivedData.
+        List<EObject> sources = new ArrayList<>();
         for (EObject object : objects)
         {
-            EObject target = toCheckTarget(object);
-            if (!(target instanceof IBmObject bmObject))
-            {
-                Global.tempLog(LOG_TOPIC, "пропущен не-BM объект: " + target); //$NON-NLS-1$
+            if (object == null)
                 continue;
-            }
-            Global.tempLog(LOG_TOPIC, "цель: id=" + bmObject.bmGetId() + ", fqn=" + bmObject.bmGetFqn() //$NON-NLS-1$ //$NON-NLS-2$
-                + ", isComputed(до)=" + manager.isComputed(bmObject.bmGetId(), checkIds)); //$NON-NLS-1$
-            targets.add(bmObject);
+            if (object instanceof IBmObject || object instanceof BasicForm)
+                sources.add(object);
         }
-
-        if (targets.isEmpty())
+        if (sources.isEmpty())
         {
-            Global.tempLog(LOG_TOPIC, "нет ни одного BM-объекта среди переданных — перепроверять нечего"); //$NON-NLS-1$
+            toast("Проверить", "Выбранный элемент нельзя точечно перепроверить."); //$NON-NLS-1$
             return;
         }
 
-        String objectsLabel = describeObjects(objects);
+        String objectsLabel = describeObjects(sources);
         toast("Проверить", //$NON-NLS-1$
-            "Запущена проверка объекта " + objectsLabel + ". По окончании будет показано уведомление.");
+            "Запущена проверка объекта " + objectsLabel
+                + " с вложенными. По окончании будет показано уведомление.");
 
+        List<IBmObject> targets = new ArrayList<>();
+        Set<Long> targetIds = new HashSet<>();
         int[] marked = { 0 };
         boolean scheduled = manager.updateDerivedData(new IDerivedDataUpdate()
         {
             @Override
             public void update(IContextCollectingSession session, IBmModel model)
             {
-                Global.tempLog(LOG_TOPIC, "update(): поток=" + Thread.currentThread().getName()); //$NON-NLS-1$
-                for (IBmObject bmObject : targets)
+                for (EObject source : sources)
                 {
-                    boolean okM = markSegmentFullRebuild(session, bmObject, M_CHECKS_SEGMENT, checkIds);
-                    boolean okCm = markSegmentFullRebuild(session, bmObject, CM_CHECKS_SEGMENT, checkIds);
-                    if (okM || okCm)
-                        marked[0]++;
+                    for (EObject item : expandToCheckItems(source))
+                    {
+                        EObject target = toCheckTarget(item);
+                        if (!(target instanceof IBmObject bmObject))
+                            continue;
+                        long id = bmObject.bmGetId();
+                        if (!targetIds.add(id))
+                            continue;
+                        targets.add(bmObject);
+                        boolean okM = markSegmentFullRebuild(session, bmObject, M_CHECKS_SEGMENT, checkIds);
+                        boolean okCm = markSegmentFullRebuild(session, bmObject, CM_CHECKS_SEGMENT, checkIds);
+                        if (okM || okCm)
+                            marked[0]++;
+                    }
                 }
             }
         }, 0L, "comfort-recompute-checks"); //$NON-NLS-1$
-        Global.tempLog(LOG_TOPIC, "updateDerivedData вернул=" + scheduled + ", помечено объектов=" + marked[0]); //$NON-NLS-1$ //$NON-NLS-2$
-
-        if (marked[0] == 0)
+        if (!scheduled)
         {
-            Global.tempLog(LOG_TOPIC, "ни один объект не помечен — перепроверять нечего"); //$NON-NLS-1$
+            toast("Проверить", "Не удалось запланировать перепроверку объекта " + objectsLabel + "."); //$NON-NLS-1$
             return;
         }
-        try
+        if (targets.isEmpty())
         {
-            manager.applyForcedUpdates();
-            Global.tempLog(LOG_TOPIC, "перепроверка запланирована, помечено объектов: " + marked[0] //$NON-NLS-1$
-                + ", isIdle(после)=" + manager.isIdle() //$NON-NLS-1$
-                + ", status(после)=" + manager.getDerivedDataStatus()); //$NON-NLS-1$
-            for (IBmObject bmObject : targets)
-            {
-                Global.tempLog(LOG_TOPIC, "цель: id=" + bmObject.bmGetId() //$NON-NLS-1$
-                    + ", isComputed(сразу после applyForcedUpdates)=" //$NON-NLS-1$
-                    + manager.isComputed(bmObject.bmGetId(), checkIds));
-            }
-            notifyWhenComplete(manager, project, objectsLabel, objects, targets);
+            toast("Проверить", "Не удалось определить объект проверки для " + objectsLabel + "."); //$NON-NLS-1$
+            return;
         }
-        catch (RuntimeException e)
+        if (marked[0] == 0)
         {
-            Global.tempLogException(LOG_TOPIC, "applyForcedUpdates не удался", e); //$NON-NLS-1$
+            toast("Проверить", //$NON-NLS-1$
+                "Не удалось пометить проверки для " + objectsLabel + " — перепроверка не запущена.");
+            return;
         }
+        manager.applyForcedUpdates();
+        notifyWhenComplete(manager, project, objectsLabel, sources, targets);
     }
 
     /**
@@ -192,17 +207,17 @@ public final class ComfortCheckRecompute
             try
             {
                 boolean completed = manager.waitAllComputations(WAIT_COMPLETION_TIMEOUT_MS);
-                Global.tempLog(LOG_TOPIC, "ожидание завершения: completed=" + completed); //$NON-NLS-1$
                 if (completed)
                 {
-                    int errorCount = countErrors(project, targets);
+                    int errorCount = countErrors(project, targets, objects);
                     toastWithAction("Проверить", "Завершена проверка объекта " + objectsLabel //$NON-NLS-1$
-                        + ". Обнаружено " + errorCount + " ошибок.", //$NON-NLS-1$ //$NON-NLS-2$
+                        + " с вложенными. Обнаружено " + errorCount + " ошибок.", //$NON-NLS-1$ //$NON-NLS-2$
                         () -> showResults(objects), "Показать результаты"); //$NON-NLS-1$
                 }
                 else
                 {
-                    toast("Проверить", "Перепроверка объекта " + objectsLabel + " не завершилась за " //$NON-NLS-1$
+                    toast("Проверить", "Перепроверка объекта " + objectsLabel //$NON-NLS-1$
+                        + " с вложенными не завершилась за " //$NON-NLS-1$
                         + (WAIT_COMPLETION_TIMEOUT_MS / 1000) + " с.");
                 }
             }
@@ -220,30 +235,67 @@ public final class ComfortCheckRecompute
     }
 
     /**
-     * Считает маркеры уровня {@link MarkerSeverity#ERRORS} для проверенных объектов, включая
-     * вложенные (формы, модули и т.п.) — через {@link IMarkerManager#getNestedMarkers}.
+     * Считает маркеры уровня «ошибка» для проверенных объектов, включая вложенные.
+     * <p>
+     * Штатные и наши проверки пишут {@link MarkerSeverity#MAJOR}/{@link MarkerSeverity#CRITICAL}/
+     * {@link MarkerSeverity#BLOCKER} (см. {@code IssueSeverity}), а не {@link MarkerSeverity#ERRORS}.
      */
-    private static int countErrors(IProject project, List<IBmObject> targets)
+    private static int countErrors(IProject project, List<IBmObject> targets,
+        Collection<? extends EObject> sources)
     {
         IMarkerManager markerManager = Global.getOsgiService(IMarkerManager.class);
         if (markerManager == null)
-        {
-            Global.tempLog(LOG_TOPIC, "IMarkerManager недоступен — подсчёт ошибок пропущен"); //$NON-NLS-1$
             return 0;
-        }
-        int count = 0;
+
+        LinkedHashSet<Object> objectIds = new LinkedHashSet<>();
         for (IBmObject bmObject : targets)
+            objectIds.add(Long.valueOf(bmObject.bmGetId()));
+        if (sources != null)
         {
-            Marker[] markers = markerManager.getNestedMarkers(project, bmObject.bmGetId());
-            if (markers == null)
-                continue;
-            for (Marker marker : markers)
+            for (EObject source : sources)
             {
-                if (marker.getSeverity() == MarkerSeverity.ERRORS)
-                    count++;
+                if (source instanceof IBmObject bm)
+                    objectIds.add(Long.valueOf(bm.bmGetId()));
             }
         }
-        return count;
+
+        int errorCount = 0;
+        HashSet<String> seen = new HashSet<>();
+        for (Object objectId : objectIds)
+        {
+            for (Marker[] batch : new Marker[][] {
+                markerManager.getNestedMarkers(project, objectId),
+                markerManager.getMarkers(project, objectId) })
+            {
+                if (batch == null)
+                    continue;
+                for (Marker marker : batch)
+                {
+                    if (marker == null)
+                        continue;
+                    String markerId = marker.getMarkerId();
+                    if (markerId != null)
+                    {
+                        if (!seen.add(markerId))
+                            continue;
+                    }
+                    else if (!seen.add("idhash:" + System.identityHashCode(marker))) //$NON-NLS-1$
+                        continue;
+
+                    if (isErrorLevel(marker.getSeverity()))
+                        errorCount++;
+                }
+            }
+        }
+        return errorCount;
+    }
+
+    private static boolean isErrorLevel(MarkerSeverity severity)
+    {
+        return severity == MarkerSeverity.ERRORS
+            || severity == MarkerSeverity.BLOCKER
+            || severity == MarkerSeverity.CRITICAL
+            || severity == MarkerSeverity.MAJOR;
     }
 
     /**
@@ -267,9 +319,8 @@ public final class ComfortCheckRecompute
             {
                 new OpenHelper(page).openEditor(object);
             }
-            catch (RuntimeException e)
+            catch (RuntimeException ignored)
             {
-                Global.tempLogException(LOG_TOPIC, "не удалось открыть редактор объекта " + object, e); //$NON-NLS-1$
             }
             // Переключение области — после открытия редактора: панель определяет «текущий объект»
             // по активной части (редактору), а showView ниже сразу же увёл бы фокус на панель.
@@ -280,9 +331,8 @@ public final class ComfortCheckRecompute
         {
             page.showView(ProblemViewMarkers.PROBLEM_VIEW_ID);
         }
-        catch (PartInitException e)
+        catch (PartInitException ignored)
         {
-            Global.tempLogException(LOG_TOPIC, "не удалось открыть панель «Ошибки конфигурации»", e); //$NON-NLS-1$
         }
     }
 
@@ -300,37 +350,93 @@ public final class ComfortCheckRecompute
             ParameterizedCommand parameterizedCommand = ParameterizedCommand.generateCommand(command, parameters);
             handlerService.executeCommand(parameterizedCommand, null);
         }
-        catch (Exception e)
+        catch (Exception ignored)
         {
-            Global.tempLogException(LOG_TOPIC, "не удалось переключить область отбора на «Текущий объект»", e); //$NON-NLS-1$
         }
     }
 
     /**
      * Человекочитаемое имя объектов для тостов запуска/завершения перепроверки, например
      * {@code ОбщаяФорма.Форма1} или {@code 3 объекта: ..., ..., ...} для нескольких.
+     * <p>
+     * Для {@link BasicForm} не вызываем {@code bmGetFqn()} — на форме он тянет модель Form
+     * до сессии DD и срывает последующий {@code updateDerivedData}.
      */
     private static String describeObjects(Collection<? extends EObject> objects)
     {
         List<String> names = new ArrayList<>();
         for (EObject object : objects)
-        {
-            String name = null;
-            if (object instanceof IBmObject bmObject)
-            {
-                name = MdTypeMapping.bmFqnToRuFullName(bmObject.bmGetFqn());
-                if (name == null)
-                    name = bmObject.bmGetFqn();
-            }
-            if (name == null)
-                name = object.eClass().getName();
-            names.add(name);
-        }
+            names.add(describeOneSafe(object));
         if (names.isEmpty())
             return "?"; //$NON-NLS-1$
         if (names.size() == 1)
             return names.get(0);
         return names.size() + " объекта: " + String.join(", ", names); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static String describeOneSafe(EObject object)
+    {
+        if (object == null)
+            return "?"; //$NON-NLS-1$
+        try
+        {
+            if (object instanceof BasicForm basicForm)
+            {
+                String formName = basicForm instanceof MdObject md ? md.getName() : null;
+                if (formName == null || formName.isBlank())
+                    formName = basicForm.eClass().getName();
+                return "Форма." + formName; //$NON-NLS-1$
+            }
+            if (object instanceof IBmObject bmObject)
+            {
+                String name = MdTypeMapping.bmFqnToRuFullName(bmObject.bmGetFqn());
+                if (name != null)
+                    return name;
+                String fqn = bmObject.bmGetFqn();
+                if (fqn != null)
+                    return fqn;
+            }
+            if (object instanceof MdObject md && md.getName() != null && !md.getName().isBlank())
+                return object.eClass().getName() + "." + md.getName(); //$NON-NLS-1$
+        }
+        catch (RuntimeException ignored)
+        {
+        }
+        return object.eClass().getName();
+    }
+
+    /**
+     * Что помечать проверками для выбранного узла.
+     * <p>
+     * Сам объект всегда. Если это не форма, а объект МД (документ, справочник…) — ещё все
+     * вложенные {@link BasicForm}: у форм свой BM ({@code form.model.Form}), и fullRebuild
+     * родителя их не пересчитывает.
+     * <p>
+     * Только перечисление {@code BasicForm} из containment (без {@code getForm()}): сам Form
+     * резолвится в {@link #toCheckTarget} уже в сессии DD.
+     */
+    private static List<EObject> expandToCheckItems(EObject source)
+    {
+        List<EObject> items = new ArrayList<>();
+        if (source == null)
+            return items;
+        items.add(source);
+        if (source instanceof BasicForm)
+            return items;
+        try
+        {
+            TreeIterator<EObject> it = source.eAllContents();
+            while (it.hasNext())
+            {
+                EObject next = it.next();
+                if (next instanceof BasicForm)
+                    items.add(next);
+            }
+        }
+        catch (RuntimeException ignored)
+        {
+        }
+        return items;
     }
 
     /**
@@ -339,7 +445,9 @@ public final class ComfortCheckRecompute
      * Из навигатора и из области отбора панели приходит объект метаданных формы
      * ({@code BasicForm}: {@code DocumentFormImpl}, {@code CommonFormImpl} и т.п.), а проверки форм
      * зарегистрированы на {@code form.model.Form} — вложенный объект, который и привязан к
-     * BM-транзакции. Без этого перехода объект молча отбраковывается.
+     * BM-транзакции. Без этого перехода контекст сегмента проверок для формы не находится.
+     * <p>
+     * Вызывать только внутри {@code IDerivedDataUpdate#update}.
      */
     private static EObject toCheckTarget(EObject object)
     {
@@ -364,11 +472,7 @@ public final class ComfortCheckRecompute
         {
             Object ctx = session.getObjectContext(bmObject, segmentId);
             if (ctx == null)
-            {
-                Global.tempLog(LOG_TOPIC, "контекст null для сегмента " + segmentId //$NON-NLS-1$
-                    + ", объект=" + bmObject); //$NON-NLS-1$
                 return false;
-            }
             if (ctx instanceof IObjectDerivedDataContext typed)
             {
                 typed.setFullRebuild(true);
@@ -384,17 +488,10 @@ public final class ComfortCheckRecompute
                 typed.setFullRebuild(true);
             else
                 ctx.getClass().getMethod("setFullRebuild", boolean.class).invoke(ctx, Boolean.TRUE); //$NON-NLS-1$
-            String stateAfter = ctx instanceof IObjectDerivedDataContext typed
-                ? "fullRebuild=" + typed.isFullRebuild() + ", inactive=" + typed.isInactive() //$NON-NLS-1$ //$NON-NLS-2$
-                    + ", version=" + typed.getVersion() //$NON-NLS-1$
-                : "(не IObjectDerivedDataContext, класс=" + ctx.getClass().getName() + ")"; //$NON-NLS-1$ //$NON-NLS-2$
-            Global.tempLog(LOG_TOPIC, "контекст готов: сегмент=" + segmentId //$NON-NLS-1$
-                + ", объект=" + bmObject + ", " + stateAfter); //$NON-NLS-1$ //$NON-NLS-2$
             return true;
         }
         catch (Exception e)
         {
-            Global.tempLogException(LOG_TOPIC, "пометка сегмента " + segmentId + " не удалась", e); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
         }
     }

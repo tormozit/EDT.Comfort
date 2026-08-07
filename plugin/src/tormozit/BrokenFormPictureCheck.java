@@ -30,7 +30,8 @@ import com.e1c.g5.v8.dt.check.settings.IssueType;
  */
 public class BrokenFormPictureCheck extends BasicCheck<Void>
 {
-    private static final String CHECK_ID = "tormozit.comfort.check.brokenFormPicture";
+    /** Идентификатор проверки — для фильтрации маркеров в панели «Ошибки конфигурации». */
+    public static final String CHECK_ID = "tormozit.comfort.check.brokenFormPicture";
 
     private static final FeatureNameLocalizationProvider FEATURE_NAMES = new FeatureNameLocalizationProvider();
 

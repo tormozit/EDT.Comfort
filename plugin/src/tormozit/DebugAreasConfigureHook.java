@@ -16,7 +16,6 @@ import org.eclipse.debug.ui.DebugUITools;
 import org.eclipse.jface.action.ActionContributionItem;
 import org.eclipse.jface.action.IAction;
 import org.eclipse.jface.action.IContributionItem;
-import org.eclipse.jface.action.IContributionManager;
 import org.eclipse.jface.action.IMenuListener;
 import org.eclipse.jface.action.IMenuManager;
 import org.eclipse.swt.widgets.Display;
@@ -180,12 +179,8 @@ public final class DebugAreasConfigureHook implements IStartup
         IAction viaSets = findToolbarActionViaActionSets(window);
         if (viaSets != null)
             return viaSets;
-        // Фолбэк 1: command-service -> ActionHandler (в e4 завёрнут в прокси).
-        IAction viaCommand = findToolbarActionByCommand();
-        if (viaCommand != null)
-            return viaCommand;
-        // Фолбэк 2: legacy-coolbar (в e4 обычно пуст).
-        return findToolbarActionInCoolbar(window);
+        // Фолбэк: command-service -> ActionHandler (в e4 завёрнут в прокси, обычно null).
+        return findToolbarActionByCommand();
     }
 
     private static IAction findToolbarActionViaActionSets(IWorkbenchWindow window)
@@ -278,74 +273,6 @@ public final class DebugAreasConfigureHook implements IStartup
                 // no-op
             }
         }
-        return null;
-    }
-
-    private static IAction findToolbarActionInCoolbar(IWorkbenchWindow window)
-    {
-        try
-        {
-            Method getCool = lookup(window.getClass(), "getCoolBarManager"); //$NON-NLS-1$
-            if (getCool == null)
-                return null;
-            getCool.setAccessible(true);
-            Object cool = getCool.invoke(window);
-            if (!(cool instanceof IContributionManager cm))
-                return null;
-            return scanForAction(cm, TOOLBAR_ACTION_ID);
-        }
-        catch (Exception e)
-        {
-            return null;
-        }
-    }
-
-    private static IAction scanForAction(IContributionManager mgr, String id)
-    {
-        for (IContributionItem item : mgr.getItems())
-        {
-            IAction found = itemToAction(item, id);
-            if (found != null)
-                return found;
-        }
-        return null;
-    }
-
-    private static IAction itemToAction(IContributionItem item, String id)
-    {
-        if (item == null)
-            return null;
-        if (item instanceof ActionContributionItem aci && aci.getId() != null && id.equals(aci.getId()))
-            return aci.getAction();
-        Object sub = subManagerOf(item);
-        if (sub instanceof IContributionManager cm)
-        {
-            IAction found = scanForAction(cm, id);
-            if (found != null)
-                return found;
-        }
-        return null;
-    }
-
-    private static Object subManagerOf(IContributionItem item)
-    {
-        try
-        {
-            Method m = lookup(item.getClass(), "getToolBarManager"); //$NON-NLS-1$
-            if (m != null)
-            {
-                m.setAccessible(true);
-                Object o = m.invoke(item);
-                if (o instanceof IContributionManager)
-                    return o;
-            }
-        }
-        catch (Exception ignored)
-        {
-            // no-op
-        }
-        if (item instanceof IMenuManager mm)
-            return mm;
         return null;
     }
 

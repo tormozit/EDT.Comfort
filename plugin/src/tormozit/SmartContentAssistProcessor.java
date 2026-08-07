@@ -1,8 +1,11 @@
 package tormozit;
 
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -14,13 +17,21 @@ import java.util.Set;
 
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
+import org.eclipse.core.runtime.ListenerList;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.emf.common.util.EList;
 import org.eclipse.emf.ecore.EObject;
+import org.eclipse.emf.ecore.util.EcoreUtil;
+import org.eclipse.jface.text.AbstractDocument;
 import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.IDocumentExtension4;
+import org.eclipse.jface.text.IDocumentListener;
 import org.eclipse.jface.text.ITextViewer;
+import org.eclipse.jface.text.link.LinkedModeModel;
+import org.eclipse.jface.text.link.LinkedPosition;
+import org.eclipse.jface.text.link.LinkedPositionGroup;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
@@ -31,19 +42,31 @@ import org.eclipse.jface.text.contentassist.IContentAssistProcessor;
 import org.eclipse.jface.text.contentassist.IContextInformation;
 import org.eclipse.jface.text.contentassist.IContextInformationValidator;
 import org.eclipse.swt.graphics.Point;
+import org.eclipse.xtext.naming.QualifiedName;
 import org.eclipse.xtext.nodemodel.ICompositeNode;
 import org.eclipse.xtext.nodemodel.INode;
 import org.eclipse.xtext.nodemodel.util.NodeModelUtils;
 import org.eclipse.xtext.resource.EObjectAtOffsetHelper;
+import org.eclipse.xtext.resource.IEObjectDescription;
 import org.eclipse.xtext.resource.XtextResource;
+import org.eclipse.xtext.scoping.IScope;
+import org.eclipse.xtext.scoping.IScopeProvider;
 import org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.util.concurrent.IUnitOfWork;
 
 import com._1c.g5.v8.dt.bsl.model.DynamicFeatureAccess;
 import com._1c.g5.v8.dt.bsl.model.Expression;
+import com._1c.g5.v8.dt.bsl.model.ProposalElement;
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
+import com._1c.g5.v8.dt.mcore.Ctor;
 import com._1c.g5.v8.dt.mcore.DuallyNamedElement;
+import com._1c.g5.v8.dt.mcore.FakeCtor;
+import com._1c.g5.v8.dt.mcore.FakeParameter;
+import com._1c.g5.v8.dt.mcore.McorePackage;
+import com._1c.g5.v8.dt.mcore.ParamSet;
+import com._1c.g5.v8.dt.mcore.Parameter;
+import com._1c.g5.v8.dt.mcore.Type;
 import com._1c.g5.v8.dt.mcore.TypeItem;
 
 /**
@@ -566,7 +589,11 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     static List<ICompletionProposal> collapseOptionalEdtOverlapsInMergedList(
         List<ICompletionProposal> merged)
     {
-        if (merged == null || merged.size() <= 1)
+        if (merged == null || merged.isEmpty())
+            return merged;
+        for (ICompletionProposal p : merged)
+            CtorMinParamsInsert.trimIfNeeded(unwrapProposal(p));
+        if (merged.size() <= 1)
             return merged;
         Map<String, List<ICompletionProposal>> byKey = new LinkedHashMap<>();
         for (ICompletionProposal p : merged)
@@ -617,8 +644,11 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
 
     static ICompletionProposal[] collapseOptionalEdtOverlapsArray(ICompletionProposal[] merged)
     {
-        if (merged == null || merged.length <= 1)
+        if (merged == null || merged.length == 0)
             return merged != null ? merged : EMPTY;
+        CtorMinParamsInsert.trimAll(merged);
+        if (merged.length <= 1)
+            return merged;
         List<ICompletionProposal> collapsed =
             collapseOptionalEdtOverlapsInMergedList(java.util.Arrays.asList(merged));
         if (collapsed.size() == merged.length)
@@ -2753,6 +2783,14 @@ return stripEmptyPlaceholderProposals(result);
     private static final Set<String> BARE_CONSTRUCTOR_TYPE_NAMES_LC = Set.of(
         "структура", "массив"); //$NON-NLS-1$ //$NON-NLS-2$
 
+    /** Имя типа из {@link #BARE_CONSTRUCTOR_TYPE_NAMES_LC} (бесскобочный конструктор после {@code Новый}). */
+    static boolean isBareConstructorTypeName(String name)
+    {
+        if (name == null || name.isEmpty())
+            return false;
+        return BARE_CONSTRUCTOR_TYPE_NAMES_LC.contains(name.toLowerCase(java.util.Locale.ROOT));
+    }
+
     /**
      * Разрешено ли добавить в merged ИР-предложение, не совпавшее по {@link #mergeMatchKey}
      * ни с одной EDT-очередью. Для не-бесскобочных (метод/скобочный шаблон) — не наша забота,
@@ -4204,11 +4242,35 @@ return finalizeListForIrAssistDisplay(buildDelegateOrderedList(memberStockFullLi
         if (proposal instanceof SmartCompletionProposal)
         {
             SmartCompletionProposal wrapped = (SmartCompletionProposal) proposal;
+            CtorMinParamsInsert.trimIfNeeded(wrapped.getDelegate());
             if (delegateOrder < 0 || wrapped.getDelegateOrder() == delegateOrder)
                 return proposal;
             return new SmartCompletionProposal(wrapped.getDelegate(), delegateOrder);
         }
+        CtorMinParamsInsert.trimIfNeeded(proposal);
         return new SmartCompletionProposal(proposal, delegateOrder);
+    }
+
+    /** Перед apply конструктора — FakeCtor выбранной перегрузки в DataEvent. */
+    static void bindCtorFakeCtorBeforeApply(ICompletionProposal proposal)
+    {
+        bindCtorFakeCtorBeforeApply(proposal, null);
+    }
+
+    static void bindCtorFakeCtorBeforeApply(ICompletionProposal proposal, IDocument document)
+    {
+        CtorMinParamsInsert.bindSelectedFakeCtorBeforeApply(proposal, document);
+    }
+
+    /** Страховка в documentAboutToBeChanged: ключ DataEvent = фактический текст вставки. */
+    static void ensureCtorDataEventForInsert(DocumentEvent event)
+    {
+        CtorMinParamsInsert.ensureDataEventForInsert(event);
+    }
+
+    static void clearCtorPendingApplyState()
+    {
+        CtorMinParamsInsert.clearPendingApplyState();
     }
 
     /** Только для {@link #computeForPopupRefresh} — не для штатного keystroke path. */
@@ -4970,6 +5032,794 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             }
             String name = type.getName();
             return name != null ? name : type.toString();
+        }
+    }
+
+    /**
+     * Конструкторы/методы EDT часто вставляют max-слоты. Обрезаем replacement до
+     * {@code getMinParams()}; перед apply кладём выбранный {@link FakeCtor}/{@link ParamSet}
+     * в {@code DataEvent.objects} (иначе при общем ключе вставки побеждает чужая перегрузка).
+     */
+    private static final class CtorMinParamsInsert
+    {
+        private static final String BSL_DOCUMENT_LISTENER_SIMPLE =
+            "BslProposalProvider$BslDocumentListener"; //$NON-NLS-1$
+
+        /** Исходный ключ DataEvent до обрезки replacement (identity proposal → oldKey). */
+        private static final IdentityHashMap<ConfigurableCompletionProposal, String> ORIGINAL_DATA_EVENT_KEY =
+            new IdentityHashMap<>();
+
+        /** Выбранная сигнатура (FakeCtor / ParamSet) на время apply. */
+        private static final ThreadLocal<EObject> PENDING_SIGNATURE = new ThreadLocal<>();
+
+        /** Ожидаемый текст вставки / ключ DataEvent на время apply. */
+        private static final ThreadLocal<String> PENDING_INSERT_KEY = new ThreadLocal<>();
+
+        /** Ключ DataEvent до обрезки (max-запятые). */
+        private static final ThreadLocal<String> PENDING_OLD_KEY = new ThreadLocal<>();
+
+        private CtorMinParamsInsert()
+        {
+        }
+
+        static void clearPendingApplyState()
+        {
+            PENDING_SIGNATURE.remove();
+            PENDING_INSERT_KEY.remove();
+            PENDING_OLD_KEY.remove();
+        }
+
+        /**
+         * До {@code DataEvent.doIt}: перенести ключ при обрезке и/или подставить
+         * выбранную сигнатуру в {@code objects}.
+         */
+        static void ensureDataEventForInsert(DocumentEvent event)
+        {
+            if (event == null || event.getText() == null || event.getText().isEmpty())
+                return;
+            if (Boolean.TRUE.equals(SmartCompletionProposal.IR_PROPOSAL_APPLY_IN_PROGRESS.get()))
+            {
+                Global.tempLog("ctor-min-params", "ensureSkipIrApply text=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + event.getText());
+                return;
+            }
+            EObject pending = PENDING_SIGNATURE.get();
+            if (pending == null)
+                return;
+            String text = event.getText();
+            String oldKey = PENDING_OLD_KEY.get();
+            IDocument doc = event.getDocument();
+            IDocumentListener listener = findBslDocumentListener(doc);
+            if (listener == null)
+            {
+                Global.tempLog("ctor-min-params", "ensureFail noListener"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            try
+            {
+                Field mapField = listener.getClass().getDeclaredField("map"); //$NON-NLS-1$
+                mapField.setAccessible(true);
+                Object mapObj = mapField.get(listener);
+                if (!(mapObj instanceof Map<?, ?> rawMap))
+                    return;
+                @SuppressWarnings("unchecked")
+                Map<Object, Object> map = (Map<Object, Object>) rawMap;
+                Object existing = map.get(text);
+                if (existing != null)
+                {
+                    setDataEventObjects(existing, pending);
+                    Global.tempLog("ctor-min-params", "ensureObjectsOnly key=" + text //$NON-NLS-1$ //$NON-NLS-2$
+                        + " sig=" + signatureLabel(pending)); //$NON-NLS-1$
+                    return;
+                }
+                Global.tempLog("ctor-min-params", "ensureMigrate text=" + text //$NON-NLS-1$ //$NON-NLS-2$
+                    + " oldKey=" + oldKey); //$NON-NLS-1$
+                migrateDataEvent(listener, doc, text, oldKey, pending, event.getOffset());
+            }
+            catch (Exception ex)
+            {
+                Global.tempLog("ctor-min-params", "ensureEx " + ex); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        static void trimAll(ICompletionProposal[] proposals)
+        {
+            if (proposals == null)
+                return;
+            for (ICompletionProposal p : proposals)
+                trimIfNeeded(unwrapProposal(p));
+        }
+
+        static void trimIfNeeded(ICompletionProposal proposal)
+        {
+            if (!(proposal instanceof ConfigurableCompletionProposal cp))
+                return;
+            EObject signature = readSignatureObject(cp);
+            if (signature == null)
+                return;
+            String oldRepl = cp.getReplacementString();
+            if (oldRepl == null || oldRepl.isEmpty())
+                return;
+            int open = oldRepl.indexOf('(');
+            int close = oldRepl.lastIndexOf(')');
+            if (open < 0 || close <= open)
+                return;
+            String inside = oldRepl.substring(open + 1, close);
+            int currentSlots = countEmptySlots(inside);
+            if (currentSlots <= 0)
+                return;
+            int minParams = resolveMinParams(signature, currentSlots);
+            if (minParams < 0 || minParams >= currentSlots)
+            {
+                Global.tempLog("ctor-min-params", "trimSkip minParams=" + minParams //$NON-NLS-1$ //$NON-NLS-2$
+                    + " currentSlots=" + currentSlots //$NON-NLS-1$
+                    + " sig=" + signatureLabel(signature) //$NON-NLS-1$
+                    + " class=" + cp.getClass().getSimpleName()); //$NON-NLS-1$
+                return;
+            }
+            String commaStr = detectCommaStr(inside);
+            String newInside = buildEmptyInside(minParams, commaStr);
+            String newRepl = oldRepl.substring(0, open + 1) + newInside + oldRepl.substring(close);
+            if (newRepl.equals(oldRepl))
+                return;
+            if (!ORIGINAL_DATA_EVENT_KEY.containsKey(cp))
+            {
+                String linkKey = readStringField(cp, "linkModelContent"); //$NON-NLS-1$
+                ORIGINAL_DATA_EVENT_KEY.put(cp, linkKey != null && !linkKey.isEmpty()
+                    ? linkKey
+                    : oldRepl);
+            }
+            cp.setReplacementString(newRepl);
+            cp.setCursorPosition(open + 1);
+            syncInitialReplacementContent(cp, newRepl);
+            Global.tempLog("ctor-min-params", "trimOk minParams=" + minParams //$NON-NLS-1$ //$NON-NLS-2$
+                + " sig=" + signatureLabel(signature) //$NON-NLS-1$
+                + " oldKey=" + ORIGINAL_DATA_EVENT_KEY.get(cp) //$NON-NLS-1$
+                + " newRepl=" + newRepl //$NON-NLS-1$
+                + " class=" + cp.getClass().getSimpleName()); //$NON-NLS-1$
+        }
+
+        /**
+         * Перед apply: выбранная перегрузка в DataEvent; при обрезке — перенос ключа.
+         */
+        static void bindSelectedFakeCtorBeforeApply(ICompletionProposal proposal, IDocument document)
+        {
+            ICompletionProposal raw = unwrapProposal(proposal);
+            if (!(raw instanceof ConfigurableCompletionProposal cp))
+                return;
+            EObject signature = readSignatureObject(cp);
+            String key = cp.getReplacementString();
+            String oldKey = ORIGINAL_DATA_EVENT_KEY.get(cp);
+            if (oldKey == null)
+                oldKey = readStringField(cp, "linkModelContent"); //$NON-NLS-1$
+            Global.tempLog("ctor-min-params", "bindEnter sig=" + signatureLabel(signature) //$NON-NLS-1$ //$NON-NLS-2$
+                + " key=" + key //$NON-NLS-1$
+                + " oldKey=" + oldKey //$NON-NLS-1$
+                + " additional=" + additionalClass(cp) //$NON-NLS-1$
+                + " class=" + raw.getClass().getSimpleName()); //$NON-NLS-1$
+            if (signature == null || key == null || key.isEmpty())
+                return;
+            PENDING_SIGNATURE.set(signature);
+            PENDING_INSERT_KEY.set(key);
+            PENDING_OLD_KEY.set(oldKey);
+            IDocument doc = document;
+            if (doc == null)
+            {
+                SourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
+                doc = viewer != null ? viewer.getDocument() : null;
+            }
+            if (doc == null)
+            {
+                Global.tempLog("ctor-min-params", "bindDefer noDoc (ensure on insert)"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            IDocumentListener listener = resolveDocEventListener(cp, doc);
+            if (listener == null)
+            {
+                Global.tempLog("ctor-min-params", "bindDefer noListener (ensure on insert)"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            try
+            {
+                boolean needMigrate = oldKey != null && !oldKey.equals(key);
+                if (!needMigrate)
+                {
+                    if (bindObjectsOnly(listener, key, oldKey, signature))
+                    {
+                        ORIGINAL_DATA_EVENT_KEY.remove(cp);
+                        return;
+                    }
+                }
+                migrateDataEvent(listener, doc, key, oldKey, signature, cp.getReplacementOffset());
+                ORIGINAL_DATA_EVENT_KEY.remove(cp);
+            }
+            catch (Exception ex)
+            {
+                Global.tempLog("ctor-min-params", "bindEx " + ex); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+
+        /** Подставить objects без пересборки LinkedMode (общий ключ перегрузок). */
+        private static boolean bindObjectsOnly(IDocumentListener listener, String newKey,
+            String oldKey, EObject signature) throws Exception
+        {
+            Field mapField = listener.getClass().getDeclaredField("map"); //$NON-NLS-1$
+            mapField.setAccessible(true);
+            Object mapObj = mapField.get(listener);
+            if (!(mapObj instanceof Map<?, ?> rawMap))
+                return false;
+            @SuppressWarnings("unchecked")
+            Map<Object, Object> map = (Map<Object, Object>) rawMap;
+            Object dataEvent = map.get(newKey);
+            if (dataEvent == null && oldKey != null)
+                dataEvent = map.get(oldKey);
+            if (dataEvent == null)
+            {
+                String namePrefix = insertNamePrefix(newKey);
+                int wantSlots = signatureSlotHint(signature);
+                for (Map.Entry<Object, Object> e : map.entrySet())
+                {
+                    if (!(e.getKey() instanceof String mapKey) || namePrefix == null)
+                        continue;
+                    if (!mapKey.startsWith(namePrefix))
+                        continue;
+                    if (wantSlots > 0 && countEmptySlots(insideOf(mapKey)) == wantSlots)
+                    {
+                        dataEvent = e.getValue();
+                        break;
+                    }
+                    if (dataEvent == null)
+                        dataEvent = e.getValue();
+                }
+            }
+            if (dataEvent == null)
+                return false;
+            setDataEventObjects(dataEvent, signature);
+            // Если нашли под другим ключом с тем же текстом вставки — уже newKey.
+            if (!map.containsKey(newKey))
+            {
+                // donor мог быть oldKey с тем же содержимым слотов
+                for (Map.Entry<Object, Object> e : new ArrayList<>(map.entrySet()))
+                {
+                    if (e.getValue() == dataEvent && e.getKey() instanceof String dk
+                        && !dk.equals(newKey))
+                    {
+                        map.remove(dk);
+                        break;
+                    }
+                }
+                map.put(newKey, dataEvent);
+            }
+            Global.tempLog("ctor-min-params", "bindObjectsOnly key=" + newKey //$NON-NLS-1$ //$NON-NLS-2$
+                + " sig=" + signatureLabel(signature)); //$NON-NLS-1$
+            return true;
+        }
+
+        private static void setDataEventObjects(Object dataEvent, EObject signature)
+            throws Exception
+        {
+            Field objectsField = dataEvent.getClass().getDeclaredField("objects"); //$NON-NLS-1$
+            objectsField.setAccessible(true);
+            objectsField.set(dataEvent, List.of(signature));
+        }
+
+        private static void migrateDataEvent(IDocumentListener listener, IDocument doc,
+            String newKey, String oldKey, EObject signature, int replacementOffset)
+            throws Exception
+        {
+            if (listener == null || doc == null || newKey == null || signature == null)
+                return;
+            Field mapField = listener.getClass().getDeclaredField("map"); //$NON-NLS-1$
+            mapField.setAccessible(true);
+            Object mapObj = mapField.get(listener);
+            if (!(mapObj instanceof Map<?, ?> rawMap))
+                return;
+            @SuppressWarnings("unchecked")
+            Map<Object, Object> map = (Map<Object, Object>) rawMap;
+            Object dataEvent = map.get(newKey);
+            String donorKey = dataEvent != null ? newKey : null;
+            if (dataEvent == null && oldKey != null && !oldKey.equals(newKey))
+            {
+                dataEvent = map.get(oldKey);
+                if (dataEvent != null)
+                    donorKey = oldKey;
+            }
+            if (dataEvent == null)
+            {
+                String namePrefix = insertNamePrefix(newKey);
+                Object best = null;
+                String bestKey = null;
+                int bestSlots = -1;
+                int wantSlots = signatureSlotHint(signature);
+                for (Map.Entry<Object, Object> e : map.entrySet())
+                {
+                    if (!(e.getKey() instanceof String mapKey) || namePrefix == null)
+                        continue;
+                    if (!mapKey.startsWith(namePrefix))
+                        continue;
+                    int mapSlots = countEmptySlots(insideOf(mapKey));
+                    if (wantSlots > 0 && mapSlots == wantSlots)
+                    {
+                        best = e.getValue();
+                        bestKey = mapKey;
+                        break;
+                    }
+                    if (mapSlots > bestSlots)
+                    {
+                        best = e.getValue();
+                        bestKey = mapKey;
+                        bestSlots = mapSlots;
+                    }
+                }
+                dataEvent = best;
+                donorKey = bestKey;
+            }
+            if (dataEvent == null)
+            {
+                Global.tempLog("ctor-min-params", "migrateFail noDataEvent mapSize=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + map.size() + " newKey=" + newKey + " oldKey=" + oldKey); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            int open = newKey.indexOf('(');
+            int close = newKey.lastIndexOf(')');
+            String inside = open >= 0 && close > open ? newKey.substring(open + 1, close) : ""; //$NON-NLS-1$
+            int slots = Math.max(countEmptySlots(inside), 1);
+            String commaStr = detectCommaStr(inside.isEmpty() ? ", " : inside); //$NON-NLS-1$
+
+            Field allInfoField = dataEvent.getClass().getDeclaredField("allInfo"); //$NON-NLS-1$
+            allInfoField.setAccessible(true);
+            Object allInfoObj = allInfoField.get(dataEvent);
+            int base;
+            if (allInfoObj instanceof List<?> oldPositions && !oldPositions.isEmpty()
+                && oldPositions.get(0) instanceof LinkedPosition firstPos)
+                base = firstPos.getOffset();
+            else if (replacementOffset >= 0 && open >= 0)
+                base = replacementOffset + open + 1;
+            else
+                base = -1;
+            if (base < 0)
+            {
+                Global.tempLog("ctor-min-params", "migrateFail badBase"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+
+            List<LinkedPosition> trimmed = new ArrayList<>(slots);
+            LinkedModeModel model = new LinkedModeModel();
+            for (int i = 0; i < slots; i++)
+            {
+                LinkedPosition pos = new LinkedPosition(doc, base + i * commaStr.length(), 0);
+                trimmed.add(pos);
+                LinkedPositionGroup group = new LinkedPositionGroup();
+                group.addPosition(pos);
+                model.addGroup(group);
+            }
+            int stopPos = base + (slots <= 1 ? 0 : (slots - 1) * commaStr.length()) + 1;
+            Object newEvent = newDataEvent(listener, dataEvent.getClass(), base, 0, stopPos,
+                model, trimmed, List.of(signature));
+            if (newEvent == null)
+            {
+                setDataEventObjects(dataEvent, signature);
+                if (donorKey != null && !donorKey.equals(newKey))
+                    map.remove(donorKey);
+                map.put(newKey, dataEvent);
+                Global.tempLog("ctor-min-params", "migrateFallback objectsOnly donor=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + donorKey + " newKey=" + newKey); //$NON-NLS-1$
+                return;
+            }
+            if (donorKey != null)
+                map.remove(donorKey);
+            map.remove(newKey);
+            map.put(newKey, newEvent);
+            Global.tempLog("ctor-min-params", "migrateOk slots=" + slots //$NON-NLS-1$ //$NON-NLS-2$
+                + " donor=" + donorKey //$NON-NLS-1$
+                + " newKey=" + newKey //$NON-NLS-1$
+                + " base=" + base //$NON-NLS-1$
+                + " sig=" + signatureLabel(signature)); //$NON-NLS-1$
+        }
+
+        private static String insertNamePrefix(String key)
+        {
+            if (key == null)
+                return null;
+            int open = key.indexOf('(');
+            if (open <= 0)
+                return null;
+            return key.substring(0, open + 1);
+        }
+
+        private static String insideOf(String key)
+        {
+            if (key == null)
+                return ""; //$NON-NLS-1$
+            int open = key.indexOf('(');
+            int close = key.lastIndexOf(')');
+            if (open < 0 || close <= open)
+                return ""; //$NON-NLS-1$
+            return key.substring(open + 1, close);
+        }
+
+        private static IDocumentListener resolveDocEventListener(ConfigurableCompletionProposal cp,
+            IDocument doc)
+        {
+            Object fromField = Global.getField(cp, "docEvent"); //$NON-NLS-1$
+            if (fromField instanceof IDocumentListener listener)
+                return listener;
+            return findBslDocumentListener(doc);
+        }
+
+        private static void syncInitialReplacementContent(ConfigurableCompletionProposal cp,
+            String newRepl)
+        {
+            syncStringField(cp, "initialReplacementContent", newRepl); //$NON-NLS-1$
+            // Сброс кэша CustomBsl.getReplacementString().
+            syncStringField(cp, "replacementString", newRepl); //$NON-NLS-1$
+        }
+
+        private static String readStringField(Object target, String fieldName)
+        {
+            try
+            {
+                Field f = findDeclaredField(target.getClass(), fieldName);
+                if (f == null)
+                    return null;
+                f.setAccessible(true);
+                Object v = f.get(target);
+                return v instanceof String s ? s : null;
+            }
+            catch (Exception ignored)
+            {
+                return null;
+            }
+        }
+
+        private static void syncStringField(Object target, String fieldName, String value)
+        {
+            try
+            {
+                Field f = findDeclaredField(target.getClass(), fieldName);
+                if (f == null)
+                    return;
+                f.setAccessible(true);
+                f.set(target, value);
+            }
+            catch (Exception ignored)
+            {
+            }
+        }
+
+        private static Field findDeclaredField(Class<?> start, String fieldName)
+        {
+            Class<?> c = start;
+            while (c != null)
+            {
+                try
+                {
+                    return c.getDeclaredField(fieldName);
+                }
+                catch (NoSuchFieldException ignored)
+                {
+                    c = c.getSuperclass();
+                }
+            }
+            return null;
+        }
+
+        private static String additionalClass(ConfigurableCompletionProposal cp)
+        {
+            Object additional = Global.getField(cp, "additionalProposalInfo"); //$NON-NLS-1$
+            return additional == null ? "null" : additional.getClass().getName(); //$NON-NLS-1$
+        }
+
+        private static EObject readSignatureObject(ConfigurableCompletionProposal cp)
+        {
+            Object additional = Global.getField(cp, "additionalProposalInfo"); //$NON-NLS-1$
+            if (additional instanceof FakeCtor fake)
+                return fake;
+            if (additional instanceof ParamSet set)
+                return set;
+            // Платформенные методы: createPopumMenu кладёт ProposalElement со списком ParamSet.
+            if (additional instanceof ProposalElement pe)
+            {
+                EList<EObject> list = pe.getList();
+                if (list != null)
+                {
+                    for (EObject o : list)
+                    {
+                        if (o instanceof ParamSet set)
+                            return set;
+                    }
+                }
+            }
+            return null;
+        }
+
+        private static String signatureLabel(EObject signature)
+        {
+            if (signature instanceof FakeCtor fake)
+                return "FakeCtor:" + fake.getTypeName() //$NON-NLS-1$
+                    + fakeParamNames(fake);
+            if (signature instanceof ParamSet set)
+                return "ParamSet:min=" + set.getMinParams() //$NON-NLS-1$
+                    + "/max=" + set.getMaxParams() //$NON-NLS-1$
+                    + paramSetNames(set);
+            return String.valueOf(signature);
+        }
+
+        private static int signatureSlotHint(EObject signature)
+        {
+            if (signature instanceof FakeCtor fake)
+                return fake.getParams() != null ? fake.getParams().size() : -1;
+            if (signature instanceof ParamSet set)
+            {
+                int max = set.getMaxParams();
+                if (max >= 0)
+                    return max;
+                return set.getParams() != null ? set.getParams().size() : -1;
+            }
+            return -1;
+        }
+
+        private static int countEmptySlots(String inside)
+        {
+            if (inside == null || inside.isEmpty())
+                return 0;
+            int commas = 0;
+            for (int i = 0; i < inside.length(); i++)
+            {
+                if (inside.charAt(i) == ',')
+                    commas++;
+            }
+            return commas + 1;
+        }
+
+        private static String detectCommaStr(String inside)
+        {
+            int comma = inside.indexOf(',');
+            if (comma < 0)
+                return ", "; //$NON-NLS-1$
+            int end = comma + 1;
+            while (end < inside.length() && inside.charAt(end) == ' ')
+                end++;
+            return inside.substring(comma, end);
+        }
+
+        private static String buildEmptyInside(int minParams, String commaStr)
+        {
+            if (minParams <= 1)
+                return ""; //$NON-NLS-1$
+            String sep = commaStr != null ? commaStr : ", "; //$NON-NLS-1$
+            StringBuilder sb = new StringBuilder();
+            for (int i = 0; i < minParams; i++)
+            {
+                if (i > 0)
+                    sb.append(sep);
+            }
+            return sb.toString();
+        }
+
+        private static int resolveMinParams(EObject signature, int currentSlots)
+        {
+            if (signature instanceof ParamSet set)
+            {
+                int min = set.getMinParams();
+                return Math.max(0, Math.min(min, currentSlots));
+            }
+            if (!(signature instanceof FakeCtor fakeCtor))
+                return -1;
+            try
+            {
+                Type type = resolveType(fakeCtor.getTypeName());
+                if (type == null)
+                    return -1;
+                EList<Ctor> ctors = type.getCtors();
+                if (ctors == null || ctors.isEmpty())
+                    return -1;
+                List<String> fakeNames = fakeParamNames(fakeCtor);
+                Ctor matched = null;
+                for (Ctor ctor : ctors)
+                {
+                    if (ctor == null)
+                        continue;
+                    int max = ctor.getMaxParams();
+                    if (max < 0)
+                        max = ctor.getParams() != null ? ctor.getParams().size() : -1;
+                    if (max != currentSlots && (ctor.getParams() == null
+                        || ctor.getParams().size() != currentSlots))
+                        continue;
+                    if (!paramNamesMatch(ctor, fakeNames))
+                        continue;
+                    matched = ctor;
+                    break;
+                }
+                if (matched == null)
+                    return -1;
+                int min = matched.getMinParams();
+                return Math.max(0, Math.min(min, currentSlots));
+            }
+            catch (Exception ex)
+            {
+                return -1;
+            }
+        }
+
+        private static List<String> fakeParamNames(FakeCtor fakeCtor)
+        {
+            EList<FakeParameter> params = fakeCtor.getParams();
+            if (params == null || params.isEmpty())
+                return Collections.emptyList();
+            List<String> names = new ArrayList<>(params.size());
+            for (FakeParameter p : params)
+            {
+                if (p == null)
+                    continue;
+                String name = p.getName();
+                names.add(name != null ? name : ""); //$NON-NLS-1$
+            }
+            return names;
+        }
+
+        private static List<String> paramSetNames(ParamSet set)
+        {
+            EList<Parameter> params = set.getParams();
+            if (params == null || params.isEmpty())
+                return Collections.emptyList();
+            List<String> names = new ArrayList<>(params.size());
+            for (Parameter p : params)
+            {
+                if (p == null)
+                    continue;
+                String ru = p.getNameRu();
+                String en = p.getName();
+                names.add(ru != null && !ru.isEmpty() ? ru : (en != null ? en : "")); //$NON-NLS-1$
+            }
+            return names;
+        }
+
+        private static boolean paramNamesMatch(Ctor ctor, List<String> fakeNames)
+        {
+            if (fakeNames == null || fakeNames.isEmpty())
+                return true;
+            EList<Parameter> params = ctor.getParams();
+            if (params == null || params.size() < fakeNames.size())
+                return false;
+            for (int i = 0; i < fakeNames.size(); i++)
+            {
+                String want = fakeNames.get(i);
+                if (want == null || want.isEmpty())
+                    continue;
+                Parameter p = params.get(i);
+                if (p == null)
+                    return false;
+                String ru = p.getNameRu();
+                String en = p.getName();
+                if (!want.equalsIgnoreCase(ru != null ? ru : "") //$NON-NLS-1$
+                    && !want.equalsIgnoreCase(en != null ? en : "")) //$NON-NLS-1$
+                    return false;
+            }
+            return true;
+        }
+
+        private static Type resolveType(String typeName)
+        {
+            if (typeName == null || typeName.isBlank())
+                return null;
+            SourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
+            if (viewer == null)
+                return null;
+            IDocument doc = viewer.getDocument();
+            if (!(doc instanceof IXtextDocument xdoc))
+                return null;
+            try
+            {
+                return xdoc.readOnly(new IUnitOfWork<Type, XtextResource>()
+                {
+                    @Override
+                    public Type exec(XtextResource resource) throws Exception
+                    {
+                        if (resource == null || resource.getContents().isEmpty())
+                            return null;
+                        IScopeProvider scopes = resource.getResourceServiceProvider()
+                            .get(IScopeProvider.class);
+                        if (scopes == null)
+                            return null;
+                        EObject model = resource.getContents().get(0);
+                        IScope scope = scopes.getScope(model,
+                            McorePackage.Literals.TYPE_DESCRIPTION__TYPES);
+                        if (scope == null)
+                            return null;
+                        IEObjectDescription desc = scope.getSingleElement(
+                            QualifiedName.create(typeName));
+                        if (desc == null)
+                        {
+                            for (IEObjectDescription d : scope.getAllElements())
+                            {
+                                if (d == null || d.getName() == null)
+                                    continue;
+                                if (typeName.equalsIgnoreCase(d.getName().toString()))
+                                {
+                                    desc = d;
+                                    break;
+                                }
+                            }
+                        }
+                        if (desc == null)
+                            return null;
+                        EObject obj = desc.getEObjectOrProxy();
+                        if (obj != null && obj.eIsProxy())
+                            obj = EcoreUtil.resolve(obj, resource);
+                        return obj instanceof Type t ? t : null;
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                return null;
+            }
+        }
+
+        private static Object newDataEvent(IDocumentListener listener, Class<?> eventClass,
+            int posStart, int length, int stopPos, LinkedModeModel model,
+            List<LinkedPosition> positions, Object objects) throws Exception
+        {
+            Constructor<?>[] ctors = eventClass.getDeclaredConstructors();
+            for (Constructor<?> ctor : ctors)
+            {
+                Class<?>[] params = ctor.getParameterTypes();
+                if (params.length != 7)
+                    continue;
+                ctor.setAccessible(true);
+                return ctor.newInstance(listener, Integer.valueOf(posStart),
+                    Integer.valueOf(length), Integer.valueOf(stopPos), model, positions, objects);
+            }
+            return null;
+        }
+
+        private static IDocumentListener findBslDocumentListener(IDocument doc)
+        {
+            if (doc == null)
+                return null;
+            for (IDocumentListener listener : listDocumentListeners(doc))
+            {
+                if (listener == null)
+                    continue;
+                String name = listener.getClass().getName();
+                if (name != null && name.endsWith(BSL_DOCUMENT_LISTENER_SIMPLE))
+                    return listener;
+            }
+            return null;
+        }
+
+        private static List<IDocumentListener> listDocumentListeners(IDocument doc)
+        {
+            List<IDocumentListener> result = new ArrayList<>();
+            if (!(doc instanceof AbstractDocument))
+                return result;
+            try
+            {
+                Field field = AbstractDocument.class.getDeclaredField("fDocumentListeners"); //$NON-NLS-1$
+                field.setAccessible(true);
+                Object listObj = field.get(doc);
+                if (listObj instanceof ListenerList<?> listenerList)
+                {
+                    for (Object o : listenerList)
+                    {
+                        if (o instanceof IDocumentListener l)
+                            result.add(l);
+                    }
+                }
+                else if (listObj instanceof Iterable<?> iterable)
+                {
+                    for (Object o : iterable)
+                    {
+                        if (o instanceof IDocumentListener l)
+                            result.add(l);
+                    }
+                }
+            }
+            catch (Exception ignored)
+            {
+            }
+            return result;
         }
     }
 }
