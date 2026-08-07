@@ -1635,16 +1635,16 @@ public class CompareConfigSearchDialogHook
     static String getObjectColumnHeader(IEditorPart editor)
     {
         AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
-        if (viewer == null) return "\u041E\u0431\u044A\u0435\u043A\u0442";
+        if (viewer == null) return "Объект";
         Tree tree = (Tree) viewer.getControl();
-        if (tree == null || tree.isDisposed()) return "\u041E\u0431\u044A\u0435\u043A\u0442";
+        if (tree == null || tree.isDisposed()) return "Объект";
         TreeColumn[] columns = tree.getColumns();
         if (columns.length > 0)
         {
             String text = columns[0].getText();
             if (text != null && !text.isEmpty()) return text;
         }
-        return "\u041E\u0431\u044A\u0435\u043A\u0442";
+        return "Объект";
     }
 
     private static Object getField(Object obj, String name)

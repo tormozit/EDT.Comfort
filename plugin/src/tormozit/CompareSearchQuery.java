@@ -28,7 +28,7 @@ public class CompareSearchQuery implements ISearchQuery
     @Override
     public String getLabel()
     {
-        return result != null ? result.getLabel() : "\u041F\u043E\u0438\u0441\u043A \u043F\u043E \u0434\u0435\u0440\u0435\u0432\u0443 \u0441\u0440\u0430\u0432\u043D\u0435\u043D\u0438\u044F"; //$NON-NLS-1$
+        return result != null ? result.getLabel() : "Поиск по дереву сравнения"; //$NON-NLS-1$
     }
 
     @Override

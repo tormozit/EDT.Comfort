@@ -167,7 +167,7 @@ public final class ConfigSearchResultsHook implements IStartup
     private static final String INPUT_WATCH_HOOKED_KEY = "tormozit.searchTreeInputWatchHooked"; //$NON-NLS-1$
     private static final String TREE_COUNT_LABEL_HOOKED_KEY = "tormozit.searchTreeCountLabelHooked"; //$NON-NLS-1$
     /** Как {@code Messages.IMatchItem_Total_matches_count_pattern__0} в search.ui. */
-    private static final String MATCH_COUNT_SUFFIX_PATTERN = " ({0} \u0441\u043E\u043E\u0442\u0432\u0435\u0442\u0441\u0442\u0432\u0438\u0439)"; //$NON-NLS-1$
+    private static final String MATCH_COUNT_SUFFIX_PATTERN = " ({0} соответствий)"; //$NON-NLS-1$
 
     // -----------------------------------------------------------------------
     // IStartup
@@ -4630,7 +4630,7 @@ public final class ConfigSearchResultsHook implements IStartup
         if (label == null || label.isEmpty())
             return -1;
         java.util.regex.Matcher m = java.util.regex.Pattern
-            .compile("\\(\\s*(\\d+)\\s+\\u0441\\u043E\\u043E\\u0442\\u0432\\u0435\\u0442") //$NON-NLS-1$
+            .compile("\\(\\s*(\\d+)\\s+соответ") //$NON-NLS-1$
             .matcher(label);
         if (!m.find())
             return -1;
