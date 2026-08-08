@@ -146,7 +146,8 @@ public final class SmartMatchHighlight
     public static void paintTableCellMatchOverlayFlat(Event e, Table table, TableItem item, SmartMatcher matcher,
             String textOverride)
     {
-        paintTableCellMatchOverlayFlat(e, table, item, matcher, textOverride, true);
+        // bold=false по умолчанию: overlay поверх нативного текста не должен менять ширину глифов.
+        paintTableCellMatchOverlayFlat(e, table, item, matcher, textOverride, false);
     }
 
     /**
@@ -154,7 +155,8 @@ public final class SmartMatchHighlight
      * {@code bold} — см. {@link #paintTableCellMatchOverlay(Event, Table, TableItem, SmartMatcher,
      * boolean, int, boolean)}: жирный overlay поверх уже нарисованного нативного текста не может
      * сдвинуть то, что идёт правее совпадения, и наезжает на соседние буквы, если совпадение не в
-     * самом конце текста ячейки.
+     * самом конце текста ячейки. Для overlay поверх нативного текста всегда передавайте
+     * {@code bold=false}.
      */
     public static void paintTableCellMatchOverlayFlat(Event e, Table table, TableItem item, SmartMatcher matcher,
             boolean bold)

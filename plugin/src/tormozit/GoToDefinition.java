@@ -2750,6 +2750,7 @@ public class GoToDefinition extends AbstractHandler
             listViewer.setInput(rows);
 
             tableInteraction = new FormTableInteraction(table, listViewer, this::cellText);
+            tableInteraction.setFilterTextResolver(this::filterText);
             tableInteraction.install();
             if (!rows.isEmpty())
             {
@@ -2855,7 +2856,19 @@ public class GoToDefinition extends AbstractHandler
         {
             if (!(item.getData() instanceof Row row))
                 return ""; //$NON-NLS-1$
-            Table table = item.getParent();
+            return rowText(row, item.getParent(), column);
+        }
+
+        /** То же значение по элементу модели — для отбора по значению ячейки (без {@code TableItem}). */
+        private String filterText(Object element, int column)
+        {
+            if (!(element instanceof Row row) || listViewer == null || listViewer.getTable().isDisposed())
+                return ""; //$NON-NLS-1$
+            return rowText(row, listViewer.getTable(), column);
+        }
+
+        private String rowText(Row row, Table table, int column)
+        {
             if (column < 0 || column >= table.getColumnCount())
                 return ""; //$NON-NLS-1$
             TableColumn col = table.getColumn(column);

@@ -184,18 +184,7 @@ public class PictureDialogHook implements IStartup {
             standartViewer.refresh();
 
         Table activeTable = tableForActiveTab(dialog, commonViewer, standartViewer);
-        if (activeTable != null && !activeTable.isDisposed()
-                && activeTable.getItemCount() > 0 && activeTable.getSelectionCount() == 0) {
-            activeTable.setSelection(0);
-            TableItem[] sel = activeTable.getSelection();
-            if (sel.length > 0) {
-                Event ev = new Event();
-                ev.type = SWT.Selection;
-                ev.widget = activeTable;
-                ev.item = sel[0];
-                activeTable.notifyListeners(SWT.Selection, ev);
-            }
-        }
+        FilterInputBoxListNavigation.selectFirstRowIfSelectionLost(activeTable);
     }
 
     private static void hookTabSwitching(

@@ -56,12 +56,8 @@ final class FilterInputBox
         + "• ищет по имени подсистемы; родители совпадений не скрываются"; //$NON-NLS-1$
 
     private static final int MAX_ITEMS = 20;
-    /** Максимальная ширина compact-поля (окно «Коллекция»). */
-    static final int COMPACT_MAX_WIDTH = 267;
-    /** Максимальная ширина поля фильтра (панель «Последние места»). */
-    static final int RECENT_PLACES_MAX_WIDTH = 300;
-    /** Максимальная ширина поля фильтра (панель «Набор объектов»). */
-    static final int OBJECT_SETS_MAX_WIDTH = 300;
+    /** Максимальная ширина поля фильтра. */
+    static final int MAX_WIDTH = 300;
     /** Отступ справа от compact-поля до следующего элемента строки. */
     static final int COMPACT_RIGHT_MARGIN = 10;
 
@@ -105,7 +101,13 @@ final class FilterInputBox
             "comfort.compareStructure.filter.history."), //$NON-NLS-1$
         VALIDATION_CHECKS(
             "comfort.validationChecks.filter.history.count", //$NON-NLS-1$
-            "comfort.validationChecks.filter.history."); //$NON-NLS-1$
+            "comfort.validationChecks.filter.history."), //$NON-NLS-1$
+        STACKTRACES(
+            "comfort.stacktracesList.filter.history.count", //$NON-NLS-1$
+            "comfort.stacktracesList.filter.history."), //$NON-NLS-1$
+        COLUMN_VALUES(
+            "comfort.formTableColumnValues.filter.history.count", //$NON-NLS-1$
+            "comfort.formTableColumnValues.filter.history."); //$NON-NLS-1$
 
         final String prefCountKey;
         final String prefItemPrefix;
@@ -152,7 +154,10 @@ final class FilterInputBox
         box.setSearchDelay(opts.searchDelay);
         box.setHistory(new PrefsSearchHistory(opts.scope));
         if (onSearch != null)
+        {
             box.setSearchListener((text, monitor) -> onSearch.run());
+            FilterInputBoxListNavigation.installHistoryCommit(box);
+        }
         return new FilterInputBox(box, opts.scope);
     }
 
@@ -238,6 +243,28 @@ final class FilterInputBox
         return create(parent, opts, onSearch);
     }
 
+    /** Фильтр списка трассировок в панели «Трассировки стеков». */
+    static FilterInputBox forStacktraces(Composite parent, Runnable onSearch)
+    {
+        Options opts = new Options();
+        opts.scope = Scope.STACKTRACES;
+        opts.layoutData = new GridData(SWT.FILL, SWT.CENTER, true, false);
+        opts.message = "Фильтр..."; //$NON-NLS-1$
+        opts.tooltip = FLAT_FILTER_TOOLTIP;
+        return create(parent, opts, onSearch);
+    }
+
+    /** Фильтр по подстроке в окне «Значения колонки» ({@code FormTableInteraction.ColumnValuesDialog}) — на всю ширину. */
+    static FilterInputBox forColumnValues(Composite parent, Runnable onSearch)
+    {
+        Options opts = new Options();
+        opts.scope = Scope.COLUMN_VALUES;
+        opts.layoutData = new GridData(SWT.FILL, SWT.CENTER, true, false);
+        opts.message = "Фильтр..."; //$NON-NLS-1$
+        opts.tooltip = FLAT_FILTER_TOOLTIP;
+        return create(parent, opts, onSearch);
+    }
+
     /** Замена штатного поля в {@code FilteredList}-диалогах (см. {@code FilteredListDialogFilterHook}) — на всю ширину. */
     static FilterInputBox forFilteredListDialog(Composite parent, Runnable onSearch)
     {
@@ -313,13 +340,15 @@ final class FilterInputBox
             case INFOBASES -> throw new IllegalStateException("INFOBASES: use attachHistory(SearchBox, Scope.INFOBASES)"); //$NON-NLS-1$
             case COMPARE_STRUCTURE -> forCompareStructure(parent, onSearch);
             case VALIDATION_CHECKS -> throw new IllegalStateException("VALIDATION_CHECKS: use attachHistory(SearchBox, Scope.VALIDATION_CHECKS)"); //$NON-NLS-1$
+            case STACKTRACES -> forStacktraces(parent, onSearch);
+            case COLUMN_VALUES -> forColumnValues(parent, onSearch);
         };
     }
 
     static GridData compactLayoutData()
     {
         GridData gd = new GridData(SWT.BEGINNING, SWT.CENTER, false, false);
-        gd.widthHint = COMPACT_MAX_WIDTH;
+        gd.widthHint = MAX_WIDTH;
         gd.minimumWidth = 80;
         return gd;
     }
@@ -327,7 +356,7 @@ final class FilterInputBox
     static GridData recentPlacesLayoutData()
     {
         GridData gd = new GridData(SWT.BEGINNING, SWT.CENTER, false, false);
-        gd.widthHint = RECENT_PLACES_MAX_WIDTH;
+        gd.widthHint = MAX_WIDTH;
         gd.minimumWidth = 80;
         return gd;
     }
@@ -335,7 +364,7 @@ final class FilterInputBox
     static GridData objectSetsLayoutData()
     {
         GridData gd = new GridData(SWT.BEGINNING, SWT.CENTER, false, false);
-        gd.widthHint = OBJECT_SETS_MAX_WIDTH;
+        gd.widthHint = MAX_WIDTH;
         gd.minimumWidth = 80;
         return gd;
     }

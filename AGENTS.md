@@ -205,7 +205,7 @@ powershell -NoProfile -File "C:\VC\EDT.Comfort\.cursor\scripts\repair-double-eol
 Обязательно:
 
 1. **Клик и выбор:** ЛКМ в любой колонке → строка + `activeColumn` (`getItem(Point)` + `columnAt` по `getBounds`); `setSelection` + перерисовка.
-2. **Копирование:** Ctrl+C / «Копировать» — только текст активной ячейки (`getCellDisplayText` / `getText(activeColumn)`); для EDT-инспектора — подмена Copy как в `DebugInspectorTreeEnhancement.hookGlobalCopyAction()`.
+2. **Копирование:** Ctrl+C / «Копировать» — только текст активной ячейки (`getCellDisplayText` / `getText(activeColumn)`). В `FormTableInteraction.install()` уже вызывается `CopyCommandSupport.wireCopyOverride` (Win32: Ctrl+C не доходит до KeyDown). **Не** дублировать ручной `wireCopyOverride` и **не** полагаться только на `SWT.KeyDown`. Для EDT-инспектора (Tree) — подмена Copy как в `DebugInspectorTreeEnhancement.hookGlobalCopyAction()`.
 3. **Подсветка строки/ячейки:** `EraseItem` — фон строки (`rowSelectionBackground`), активной ячейки темнее (`activeCellBackground`); `PaintItem` — рамка по `getBounds(activeColumn)`; при `FocusIn`/`FocusOut` — сброс кэша цветов.
 4. **Заголовок колонки:** accent 2 px снизу активной колонки; линия 1 px под шапкой на ширину клиента; overlay `Canvas` на `tableStack` (`setLayout(null)`), таблица в `columnHost` + `TableColumnLayout` — см. `FormTableInteraction` (`headerSeparator` + `headerHighlight`). Accent над разделителем; scroll не сбрасывает `activeColumn`; при drag-resize колонки — accent на паузе (`SWT.Resize`).
 5. **Порядок колонок:** `setMoveable(true)` в `FormTableInteraction`; opt-out коллекции — `setColumnReorderEnabled(false)`. После reorder `activeColumn` — ссылка на `TableColumn`; persist — `FormTableColumnOrder` + `IDialogSettings` (`"0,2,1,3"`). Load до `install()`, save в `close()`.
@@ -241,6 +241,8 @@ powershell -NoProfile -File "C:\VC\EDT.Comfort\.cursor\scripts\repair-double-eol
 Для нового места — завести новую константу в `FilterInputBox.Scope` (ключи `comfort.<место>.filter.history.count` / `comfort.<место>.filter.history.`), при необходимости — `case XXX -> throw new IllegalStateException(...)` в `createForScope`, если `SearchBox` штатный и через `create()` не создаётся (см. `RIGHTS_DIALOG`/`FILTER_BY_SUBSYSTEMS`/`INFOBASES`/`VALIDATION_CHECKS`).
 
 Проверка перед сдачей: закрыть окно/диалог с фильтром → открыть заново → набрать первую букву запроса → всплывает история прошлых запросов (Ctrl+↓ или клик по стрелке). Если история пуста после переоткрытия — фильтр подключён неправильно.
+
+При добавлении фильтра по подстроке — окрашивать его вхождения (`SmartMatcher.getHighlightRanges` + `SmartMatchHighlight.styler`, как в `ObjectSetsView.NameLabelProvider`). **Для колонки с такой подсветкой — только `SelectionAwareStyledCellLabelProvider`, НИКОГДА штатный `DelegatingStyledCellLabelProvider`** (см. класс-javadoc `SelectionAwareStyledCellLabelProvider`): у штатного нет способа передать `StyledCellLabelProvider.COLORS_ON_SELECTION`, и без этого флага JFace намеренно игнорирует цвета `StyleRange` на ВЫДЕЛЕННЫХ строках — подсветка вхождений пропадает именно на активной строке, независимо от `setOwnerDrawColumns` (тот нужен отдельно, для перерисовки самим `FormTableInteraction`, но саму проблему цвета не решает). Проверка перед сдачей: набрать фильтр → стрелками пройтись по всем видимым строкам → подсветка должна быть видна и на активной (выделенной) строке тоже, не только на невыделенных.
 
 ## SWT: Ctrl+<буква> не долетает до KeyDown (нативный акселератор Win32)
 

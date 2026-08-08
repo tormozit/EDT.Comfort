@@ -304,6 +304,15 @@ public final class RecentPlacesView extends ViewPart
 
         tableInteraction = new FormTableInteraction(table, listViewer, this::cellText);
         tableInteraction.setOwnerDrawColumns(nameColumn);
+        tableInteraction.setFilterTextResolver(this::filterText);
+        // «Отключить все отборы» снимает и отбор по подстроке из поля поиска.
+        tableInteraction.setSubstringFilterClearer(() ->
+        {
+            if (filterInput == null || filterInput.isDisposed() || filterInput.getText().isEmpty())
+                return;
+            filterInput.setText(""); //$NON-NLS-1$
+            applyFilterFromField(true);
+        });
         tableInteraction.install();
 
         installColumnWidthPersistence();
@@ -1191,7 +1200,22 @@ public final class RecentPlacesView extends ViewPart
     {
         if (!(item.getData() instanceof RecentPlaces.Entry entry))
             return ""; //$NON-NLS-1$
-        Table table = item.getParent();
+        return entryText(entry, item.getParent(), column);
+    }
+
+    /** То же значение по элементу модели — для отбора по значению ячейки (без {@code TableItem}). */
+    private String filterText(Object element, int column)
+    {
+        if (!(element instanceof RecentPlaces.Entry entry) || listViewer == null
+            || listViewer.getTable().isDisposed())
+        {
+            return ""; //$NON-NLS-1$
+        }
+        return entryText(entry, listViewer.getTable(), column);
+    }
+
+    private String entryText(RecentPlaces.Entry entry, Table table, int column)
+    {
         if (column < 0 || column >= table.getColumnCount())
             return ""; //$NON-NLS-1$
         TableColumn col = table.getColumn(column);

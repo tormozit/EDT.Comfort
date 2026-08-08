@@ -104,8 +104,14 @@ public final class CopyCommandSupport
         Control focus = display.getFocusControl();
         if (focus == null)
             return;
-        Runnable action = targets.get(focus);
-        if (action != null)
-            action.run();
+        for (Control c = focus; c != null && !c.isDisposed(); c = c.getParent())
+        {
+            Runnable action = targets.get(c);
+            if (action != null)
+            {
+                action.run();
+                return;
+            }
+        }
     }
 }

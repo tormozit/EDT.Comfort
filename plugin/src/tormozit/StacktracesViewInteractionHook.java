@@ -5,10 +5,14 @@ import java.io.InputStreamReader;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
+import java.text.DateFormat;
+import java.text.ParseException;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Date;
 import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.WeakHashMap;
 
@@ -21,16 +25,40 @@ import org.eclipse.core.runtime.Path;
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.util.EcoreUtil;
+import org.eclipse.jface.dialogs.DialogSettings;
+import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.dialogs.MessageDialog;
+import org.eclipse.jface.layout.TableColumnLayout;
+import org.eclipse.jface.viewers.ArrayContentProvider;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
+import org.eclipse.jface.viewers.ColumnPixelData;
+import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.jface.viewers.ILabelProviderListener;
+import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.LabelProvider;
+import org.eclipse.jface.viewers.StructuredSelection;
+import org.eclipse.jface.viewers.StyledString;
+import org.eclipse.jface.viewers.TableViewer;
+import org.eclipse.jface.viewers.TableViewerColumn;
 import org.eclipse.jface.viewers.TreeViewer;
+import org.eclipse.jface.viewers.Viewer;
+import org.eclipse.jface.viewers.ViewerComparator;
+import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.custom.CTabFolder;
+import org.eclipse.swt.custom.CTabItem;
+import org.eclipse.swt.custom.SashForm;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
+import org.eclipse.swt.events.ControlAdapter;
+import org.eclipse.swt.events.ControlEvent;
+import org.eclipse.swt.events.KeyAdapter;
+import org.eclipse.swt.events.KeyEvent;
+import org.eclipse.swt.events.SelectionAdapter;
+import org.eclipse.swt.events.SelectionEvent;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
@@ -39,9 +67,13 @@ import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Label;
+import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.swt.widgets.Table;
+import org.eclipse.swt.widgets.TableColumn;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
+import org.eclipse.ui.IMemento;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.ISharedImages;
 import org.eclipse.ui.IStartup;
@@ -55,6 +87,9 @@ import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.handlers.IHandlerService;
 import org.osgi.framework.Bundle;
+import org.w3c.dom.Element;
+import org.w3c.dom.Node;
+import org.w3c.dom.NodeList;
 
 import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
@@ -69,8 +104,10 @@ import com.google.inject.Injector;
  * Доработки панели «Трассировки стека»:
  * <ul>
  * <li>заголовок вкладки — вместо «Трассировка стека» обрезка до 30 символов первой строки
- * текста ошибки с суффиксом «...»; дата ({@code getDetail()}) сохраняется второй строкой как
- * у EDT; при обрезке подсказка при наведении показывает полную первую строку ошибки;</li>
+ * текста ошибки с суффиксом «...»; дата ({@code getDetail()}) — в той же строке через пробел;</li>
+ * <li>слева от стека — таблица списка трассировок ({@link FormTableInteraction}: колонки
+ * «Ошибка», «Дата», «Проект»; мультивыбор; Del закрывает вкладки; сортировка по дате по
+ * умолчанию; фильтр {@link FilterInputBox}; персист ширин/порядка колонок и разделителя);</li>
  * <li>поле выбора проекта над деревом каждой вкладки — по умолчанию проект с максимальным
  * покрытием модулей кадров стека (issue 253); заполнение Combo и резолв кадров — только для
  * активной вкладки; при смене проекта имя записывается в элементы трассировки, кэш модуля
@@ -112,14 +149,22 @@ public final class StacktracesViewInteractionHook implements IStartup
             "com._1c.g5.v8.dt.internal.stacktraces.ui.bsl.IBslModuleLocator"; //$NON-NLS-1$
     private static final String PAGE_ENHANCED_KEY = "tormozit.comfort.stacktraces.pageEnhanced"; //$NON-NLS-1$
     private static final String PAGE_STATE_KEY = "tormozit.comfort.stacktraces.pageState"; //$NON-NLS-1$
+    private static final String LIST_PANE_KEY = "tormozit.comfort.stacktraces.listPane"; //$NON-NLS-1$
+    private static final String LIST_SASH_KEY = "tormozit.comfort.stacktraces.listSash"; //$NON-NLS-1$
+    private static final String LIST_INSTALLING_KEY = "tormozit.comfort.stacktraces.listInstalling"; //$NON-NLS-1$
+    private static final String FOLDER_LISTENERS_KEY = "tormozit.comfort.stacktraces.folderListeners"; //$NON-NLS-1$
+    private static final String REPO_PROBE_KEY = "tormozit.comfort.stacktraces.repoProbe"; //$NON-NLS-1$
+    private static final String MEMENTO_GUARD_KEY = "tormozit.comfort.stacktraces.mementoGuard"; //$NON-NLS-1$
+    private static final String FOLDER_TAB_PROBE_KEY = "tormozit.comfort.stacktraces.folderTabProbe"; //$NON-NLS-1$
+    private static final String LIST_LOG_TOPIC = "stacktraces-list"; //$NON-NLS-1$
+    /** Тип дочернего узла memento = {@code IStacktrace.class.getSimpleName()}. */
+    private static final String MEMENTO_STACKTRACE_TYPE = "IStacktrace"; //$NON-NLS-1$
     /** Максимум символов в заголовке вкладки (первая строка текста ошибки). */
     private static final int TAB_TITLE_MAX_CHARS = 30;
     /** Максимальная ширина Combo выбора проекта, px. */
     private static final int PROJECT_COMBO_MAX_WIDTH = 300;
 
     private static final java.util.Set<IViewPart> COPY_HANDLER_INSTALLED =
-            java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
-    private static final java.util.Set<IViewPart> VIEW_HOOKED =
             java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
     private static final WeakHashMap<Composite, PageState> PAGE_STATES = new WeakHashMap<>();
 
@@ -467,32 +512,513 @@ public final class StacktracesViewInteractionHook implements IStartup
     {
         if (!(part instanceof IViewPart view) || !VIEW_ID.equals(view.getViewSite().getId()))
             return;
+        listLog("tryInstallView view@" + System.identityHashCode(view) //$NON-NLS-1$
+                + " " + shortStack()); //$NON-NLS-1$
         tryInstallCopy(view);
+        installMementoGuard(view);
+        installRepositoryProbe(view);
         hookViewPages(view);
     }
 
     private static void hookViewPages(IViewPart view)
     {
         Object folderObj = Global.invoke(view, "getPageContainer"); //$NON-NLS-1$
-        if (!(folderObj instanceof org.eclipse.swt.custom.CTabFolder folder) || folder.isDisposed())
+        if (!(folderObj instanceof CTabFolder folder) || folder.isDisposed())
+        {
+            listLog("hookViewPages: no folder view@" + System.identityHashCode(view)); //$NON-NLS-1$
             return;
+        }
 
+        listLog("hookViewPages tabs=" + folder.getItemCount() //$NON-NLS-1$
+                + " folder@" + System.identityHashCode(folder) //$NON-NLS-1$
+                + " listeners=" + Boolean.TRUE.equals(folder.getData(FOLDER_LISTENERS_KEY)) //$NON-NLS-1$
+                + " " + shortStack()); //$NON-NLS-1$
+        installFolderTabProbe(folder);
+        StacktracesListPane listPane = installListPane(view, folder);
         updateFolderTabTitles(folder);
+        if (listPane != null)
+            listPane.refreshFromFolder();
         enhanceActivePage(view, folder);
 
-        if (!VIEW_HOOKED.add(view))
+        if (Boolean.TRUE.equals(folder.getData(FOLDER_LISTENERS_KEY)))
             return;
+        folder.setData(FOLDER_LISTENERS_KEY, Boolean.TRUE);
+        listLog("hookViewPages: Selection listener installed tabs=" + folder.getItemCount()); //$NON-NLS-1$
 
         folder.addListener(SWT.Selection, event ->
         {
             updateFolderTabTitles(folder);
+            StacktracesListPane pane = listPaneOf(folder);
+            if (pane != null)
+                pane.syncSelectionFromFolder();
             enhanceActivePage(view, folder);
         });
-        folder.addDisposeListener(e -> VIEW_HOOKED.remove(view));
+    }
+
+    private static StacktracesListPane listPaneOf(CTabFolder folder)
+    {
+        if (folder == null || folder.isDisposed())
+            return null;
+        Object data = folder.getData(LIST_PANE_KEY);
+        return data instanceof StacktracesListPane pane ? pane : null;
+    }
+
+    private static StacktracesListPane installListPane(IViewPart view, CTabFolder folder)
+    {
+        if (Boolean.TRUE.equals(folder.getData(LIST_INSTALLING_KEY)))
+        {
+            listLog("installListPane: reentrant skip tabs=" + folder.getItemCount()); //$NON-NLS-1$
+            return listPaneOf(folder);
+        }
+
+        if (folder.getData(LIST_PANE_KEY) instanceof StacktracesListPane existing)
+        {
+            if (existing.isAlive(folder))
+            {
+                listLog("installListPane: reuse alive tabs=" + folder.getItemCount()); //$NON-NLS-1$
+                return existing;
+            }
+            listLog("installListPane: dead pane -> lift tabs=" + folder.getItemCount()); //$NON-NLS-1$
+            liftFolderOutOfListSash(folder);
+            folder.setData(LIST_PANE_KEY, null);
+        }
+
+        Composite parent = folder.getParent();
+        if (parent == null || parent.isDisposed())
+        {
+            listLog("installListPane: no parent"); //$NON-NLS-1$
+            return null;
+        }
+        folder.setData(LIST_INSTALLING_KEY, Boolean.TRUE);
+        try
+        {
+            listLog("installListPane: create sash tabs=" + folder.getItemCount() //$NON-NLS-1$
+                    + " parent=" + parent.getClass().getSimpleName() //$NON-NLS-1$
+                    + " " + shortStack()); //$NON-NLS-1$
+            StacktracesListPane pane = StacktracesListPane.install(view, parent, folder);
+            folder.setData(LIST_PANE_KEY, pane);
+            listLog("installListPane: done tabs=" + folder.getItemCount()); //$NON-NLS-1$
+            return pane;
+        }
+        catch (Exception e)
+        {
+            listLog("installListPane: FAIL " + e); //$NON-NLS-1$
+            Global.log("StacktracesViewInteraction", "installListPane: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
+        finally
+        {
+            if (!folder.isDisposed())
+                folder.setData(LIST_INSTALLING_KEY, null);
+        }
+    }
+
+    /** Вынуть {@code folder} из наших (в т.ч. вложенных) SashForm и уничтожить их. */
+    private static void liftFolderOutOfListSash(CTabFolder folder)
+    {
+        if (folder == null || folder.isDisposed())
+            return;
+        Composite parent = folder.getParent();
+        int lifted = 0;
+        while (parent instanceof SashForm sash && Boolean.TRUE.equals(sash.getData(LIST_SASH_KEY)))
+        {
+            Composite up = sash.getParent();
+            if (up == null || up.isDisposed())
+                break;
+            listLog("liftFolder: setParent out of sash#" + lifted //$NON-NLS-1$
+                    + " tabs=" + folder.getItemCount()); //$NON-NLS-1$
+            folder.setParent(up);
+            if (!sash.isDisposed())
+                sash.dispose();
+            parent = up;
+            lifted++;
+        }
+        if (lifted > 0)
+            listLog("liftFolder: done lifted=" + lifted + " tabs=" + folder.getItemCount()); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static void listLog(String text)
+    {
+        Global.tempLog(LIST_LOG_TOPIC, text);
+    }
+
+    private static String shortStack()
+    {
+        StackTraceElement[] st = Thread.currentThread().getStackTrace();
+        StringBuilder sb = new StringBuilder();
+        int n = 0;
+        for (int i = 2; i < st.length && n < 14; i++)
+        {
+            String cn = st[i].getClassName();
+            if (cn.startsWith("java.") || cn.startsWith("jdk.") || cn.startsWith("sun.") //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                    || cn.startsWith("org.eclipse.swt.") || cn.startsWith("org.eclipse.jface.")) //$NON-NLS-1$ //$NON-NLS-2$
+                continue;
+            if (n > 0)
+                sb.append(" <- "); //$NON-NLS-1$
+            String simple = cn;
+            int dot = cn.lastIndexOf('.');
+            if (dot >= 0)
+                simple = cn.substring(dot + 1);
+            sb.append(simple).append('.').append(st[i].getMethodName()).append(':')
+                    .append(st[i].getLineNumber());
+            n++;
+        }
+        return sb.toString();
+    }
+
+    private static int repoSizeOf(Object repository)
+    {
+        if (repository == null)
+            return -1;
+        Object all = Global.invoke(repository, "getStacktraces"); //$NON-NLS-1$
+        return all instanceof List<?> list ? list.size() : -1;
+    }
+
+    private static String stacktraceLogId(Object stacktrace)
+    {
+        if (stacktrace == null)
+            return "null"; //$NON-NLS-1$
+        String detail = ""; //$NON-NLS-1$
+        if (stacktrace instanceof IStacktrace st)
+        {
+            String d = st.getDetail();
+            if (d != null)
+                detail = d.strip();
+            String name = st.getName();
+            if (name == null)
+                name = ""; //$NON-NLS-1$
+            return Integer.toHexString(System.identityHashCode(st)) + " '" + name + "' " + detail; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        return Integer.toHexString(System.identityHashCode(stacktrace));
+    }
+
+    /**
+     * Только диагностика + защита от дописывания в непустой memento при save.
+     * Ничего не удаляет из репозитория и не дедуплицирует стеки.
+     */
+    private static void installMementoGuard(IViewPart view)
+    {
+        if (view == null)
+            return;
+        Object already = Global.getField(view, "mementoManager"); //$NON-NLS-1$
+        if (already == null)
+            return;
+        try
+        {
+            if (Proxy.isProxyClass(already.getClass()))
+            {
+                listLog("mementoGuard: already proxy view@" + System.identityHashCode(view)); //$NON-NLS-1$
+                return;
+            }
+            Object pageContainer = Global.invoke(view, "getPageContainer"); //$NON-NLS-1$
+            if (pageContainer instanceof Control marked
+                    && Boolean.TRUE.equals(marked.getData(MEMENTO_GUARD_KEY)))
+                return;
+
+            ClassLoader cl = already.getClass().getClassLoader();
+            Class<?> mementoIface = Class.forName(
+                    "com._1c.g5.v8.dt.internal.stacktraces.ui.view.IStacktracesMemento", true, cl); //$NON-NLS-1$
+            Object real = already;
+            Object repo = Global.getField(real, "repository"); //$NON-NLS-1$
+            InvocationHandler handler = (proxy, method, args) ->
+            {
+                String name = method.getName();
+                if (method.getDeclaringClass() == Object.class)
+                {
+                    if ("equals".equals(name)) //$NON-NLS-1$
+                        return Boolean.valueOf(proxy == args[0]);
+                    if ("hashCode".equals(name)) //$NON-NLS-1$
+                        return Integer.valueOf(System.identityHashCode(proxy));
+                    if ("toString".equals(name)) //$NON-NLS-1$
+                        return "ComfortMementoGuard(" + real + ")"; //$NON-NLS-1$ //$NON-NLS-2$
+                    return method.invoke(real, args);
+                }
+                if ("save".equals(name) && args != null && args.length == 1 && args[0] instanceof IMemento memento) //$NON-NLS-1$
+                {
+                    int beforeKids = countMementoStacktraces(memento);
+                    int cleared = clearMementoStacktraceChildren(memento);
+                    listLog("memento.save beforeKids=" + beforeKids //$NON-NLS-1$
+                            + " clearedKids=" + cleared //$NON-NLS-1$
+                            + " repo=" + repoSizeOf(repo) //$NON-NLS-1$
+                            + " " + shortStack()); //$NON-NLS-1$
+                    Object result = method.invoke(real, args);
+                    listLog("memento.save afterKids=" + countMementoStacktraces(memento)); //$NON-NLS-1$
+                    return result;
+                }
+                if ("load".equals(name) && args != null && args.length == 1) //$NON-NLS-1$
+                {
+                    IMemento memento = args[0] instanceof IMemento m ? m : null;
+                    listLog("memento.load kids=" + countMementoStacktraces(memento) //$NON-NLS-1$
+                            + " repoBefore=" + repoSizeOf(repo) //$NON-NLS-1$
+                            + " " + shortStack()); //$NON-NLS-1$
+                    Object result = method.invoke(real, args);
+                    listLog("memento.load afterRepo=" + repoSizeOf(repo)); //$NON-NLS-1$
+                    return result;
+                }
+                return method.invoke(real, args);
+            };
+            Object proxy = Proxy.newProxyInstance(cl, new Class<?>[] { mementoIface }, handler);
+            Global.setFieldForce(view, "mementoManager", proxy); //$NON-NLS-1$
+            if (pageContainer instanceof Control marked)
+                marked.setData(MEMENTO_GUARD_KEY, Boolean.TRUE);
+            listLog("mementoGuard: installed view@" + System.identityHashCode(view) //$NON-NLS-1$
+                    + " repoSize=" + repoSizeOf(repo)); //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+            listLog("mementoGuard: FAIL " + e); //$NON-NLS-1$
+        }
+    }
+
+    private static int countMementoStacktraces(IMemento memento)
+    {
+        if (memento == null)
+            return -1;
+        IMemento[] kids = memento.getChildren(MEMENTO_STACKTRACE_TYPE);
+        return kids != null ? kids.length : 0;
+    }
+
+    /** Удаляет дочерние {@code IStacktrace} из XMLMemento через DOM (публичного remove нет). */
+    private static int clearMementoStacktraceChildren(IMemento memento)
+    {
+        if (memento == null)
+            return 0;
+        Object elementObj = Global.getField(memento, "element"); //$NON-NLS-1$
+        if (!(elementObj instanceof Element element))
+            return 0;
+        List<Node> toRemove = new ArrayList<>();
+        NodeList nodes = element.getChildNodes();
+        for (int i = 0; i < nodes.getLength(); i++)
+        {
+            Node node = nodes.item(i);
+            if (node != null && node.getNodeType() == Node.ELEMENT_NODE
+                    && MEMENTO_STACKTRACE_TYPE.equals(node.getNodeName()))
+                toRemove.add(node);
+        }
+        for (Node node : toRemove)
+            element.removeChild(node);
+        return toRemove.size();
+    }
+
+    /**
+     * Зонд repository: логирует add/remove/addChangedListener (двойная регистрация listener =
+     * два addPage на один add). Ставится при первом hook view.
+     */
+    private static void installRepositoryProbe(IViewPart view)
+    {
+        if (view == null)
+            return;
+        Object already = Global.getField(view, "repository"); //$NON-NLS-1$
+        if (already == null)
+            return;
+        try
+        {
+            if (Proxy.isProxyClass(already.getClass()))
+            {
+                listLog("repoProbe: already proxy view@" + System.identityHashCode(view)); //$NON-NLS-1$
+                return;
+            }
+            Object pageContainer = Global.invoke(view, "getPageContainer"); //$NON-NLS-1$
+            if (pageContainer instanceof Control marked
+                    && Boolean.TRUE.equals(marked.getData(REPO_PROBE_KEY)))
+                return;
+
+            ClassLoader cl = already.getClass().getClassLoader();
+            Class<?> repoIface = Class.forName(
+                    "com._1c.g5.v8.dt.stacktraces.model.IStacktraceRepository", true, cl); //$NON-NLS-1$
+            Class<?> listenerIface = Class.forName(
+                    "com._1c.g5.v8.dt.stacktraces.model.IStacktraceRepositoryChangedListener", true, cl); //$NON-NLS-1$
+            Object real = already;
+            InvocationHandler handler = (proxy, method, args) ->
+            {
+                String name = method.getName();
+                if (method.getDeclaringClass() == Object.class)
+                {
+                    if ("equals".equals(name)) //$NON-NLS-1$
+                        return Boolean.valueOf(proxy == args[0]);
+                    if ("hashCode".equals(name)) //$NON-NLS-1$
+                        return Integer.valueOf(System.identityHashCode(proxy));
+                    if ("toString".equals(name)) //$NON-NLS-1$
+                        return "ComfortRepoProbe(" + real + ")"; //$NON-NLS-1$ //$NON-NLS-2$
+                    return method.invoke(real, args);
+                }
+                if ("addChangedListener".equals(name) && args != null && args.length == 1) //$NON-NLS-1$
+                {
+                    Object listener = args[0];
+                    listLog("repo.addChangedListener listener@" + System.identityHashCode(listener) //$NON-NLS-1$
+                            + " " + (listener != null ? listener.getClass().getName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
+                            + " beforeListeners=" + listenerCount(real) //$NON-NLS-1$
+                            + " " + shortStack()); //$NON-NLS-1$
+                    Object result = method.invoke(real, args);
+                    listLog("repo.addChangedListener afterListeners=" + listenerCount(real)); //$NON-NLS-1$
+                    return result;
+                }
+                if ("removeChangedListener".equals(name) && args != null && args.length == 1) //$NON-NLS-1$
+                {
+                    Object listener = args[0];
+                    listLog("repo.removeChangedListener listener@" + System.identityHashCode(listener) //$NON-NLS-1$
+                            + " beforeListeners=" + listenerCount(real)); //$NON-NLS-1$
+                    Object result = method.invoke(real, args);
+                    listLog("repo.removeChangedListener afterListeners=" + listenerCount(real)); //$NON-NLS-1$
+                    return result;
+                }
+                if (("add".equals(name) || "remove".equals(name)) && args != null && args.length == 1) //$NON-NLS-1$ //$NON-NLS-2$
+                {
+                    listLog("repo." + name + " st=" + stacktraceLogId(args[0]) //$NON-NLS-1$ //$NON-NLS-2$
+                            + " beforeSize=" + repoSizeOf(real) //$NON-NLS-1$
+                            + " " + shortStack()); //$NON-NLS-1$
+                }
+                Object result = method.invoke(real, args);
+                if ("add".equals(name) || "remove".equals(name)) //$NON-NLS-1$ //$NON-NLS-2$
+                    listLog("repo." + name + " afterSize=" + repoSizeOf(real)); //$NON-NLS-1$ //$NON-NLS-2$
+                return result;
+            };
+            Object proxy = Proxy.newProxyInstance(cl, new Class<?>[] { repoIface }, handler);
+            Global.setFieldForce(view, "repository", proxy); //$NON-NLS-1$
+            if (pageContainer instanceof Control marked)
+                marked.setData(REPO_PROBE_KEY, Boolean.TRUE);
+            installDiagnosticRepoListener(real, cl, listenerIface);
+            listLog("repoProbe: installed view@" + System.identityHashCode(view) //$NON-NLS-1$
+                    + " size=" + repoSizeOf(real) //$NON-NLS-1$
+                    + " listeners~=" + listenerCount(real)); //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+            listLog("repoProbe: FAIL " + e); //$NON-NLS-1$
+        }
+    }
+
+    private static int listenerCount(Object realRepo)
+    {
+        Object listenersObj = Global.getField(realRepo, "listeners"); //$NON-NLS-1$
+        return listenersObj instanceof java.util.List<?> list ? list.size() : -1;
+    }
+
+    /** Отдельный listener только для лога — не подменяет штатный (иначе dispose не снимет). */
+    private static void installDiagnosticRepoListener(Object realRepo, ClassLoader cl, Class<?> listenerIface)
+    {
+        Object listenersObj = Global.getField(realRepo, "listeners"); //$NON-NLS-1$
+        if (listenersObj instanceof java.util.List<?> list)
+        {
+            for (Object listener : list)
+            {
+                if (listener != null && Proxy.isProxyClass(listener.getClass())
+                        && String.valueOf(listener).contains("ComfortRepoDiag")) //$NON-NLS-1$
+                    return;
+            }
+            listLog("repoProbe: existingListeners=" + list.size()); //$NON-NLS-1$
+            for (Object listener : list)
+            {
+                if (listener != null)
+                    listLog("repoProbe: listener@" + System.identityHashCode(listener) //$NON-NLS-1$
+                            + " " + listener.getClass().getName()); //$NON-NLS-1$
+            }
+        }
+        Object diag = Proxy.newProxyInstance(cl, new Class<?>[] { listenerIface },
+                (lp, lm, largs) ->
+                {
+                    if (lm.getDeclaringClass() == Object.class)
+                    {
+                        if ("equals".equals(lm.getName())) //$NON-NLS-1$
+                            return Boolean.valueOf(lp == largs[0]);
+                        if ("hashCode".equals(lm.getName())) //$NON-NLS-1$
+                            return Integer.valueOf(System.identityHashCode(lp));
+                        if ("toString".equals(lm.getName())) //$NON-NLS-1$
+                            return "ComfortRepoDiag"; //$NON-NLS-1$
+                        return null;
+                    }
+                    if ("repositoryChanged".equals(lm.getName()) && largs != null && largs.length == 1) //$NON-NLS-1$
+                    {
+                        Object ev = largs[0];
+                        String evName = ev != null ? ev.getClass().getSimpleName() : "null"; //$NON-NLS-1$
+                        Object st = Global.invoke(ev, "getStacktrace"); //$NON-NLS-1$
+                        listLog("repo.repositoryChanged(diag) " + evName //$NON-NLS-1$
+                                + " st=" + stacktraceLogId(st) //$NON-NLS-1$
+                                + " repoSize=" + repoSizeOf(realRepo) //$NON-NLS-1$
+                                + " listeners=" + listenerCount(realRepo) //$NON-NLS-1$
+                                + " " + shortStack()); //$NON-NLS-1$
+                    }
+                    return null;
+                });
+        Global.invoke(realRepo, "addChangedListener", diag); //$NON-NLS-1$
+        listLog("repoProbe: diagListener added listeners=" + listenerCount(realRepo)); //$NON-NLS-1$
+    }
+
+    /** Лог при появлении/удалении CTabItem (Dispose на item + периодический контроль через refresh). */
+    private static void installFolderTabProbe(CTabFolder folder)
+    {
+        if (folder == null || folder.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(folder.getData(FOLDER_TAB_PROBE_KEY)))
+            return;
+        folder.setData(FOLDER_TAB_PROBE_KEY, Boolean.TRUE);
+        int[] lastCount = { folder.getItemCount() };
+        folder.addListener(SWT.Resize, e ->
+        {
+            if (folder.isDisposed())
+                return;
+            int now = folder.getItemCount();
+            if (now != lastCount[0])
+            {
+                listLog("folder.tabsChanged " + lastCount[0] + "->" + now //$NON-NLS-1$ //$NON-NLS-2$
+                        + " " + shortStack()); //$NON-NLS-1$
+                lastCount[0] = now;
+                wireTabItemDisposeProbes(folder, lastCount);
+            }
+        });
+        folder.addDisposeListener(e -> listLog("folder.dispose tabsWere=" + lastCount[0])); //$NON-NLS-1$
+        wireTabItemDisposeProbes(folder, lastCount);
+        listLog("folderTabProbe: installed tabs=" + lastCount[0]); //$NON-NLS-1$
+    }
+
+    private static void wireTabItemDisposeProbes(CTabFolder folder, int[] lastCount)
+    {
+        if (folder == null || folder.isDisposed())
+            return;
+        for (CTabItem item : folder.getItems())
+        {
+            if (item == null || item.isDisposed())
+                continue;
+            if (Boolean.TRUE.equals(item.getData(FOLDER_TAB_PROBE_KEY)))
+                continue;
+            item.setData(FOLDER_TAB_PROBE_KEY, Boolean.TRUE);
+            final CTabItem watched = item;
+            item.addDisposeListener(e ->
+            {
+                int after = folder.isDisposed() ? -1 : folder.getItemCount();
+                listLog("tab.dispose text='" + safeTabText(watched) + "' tabsAfter=" + after //$NON-NLS-1$ //$NON-NLS-2$
+                        + " " + shortStack()); //$NON-NLS-1$
+                if (!folder.isDisposed())
+                    lastCount[0] = folder.getItemCount();
+            });
+        }
+        // Нет штатного ItemAdded — ловим рост через async после Selection/refresh и Resize выше.
+        int now = folder.getItemCount();
+        if (now > lastCount[0])
+        {
+            listLog("folder.tabsGrew " + lastCount[0] + "->" + now); //$NON-NLS-1$ //$NON-NLS-2$
+            lastCount[0] = now;
+        }
+    }
+
+    private static String safeTabText(CTabItem item)
+    {
+        try
+        {
+            if (item == null || item.isDisposed())
+                return "?"; //$NON-NLS-1$
+            String t = item.getText();
+            return t != null ? t : ""; //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+            return "?"; //$NON-NLS-1$
+        }
     }
 
     /**
      * Заголовки вкладок: обрезка первой строки ошибки (без резолва модулей — для всех вкладок).
+     * Список слева не обновляем здесь — иначе Selection сбрасывает мультивыбор.
      */
     private static void updateFolderTabTitles(org.eclipse.swt.custom.CTabFolder folder)
     {
@@ -512,9 +1038,26 @@ public final class StacktracesViewInteractionHook implements IStartup
         IStacktrace stacktrace = resolveStacktrace(page);
         if (stacktrace == null)
             return;
+        String detail = stacktrace.getDetail();
+        if (detail != null)
+            detail = detail.strip();
+        if (detail != null && detail.isEmpty())
+            detail = null;
+
         String full = BreakpointListHook.firstLine(findStacktraceErrorText(stacktrace));
         if (full.isEmpty())
+        {
+            // Нет текста ошибки — штатное имя, дату всё равно в одну строку (сжатие вкладок).
+            String name = stacktrace.getName();
+            if (name == null || name.isBlank())
+                name = BreakpointListHook.firstLine(item.getText());
+            if (name == null || name.isBlank())
+                return;
+            String title = detail == null ? name : name + ' ' + detail;
+            if (!title.equals(item.getText()))
+                item.setText(title);
             return;
+        }
 
         String shortError;
         boolean truncated = full.length() > TAB_TITLE_MAX_CHARS;
@@ -522,11 +1065,9 @@ public final class StacktracesViewInteractionHook implements IStartup
             shortError = full.substring(0, TAB_TITLE_MAX_CHARS) + "..."; //$NON-NLS-1$
         else
             shortError = full;
-        // Штатно EDT: getName() + "\n" + getDetail() (дата). Меняем только первую строку.
-        String detail = stacktrace.getDetail();
-        String title = detail == null || detail.isBlank()
-                ? shortError
-                : shortError + '\n' + detail;
+        // Одна строка: сжатый CTabFolder рисует только первую; перевод строки перед датой
+        // виден лишь в меню переполнения вкладок.
+        String title = detail == null ? shortError : shortError + ' ' + detail;
         if (!title.equals(item.getText()))
             item.setText(title);
         if (truncated)
@@ -566,15 +1107,28 @@ public final class StacktracesViewInteractionHook implements IStartup
         if (!(control instanceof Composite page) || page.isDisposed())
             return;
 
-        if (Boolean.TRUE.equals(page.getData(PAGE_ENHANCED_KEY)))
+        boolean already = Boolean.TRUE.equals(page.getData(PAGE_ENHANCED_KEY));
+        listLog("enhanceActivePage tabs=" + folder.getItemCount() //$NON-NLS-1$
+                + " alreadyEnhanced=" + already //$NON-NLS-1$
+                + " page@" + System.identityHashCode(page)); //$NON-NLS-1$
+        if (already)
             refreshPageProjects(page);
         else
             enhancePage(page);
+        ensureFrameStatusLabelProvider(page);
+
+        // Если enhance уже был при нулевом размере — дерево осталось 0×0.
+        Tree tree = findTree(page);
+        if (tree != null && !tree.isDisposed()
+                && (tree.getSize().x <= 0 || tree.getSize().y <= 0))
+            schedulePageRelayout(page);
 
         // afterPageChange снова регистрирует страницу как selection listener —
         // снимаем сейчас и ещё раз async (addPage вызывает afterPageChange после
-        // Selection от setActivePage).
+        // Selection от setActivePage). Провайдер иконок тоже может сброситься —
+        // «Анализировать» создаёт страницу до готового TreeViewer.
         suppressPageSelectionOpen(view, page);
+        scheduleEnsureFrameIcons(page);
         Display display = page.getDisplay();
         if (display != null && !display.isDisposed())
         {
@@ -599,6 +1153,9 @@ public final class StacktracesViewInteractionHook implements IStartup
         state.clearIconCache();
         if (state.treeViewer != null && !state.treeViewer.getControl().isDisposed())
             state.treeViewer.refresh();
+        StacktracesListPane pane = listPaneOf(findFolder(page));
+        if (pane != null)
+            pane.refreshFromFolder();
     }
 
     private static void enhancePage(Composite page)
@@ -606,12 +1163,23 @@ public final class StacktracesViewInteractionHook implements IStartup
         if (page == null || page.isDisposed())
             return;
         if (Boolean.TRUE.equals(page.getData(PAGE_ENHANCED_KEY)))
+        {
+            listLog("enhancePage: skip already page@" + System.identityHashCode(page)); //$NON-NLS-1$
             return;
+        }
 
         IStacktrace stacktrace = resolveStacktrace(page);
         Tree tree = findTree(page);
         if (tree == null)
+        {
+            listLog("enhancePage: no tree page@" + System.identityHashCode(page) //$NON-NLS-1$
+                    + " st=" + (stacktrace != null ? Integer.toHexString(System.identityHashCode(stacktrace)) : "null")); //$NON-NLS-1$ //$NON-NLS-2$
             return;
+        }
+
+        listLog("enhancePage: start page@" + System.identityHashCode(page) //$NON-NLS-1$
+                + " st=" + (stacktrace != null ? Integer.toHexString(System.identityHashCode(stacktrace)) : "null") //$NON-NLS-1$ //$NON-NLS-2$
+                + " " + shortStack()); //$NON-NLS-1$
 
         Object realDisplay = Global.getField(page, "sourceDisplay"); //$NON-NLS-1$
         if (realDisplay != null)
@@ -624,24 +1192,76 @@ public final class StacktracesViewInteractionHook implements IStartup
         PageState state = new PageState(stacktrace, realDisplay);
         PAGE_STATES.put(page, state);
         page.setData(PAGE_STATE_KEY, state);
+        // Сразу, до combo/viewer: иначе повторный enhanceActivePage удвоит шапку «Проект».
         page.setData(PAGE_ENHANCED_KEY, Boolean.TRUE);
 
         installProjectCombo(page, tree, state);
         installFrameStatusLabelProvider(page, state);
         page.addDisposeListener(e -> PAGE_STATES.remove(page));
+        scheduleEnsureFrameIcons(page);
+        StacktracesListPane pane = listPaneOf(findFolder(page));
+        if (pane != null)
+            pane.refreshFromFolder();
+        listLog("enhancePage: done page@" + System.identityHashCode(page)); //$NON-NLS-1$
     }
 
-    private static void installFrameStatusLabelProvider(Composite page, PageState state)
+    /**
+     * «Анализировать» / addPage: {@code viewer} на странице может появиться позже первого
+     * {@link #enhancePage}, либо штатный код снова ставит свой label provider. Повторяем
+     * обёртку {@link FrameStatusLabelProvider} (иконка корня — {@code runtime_debug_target}).
+     */
+    private static void scheduleEnsureFrameIcons(Composite page)
+    {
+        if (page == null || page.isDisposed())
+            return;
+        Display display = page.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        Runnable retry = () ->
+        {
+            if (!page.isDisposed())
+                ensureFrameStatusLabelProvider(page);
+        };
+        display.asyncExec(retry);
+        display.timerExec(50, retry);
+        display.timerExec(200, retry);
+        display.timerExec(500, retry);
+    }
+
+    /** @return {@code true}, если на дереве уже наш провайдер иконок */
+    private static boolean ensureFrameStatusLabelProvider(Composite page)
+    {
+        if (page == null || page.isDisposed())
+            return false;
+        Object data = page.getData(PAGE_STATE_KEY);
+        if (!(data instanceof PageState state))
+        {
+            Global.tempLog("stacktraces-icons", "ensure: no PageState"); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        }
+        return installFrameStatusLabelProvider(page, state);
+    }
+
+    private static boolean installFrameStatusLabelProvider(Composite page, PageState state)
     {
         Object viewerObj = Global.getField(page, "viewer"); //$NON-NLS-1$
         if (!(viewerObj instanceof TreeViewer viewer))
-            return;
+        {
+            Global.tempLog("stacktraces-icons", "install: viewer not ready"); //$NON-NLS-1$ //$NON-NLS-2$
+            return false;
+        }
         IBaseLabelProvider current = viewer.getLabelProvider();
         if (current instanceof FrameStatusLabelProvider)
-            return;
+        {
+            state.treeViewer = viewer;
+            return true;
+        }
         FrameStatusLabelProvider wrapped = new FrameStatusLabelProvider(current, state, page);
         viewer.setLabelProvider(wrapped);
         state.treeViewer = viewer;
+        viewer.refresh();
+        Global.tempLog("stacktraces-icons", "install: wrapped + refresh"); //$NON-NLS-1$ //$NON-NLS-2$
+        return true;
     }
 
     /** Страница вкладки видна (активна в {@code CTabFolder}). */
@@ -756,9 +1376,67 @@ public final class StacktracesViewInteractionHook implements IStartup
             state.clearIconCache();
             if (state.treeViewer != null && !state.treeViewer.getControl().isDisposed())
                 state.treeViewer.refresh();
+            StacktracesListPane pane = listPaneOf(findFolder(page));
+            if (pane != null)
+                pane.refreshFromFolder();
         });
 
-        page.layout(true, true);
+        // «Анализировать» → showView/addPage: workbench ещё не доложил размеры страницы.
+        // Синхронный layout при clientArea 0×0 оставляет дерево нулевой высоты — пустая
+        // панель до смены вкладки. Откладываем layout до ненулевого размера.
+        schedulePageRelayout(page);
+    }
+
+    private static CTabFolder findFolder(Control control)
+    {
+        Control current = control;
+        while (current != null && !current.isDisposed())
+        {
+            if (current instanceof CTabFolder folder)
+                return folder;
+            current = current.getParent();
+        }
+        return null;
+    }
+
+    /**
+     * Layout страницы вкладки после того, как {@code CTabFolder}/workbench задаст ей
+     * ненулевой clientArea (сразу, async и одноразовый {@link SWT#Resize}).
+     */
+    private static void schedulePageRelayout(Composite page)
+    {
+        if (page == null || page.isDisposed())
+            return;
+        Runnable layoutOnce = () ->
+        {
+            if (page.isDisposed())
+                return;
+            org.eclipse.swt.graphics.Rectangle ca = page.getClientArea();
+            if (ca.width <= 0 || ca.height <= 0)
+                return;
+            page.layout(true, true);
+            Composite parent = page.getParent();
+            if (parent != null && !parent.isDisposed())
+                parent.layout(true, true);
+        };
+        layoutOnce.run();
+        Display display = page.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(layoutOnce);
+        if (page.getClientArea().width > 0 && page.getClientArea().height > 0)
+            return;
+        Listener[] resizeHold = new Listener[1];
+        resizeHold[0] = e ->
+        {
+            if (page.isDisposed())
+                return;
+            if (page.getClientArea().width <= 0 || page.getClientArea().height <= 0)
+                return;
+            page.removeListener(SWT.Resize, resizeHold[0]);
+            layoutOnce.run();
+        };
+        page.addListener(SWT.Resize, resizeHold[0]);
     }
 
     /**
@@ -1391,6 +2069,783 @@ public final class StacktracesViewInteractionHook implements IStartup
         {
             this.name = name;
             this.score = score;
+        }
+    }
+
+    /**
+     * Левая панель списка трассировок: фильтр + таблица; вкладки CTabFolder скрыты
+     * ({@code setTabHeight(0)}), активация/удаление строк синхронизированы со страницами.
+     */
+    private static final class StacktracesListPane
+    {
+        private static final int COL_DATE = 0;
+        private static final int COL_ERROR = 1;
+        private static final int COL_PROJECT = 2;
+
+        /** Текст ячейки по элементу модели — общий для копирования и отбора по значению. */
+        private static String stackRowText(Object element, int column)
+        {
+            if (!(element instanceof StackRow row))
+                return ""; //$NON-NLS-1$
+            if (column == COL_ERROR)
+                return row.error;
+            if (column == COL_DATE)
+                return row.date;
+            if (column == COL_PROJECT)
+                return row.project;
+            return ""; //$NON-NLS-1$
+        }
+
+        private static final int DEFAULT_ERROR_WIDTH = 220;
+        private static final int DEFAULT_DATE_WIDTH = 160;
+        private static final int DEFAULT_PROJECT_WIDTH = 120;
+        private static final int DEFAULT_SASH_LEFT = 38;
+        private static final int DEFAULT_SASH_RIGHT = 62;
+        private static final String ORDER_SETTINGS_KEY = "order"; //$NON-NLS-1$
+
+        private final IViewPart view;
+        private final CTabFolder folder;
+        private final SashForm sash;
+        private final TableViewer viewer;
+        private final FormTableInteraction interaction;
+        private final FilterInputBox filterInput;
+        private final TableColumn errorColumn;
+        private final TableColumn dateColumn;
+        private final TableColumn projectColumn;
+        private final DateSortComparator comparator = new DateSortComparator();
+        private final ListFilter listFilter = new ListFilter();
+
+        private boolean syncingSelection;
+        private String filterText = ""; //$NON-NLS-1$
+        private Runnable pendingSaveSash;
+        /** Индекс строки после Del — не прыгать на первую из‑за folder.setSelection. */
+        private int deleteAnchorIndex = -1;
+
+        static StacktracesListPane install(IViewPart view, Composite parent, CTabFolder folder)
+        {
+            liftFolderOutOfListSash(folder);
+            parent = folder.getParent();
+            if (parent == null || parent.isDisposed())
+                throw new IllegalStateException("stacktraces folder has no parent"); //$NON-NLS-1$
+
+            SashForm sash = new SashForm(parent, SWT.HORIZONTAL);
+            sash.setData(LIST_SASH_KEY, Boolean.TRUE);
+            folder.setParent(sash);
+
+            StacktracesListPane pane = new StacktracesListPane(view, sash, folder);
+            pane.root.moveAbove(folder);
+            folder.setTabHeight(0);
+            int left = ComfortSettings.getStacktracesListSashWeight("left", DEFAULT_SASH_LEFT); //$NON-NLS-1$
+            int right = ComfortSettings.getStacktracesListSashWeight("right", DEFAULT_SASH_RIGHT); //$NON-NLS-1$
+            if (left < 1)
+                left = DEFAULT_SASH_LEFT;
+            if (right < 1)
+                right = DEFAULT_SASH_RIGHT;
+            sash.setWeights(new int[] { left, right });
+            parent.layout(true, true);
+            return pane;
+        }
+
+        private final Composite root;
+
+        boolean isAlive(CTabFolder expectedFolder)
+        {
+            return expectedFolder == folder
+                    && folder != null && !folder.isDisposed()
+                    && sash != null && !sash.isDisposed()
+                    && root != null && !root.isDisposed()
+                    && viewer != null && viewer.getControl() != null && !viewer.getControl().isDisposed()
+                    && folder.getParent() == sash
+                    && root.getParent() == sash
+                    && Boolean.TRUE.equals(sash.getData(LIST_SASH_KEY));
+        }
+
+        private StacktracesListPane(IViewPart view, SashForm sash, CTabFolder folder)
+        {
+            this.view = view;
+            this.sash = sash;
+            this.folder = folder;
+
+            root = new Composite(sash, SWT.NONE);
+            GridLayout rootLayout = new GridLayout(1, false);
+            rootLayout.marginWidth = 0;
+            rootLayout.marginHeight = 0;
+            rootLayout.verticalSpacing = 2;
+            root.setLayout(rootLayout);
+
+            filterInput = FilterInputBox.forStacktraces(root, this::applyFilter);
+
+            Composite tableStack = new Composite(root, SWT.NONE);
+            tableStack.setLayout(null);
+            tableStack.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+
+            Composite columnHost = new Composite(tableStack, SWT.NONE);
+            TableColumnLayout columnLayout = new TableColumnLayout(true);
+            columnHost.setLayout(columnLayout);
+
+            viewer = new TableViewer(columnHost,
+                SWT.MULTI | SWT.FULL_SELECTION | SWT.BORDER | SWT.V_SCROLL | SWT.H_SCROLL);
+            Table table = viewer.getTable();
+            table.setHeaderVisible(true);
+            table.setLinesVisible(true);
+
+            // Колонка 0 не должна быть StyledCell: у SWT/Win32 у первой колонки отступ под
+            // иконку, owner-draw текст оставляет «обрезок» слева (эталон: RecentPlaces/ObjectSets —
+            // сначала колонка-иконка, потом styled). Дата — обычный провайдер; подсветка фильтра
+            // только в «Ошибка».
+            dateColumn = createColumn(viewer, columnLayout, "Дата", //$NON-NLS-1$
+                "date", DEFAULT_DATE_WIDTH, COL_DATE, false); //$NON-NLS-1$
+            errorColumn = createColumn(viewer, columnLayout, "Ошибка", //$NON-NLS-1$
+                "error", DEFAULT_ERROR_WIDTH, COL_ERROR, true); //$NON-NLS-1$
+            projectColumn = createColumn(viewer, columnLayout, "Проект", //$NON-NLS-1$
+                "project", DEFAULT_PROJECT_WIDTH, COL_PROJECT, false); //$NON-NLS-1$
+
+            loadColumnOrder(table);
+            viewer.setContentProvider(ArrayContentProvider.getInstance());
+            viewer.setComparator(comparator);
+            viewer.addFilter(listFilter);
+
+            Control filterKeys = filterInput.inputControl();
+            if (filterKeys == null)
+                filterKeys = filterInput.widget();
+            FilterInputBoxListNavigation.installTableOpenOnEnter(filterKeys, table, null, () ->
+            {
+                IStructuredSelection sel = viewer.getStructuredSelection();
+                Object first = sel.getFirstElement();
+                if (first instanceof StackRow row && row.item != null && !row.item.isDisposed())
+                {
+                    folder.setSelection(row.item);
+                    enhanceActivePage(view, folder);
+                }
+            });
+
+            interaction = new FormTableInteraction(table, viewer,
+                (item, column) -> stackRowText(item.getData(), column));
+            // Owner-draw только у «Ошибка» (StyledCell); Date/Project — нативный текст.
+            interaction.setOwnerDrawColumns(errorColumn);
+            // Отбор по значению ячейки работает по элементу модели — живого TableItem там ещё нет.
+            interaction.setFilterTextResolver(StacktracesListPane::stackRowText);
+            // «Отключить все отборы» снимает и отбор по подстроке из поля поиска.
+            interaction.setSubstringFilterClearer(() ->
+            {
+                if (filterInput == null || filterInput.isDisposed() || filterInput.getText().isEmpty())
+                    return;
+                filterInput.setText(""); //$NON-NLS-1$
+                applyFilter();
+            });
+            interaction.install();
+
+            tableStack.addControlListener(new ControlAdapter()
+            {
+                @Override
+                public void controlResized(ControlEvent e)
+                {
+                    if (!columnHost.isDisposed())
+                        columnHost.setBounds(tableStack.getClientArea());
+                    scheduleSaveSash();
+                }
+            });
+
+            viewer.addSelectionChangedListener(event ->
+            {
+                if (syncingSelection)
+                    return;
+                Object first = viewer.getStructuredSelection().getFirstElement();
+                if (!(first instanceof StackRow row) || row.item == null || row.item.isDisposed())
+                    return;
+                syncingSelection = true;
+                try
+                {
+                    folder.setSelection(row.item);
+                    enhanceActivePage(view, folder);
+                }
+                finally
+                {
+                    syncingSelection = false;
+                }
+            });
+
+            table.addKeyListener(new KeyAdapter()
+            {
+                @Override
+                public void keyPressed(KeyEvent e)
+                {
+                    if (e.keyCode == SWT.DEL)
+                    {
+                        deleteSelected();
+                        e.doit = false;
+                    }
+                }
+            });
+
+            installColumnSort(errorColumn, COL_ERROR);
+            installColumnSort(dateColumn, COL_DATE);
+            installColumnSort(projectColumn, COL_PROJECT);
+            comparator.sortColumn = COL_DATE;
+            comparator.descending = true;
+            table.setSortColumn(dateColumn);
+            table.setSortDirection(SWT.DOWN);
+
+            folder.addDisposeListener(e -> saveColumnOrder(table));
+        }
+
+        private TableColumn createColumn(TableViewer tableViewer, TableColumnLayout layout,
+                String title, String widthId, int defaultWidth, int modelIndex, boolean styled)
+        {
+            TableViewerColumn col = new TableViewerColumn(tableViewer, SWT.LEFT);
+            TableColumn column = col.getColumn();
+            column.setText(title);
+            column.setToolTipText(title + Global.pluginSignForTooltip());
+            column.setMoveable(true);
+            int width = ComfortSettings.getStacktracesListColumnWidth(widthId, defaultWidth);
+            if (width < 40)
+                width = defaultWidth;
+            layout.setColumnData(column, new ColumnPixelData(width, true, true));
+            final int index = modelIndex;
+            if (styled)
+            {
+                col.setLabelProvider(new SelectionAwareStyledCellLabelProvider(
+                        new HighlightLabelProvider(index)));
+            }
+            else
+            {
+                col.setLabelProvider(new ColumnLabelProvider()
+                {
+                    @Override
+                    public String getText(Object element)
+                    {
+                        return cellTextForColumn(element, index);
+                    }
+                });
+            }
+            column.addListener(SWT.Resize, e ->
+            {
+                int w = column.getWidth();
+                if (w > 0)
+                    ComfortSettings.setStacktracesListColumnWidth(widthId, w);
+            });
+            column.addControlListener(new ControlAdapter()
+            {
+                @Override
+                public void controlMoved(ControlEvent e)
+                {
+                    saveColumnOrder(tableViewer.getTable());
+                }
+            });
+            return column;
+        }
+
+        private static String cellTextForColumn(Object element, int index)
+        {
+            if (!(element instanceof StackRow row))
+                return ""; //$NON-NLS-1$
+            if (index == COL_ERROR)
+                return row.error;
+            if (index == COL_DATE)
+                return row.date;
+            if (index == COL_PROJECT)
+                return row.project;
+            return ""; //$NON-NLS-1$
+        }
+
+        private final class HighlightLabelProvider extends LabelProvider implements IStyledLabelProvider
+        {
+            private final int index;
+
+            HighlightLabelProvider(int index)
+            {
+                this.index = index;
+            }
+
+            @Override
+            public StyledString getStyledText(Object element)
+            {
+                String text = cellTextForColumn(element, index);
+                StyledString styled = new StyledString(text);
+                SmartMatcher matcher = listFilter.matcher;
+                if (matcher != null && !matcher.isEmpty && !text.isEmpty())
+                    SmartMatchHighlight.applyRanges(styled, matcher.getHighlightRanges(text),
+                            viewer.getControl());
+                return styled;
+            }
+
+            @Override
+            public String getText(Object element)
+            {
+                return cellTextForColumn(element, index);
+            }
+        }
+
+        private void installColumnSort(TableColumn column, int modelIndex)
+        {
+            column.addSelectionListener(new SelectionAdapter()
+            {
+                @Override
+                public void widgetSelected(SelectionEvent e)
+                {
+                    Table table = viewer.getTable();
+                    if (comparator.sortColumn == modelIndex)
+                        comparator.descending = !comparator.descending;
+                    else
+                    {
+                        comparator.sortColumn = modelIndex;
+                        comparator.descending = modelIndex == COL_DATE;
+                    }
+                    table.setSortColumn(column);
+                    table.setSortDirection(comparator.descending ? SWT.DOWN : SWT.UP);
+                    viewer.refresh();
+                }
+            });
+        }
+
+        private void applyFilter()
+        {
+            if (filterInput == null || filterInput.isDisposed())
+                return;
+            filterText = filterInput.getText() != null ? filterInput.getText() : ""; //$NON-NLS-1$
+            listFilter.matcher = filterText.isBlank() ? null : new SmartMatcher(filterText);
+            viewer.refresh();
+            // Прежняя строка отфильтрована — переносим выделение на первую видимую.
+            FilterInputBoxListNavigation.selectFirstRowIfSelectionLost(viewer.getTable());
+        }
+
+        void refreshFromFolder()
+        {
+            if (viewer.getControl().isDisposed() || folder.isDisposed())
+                return;
+            List<StackRow> previousSelection = new ArrayList<>();
+            for (Object o : viewer.getStructuredSelection().toList())
+            {
+                if (o instanceof StackRow row)
+                    previousSelection.add(row);
+            }
+            Object repository = Global.getField(view, "repository"); //$NON-NLS-1$
+            int repoSize = -1;
+            if (repository != null)
+            {
+                Object all = Global.invoke(repository, "getStacktraces"); //$NON-NLS-1$
+                if (all instanceof List<?> list)
+                    repoSize = list.size();
+            }
+            List<StackRow> rows = new ArrayList<>();
+            Map<String, Integer> contentFirst = new java.util.HashMap<>();
+            IdentityHashMap<IStacktrace, Integer> stFirst = new IdentityHashMap<>();
+            int tabIndex = 0;
+            int contentDupMark = 0;
+            int identityDupMark = 0;
+            StringBuilder tabDump = new StringBuilder();
+            for (CTabItem item : folder.getItems())
+            {
+                int idx = tabIndex++;
+                if (item == null || item.isDisposed())
+                    continue;
+                Control control = item.getControl();
+                IStacktrace stacktrace = control instanceof Composite page && !page.isDisposed()
+                        ? resolveStacktrace(page) : null;
+                int stId = stacktrace != null ? System.identityHashCode(stacktrace) : 0;
+                StackRow row = StackRow.from(item);
+                if (row == null)
+                {
+                    tabDump.append(" |#").append(idx).append(" nullRow stId=").append(stId); //$NON-NLS-1$ //$NON-NLS-2$
+                    continue;
+                }
+                String contentKey = row.error + "\t" + row.date; //$NON-NLS-1$
+                Integer contentPrev = contentFirst.putIfAbsent(contentKey, Integer.valueOf(idx));
+                Integer stPrev = stacktrace != null
+                        ? stFirst.putIfAbsent(stacktrace, Integer.valueOf(idx)) : null;
+                tabDump.append(" |#").append(idx) //$NON-NLS-1$
+                        .append(" st=").append(Integer.toHexString(stId)) //$NON-NLS-1$
+                        .append(" '").append(shortLog(row.error)).append("' ") //$NON-NLS-1$ //$NON-NLS-2$
+                        .append(row.date);
+                if (stPrev != null)
+                {
+                    identityDupMark++;
+                    tabDump.append(" ID_DUP_of#").append(stPrev.intValue()); //$NON-NLS-1$
+                }
+                if (contentPrev != null)
+                {
+                    contentDupMark++;
+                    tabDump.append(" CONTENT_DUP_of#").append(contentPrev.intValue()); //$NON-NLS-1$
+                }
+                rows.add(row);
+                if (item.getData("tormozit.comfort.stacktraces.listDispose") == null) //$NON-NLS-1$
+                {
+                    item.setData("tormozit.comfort.stacktraces.listDispose", Boolean.TRUE); //$NON-NLS-1$
+                    item.addDisposeListener(e ->
+                    {
+                        Display display = Display.getCurrent();
+                        if (display != null)
+                            display.asyncExec(this::refreshFromFolder);
+                    });
+                }
+            }
+            CTabItem selected = folder.getSelection();
+            installFolderTabProbe(folder);
+            Global.tempLog("stacktraces-list", //$NON-NLS-1$
+                    "refresh tabs=" + folder.getItemCount() //$NON-NLS-1$
+                            + " repo=" + repoSize //$NON-NLS-1$
+                            + " rows=" + rows.size() //$NON-NLS-1$
+                            + " contentDupMark=" + contentDupMark //$NON-NLS-1$
+                            + " idDupMark=" + identityDupMark //$NON-NLS-1$
+                            + " tableItems=" + viewer.getTable().getItemCount() //$NON-NLS-1$
+                            + " folderSel=" + (selected != null && !selected.isDisposed() //$NON-NLS-1$
+                                    ? selected.getText() : "null") //$NON-NLS-1$
+                            + tabDump);
+            syncingSelection = true;
+            try
+            {
+                viewer.setInput(rows);
+                List<StackRow> keep = new ArrayList<>();
+                for (StackRow prev : previousSelection)
+                {
+                    for (StackRow row : rows)
+                    {
+                        if (row.item == prev.item)
+                        {
+                            keep.add(row);
+                            break;
+                        }
+                    }
+                }
+                StackRow folderRow = null;
+                if (selected != null && !selected.isDisposed())
+                {
+                    for (StackRow row : rows)
+                    {
+                        if (row.item == selected)
+                        {
+                            folderRow = row;
+                            break;
+                        }
+                    }
+                }
+                boolean folderInKeep = false;
+                if (folderRow != null)
+                {
+                    for (StackRow row : keep)
+                    {
+                        if (row.item == folderRow.item)
+                        {
+                            folderInKeep = true;
+                            break;
+                        }
+                    }
+                }
+                if (deleteAnchorIndex >= 0)
+                {
+                    StackRow byIndex = rowAtTableIndex(deleteAnchorIndex);
+                    if (byIndex != null)
+                    {
+                        viewer.setSelection(new StructuredSelection(byIndex), true);
+                        if (byIndex.item != null && !byIndex.item.isDisposed())
+                            folder.setSelection(byIndex.item);
+                    }
+                    else if (folderRow != null)
+                        viewer.setSelection(new StructuredSelection(folderRow), true);
+                    else if (!keep.isEmpty())
+                        viewer.setSelection(new StructuredSelection(keep), true);
+                }
+                // «Анализировать» / смена вкладки: folder уже на новом CTabItem —
+                // не оставляем прежнее выделение таблицы.
+                else if (folderRow != null && !folderInKeep)
+                    viewer.setSelection(new StructuredSelection(folderRow), true);
+                else if (!keep.isEmpty())
+                    viewer.setSelection(new StructuredSelection(keep), true);
+                else if (folderRow != null)
+                    viewer.setSelection(new StructuredSelection(folderRow), true);
+            }
+            finally
+            {
+                syncingSelection = false;
+            }
+        }
+
+        private static String shortLog(String text)
+        {
+            if (text == null || text.isEmpty())
+                return ""; //$NON-NLS-1$
+            String one = text.replace('\n', ' ').replace('\r', ' ');
+            return one.length() <= 40 ? one : one.substring(0, 40) + "..."; //$NON-NLS-1$
+        }
+
+        private StackRow rowAtTableIndex(int index)
+        {
+            Table table = viewer.getTable();
+            if (table.isDisposed())
+                return null;
+            int count = table.getItemCount();
+            if (count <= 0)
+                return null;
+            int i = index;
+            if (i < 0)
+                i = 0;
+            if (i >= count)
+                i = count - 1;
+            Object data = table.getItem(i).getData();
+            return data instanceof StackRow row ? row : null;
+        }
+
+        private int minSelectedTableIndex()
+        {
+            Table table = viewer.getTable();
+            if (table.isDisposed())
+                return -1;
+            int[] indices = table.getSelectionIndices();
+            if (indices == null || indices.length == 0)
+                return -1;
+            int min = indices[0];
+            for (int i = 1; i < indices.length; i++)
+            {
+                if (indices[i] < min)
+                    min = indices[i];
+            }
+            return min;
+        }
+
+        void syncSelectionFromFolder()
+        {
+            if (syncingSelection || deleteAnchorIndex >= 0
+                    || viewer.getControl().isDisposed() || folder.isDisposed())
+                return;
+            CTabItem selected = folder.getSelection();
+            if (selected == null || selected.isDisposed())
+                return;
+            IStructuredSelection current = viewer.getStructuredSelection();
+            for (Object o : current.toList())
+            {
+                if (o instanceof StackRow row && row.item == selected)
+                    return;
+            }
+            Object input = viewer.getInput();
+            if (!(input instanceof List<?> rows))
+            {
+                refreshFromFolder();
+                return;
+            }
+            for (Object o : rows)
+            {
+                if (o instanceof StackRow row && row.item == selected)
+                {
+                    syncingSelection = true;
+                    try
+                    {
+                        viewer.setSelection(new StructuredSelection(row), true);
+                    }
+                    finally
+                    {
+                        syncingSelection = false;
+                    }
+                    return;
+                }
+            }
+            refreshFromFolder();
+        }
+
+        private void deleteSelected()
+        {
+            IStructuredSelection sel = viewer.getStructuredSelection();
+            if (sel.isEmpty())
+                return;
+            Object repository = Global.getField(view, "repository"); //$NON-NLS-1$
+            if (repository == null)
+                return;
+            int anchorIndex = minSelectedTableIndex();
+            List<IStacktrace> toRemove = new ArrayList<>();
+            for (Object o : sel.toList())
+            {
+                if (!(o instanceof StackRow row) || row.item == null || row.item.isDisposed())
+                    continue;
+                Control control = row.item.getControl();
+                if (!(control instanceof Composite page) || page.isDisposed())
+                    continue;
+                IStacktrace stacktrace = resolveStacktrace(page);
+                if (stacktrace != null)
+                    toRemove.add(stacktrace);
+            }
+            if (toRemove.isEmpty())
+                return;
+            deleteAnchorIndex = anchorIndex;
+            try
+            {
+                for (IStacktrace stacktrace : toRemove)
+                    Global.invokeVoid(repository, "remove", stacktrace); //$NON-NLS-1$
+                refreshFromFolder();
+                StackRow byIndex = rowAtTableIndex(deleteAnchorIndex);
+                if (byIndex != null)
+                {
+                    syncingSelection = true;
+                    try
+                    {
+                        viewer.setSelection(new StructuredSelection(byIndex), true);
+                        if (byIndex.item != null && !byIndex.item.isDisposed())
+                        {
+                            folder.setSelection(byIndex.item);
+                            enhanceActivePage(view, folder);
+                        }
+                    }
+                    finally
+                    {
+                        syncingSelection = false;
+                    }
+                }
+            }
+            finally
+            {
+                deleteAnchorIndex = -1;
+            }
+        }
+
+        private void scheduleSaveSash()
+        {
+            Display display = sash.getDisplay();
+            if (display == null || display.isDisposed())
+                return;
+            if (pendingSaveSash != null)
+                display.timerExec(-1, pendingSaveSash);
+            pendingSaveSash = () ->
+            {
+                pendingSaveSash = null;
+                if (sash.isDisposed())
+                    return;
+                int[] w = sash.getWeights();
+                if (w.length == 2)
+                    ComfortSettings.setStacktracesListSashWeights(w[0], w[1]);
+            };
+            display.timerExec(300, pendingSaveSash);
+        }
+
+        private static void loadColumnOrder(Table table)
+        {
+            String order = ComfortSettings.getStacktracesListColumnOrder();
+            if (order == null || order.isBlank())
+                return;
+            IDialogSettings settings = new DialogSettings("stacktracesList"); //$NON-NLS-1$
+            settings.put(ORDER_SETTINGS_KEY, order);
+            FormTableColumnOrder.load(settings, ORDER_SETTINGS_KEY, table);
+        }
+
+        private static void saveColumnOrder(Table table)
+        {
+            if (table == null || table.isDisposed())
+                return;
+            ComfortSettings.setStacktracesListColumnOrder(FormTableColumnOrder.formatOrder(table));
+        }
+
+        private final class ListFilter extends ViewerFilter
+        {
+            SmartMatcher matcher;
+
+            @Override
+            public boolean select(Viewer viewer, Object parentElement, Object element)
+            {
+                if (matcher == null)
+                    return true;
+                if (!(element instanceof StackRow row))
+                    return false;
+                String hay = row.error + ' ' + row.date + ' ' + row.project;
+                return matcher.matches(hay);
+            }
+        }
+
+        private static final class DateSortComparator extends ViewerComparator
+        {
+            int sortColumn = COL_DATE;
+            boolean descending = true;
+
+            @Override
+            public int compare(Viewer viewer, Object e1, Object e2)
+            {
+                if (!(e1 instanceof StackRow a) || !(e2 instanceof StackRow b))
+                    return 0;
+                int result;
+                if (sortColumn == COL_DATE)
+                    result = Long.compare(a.dateMillis, b.dateMillis);
+                else if (sortColumn == COL_PROJECT)
+                    result = a.project.compareToIgnoreCase(b.project);
+                else
+                    result = a.error.compareToIgnoreCase(b.error);
+                return descending ? -result : result;
+            }
+        }
+
+        private static final class StackRow
+        {
+            final CTabItem item;
+            final String error;
+            final String date;
+            final String project;
+            final long dateMillis;
+
+            StackRow(CTabItem item, String error, String date, String project, long dateMillis)
+            {
+                this.item = item;
+                this.error = error != null ? error : ""; //$NON-NLS-1$
+                this.date = date != null ? date : ""; //$NON-NLS-1$
+                this.project = project != null ? project : ""; //$NON-NLS-1$
+                this.dateMillis = dateMillis;
+            }
+
+            static StackRow from(CTabItem item)
+            {
+                Control control = item.getControl();
+                if (!(control instanceof Composite page) || page.isDisposed())
+                    return null;
+                IStacktrace stacktrace = resolveStacktrace(page);
+                if (stacktrace == null)
+                    return null;
+                String error = BreakpointListHook.firstLine(findStacktraceErrorText(stacktrace));
+                if (error.isEmpty())
+                {
+                    String name = stacktrace.getName();
+                    error = name != null ? name : ""; //$NON-NLS-1$
+                }
+                String date = stacktrace.getDetail();
+                if (date != null)
+                    date = date.strip();
+                else
+                    date = ""; //$NON-NLS-1$
+                String project = resolveProjectLabel(stacktrace, page);
+                return new StackRow(item, error, date, project, parseDetailMillis(date));
+            }
+        }
+
+        private static String resolveProjectLabel(IStacktrace stacktrace, Composite page)
+        {
+            Object stateObj = page.getData(PAGE_STATE_KEY);
+            if (stateObj instanceof PageState state)
+            {
+                String selected = state.selectedProjectName();
+                if (selected != null && !selected.isBlank())
+                    return selected;
+            }
+            String project = stacktrace.getProjectName();
+            if (project != null && !project.isBlank())
+                return project;
+            List<IStacktraceFrame> frames = collectFrames(stacktrace);
+            for (IStacktraceFrame frame : frames)
+            {
+                String name = frame.getProjectName();
+                if (name != null && !name.isBlank())
+                    return name;
+            }
+            return ""; //$NON-NLS-1$
+        }
+
+        private static long parseDetailMillis(String detail)
+        {
+            if (detail == null || detail.isBlank())
+                return 0L;
+            try
+            {
+                DateFormat format = DateFormat.getDateTimeInstance(
+                    DateFormat.MEDIUM, DateFormat.MEDIUM, Locale.getDefault());
+                Date date = format.parse(detail);
+                return date != null ? date.getTime() : 0L;
+            }
+            catch (ParseException ex)
+            {
+                return 0L;
+            }
         }
     }
 }

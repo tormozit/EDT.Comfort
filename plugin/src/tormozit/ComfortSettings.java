@@ -149,6 +149,15 @@ public final class ComfortSettings
     /** Prefix for git history file-list sash weights (graph | files). */
     private static final String PREF_GIT_HISTORY_SASH_PREFIX = "comfort.gitHistory.sash."; //$NON-NLS-1$
 
+    /** Prefix for stacktraces list sash weights (table | stack). */
+    private static final String PREF_STACKTRACES_LIST_SASH_PREFIX = "comfort.stacktracesList.sash."; //$NON-NLS-1$
+
+    /** Prefix for stacktraces list column widths. */
+    private static final String PREF_STACKTRACES_LIST_COLUMN_PREFIX = "comfort.stacktracesList.columnWidth."; //$NON-NLS-1$
+
+    /** Column order of stacktraces list table ({@code "0,2,1"}). */
+    private static final String PREF_STACKTRACES_LIST_COLUMN_ORDER = "comfort.stacktracesList.columnOrder"; //$NON-NLS-1$
+
     /**
      * Ключ: однократный bootstrap настроек списка коммитов EGit History
      * (видимы Автор и Дата фиксации; скрыты Коммитер и Дата изменения автором;
@@ -740,6 +749,89 @@ public final class ComfortSettings
         catch (Exception ex)
         {
             Global.log("ComfortSettings save error (configSearchMatchColumnWidth): " + ex); //$NON-NLS-1$
+        }
+    }
+
+    // ---- Stacktraces list pane (table | stack) ----
+
+    public static int getStacktracesListSashWeight(String side, int defaultWeight)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return defaultWeight;
+        String key = PREF_STACKTRACES_LIST_SASH_PREFIX + side;
+        if (!settings.preferenceStore.contains(key))
+            return defaultWeight;
+        return settings.preferenceStore.getInt(key);
+    }
+
+    public static void setStacktracesListSashWeights(int left, int right)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        settings.preferenceStore.setValue(PREF_STACKTRACES_LIST_SASH_PREFIX + "left", left); //$NON-NLS-1$
+        settings.preferenceStore.setValue(PREF_STACKTRACES_LIST_SASH_PREFIX + "right", right); //$NON-NLS-1$
+        try
+        {
+            settings.preferenceStore.save();
+        }
+        catch (Exception ex)
+        {
+            Global.log("ComfortSettings save error (stacktracesListSashWeights): " + ex); //$NON-NLS-1$
+        }
+    }
+
+    public static int getStacktracesListColumnWidth(String columnId, int defaultWidth)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return defaultWidth;
+        String key = PREF_STACKTRACES_LIST_COLUMN_PREFIX + columnId;
+        if (!settings.preferenceStore.contains(key))
+            return defaultWidth;
+        return settings.preferenceStore.getInt(key);
+    }
+
+    public static void setStacktracesListColumnWidth(String columnId, int width)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return;
+        settings.preferenceStore.setValue(PREF_STACKTRACES_LIST_COLUMN_PREFIX + columnId, width);
+        try
+        {
+            settings.preferenceStore.save();
+        }
+        catch (Exception ex)
+        {
+            Global.log("ComfortSettings save error (stacktracesListColumnWidth): " + ex); //$NON-NLS-1$
+        }
+    }
+
+    public static String getStacktracesListColumnOrder()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return null;
+        if (!settings.preferenceStore.contains(PREF_STACKTRACES_LIST_COLUMN_ORDER))
+            return null;
+        return settings.preferenceStore.getString(PREF_STACKTRACES_LIST_COLUMN_ORDER);
+    }
+
+    public static void setStacktracesListColumnOrder(String order)
+    {
+        ComfortSettings settings = instance;
+        if (settings == null || order == null)
+            return;
+        settings.preferenceStore.setValue(PREF_STACKTRACES_LIST_COLUMN_ORDER, order);
+        try
+        {
+            settings.preferenceStore.save();
+        }
+        catch (Exception ex)
+        {
+            Global.log("ComfortSettings save error (stacktracesListColumnOrder): " + ex); //$NON-NLS-1$
         }
     }
 

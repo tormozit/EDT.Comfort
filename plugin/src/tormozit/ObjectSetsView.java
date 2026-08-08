@@ -407,17 +407,18 @@ public final class ObjectSetsView extends ViewPart
 
         itemsViewer.setContentProvider(ArrayContentProvider.getInstance());
         itemsInteraction = new FormTableInteraction(table, itemsViewer, (item, column) ->
-        {
-            if (!(item.getData() instanceof ObjectSets.Item row))
-                return ""; //$NON-NLS-1$
-            TableColumn col = table.getColumn(column);
-            if (col == nameColumn)
-                return row.ownName != null ? row.ownName : ""; //$NON-NLS-1$
-            if (col == pathColumn)
-                return placePrefix(row.displayName, row.ownName);
-            return ""; //$NON-NLS-1$
-        });
+            itemColumnText(item.getData(), table, column));
         itemsInteraction.setOwnerDrawColumns(nameColumn);
+        // Отбор по значению ячейки работает по элементу модели — живого TableItem там ещё нет.
+        itemsInteraction.setFilterTextResolver((element, column) -> itemColumnText(element, table, column));
+        // «Отключить все отборы» снимает и отбор по подстроке из поля поиска.
+        itemsInteraction.setSubstringFilterClearer(() ->
+        {
+            if (filterInput == null || filterInput.isDisposed() || filterInput.getText().isEmpty())
+                return;
+            filterInput.setText(""); //$NON-NLS-1$
+            applyFilter();
+        });
         itemsInteraction.install();
 
         installItemsFilterNavigation(table);
@@ -544,20 +545,9 @@ public final class ObjectSetsView extends ViewPart
         setsViewer.setContentProvider(ArrayContentProvider.getInstance());
 
         setsInteraction = new FormTableInteraction(table, setsViewer, (item, column) ->
-        {
-            if (!(item.getData() instanceof ObjectSets.SetDef set))
-                return ""; //$NON-NLS-1$
-            TableColumn col = table.getColumn(column);
-            if (col == activeColumn)
-                return ObjectSetsAddTargetState.getInstance().isAddTarget(set.id) ? "●" : ""; //$NON-NLS-1$ //$NON-NLS-2$
-            if (col == setNameColumn)
-                return set.name != null ? set.name : ""; //$NON-NLS-1$
-            if (col == countColumn)
-                return Integer.toString(set.items.size());
-            if (col == projectColumn)
-                return set.projectName != null ? set.projectName : ""; //$NON-NLS-1$
-            return ""; //$NON-NLS-1$
-        });
+            setColumnText(item.getData(), table, column));
+        // Отбор по значению ячейки работает по элементу модели — живого TableItem там ещё нет.
+        setsInteraction.setFilterTextResolver((element, column) -> setColumnText(element, table, column));
         setsInteraction.install();
 
         table.addListener(SWT.MouseDoubleClick, e ->
@@ -906,6 +896,9 @@ public final class ObjectSetsView extends ViewPart
             itemsViewer.refresh();
             if (selectedKey != null && !selectedKey.isBlank())
                 restoreItemSelectionByKey(selectedKey);
+            // Прежняя строка отфильтрована (или ничего не было выделено) — переносим на первую
+            // видимую, иначе список остаётся без активной строки при непустом результате.
+            FilterInputBoxListNavigation.selectFirstRowIfSelectionLost(table);
         }
         finally
         {
@@ -1339,6 +1332,42 @@ public final class ObjectSetsView extends ViewPart
         final String  text;
         final boolean highlight;
         NameSegment(String t, boolean h) { text = t; highlight = h; }
+    }
+
+    /** Текст ячейки таблицы объектов по элементу модели (общий для копирования и отбора). */
+    private String itemColumnText(Object element, Table table, int column)
+    {
+        if (!(element instanceof ObjectSets.Item row) || table.isDisposed()
+            || column < 0 || column >= table.getColumnCount())
+        {
+            return ""; //$NON-NLS-1$
+        }
+        TableColumn col = table.getColumn(column);
+        if (col == nameColumn)
+            return row.ownName != null ? row.ownName : ""; //$NON-NLS-1$
+        if (col == pathColumn)
+            return placePrefix(row.displayName, row.ownName);
+        return ""; //$NON-NLS-1$
+    }
+
+    /** Текст ячейки таблицы наборов по элементу модели (общий для копирования и отбора). */
+    private String setColumnText(Object element, Table table, int column)
+    {
+        if (!(element instanceof ObjectSets.SetDef set) || table.isDisposed()
+            || column < 0 || column >= table.getColumnCount())
+        {
+            return ""; //$NON-NLS-1$
+        }
+        TableColumn col = table.getColumn(column);
+        if (col == activeColumn)
+            return ObjectSetsAddTargetState.getInstance().isAddTarget(set.id) ? "●" : ""; //$NON-NLS-1$ //$NON-NLS-2$
+        if (col == setNameColumn)
+            return set.name != null ? set.name : ""; //$NON-NLS-1$
+        if (col == countColumn)
+            return Integer.toString(set.items.size());
+        if (col == projectColumn)
+            return set.projectName != null ? set.projectName : ""; //$NON-NLS-1$
+        return ""; //$NON-NLS-1$
     }
 
     private static String placePrefix(String displayName, String ownName)

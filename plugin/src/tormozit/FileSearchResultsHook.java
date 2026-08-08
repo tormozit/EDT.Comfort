@@ -46,9 +46,6 @@ import org.eclipse.search.ui.text.Match;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.SashForm;
 import org.eclipse.swt.custom.StyledText;
-import org.eclipse.swt.dnd.Clipboard;
-import org.eclipse.swt.dnd.TextTransfer;
-import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.swt.events.ControlAdapter;
 import org.eclipse.swt.events.ControlEvent;
 import org.eclipse.swt.events.MouseAdapter;
@@ -57,7 +54,6 @@ import org.eclipse.swt.layout.FillLayout;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
-import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.Table;
@@ -86,7 +82,6 @@ public final class FileSearchResultsHook implements IStartup
     private static final String SEARCH_VIEW_ID = "org.eclipse.search.ui.views.SearchView";
     private static final String PAGE_CLASS_MARKER = "FileSearchPage";
     private static final String HOOKED_KEY = "tormozit.fileSearchResultsHooked";
-    private static final String COPY_HOOKED_KEY = "tormozit.fileSearchResultsCopyHooked";
     private static final String TREE_OPEN_HOOKED_KEY = "tormozit.fileSearchTreeOpenHooked";
 
     /** Как в {@code org.eclipse.ui.actions.OpenWithMenu}: не переиспользовать чужой редактор по тому же input. */
@@ -399,11 +394,9 @@ public final class FileSearchResultsHook implements IStartup
         // Create the table on the right side
         TableViewer tableViewer = createResultTable(sashForm);
         cachedResultTableViewer = tableViewer;
-        registerCopyHandler(tableViewer);
         registerOpenHandler(tableViewer, treeViewer, page);
         registerContextMenu(tableViewer, treeViewer, page);
         registerTreeContextMenu(treeViewer, page);
-        registerGlobalCopyHandler(tableViewer, page, view);
 
         sashForm.setWeights(new int[] {
             ComfortSettings.getFileSearchSashWeight("left", 60),
@@ -758,57 +751,6 @@ public final class FileSearchResultsHook implements IStartup
     {
         String fullName = GetRef.resolveFullNameOrNull(projectRelativePath);
         return fullName != null ? fullName : projectRelativePath;
-    }
-
-    private static void registerCopyHandler(TableViewer tableViewer)
-    {
-        Table table = tableViewer.getTable();
-        if (table == null || table.isDisposed() || table.getData(COPY_HOOKED_KEY) != null)
-            return;
-        table.setData(COPY_HOOKED_KEY, Boolean.TRUE);
-        table.addListener(SWT.KeyDown, event -> {
-            if (!ComfortSettings.isReplaceListFiltersEnabled())
-                return;
-            if ((event.stateMask & SWT.MOD1) == 0)
-                return;
-            if (event.keyCode != 'c' && event.keyCode != 'C')
-                return;
-            if (copySelectedRowsToClipboard(tableViewer))
-                event.doit = false;
-        });
-    }
-
-    /** Копирует текст для активной колонки (см. {@link FormTableInteraction#activeSelectionText()}). */
-    private static boolean copySelectedRowsToClipboard(TableViewer tableViewer)
-    {
-        Table table = tableViewer.getTable();
-        if (table == null || table.isDisposed())
-            return false;
-        FormTableInteraction interaction = cachedTableInteraction;
-        if (interaction == null)
-            return false;
-        String text = interaction.activeSelectionText();
-        Global.tempLog("search-copy-dispatch", "file.copySelectedRowsToClipboard: text=" + logShort(text));
-        if (text == null)
-            return false;
-
-        Clipboard cb = new Clipboard(table.getDisplay());
-        try
-        {
-            cb.setContents(new Object[] { text }, new Transfer[] { TextTransfer.getInstance() });
-        }
-        finally
-        {
-            cb.dispose();
-        }
-        return true;
-    }
-
-    private static String logShort(String s)
-    {
-        if (s == null)
-            return "null";
-        return s.length() > 120 ? s.substring(0, 120) + "…(" + s.length() + ")" : s;
     }
 
     private static void registerOpenHandler(TableViewer tableViewer,
@@ -1361,53 +1303,6 @@ public final class FileSearchResultsHook implements IStartup
         return true;
     }
 
-    private static void registerGlobalCopyHandler(TableViewer tableViewer, Object page, IViewPart view)
-    {
-        Display display = Display.getDefault();
-        if (display == null || display.isDisposed())
-            return;
-        // KeyUp filter: SWT Table consumes Ctrl+C KeyDown in its window procedure,
-        // so we intercept the KeyUp of 'C' and overwrite clipboard after e4 handler.
-        display.addFilter(SWT.KeyUp, event -> {
-            if (!ComfortSettings.isReplaceListFiltersEnabled())
-                return;
-            Table table = tableViewer.getTable();
-            if (table == null || table.isDisposed() || !table.isFocusControl())
-                return;
-            if ((event.stateMask & SWT.MOD1) == 0)
-                return;
-            if (event.keyCode != 'c' && event.keyCode != 'C')
-                return;
-            Global.tempLog("search-copy-dispatch", "file.KeyUp filter: firing async copy");
-            display.asyncExec(() -> copySelectedRowsToClipboard(tableViewer));
-        });
-
-        // "org.eclipse.ui.edit.copy" активируется ОДИН раз на весь view — общая точка
-        // CreateDebuggerBreakpoints.installGlobalCopyHandler (см. её javadoc): если оба хука панели
-        // поиска (этот и ConfigSearchResultsHook) активируют обработчик этой команды по отдельности,
-        // второй молча перебивает первого на всём view, даже когда фокус не на его таблице.
-        CreateDebuggerBreakpoints.installGlobalCopyHandler(view);
-    }
-
-    /** Копирует активную ячейку, если фокус сейчас на этой таблице — для {@link CreateDebuggerBreakpoints#installGlobalCopyHandler}. */
-    static boolean copyActiveCellIfFocused()
-    {
-        TableViewer tableViewer = cachedResultTableViewer;
-        if (tableViewer == null)
-        {
-            Global.tempLog("search-copy-dispatch", "file.copyActiveCellIfFocused: cachedResultTableViewer=null");
-            return false;
-        }
-        Table table = tableViewer.getTable();
-        boolean focused = table != null && !table.isDisposed() && table.isFocusControl();
-        Global.tempLog("search-copy-dispatch", "file.copyActiveCellIfFocused: table=" + table + " focus=" + focused);
-        if (!focused)
-            return false;
-        boolean copied = copySelectedRowsToClipboard(tableViewer);
-        Global.tempLog("search-copy-dispatch", "file.copyActiveCellIfFocused: result=" + copied);
-        return copied;
-    }
-
     private static void reinstallHandlers(Object page, IViewPart view)
     {
         if (!ComfortSettings.isReplaceListFiltersEnabled())
@@ -1415,9 +1310,6 @@ public final class FileSearchResultsHook implements IStartup
         TableViewer tv = cachedResultTableViewer;
         if (tv == null || tv.getTable() == null || tv.getTable().isDisposed())
             return;
-        tv.getTable().setData(COPY_HOOKED_KEY, null);
-        registerCopyHandler(tv);
-        registerGlobalCopyHandler(tv, page, view);
 
         ISearchResultPage activePage = ((ISearchResultViewPart) view).getActivePage();
         if (activePage != null && activePage.getClass().getName().contains(PAGE_CLASS_MARKER))

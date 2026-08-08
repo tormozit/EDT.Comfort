@@ -27,9 +27,6 @@ import org.eclipse.search.ui.ISearchResult;
 import org.eclipse.search.ui.ISearchResultPage;
 import org.eclipse.search.ui.ISearchResultViewPart;
 import org.eclipse.swt.SWT;
-import org.eclipse.swt.dnd.Clipboard;
-import org.eclipse.swt.dnd.TextTransfer;
-import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.swt.events.ControlAdapter;
 import org.eclipse.swt.events.ControlEvent;
 import org.eclipse.swt.events.MouseAdapter;
@@ -43,7 +40,6 @@ import org.eclipse.swt.graphics.TextStyle;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
-import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableColumn;
@@ -61,9 +57,6 @@ import com._1c.g5.v8.dt.compare.ui.partialmodel.node.IPartialModelNode;
 
 public class CompareSearchResultPage implements ISearchResultPage
 {
-    /** Активная страница для глобального Copy в панели поиска. */
-    private static volatile CompareSearchResultPage activeInstance;
-
     /**
      * Обходной путь (issue #165, платформенная гонка PageBook/CTabFolder — см. описание у вызова):
      * повторно скрывает таблицу, если страница всё ещё деактивирована ({@code this.searchResult
@@ -90,7 +83,6 @@ public class CompareSearchResultPage implements ISearchResultPage
     private TableViewer tableViewer;
     private FormTableInteraction tableInteraction;
     private TableColumn checkColumn;
-    private Listener copyKeyUpFilter;
 
     private CompareSearchResult searchResult;
     private String queryText;
@@ -235,9 +227,6 @@ public class CompareSearchResultPage implements ISearchResultPage
         tableInteraction.install();
         if (checkColumn != null && !checkColumn.isDisposed())
             checkColumn.setMoveable(false);
-
-        installCopyKeyUpFilter();
-        activeInstance = this;
     }
 
     private static boolean isTableItemSelected(TableItem item)
@@ -253,72 +242,6 @@ public class CompareSearchResultPage implements ISearchResultPage
                 return true;
         }
         return false;
-    }
-
-    private void installCopyKeyUpFilter()
-    {
-        // Win32: Ctrl+C часто не доходит до KeyDown (нативный акселератор) — см. AGENTS.md.
-        Display display = table.getDisplay();
-        copyKeyUpFilter = event ->
-        {
-            if (table.isDisposed() || !table.isFocusControl())
-                return;
-            if ((event.stateMask & SWT.MOD1) == 0)
-                return;
-            if (event.keyCode != 'c' && event.keyCode != 'C')
-                return;
-            display.asyncExec(this::copyActiveCellToClipboard);
-        };
-        display.addFilter(SWT.KeyUp, copyKeyUpFilter);
-        table.addDisposeListener(e ->
-        {
-            if (copyKeyUpFilter != null && !display.isDisposed())
-                display.removeFilter(SWT.KeyUp, copyKeyUpFilter);
-            copyKeyUpFilter = null;
-        });
-    }
-
-    private void copyActiveCellToClipboard()
-    {
-        if (table == null || table.isDisposed() || tableInteraction == null)
-            return;
-        String text = tableInteraction.activeSelectionText();
-        if (text == null)
-            return;
-        Clipboard clipboard = new Clipboard(table.getDisplay());
-        try
-        {
-            clipboard.setContents(new Object[] { text },
-                new Transfer[] { TextTransfer.getInstance() });
-        }
-        finally
-        {
-            clipboard.dispose();
-        }
-    }
-
-    /** Для {@link CreateDebuggerBreakpoints#installGlobalCopyHandler}: копия активной ячейки. */
-    static boolean copyActiveCellIfFocused()
-    {
-        CompareSearchResultPage page = activeInstance;
-        if (page == null || page.table == null || page.table.isDisposed() || page.tableInteraction == null)
-            return false;
-        if (!page.table.isFocusControl())
-            return false;
-        String text = page.tableInteraction.activeSelectionText();
-        if (text == null)
-            return false;
-        Clipboard clipboard = new Clipboard(page.table.getDisplay());
-        try
-        {
-            clipboard.setContents(new Object[] { text },
-                new Transfer[] { TextTransfer.getInstance() });
-        }
-        finally
-        {
-            clipboard.dispose();
-        }
-        return true;
     }
 
     private void installContextMenu()
@@ -1122,8 +1045,6 @@ public class CompareSearchResultPage implements ISearchResultPage
     public void setViewPart(ISearchResultViewPart part)
     {
         this.viewPart = part;
-        if (part != null)
-            CreateDebuggerBreakpoints.installGlobalCopyHandler(part);
     }
 
     @Override
@@ -1140,8 +1061,6 @@ public class CompareSearchResultPage implements ISearchResultPage
     @Override
     public void dispose()
     {
-        if (activeInstance == this)
-            activeInstance = null;
         uninstallTreeCheckListener();
         disposeCheckImages();
         tableInteraction = null;

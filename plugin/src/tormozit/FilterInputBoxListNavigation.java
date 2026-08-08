@@ -37,8 +37,12 @@ public final class FilterInputBoxListNavigation
     private static final String SEARCH_BOX_TRAVERSE_GUARD_KEY = "tormozit.searchBoxTraverseGuard"; //$NON-NLS-1$
     private static final String SUPPRESS_PRIMARY_ENTER_KEY = "tormozit.suppressFilterPrimaryEnter"; //$NON-NLS-1$
     private static final String NAV_CONTEXT_KEY = "tormozit.filterNavContext"; //$NON-NLS-1$
+    private static final String HISTORY_COMMIT_KEY = "tormozit.searchBoxHistoryCommit"; //$NON-NLS-1$
 
     private static volatile boolean displayTraverseFilterInstalled;
+    private static volatile boolean displayMouseUpHistoryFilterInstalled;
+    private static final java.util.Set<SearchBox> HISTORY_COMMIT_BOXES =
+            java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
 
     private static final class NavContext
     {
@@ -225,6 +229,24 @@ public final class FilterInputBoxListNavigation
         return newIdx;
     }
 
+    /**
+     * Если после смены текста фильтра прежнее выделение отфильтровано (выделения не осталось), а
+     * видимые строки есть — выделяет первую и синхронизирует {@link
+     * org.eclipse.jface.viewers.TableViewer}/строку состояния (тот же приём, что при обычной
+     * навигации ↓/↑ — {@link #fireTableSelection}). Вызывать из {@code onSearch}-колбэка ПОСЛЕ
+     * {@code viewer.refresh()}/пересчёта видимых строк.
+     */
+    public static void selectFirstRowIfSelectionLost(Table table)
+    {
+        if (table == null || table.isDisposed())
+            return;
+        if (table.getSelectionCount() > 0 || table.getItemCount() == 0)
+            return;
+        table.setSelection(0);
+        table.showSelection();
+        fireTableSelection(table);
+    }
+
     /** Синхронизация {@link org.eclipse.jface.viewers.TableViewer} и строки статуса после программного выбора. */
     private static void fireTableSelection(Table table)
     {
@@ -381,6 +403,80 @@ public final class FilterInputBoxListNavigation
     static void ensureSearchBoxStockKeyStripped(SearchBox box)
     {
         stripSearchBoxStockKeyListener(box);
+    }
+
+    /**
+     * Штатный {@link SearchBox} при выборе пункта истории (мышь / Enter) делает только
+     * {@code setText} + {@code hidePopup}, без {@code performSearch} — фильтр не применяется.
+     * Вызывать из {@link FilterInputBox#create} для любого поля с {@code onSearch}.
+     */
+    static void installHistoryCommit(SearchBox box)
+    {
+        if (box == null || box.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(box.getData(HISTORY_COMMIT_KEY)))
+            return;
+        box.setData(HISTORY_COMMIT_KEY, Boolean.TRUE);
+        HISTORY_COMMIT_BOXES.add(box);
+        if (!(box.getData(NAV_CONTEXT_KEY) instanceof NavContext))
+            box.setData(NAV_CONTEXT_KEY, new NavContext());
+        installSearchBoxKeyGuard(box);
+        ensureDisplayMouseUpHistoryFilter();
+        box.addDisposeListener(e -> HISTORY_COMMIT_BOXES.remove(box));
+    }
+
+    private static void ensureDisplayMouseUpHistoryFilter()
+    {
+        if (displayMouseUpHistoryFilterInstalled)
+            return;
+        Display display = Display.getCurrent();
+        if (display == null)
+            display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        displayMouseUpHistoryFilterInstalled = true;
+        display.addFilter(SWT.MouseUp, FilterInputBoxListNavigation::displayMouseUpHistoryFilter);
+    }
+
+    /**
+     * Фильтр до stock {@code MouseUp} на popup: после выбора пункта истории форсируем
+     * {@code performSearch} (иначе при том же тексте, что уже в поле, Modify не приходит).
+     */
+    private static void displayMouseUpHistoryFilter(Event event)
+    {
+        if (!(event.widget instanceof Control control) || control.isDisposed())
+            return;
+        Shell eventShell = control instanceof Shell shell ? shell : control.getShell();
+        if (eventShell == null || eventShell.isDisposed())
+            return;
+        SearchBox match = null;
+        for (SearchBox box : HISTORY_COMMIT_BOXES)
+        {
+            if (box == null || box.isDisposed())
+                continue;
+            if (!Boolean.TRUE.equals(Global.getField(box, "displayingPopup"))) //$NON-NLS-1$
+                continue;
+            Object popup = Global.getField(box, "popup"); //$NON-NLS-1$
+            if (popup instanceof Shell ps && (ps == eventShell || ps == control))
+            {
+                match = box;
+                break;
+            }
+        }
+        if (match == null)
+            return;
+        SearchBox box = match;
+        Display display = box.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() ->
+        {
+            if (box.isDisposed())
+                return;
+            if (Boolean.TRUE.equals(Global.getField(box, "displayingPopup"))) //$NON-NLS-1$
+                return;
+            Global.invoke(box, "performSearch"); //$NON-NLS-1$
+        });
     }
 
     private static void handleSearchBoxVerifyKey(SearchBox box, VerifyEvent event)

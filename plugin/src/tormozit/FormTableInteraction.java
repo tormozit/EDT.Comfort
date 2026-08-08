@@ -3,18 +3,32 @@ package tormozit;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
+import java.util.concurrent.ConcurrentHashMap;
 
+import org.eclipse.jface.dialogs.Dialog;
+import org.eclipse.jface.dialogs.IDialogConstants;
+import org.eclipse.jface.dialogs.IDialogSettings;
+import org.eclipse.jface.layout.TableColumnLayout;
+import org.eclipse.jface.viewers.ArrayContentProvider;
 import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
+import org.eclipse.jface.viewers.ColumnPixelData;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.ILabelProvider;
+import org.eclipse.jface.viewers.IStructuredContentProvider;
 import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.LabelProvider;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.jface.viewers.TableViewer;
+import org.eclipse.jface.viewers.TableViewerColumn;
+import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.viewers.ViewerCell;
+import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
@@ -28,20 +42,29 @@ import org.eclipse.swt.events.SelectionEvent;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Device;
 import org.eclipse.swt.graphics.GC;
+import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.graphics.Rectangle;
+import org.eclipse.swt.layout.GridData;
+import org.eclipse.swt.layout.GridLayout;
+import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Canvas;
 import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.ScrollBar;
+import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableColumn;
 import org.eclipse.swt.widgets.TableItem;
+import org.eclipse.swt.widgets.Text;
+import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.keys.IBindingService;
 
 /**
  * Единое поведение таблиц в формах плагина: выбор ячейки, копирование,
@@ -57,11 +80,34 @@ final class FormTableInteraction
     /** Горизонтальный запас шапки Win32 (отступы без sort-иконки). */
     private static final int HEADER_TEXT_INSET = 16;
 
+    /** Сторона квадратной иконки «снять фильтр» (в заголовке колонки и в меню). */
+    private static final int FILTER_GLYPH_SIZE = 12;
+    /** Команда отбора по значению ячейки (см. {@code plugin.xml}); сочетание — Alt+W по умолчанию. */
+    private static final String FILTER_COMMAND_ID = "tormozit.formTable.filterByCellValue"; //$NON-NLS-1$
+    /** Команда «Различные значения колонки» (см. {@code plugin.xml}); сочетание — Alt+F по умолчанию. */
+    private static final String COLUMN_VALUES_COMMAND_ID = "tormozit.formTable.columnValues"; //$NON-NLS-1$
+
+    /** Таблицы с установленным взаимодействием — для поиска цели команды по фокусу. */
+    private static final Map<Control, FormTableInteraction> INSTANCES = new ConcurrentHashMap<>();
+
     @FunctionalInterface
     interface FormTableCellAccess
     {
         /** Отображаемый текст ячейки; {@code null} → пустая строка. */
         String cellText(TableItem item, int column);
+    }
+
+    /**
+     * Текст ячейки по ЭЛЕМЕНТУ МОДЕЛИ (без живого {@link TableItem}) — для отбора по значению.
+     *
+     * <p>Отдельный интерфейс, а не {@link FormTableCellAccess}: {@link ViewerFilter#select} вызывается
+     * JFace на сырых элементах входа ДО создания {@code TableItem}, поэтому item-ориентированный
+     * {@code cellText} там неприменим. {@code null} → колонка не поддерживает отбор.
+     */
+    @FunctionalInterface
+    interface FormTableFilterTextResolver
+    {
+        String filterText(Object element, int column);
     }
 
     private static final TableColumn[] NO_OWNER_DRAW_COLUMNS = new TableColumn[0];
@@ -84,6 +130,15 @@ final class FormTableInteraction
     private Color ownedActiveCellBg;
     private Color ownedHeaderAccentBg;
     private Color ownedHeaderSeparatorBg;
+
+    /** Отбор по значению: индекс создания колонки → эталонное значение ячейки (AND между колонками). */
+    private final Map<Integer, String> columnValueFilters = new LinkedHashMap<>();
+    private final Map<Integer, Canvas> filterIndicators = new LinkedHashMap<>();
+    private final List<MenuItem> filterMenuItems = new ArrayList<>();
+    private FormTableFilterTextResolver filterTextResolver;
+    private ViewerFilter columnValueViewerFilter;
+    private Runnable substringFilterClearer;
+    private Image filterGlyph;
 
     private Canvas headerSeparator;
     private Canvas headerHighlight;
@@ -301,12 +356,33 @@ final class FormTableInteraction
         this.columnReorderEnabled = columnReorderEnabled;
     }
 
+    /**
+     * Текст ячейки по элементу модели для «Отобрать по значению ячейки». Нужен там, где текст
+     * берётся из {@link FormTableCellAccess} (по {@code TableItem}) — при отборе живого item ещё нет.
+     * Не задан → значение берётся из label provider колонки, а если и его нет, отбор по этой
+     * колонке недоступен (пункт меню заблокирован).
+     */
+    void setFilterTextResolver(FormTableFilterTextResolver filterTextResolver)
+    {
+        this.filterTextResolver = filterTextResolver;
+    }
+
+    /**
+     * Сброс постороннего отбора по подстроке (поле поиска над таблицей) — вызывается из
+     * «Отключить все отборы» вместе со сбросом отбора по значениям колонок.
+     */
+    void setSubstringFilterClearer(Runnable substringFilterClearer)
+    {
+        this.substringFilterClearer = substringFilterClearer;
+    }
+
     void install()
     {
         if (table == null || table.isDisposed())
             return;
 
         ListSelectionThemeColors.markOptOut(table);
+        INSTANCES.put(table, this);
 
         mouseDownListener = this::onMouseDown;
         table.addListener(SWT.MouseDown, mouseDownListener);
@@ -333,6 +409,8 @@ final class FormTableInteraction
 
         keyFilter = this::onKeyFilter;
         table.getDisplay().addFilter(SWT.KeyDown, keyFilter);
+        // Win32: Ctrl+C не доходит до KeyDown (акселератор Edit→Copy) — только через команду.
+        CopyCommandSupport.wireCopyOverride(table, this::copyActiveCell);
         installHeaderOverlays();
         ListSelectionThemeColors.installSelectionPrePaintFilter(table, (t, item, col) ->
         {
@@ -348,9 +426,22 @@ final class FormTableInteraction
 
     void dispose()
     {
+        if (table != null)
+            INSTANCES.remove(table);
         if (keyFilter != null && table != null && !table.isDisposed())
             table.getDisplay().removeFilter(SWT.KeyDown, keyFilter);
+        if (columnValueViewerFilter != null && multiSelectViewer != null
+            && multiSelectViewer.getControl() != null && !multiSelectViewer.getControl().isDisposed())
+        {
+            multiSelectViewer.removeFilter(columnValueViewerFilter);
+        }
+        columnValueViewerFilter = null;
+        columnValueFilters.clear();
+        filterMenuItems.clear();
         uninstallHeaderOverlays();
+        if (filterGlyph != null && !filterGlyph.isDisposed())
+            filterGlyph.dispose();
+        filterGlyph = null;
         disposeColors();
     }
 
@@ -513,9 +604,80 @@ final class FormTableInteraction
         selectionAnchor = item;
         Object data = item.getData();
         if (useViewerForMultiSelect() && data != null)
+        {
             applyViewerSelection(new StructuredSelection(data));
+            ensureNativeSelection(item);
+        }
         else
             table.setSelection(item);
+    }
+
+    /**
+     * Гарантировать НАТИВНОЕ выделение строки. На виртуальной таблице с переопределённым
+     * хостом {@code setSelectionToWidget} (EGit CommitFileDiffViewer) {@code viewer.setSelection()}
+     * внутри {@link #applyViewerSelection} нативное выделение не выставляет — без него текущая
+     * строка рисуется лишь нашей тонкой заливкой в {@link #onEraseItem}, без полного нативного
+     * оформления выделения. Для штатных таблиц выделение уже выставлено viewer.setSelection-ом,
+     * {@code isRowSelected} здесь истинен — форс пропускается. Programmatic
+     * {@code table.setSelection} не порождает SWT.Selection.
+     */
+    private void ensureNativeSelection(TableItem item)
+    {
+        if (item == null || item.isDisposed() || table.isDisposed())
+            return;
+        if (isRowSelected(item))
+            return;
+        table.setSelection(new TableItem[] { item });
+    }
+
+    /** Ключ элемента модели — зеркально {@link #rowKey(TableItem)}, но по самому элементу
+     *  (без живого TableItem): для поиска активной строки среди входа viewer, когда она
+     *  не материализована (виртуальная таблица). Разделитель тот же, что в rowKey. */
+    private String elementKey(Object element)
+    {
+        if (element == null || table.isDisposed())
+            return null;
+        int cols = Math.max(1, table.getColumnCount());
+        StringBuilder sb = new StringBuilder();
+        for (int c = 0; c < cols; c++)
+        {
+            String text = filterElementText(element, c);
+            sb.append(text != null ? text : "").append('\u0001'); //$NON-NLS-1$
+        }
+        return sb.toString();
+    }
+
+    /** Индекс элемента с заданным ключом среди отображаемых строк (вход + фильтры viewer),
+     *  в порядке отображения. {@code -1}, если не найден. */
+    private int findDisplayedIndexByKey(String key)
+    {
+        if (key == null || multiSelectViewer == null || table.isDisposed())
+            return -1;
+        if (!(multiSelectViewer.getContentProvider() instanceof IStructuredContentProvider cp))
+            return -1;
+        Object[] elements = cp.getElements(multiSelectViewer.getInput());
+        if (elements == null)
+            return -1;
+        ViewerFilter[] filters = multiSelectViewer.getFilters();
+        int idx = 0;
+        for (Object el : elements)
+        {
+            boolean passes = true;
+            for (ViewerFilter f : filters)
+            {
+                if (!f.select(multiSelectViewer, null, el))
+                {
+                    passes = false;
+                    break;
+                }
+            }
+            if (!passes)
+                continue;
+            if (key.equals(elementKey(el)))
+                return idx;
+            idx++;
+        }
+        return -1;
     }
 
     private void toggleRowSelection(TableItem item)
@@ -670,6 +832,651 @@ final class FormTableInteraction
         MenuItem copyItem = new MenuItem(menu, SWT.PUSH);
         copyItem.setText("Копировать\tCtrl+C"); //$NON-NLS-1$
         copyItem.addListener(SWT.Selection, ev -> copyActiveCell());
+
+        // Пункты отбора зависят от активной ячейки и от набора наложенных фильтров, а у SWT
+        // MenuItem нет setVisible — поэтому их набор пересобирается на каждом показе меню.
+        // Меню общее с другими хуками (они дописывают в него свои пункты), свои пункты держим
+        // в конце и трогаем только их.
+        Menu tableMenu = menu;
+        tableMenu.addListener(SWT.Show, ev -> rebuildFilterMenuItems(tableMenu));
+    }
+
+    private void rebuildFilterMenuItems(Menu menu)
+    {
+        for (MenuItem item : filterMenuItems)
+        {
+            if (!item.isDisposed())
+                item.dispose();
+        }
+        filterMenuItems.clear();
+        if (menu == null || menu.isDisposed() || table.isDisposed())
+            return;
+
+        filterMenuItems.add(new MenuItem(menu, SWT.SEPARATOR));
+
+        boolean activeCellFiltered = isActiveCellFiltered();
+        MenuItem filterItem = new MenuItem(menu, SWT.PUSH);
+        filterItem.setText((activeCellFiltered
+            ? "Снять отбор по значению ячейки" //$NON-NLS-1$
+            : "Отобрать по значению ячейки") + shortcutSuffix(FILTER_COMMAND_ID)); //$NON-NLS-1$
+        filterItem.setEnabled(activeCellFiltered || canFilterByActiveCell());
+        filterItem.addListener(SWT.Selection, ev -> toggleActiveCellFilter());
+        filterMenuItems.add(filterItem);
+
+        MenuItem valuesItem = new MenuItem(menu, SWT.PUSH);
+        valuesItem.setText("Различные значения колонки" + shortcutSuffix(COLUMN_VALUES_COMMAND_ID)); //$NON-NLS-1$
+        valuesItem.setEnabled(canBrowseColumnValues());
+        valuesItem.addListener(SWT.Selection, ev -> openColumnValuesDialog());
+        filterMenuItems.add(valuesItem);
+
+        if (!columnValueFilters.isEmpty())
+        {
+            MenuItem clearAllItem = new MenuItem(menu, SWT.PUSH);
+            clearAllItem.setText("Отключить все отборы"); //$NON-NLS-1$
+            clearAllItem.setToolTipText(activeFiltersDescription());
+            clearAllItem.setImage(filterGlyph());
+            clearAllItem.addListener(SWT.Selection, ev -> clearAllFilters());
+            filterMenuItems.add(clearAllItem);
+
+            MenuItem countItem = new MenuItem(menu, SWT.PUSH);
+            countItem.setText("Отобрано элементов:  " + table.getItemCount()); //$NON-NLS-1$
+            countItem.setToolTipText(activeFiltersDescription());
+            countItem.setEnabled(false);
+            filterMenuItems.add(countItem);
+        }
+    }
+
+    /** Полный текущий отбор — по строке на колонку, для подсказки у счётчика отобранных строк. */
+    private String activeFiltersDescription()
+    {
+        return activeFiltersDescriptionExcluding(-1);
+    }
+
+    /**
+     * Текст ячейки по ЭЛЕМЕНТУ модели (для отбора; живого {@code TableItem} на момент
+     * {@link ViewerFilter#select} ещё нет): явный {@link FormTableFilterTextResolver}, иначе label
+     * provider колонки. {@code null} — отбор по этой колонке не поддерживается (например,
+     * {@link CellLabelProvider} без {@code getText}, кладущий текст только в {@code update}).
+     */
+    private String filterElementText(Object element, int column)
+    {
+        if (element == null || column < 0)
+            return null;
+        if (filterTextResolver != null)
+        {
+            String text = filterTextResolver.filterText(element, column);
+            return text != null ? text : ""; //$NON-NLS-1$
+        }
+        if (multiSelectViewer == null)
+            return null;
+        CellLabelProvider cellLp;
+        try
+        {
+            cellLp = multiSelectViewer.getLabelProvider(column);
+        }
+        catch (RuntimeException ignored)
+        {
+            return null;
+        }
+        if (cellLp instanceof SelectionAwareStyledCellLabelProvider selectionAware)
+        {
+            String s = selectionAware.textForCopy(element);
+            if (s != null)
+                return s;
+        }
+        if (cellLp instanceof DelegatingStyledCellLabelProvider delegating)
+        {
+            DelegatingStyledCellLabelProvider.IStyledLabelProvider styled = delegating.getStyledStringProvider();
+            if (styled != null)
+            {
+                StyledString ss = styled.getStyledText(element);
+                if (ss != null && ss.getString() != null)
+                    return ss.getString();
+            }
+        }
+        if (cellLp instanceof ColumnLabelProvider columnLp)
+        {
+            String t = columnLp.getText(element);
+            return t != null ? t : ""; //$NON-NLS-1$
+        }
+        if (cellLp instanceof ILabelProvider labelProvider)
+        {
+            String t = labelProvider.getText(element);
+            return t != null ? t : ""; //$NON-NLS-1$
+        }
+        return null;
+    }
+
+    /**
+     * Отбор по {@code column} в принципе возможен — без вычисления конкретного значения (для
+     * enable/disable пункта меню и «Различные значения колонки», где активной ячейки может ещё не быть).
+     * Условия зеркалируют ветки {@link #filterElementText}.
+     */
+    private boolean supportsElementFilterText(int column)
+    {
+        if (column < 0)
+            return false;
+        if (filterTextResolver != null)
+            return true;
+        if (multiSelectViewer == null)
+            return false;
+        CellLabelProvider cellLp;
+        try
+        {
+            cellLp = multiSelectViewer.getLabelProvider(column);
+        }
+        catch (RuntimeException ignored)
+        {
+            return false;
+        }
+        if (cellLp instanceof SelectionAwareStyledCellLabelProvider)
+            return true;
+        if (cellLp instanceof DelegatingStyledCellLabelProvider delegating)
+            return delegating.getStyledStringProvider() != null;
+        return cellLp instanceof ColumnLabelProvider || cellLp instanceof ILabelProvider;
+    }
+
+    private TableItem activeRow()
+    {
+        if (selectedItem != null && !selectedItem.isDisposed())
+            return selectedItem;
+        return currentSelectedRow();
+    }
+
+    private boolean canFilterByActiveCell()
+    {
+        if (multiSelectViewer == null || table.isDisposed())
+            return false;
+        TableItem item = activeRow();
+        int column = activeColumnIndex();
+        if (item == null || item.isDisposed() || column < 0)
+            return false;
+        return filterElementText(item.getData(), column) != null;
+    }
+
+    /** По активной колонке уже наложен отбор ровно по значению активной ячейки. */
+    private boolean isActiveCellFiltered()
+    {
+        int column = activeColumnIndex();
+        if (column < 0)
+            return false;
+        String applied = columnValueFilters.get(Integer.valueOf(column));
+        if (applied == null)
+            return false;
+        TableItem item = activeRow();
+        if (item == null || item.isDisposed())
+            return false;
+        String value = filterElementText(item.getData(), column);
+        return value != null && applied.equals(value);
+    }
+
+    private void toggleActiveCellFilter()
+    {
+        if (isActiveCellFiltered())
+            clearColumnFilter(activeColumnIndex());
+        else
+            filterByActiveCell();
+    }
+
+    /**
+     * Отбор/снятие отбора по активной ячейке таблицы под фокусом — точка входа для команды
+     * {@link #FILTER_COMMAND_ID} (сочетание клавиш настраивается в «Клавиши»).
+     */
+    static void toggleFilterOnFocusedTable()
+    {
+        Display display = Display.getCurrent();
+        if (display == null)
+            return;
+        for (Control c = display.getFocusControl(); c != null && !c.isDisposed(); c = c.getParent())
+        {
+            FormTableInteraction interaction = INSTANCES.get(c);
+            if (interaction != null)
+            {
+                interaction.toggleActiveCellFilter();
+                return;
+            }
+        }
+    }
+
+    /** Текущее сочетание клавиш команды {@code commandId} — как «\tAlt+W» для подписи пункта меню. */
+    private static String shortcutSuffix(String commandId)
+    {
+        try
+        {
+            if (PlatformUI.getWorkbench() == null)
+                return ""; //$NON-NLS-1$
+            IBindingService bindingService = PlatformUI.getWorkbench().getService(IBindingService.class);
+            if (bindingService == null)
+                return ""; //$NON-NLS-1$
+            String formatted = bindingService.getBestActiveBindingFormattedFor(commandId);
+            return formatted != null && !formatted.isEmpty() ? "\t" + formatted : ""; //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (RuntimeException ignored)
+        {
+            return ""; //$NON-NLS-1$
+        }
+    }
+
+    private void filterByActiveCell()
+    {
+        TableItem item = activeRow();
+        int column = activeColumnIndex();
+        if (item == null || item.isDisposed() || column < 0)
+            return;
+        String value = filterElementText(item.getData(), column);
+        if (value == null)
+            return;
+        applyColumnFilterValue(column, value);
+    }
+
+    /** Наложить отбор на {@code column} по конкретному значению — используется меню и {@link ColumnValuesDialog}. */
+    void applyColumnFilterValue(int column, String value)
+    {
+        if (multiSelectViewer == null || column < 0 || value == null)
+            return;
+        // Снимок ДО любых мутаций фильтра: JFace-овский addFilter() внутри
+        // installColumnValueViewerFilter() сам делает refresh() и перетасовывает TableItem —
+        // после него activeRow() указывает уже на ЧУЖОЙ элемент.
+        SelectionSnapshot snapshot = captureSelection();
+        columnValueFilters.put(Integer.valueOf(column), value);
+        installColumnValueViewerFilter();
+        refreshKeepingActiveCell(snapshot);
+    }
+
+    /**
+     * Активная строка + выделение для восстановления после {@code refresh()}.
+     *
+     * <p>Хранится И элемент модели, И ТЕКСТОВЫЙ КЛЮЧ строки. Только элемента недостаточно:
+     * провайдер содержимого может ПЕРЕСОЗДАТЬ объекты строк на refresh (EGit-овские
+     * {@code FileDiff} в «Истории Git» создаются заново, а {@code equals()} у них не
+     * переопределён, так что ни {@code ==}, ни {@code List.contains} старый объект уже не
+     * находят). Тот же класс проблемы описан в javadoc {@link #isRowSelected}
+     * ({@code MatchRow}/{@code FileSearchRow} без {@code equals()}).
+     */
+    private static final class SelectionSnapshot
+    {
+        final Object activeElement;
+        final String activeKey;
+        final int activeColumn;
+        final List<Object> selectedElements;
+        final List<String> selectedKeys;
+
+        SelectionSnapshot(Object activeElement, String activeKey, int activeColumn,
+            List<Object> selectedElements, List<String> selectedKeys)
+        {
+            this.activeElement = activeElement;
+            this.activeKey = activeKey;
+            this.activeColumn = activeColumn;
+            this.selectedElements = selectedElements;
+            this.selectedKeys = selectedKeys;
+        }
+    }
+
+    private SelectionSnapshot captureSelection()
+    {
+        TableItem active = activeRow();
+        boolean activeAlive = active != null && !active.isDisposed();
+        Object activeElement = activeAlive ? active.getData() : null;
+        String activeKey = activeAlive ? rowKey(active) : null;
+        List<Object> selectedElements = new ArrayList<>();
+        List<String> selectedKeys = new ArrayList<>();
+        if (!table.isDisposed())
+        {
+            for (TableItem row : table.getSelection())
+            {
+                Object data = row.getData();
+                if (data != null)
+                    selectedElements.add(data);
+                String key = rowKey(row);
+                if (key != null)
+                    selectedKeys.add(key);
+            }
+        }
+        return new SelectionSnapshot(activeElement, activeKey, activeColumnIndex(),
+            selectedElements, selectedKeys);
+    }
+
+    /**
+     * Текст всех ячеек строки — устойчивый ключ для сопоставления строк ДО и ПОСЛЕ {@code refresh()},
+     * когда объекты модели пересоздаются. Берётся из {@link #resolveCellText} (тот же путь, что для
+     * копирования), поэтому работает и без {@link FormTableFilterTextResolver}.
+     */
+    private String rowKey(TableItem item)
+    {
+        if (item == null || item.isDisposed() || table.isDisposed())
+            return null;
+        int cols = Math.max(1, table.getColumnCount());
+        StringBuilder sb = new StringBuilder();
+        for (int c = 0; c < cols; c++)
+        {
+            String text = resolveCellText(item, c);
+            sb.append(text != null ? text : "").append(''); //$NON-NLS-1$
+        }
+        return sb.toString();
+    }
+
+    private boolean canBrowseColumnValues()
+    {
+        int column = activeColumnIndex();
+        return multiSelectViewer != null && column >= 0 && supportsElementFilterText(column);
+    }
+
+    /**
+     * Разные значения активной колонки (без дублей) + число строк с этим значением, СРЕДИ строк,
+     * проходящих все ОСТАЛЬНЫЕ фильтры (сторонний ViewerFilter вроде отбора по подстроке и отбор
+     * по другим колонкам) — собственный отбор по {@code column} игнорируется, иначе при уже
+     * наложенном отборе список сужался бы до одного текущего значения.
+     */
+    private List<ColumnValuesDialog.ValueRow> computeColumnValueRows(int column)
+    {
+        return computeColumnValueRows(column, true);
+    }
+
+    /**
+     * {@code honorOtherFilters=true} — считать различные значения СРЕДИ строк, проходящих все
+     * ОСТАЛЬНЫЕ фильтры (сторонний ViewerFilter вроде отбора по подстроке и отбор по другим
+     * колонкам; собственный отбор по {@code column} всегда игнорируется — см. класс-javadoc
+     * {@link ColumnValuesDialog}). {@code false} — считать по ВСЕМ строкам источника, полностью
+     * игнорируя прочие фильтры (флажок «Учитывать отбор» в окне снят).
+     */
+    private List<ColumnValuesDialog.ValueRow> computeColumnValueRows(int column, boolean honorOtherFilters)
+    {
+        List<ColumnValuesDialog.ValueRow> result = new ArrayList<>();
+        if (multiSelectViewer == null || column < 0)
+            return result;
+        if (!(multiSelectViewer.getContentProvider() instanceof IStructuredContentProvider provider))
+            return result;
+        Object[] elements = provider.getElements(multiSelectViewer.getInput());
+        if (elements == null)
+            return result;
+        ViewerFilter[] allFilters = honorOtherFilters ? multiSelectViewer.getFilters() : new ViewerFilter[0];
+        Map<String, Integer> counts = new LinkedHashMap<>();
+        for (Object element : elements)
+        {
+            boolean matches = true;
+            for (ViewerFilter filter : allFilters)
+            {
+                if (filter == columnValueViewerFilter)
+                    continue;
+                if (!filter.select(multiSelectViewer, null, element))
+                {
+                    matches = false;
+                    break;
+                }
+            }
+            if (matches && honorOtherFilters)
+            {
+                for (Map.Entry<Integer, String> entry : columnValueFilters.entrySet())
+                {
+                    if (entry.getKey().intValue() == column)
+                        continue;
+                    String text = filterElementText(element, entry.getKey().intValue());
+                    if (!entry.getValue().equals(text != null ? text : "")) //$NON-NLS-1$
+                    {
+                        matches = false;
+                        break;
+                    }
+                }
+            }
+            if (!matches)
+                continue;
+            String value = filterElementText(element, column);
+            if (value == null)
+                continue;
+            counts.merge(value, Integer.valueOf(1), Integer::sum);
+        }
+        for (Map.Entry<String, Integer> entry : counts.entrySet())
+            result.add(new ColumnValuesDialog.ValueRow(entry.getKey(), entry.getValue().intValue()));
+        return result;
+    }
+
+    /**
+     * Как {@link #activeFiltersDescription()}, но без записи по {@code excludedColumn} — для поля
+     * «текущий отбор» в {@link ColumnValuesDialog}: колонка, значения которой сейчас просматривают,
+     * там не нужна (она — предмет самого окна, а не контекст).
+     */
+    private String activeFiltersDescriptionExcluding(int excludedColumn)
+    {
+        StringBuilder sb = new StringBuilder();
+        boolean first = true;
+        for (Map.Entry<Integer, String> entry : columnValueFilters.entrySet())
+        {
+            int column = entry.getKey().intValue();
+            if (column == excludedColumn)
+                continue;
+            if (!first)
+                sb.append(" И "); //$NON-NLS-1$
+            else
+                sb.append("Отбор: "); //$NON-NLS-1$
+            first = false;
+            String header = column >= 0 && column < table.getColumnCount()
+                ? table.getColumn(column).getText()
+                : null;
+            if (header == null || header.isEmpty())
+                header = "Колонка " + (column + 1); //$NON-NLS-1$
+            sb.append(header).append(" = \"").append(entry.getValue()).append('"'); //$NON-NLS-1$
+        }
+        return sb.toString();
+    }
+
+    private void openColumnValuesDialog()
+    {
+        int column = activeColumnIndex();
+        if (!canBrowseColumnValues() || table.getShell() == null)
+            return;
+        String header = column < table.getColumnCount() ? table.getColumn(column).getText() : ""; //$NON-NLS-1$
+        TableItem active = activeRow();
+        String initialValue = active != null && !active.isDisposed()
+            ? filterElementText(active.getData(), column)
+            : null;
+        List<ColumnValuesDialog.ValueRow> rows = computeColumnValueRows(column, true);
+        String originalFilterValue = columnValueFilters.get(Integer.valueOf(column));
+        String otherFiltersDescription = activeFiltersDescriptionExcluding(column);
+        new ColumnValuesDialog(table.getShell(), this, column, header, rows, initialValue, originalFilterValue,
+            otherFiltersDescription).open();
+    }
+
+    /** Открыть «Различные значения колонки» для таблицы под фокусом — точка входа для {@link #COLUMN_VALUES_COMMAND_ID}. */
+    static void openColumnValuesOnFocusedTable()
+    {
+        Display display = Display.getCurrent();
+        if (display == null)
+            return;
+        for (Control c = display.getFocusControl(); c != null && !c.isDisposed(); c = c.getParent())
+        {
+            FormTableInteraction interaction = INSTANCES.get(c);
+            if (interaction != null)
+            {
+                interaction.openColumnValuesDialog();
+                return;
+            }
+        }
+    }
+
+    private void installColumnValueViewerFilter()
+    {
+        if (columnValueViewerFilter != null || multiSelectViewer == null)
+            return;
+        // Один фильтр на все колонки: AND по всем записям columnValueFilters. Снятие отбора
+        // очищает карту, но сам фильтр остаётся во viewer — с пустой картой он пропускает всё.
+        columnValueViewerFilter = new ViewerFilter()
+        {
+            @Override
+            public boolean select(Viewer viewer, Object parentElement, Object element)
+            {
+                for (Map.Entry<Integer, String> entry : columnValueFilters.entrySet())
+                {
+                    String text = filterElementText(element, entry.getKey().intValue());
+                    if (!entry.getValue().equals(text != null ? text : "")) //$NON-NLS-1$
+                        return false;
+                }
+                return true;
+            }
+        };
+        multiSelectViewer.addFilter(columnValueViewerFilter);
+    }
+
+    private void clearColumnFilter(int column)
+    {
+        SelectionSnapshot snapshot = captureSelection();
+        if (columnValueFilters.remove(Integer.valueOf(column)) == null)
+            return;
+        refreshKeepingActiveCell(snapshot);
+    }
+
+    private void clearAllFilters()
+    {
+        SelectionSnapshot snapshot = captureSelection();
+        boolean hadColumnFilters = !columnValueFilters.isEmpty();
+        columnValueFilters.clear();
+        // Сначала снять посторонний отбор по подстроке (поле поиска над таблицей) — его слушатель
+        // сам обновит viewer, а наш refresh ниже сведёт оба сброса в один визуальный апдейт.
+        if (substringFilterClearer != null)
+            substringFilterClearer.run();
+        if (hadColumnFilters || substringFilterClearer != null)
+            refreshKeepingActiveCell(snapshot);
+    }
+
+    /**
+     * {@code viewer.refresh()} с сохранением активной ячейки ПО ЭЛЕМЕНТУ модели ({@code TableItem}
+     * после refresh переиспользуются произвольно, ссылки на виджеты не выживают).
+     *
+     * <p><b>Выделение отдельно восстанавливать не нужно</b> — {@code StructuredViewer.refresh()}
+     * уже делает это сам через внутренний {@code preservingSelection()} (сохраняет {@code
+     * getSelection()} до перестроения, восстанавливает после). Раньше здесь ЕЩЁ РАЗ вручную
+     * выставлялось выделение через {@code applyViewerSelection()}/{@code table.setSelection()} —
+     * это гонялось со штатным восстановлением JFace и было причиной пропадающей подсветки активной
+     * строки именно у той строки, что была активна на момент наложения/снятия отбора (двойное,
+     * рассинхронизированное выставление выделения на одном и том же {@code TableItem}). «Активная
+     * ячейка» ({@link #selectedItem}/{@link #activeColumnWidget}) — своё понятие
+     * {@code FormTableInteraction}, JFace о нём не знает, поэтому её всё равно нужно восстанавливать
+     * вручную по элементу.
+     */
+    private void refreshKeepingActiveCell(SelectionSnapshot snapshot)
+    {
+        if (multiSelectViewer == null || table.isDisposed())
+            return;
+        Object activeElement = snapshot.activeElement;
+        int column = snapshot.activeColumn;
+        List<Object> selectedElements = snapshot.selectedElements;
+
+        multiSelectViewer.refresh();
+
+        selectedItem = null;
+        selectionAnchor = null;
+
+        // Восстановление выделения по элементам модели. Выставляем его через ШТАТНЫЙ
+        // viewer.setSelection(), а НЕ через table.select() + синтетический SWT.Selection:
+        // синтетическое событие уходило внешним слушателям (у «Истории Git» — в EGit-овский
+        // CommitFileDiffViewer, который асинхронно грузит diff и через ~1 с сам перетряхивал
+        // таблицу, сбивая выделение). setSelection синхронизирует и viewer, и нативную таблицу,
+        // не порождая ложного пользовательского события.
+        // Сопоставление сначала по объекту модели, при промахе — по текстовому ключу строки
+        // (объекты могли быть пересозданы провайдером содержимого, см. javadoc SelectionSnapshot).
+        List<String> selectedKeys = snapshot.selectedKeys;
+        String activeKey = snapshot.activeKey;
+        List<Object> elementsToSelect = new ArrayList<>();
+        TableItem activeRowAfter = null;
+        for (TableItem row : table.getItems())
+        {
+            Object data = row.getData();
+            if (data == null)
+                continue;
+            String key = null;
+            boolean selected = !selectedElements.isEmpty() && selectedElements.contains(data);
+            if (!selected && !selectedKeys.isEmpty())
+            {
+                key = rowKey(row);
+                selected = key != null && selectedKeys.contains(key);
+            }
+            if (selected)
+                elementsToSelect.add(data);
+            if (activeRowAfter == null)
+            {
+                if (activeElement != null && data == activeElement)
+                {
+                    activeRowAfter = row;
+                }
+                else if (activeKey != null)
+                {
+                    if (key == null)
+                        key = rowKey(row);
+                    if (activeKey.equals(key))
+                        activeRowAfter = row;
+                }
+            }
+        }
+        suppressTableToViewerSync++;
+        try
+        {
+            if (elementsToSelect.isEmpty())
+            {
+                table.deselectAll();
+                multiSelectViewer.setSelection(StructuredSelection.EMPTY, false);
+            }
+            else
+            {
+                multiSelectViewer.setSelection(new StructuredSelection(elementsToSelect), false);
+            }
+        }
+        finally
+        {
+            table.getDisplay().asyncExec(() ->
+            {
+                if (!table.isDisposed())
+                    suppressTableToViewerSync = Math.max(0, suppressTableToViewerSync - 1);
+            });
+        }
+        if (activeRowAfter != null)
+        {
+            updateActiveCell(activeRowAfter, column);
+            ensureNativeSelection(activeRowAfter);
+        }
+        else if (activeKey != null && !table.isDisposed())
+        {
+            // Виртуальная таблица (EGit CommitFileDiffViewer): после refresh активная строка
+            // часто оказывается за пределами вьюпорта и не материализована — её нет среди
+            // table.getItems() с живым getData(), и цикл выше её не нашёл. Ищем по ключу среди
+            // элементов входа viewer, выбираем по индексу (надёжно для VIRTUAL) и асинхронно
+            // (после showSelection → materialize) ставим активную ячейку.
+            int idx = findDisplayedIndexByKey(activeKey);
+            if (idx >= 0 && idx < table.getItemCount())
+            {
+                final int col0 = column;
+                final int finalIdx = idx;
+                table.setSelection(new int[] { idx });
+                table.showSelection();
+                table.getDisplay().asyncExec(() ->
+                {
+                    if (table.isDisposed() || finalIdx >= table.getItemCount())
+                        return;
+                    TableItem it = table.getItem(finalIdx);
+                    if (it == null || it.isDisposed())
+                        return;
+                    updateActiveCell(it, col0);
+                    ensureNativeSelection(it);
+                    redrawSelectedRows();
+                    redrawHeader();
+                });
+            }
+        }
+
+        updateFilterIndicators();
+        redrawSelectedRows();
+        redrawHeader();
+
+        // Внешний слушатель (EGit diff-loader) может сбить нативное выделение ПОСЛЕ нас —
+        // восстанавливаем его через тик, если активная строка потеряла выделение.
+        table.getDisplay().asyncExec(() ->
+        {
+            if (table.isDisposed())
+                return;
+            if (selectedItem != null && !selectedItem.isDisposed() && !isRowSelected(selectedItem))
+            {
+                ensureNativeSelection(selectedItem);
+                redrawSelectedRows();
+            }
+        });
     }
 
     private void copyActiveCell()
@@ -739,7 +1546,9 @@ final class FormTableInteraction
      */
     private void onEraseItem(Event e)
     {
-        if (!(e.item instanceof TableItem item) || !isRowSelected(item))
+        if (!(e.item instanceof TableItem item))
+            return;
+        if (!isRowSelected(item) && item != selectedItem)
             return;
         Color bg = selectionCellBackground(table, item, e.index);
         if (bg == null)
@@ -770,7 +1579,7 @@ final class FormTableInteraction
 
     private Color selectionCellBackground(Table t, TableItem item, int column)
     {
-        if (!isRowSelected(item))
+        if (!isRowSelected(item) && item != selectedItem)
             return null;
         boolean activeRow = item == selectedItem;
         Color rowBg = activeRow ? rowSelectionBackground() : inactiveRowSelectionBackground();
@@ -1069,6 +1878,7 @@ final class FormTableInteraction
         if (overlayRoot != null && !overlayRoot.isDisposed() && stackResizeListener != null)
             overlayRoot.removeControlListener(stackResizeListener);
         uninstallColumnHeaderListeners();
+        disposeFilterIndicators();
         if (headerSeparator != null && !headerSeparator.isDisposed())
             headerSeparator.dispose();
         if (headerHighlight != null && !headerHighlight.isDisposed())
@@ -1090,6 +1900,7 @@ final class FormTableInteraction
             return;
         updateHeaderSeparatorBounds();
         updateHeaderHighlightBounds();
+        updateFilterIndicatorBounds();
     }
 
     private void updateHeaderSeparatorBounds()
@@ -1146,6 +1957,147 @@ final class FormTableInteraction
             ? headerSeparator
             : (columnHost != null ? columnHost : table));
         headerHighlight.redraw();
+    }
+
+    /**
+     * Значки «снять отбор» в шапке — по одному на отфильтрованную колонку. Создаются/удаляются
+     * при изменении набора фильтров; позиционируются вместе с прочими оверлеями шапки.
+     */
+    private void updateFilterIndicators()
+    {
+        if (table == null || table.isDisposed())
+            return;
+        List<Integer> stale = new ArrayList<>();
+        for (Map.Entry<Integer, Canvas> entry : filterIndicators.entrySet())
+        {
+            if (!columnValueFilters.containsKey(entry.getKey()))
+                stale.add(entry.getKey());
+        }
+        for (Integer column : stale)
+        {
+            Canvas canvas = filterIndicators.remove(column);
+            if (canvas != null && !canvas.isDisposed())
+                canvas.dispose();
+        }
+        if (overlayRoot == null || overlayRoot.isDisposed())
+            return;
+        for (Map.Entry<Integer, String> entry : columnValueFilters.entrySet())
+        {
+            Canvas canvas = filterIndicators.get(entry.getKey());
+            if (canvas == null || canvas.isDisposed())
+            {
+                canvas = createFilterIndicator(entry.getKey().intValue());
+                if (canvas == null)
+                    continue;
+                filterIndicators.put(entry.getKey(), canvas);
+            }
+            canvas.setToolTipText("Снять отбор по значению «" + entry.getValue() + "»"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        updateFilterIndicatorBounds();
+    }
+
+    private Canvas createFilterIndicator(int column)
+    {
+        if (overlayRoot == null || overlayRoot.isDisposed())
+            return null;
+        Canvas canvas = new Canvas(overlayRoot, SWT.NO_MERGE_PAINTS | SWT.DOUBLE_BUFFERED);
+        canvas.setBackground(table.getDisplay().getSystemColor(SWT.COLOR_WIDGET_BACKGROUND));
+        canvas.setCursor(table.getDisplay().getSystemCursor(SWT.CURSOR_HAND));
+        canvas.addPaintListener(new PaintListener()
+        {
+            @Override
+            public void paintControl(PaintEvent e)
+            {
+                Image glyph = filterGlyph();
+                if (glyph == null || glyph.isDisposed())
+                    return;
+                Rectangle glyphBounds = glyph.getBounds();
+                Point size = ((Canvas)e.widget).getSize();
+                int x = Math.max(0, (size.x - glyphBounds.width) / 2);
+                int y = Math.max(0, (size.y - glyphBounds.height) / 2);
+                e.gc.drawImage(glyph, x, y);
+            }
+        });
+        canvas.addListener(SWT.MouseUp, e -> clearColumnFilter(column));
+        return canvas;
+    }
+
+    private void updateFilterIndicatorBounds()
+    {
+        if (filterIndicators.isEmpty() || table == null || table.isDisposed())
+            return;
+        boolean headerVisible = table.getHeaderVisible() && table.getHeaderHeight() > 0;
+        Point origin = tableOriginInOverlayRoot();
+        Rectangle client = table.getClientArea();
+        int left = origin.x + table.getBorderWidth();
+        for (Map.Entry<Integer, Canvas> entry : filterIndicators.entrySet())
+        {
+            Canvas canvas = entry.getValue();
+            if (canvas == null || canvas.isDisposed())
+                continue;
+            Rectangle header = headerVisible ? columnHeaderBounds(entry.getKey().intValue()) : null;
+            if (header == null || header.isEmpty() || header.width < FILTER_GLYPH_SIZE + 4)
+            {
+                canvas.setVisible(false);
+                continue;
+            }
+            int size = Math.min(FILTER_GLYPH_SIZE, Math.max(0, header.height - 4));
+            int x = left + header.x + header.width - size - 2;
+            int y = origin.y + header.y + Math.max(0, (header.height - size) / 2);
+            // При горизонтальном скролле заголовок может уехать за пределы клиентской области —
+            // значок не должен рисоваться поверх соседних контролов.
+            if (size <= 0 || x < left || x + size > left + client.width)
+            {
+                canvas.setVisible(false);
+                continue;
+            }
+            canvas.setBounds(x, y, size, size);
+            canvas.setVisible(true);
+            canvas.moveAbove(headerHighlight != null && !headerHighlight.isDisposed()
+                ? headerHighlight
+                : (columnHost != null ? columnHost : table));
+            canvas.redraw();
+        }
+    }
+
+    private void disposeFilterIndicators()
+    {
+        for (Canvas canvas : filterIndicators.values())
+        {
+            if (canvas != null && !canvas.isDisposed())
+                canvas.dispose();
+        }
+        filterIndicators.clear();
+    }
+
+    /** Общий глиф «×» для значка в шапке и для пункта меню «Отключить все фильтры». */
+    private Image filterGlyph()
+    {
+        if (filterGlyph != null && !filterGlyph.isDisposed())
+            return filterGlyph;
+        if (table == null || table.isDisposed())
+            return null;
+        Display display = table.getDisplay();
+        Image image = new Image(display, FILTER_GLYPH_SIZE, FILTER_GLYPH_SIZE);
+        GC gc = new GC(image);
+        try
+        {
+            gc.setAdvanced(true);
+            gc.setAntialias(SWT.ON);
+            gc.setBackground(display.getSystemColor(SWT.COLOR_WIDGET_BACKGROUND));
+            gc.fillRectangle(0, 0, FILTER_GLYPH_SIZE, FILTER_GLYPH_SIZE);
+            gc.setForeground(display.getSystemColor(SWT.COLOR_WIDGET_FOREGROUND));
+            gc.setLineWidth(2);
+            int pad = 3;
+            gc.drawLine(pad, pad, FILTER_GLYPH_SIZE - pad, FILTER_GLYPH_SIZE - pad);
+            gc.drawLine(FILTER_GLYPH_SIZE - pad, pad, pad, FILTER_GLYPH_SIZE - pad);
+        }
+        finally
+        {
+            gc.dispose();
+        }
+        filterGlyph = image;
+        return filterGlyph;
     }
 
     private Point tableOriginInOverlayRoot()
@@ -1280,18 +2232,39 @@ final class FormTableInteraction
         scheduleHeaderOverlayUpdate();
     }
 
+    /**
+     * Границы заголовка колонки в координатах клиентской области таблицы.
+     * {@code column} — индекс создания ({@link Table#indexOf(TableColumn)}), не визуальная
+     * позиция: после reorder {@link Table#getColumnOrder()} визуальный порядок ≠ 0..n-1.
+     */
     private Rectangle columnHeaderBounds(int column)
     {
         if (column < 0 || column >= table.getColumnCount())
             return null;
-        int x = 0;
-        for (int i = 0; i < column; i++)
-            x += table.getColumn(i).getWidth();
-        ScrollBar horizontal = table.getHorizontalBar();
-        if (horizontal != null)
-            x -= horizontal.getSelection();
         int width = table.getColumn(column).getWidth();
         int height = table.getHeaderHeight();
+        int x;
+        if (table.getItemCount() > 0)
+        {
+            // getBounds(creationIndex) уже учитывает columnOrder и горизонтальный скролл.
+            Rectangle cell = table.getItem(0).getBounds(column);
+            x = cell.x;
+        }
+        else
+        {
+            x = 0;
+            int[] order = table.getColumnOrder();
+            for (int visual = 0; visual < order.length; visual++)
+            {
+                int creation = order[visual];
+                if (creation == column)
+                    break;
+                x += table.getColumn(creation).getWidth();
+            }
+            ScrollBar horizontal = table.getHorizontalBar();
+            if (horizontal != null)
+                x -= horizontal.getSelection();
+        }
         return new Rectangle(x, 0, width, height);
     }
 
@@ -1429,5 +2402,487 @@ final class FormTableInteraction
     private void disposeColors()
     {
         invalidateHighlightColor();
+    }
+
+    /**
+     * Модальное окно «Различные значения колонки»: список различных значений активной колонки исходной
+     * таблицы + число строк с этим значением, фильтр по подстроке сверху. Выбор строки сразу
+     * накладывает отбор в исходной таблице ({@link #owner}) по выбранному значению.
+     *
+     * <p>Отдельный класс, а не вложенный анонимный: используется только отсюда (единственный
+     * потребитель — {@link FormTableInteraction}), поэтому не выносится в свой файл.
+     */
+    private static final class ColumnValuesDialog extends Dialog
+    {
+        private static final String SETTINGS_SECTION = "FormTableColumnValuesDialog"; //$NON-NLS-1$
+        private static final String KEY_COL_VALUE_WIDTH = "colValueWidth"; //$NON-NLS-1$
+        private static final String KEY_COL_COUNT_WIDTH = "colCountWidth"; //$NON-NLS-1$
+        private static final int DEFAULT_VALUE_COL_WIDTH = 260;
+        private static final int DEFAULT_COUNT_COL_WIDTH = 80;
+        private static final int MIN_VALUE_COL_WIDTH = 100;
+        private static final int MIN_COUNT_COL_WIDTH = 50;
+
+        /** Строка списка: значение колонки исходной таблицы + число строк с этим значением. */
+        static final class ValueRow
+        {
+            final String value;
+            final int count;
+
+            ValueRow(String value, int count)
+            {
+                this.value = value;
+                this.count = count;
+            }
+        }
+
+        private final FormTableInteraction owner;
+        private final int column;
+        private final String columnHeader;
+        private final List<ValueRow> rows;
+        private final String initialValue;
+        /** Значение отбора по {@code column} ДО открытия окна ({@code null} — отбора не было); восстанавливается при закрытии не через ОК. */
+        private final String originalFilterValue;
+        /** Текущий отбор исходной таблицы БЕЗ {@code column} — для копируемого поля сверху ({@code ""}, если его нет). */
+        private final String otherFiltersDescription;
+
+        private TableViewer viewer;
+        private Table dialogTable;
+        private TableColumn valueColumn;
+        private TableColumn countColumn;
+        private FilterInputBox filterInput;
+        private Button honorOtherFiltersCheckbox;
+        private FormTableInteraction dialogInteraction;
+        private boolean sortByCount;
+        private boolean sortAscending = true;
+        /** На программное выделение текущей строки при открытии отбор в owner не накладывается. */
+        private boolean suppressSelectionApply;
+        private SmartMatcher matcher = new SmartMatcher(""); //$NON-NLS-1$
+
+        ColumnValuesDialog(Shell parentShell, FormTableInteraction owner, int column, String columnHeader,
+            List<ValueRow> rows, String initialValue, String originalFilterValue, String otherFiltersDescription)
+        {
+            super(parentShell);
+            setShellStyle(getShellStyle() | SWT.RESIZE);
+            this.owner = owner;
+            this.column = column;
+            this.columnHeader = columnHeader;
+            this.rows = rows;
+            this.initialValue = initialValue;
+            this.originalFilterValue = originalFilterValue;
+            this.otherFiltersDescription = otherFiltersDescription != null ? otherFiltersDescription : ""; //$NON-NLS-1$
+        }
+
+        /**
+         * X/Escape по умолчанию просто закрывают окно (в {@link Window} без явного {@code
+         * setReturnCode} возврат остаётся {@code OK} — 0 по умолчанию), из-за чего в {@link #close()}
+         * нельзя было бы отличить их от настоящего ОК. Заворачиваем оба пути в {@link #cancelPressed()}
+         * — как нажатие кнопки «Отмена» — чтобы код возврата всегда был {@code CANCEL}.
+         */
+        @Override
+        protected void handleShellCloseEvent()
+        {
+            cancelPressed();
+        }
+
+        @Override
+        protected void configureShell(Shell newShell)
+        {
+            super.configureShell(newShell);
+            String title = columnHeader != null && !columnHeader.isEmpty()
+                ? "Различные значения колонки «" + columnHeader + "»" //$NON-NLS-1$ //$NON-NLS-2$
+                : "Различные значения колонки"; //$NON-NLS-1$
+            newShell.setText(Global.withPluginWindowTitle(title));
+        }
+
+        @Override
+        protected Point getInitialSize()
+        {
+            IDialogSettings settings = dialogSettings();
+            if (settings.get("DIALOG_WIDTH") == null) //$NON-NLS-1$
+                return new Point(420, 480);
+            return super.getInitialSize();
+        }
+
+        @Override
+        protected IDialogSettings getDialogBoundsSettings()
+        {
+            return dialogSettings();
+        }
+
+        @Override
+        protected int getDialogBoundsStrategy()
+        {
+            return DIALOG_PERSISTSIZE | DIALOG_PERSISTLOCATION;
+        }
+
+        @Override
+        protected Control createDialogArea(Composite parent)
+        {
+            Composite area = (Composite)super.createDialogArea(parent);
+            area.setLayout(new GridLayout(1, false));
+
+            Composite otherFiltersRow = new Composite(area, SWT.NONE);
+            otherFiltersRow.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+            otherFiltersRow.setLayout(new GridLayout(2, false));
+
+            honorOtherFiltersCheckbox = new Button(otherFiltersRow, SWT.CHECK);
+            honorOtherFiltersCheckbox.setText("Учитывать отбор"); //$NON-NLS-1$
+            honorOtherFiltersCheckbox.setToolTipText(
+                "Учитывать текущий отбор исходной таблицы (кроме этой колонки) при группировке различных значений"); //$NON-NLS-1$
+            honorOtherFiltersCheckbox.setSelection(true);
+            honorOtherFiltersCheckbox.setLayoutData(new GridData(SWT.LEFT, SWT.CENTER, false, false));
+            honorOtherFiltersCheckbox.addListener(SWT.Selection, e -> reloadRows());
+
+            Text otherFiltersText = new Text(otherFiltersRow, SWT.BORDER | SWT.READ_ONLY);
+            otherFiltersText.setText(otherFiltersDescription);
+            otherFiltersText.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+
+            filterInput = FilterInputBox.forColumnValues(area, this::applyTextFilter);
+            filterInput.widget().setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+
+            Composite tableHost = new Composite(area, SWT.NONE);
+            tableHost.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
+            TableColumnLayout tableLayout = new TableColumnLayout();
+            tableHost.setLayout(tableLayout);
+
+            // SWT.MULTI — множественное выделение полезно для копирования нескольких значений разом.
+            viewer = new TableViewer(tableHost, SWT.FULL_SELECTION | SWT.MULTI | SWT.BORDER);
+            dialogTable = viewer.getTable();
+            dialogTable.setHeaderVisible(true);
+            dialogTable.setLinesVisible(true);
+
+            IDialogSettings settings = dialogSettings();
+            int valueWidth = readColWidth(settings, KEY_COL_VALUE_WIDTH, DEFAULT_VALUE_COL_WIDTH, MIN_VALUE_COL_WIDTH);
+            int countWidth = readColWidth(settings, KEY_COL_COUNT_WIDTH, DEFAULT_COUNT_COL_WIDTH, MIN_COUNT_COL_WIDTH);
+
+            TableViewerColumn valueVc = new TableViewerColumn(viewer, SWT.NONE);
+            valueColumn = valueVc.getColumn();
+            valueColumn.setText("Значение"); //$NON-NLS-1$
+            // SelectionAwareStyledCellLabelProvider, а НЕ DelegatingStyledCellLabelProvider: у
+            // последнего нет способа передать StyledCellLabelProvider.COLORS_ON_SELECTION, и без
+            // этого флага JFace намеренно игнорирует цвета StyleRange на ВЫДЕЛЕННЫХ строках —
+            // подсветка вхождений фильтра пропадала именно на активной строке. См. класс-javadoc
+            // SelectionAwareStyledCellLabelProvider и ObjectSetsView.NameLabelProvider (тот же приём).
+            valueVc.setLabelProvider(new SelectionAwareStyledCellLabelProvider(new ValueLabelProvider()));
+            tableLayout.setColumnData(valueColumn, new ColumnPixelData(valueWidth, true, true));
+
+            TableViewerColumn countVc = new TableViewerColumn(viewer, SWT.RIGHT);
+            countColumn = countVc.getColumn();
+            countColumn.setText("Строк"); //$NON-NLS-1$
+            countVc.setLabelProvider(new ColumnLabelProvider()
+            {
+                @Override
+                public String getText(Object element)
+                {
+                    return element instanceof ValueRow row ? Integer.toString(row.count) : ""; //$NON-NLS-1$
+                }
+            });
+            tableLayout.setColumnData(countColumn, new ColumnPixelData(countWidth, true, true));
+
+            viewer.setContentProvider(ArrayContentProvider.getInstance());
+            viewer.addFilter(new ViewerFilter()
+            {
+                @Override
+                public boolean select(Viewer v, Object parentElement, Object element)
+                {
+                    return element instanceof ValueRow row && matcher.matches(row.value);
+                }
+            });
+
+            dialogInteraction = new FormTableInteraction(dialogTable, viewer, (item, col) ->
+            {
+                if (!(item.getData() instanceof ValueRow row))
+                    return ""; //$NON-NLS-1$
+                return col == 0 ? row.value : Integer.toString(row.count);
+            });
+            // Owner-draw для «Значение» — как у остальных стилизованных колонок в проекте
+            // (ObjectSetsView.nameColumn и т.п.); цвет подсветки вхождений на активной строке
+            // обеспечивает SelectionAwareStyledCellLabelProvider выше (COLORS_ON_SELECTION), это —
+            // независимая настройка перерисовки самого FormTableInteraction.
+            dialogInteraction.setOwnerDrawColumns(valueColumn);
+            dialogInteraction.install();
+
+            installSortListeners();
+
+            viewer.setInput(rows);
+            applySort();
+
+            // Отбор в owner накладывается по АКТИВНОЙ ячейке (dialogInteraction.selectedItem()),
+            // не по первому элементу выделения viewer — при мультивыделении (Ctrl/Shift-клик для
+            // копирования) это осталось бы последним КЛИКНУТЫМ значением, а не произвольным первым
+            // по порядку. Слушатель добавлен ПОСЛЕ dialogInteraction.install(), поэтому активная
+            // ячейка внутри dialogInteraction уже обновлена к моменту его срабатывания.
+            dialogTable.addListener(SWT.Selection, e -> applyActiveRowFilter());
+            dialogTable.addListener(SWT.MouseDoubleClick, e -> okPressed());
+            installFilterKeyNavigation();
+
+            selectInitialValue();
+            filterInput.scheduleFocusWhenReady();
+
+            return area;
+        }
+
+        @Override
+        protected void createButtonsForButtonBar(Composite parent)
+        {
+            createButton(parent, IDialogConstants.OK_ID, "ОК", true); //$NON-NLS-1$
+            createButton(parent, IDialogConstants.CANCEL_ID, "Отмена", false); //$NON-NLS-1$
+        }
+
+        /**
+         * Отбор по активной строке накладывается в {@link #applyActiveRowFilter()} только в ОТВЕТ
+         * на {@code SWT.Selection} (клик/навигация клавишами — см. {@link
+         * #selectTableIndexAndNotify(int)}). Если Enter нажат СРАЗУ при открытии окна, до любой
+         * навигации — выделение с момента открытия не менялось, новый {@code SWT.Selection} не
+         * возникал, и без явного вызова здесь окно закрывалось бы через ОК, ничего не применив.
+         */
+        @Override
+        protected void okPressed()
+        {
+            applyActiveRowFilter();
+            super.okPressed();
+        }
+
+        /**
+         * Два режима закрытия: ОК/двойной клик по строке — оставить текущий (уже применённый вживую)
+         * отбор; «Отмена», X, Escape — откатить {@code column} к {@link #originalFilterValue}
+         * (тому, что было до открытия окна), а не оставлять последнее значение, просмотренное при
+         * навигации по списку.
+         */
+        @Override
+        public boolean close()
+        {
+            saveColumnWidths();
+            if (getReturnCode() != OK)
+            {
+                if (originalFilterValue != null)
+                    owner.applyColumnFilterValue(column, originalFilterValue);
+                else
+                    owner.clearColumnFilter(column);
+            }
+            return super.close();
+        }
+
+        private static IDialogSettings dialogSettings()
+        {
+            IDialogSettings top = Activator.getDefault().getDialogSettings();
+            IDialogSettings section = top.getSection(SETTINGS_SECTION);
+            if (section == null)
+                section = top.addNewSection(SETTINGS_SECTION);
+            return section;
+        }
+
+        private static int readColWidth(IDialogSettings settings, String key, int defaultWidth, int minWidth)
+        {
+            String raw = settings.get(key);
+            if (raw == null || raw.isEmpty())
+                return defaultWidth;
+            try
+            {
+                int w = Integer.parseInt(raw);
+                return w >= minWidth ? w : defaultWidth;
+            }
+            catch (NumberFormatException ex)
+            {
+                return defaultWidth;
+            }
+        }
+
+        private void saveColumnWidths()
+        {
+            if (valueColumn == null || countColumn == null
+                || valueColumn.isDisposed() || countColumn.isDisposed())
+                return;
+            IDialogSettings settings = dialogSettings();
+            settings.put(KEY_COL_VALUE_WIDTH, Integer.toString(valueColumn.getWidth()));
+            settings.put(KEY_COL_COUNT_WIDTH, Integer.toString(countColumn.getWidth()));
+        }
+
+        private void applyTextFilter()
+        {
+            matcher = new SmartMatcher(filterInput != null ? filterInput.getText() : null);
+            if (viewer == null || viewer.getControl().isDisposed())
+                return;
+            viewer.refresh();
+            // Прежнее выделение отфильтровано текстом — переносим его на первую видимую строку
+            // (иначе после сужения списка активная ячейка держится за скрытую строку).
+            FilterInputBoxListNavigation.selectFirstRowIfSelectionLost(dialogTable);
+        }
+
+        /** ↓/↑/PgUp/PgDn из поля фильтра — навигация по списку; Enter — как двойной клик (закрыть). */
+        private void installFilterKeyNavigation()
+        {
+            if (filterInput == null || filterInput.isDisposed())
+                return;
+            Control filterKeys = filterInput.inputControl();
+            if (filterKeys == null)
+                filterKeys = filterInput.widget();
+            FilterInputBoxListNavigation.installTableOpenOnEnter(filterKeys, dialogTable,
+                this::selectTableIndexAndNotify, this::okPressed);
+        }
+
+        /**
+         * Программное {@code table.setSelection(idx)} — как {@code viewer.setSelection(...)} — НЕ
+         * генерирует {@code SWT.Selection} (задокументированное соглашение SWT: {@code setXxx} не
+         * стреляет событиями, в отличие от настоящего клика мышью). {@code dialogInteraction}
+         * обновляет активную ячейку/подсветку ТОЛЬКО в ответ на {@code SWT.Selection}/{@code
+         * MouseDown} — без ручного {@code notifyListeners} строка визуально не активируется бы и
+         * отбор не накладывался бы: навигация клавишами вела бы себя иначе, чем клик (тот же приём,
+         * что в {@code FilterInputBoxListNavigation.fireTableSelection}, — там не подходит напрямую,
+         * т.к. используется свой {@code onIndexChanged}).
+         */
+        private void selectTableIndexAndNotify(int idx)
+        {
+            if (idx < 0 || idx >= dialogTable.getItemCount())
+                return;
+            dialogTable.setSelection(idx);
+            dialogTable.showSelection();
+            TableItem[] selected = dialogTable.getSelection();
+            if (selected.length == 0)
+                return;
+            Event selectionEvent = new Event();
+            selectionEvent.type = SWT.Selection;
+            selectionEvent.widget = dialogTable;
+            selectionEvent.item = selected[0];
+            dialogTable.notifyListeners(SWT.Selection, selectionEvent);
+        }
+
+        private void applyActiveRowFilter()
+        {
+            if (suppressSelectionApply)
+                return;
+            TableItem active = dialogInteraction.selectedItem();
+            if (active != null && !active.isDisposed() && active.getData() instanceof ValueRow row)
+                owner.applyColumnFilterValue(column, row.value);
+        }
+
+        /**
+         * Значение с подсветкой вхождений {@link #matcher} (плоский AND, без иерархии — колонка
+         * содержит одиночные значения ячеек, не составные имена).
+         */
+        private StyledString highlightedText(String text)
+        {
+            String value = text != null ? text : ""; //$NON-NLS-1$
+            if (matcher.isEmpty || value.isEmpty())
+                return new StyledString(value);
+            List<SmartMatcher.HighlightRange> raw = matcher.getHighlightRanges(value);
+            if (raw.isEmpty())
+                return new StyledString(value);
+            List<int[]> ranges = new ArrayList<>();
+            for (SmartMatcher.HighlightRange hr : raw)
+                ranges.add(new int[] { hr.offset, hr.offset + hr.length });
+            ranges.sort((a, b) -> Integer.compare(a[0], b[0]));
+            List<int[]> merged = new ArrayList<>();
+            for (int[] r : ranges)
+            {
+                if (merged.isEmpty() || r[0] >= merged.get(merged.size() - 1)[1])
+                    merged.add(r);
+                else
+                    merged.get(merged.size() - 1)[1] = Math.max(merged.get(merged.size() - 1)[1], r[1]);
+            }
+            StyledString.Styler styler = SmartMatchHighlight.styler(dialogTable);
+            StyledString styled = new StyledString();
+            int pos = 0;
+            for (int[] r : merged)
+            {
+                if (r[0] > pos)
+                    styled.append(value.substring(pos, r[0]));
+                int end = Math.min(r[1], value.length());
+                if (r[0] < end)
+                    styled.append(value.substring(r[0], end), styler);
+                pos = end;
+            }
+            if (pos < value.length())
+                styled.append(value.substring(pos));
+            return styled;
+        }
+
+        /** Отдельный класс, а не анонимный: {@code LabelProvider} и {@code IStyledLabelProvider} нельзя совместить в одном anonymous-выражении. */
+        private final class ValueLabelProvider extends LabelProvider
+            implements DelegatingStyledCellLabelProvider.IStyledLabelProvider
+        {
+            @Override
+            public StyledString getStyledText(Object element)
+            {
+                return element instanceof ValueRow row ? highlightedText(row.value) : new StyledString();
+            }
+        }
+
+        private void installSortListeners()
+        {
+            valueColumn.addListener(SWT.Selection, e ->
+            {
+                if (sortByCount)
+                {
+                    sortByCount = false;
+                    sortAscending = true;
+                }
+                else
+                    sortAscending = !sortAscending;
+                applySort();
+            });
+            countColumn.addListener(SWT.Selection, e ->
+            {
+                if (!sortByCount)
+                {
+                    sortByCount = true;
+                    sortAscending = true;
+                }
+                else
+                    sortAscending = !sortAscending;
+                applySort();
+            });
+        }
+
+        private void applySort()
+        {
+            Comparator<ValueRow> comparator = sortByCount
+                ? Comparator.comparingInt((ValueRow r) -> r.count)
+                : Comparator.comparing((ValueRow r) -> r.value, String.CASE_INSENSITIVE_ORDER);
+            if (!sortAscending)
+                comparator = comparator.reversed();
+            rows.sort(comparator);
+            if (!dialogTable.isDisposed())
+            {
+                dialogTable.setSortColumn(sortByCount ? countColumn : valueColumn);
+                dialogTable.setSortDirection(sortAscending ? SWT.UP : SWT.DOWN);
+            }
+            if (viewer != null && !viewer.getControl().isDisposed())
+                viewer.refresh();
+        }
+
+        /** Флажок «Учитывать отбор» переключён — пересчитать список различных значений с нуля. */
+        private void reloadRows()
+        {
+            boolean honorOtherFilters = honorOtherFiltersCheckbox != null && honorOtherFiltersCheckbox.getSelection();
+            List<ValueRow> recomputed = owner.computeColumnValueRows(column, honorOtherFilters);
+            rows.clear();
+            rows.addAll(recomputed);
+            applySort();
+        }
+
+        private void selectInitialValue()
+        {
+            if (initialValue == null)
+                return;
+            // Отбор ещё пуст (фильтр по подстроке только что открыт) — порядок rows == порядок
+            // видимых TableItem, индекс в списке валиден и как индекс в dialogTable.
+            for (int i = 0; i < rows.size(); i++)
+            {
+                if (initialValue.equals(rows.get(i).value))
+                {
+                    suppressSelectionApply = true;
+                    try
+                    {
+                        selectTableIndexAndNotify(i);
+                    }
+                    finally
+                    {
+                        suppressSelectionApply = false;
+                    }
+                    break;
+                }
+            }
+        }
     }
 }

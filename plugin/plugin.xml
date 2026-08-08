@@ -169,6 +169,18 @@
           sequence="M1+3">
     </key>
     <key
+          commandId="tormozit.formTable.filterByCellValue"
+          contextId="org.eclipse.ui.contexts.window"
+          schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
+          sequence="M3+W">
+    </key>
+    <key
+          commandId="tormozit.formTable.columnValues"
+          contextId="org.eclipse.ui.contexts.window"
+          schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
+          sequence="M3+F">
+    </key>
+    <key
           commandId="tormozit.OpenConfigurationObject"
           contextId="org.eclipse.ui.contexts.window"
           schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
@@ -326,6 +338,16 @@
           class="org.eclipse.ui.handlers.RegistryToggleState"
           id="org.eclipse.ui.commands.toggleState"/>
     </command>
+    <command
+        id="tormozit.formTable.filterByCellValue"
+        name="Отобрать по значению ячейки"
+        categoryId="tormozit.commands.global"
+        description="Отобрать строки таблицы по значению активной ячейки; повторный вызов на той же ячейке снимает отбор (Комфорт)"/>
+    <command
+        id="tormozit.formTable.columnValues"
+        name="Различные значения колонки"
+        categoryId="tormozit.commands.global"
+        description="Открыть окно различных значений активной колонки с числом строк; выбор строки накладывает отбор в таблице (Комфорт)"/>
     <command
         id="tormozit.recentPlaces.showInNavigator"
         name="Показать в навигаторе"
@@ -552,6 +574,14 @@
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.NavigatorAddToObjectSetHandler"
         commandId="tormozit.navigator.addToObjectSet">
+    </handler>
+    <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.FormTableFilterHandler"
+        commandId="tormozit.formTable.filterByCellValue">
+    </handler>
+    <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.FormTableColumnValuesHandler"
+        commandId="tormozit.formTable.columnValues">
     </handler>
     <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.ObjectSetsNavigatorFilterHandler"

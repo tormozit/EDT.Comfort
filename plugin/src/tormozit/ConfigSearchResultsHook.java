@@ -564,7 +564,6 @@ public final class ConfigSearchResultsHook implements IStartup
         });
 
         installMatchTableOpenSupport(matchViewer, activePage, view.getSite().getPage());
-        installMatchTableCopyHandler(matchViewer, view);
 
         treeViewer.addPostSelectionChangedListener(event -> {
             if (!ComfortSettings.isReplaceListFiltersEnabled())
@@ -2135,82 +2134,6 @@ public final class ConfigSearchResultsHook implements IStartup
                 return;
             SearchMatchScrollSupport.applyLeftmost(widget, selection.x, selection.x + Math.max(0, selection.y));
         });
-    }
-
-    private static void installMatchTableCopyHandler(TableViewer matchViewer, IViewPart view)
-    {
-        Table table = matchViewer.getTable();
-        table.addListener(SWT.KeyDown, event -> {
-            if (!ComfortSettings.isReplaceListFiltersEnabled())
-                return;
-            if ((event.stateMask & SWT.MOD1) == 0)
-                return;
-            if (event.keyCode != 'c' && event.keyCode != 'C')
-                return;
-            if (copyActiveMatchCellToClipboard(matchViewer))
-                event.doit = false;
-        });
-
-        // Как в FileSearchResultsHook.registerGlobalCopyHandler: в панели поиска Ctrl+C нередко
-        // не доходит до SWT.KeyDown (нативный Win32-акселератор), поэтому дублируем через KeyUp.
-        Display display = table.getDisplay();
-        if (display != null && !display.isDisposed())
-        {
-            display.addFilter(SWT.KeyUp, event -> {
-                if (!ComfortSettings.isReplaceListFiltersEnabled())
-                    return;
-                if (table.isDisposed() || !table.isFocusControl())
-                    return;
-                if ((event.stateMask & SWT.MOD1) == 0)
-                    return;
-                if (event.keyCode != 'c' && event.keyCode != 'C')
-                    return;
-                display.asyncExec(() -> copyActiveMatchCellToClipboard(matchViewer));
-            });
-        }
-
-        // "org.eclipse.ui.edit.copy" активируется ОДИН раз на весь view — общая точка
-        // CreateDebuggerBreakpoints.installGlobalCopyHandler (см. её javadoc): если оба хука панели
-        // поиска (этот и FileSearchResultsHook) активируют обработчик этой команды по отдельности,
-        // второй молча перебивает первого на всём view, даже когда фокус не на его таблице.
-        CreateDebuggerBreakpoints.installGlobalCopyHandler(view);
-    }
-
-    /** Копирует активную ячейку, если фокус сейчас на этой таблице — для {@link CreateDebuggerBreakpoints#installGlobalCopyHandler}. */
-    static boolean copyActiveCellIfFocused()
-    {
-        TableViewer matchViewer = cachedMatchTableViewer;
-        if (matchViewer == null)
-            return false;
-        Table table = matchViewer.getTable();
-        if (table == null || table.isDisposed() || !table.isFocusControl())
-            return false;
-        return copyActiveMatchCellToClipboard(matchViewer);
-    }
-
-    /** Копирует текст для активной колонки (см. {@link FormTableInteraction#activeSelectionText()}). */
-    private static boolean copyActiveMatchCellToClipboard(TableViewer matchViewer)
-    {
-        Table table = matchViewer.getTable();
-        if (table == null || table.isDisposed())
-            return false;
-        FormTableInteraction interaction = cachedMatchTableInteraction;
-        if (interaction == null)
-            return false;
-        String text = interaction.activeSelectionText();
-        if (text == null)
-            return false;
-
-        Clipboard cb = new Clipboard(table.getDisplay());
-        try
-        {
-            cb.setContents(new Object[] { text }, new Transfer[] { TextTransfer.getInstance() });
-        }
-        finally
-        {
-            cb.dispose();
-        }
-        return true;
     }
 
     /**

@@ -2,10 +2,6 @@ package tormozit;
 
 import java.util.List;
 
-import org.eclipse.core.commands.ExecutionEvent;
-import org.eclipse.core.commands.ExecutionException;
-import org.eclipse.core.commands.IExecutionListener;
-import org.eclipse.core.commands.NotHandledException;
 import org.eclipse.core.runtime.preferences.InstanceScope;
 import org.eclipse.jface.layout.TableColumnLayout;
 import org.eclipse.jface.preference.IPreferenceStore;
@@ -25,9 +21,6 @@ import org.eclipse.jface.viewers.ViewerColumn;
 import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.SashForm;
-import org.eclipse.swt.dnd.Clipboard;
-import org.eclipse.swt.dnd.TextTransfer;
-import org.eclipse.swt.dnd.Transfer;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.layout.GridData;
@@ -50,7 +43,6 @@ import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
-import org.eclipse.ui.commands.ICommandService;
 import org.eclipse.ui.preferences.ScopedPreferenceStore;
 
 /**
@@ -86,14 +78,9 @@ public final class GitHistoryFileColumnsHook implements IStartup
 {
     private static final String TEAM_HISTORY_VIEW_ID = "org.eclipse.team.ui.GenericHistoryView"; //$NON-NLS-1$
     private static final String PATCHED_KEY = "tormozit.gitHistoryFileColumnsPatched"; //$NON-NLS-1$
-    private static final String COPY_CMD = "org.eclipse.ui.edit.copy"; //$NON-NLS-1$
 
     private static final String EGIT_UI_PLUGIN_ID = "org.eclipse.egit.ui"; //$NON-NLS-1$
 
-    /** Активная таблица файлов для перехвата Ctrl+C (Win32 не шлёт букву в KeyDown). */
-    private static volatile Table copyTargetTable;
-    private static volatile FormTableInteraction copyTargetInteraction;
-    private static boolean copyExecutionListenerInstalled;
     private static final String EGIT_PREF_COLUMN_AUTHOR = "HistoryView_ColumnAuthorShow"; //$NON-NLS-1$
     private static final String EGIT_PREF_COLUMN_AUTHOR_DATE = "HistoryView_ColumnAuthorDateShow"; //$NON-NLS-1$
     private static final String EGIT_PREF_COLUMN_COMMITTER = "HistoryView_ColumnCommitterShow"; //$NON-NLS-1$
@@ -391,6 +378,8 @@ public final class GitHistoryFileColumnsHook implements IStartup
             // После перезаполнения — строка с тем же значением колонки «Файл».
             if (savedFile != null && !savedFile.isEmpty())
                 selectRowByFileColumnValue(table, savedFile);
+            // Прежний файл отфильтрован (не нашёлся) — переносим выделение на первую видимую строку.
+            FilterInputBoxListNavigation.selectFirstRowIfSelectionLost(table);
             FormTableInteraction interaction = interactionRef[0];
             if (interaction != null)
                 interaction.resyncSelectionTheme();
@@ -452,9 +441,31 @@ public final class GitHistoryFileColumnsHook implements IStartup
             });
         interaction.setOwnerDrawColumns(fileCol, typeCol, pathCol);
         interaction.setColumnReorderEnabled(true);
+        // Отбор/«Различные значения колонки» работают по ЭЛЕМЕНТУ модели (FileDiff), а не по
+        // TableItem — тот же расчёт, что и в GitHistoryFileLabelProvider.update() для колонок
+        // «Тип»/«Путь» (там же — только пишется в ViewerCell, а не возвращается строкой). Без
+        // этого резолвера FormTableInteraction тихо падал на fallback через
+        // fileViewer.getLabelProvider(col): т.к. все 3 колонки — «сырые» TableColumn без
+        // TableViewerColumn, JFace для ЛЮБОГО col возвращает один и тот же общий
+        // GitHistoryFileLabelProvider, чей однопараметрический getText(element) всегда отдаёт
+        // текст колонки «Файл» — отбор/группировка по «Тип»/«Путь» тогда фактически шли по «Файл».
+        interaction.setFilterTextResolver((element, col) ->
+        {
+            if (col == 0)
+                return labelProvider.getText(element);
+            Object pathObj = Global.call(element, "getPath"); //$NON-NLS-1$
+            String path = pathObj instanceof String s ? s : ""; //$NON-NLS-1$
+            if (col == 1)
+                return extensionOf(path);
+            if (col == 2)
+            {
+                String fullName = GetRef.resolveFullNameOrNull(path);
+                return fullName != null ? fullName : ""; //$NON-NLS-1$
+            }
+            return ""; //$NON-NLS-1$
+        });
         interaction.install();
         interactionRef[0] = interaction;
-        wireCellCopyCommand(table, interaction);
 
         horizontalSplit.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
         int leftW = ComfortSettings.getGitHistorySashWeight("left", 50); //$NON-NLS-1$
@@ -487,97 +498,6 @@ public final class GitHistoryFileColumnsHook implements IStartup
             + " children=" + childrenStr(historyControl));
 
         table.setData(PATCHED_KEY, Boolean.TRUE);
-    }
-
-    /**
-     * Win32: Ctrl+C не доходит до {@code SWT.KeyDown} (акселератор Edit→Copy).
-     * Перехват {@code org.eclipse.ui.edit.copy} — как в {@code PreferenceSearchFilterAugmenter}.
-     */
-    private static void wireCellCopyCommand(Table table, FormTableInteraction interaction)
-    {
-        copyTargetTable = table;
-        copyTargetInteraction = interaction;
-        table.addDisposeListener(e ->
-        {
-            if (copyTargetTable == table)
-            {
-                copyTargetTable = null;
-                copyTargetInteraction = null;
-            }
-        });
-        installCopyExecutionListener();
-    }
-
-    private static void installCopyExecutionListener()
-    {
-        if (copyExecutionListenerInstalled || PlatformUI.getWorkbench() == null)
-            return;
-        ICommandService commandService = PlatformUI.getWorkbench().getService(ICommandService.class);
-        if (commandService == null)
-            return;
-        copyExecutionListenerInstalled = true;
-        commandService.addExecutionListener(new IExecutionListener()
-        {
-            @Override
-            public void preExecute(String commandId, ExecutionEvent event)
-            {
-            }
-
-            @Override
-            public void postExecuteSuccess(String commandId, Object returnValue)
-            {
-                // После штатного Copy EGit перезаписываем буфер текстом активной ячейки.
-                handlePossibleCellCopy(commandId);
-            }
-
-            @Override
-            public void notHandled(String commandId, NotHandledException exception)
-            {
-                handlePossibleCellCopy(commandId);
-            }
-
-            @Override
-            public void postExecuteFailure(String commandId, ExecutionException exception)
-            {
-            }
-        });
-    }
-
-    private static void handlePossibleCellCopy(String commandId)
-    {
-        if (!COPY_CMD.equals(commandId))
-            return;
-        Table table = copyTargetTable;
-        FormTableInteraction interaction = copyTargetInteraction;
-        if (table == null || table.isDisposed() || interaction == null || !table.isFocusControl())
-            return;
-        TableItem item = interaction.selectedItem();
-        if (item == null || item.isDisposed())
-        {
-            int idx = table.getSelectionIndex();
-            if (idx < 0)
-                return;
-            item = table.getItem(idx);
-        }
-        if (item == null || item.isDisposed())
-            return;
-        int col = interaction.activeColumn();
-        if (col < 0)
-            col = 0;
-        String text = item.getText(col);
-        if (text == null)
-            text = ""; //$NON-NLS-1$
-        Clipboard clipboard = new Clipboard(table.getDisplay());
-        try
-        {
-            clipboard.setContents(new Object[] { text },
-                new Transfer[] { TextTransfer.getInstance() });
-            Debug.log("cellCopy via command col=" + col + " len=" + text.length()); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        finally
-        {
-            clipboard.dispose();
-        }
     }
 
     /**

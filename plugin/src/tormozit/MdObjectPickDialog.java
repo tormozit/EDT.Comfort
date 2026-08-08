@@ -206,6 +206,7 @@ public class MdObjectPickDialog extends Dialog
         listViewer.setInput(entries);
 
         tableInteraction = new FormTableInteraction(table, listViewer, this::cellText);
+        tableInteraction.setFilterTextResolver(this::filterText);
         tableInteraction.install();
         selectFirst();
 
@@ -262,7 +263,19 @@ public class MdObjectPickDialog extends Dialog
     {
         if (!(item.getData() instanceof Entry entry))
             return ""; //$NON-NLS-1$
-        Table table = item.getParent();
+        return entryText(entry, item.getParent(), column);
+    }
+
+    /** То же значение по элементу модели — для отбора по значению ячейки (без {@code TableItem}). */
+    private String filterText(Object element, int column)
+    {
+        if (!(element instanceof Entry entry) || listViewer == null || listViewer.getTable().isDisposed())
+            return ""; //$NON-NLS-1$
+        return entryText(entry, listViewer.getTable(), column);
+    }
+
+    private String entryText(Entry entry, Table table, int column)
+    {
         if (column < 0 || column >= table.getColumnCount())
             return ""; //$NON-NLS-1$
         TableColumn col = table.getColumn(column);
