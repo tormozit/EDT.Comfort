@@ -163,6 +163,9 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         rowFilter = cloneSnapshot != null ? cloneSnapshot.toRowFilter() : new DebugCollectionRowFilter(""); //$NON-NLS-1$
         findSession = new DebugCollectionFindSession(this);
         indexInteraction = new DebugCollectionTableInteraction(splitTable.indexTable(), this);
+        // Fixed-панель пока держит собственную priority-логику колонок (sash/ персистентность);
+        // единая логика FormTableInteraction подключается к ней отдельной фазой миграции.
+        indexInteraction.setColumnAutoResizeEnabled(false);
         indexInteraction.install();
         dataInteraction = new DebugCollectionTableInteraction(splitTable.dataTable(), this);
         dataInteraction.install();
@@ -627,6 +630,37 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
     {
         if (shell == null || shell.isDisposed() || model == null)
             return;
+
+        if (context == null || context.length == 0)
+        {
+            if (model.columns.propertyColumnCount() > 0)
+                return;
+        }
+        else if (model.columns.hasProvisionalPropertyHeaders()
+            && context.length == model.columns.propertyColumnCount())
+        {
+            String[] labels = new String[context.length];
+            boolean anyReal = false;
+            for (int i = 0; i < context.length; i++)
+            {
+                labels[i] = DebugCollectionPropertyVariables.columnLabel(context[i]);
+                if (labels[i] != null
+                    && !DebugCollectionPropertyVariables.isIndexedPlaceholderName(labels[i]))
+                    anyReal = true;
+            }
+            if (!anyReal)
+                return;
+            if (model.columns.refinePropertyLabels(labels))
+            {
+                if (splitTable != null)
+                    model.columns.refreshHeaderTexts(splitTable.indexTable(), splitTable.dataTable());
+                refreshPresentationCombo();
+                updateColumnSettingsButton();
+                updateCloneButtonState();
+            }
+            return;
+        }
+
         DebugCollectionColumnModel rebuilt = DebugCollectionColumnModel.fromContextVariables(context);
         String pathKey = model.pathKey();
         int count = rebuilt.allColumns().size();
@@ -659,13 +693,13 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
                 {
                     index.setRedraw(true);
                     data.setRedraw(true);
-                    index.redraw();
                 }
             }
+            // itemCount часто уже = totalSize — без «сброса» виртуальные строки не запрашивают SetData,
+            // пока пользователь не дернет границу колонки (layout/redraw).
+            refreshRowsAfterSchemaChange();
         }
-        if (splitTable != null)
-            splitTable.clearAll();
-        if (model.totalSize >= 0)
+        else if (model.totalSize >= 0)
             updateTableItemCount(model.totalSize);
         if (scheduler != null)
         {
@@ -691,6 +725,79 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
                 + (wideUnion ? " wideUnion" : "") //$NON-NLS-1$ //$NON-NLS-2$
                 + (model.columns.hasHiddenColumns()
                     ? " hidden=" + model.columns.hiddenColumnCount() : "")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * После смены схемы колонок: принудительный layout + SetData.
+     * Иначе при неизменном {@code itemCount} виртуальная таблица остаётся пустой, пока не будет
+     * resize колонки / другой layout.
+     */
+    private void refreshRowsAfterSchemaChange()
+    {
+        if (splitTable == null || model == null)
+            return;
+        int total = model.totalSize;
+        if (total < 0)
+            total = splitTable.getItemCount();
+        if (rowFilter != null && rowFilter.isActive())
+            total = rowFilter.visibleCount(Math.max(0, total));
+        if (total < 0)
+            total = 0;
+
+        splitTable.setItemCount(0);
+        splitTable.clearAll();
+        updateTableItemCount(total);
+        splitTable.syncIndexColumnLayout();
+        splitTable.requestSyncFixedPaneLayout("schema"); //$NON-NLS-1$
+
+        Table index = indexTable();
+        Table data = dataTable();
+        if (index != null && !index.isDisposed())
+        {
+            Composite host = index.getParent();
+            if (host != null && !host.isDisposed())
+                host.layout(true, true);
+            index.redraw();
+        }
+        if (data != null && !data.isDisposed())
+        {
+            Composite host = data.getParent();
+            if (host != null && !host.isDisposed())
+                host.layout(true, true);
+            data.redraw();
+        }
+        // После layout — принудительно запросить SetData видимых строк (особенно index-таблица).
+        Display display = index != null && !index.isDisposed() ? index.getDisplay() : null;
+        if (display != null && !display.isDisposed())
+        {
+            display.asyncExec(this::forceRealizeVisibleSplitRows);
+            display.timerExec(50, this::forceRealizeVisibleSplitRows);
+        }
+    }
+
+    /** VIRTUAL: {@code getItem} инициирует SetData для видимого диапазона. */
+    private void forceRealizeVisibleSplitRows()
+    {
+        if (shell == null || shell.isDisposed() || splitTable == null)
+            return;
+        forceRealizeVisibleRows(indexTable());
+        forceRealizeVisibleRows(dataTable());
+    }
+
+    private void forceRealizeVisibleRows(Table table)
+    {
+        if (table == null || table.isDisposed())
+            return;
+        int itemCount = table.getItemCount();
+        if (itemCount <= 0)
+            return;
+        int top = Math.max(0, table.getTopIndex());
+        int visible = Math.max(8, table.getClientArea().height / Math.max(1, table.getItemHeight()) + 2);
+        int last = Math.min(itemCount - 1, top + visible);
+        table.clear(top, last);
+        for (int i = top; i <= last; i++)
+            table.getItem(i);
+        table.redraw();
     }
 
     private String pathKeyFromPath()
@@ -2327,6 +2434,12 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             syncRowAreaAlignment();
         }
 
+        /** После смены схемы — отложенный layout как после resize заголовка колонки. */
+        void requestSyncFixedPaneLayout(String source)
+        {
+            scheduleSyncFixedPaneLayout(source);
+        }
+
         /** Сохранить ширину левой панели и колонок «Индекс» / «Тип» / «Представление» (при закрытии окна). */
         void persistFixedPaneWidth()
         {
@@ -2771,7 +2884,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         {
             if ("indexStackResize".equals(source) || "sashSelection".equals(source) //$NON-NLS-1$ //$NON-NLS-2$
                 || "vbarShow".equals(source) || "vbarHide".equals(source) //$NON-NLS-1$ //$NON-NLS-2$
-                || "setItemCount".equals(source)) //$NON-NLS-1$
+                || "setItemCount".equals(source) || "schema".equals(source)) //$NON-NLS-1$ //$NON-NLS-2$
                 return 0;
             return 50;
         }

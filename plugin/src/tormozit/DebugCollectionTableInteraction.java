@@ -37,6 +37,12 @@ final class DebugCollectionTableInteraction
         interaction.setCopyHook(this::logCopy);
     }
 
+    /** См. {@link FormTableInteraction#setColumnAutoResizeEnabled(boolean)}. */
+    void setColumnAutoResizeEnabled(boolean enabled)
+    {
+        interaction.setColumnAutoResizeEnabled(enabled);
+    }
+
     void install()
     {
         interaction.install();

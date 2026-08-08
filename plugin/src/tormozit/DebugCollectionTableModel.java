@@ -369,7 +369,7 @@ final class DebugCollectionTableModel
     {
         DebugCollectionColumnModel.Column col = columns.columnAt(visibleCol);
         if (col != null && col.kind == DebugCollectionColumnModel.Kind.INDEX)
-            return true;
+            return text != null && !text.isEmpty();
         if (!hasResolvableRow(logicalRow))
             return false;
         if (text == null || text.isEmpty() || EVALUATING_ROW_TEXT.equals(text))
@@ -744,7 +744,9 @@ final class DebugCollectionTableModel
             return null;
         }
         IBslVariable child = findPropertyVariable(props, propertyName);
-        if (child == null && DebugCollectionPropertyVariables.isIndexedPlaceholderContext(props))
+        if (child == null
+            && (DebugCollectionPropertyVariables.isIndexedPlaceholderName(propertyName)
+                || DebugCollectionPropertyVariables.isIndexedPlaceholderContext(props)))
         {
             int ordinal = propertyColumnOrdinal(propertyName);
             if (ordinal >= 0 && ordinal < props.length)

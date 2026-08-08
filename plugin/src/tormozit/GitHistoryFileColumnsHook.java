@@ -3,13 +3,13 @@ package tormozit;
 import java.util.List;
 
 import org.eclipse.core.runtime.preferences.InstanceScope;
+import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.layout.TableColumnLayout;
 import org.eclipse.jface.preference.IPreferenceStore;
 import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.ColumnPixelData;
 import org.eclipse.jface.viewers.ColumnViewer;
-import org.eclipse.jface.viewers.ColumnWeightData;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.jface.viewers.ILabelProviderListener;
@@ -29,7 +29,6 @@ import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
-import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableColumn;
 import org.eclipse.swt.widgets.TableItem;
@@ -78,6 +77,16 @@ public final class GitHistoryFileColumnsHook implements IStartup
 {
     private static final String TEAM_HISTORY_VIEW_ID = "org.eclipse.team.ui.GenericHistoryView"; //$NON-NLS-1$
     private static final String PATCHED_KEY = "tormozit.gitHistoryFileColumnsPatched"; //$NON-NLS-1$
+    private static final String SETTINGS_SECTION = "GitHistoryFileColumns"; //$NON-NLS-1$
+    /** Второстепенные данные (положение разделителя) — в {@link IDialogSettings}, сохраняются при
+     * закрытии/пересоздании панели, а не живьём при каждом драге. */
+    private static final String KEY_SASH_LEFT = "sashLeft"; //$NON-NLS-1$
+    private static final String KEY_SASH_RIGHT = "sashRight"; //$NON-NLS-1$
+    private static final String KEY_COL_ORDER = "columnOrder"; //$NON-NLS-1$
+    private static final String KEY_COL_FILL_MODE = "colFillMode"; //$NON-NLS-1$
+    private static final String KEY_COL_FILE_WIDTH = "colFileWidth"; //$NON-NLS-1$
+    private static final String KEY_COL_TYPE_WIDTH = "colTypeWidth"; //$NON-NLS-1$
+    private static final String KEY_COL_PATH_WIDTH = "colPathWidth"; //$NON-NLS-1$
 
     private static final String EGIT_UI_PLUGIN_ID = "org.eclipse.egit.ui"; //$NON-NLS-1$
 
@@ -266,17 +275,13 @@ public final class GitHistoryFileColumnsHook implements IStartup
     /** @return [0]=«Файл», [1]=«Тип», [2]=«Путь» */
     private static TableColumn[] installColumns(Table table)
     {
+        // Реальные ширины/порядок/режим заполнения выставляются и персистятся в installFilterComposite
+        // (см. columnLayout.setColumnData) — здесь только временные значения до реального layout.
         TableColumn fileCol = new TableColumn(table, SWT.LEFT, 0);
         fileCol.setText("Файл"); //$NON-NLS-1$
         fileCol.setToolTipText("Путь к файлу в репозитории" + Global.pluginSignForTooltip()); //$NON-NLS-1$
         fileCol.setResizable(true);
-        fileCol.setWidth(ComfortSettings.getGitHistoryColumnWidth("file", 300)); //$NON-NLS-1$
-        fileCol.addListener(SWT.Resize, e ->
-        {
-            int w = fileCol.getWidth();
-            if (w > 0)
-                ComfortSettings.setGitHistoryColumnWidth("file", w); //$NON-NLS-1$
-        });
+        fileCol.setWidth(300);
 
         TableColumn typeCol = new TableColumn(table, SWT.LEFT, 1);
         typeCol.setText("Тип"); //$NON-NLS-1$
@@ -426,10 +431,13 @@ public final class GitHistoryFileColumnsHook implements IStartup
         table.setParent(columnHost);
         table.setLayoutData(null);
 
-        int fileWidth = ComfortSettings.getGitHistoryColumnWidth("file", 300); //$NON-NLS-1$
+        IDialogSettings columnSettings = dialogSettings();
+        int fileWidth = FormTableColumnState.readWidth(columnSettings, KEY_COL_FILE_WIDTH, 300, 1);
+        int typeWidth = FormTableColumnState.readWidth(columnSettings, KEY_COL_TYPE_WIDTH, 60, 1);
+        int pathWidth = FormTableColumnState.readWidth(columnSettings, KEY_COL_PATH_WIDTH, 250, 1);
         columnLayout.setColumnData(fileCol, new ColumnPixelData(fileWidth, true, true));
-        columnLayout.setColumnData(typeCol, new ColumnPixelData(60, true, true));
-        columnLayout.setColumnData(pathCol, new ColumnWeightData(1, 50, true));
+        columnLayout.setColumnData(typeCol, new ColumnPixelData(typeWidth, true, true));
+        columnLayout.setColumnData(pathCol, new ColumnPixelData(pathWidth, true, true));
 
         FormTableInteraction interaction =
             new FormTableInteraction(table, fileViewer, (item, col) ->
@@ -464,12 +472,23 @@ public final class GitHistoryFileColumnsHook implements IStartup
             }
             return ""; //$NON-NLS-1$
         });
-        interaction.install();
+        FormTableColumnState.loadOrder(columnSettings, KEY_COL_ORDER, table);
+        boolean hasSavedColumnWidths = FormTableColumnState.hasSavedColumnWidths(columnSettings, KEY_COL_FILL_MODE,
+            KEY_COL_FILE_WIDTH, KEY_COL_TYPE_WIDTH, KEY_COL_PATH_WIDTH);
+        interaction.install(hasSavedColumnWidths);
         interactionRef[0] = interaction;
+        table.addDisposeListener(e ->
+        {
+            boolean fillMode = interaction.isColumnsExactFill();
+            FormTableColumnState.saveOrderAndWidths(dialogSettings(), KEY_COL_ORDER, KEY_COL_FILL_MODE, fillMode,
+                new String[] { KEY_COL_FILE_WIDTH, KEY_COL_TYPE_WIDTH, KEY_COL_PATH_WIDTH },
+                new TableColumn[] { fileCol, typeCol, pathCol }, table);
+        });
 
         horizontalSplit.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
-        int leftW = ComfortSettings.getGitHistorySashWeight("left", 50); //$NON-NLS-1$
-        int rightW = ComfortSettings.getGitHistorySashWeight("right", 50); //$NON-NLS-1$
+        IDialogSettings sashSettings = dialogSettings();
+        int leftW = FormTableColumnState.readWidth(sashSettings, KEY_SASH_LEFT, 50, 1);
+        int rightW = FormTableColumnState.readWidth(sashSettings, KEY_SASH_RIGHT, 50, 1);
         Debug.log("sashLoad left=" + leftW + " right=" + rightW); //$NON-NLS-1$ //$NON-NLS-2$
         horizontalSplit.setWeights(new int[] { leftW, rightW });
         installSashWeightPersistence(horizontalSplit);
@@ -580,45 +599,20 @@ public final class GitHistoryFileColumnsHook implements IStartup
             + " match=" + fileColumnValue.equals(gotFile)); //$NON-NLS-1$
     }
 
+    /** Второстепенные данные — сохраняем при закрытии/пересоздании панели, не живьём на резайз. */
     private static void installSashWeightPersistence(SashForm sashForm)
     {
-        // Не сохраняем веса, пока первичная раскладка не успокоится (Resize при open
-        // иначе затирает prefs значением 50/50).
-        final boolean[] armed = { false };
-        Display.getDefault().timerExec(500, () -> armed[0] = true);
-
-        final Runnable[] pending = new Runnable[1];
-        Runnable save = () ->
+        sashForm.addDisposeListener(e ->
         {
-            pending[0] = null;
-            if (!armed[0] || sashForm.isDisposed())
-                return;
             int[] w = sashForm.getWeights();
             if (w.length == 2 && w[0] > 0 && w[1] > 0)
             {
-                ComfortSettings.setGitHistorySashWeights(w[0], w[1]);
+                IDialogSettings settings = dialogSettings();
+                settings.put(KEY_SASH_LEFT, w[0]);
+                settings.put(KEY_SASH_RIGHT, w[1]);
                 Debug.log("sashSave left=" + w[0] + " right=" + w[1]); //$NON-NLS-1$ //$NON-NLS-2$
             }
-        };
-        Listener scheduleSave = e ->
-        {
-            if (!armed[0])
-                return;
-            if (pending[0] != null)
-                Display.getDefault().timerExec(-1, pending[0]);
-            pending[0] = save;
-            Display.getDefault().timerExec(300, save);
-        };
-        // Перетаскивание разделителя: SashForm сам Resize не шлёт — только дети / Sash.
-        for (Control child : sashForm.getChildren())
-        {
-            if (child == null || child.isDisposed())
-                continue;
-            if ("Sash".equals(child.getClass().getSimpleName())) //$NON-NLS-1$
-                child.addListener(SWT.Selection, scheduleSave);
-            else
-                child.addListener(SWT.Resize, scheduleSave);
-        }
+        });
     }
 
     private static void refreshWithRedrawOff(TableViewer viewer)
@@ -858,6 +852,15 @@ public final class GitHistoryFileColumnsHook implements IStartup
             sb.append(ch.getBounds());
         }
         return sb.append("]").toString(); //$NON-NLS-1$
+    }
+
+    private static IDialogSettings dialogSettings()
+    {
+        IDialogSettings top = Activator.getDefault().getDialogSettings();
+        IDialogSettings section = top.getSection(SETTINGS_SECTION);
+        if (section == null)
+            section = top.addNewSection(SETTINGS_SECTION);
+        return section;
     }
 
     private static final class Debug

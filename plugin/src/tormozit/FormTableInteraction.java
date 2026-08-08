@@ -46,6 +46,7 @@ import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.graphics.Rectangle;
+import org.eclipse.swt.internal.win32.OS;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Button;
@@ -79,6 +80,10 @@ final class FormTableInteraction
     private static final int HEADER_SEPARATOR_HEIGHT = 1;
     /** Горизонтальный запас шапки Win32 (отступы без sort-иконки). */
     private static final int HEADER_TEXT_INSET = 16;
+    /** Абсолютный пол минимальной ширины колонки (px) — ниже не сужаем, даже если символ шрифта уже. */
+    private static final int MIN_COLUMN_WIDTH_FLOOR_PX = 15;
+    /** Пауза без новых {@code Resize}-событий колонки, после которой накопленное сужение применяется (мс). */
+    private static final int RESIZE_COMMIT_DEBOUNCE_MS = 60;
 
     /** Сторона квадратной иконки «снять фильтр» (в заголовке колонки и в меню). */
     private static final int FILTER_GLYPH_SIZE = 12;
@@ -158,6 +163,27 @@ final class FormTableInteraction
     private Listener keyFilter;
     private Listener mouseDownListener;
     private TableColumn[] ownerDrawColumns = NO_OWNER_DRAW_COLUMNS;
+
+    /** Ширины колонок (визуальный порядок) на момент последнего фактического применения (commit) сужения/fill. */
+    private int[] lastKnownVisualWidths;
+    /** Реентерабельный флаг: наши собственные setWidth (fill/shrink) не должны запускать логику повторно. */
+    private boolean selfAdjusting;
+    /** Дебаунс auto-fill при ресайзе таблицы/хоста. */
+    private Runnable pendingAutoFill;
+    /** Auto-fill + пропорц. сужение при drag включены; opt-out для мест со своей логикой колонок. */
+    private boolean columnAutoResizeEnabled = true;
+    /** Колонка, чей drag сейчас накапливается (см. {@link #onUserColumnResize}); {@code null} — нет активного. */
+    private TableColumn pendingResizeColumn;
+    /** Ширины (визуальный порядок) на момент НАЧАЛА накопления текущего drag {@link #pendingResizeColumn}. */
+    private int[] pendingResizeBaseline;
+    /** Запланированный (и переоткладываемый на каждое новое событие) commit сужения после паузы в drag. */
+    private Runnable pendingResizeCommit;
+    /** Ширина клиентской области таблицы на момент последнего реального auto-fill; -1 — ещё не запускался. */
+    private int lastAutoFillClientWidth = -1;
+    /** Умещались ли колонки в ширину таблицы на момент последнего известного состояния (без overflow). */
+    private boolean columnsFitBefore = true;
+    /** Точно ли колонки заполняли ширину таблицы (правая граница последней = граница таблицы), без запаса. */
+    private boolean columnsExactFillBefore = true;
 
     FormTableInteraction(Table table, FormTableCellAccess cellAccess)
     {
@@ -378,6 +404,18 @@ final class FormTableInteraction
 
     void install()
     {
+        install(false);
+    }
+
+    /**
+     * @param hasSavedColumnWidths потребитель восстановил ширины колонок из сохранённых настроек
+     * (пользователь ранее сам их подстроил, в т.ч. специально оставил свободное место) — тогда режим
+     * заполнения по ширине НЕ включается самовольно, даже если колонки сейчас умещаются в таблицу.
+     * {@code false} (в т.ч. {@link #install()}) — ширины дефолтные (сохранённых настроек нет): если они
+     * уже умещаются в ширину таблицы, сразу входим в режим заполнения (см. {@link #columnsExactFillBefore}).
+     */
+    void install(boolean hasSavedColumnWidths)
+    {
         if (table == null || table.isDisposed())
             return;
 
@@ -421,6 +459,9 @@ final class FormTableInteraction
                 return null;
             return new Color(t.getDisplay(), bg.getRGB());
         }, "formTable"); //$NON-NLS-1$
+        rememberVisualWidths();
+        columnsExactFillBefore = !hasSavedColumnWidths;
+        scheduleAutoFill();
         table.addDisposeListener(e -> dispose());
     }
 
@@ -430,6 +471,14 @@ final class FormTableInteraction
             INSTANCES.remove(table);
         if (keyFilter != null && table != null && !table.isDisposed())
             table.getDisplay().removeFilter(SWT.KeyDown, keyFilter);
+        if (pendingAutoFill != null && table != null && !table.isDisposed())
+        {
+            table.getDisplay().timerExec(-1, pendingAutoFill);
+            pendingAutoFill = null;
+        }
+        cancelPendingResizeCommit();
+        pendingResizeColumn = null;
+        pendingResizeBaseline = null;
         if (columnValueViewerFilter != null && multiSelectViewer != null
             && multiSelectViewer.getControl() != null && !multiSelectViewer.getControl().isDisposed())
         {
@@ -1668,6 +1717,7 @@ final class FormTableInteraction
             public void controlResized(ControlEvent e)
             {
                 scheduleHeaderOverlayUpdate();
+                scheduleAutoFill();
             }
         };
         table.addControlListener(tableResizeListener);
@@ -1703,6 +1753,10 @@ final class FormTableInteraction
                 public void controlResized(ControlEvent e)
                 {
                     scheduleHeaderOverlayUpdate();
+                    if (e.widget instanceof TableColumn col && !col.isDisposed())
+                    {
+                        onUserColumnResize(col);
+                    }
                 }
 
                 @Override
@@ -1721,6 +1775,600 @@ final class FormTableInteraction
                 column.setMoveable(true);
             column.setData(COLUMN_HEADER_KEY, Boolean.TRUE);
             column.addControlListener(columnHeaderListener);
+        }
+    }
+
+    /**
+     * Управление колонками: авто-растягивание на всю ширину + пропорциональное сужение правых колонок
+     * при перетаскивании границы без Ctrl. Выключается для таблиц со своей логикой колонок (напр.
+     * fixed-панель «Коллекции» до её миграции на эту единую логику).
+     */
+    void setColumnAutoResizeEnabled(boolean enabled)
+    {
+        columnAutoResizeEnabled = enabled;
+    }
+
+    /**
+     * Пользовательский ресайз колонки (native drag делителя, реже двойной клик по нему) на Win32.
+     * {@code SWT.Resize} колонки приходит через {@code HDN_ITEMCHANGED}, а MouseDown/MouseUp по шапке в
+     * SWT не доходят (заголовок — отдельное окно SysHeader32) — надёжного сигнала «drag закончился» нет.
+     * Делитель колонки при активном перетаскивании работает как СВОЙ модальный native-loop (аналог
+     * известного Win32-ограничения, см. класс-javadoc): если синхронно, из обработчика этого же события,
+     * менять ширину ДРУГИХ колонок, native-loop пересчитывает позицию под курсором заново и «отращивает»
+     * перетаскиваемую колонку в ответ — получается резонанс с растущим без остановки drag-колонки, пока
+     * не отпустят мышь. Поэтому реальное сужение соседей применяется не на каждое событие, а одним
+     * commit'ом после паузы в событиях ({@link #schedulePendingResizeCommit}) — вне активного native-loop.
+     */
+    private void onUserColumnResize(TableColumn col)
+    {
+        if (selfAdjusting)
+            return; // событие от нашего же commit — не переоткладывать накопление заново
+        if (col == null || col.isDisposed() || !columnAutoResizeEnabled)
+        {
+            cancelPendingResizeCommit();
+            pendingResizeColumn = null;
+            pendingResizeBaseline = null;
+            rememberVisualWidths();
+            return;
+        }
+        if (pendingResizeColumn != col)
+        {
+            pendingResizeColumn = col;
+            pendingResizeBaseline = lastKnownVisualWidths;
+        }
+        schedulePendingResizeCommit();
+    }
+
+    /** (Пере)отложить commit накопленного сужения на {@link #RESIZE_COMMIT_DEBOUNCE_MS} мс без новых событий. */
+    private void schedulePendingResizeCommit()
+    {
+        if (table == null || table.isDisposed())
+            return;
+        Display display = table.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        if (pendingResizeCommit != null)
+            display.timerExec(-1, pendingResizeCommit);
+        pendingResizeCommit = () -> {
+            pendingResizeCommit = null;
+            commitPendingResize();
+        };
+        display.timerExec(RESIZE_COMMIT_DEBOUNCE_MS, pendingResizeCommit);
+    }
+
+    private void cancelPendingResizeCommit()
+    {
+        if (pendingResizeCommit != null && table != null && !table.isDisposed())
+        {
+            table.getDisplay().timerExec(-1, pendingResizeCommit);
+            pendingResizeCommit = null;
+        }
+    }
+
+    /** Фактическое применение накопленного за паузу в drag сужения — вне активного native-loop делителя. */
+    private void commitPendingResize()
+    {
+        TableColumn col = pendingResizeColumn;
+        int[] before = pendingResizeBaseline;
+        pendingResizeColumn = null;
+        pendingResizeBaseline = null;
+        if (col == null || col.isDisposed() || !columnAutoResizeEnabled || table == null || table.isDisposed())
+        {
+            rememberVisualWidths();
+            return;
+        }
+        clampColumnMinWidth(col); // и при зажатом Ctrl тоже — native drag ничем не ограничен снизу
+        boolean beforeValid = before != null && before.length == table.getColumnCount();
+        if (beforeValid && !isCtrlPressed())
+            applyProportionalShrink(col, before);
+        rememberVisualWidths();
+        updateFitState(); // для последующего сужения ТАБЛИЦЫ — знать, было ли переполнение уже до него
+    }
+
+    /** Пересчитать {@link #columnsFitBefore} по текущему фактическому состоянию колонок и ширины таблицы. */
+    private void updateFitState()
+    {
+        if (table == null || table.isDisposed())
+            return;
+        int total = 0;
+        int cols = table.getColumnCount();
+        for (int i = 0; i < cols; i++)
+            total += table.getColumn(i).getWidth();
+        int clientW = table.getClientArea().width;
+        columnsFitBefore = total <= clientW;
+        columnsExactFillBefore = total == clientW;
+    }
+
+    /**
+     * Активен ли сейчас режим заполнения по ширине (правая граница последней колонки = граница таблицы).
+     * Потребителям, персистящим ширины колонок между открытиями окна — использовать перед сохранением:
+     * если ширины — чистый результат авто-заполнения (а не ручной подгонки пользователем), сохранять их
+     * как «сохранённые настройки» не нужно, иначе при следующем открытии {@link #install(boolean)} с
+     * {@code hasSavedColumnWidths=true} навсегда отключит повторное авто-заполнение для этого окна.
+     */
+    boolean isColumnsExactFill()
+    {
+        if (table == null || table.isDisposed())
+            return false;
+        int total = 0;
+        int cols = table.getColumnCount();
+        for (int i = 0; i < cols; i++)
+            total += table.getColumn(i).getWidth();
+        return total == table.getClientArea().width;
+    }
+
+    /** Подтянуть ширину колонки до {@link #minColumnWidth()}, если native drag увёл её ниже (в т.ч. до 0). */
+    private void clampColumnMinWidth(TableColumn col)
+    {
+        if (col == null || col.isDisposed())
+            return;
+        int minWidth = minColumnWidth();
+        if (col.getWidth() >= minWidth)
+            return;
+        selfAdjusting = true;
+        try
+        {
+            col.setWidth(minWidth);
+        }
+        finally
+        {
+            selfAdjusting = false;
+        }
+    }
+
+    /** Зажата ли клавиша Ctrl в данный момент (Win32, состояние клавиши на момент commit'а). */
+    private static boolean isCtrlPressed()
+    {
+        return (OS.GetKeyState(OS.VK_CONTROL) & 0x8000) != 0;
+    }
+
+    /**
+     * Минимальная ширина колонки: не уже {@link #MIN_COLUMN_WIDTH_FLOOR_PX} и не уже одного символа
+     * текущего шрифта таблицы (средняя ширина символа шрифта, {@link org.eclipse.swt.graphics.FontMetrics}).
+     */
+    private int minColumnWidth()
+    {
+        if (table == null || table.isDisposed())
+            return MIN_COLUMN_WIDTH_FLOOR_PX;
+        GC gc = new GC(table);
+        try
+        {
+            return Math.max(MIN_COLUMN_WIDTH_FLOOR_PX, (int) Math.ceil(gc.getFontMetrics().getAverageCharacterWidth()));
+        }
+        finally
+        {
+            gc.dispose();
+        }
+    }
+
+    /** Запомнить текущие ширины колонок (визуальный порядок) — база до-драг снимка для следующей серии. */
+    private void rememberVisualWidths()
+    {
+        lastKnownVisualWidths = visualOrderWidths();
+    }
+
+    /** Ширины колонок в визуальном порядке (с учётом {@link Table#getColumnOrder()}). */
+    private int[] visualOrderWidths()
+    {
+        if (table == null || table.isDisposed())
+            return new int[0];
+        int[] order = table.getColumnOrder();
+        int[] widths = new int[order.length];
+        for (int v = 0; v < order.length; v++)
+        {
+            TableColumn c = table.getColumn(order[v]);
+            widths[v] = c.isDisposed() ? 0 : c.getWidth();
+        }
+        return widths;
+    }
+
+    /**
+     * Авто-заполнение ширины (отложенный запуск через timerExec=0) при реальном изменении ширины
+     * таблицы/хоста — растягивание или сужение всех resizable-колонок пропорционально их текущим ширинам.
+     * Для таблиц с {@link TableColumnLayout} запускается ПОСЛЕ его синхронной раскладки, поэтому наши
+     * ширины оказываются последними и не конфликтуют с layout.
+     */
+    private void scheduleAutoFill()
+    {
+        if (table == null || table.isDisposed())
+            return;
+        Display display = table.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        if (pendingAutoFill != null)
+            display.timerExec(-1, pendingAutoFill);
+        pendingAutoFill = () -> {
+            pendingAutoFill = null;
+            autoFillColumns();
+        };
+        display.timerExec(0, pendingAutoFill);
+    }
+
+    /**
+     * Растягиваем/сужаем колонки при реальном изменении ширины таблицы/хоста — только чтобы СОХРАНИТЬ
+     * ранее активный режим заполнения по ширине (правая граница последней колонки = граница таблицы),
+     * а не включить его самовольно там, где до этого специально был запас свободного места:
+     * <ul>
+     * <li>таблица расширилась ({@code total < clientW}) — растягиваем на всю ширину ТОЛЬКО если до этого
+     * изменения колонки точно её заполняли ({@link #columnsExactFillBefore}). Если был запас свободного
+     * места — просто становится больше свободного места, колонки не трогаем;</li>
+     * <li>таблица сузилась ({@code total > clientW}) — сужаем ТОЛЬКО если до этого колонки хотя бы
+     * умещались без переполнения ({@link #columnsFitBefore}, заполнение точно или с запасом). Если
+     * переполнение уже было ДО этого (создано перетаскиванием колонки, не сужением таблицы) — не трогаем.</li>
+     * </ul>
+     * Срабатывает только при реальном изменении ширины таблицы/хоста — не на любое postCondition-уведомление
+     * controlResized, иначе после сужения колонки drag'ом (см. {@link #applyProportionalShrink}) сюда
+     * прилетало бы лишнее срабатывание и трогало ВСЕ колонки.
+     */
+    private void autoFillColumns()
+    {
+        if (table == null || table.isDisposed() || !columnAutoResizeEnabled)
+            return;
+        if (selfAdjusting)
+            return;
+        int cols = table.getColumnCount();
+        if (cols <= 0)
+            return;
+        int clientW = table.getClientArea().width;
+        if (clientW <= 0)
+            return;
+        if (clientW == lastAutoFillClientWidth)
+            return;
+        lastAutoFillClientWidth = clientW;
+        int total = 0;
+        for (int i = 0; i < cols; i++)
+            total += table.getColumn(i).getWidth();
+        if (total < clientW)
+        {
+            if (columnsExactFillBefore)
+            {
+                growColumnsToFill(total, clientW, cols);
+                columnsFitBefore = true;
+                columnsExactFillBefore = true;
+            }
+            else
+            {
+                // Был запас свободного места (не заполняли по ширине) — не включаем режим заполнения
+                // самовольно, просто становится больше свободного места.
+                columnsFitBefore = true;
+                columnsExactFillBefore = false;
+            }
+        }
+        else if (total == clientW)
+        {
+            columnsFitBefore = true;
+            columnsExactFillBefore = true;
+        }
+        else if (columnsFitBefore)
+        {
+            shrinkColumnsToFit(total, clientW, cols);
+        }
+        else
+        {
+            columnsExactFillBefore = false; // переполнение уже было ДО этого — не наш случай, не трогаем
+        }
+    }
+
+    private void growColumnsToFill(int total, int clientW, int cols)
+    {
+        int extra = clientW - total;
+        int[] idx = new int[cols];
+        int stretchCount = 0;
+        int stretchSum = 0;
+        for (int i = 0; i < cols; i++)
+        {
+            TableColumn c = table.getColumn(i);
+            if (c.isDisposed() || !c.getResizable() || c.getWidth() <= 0)
+                continue;
+            idx[stretchCount++] = i;
+            stretchSum += c.getWidth();
+        }
+        if (stretchCount == 0)
+            return;
+        selfAdjusting = true;
+        try
+        {
+            int assigned = 0;
+            for (int s = 0; s < stretchCount; s++)
+            {
+                TableColumn c = table.getColumn(idx[s]);
+                int share = stretchSum > 0
+                    ? (int) ((long) extra * c.getWidth() / stretchSum)
+                    : extra / stretchCount;
+                if (share < 0)
+                    share = 0;
+                c.setWidth(c.getWidth() + share);
+                assigned += share;
+            }
+            int remainder = extra - assigned;
+            if (remainder != 0)
+            {
+                TableColumn last = table.getColumn(idx[stretchCount - 1]);
+                last.setWidth(Math.max(minColumnWidth(), last.getWidth() + remainder));
+            }
+            clampTotalToClientWidth();
+            rebindColumnLayoutData();
+        }
+        finally
+        {
+            selfAdjusting = false;
+        }
+        Global.tempLog("formTable-fill", "grow total=" + total + " clientW=" + clientW //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " extra=" + extra + " stretch=" + stretchCount); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private void shrinkColumnsToFit(int total, int clientW, int cols)
+    {
+        int minWidth = minColumnWidth();
+        int deficit = total - clientW;
+        int[] idx = new int[cols];
+        int shrinkCount = 0;
+        int shrinkSum = 0;
+        for (int i = 0; i < cols; i++)
+        {
+            TableColumn c = table.getColumn(i);
+            if (c.isDisposed() || !c.getResizable())
+                continue;
+            idx[shrinkCount++] = i;
+            shrinkSum += c.getWidth();
+        }
+        if (shrinkCount == 0)
+            return;
+        selfAdjusting = true;
+        try
+        {
+            int assigned = 0;
+            for (int s = 0; s < shrinkCount; s++)
+            {
+                TableColumn c = table.getColumn(idx[s]);
+                int cut = shrinkSum > 0
+                    ? (int) ((long) deficit * c.getWidth() / shrinkSum)
+                    : deficit / shrinkCount;
+                if (cut < 0)
+                    cut = 0;
+                int newWidth = Math.max(minWidth, c.getWidth() - cut);
+                assigned += c.getWidth() - newWidth;
+                c.setWidth(newWidth);
+            }
+            int remainder = deficit - assigned;
+            if (remainder > 0)
+            {
+                TableColumn last = table.getColumn(idx[shrinkCount - 1]);
+                last.setWidth(Math.max(minWidth, last.getWidth() - remainder));
+            }
+            clampTotalToClientWidth();
+            rebindColumnLayoutData();
+        }
+        finally
+        {
+            selfAdjusting = false;
+        }
+        int actualTotal = 0;
+        for (int i = 0; i < cols; i++)
+            actualTotal += table.getColumn(i).getWidth();
+        // Если уперлись в пол и полностью сузить не удалось — переполнение остаётся, и это уже
+        // не результат сужения ТАБЛИЦЫ, а нехватка места по факту: дальше не наш случай (как обычный overflow).
+        columnsFitBefore = actualTotal <= clientW;
+        columnsExactFillBefore = actualTotal == clientW;
+        Global.tempLog("formTable-fill", "shrink total=" + total + " clientW=" + clientW //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " deficit=" + deficit + " shrinkCount=" + shrinkCount + " actualTotal=" + actualTotal); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    /**
+     * Перетаскивание границы БЕЗ Ctrl. Колонки правее трогаются ТОЛЬКО на величину, которую не удалось
+     * поглотить/освободить за счёт уже имеющегося запаса, и только когда правая граница последней колонки
+     * совпадает (или превосходит) границу таблицы — т.е. активен режим заполнения по ширине:
+     * <ul>
+     * <li>граница вправо (колонка выросла, {@code delta > 0}) — если в таблице было свободное место
+     * ({@code totalBefore < clientW}), рост сначала расходует его, соседей не трогая; сужение соседей
+     * применяется только к части роста, которая это свободное место превысила;</li>
+     * <li>граница влево (колонка сузилась, {@code delta < 0}), а до этого было свободное место
+     * ({@code totalBefore < clientW}, режим заполнения НЕ активен) — соседи не трогаются вообще,
+     * освободившееся место остаётся пустым;</li>
+     * <li>граница влево, а до этого было переполнение или точное совпадение ({@code totalBefore >= clientW})
+     * — сужение СНАЧАЛА расходуется на устранение переполнения, соседей не трогая. Как только переполнение
+     * устранено (граница совпала), дальнейший ИЗБЫТОК сужения поддерживает заполнение по ширине —
+     * идёт на пропорциональный рост соседей.</li>
+     * </ul>
+     * Non-resizable правые колонки не трогаются — их ширина вычитается из перераспределяемого остатка.
+     * При нехватке места правые сужаются до {@link #minColumnWidth()}. База ({@code before}) — снимок на
+     * начало серии событий текущего drag, применяется одним commit'ом ({@link #commitPendingResize}).
+     */
+    private void applyProportionalShrink(TableColumn dragged, int[] before)
+    {
+        if (table == null || table.isDisposed() || !columnAutoResizeEnabled)
+            return;
+        if (dragged == null || dragged.isDisposed())
+            return;
+        int[] order = table.getColumnOrder();
+        if (before.length != order.length)
+            return;
+        int draggedCreation = table.indexOf(dragged);
+        int draggedPos = -1;
+        for (int v = 0; v < order.length; v++)
+        {
+            if (order[v] == draggedCreation)
+            {
+                draggedPos = v;
+                break;
+            }
+        }
+        if (draggedPos < 0 || draggedPos >= order.length - 1)
+            return; // колонок правее нет
+        // Собственная ширина dragged уже подтянута к минимуму в commitPendingResize (clampColumnMinWidth)
+        // до вызова этого метода — здесь дальше используется уже скорректированное значение.
+        int minWidth = minColumnWidth();
+        int rawDelta = dragged.getWidth() - before[draggedPos];
+        if (rawDelta == 0)
+            return;
+        int totalBefore = 0;
+        for (int w : before)
+            totalBefore += w;
+        int clientW = table.getClientArea().width;
+        int effectiveDelta;
+        if (rawDelta > 0)
+        {
+            int freeSpace = Math.max(0, clientW - totalBefore);
+            effectiveDelta = rawDelta - Math.min(rawDelta, freeSpace);
+            if (effectiveDelta <= 0)
+                return; // рост поглощён свободным местом таблицы — соседей не трогаем
+        }
+        else if (totalBefore < clientW)
+        {
+            // Правая граница последней колонки НЕ совпадает с границей таблицы — свободное место уже
+            // есть, режим заполнения по ширине не активен. Сужение просто уменьшает общую ширину,
+            // соседей не трогаем вообще (освободившееся место остаётся пустым).
+            return;
+        }
+        else
+        {
+            // totalBefore >= clientW: либо точное совпадение (режим заполнения по ширине), либо
+            // переполнение. Сначала весь shrink идёт на устранение УЖЕ имевшегося переполнения (overflow)
+            // — соседей не трогаем, просто уменьшаем общую ширину. Как только переполнение устранено
+            // (достигнуто точное совпадение границ), дальнейший ИЗБЫТОК сужения поддерживает заполнение
+            // по ширине — идёт на пропорциональный рост соседей, как обычно.
+            int shrinkAmount = -rawDelta;
+            int overflow = Math.max(0, totalBefore - clientW);
+            int absorbedByOverflow = Math.min(shrinkAmount, overflow);
+            int excessShrink = shrinkAmount - absorbedByOverflow;
+            if (excessShrink <= 0)
+                return; // весь shrink ушёл на устранение overflow — соседей не трогаем
+            effectiveDelta = -excessShrink;
+        }
+        int rightBefore = 0;
+        for (int v = draggedPos + 1; v < order.length; v++)
+            rightBefore += before[v];
+        int resizableTarget = rightBefore - effectiveDelta;
+        int minResizable = 0;
+        int rc = 0;
+        int[] rcVisual = new int[order.length - draggedPos - 1];
+        int[] rcStart = new int[order.length - draggedPos - 1];
+        for (int v = draggedPos + 1; v < order.length; v++)
+        {
+            TableColumn c = table.getColumn(order[v]);
+            if (c.isDisposed())
+                continue;
+            if (c.getResizable())
+            {
+                rcVisual[rc] = v;
+                rcStart[rc] = before[v];
+                rc++;
+                minResizable += minWidth;
+            }
+            else
+            {
+                resizableTarget -= before[v];
+            }
+        }
+        if (rc == 0)
+            return;
+        if (resizableTarget < minResizable)
+            resizableTarget = minResizable;
+        int startSum = 0;
+        for (int s = 0; s < rc; s++)
+            startSum += rcStart[s];
+        int[] shares = new int[rc];
+        int assigned = 0;
+        for (int s = 0; s < rc; s++)
+        {
+            int share = startSum > 0
+                ? (int) ((long) resizableTarget * rcStart[s] / startSum)
+                : resizableTarget / rc;
+            share = Math.max(minWidth, share);
+            shares[s] = share;
+            assigned += share;
+        }
+        int remainder = resizableTarget - assigned;
+        if (remainder != 0)
+            shares[rc - 1] = Math.max(minWidth, shares[rc - 1] + remainder);
+        // Соседи уже упёрлись в пол и их целевые ширины не изменились относительно текущих — нечего
+        // применять. Без этой проверки на каждый пиксель драга при упоре в пол шёл лишний setWidth +
+        // rebindColumnLayoutData на неизменные значения, что и давало видимое дёргание.
+        boolean anyChange = false;
+        for (int s = 0; s < rc; s++)
+        {
+            TableColumn c = table.getColumn(order[rcVisual[s]]);
+            if (c.getWidth() != shares[s])
+            {
+                anyChange = true;
+                break;
+            }
+        }
+        if (!anyChange)
+            return;
+        selfAdjusting = true;
+        try
+        {
+            for (int s = 0; s < rc; s++)
+                table.getColumn(order[rcVisual[s]]).setWidth(shares[s]);
+            clampTotalToClientWidth();
+            rebindColumnLayoutData();
+        }
+        finally
+        {
+            selfAdjusting = false;
+        }
+        Global.tempLog("formTable-shrink", "dragged=" + draggedPos + " rawDelta=" + rawDelta //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " effectiveDelta=" + effectiveDelta + " totalBefore=" + totalBefore + " clientW=" + clientW //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + " resizableTarget=" + resizableTarget + " candidates=" + rc + " minWidth=" + minWidth); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+    }
+
+    /**
+     * Финальная защита от горизонтального скролла: если после fill/shrink/сужения соседей сумма ширин
+     * всё же превысила ширину таблицы (округления при пропорциональном делении, неточности измерения
+     * {@code clientArea} и т.п.) — обрезаем избыток с последней resizable-колонки (и, если не хватит, с
+     * предыдущих), не глубже {@link #minColumnWidth()}. Лучше колонки чуть уже, чем горизонтальный скролл.
+     * Вызывать ВНУТРИ уже открытого {@code selfAdjusting=true} блока, перед {@link #rebindColumnLayoutData()}.
+     */
+    private void clampTotalToClientWidth()
+    {
+        if (table == null || table.isDisposed())
+            return;
+        int cols = table.getColumnCount();
+        int total = 0;
+        for (int i = 0; i < cols; i++)
+            total += table.getColumn(i).getWidth();
+        int clientW = table.getClientArea().width;
+        int overshoot = total - clientW;
+        if (overshoot <= 0)
+            return;
+        int minWidth = minColumnWidth();
+        for (int i = cols - 1; i >= 0 && overshoot > 0; i--)
+        {
+            TableColumn c = table.getColumn(i);
+            if (c.isDisposed() || !c.getResizable())
+                continue;
+            int reducible = c.getWidth() - minWidth;
+            if (reducible <= 0)
+                continue;
+            int cut = Math.min(reducible, overshoot);
+            c.setWidth(c.getWidth() - cut);
+            overshoot -= cut;
+        }
+    }
+
+    /**
+     * Синхронизация {@link TableColumnLayout}-данных с реально выставленными ширинами после fill/shrink.
+     * Без неё layout при следующем ресайзе хоста вернёт колонкам исходные {@link ColumnPixelData}-ширины,
+     * отменив правку. Сам {@code setColumnData} раскладку не запускает, а данные уже совпадают с текущими
+     * ширинами — вызывать {@code layout()} не нужно.
+     */
+    private void rebindColumnLayoutData()
+    {
+        if (table == null || table.isDisposed())
+            return;
+        Composite host = table.getParent();
+        if (host == null || host.isDisposed()
+            || !(host.getLayout() instanceof TableColumnLayout layout))
+            return;
+        int cols = table.getColumnCount();
+        for (int i = 0; i < cols; i++)
+        {
+            TableColumn c = table.getColumn(i);
+            if (c.isDisposed())
+                continue;
+            layout.setColumnData(c, new ColumnPixelData(Math.max(1, c.getWidth()),
+                c.getResizable(), i < cols - 1));
         }
     }
 
@@ -2417,6 +3065,10 @@ final class FormTableInteraction
         private static final String SETTINGS_SECTION = "FormTableColumnValuesDialog"; //$NON-NLS-1$
         private static final String KEY_COL_VALUE_WIDTH = "colValueWidth"; //$NON-NLS-1$
         private static final String KEY_COL_COUNT_WIDTH = "colCountWidth"; //$NON-NLS-1$
+        /** Был ли режим заполнения по ширине активен при закрытии — приоритетнее сохранённых пиксельных
+         * ширин, которые могут не совпасть впритык с шириной таблицы при следующем открытии. */
+        private static final String KEY_COL_FILL_MODE = "colFillMode"; //$NON-NLS-1$
+        private static final String KEY_COL_ORDER = "columnOrder"; //$NON-NLS-1$
         private static final int DEFAULT_VALUE_COL_WIDTH = 260;
         private static final int DEFAULT_COUNT_COL_WIDTH = 80;
         private static final int MIN_VALUE_COL_WIDTH = 100;
@@ -2552,8 +3204,12 @@ final class FormTableInteraction
             dialogTable.setLinesVisible(true);
 
             IDialogSettings settings = dialogSettings();
-            int valueWidth = readColWidth(settings, KEY_COL_VALUE_WIDTH, DEFAULT_VALUE_COL_WIDTH, MIN_VALUE_COL_WIDTH);
-            int countWidth = readColWidth(settings, KEY_COL_COUNT_WIDTH, DEFAULT_COUNT_COL_WIDTH, MIN_COUNT_COL_WIDTH);
+            boolean hasSavedColumnWidths = FormTableColumnState.hasSavedColumnWidths(
+                settings, KEY_COL_FILL_MODE, KEY_COL_VALUE_WIDTH, KEY_COL_COUNT_WIDTH);
+            int valueWidth = FormTableColumnState.readWidth(settings, KEY_COL_VALUE_WIDTH,
+                DEFAULT_VALUE_COL_WIDTH, MIN_VALUE_COL_WIDTH);
+            int countWidth = FormTableColumnState.readWidth(settings, KEY_COL_COUNT_WIDTH,
+                DEFAULT_COUNT_COL_WIDTH, MIN_COUNT_COL_WIDTH);
 
             TableViewerColumn valueVc = new TableViewerColumn(viewer, SWT.NONE);
             valueColumn = valueVc.getColumn();
@@ -2600,7 +3256,8 @@ final class FormTableInteraction
             // обеспечивает SelectionAwareStyledCellLabelProvider выше (COLORS_ON_SELECTION), это —
             // независимая настройка перерисовки самого FormTableInteraction.
             dialogInteraction.setOwnerDrawColumns(valueColumn);
-            dialogInteraction.install();
+            FormTableColumnState.loadOrder(settings, KEY_COL_ORDER, dialogTable);
+            dialogInteraction.install(hasSavedColumnWidths);
 
             installSortListeners();
 
@@ -2672,30 +3329,16 @@ final class FormTableInteraction
             return section;
         }
 
-        private static int readColWidth(IDialogSettings settings, String key, int defaultWidth, int minWidth)
-        {
-            String raw = settings.get(key);
-            if (raw == null || raw.isEmpty())
-                return defaultWidth;
-            try
-            {
-                int w = Integer.parseInt(raw);
-                return w >= minWidth ? w : defaultWidth;
-            }
-            catch (NumberFormatException ex)
-            {
-                return defaultWidth;
-            }
-        }
-
         private void saveColumnWidths()
         {
             if (valueColumn == null || countColumn == null
                 || valueColumn.isDisposed() || countColumn.isDisposed())
                 return;
-            IDialogSettings settings = dialogSettings();
-            settings.put(KEY_COL_VALUE_WIDTH, Integer.toString(valueColumn.getWidth()));
-            settings.put(KEY_COL_COUNT_WIDTH, Integer.toString(countColumn.getWidth()));
+            boolean fillMode = dialogInteraction != null && dialogInteraction.isColumnsExactFill();
+            FormTableColumnState.saveOrderAndWidths(dialogSettings(), KEY_COL_ORDER,
+                KEY_COL_FILL_MODE, fillMode,
+                new String[] { KEY_COL_VALUE_WIDTH, KEY_COL_COUNT_WIDTH },
+                new TableColumn[] { valueColumn, countColumn }, dialogTable);
         }
 
         private void applyTextFilter()

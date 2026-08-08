@@ -99,6 +99,9 @@ public final class ObjectSetsView extends ViewPart
     private static final String KEY_ITEMS_COL_NAME_WIDTH = "itemsColNameWidth"; //$NON-NLS-1$
     private static final String KEY_ITEMS_COL_PATH_WIDTH = "itemsColPathWidth"; //$NON-NLS-1$
     private static final String KEY_ITEMS_COL_ORDER      = "itemsColumnOrder"; //$NON-NLS-1$
+    /** Был ли режим заполнения по ширине активен при закрытии — приоритетнее сохранённых пиксельных
+     * ширин, которые могут не совпасть впритык с шириной таблицы при следующем открытии. */
+    private static final String KEY_ITEMS_COL_FILL_MODE  = "itemsColFillMode"; //$NON-NLS-1$
     private static final String KEY_SELECTED_SET_ID      = "selectedSetId"; //$NON-NLS-1$
     private static final String KEY_SELECTED_ITEM_KEY    = "selectedItemKey"; //$NON-NLS-1$
 
@@ -351,6 +354,11 @@ public final class ObjectSetsView extends ViewPart
             DEFAULT_ITEMS_NAME_COL_WIDTH, MIN_ITEMS_NAME_COL_WIDTH);
         int pathWidth = readColWidth(workbenchState, settings, KEY_ITEMS_COL_PATH_WIDTH,
             DEFAULT_ITEMS_PATH_COL_WIDTH, MIN_ITEMS_PATH_COL_WIDTH);
+        // Флаг режима заполнения приоритетнее: если при закрытии он был активен — сохранённые
+        // пиксельные ширины не считаем «пользовательской» настройкой (см. saveItemsColumnWidths()).
+        boolean hasSavedItemsColumnWidths = !settings.getBoolean(KEY_ITEMS_COL_FILL_MODE)
+            && (hasSavedColWidth(workbenchState, settings, KEY_ITEMS_COL_NAME_WIDTH)
+                || hasSavedColWidth(workbenchState, settings, KEY_ITEMS_COL_PATH_WIDTH));
         cachedItemsNameWidth = nameWidth;
         cachedItemsPathWidth = pathWidth;
 
@@ -402,8 +410,8 @@ public final class ObjectSetsView extends ViewPart
         });
         layout.setColumnData(pathColumn, new ColumnPixelData(pathWidth, true, true));
 
-        FormTableColumnOrder.load(settings, KEY_ITEMS_COL_ORDER, table);
-        FormTableColumnOrder.load(workbenchState, KEY_ITEMS_COL_ORDER, table);
+        FormTableColumnState.loadOrder(settings, KEY_ITEMS_COL_ORDER, table);
+        FormTableColumnState.loadOrder(workbenchState, KEY_ITEMS_COL_ORDER, table);
 
         itemsViewer.setContentProvider(ArrayContentProvider.getInstance());
         itemsInteraction = new FormTableInteraction(table, itemsViewer, (item, column) ->
@@ -419,7 +427,7 @@ public final class ObjectSetsView extends ViewPart
             filterInput.setText(""); //$NON-NLS-1$
             applyFilter();
         });
-        itemsInteraction.install();
+        itemsInteraction.install(hasSavedItemsColumnWidths);
 
         installItemsFilterNavigation(table);
 
@@ -1817,6 +1825,18 @@ public final class ObjectSetsView extends ViewPart
         return raw != null ? raw : ""; //$NON-NLS-1$
     }
 
+    private static boolean hasSavedColWidth(IMemento memento, IDialogSettings settings, String key)
+    {
+        if (memento != null)
+        {
+            String raw = memento.getString(key);
+            if (raw != null && !raw.isBlank())
+                return true;
+        }
+        String raw = settings.get(key);
+        return raw != null && !raw.isBlank();
+    }
+
     private static int readColWidth(IMemento memento, IDialogSettings settings, String key,
         int defaultWidth, int minWidth)
     {
@@ -1836,18 +1856,7 @@ public final class ObjectSetsView extends ViewPart
                 }
             }
         }
-        String raw = settings.get(key);
-        if (raw == null || raw.isBlank())
-            return defaultWidth;
-        try
-        {
-            int w = Integer.parseInt(raw);
-            return w >= minWidth ? w : defaultWidth;
-        }
-        catch (NumberFormatException ex)
-        {
-            return defaultWidth;
-        }
+        return FormTableColumnState.readWidth(settings, key, defaultWidth, minWidth);
     }
 
     private void installItemsColumnPersistence()
@@ -1909,13 +1918,13 @@ public final class ObjectSetsView extends ViewPart
         if (pathWidth > 0)
             cachedItemsPathWidth = pathWidth;
 
-        IDialogSettings settings = viewSettings();
-        if (nameWidth > 0)
-            settings.put(KEY_ITEMS_COL_NAME_WIDTH, Integer.toString(nameWidth));
-        if (pathWidth > 0)
-            settings.put(KEY_ITEMS_COL_PATH_WIDTH, Integer.toString(pathWidth));
-        if (itemsViewer != null && !itemsViewer.getControl().isDisposed())
-            FormTableColumnOrder.save(settings, KEY_ITEMS_COL_ORDER, itemsViewer.getTable());
+        Table table = itemsViewer != null && !itemsViewer.getControl().isDisposed()
+            ? itemsViewer.getTable() : null;
+        boolean fillMode = itemsInteraction != null && itemsInteraction.isColumnsExactFill();
+        FormTableColumnState.saveOrderAndWidths(viewSettings(), KEY_ITEMS_COL_ORDER,
+            KEY_ITEMS_COL_FILL_MODE, fillMode,
+            new String[] { KEY_ITEMS_COL_NAME_WIDTH, KEY_ITEMS_COL_PATH_WIDTH },
+            new int[] { nameWidth, pathWidth }, table);
     }
 
     private int readLiveOrCached(TableColumn column, int minWidth, int cached)
@@ -1930,16 +1939,11 @@ public final class ObjectSetsView extends ViewPart
             return;
         int nameWidth = readLiveOrCached(nameColumn, MIN_ITEMS_NAME_COL_WIDTH, cachedItemsNameWidth);
         int pathWidth = readLiveOrCached(pathColumn, MIN_ITEMS_PATH_COL_WIDTH, cachedItemsPathWidth);
-        if (nameWidth > 0)
-            memento.putString(KEY_ITEMS_COL_NAME_WIDTH, Integer.toString(nameWidth));
-        if (pathWidth > 0)
-            memento.putString(KEY_ITEMS_COL_PATH_WIDTH, Integer.toString(pathWidth));
-        if (itemsViewer != null && !itemsViewer.getControl().isDisposed())
-        {
-            Table table = itemsViewer.getTable();
-            if (table.getColumnCount() > 0)
-                memento.putString(KEY_ITEMS_COL_ORDER, FormTableColumnOrder.formatOrder(table));
-        }
+        Table table = itemsViewer != null && !itemsViewer.getControl().isDisposed()
+            ? itemsViewer.getTable() : null;
+        FormTableColumnState.writeOrderAndWidthsToMemento(memento, KEY_ITEMS_COL_ORDER,
+            new String[] { KEY_ITEMS_COL_NAME_WIDTH, KEY_ITEMS_COL_PATH_WIDTH },
+            new int[] { nameWidth, pathWidth }, table);
     }
 
     private static IDialogSettings viewSettings()

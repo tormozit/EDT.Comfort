@@ -13,6 +13,7 @@ import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.MenuManager;
+import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.DecoratingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
@@ -83,6 +84,18 @@ public final class FileSearchResultsHook implements IStartup
     private static final String PAGE_CLASS_MARKER = "FileSearchPage";
     private static final String HOOKED_KEY = "tormozit.fileSearchResultsHooked";
     private static final String TREE_OPEN_HOOKED_KEY = "tormozit.fileSearchTreeOpenHooked";
+    private static final String SETTINGS_SECTION = "FileSearchResults"; //$NON-NLS-1$
+    /** Второстепенные данные (положение разделителя, порядок/ширина колонок таблицы) — в
+     * {@link IDialogSettings}, сохраняются при закрытии/пересоздании панели, а не живьём. */
+    private static final String KEY_SASH_LEFT = "sashLeft"; //$NON-NLS-1$
+    private static final String KEY_SASH_RIGHT = "sashRight"; //$NON-NLS-1$
+    private static final String KEY_COL_ORDER = "columnOrder"; //$NON-NLS-1$
+    private static final String KEY_COL_FILL_MODE = "colFillMode"; //$NON-NLS-1$
+    private static final String KEY_COL_PATH_WIDTH = "colPathWidth"; //$NON-NLS-1$
+    private static final String KEY_COL_FILE_WIDTH = "colFileWidth"; //$NON-NLS-1$
+    private static final String KEY_COL_TYPE_WIDTH = "colTypeWidth"; //$NON-NLS-1$
+    private static final String KEY_COL_LINE_WIDTH = "colLineWidth"; //$NON-NLS-1$
+    private static final String KEY_COL_TEXT_WIDTH = "colTextWidth"; //$NON-NLS-1$
 
     /** Как в {@code org.eclipse.ui.actions.OpenWithMenu}: не переиспользовать чужой редактор по тому же input. */
     private static final int OPEN_WITH_MATCH =
@@ -398,34 +411,24 @@ public final class FileSearchResultsHook implements IStartup
         registerContextMenu(tableViewer, treeViewer, page);
         registerTreeContextMenu(treeViewer, page);
 
+        IDialogSettings sashSettings = dialogSettings();
         sashForm.setWeights(new int[] {
-            ComfortSettings.getFileSearchSashWeight("left", 60),
-            ComfortSettings.getFileSearchSashWeight("right", 40)
+            FormTableColumnState.readWidth(sashSettings, KEY_SASH_LEFT, 60, 1),
+            FormTableColumnState.readWidth(sashSettings, KEY_SASH_RIGHT, 40, 1)
         });
 
         viewerContainer.layout(true, true);
         sashForm.layout();
 
-        // Persist sash weights on resize (debounced)
-        sashForm.addControlListener(new ControlAdapter()
+        // Второстепенные данные — сохраняем при закрытии/пересоздании панели, не живьём на резайз.
+        sashForm.addDisposeListener(e ->
         {
-            private Runnable pending;
-
-            @Override
-            public void controlResized(ControlEvent e)
+            int[] w = sashForm.getWeights();
+            if (w.length == 2)
             {
-                if (pending != null)
-                    Display.getDefault().timerExec(-1, pending);
-                pending = () -> {
-                    if (!sashForm.isDisposed())
-                    {
-                        int[] w = sashForm.getWeights();
-                        if (w.length == 2)
-                            ComfortSettings.setFileSearchSashWeights(w[0], w[1]);
-                    }
-                    pending = null;
-                };
-                Display.getDefault().timerExec(300, pending);
+                IDialogSettings settings = dialogSettings();
+                settings.put(KEY_SASH_LEFT, w[0]);
+                settings.put(KEY_SASH_RIGHT, w[1]);
             }
         });
 
@@ -477,15 +480,12 @@ public final class FileSearchResultsHook implements IStartup
         TableViewer tableViewer = new TableViewer(table);
         tableViewer.setContentProvider(org.eclipse.jface.viewers.ArrayContentProvider.getInstance());
 
+        IDialogSettings columnSettings = dialogSettings();
         TableViewerColumn pathCol = new TableViewerColumn(tableViewer, SWT.LEFT);
         pathCol.getColumn().setText("Путь");
         pathCol.getColumn().setToolTipText("Путь" + Global.pluginSignForTooltip());
         pathCol.getColumn().setResizable(true);
-        pathCol.getColumn().setWidth(ComfortSettings.getFileSearchColumnWidth("path", 180));
-        pathCol.getColumn().addListener(SWT.Resize, e -> {
-            int w = pathCol.getColumn().getWidth();
-            if (w > 0) ComfortSettings.setFileSearchColumnWidth("path", w);
-        });
+        pathCol.getColumn().setWidth(FormTableColumnState.readWidth(columnSettings, KEY_COL_PATH_WIDTH, 180, 1));
         pathCol.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
@@ -502,11 +502,7 @@ public final class FileSearchResultsHook implements IStartup
         fileCol.getColumn().setText("Файл");
         fileCol.getColumn().setToolTipText("Файл" + Global.pluginSignForTooltip());
         fileCol.getColumn().setResizable(true);
-        fileCol.getColumn().setWidth(ComfortSettings.getFileSearchColumnWidth("file", 250));
-        fileCol.getColumn().addListener(SWT.Resize, e -> {
-            int w = fileCol.getColumn().getWidth();
-            if (w > 0) ComfortSettings.setFileSearchColumnWidth("file", w);
-        });
+        fileCol.getColumn().setWidth(FormTableColumnState.readWidth(columnSettings, KEY_COL_FILE_WIDTH, 250, 1));
         fileCol.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
@@ -522,11 +518,7 @@ public final class FileSearchResultsHook implements IStartup
         typeCol.getColumn().setText("Тип");
         typeCol.getColumn().setToolTipText("Тип" + Global.pluginSignForTooltip());
         typeCol.getColumn().setResizable(true);
-        typeCol.getColumn().setWidth(ComfortSettings.getFileSearchColumnWidth("type", 50));
-        typeCol.getColumn().addListener(SWT.Resize, e -> {
-            int w = typeCol.getColumn().getWidth();
-            if (w > 0) ComfortSettings.setFileSearchColumnWidth("type", w);
-        });
+        typeCol.getColumn().setWidth(FormTableColumnState.readWidth(columnSettings, KEY_COL_TYPE_WIDTH, 50, 1));
         typeCol.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
@@ -545,11 +537,7 @@ public final class FileSearchResultsHook implements IStartup
         lineCol.getColumn().setText("Номер строки");
         lineCol.getColumn().setToolTipText("Номер строки" + Global.pluginSignForTooltip());
         lineCol.getColumn().setResizable(true);
-        lineCol.getColumn().setWidth(ComfortSettings.getFileSearchColumnWidth("line", 60));
-        lineCol.getColumn().addListener(SWT.Resize, e -> {
-            int w = lineCol.getColumn().getWidth();
-            if (w > 0) ComfortSettings.setFileSearchColumnWidth("line", w);
-        });
+        lineCol.getColumn().setWidth(FormTableColumnState.readWidth(columnSettings, KEY_COL_LINE_WIDTH, 60, 1));
         lineCol.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
@@ -565,11 +553,7 @@ public final class FileSearchResultsHook implements IStartup
         textCol.getColumn().setText("Текст");
         textCol.getColumn().setToolTipText("Текст" + Global.pluginSignForTooltip());
         textCol.getColumn().setResizable(true);
-        textCol.getColumn().setWidth(ComfortSettings.getFileSearchColumnWidth("text", 300));
-        textCol.getColumn().addListener(SWT.Resize, e -> {
-            int w = textCol.getColumn().getWidth();
-            if (w > 0) ComfortSettings.setFileSearchColumnWidth("text", w);
-        });
+        textCol.getColumn().setWidth(FormTableColumnState.readWidth(columnSettings, KEY_COL_TEXT_WIDTH, 300, 1));
         textCol.setLabelProvider(new SelectionAwareStyledCellLabelProvider(new IStyledLabelProvider()
         {
             @Override
@@ -633,10 +617,26 @@ public final class FileSearchResultsHook implements IStartup
             }
         });
 
+        FormTableColumnState.loadOrder(columnSettings, KEY_COL_ORDER, table);
+        boolean hasSavedColumnWidths = FormTableColumnState.hasSavedColumnWidths(columnSettings, KEY_COL_FILL_MODE,
+            KEY_COL_PATH_WIDTH, KEY_COL_FILE_WIDTH, KEY_COL_TYPE_WIDTH, KEY_COL_LINE_WIDTH, KEY_COL_TEXT_WIDTH);
         FormTableInteraction interaction = new FormTableInteraction(table, tableViewer);
         interaction.setOwnerDrawColumns(textCol.getColumn());
-        interaction.install();
+        interaction.install(hasSavedColumnWidths);
         cachedTableInteraction = interaction;
+        TableColumn pathColumn = pathCol.getColumn();
+        TableColumn fileColumn = fileCol.getColumn();
+        TableColumn typeColumn = typeCol.getColumn();
+        TableColumn lineColumn = lineCol.getColumn();
+        TableColumn textColumn = textCol.getColumn();
+        table.addDisposeListener(e ->
+        {
+            boolean fillMode = interaction.isColumnsExactFill();
+            FormTableColumnState.saveOrderAndWidths(dialogSettings(), KEY_COL_ORDER, KEY_COL_FILL_MODE, fillMode,
+                new String[] { KEY_COL_PATH_WIDTH, KEY_COL_FILE_WIDTH, KEY_COL_TYPE_WIDTH,
+                    KEY_COL_LINE_WIDTH, KEY_COL_TEXT_WIDTH },
+                new TableColumn[] { pathColumn, fileColumn, typeColumn, lineColumn, textColumn }, table);
+        });
 
         return tableViewer;
     }
@@ -1461,5 +1461,14 @@ public final class FileSearchResultsHook implements IStartup
     private static void log(String message)
     {
         Global.log("FileSearchResults", message);
+    }
+
+    private static IDialogSettings dialogSettings()
+    {
+        IDialogSettings top = Activator.getDefault().getDialogSettings();
+        IDialogSettings section = top.getSection(SETTINGS_SECTION);
+        if (section == null)
+            section = top.addNewSection(SETTINGS_SECTION);
+        return section;
     }
 }

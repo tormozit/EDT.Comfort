@@ -43,7 +43,10 @@ final class DebugCollectionLoadScheduler
     private static final int DEBUG_DETAIL_STATE = 256;
     private static final int DEBUG_DETAIL_CONTENT = 512;
     private static final int OVERSCAN = 8;
-    private static final int CONTEXT_RESOLVE_MAX_ATTEMPTS = 2;
+    /** Сколько раз повторить resolve после первой неудачи (пусто / metadata / placeholders). */
+    private static final int CONTEXT_RESOLVE_MAX_ATTEMPTS = 10;
+    /** Пауза между попытками; 10×200 мс ≈ 2 с максимум ожидания схемы. */
+    private static final long CONTEXT_RESOLVE_RETRY_DELAY_MS = 200L;
 
     interface ProgressListener
     {
@@ -85,6 +88,11 @@ final class DebugCollectionLoadScheduler
         new java.util.concurrent.atomic.AtomicInteger(-1);
     private final java.util.concurrent.atomic.AtomicInteger contextResolveAttempts =
         new java.util.concurrent.atomic.AtomicInteger();
+    private final java.util.concurrent.atomic.AtomicLong contextResolveStartedAtMs =
+        new java.util.concurrent.atomic.AtomicLong(0L);
+    /** Уже отдали provisional-схему `[0]…[N]` — повторно не шлём, ждём реальные имена. */
+    private final java.util.concurrent.atomic.AtomicBoolean provisionalColumnsDelivered =
+        new java.util.concurrent.atomic.AtomicBoolean();
     private final java.util.concurrent.atomic.AtomicInteger sizeRowFrom =
         new java.util.concurrent.atomic.AtomicInteger(-1);
     private final java.util.concurrent.atomic.AtomicInteger sizeRowTo =
@@ -148,6 +156,8 @@ final class DebugCollectionLoadScheduler
         this.contextColumnsListener = contextColumnsListener;
         DebugCollectionSizeResolver.resetForNewWindow();
         contextResolveAttempts.set(0);
+        contextResolveStartedAtMs.set(0L);
+        provisionalColumnsDelivered.set(false);
         model.setDirtyRowHandler(this::markDirtyLogicalRowDebounced);
     }
 
@@ -626,13 +636,15 @@ final class DebugCollectionLoadScheduler
     void resetLoadJobForSchemaChange()
     {
         model.invalidateAllCells();
-        if (model.isRowsLoaded())
-            repaintBoundTable();
-        else
+        if (!model.isRowsLoaded())
         {
             scheduleCollectionRekick("schema"); //$NON-NLS-1$
             refreshBoundTable();
         }
+        // Если строки уже загружены — UI сам делает refreshRowsAfterSchemaChange
+        // (setItemCount 0→N + layout). Не вызывать repaintBoundTable/fireRowsReady:
+        // отложенный clear через 50 мс снова стирает видимые ячейки index-таблицы
+        // (колонка «Индекс» остаётся пустой до скролла).
     }
 
     void cancelAll()
@@ -1262,12 +1274,17 @@ final class DebugCollectionLoadScheduler
         if (disposed.get() || contextColumnsListener == null)
             return;
         cancelJob(contextJob);
+        contextResolveAttempts.set(0);
+        contextResolveStartedAtMs.set(System.currentTimeMillis());
+        provisionalColumnsDelivered.set(false);
         scheduleContextJobInternal();
     }
 
     private void scheduleContextJobInternal()
     {
         contextJob = Job.create("Комфорт: колонки коллекции", monitor -> { //$NON-NLS-1$
+            long startedAt = contextResolveStartedAtMs.get();
+            long elapsedMs = startedAt > 0 ? System.currentTimeMillis() - startedAt : 0L;
             IBslVariable[] context = null;
             try
             {
@@ -1280,32 +1297,74 @@ final class DebugCollectionLoadScheduler
             final IBslVariable[] result = context != null ? context : new IBslVariable[0];
             boolean metadataOnly = DebugCollectionPropertyVariables.isRowMetadataContext(result);
             boolean indexedPlaceholders = DebugCollectionPropertyVariables.isIndexedPlaceholderContext(result);
-            if ((result.length == 0 || metadataOnly || indexedPlaceholders) && !disposed.get()
-                && !monitor.isCanceled() && contextResolveAttempts.incrementAndGet() <= CONTEXT_RESOLVE_MAX_ATTEMPTS)
+            boolean labelsReady = DebugCollectionPropertyVariables.hasResolvedColumnLabels(result);
+            boolean tabular = DebugCollectionContextColumnsResolver.isTabularCollectionType(model.indexedValue);
+            boolean provisional = indexedPlaceholders && !labelsReady && tabular && result.length > 0;
+            boolean acceptable = result.length > 0 && !metadataOnly
+                && (!indexedPlaceholders || labelsReady);
+            elapsedMs = startedAt > 0 ? System.currentTimeMillis() - startedAt : 0L;
+
+            boolean canRetry = !disposed.get() && !monitor.isCanceled()
+                && elapsedMs < 2000L
+                && contextResolveAttempts.get() < CONTEXT_RESOLVE_MAX_ATTEMPTS;
+
+            if (acceptable)
             {
-                Job followUp = Job.create("Комфорт: колонки коллекции (retry)", m -> { //$NON-NLS-1$
-                    scheduleContextJobInternal();
-                    return org.eclipse.core.runtime.Status.OK_STATUS;
-                });
-                followUp.setSystem(true);
-                followUp.schedule(200);
+                contextResolveAttempts.set(0);
+                deliverContextColumns(result);
                 return org.eclipse.core.runtime.Status.OK_STATUS;
             }
-            if (result.length > 0 && !metadataOnly && !indexedPlaceholders)
-                contextResolveAttempts.set(0);
-            final IBslVariable[] deliver = metadataOnly || indexedPlaceholders
-                ? new IBslVariable[0] : result;
-            if (display != null && !display.isDisposed())
+
+            if (provisional && provisionalColumnsDelivered.compareAndSet(false, true))
             {
-                display.asyncExec(() -> {
-                    if (!disposed.get())
-                        contextColumnsListener.accept(deliver);
-                });
+                deliverContextColumns(result);
+                if (canRetry)
+                {
+                    contextResolveAttempts.incrementAndGet();
+                    scheduleContextRefineRetry();
+                }
+                return org.eclipse.core.runtime.Status.OK_STATUS;
+            }
+
+            if ((result.length == 0 || metadataOnly || indexedPlaceholders) && canRetry)
+            {
+                contextResolveAttempts.incrementAndGet();
+                scheduleContextRefineRetry();
+                return org.eclipse.core.runtime.Status.OK_STATUS;
+            }
+
+            if (!provisionalColumnsDelivered.get())
+            {
+                final IBslVariable[] deliver = metadataOnly || indexedPlaceholders
+                    ? new IBslVariable[0] : result;
+                deliverContextColumns(deliver);
             }
             return org.eclipse.core.runtime.Status.OK_STATUS;
         });
         contextJob.setSystem(true);
         contextJob.schedule();
+    }
+
+    private void scheduleContextRefineRetry()
+    {
+        Job followUp = Job.create("Комфорт: колонки коллекции (retry)", m -> { //$NON-NLS-1$
+            scheduleContextJobInternal();
+            return org.eclipse.core.runtime.Status.OK_STATUS;
+        });
+        followUp.setSystem(true);
+        followUp.schedule(CONTEXT_RESOLVE_RETRY_DELAY_MS);
+    }
+
+    private void deliverContextColumns(IBslVariable[] deliver)
+    {
+        if (display != null && !display.isDisposed())
+        {
+            final IBslVariable[] payload = deliver != null ? deliver : new IBslVariable[0];
+            display.asyncExec(() -> {
+                if (!disposed.get())
+                    contextColumnsListener.accept(payload);
+            });
+        }
     }
 
     private void runFilterScan(DebugCollectionRowFilter filter, org.eclipse.core.runtime.IProgressMonitor monitor, Runnable onDone)
@@ -1442,6 +1501,8 @@ final class DebugCollectionLoadScheduler
             if (indexed == null)
                 return new IBslVariable[0];
 
+            boolean tabular = isTabularCollectionType(indexed);
+
             IBslVariable[] mutual = resolveMutualFromIndexed(indexed);
             if (DebugCollectionPropertyVariables.isAcceptableColumnContext(mutual))
             {
@@ -1477,13 +1538,18 @@ final class DebugCollectionLoadScheduler
                 return chosen;
             }
 
-            if (isTabularCollectionType(indexed))
+            if (tabular)
             {
                 IBslVariable[] tableSchema = resolveValueTableSchemaColumns(indexed);
-                if (DebugCollectionPropertyVariables.isAcceptableColumnContext(tableSchema))
+                if (tableSchema != null && tableSchema.length > 0
+                    && !DebugCollectionPropertyVariables.isRowMetadataContext(tableSchema))
                 {
-                    DebugCollectionDebug.step("columns.ctx", "tableSchema=" + tableSchema.length); //$NON-NLS-1$ //$NON-NLS-2$
-                    return capColumns(tableSchema);
+                    // Acceptable names или provisional [0]…[N] — колонки сразу, заголовки уточним позже.
+                    IBslVariable[] chosen = capColumns(tableSchema);
+                    DebugCollectionDebug.step("columns.ctx", "tableSchema=" + tableSchema.length //$NON-NLS-1$ //$NON-NLS-2$
+                        + (DebugCollectionPropertyVariables.isIndexedPlaceholderContext(tableSchema)
+                            ? " provisional" : "")); //$NON-NLS-1$ //$NON-NLS-2$
+                    return chosen;
                 }
             }
 
@@ -1511,6 +1577,8 @@ final class DebugCollectionLoadScheduler
             Map<String, IBslVariable> templates = new LinkedHashMap<>();
             for (IBslVariable row : rows)
             {
+                if (row == null)
+                    continue;
                 Set<String> rowNames = new LinkedHashSet<>();
                 collectPropertyNames(row, rowNames, templates);
                 union.addAll(rowNames);
@@ -1568,9 +1636,13 @@ final class DebugCollectionLoadScheduler
             if (!isTabularCollectionType(indexed))
                 return new IBslVariable[0];
 
-            IBslVariable columnsVar = findNamedVariable(indexed.getContextVariables(), "Колонки"); //$NON-NLS-1$
+            IBslVariable[] ctxVars = indexed.getContextVariables();
+            IBslVariable columnsVar = findNamedVariable(ctxVars, "Колонки"); //$NON-NLS-1$
             if (columnsVar == null)
-                columnsVar = findNamedVariable(indexed.getVariables(), "Колонки"); //$NON-NLS-1$
+            {
+                IBslVariable[] allVars = indexed.getVariables();
+                columnsVar = findNamedVariable(allVars, "Колонки"); //$NON-NLS-1$
+            }
             if (columnsVar == null)
                 return new IBslVariable[0];
 
@@ -1617,7 +1689,7 @@ final class DebugCollectionLoadScheduler
             return templates.values().toArray(new IBslVariable[0]);
         }
 
-        private static boolean isTabularCollectionType(IBslIndexedValue indexed)
+        static boolean isTabularCollectionType(IBslIndexedValue indexed)
         {
             if (indexed == null)
                 return false;

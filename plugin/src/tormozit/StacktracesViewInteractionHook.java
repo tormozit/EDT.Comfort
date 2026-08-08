@@ -25,7 +25,6 @@ import org.eclipse.core.runtime.Path;
 import org.eclipse.core.runtime.Platform;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.util.EcoreUtil;
-import org.eclipse.jface.dialogs.DialogSettings;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.dialogs.MessageDialog;
 import org.eclipse.jface.layout.TableColumnLayout;
@@ -143,6 +142,9 @@ public final class StacktracesViewInteractionHook implements IStartup
     private static final String STACKTRACES_UI_BUNDLE = "com._1c.g5.v8.dt.stacktraces.ui"; //$NON-NLS-1$
     private static final String STACKTRACES_UI_PLUGIN =
             "com._1c.g5.v8.dt.internal.stacktraces.ui.StacktracesUiPlugin"; //$NON-NLS-1$
+    private static final String STACKTRACES_BUNDLE = "com._1c.g5.v8.dt.stacktraces"; //$NON-NLS-1$
+    private static final String STACKTRACES_PLUGIN =
+            "com._1c.g5.v8.dt.internal.stacktraces.StacktracesPlugin"; //$NON-NLS-1$
     private static final String SOURCE_DISPLAY_IFACE =
             "com._1c.g5.v8.dt.internal.stacktraces.ui.bsl.IBslSourceDisplay"; //$NON-NLS-1$
     private static final String MODULE_LOCATOR_IFACE =
@@ -159,6 +161,9 @@ public final class StacktracesViewInteractionHook implements IStartup
     private static final String LIST_LOG_TOPIC = "stacktraces-list"; //$NON-NLS-1$
     /** Тип дочернего узла memento = {@code IStacktrace.class.getSimpleName()}. */
     private static final String MEMENTO_STACKTRACE_TYPE = "IStacktrace"; //$NON-NLS-1$
+    private static final java.util.Set<IViewPart> MEMENTO_GUARD_VIEWS =
+            java.util.Collections.newSetFromMap(new WeakHashMap<>());
+    private static volatile boolean REPO_LISTENER_WATCH_INSTALLED;
     /** Максимум символов в заголовке вкладки (первая строка текста ошибки). */
     private static final int TAB_TITLE_MAX_CHARS = 30;
     /** Максимальная ширина Combo выбора проекта, px. */
@@ -178,6 +183,8 @@ public final class StacktracesViewInteractionHook implements IStartup
     @Override
     public void earlyStartup()
     {
+        // До createPartControl/restoreState: init() регистрирует view как listener репозитория.
+        installSingletonRepoListenerWatch();
         Display.getDefault().asyncExec(() ->
         {
             installDoubleClick(Display.getDefault());
@@ -693,8 +700,10 @@ public final class StacktracesViewInteractionHook implements IStartup
     }
 
     /**
-     * Только диагностика + защита от дописывания в непустой memento при save.
-     * Ничего не удаляет из репозитория и не дедуплицирует стеки.
+     * (1) save — в memento только уникальные по ключу «ошибка+дата», живой репозиторий не трогаем.
+     * (2) load — если репозиторий уже не пуст, повторный add из memento пропускаем и восстанавливаем
+     * вкладки из текущего репозитория (иначе singleton + load без очистки удваивает список).
+     * Guard ставится в {@link #installSingletonRepoListenerWatch} на init() view — до createPartControl.
      */
     private static void installMementoGuard(IViewPart view)
     {
@@ -710,14 +719,17 @@ public final class StacktracesViewInteractionHook implements IStartup
                 listLog("mementoGuard: already proxy view@" + System.identityHashCode(view)); //$NON-NLS-1$
                 return;
             }
-            Object pageContainer = Global.invoke(view, "getPageContainer"); //$NON-NLS-1$
-            if (pageContainer instanceof Control marked
-                    && Boolean.TRUE.equals(marked.getData(MEMENTO_GUARD_KEY)))
+            if (!MEMENTO_GUARD_VIEWS.add(view))
+            {
+                listLog("mementoGuard: already tracked view@" + System.identityHashCode(view)); //$NON-NLS-1$
                 return;
+            }
 
             ClassLoader cl = already.getClass().getClassLoader();
             Class<?> mementoIface = Class.forName(
                     "com._1c.g5.v8.dt.internal.stacktraces.ui.view.IStacktracesMemento", true, cl); //$NON-NLS-1$
+            Class<?> repoIface = Class.forName(
+                    "com._1c.g5.v8.dt.stacktraces.model.IStacktraceRepository", true, cl); //$NON-NLS-1$
             Object real = already;
             Object repo = Global.getField(real, "repository"); //$NON-NLS-1$
             InvocationHandler handler = (proxy, method, args) ->
@@ -737,37 +749,228 @@ public final class StacktracesViewInteractionHook implements IStartup
                 {
                     int beforeKids = countMementoStacktraces(memento);
                     int cleared = clearMementoStacktraceChildren(memento);
+                    Object liveRepo = Global.getField(real, "repository"); //$NON-NLS-1$
+                    Object allObj = liveRepo != null ? Global.invoke(liveRepo, "getStacktraces") : null; //$NON-NLS-1$
+                    List<?> all = allObj instanceof List<?> list ? list : List.of();
+                    List<Object> unique = uniqueStacktracesForPersist(all);
                     listLog("memento.save beforeKids=" + beforeKids //$NON-NLS-1$
                             + " clearedKids=" + cleared //$NON-NLS-1$
-                            + " repo=" + repoSizeOf(repo) //$NON-NLS-1$
+                            + " repo=" + all.size() //$NON-NLS-1$
+                            + " unique=" + unique.size() //$NON-NLS-1$
                             + " " + shortStack()); //$NON-NLS-1$
-                    Object result = method.invoke(real, args);
-                    listLog("memento.save afterKids=" + countMementoStacktraces(memento)); //$NON-NLS-1$
-                    return result;
+                    Object filterRepo = filteringRepositoryProxy(liveRepo, unique, repoIface, cl);
+                    Global.setFieldForce(real, "repository", filterRepo); //$NON-NLS-1$
+                    try
+                    {
+                        Object result = method.invoke(real, args);
+                        listLog("memento.save afterKids=" + countMementoStacktraces(memento)); //$NON-NLS-1$
+                        return result;
+                    }
+                    finally
+                    {
+                        Global.setFieldForce(real, "repository", liveRepo); //$NON-NLS-1$
+                    }
                 }
                 if ("load".equals(name) && args != null && args.length == 1) //$NON-NLS-1$
                 {
                     IMemento memento = args[0] instanceof IMemento m ? m : null;
-                    listLog("memento.load kids=" + countMementoStacktraces(memento) //$NON-NLS-1$
-                            + " repoBefore=" + repoSizeOf(repo) //$NON-NLS-1$
+                    Object liveRepo = Global.getField(real, "repository"); //$NON-NLS-1$
+                    int kids = countMementoStacktraces(memento);
+                    int repoBefore = repoSizeOf(liveRepo);
+                    if (repoBefore > 0)
+                    {
+                        listLog("memento.load SKIP kids=" + kids //$NON-NLS-1$
+                                + " repo=" + repoBefore //$NON-NLS-1$
+                                + " " + shortStack()); //$NON-NLS-1$
+                        recreatePagesFromRepository(view, liveRepo);
+                        return null;
+                    }
+                    listLog("memento.load kids=" + kids //$NON-NLS-1$
+                            + " repoBefore=" + repoBefore //$NON-NLS-1$
                             + " " + shortStack()); //$NON-NLS-1$
                     Object result = method.invoke(real, args);
-                    listLog("memento.load afterRepo=" + repoSizeOf(repo)); //$NON-NLS-1$
+                    listLog("memento.load afterRepo=" + repoSizeOf(liveRepo)); //$NON-NLS-1$
                     return result;
                 }
                 return method.invoke(real, args);
             };
             Object proxy = Proxy.newProxyInstance(cl, new Class<?>[] { mementoIface }, handler);
             Global.setFieldForce(view, "mementoManager", proxy); //$NON-NLS-1$
-            if (pageContainer instanceof Control marked)
-                marked.setData(MEMENTO_GUARD_KEY, Boolean.TRUE);
             listLog("mementoGuard: installed view@" + System.identityHashCode(view) //$NON-NLS-1$
                     + " repoSize=" + repoSizeOf(repo)); //$NON-NLS-1$
         }
         catch (Exception e)
         {
+            MEMENTO_GUARD_VIEWS.remove(view);
             listLog("mementoGuard: FAIL " + e); //$NON-NLS-1$
         }
+    }
+
+    /**
+     * Перехват {@code addChangedListener} через подмену списка listeners singleton-репозитория:
+     * init() view вызывает его до createPartControl/restoreState — успеваем обернуть mementoManager.
+     */
+    private static void installSingletonRepoListenerWatch()
+    {
+        if (REPO_LISTENER_WATCH_INSTALLED)
+            return;
+        try
+        {
+            Bundle bundle = Platform.getBundle(STACKTRACES_BUNDLE);
+            if (bundle == null)
+            {
+                listLog("repoListenerWatch: bundle null"); //$NON-NLS-1$
+                return;
+            }
+            Class<?> pluginClass = bundle.loadClass(STACKTRACES_PLUGIN);
+            Object plugin = Global.invoke(pluginClass, "getDefault"); //$NON-NLS-1$
+            if (plugin == null)
+            {
+                listLog("repoListenerWatch: plugin null"); //$NON-NLS-1$
+                return;
+            }
+            Object injectorObj = Global.invoke(plugin, "getInjector"); //$NON-NLS-1$
+            if (!(injectorObj instanceof Injector injector))
+            {
+                listLog("repoListenerWatch: injector null"); //$NON-NLS-1$
+                return;
+            }
+            Class<?> repoIface = bundle.loadClass(
+                    "com._1c.g5.v8.dt.stacktraces.model.IStacktraceRepository"); //$NON-NLS-1$
+            Object repo = injector.getInstance(repoIface);
+            if (repo == null)
+            {
+                listLog("repoListenerWatch: repo null"); //$NON-NLS-1$
+                return;
+            }
+            Object listenersObj = Global.getField(repo, "listeners"); //$NON-NLS-1$
+            if (!(listenersObj instanceof java.util.List<?> existing))
+            {
+                listLog("repoListenerWatch: listeners field missing"); //$NON-NLS-1$
+                return;
+            }
+            @SuppressWarnings({ "rawtypes", "unchecked" })
+            java.util.concurrent.CopyOnWriteArrayList wrapped =
+                    new java.util.concurrent.CopyOnWriteArrayList(existing)
+                    {
+                        private static final long serialVersionUID = 1L;
+
+                        @Override
+                        public boolean add(Object listener)
+                        {
+                            boolean added = super.add(listener);
+                            tryAttachMementoGuardFromRepoListener(listener);
+                            return added;
+                        }
+                    };
+            if (!Global.setFieldForce(repo, "listeners", wrapped)) //$NON-NLS-1$
+            {
+                listLog("repoListenerWatch: set listeners FAIL"); //$NON-NLS-1$
+                return;
+            }
+            REPO_LISTENER_WATCH_INSTALLED = true;
+            listLog("repoListenerWatch: installed existingListeners=" + wrapped.size()); //$NON-NLS-1$
+            for (Object listener : wrapped)
+                tryAttachMementoGuardFromRepoListener(listener);
+        }
+        catch (Exception e)
+        {
+            listLog("repoListenerWatch: FAIL " + e); //$NON-NLS-1$
+        }
+    }
+
+    private static void tryAttachMementoGuardFromRepoListener(Object listener)
+    {
+        if (!(listener instanceof IViewPart view))
+            return;
+        try
+        {
+            if (view.getViewSite() == null || !VIEW_ID.equals(view.getViewSite().getId()))
+                return;
+        }
+        catch (Exception e)
+        {
+            return;
+        }
+        installMementoGuard(view);
+    }
+
+    /** Ключ как у CONTENT_DUP в refresh: первая строка ошибки + detail (дата). */
+    private static String stacktracePersistKey(Object stacktraceObj)
+    {
+        if (stacktraceObj instanceof IStacktrace stacktrace)
+        {
+            String error = BreakpointListHook.firstLine(findStacktraceErrorText(stacktrace));
+            if (error == null || error.isBlank())
+            {
+                String name = stacktrace.getName();
+                error = name != null ? name : ""; //$NON-NLS-1$
+            }
+            String date = stacktrace.getDetail();
+            if (date != null)
+                date = date.strip();
+            else
+                date = ""; //$NON-NLS-1$
+            return error + '\t' + date;
+        }
+        if (stacktraceObj == null)
+            return ""; //$NON-NLS-1$
+        String name = String.valueOf(Global.invoke(stacktraceObj, "getName")); //$NON-NLS-1$
+        String detail = String.valueOf(Global.invoke(stacktraceObj, "getDetail")); //$NON-NLS-1$
+        return name + '\t' + detail;
+    }
+
+    private static List<Object> uniqueStacktracesForPersist(List<?> all)
+    {
+        java.util.LinkedHashMap<String, Object> first = new java.util.LinkedHashMap<>();
+        for (Object st : all)
+        {
+            if (st == null)
+                continue;
+            first.putIfAbsent(stacktracePersistKey(st), st);
+        }
+        return new ArrayList<>(first.values());
+    }
+
+    private static Object filteringRepositoryProxy(Object liveRepo, List<Object> unique,
+            Class<?> repoIface, ClassLoader cl)
+    {
+        List<Object> snapshot = List.copyOf(unique);
+        return Proxy.newProxyInstance(cl, new Class<?>[] { repoIface }, (proxy, method, args) ->
+        {
+            String name = method.getName();
+            if (method.getDeclaringClass() == Object.class)
+            {
+                if ("equals".equals(name)) //$NON-NLS-1$
+                    return Boolean.valueOf(proxy == args[0]);
+                if ("hashCode".equals(name)) //$NON-NLS-1$
+                    return Integer.valueOf(System.identityHashCode(proxy));
+                if ("toString".equals(name)) //$NON-NLS-1$
+                    return "ComfortSaveFilterRepo(size=" + snapshot.size() + ")"; //$NON-NLS-1$ //$NON-NLS-2$
+                return method.invoke(liveRepo, args);
+            }
+            if ("getStacktraces".equals(name)) //$NON-NLS-1$
+                return new ArrayList<>(snapshot);
+            return method.invoke(liveRepo, args);
+        });
+    }
+
+    private static void recreatePagesFromRepository(IViewPart view, Object repository)
+    {
+        if (view == null || repository == null)
+            return;
+        Object all = Global.invoke(repository, "getStacktraces"); //$NON-NLS-1$
+        if (!(all instanceof List<?> list))
+            return;
+        int created = 0;
+        for (Object st : list)
+        {
+            if (st == null)
+                continue;
+            Global.invokeVoid(view, "addStacktrace", st); //$NON-NLS-1$
+            created++;
+        }
+        listLog("memento.load recreatedPages=" + created + " repo=" + list.size()); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static int countMementoStacktraces(IMemento memento)
@@ -2099,9 +2302,21 @@ public final class StacktracesViewInteractionHook implements IStartup
         private static final int DEFAULT_ERROR_WIDTH = 220;
         private static final int DEFAULT_DATE_WIDTH = 160;
         private static final int DEFAULT_PROJECT_WIDTH = 120;
+        private static final int MIN_COL_WIDTH = 40;
         private static final int DEFAULT_SASH_LEFT = 38;
         private static final int DEFAULT_SASH_RIGHT = 62;
-        private static final String ORDER_SETTINGS_KEY = "order"; //$NON-NLS-1$
+        /** Второстепенные данные (в отличие от выбора проекта на стек — тот в {@link ComfortSettings})
+         * — ширины/порядок/режим заполнения колонок таблицы и положение разделителя, персистятся в
+         * {@link IDialogSettings} при закрытии панели (см. {@link #saveColumnLayout}), как у остальных
+         * окон плагина. */
+        private static final String SETTINGS_SECTION = "StacktracesListPane"; //$NON-NLS-1$
+        private static final String KEY_COL_ORDER = "columnOrder"; //$NON-NLS-1$
+        private static final String KEY_COL_DATE_WIDTH = "colDateWidth"; //$NON-NLS-1$
+        private static final String KEY_COL_ERROR_WIDTH = "colErrorWidth"; //$NON-NLS-1$
+        private static final String KEY_COL_PROJECT_WIDTH = "colProjectWidth"; //$NON-NLS-1$
+        private static final String KEY_COL_FILL_MODE = "colFillMode"; //$NON-NLS-1$
+        private static final String KEY_SASH_LEFT = "sashLeft"; //$NON-NLS-1$
+        private static final String KEY_SASH_RIGHT = "sashRight"; //$NON-NLS-1$
 
         private final IViewPart view;
         private final CTabFolder folder;
@@ -2117,7 +2332,6 @@ public final class StacktracesViewInteractionHook implements IStartup
 
         private boolean syncingSelection;
         private String filterText = ""; //$NON-NLS-1$
-        private Runnable pendingSaveSash;
         /** Индекс строки после Del — не прыгать на первую из‑за folder.setSelection. */
         private int deleteAnchorIndex = -1;
 
@@ -2135,8 +2349,9 @@ public final class StacktracesViewInteractionHook implements IStartup
             StacktracesListPane pane = new StacktracesListPane(view, sash, folder);
             pane.root.moveAbove(folder);
             folder.setTabHeight(0);
-            int left = ComfortSettings.getStacktracesListSashWeight("left", DEFAULT_SASH_LEFT); //$NON-NLS-1$
-            int right = ComfortSettings.getStacktracesListSashWeight("right", DEFAULT_SASH_RIGHT); //$NON-NLS-1$
+            IDialogSettings sashSettings = dialogSettings();
+            int left = FormTableColumnState.readWidth(sashSettings, KEY_SASH_LEFT, DEFAULT_SASH_LEFT, 1);
+            int right = FormTableColumnState.readWidth(sashSettings, KEY_SASH_RIGHT, DEFAULT_SASH_RIGHT, 1);
             if (left < 1)
                 left = DEFAULT_SASH_LEFT;
             if (right < 1)
@@ -2193,14 +2408,15 @@ public final class StacktracesViewInteractionHook implements IStartup
             // иконку, owner-draw текст оставляет «обрезок» слева (эталон: RecentPlaces/ObjectSets —
             // сначала колонка-иконка, потом styled). Дата — обычный провайдер; подсветка фильтра
             // только в «Ошибка».
+            IDialogSettings settings = dialogSettings();
             dateColumn = createColumn(viewer, columnLayout, "Дата", //$NON-NLS-1$
-                "date", DEFAULT_DATE_WIDTH, COL_DATE, false); //$NON-NLS-1$
+                settings, KEY_COL_DATE_WIDTH, DEFAULT_DATE_WIDTH, COL_DATE, false);
             errorColumn = createColumn(viewer, columnLayout, "Ошибка", //$NON-NLS-1$
-                "error", DEFAULT_ERROR_WIDTH, COL_ERROR, true); //$NON-NLS-1$
+                settings, KEY_COL_ERROR_WIDTH, DEFAULT_ERROR_WIDTH, COL_ERROR, true);
             projectColumn = createColumn(viewer, columnLayout, "Проект", //$NON-NLS-1$
-                "project", DEFAULT_PROJECT_WIDTH, COL_PROJECT, false); //$NON-NLS-1$
+                settings, KEY_COL_PROJECT_WIDTH, DEFAULT_PROJECT_WIDTH, COL_PROJECT, false);
 
-            loadColumnOrder(table);
+            FormTableColumnState.loadOrder(settings, KEY_COL_ORDER, table);
             viewer.setContentProvider(ArrayContentProvider.getInstance());
             viewer.setComparator(comparator);
             viewer.addFilter(listFilter);
@@ -2233,7 +2449,9 @@ public final class StacktracesViewInteractionHook implements IStartup
                 filterInput.setText(""); //$NON-NLS-1$
                 applyFilter();
             });
-            interaction.install();
+            boolean hasSavedColumnWidths = FormTableColumnState.hasSavedColumnWidths(settings, KEY_COL_FILL_MODE,
+                KEY_COL_DATE_WIDTH, KEY_COL_ERROR_WIDTH, KEY_COL_PROJECT_WIDTH);
+            interaction.install(hasSavedColumnWidths);
 
             tableStack.addControlListener(new ControlAdapter()
             {
@@ -2242,7 +2460,6 @@ public final class StacktracesViewInteractionHook implements IStartup
                 {
                     if (!columnHost.isDisposed())
                         columnHost.setBounds(tableStack.getClientArea());
-                    scheduleSaveSash();
                 }
             });
 
@@ -2286,20 +2503,24 @@ public final class StacktracesViewInteractionHook implements IStartup
             table.setSortColumn(dateColumn);
             table.setSortDirection(SWT.DOWN);
 
-            folder.addDisposeListener(e -> saveColumnOrder(table));
+            // НЕ folder — при пересоздании панели (liftFolderOutOfListSash) folder специально
+            // вынимается ИЗ sash (setParent) ДО sash.dispose() и переживает пересоздание, чтобы
+            // его можно было переиспользовать; удаляется именно sash (а с ним root/table/колонки).
+            // Слушатель на folder.dispose() в этом (самом частом) сценарии не срабатывал вовсе —
+            // сохранение ширины/порядка тихо никогда не происходило.
+            sash.addDisposeListener(e -> saveColumnLayout(table));
         }
 
         private TableColumn createColumn(TableViewer tableViewer, TableColumnLayout layout,
-                String title, String widthId, int defaultWidth, int modelIndex, boolean styled)
+                String title, IDialogSettings settings, String widthKey, int defaultWidth,
+                int modelIndex, boolean styled)
         {
             TableViewerColumn col = new TableViewerColumn(tableViewer, SWT.LEFT);
             TableColumn column = col.getColumn();
             column.setText(title);
             column.setToolTipText(title + Global.pluginSignForTooltip());
             column.setMoveable(true);
-            int width = ComfortSettings.getStacktracesListColumnWidth(widthId, defaultWidth);
-            if (width < 40)
-                width = defaultWidth;
+            int width = FormTableColumnState.readWidth(settings, widthKey, defaultWidth, MIN_COL_WIDTH);
             layout.setColumnData(column, new ColumnPixelData(width, true, true));
             final int index = modelIndex;
             if (styled)
@@ -2318,20 +2539,6 @@ public final class StacktracesViewInteractionHook implements IStartup
                     }
                 });
             }
-            column.addListener(SWT.Resize, e ->
-            {
-                int w = column.getWidth();
-                if (w > 0)
-                    ComfortSettings.setStacktracesListColumnWidth(widthId, w);
-            });
-            column.addControlListener(new ControlAdapter()
-            {
-                @Override
-                public void controlMoved(ControlEvent e)
-                {
-                    saveColumnOrder(tableViewer.getTable());
-                }
-            });
             return column;
         }
 
@@ -2695,40 +2902,44 @@ public final class StacktracesViewInteractionHook implements IStartup
             }
         }
 
-        private void scheduleSaveSash()
+        /** Второстепенные данные (ширины/порядок/режим заполнения колонок, положение разделителя) —
+         * сохраняются при закрытии панели. */
+        private void saveColumnLayout(Table table)
         {
-            Display display = sash.getDisplay();
-            if (display == null || display.isDisposed())
-                return;
-            if (pendingSaveSash != null)
-                display.timerExec(-1, pendingSaveSash);
-            pendingSaveSash = () ->
+            // Временная безусловная диагностика (topic "stacktraces-list") — на случай повторения
+            // проблемы с переоткрытием панели после закрытия (причина пока не установлена).
+            listLog("saveColumnLayout: enter table=" + (table == null ? "null" : System.identityHashCode(table))); //$NON-NLS-1$ //$NON-NLS-2$
+            if (table == null || table.isDisposed()
+                || dateColumn == null || errorColumn == null || projectColumn == null
+                || dateColumn.isDisposed() || errorColumn.isDisposed() || projectColumn.isDisposed())
             {
-                pendingSaveSash = null;
-                if (sash.isDisposed())
-                    return;
+                listLog("saveColumnLayout: skip (disposed/null)"); //$NON-NLS-1$
+                return;
+            }
+            boolean fillMode = interaction != null && interaction.isColumnsExactFill();
+            IDialogSettings settings = dialogSettings();
+            FormTableColumnState.saveOrderAndWidths(settings, KEY_COL_ORDER, KEY_COL_FILL_MODE, fillMode,
+                new String[] { KEY_COL_DATE_WIDTH, KEY_COL_ERROR_WIDTH, KEY_COL_PROJECT_WIDTH },
+                new TableColumn[] { dateColumn, errorColumn, projectColumn }, table);
+            if (sash != null && !sash.isDisposed())
+            {
                 int[] w = sash.getWeights();
                 if (w.length == 2)
-                    ComfortSettings.setStacktracesListSashWeights(w[0], w[1]);
-            };
-            display.timerExec(300, pendingSaveSash);
+                {
+                    settings.put(KEY_SASH_LEFT, w[0]);
+                    settings.put(KEY_SASH_RIGHT, w[1]);
+                }
+            }
+            listLog("saveColumnLayout: done"); //$NON-NLS-1$
         }
 
-        private static void loadColumnOrder(Table table)
+        private static IDialogSettings dialogSettings()
         {
-            String order = ComfortSettings.getStacktracesListColumnOrder();
-            if (order == null || order.isBlank())
-                return;
-            IDialogSettings settings = new DialogSettings("stacktracesList"); //$NON-NLS-1$
-            settings.put(ORDER_SETTINGS_KEY, order);
-            FormTableColumnOrder.load(settings, ORDER_SETTINGS_KEY, table);
-        }
-
-        private static void saveColumnOrder(Table table)
-        {
-            if (table == null || table.isDisposed())
-                return;
-            ComfortSettings.setStacktracesListColumnOrder(FormTableColumnOrder.formatOrder(table));
+            IDialogSettings top = Activator.getDefault().getDialogSettings();
+            IDialogSettings section = top.getSection(SETTINGS_SECTION);
+            if (section == null)
+                section = top.addNewSection(SETTINGS_SECTION);
+            return section;
         }
 
         private final class ListFilter extends ViewerFilter

@@ -2575,6 +2575,9 @@ public class GoToDefinition extends AbstractHandler
         private static final String KEY_COL_LINE_WIDTH = "colLineWidth"; //$NON-NLS-1$
 
         private static final String KEY_COL_CODE_WIDTH = "colCodeWidth"; //$NON-NLS-1$
+        /** Был ли режим заполнения по ширине активен при закрытии — приоритетнее сохранённых пиксельных
+         * ширин, которые могут не совпасть впритык с шириной таблицы при следующем открытии. */
+        private static final String KEY_COL_FILL_MODE = "colFillMode"; //$NON-NLS-1$
         private static final String KEY_COL_ORDER = "columnOrder"; //$NON-NLS-1$
 
         private static final int DEFAULT_MODULE_COL_WIDTH = 200;
@@ -2664,13 +2667,15 @@ public class GoToDefinition extends AbstractHandler
             message.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
 
             IDialogSettings settings = dialogSettings();
-            int moduleWidth = readColWidth(settings, KEY_COL_MODULE_WIDTH,
+            boolean hasSavedColumnWidths = FormTableColumnState.hasSavedColumnWidths(settings, KEY_COL_FILL_MODE,
+                KEY_COL_MODULE_WIDTH, KEY_COL_METHOD_WIDTH, KEY_COL_LINE_WIDTH, KEY_COL_CODE_WIDTH);
+            int moduleWidth = FormTableColumnState.readWidth(settings, KEY_COL_MODULE_WIDTH,
                 DEFAULT_MODULE_COL_WIDTH, MIN_MODULE_COL_WIDTH);
-            int methodWidth = readColWidth(settings, KEY_COL_METHOD_WIDTH,
+            int methodWidth = FormTableColumnState.readWidth(settings, KEY_COL_METHOD_WIDTH,
                 DEFAULT_METHOD_COL_WIDTH, MIN_METHOD_COL_WIDTH);
-            int lineWidth = readColWidth(settings, KEY_COL_LINE_WIDTH,
+            int lineWidth = FormTableColumnState.readWidth(settings, KEY_COL_LINE_WIDTH,
                 DEFAULT_LINE_COL_WIDTH, MIN_LINE_COL_WIDTH);
-            int codeWidth = readColWidth(settings, KEY_COL_CODE_WIDTH,
+            int codeWidth = FormTableColumnState.readWidth(settings, KEY_COL_CODE_WIDTH,
                 DEFAULT_CODE_COL_WIDTH, MIN_CODE_COL_WIDTH);
 
             Composite tableStack = new Composite(area, SWT.NONE);
@@ -2744,14 +2749,14 @@ public class GoToDefinition extends AbstractHandler
             columnLayout.setColumnData(codeColumn,
                 new ColumnPixelData(codeWidth, true, true));
 
-            FormTableColumnOrder.load(settings, KEY_COL_ORDER, table);
+            FormTableColumnState.loadOrder(settings, KEY_COL_ORDER, table);
 
             listViewer.setContentProvider(ArrayContentProvider.getInstance());
             listViewer.setInput(rows);
 
             tableInteraction = new FormTableInteraction(table, listViewer, this::cellText);
             tableInteraction.setFilterTextResolver(this::filterText);
-            tableInteraction.install();
+            tableInteraction.install(hasSavedColumnWidths);
             if (!rows.isEmpty())
             {
                 TableItem first = table.getItem(0);
@@ -2821,23 +2826,6 @@ public class GoToDefinition extends AbstractHandler
             return section;
         }
 
-        private static int readColWidth(IDialogSettings settings, String key,
-            int defaultWidth, int minWidth)
-        {
-            String raw = settings.get(key);
-            if (raw == null || raw.isEmpty())
-                return defaultWidth;
-            try
-            {
-                int w = Integer.parseInt(raw);
-                return w >= minWidth ? w : defaultWidth;
-            }
-            catch (NumberFormatException ex)
-            {
-                return defaultWidth;
-            }
-        }
-
         private void saveColumnWidths()
         {
             if (moduleColumn == null || methodColumn == null || lineColumn == null || codeColumn == null
@@ -2845,11 +2833,10 @@ public class GoToDefinition extends AbstractHandler
                     || lineColumn.isDisposed() || codeColumn.isDisposed())
                 return;
             IDialogSettings settings = dialogSettings();
-            settings.put(KEY_COL_MODULE_WIDTH, Integer.toString(moduleColumn.getWidth()));
-            settings.put(KEY_COL_METHOD_WIDTH, Integer.toString(methodColumn.getWidth()));
-            settings.put(KEY_COL_LINE_WIDTH, Integer.toString(lineColumn.getWidth()));
-            settings.put(KEY_COL_CODE_WIDTH, Integer.toString(codeColumn.getWidth()));
-            FormTableColumnOrder.save(settings, KEY_COL_ORDER, listViewer.getTable());
+            boolean fillMode = tableInteraction != null && tableInteraction.isColumnsExactFill();
+            FormTableColumnState.saveOrderAndWidths(settings, KEY_COL_ORDER, KEY_COL_FILL_MODE, fillMode,
+                new String[] { KEY_COL_MODULE_WIDTH, KEY_COL_METHOD_WIDTH, KEY_COL_LINE_WIDTH, KEY_COL_CODE_WIDTH },
+                new TableColumn[] { moduleColumn, methodColumn, lineColumn, codeColumn }, listViewer.getTable());
         }
 
         private String cellText(TableItem item, int column)

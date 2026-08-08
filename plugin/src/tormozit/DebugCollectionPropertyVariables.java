@@ -54,6 +54,84 @@ final class DebugCollectionPropertyVariables
     }
 
     /**
+     * Подпись колонки таблицы значений: {@code Имя}/{@code Name} у определения колонки,
+     * иначе {@link IBslVariable#getName()} (может быть {@code [0]}).
+     */
+    static String columnLabel(IBslVariable columnDef)
+    {
+        if (columnDef == null)
+            return null;
+        String fromProperty = readNameProperty(columnDef);
+        if (fromProperty != null && !fromProperty.isBlank())
+            return fromProperty.trim();
+        String name = columnDef.getName();
+        return name != null && !name.isBlank() ? name.trim() : null;
+    }
+
+    private static String readNameProperty(IBslVariable columnDef)
+    {
+        try
+        {
+            IBslValue value = columnDef.getValue();
+            if (value == null)
+                return null;
+            if (!value.isEvaluated())
+                value.evaluate();
+            if (value.isPending())
+                return null;
+            IBslVariable[] props = null;
+            if (value instanceof IBslIndexedValue indexed)
+            {
+                props = indexed.getContextVariables();
+                if (props == null || props.length == 0)
+                    props = indexed.getVariables();
+            }
+            if (props == null || props.length == 0)
+                props = value.getVariables();
+            if (props == null)
+                return null;
+            IBslVariable nameVar = findByName(props, "Имя"); //$NON-NLS-1$
+            if (nameVar == null)
+                nameVar = findByName(props, "Name"); //$NON-NLS-1$
+            if (nameVar == null)
+                return null;
+            IBslValue nameValue = nameVar.getValue();
+            if (nameValue == null)
+                return null;
+            if (!nameValue.isEvaluated())
+                nameValue.evaluate();
+            if (nameValue.isPending())
+                return null;
+            String text = nameValue.getValueString();
+            if (text == null)
+                return null;
+            text = text.trim();
+            if (text.length() >= 2 && text.charAt(0) == '"' && text.charAt(text.length() - 1) == '"')
+                text = text.substring(1, text.length() - 1);
+            return text.isBlank() ? null : text;
+        }
+        catch (DebugException e)
+        {
+            return null;
+        }
+    }
+
+    private static IBslVariable findByName(IBslVariable[] variables, String name)
+    {
+        if (variables == null || name == null)
+            return null;
+        for (IBslVariable variable : variables)
+        {
+            if (variable == null)
+                continue;
+            String variableName = variable.getName();
+            if (variableName != null && variableName.equalsIgnoreCase(name))
+                return variable;
+        }
+        return null;
+    }
+
+    /**
      * {@code true}, если все имена — метаданные строки таблицы/дерева
      * ({@code Индексы}, {@code Колонки}, {@code Элементы}), а не поля данных.
      */
@@ -79,6 +157,22 @@ final class DebugCollectionPropertyVariables
         return context != null && context.length > 0
             && !isRowMetadataContext(context)
             && !isIndexedPlaceholderContext(context);
+    }
+
+    /** Все элементы имеют не-placeholder подпись ({@link #columnLabel}). */
+    static boolean hasResolvedColumnLabels(IBslVariable[] context)
+    {
+        if (context == null || context.length == 0)
+            return false;
+        for (IBslVariable variable : context)
+        {
+            if (variable == null)
+                return false;
+            String label = columnLabel(variable);
+            if (label == null || label.isBlank() || isIndexedPlaceholderName(label))
+                return false;
+        }
+        return true;
     }
 
     /**

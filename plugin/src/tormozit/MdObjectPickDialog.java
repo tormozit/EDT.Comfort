@@ -9,7 +9,7 @@ import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.layout.TableColumnLayout;
 import org.eclipse.jface.viewers.ArrayContentProvider;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
-import org.eclipse.jface.viewers.ColumnWeightData;
+import org.eclipse.jface.viewers.ColumnPixelData;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.TableViewer;
@@ -36,9 +36,16 @@ public class MdObjectPickDialog extends Dialog
 {
     private static final String SETTINGS_SECTION = "MdObjectPickDialog"; //$NON-NLS-1$
     private static final String KEY_COL_ORDER = "columnOrder"; //$NON-NLS-1$
+    private static final String KEY_COL_PRESENTATION_WIDTH = "colPresentationWidth"; //$NON-NLS-1$
+    private static final String KEY_COL_LINK_WIDTH = "colLinkWidth"; //$NON-NLS-1$
+    /** Был ли режим заполнения по ширине активен при закрытии — приоритетнее сохранённых пиксельных
+     * ширин, которые могут не совпасть впритык с шириной таблицы при следующем открытии. */
+    private static final String KEY_COL_FILL_MODE = "colFillMode"; //$NON-NLS-1$
 
     private static final int MIN_PRESENTATION_COL_WIDTH = 100;
     private static final int MIN_LINK_COL_WIDTH = 120;
+    private static final int DEFAULT_PRESENTATION_COL_WIDTH = 150;
+    private static final int DEFAULT_LINK_COL_WIDTH = 300;
 
     /** Строка таблицы: колонки «Представление» и «Ссылка». */
     public static final class Entry
@@ -169,6 +176,14 @@ public class MdObjectPickDialog extends Dialog
         table.setHeaderVisible(true);
         table.setLinesVisible(true);
 
+        IDialogSettings settings = dialogSettings();
+        boolean hasSavedColumnWidths = FormTableColumnState.hasSavedColumnWidths(
+            settings, KEY_COL_FILL_MODE, KEY_COL_PRESENTATION_WIDTH, KEY_COL_LINK_WIDTH);
+        int presentationWidth = FormTableColumnState.readWidth(settings, KEY_COL_PRESENTATION_WIDTH,
+            DEFAULT_PRESENTATION_COL_WIDTH, MIN_PRESENTATION_COL_WIDTH);
+        int linkWidth = FormTableColumnState.readWidth(settings, KEY_COL_LINK_WIDTH,
+            DEFAULT_LINK_COL_WIDTH, MIN_LINK_COL_WIDTH);
+
         TableViewerColumn colPresentation = new TableViewerColumn(listViewer, SWT.NONE);
         TableColumn presentationColumn = colPresentation.getColumn();
         this.presentationColumn = presentationColumn;
@@ -196,18 +211,18 @@ public class MdObjectPickDialog extends Dialog
         });
 
         columnLayout.setColumnData(presentationColumn,
-            new ColumnWeightData(1, MIN_PRESENTATION_COL_WIDTH, true));
+            new ColumnPixelData(presentationWidth, true, true));
         columnLayout.setColumnData(linkColumn,
-            new ColumnWeightData(2, MIN_LINK_COL_WIDTH, true));
+            new ColumnPixelData(linkWidth, true, true));
 
-        FormTableColumnOrder.load(dialogSettings(), KEY_COL_ORDER, table);
+        FormTableColumnState.loadOrder(settings, KEY_COL_ORDER, table);
 
         listViewer.setContentProvider(ArrayContentProvider.getInstance());
         listViewer.setInput(entries);
 
         tableInteraction = new FormTableInteraction(table, listViewer, this::cellText);
         tableInteraction.setFilterTextResolver(this::filterText);
-        tableInteraction.install();
+        tableInteraction.install(hasSavedColumnWidths);
         selectFirst();
 
         installDoubleClick(table);
@@ -288,12 +303,16 @@ public class MdObjectPickDialog extends Dialog
 
     private void saveColumnLayout()
     {
-        if (listViewer == null)
+        if (listViewer == null || presentationColumn == null || linkColumn == null
+            || presentationColumn.isDisposed() || linkColumn.isDisposed())
             return;
         Table table = listViewer.getTable();
         if (table == null || table.isDisposed())
             return;
-        FormTableColumnOrder.save(dialogSettings(), KEY_COL_ORDER, table);
+        boolean fillMode = tableInteraction != null && tableInteraction.isColumnsExactFill();
+        FormTableColumnState.saveOrderAndWidths(dialogSettings(), KEY_COL_ORDER, KEY_COL_FILL_MODE, fillMode,
+            new String[] { KEY_COL_PRESENTATION_WIDTH, KEY_COL_LINK_WIDTH },
+            new TableColumn[] { presentationColumn, linkColumn }, table);
     }
 
     private static IDialogSettings dialogSettings()

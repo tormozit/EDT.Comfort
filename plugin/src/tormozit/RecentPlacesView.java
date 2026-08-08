@@ -96,6 +96,9 @@ public final class RecentPlacesView extends ViewPart
     private static final String KEY_COL_PROJECT_WIDTH = "colProjectWidth"; //$NON-NLS-1$
     private static final String KEY_COL_DATE_WIDTH    = "colDateWidth";    //$NON-NLS-1$
     private static final String KEY_COL_ORDER         = "columnOrderV2";   //$NON-NLS-1$
+    /** Был ли режим заполнения по ширине активен при закрытии — приоритетнее сохранённых пиксельных
+     * ширин, которые могут не совпасть впритык с шириной таблицы при следующем открытии. */
+    private static final String KEY_COL_FILL_MODE     = "colFillMode";     //$NON-NLS-1$
     private static final String KEY_FILTER_BY_PROJECT = "filterByProject"; //$NON-NLS-1$
 
     private static final int DEFAULT_PLACE_COL_WIDTH   = 560;
@@ -193,6 +196,13 @@ public final class RecentPlacesView extends ViewPart
             DEFAULT_PROJECT_COL_WIDTH, MIN_PROJECT_COL_WIDTH);
         int dateWidth = readColWidth(workbenchState, settings, KEY_COL_DATE_WIDTH,
             DEFAULT_DATE_COL_WIDTH, MIN_DATE_COL_WIDTH);
+        // Флаг режима заполнения приоритетнее: если при закрытии он был активен — сохранённые
+        // пиксельные ширины не считаем «пользовательской» настройкой (см. saveColumnWidths()).
+        boolean hasSavedColumnWidths = !settings.getBoolean(KEY_COL_FILL_MODE)
+            && (hasSavedColWidth(workbenchState, settings, KEY_COL_PLACE_WIDTH)
+                || hasSavedColWidth(workbenchState, settings, KEY_COL_NAME_WIDTH)
+                || hasSavedColWidth(workbenchState, settings, KEY_COL_PROJECT_WIDTH)
+                || hasSavedColWidth(workbenchState, settings, KEY_COL_DATE_WIDTH));
         cachedPlaceWidth = placeWidth;
         cachedNameWidth = nameWidth;
         cachedProjectWidth = projectWidth;
@@ -297,8 +307,8 @@ public final class RecentPlacesView extends ViewPart
         columnLayout.setColumnData(dateColumn,
             new ColumnPixelData(dateWidth, true, true));
 
-        FormTableColumnOrder.load(settings, KEY_COL_ORDER, table);
-        FormTableColumnOrder.load(workbenchState, KEY_COL_ORDER, table);
+        FormTableColumnState.loadOrder(settings, KEY_COL_ORDER, table);
+        FormTableColumnState.loadOrder(workbenchState, KEY_COL_ORDER, table);
 
         listViewer.setContentProvider(ArrayContentProvider.getInstance());
 
@@ -313,7 +323,7 @@ public final class RecentPlacesView extends ViewPart
             filterInput.setText(""); //$NON-NLS-1$
             applyFilterFromField(true);
         });
-        tableInteraction.install();
+        tableInteraction.install(hasSavedColumnWidths);
 
         installColumnWidthPersistence();
         installKeyListeners(table);
@@ -654,6 +664,13 @@ public final class RecentPlacesView extends ViewPart
             Boolean.toString(filterByProjectCheckbox.getSelection()));
     }
 
+    private static boolean hasSavedColWidth(IMemento memento, IDialogSettings settings, String key)
+    {
+        if (memento != null && memento.getString(key) != null)
+            return true;
+        return settings != null && settings.get(key) != null;
+    }
+
     private static int readColWidth(IMemento memento, IDialogSettings settings, String key,
                                     int defaultWidth, int minWidth)
     {
@@ -670,7 +687,7 @@ public final class RecentPlacesView extends ViewPart
     private static int readColWidth(IDialogSettings settings, String key,
                                     int defaultWidth, int minWidth)
     {
-        return parseColWidth(settings != null ? settings.get(key) : null, minWidth, defaultWidth);
+        return FormTableColumnState.readWidth(settings, key, defaultWidth, minWidth);
     }
 
     private static int parseColWidth(String raw, int minWidth)
@@ -752,17 +769,12 @@ public final class RecentPlacesView extends ViewPart
         if (dateWidth > 0)
             cachedDateWidth = dateWidth;
 
-        IDialogSettings settings = viewSettings();
-        if (placeWidth > 0)
-            settings.put(KEY_COL_PLACE_WIDTH, Integer.toString(placeWidth));
-        if (nameWidth > 0)
-            settings.put(KEY_COL_NAME_WIDTH, Integer.toString(nameWidth));
-        if (projectWidth > 0)
-            settings.put(KEY_COL_PROJECT_WIDTH, Integer.toString(projectWidth));
-        if (dateWidth > 0)
-            settings.put(KEY_COL_DATE_WIDTH, Integer.toString(dateWidth));
-        if (listViewer != null && !listViewer.getControl().isDisposed())
-            FormTableColumnOrder.save(settings, KEY_COL_ORDER, listViewer.getTable());
+        Table table = listViewer != null && !listViewer.getControl().isDisposed()
+            ? listViewer.getTable() : null;
+        boolean fillMode = tableInteraction != null && tableInteraction.isColumnsExactFill();
+        FormTableColumnState.saveOrderAndWidths(viewSettings(), KEY_COL_ORDER, KEY_COL_FILL_MODE, fillMode,
+            new String[] { KEY_COL_PLACE_WIDTH, KEY_COL_NAME_WIDTH, KEY_COL_PROJECT_WIDTH, KEY_COL_DATE_WIDTH },
+            new int[] { placeWidth, nameWidth, projectWidth, dateWidth }, table);
     }
 
     private int readLiveOrCached(TableColumn column, int minWidth, int cached)
@@ -779,20 +791,11 @@ public final class RecentPlacesView extends ViewPart
         int nameWidth = readLiveOrCached(nameColumn, MIN_NAME_COL_WIDTH, cachedNameWidth);
         int projectWidth = readLiveOrCached(projectColumn, MIN_PROJECT_COL_WIDTH, cachedProjectWidth);
         int dateWidth = readLiveOrCached(dateColumn, MIN_DATE_COL_WIDTH, cachedDateWidth);
-        if (placeWidth > 0)
-            memento.putString(KEY_COL_PLACE_WIDTH, Integer.toString(placeWidth));
-        if (nameWidth > 0)
-            memento.putString(KEY_COL_NAME_WIDTH, Integer.toString(nameWidth));
-        if (projectWidth > 0)
-            memento.putString(KEY_COL_PROJECT_WIDTH, Integer.toString(projectWidth));
-        if (dateWidth > 0)
-            memento.putString(KEY_COL_DATE_WIDTH, Integer.toString(dateWidth));
-        if (listViewer != null && !listViewer.getControl().isDisposed())
-        {
-            Table table = listViewer.getTable();
-            if (table.getColumnCount() > 0)
-                memento.putString(KEY_COL_ORDER, FormTableColumnOrder.formatOrder(table));
-        }
+        Table table = listViewer != null && !listViewer.getControl().isDisposed()
+            ? listViewer.getTable() : null;
+        FormTableColumnState.writeOrderAndWidthsToMemento(memento, KEY_COL_ORDER,
+            new String[] { KEY_COL_PLACE_WIDTH, KEY_COL_NAME_WIDTH, KEY_COL_PROJECT_WIDTH, KEY_COL_DATE_WIDTH },
+            new int[] { placeWidth, nameWidth, projectWidth, dateWidth }, table);
     }
 
     private static String placePrefix(String displayName, String ownName)

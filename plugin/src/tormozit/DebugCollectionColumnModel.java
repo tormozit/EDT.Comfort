@@ -89,40 +89,53 @@ final class DebugCollectionColumnModel
 
     static DebugCollectionColumnModel fromContextVariables(IBslVariable[] contextVars)
     {
+        if (contextVars == null || contextVars.length == 0)
+            return fromPropertyLabels(null);
+        String[] labels = new String[contextVars.length];
+        for (int i = 0; i < contextVars.length; i++)
+            labels[i] = DebugCollectionPropertyVariables.columnLabel(contextVars[i]);
+        return fromPropertyLabels(labels);
+    }
+
+    /** Схема по подписям property-колонок (без INDEX/TYPE в labels). */
+    static DebugCollectionColumnModel fromPropertyLabels(String[] propertyLabels)
+    {
         List<Column> cols = new ArrayList<>();
         cols.add(new Column(Kind.INDEX, INDEX_HEADER, null, 0));
 
         boolean hasType = false;
         boolean hasValue = false;
+        boolean anyProperty = false;
 
-        if (contextVars != null && contextVars.length > 0)
+        if (propertyLabels != null)
         {
-            for (IBslVariable ctx : contextVars)
+            for (String raw : propertyLabels)
             {
-                if (ctx == null)
+                if (raw == null || raw.isBlank())
                     continue;
-                String name = ctx.getName();
-                if (name == null || name.isBlank())
-                    continue;
+                String name = raw.trim();
                 if (INDEX_HEADER.equalsIgnoreCase(name) || "Index".equalsIgnoreCase(name)) //$NON-NLS-1$
                     continue;
                 if (TYPE_HEADER.equalsIgnoreCase(name) || "Type".equalsIgnoreCase(name)) //$NON-NLS-1$
                 {
                     hasType = true;
                     cols.add(new Column(Kind.PROPERTY, name, name, cols.size()));
+                    anyProperty = true;
                     continue;
                 }
                 if (VALUE_HEADER.equalsIgnoreCase(name) || "Value".equalsIgnoreCase(name)) //$NON-NLS-1$
                 {
                     hasValue = true;
                     cols.add(new Column(Kind.PROPERTY, name, name, cols.size()));
+                    anyProperty = true;
                     continue;
                 }
                 cols.add(new Column(Kind.PROPERTY, name, name, cols.size()));
+                anyProperty = true;
             }
         }
 
-        if (contextVars == null || contextVars.length == 0)
+        if (!anyProperty)
         {
             cols.add(new Column(Kind.TYPE, TYPE_HEADER, null, cols.size()));
             cols.add(new Column(Kind.VALUE, VALUE_HEADER, null, cols.size()));
@@ -140,6 +153,86 @@ final class DebugCollectionColumnModel
         }
 
         return withVisibleAll(cols);
+    }
+
+    int propertyColumnCount()
+    {
+        int count = 0;
+        for (Column col : columns)
+        {
+            if (col.kind == Kind.PROPERTY)
+                count++;
+        }
+        return count;
+    }
+
+    boolean hasProvisionalPropertyHeaders()
+    {
+        boolean any = false;
+        for (Column col : columns)
+        {
+            if (col.kind != Kind.PROPERTY)
+                continue;
+            any = true;
+            if (!DebugCollectionPropertyVariables.isIndexedPlaceholderName(col.header)
+                && !DebugCollectionPropertyVariables.isIndexedPlaceholderName(col.propertyName))
+                return false;
+        }
+        return any;
+    }
+
+    /**
+     * Обновить подписи PROPERTY-колонок in-place (тот же порядок/число).
+     * {@code true}, если хотя бы одна подпись изменилась.
+     */
+    boolean refinePropertyLabels(String[] propertyLabels)
+    {
+        if (propertyLabels == null || propertyLabels.length == 0)
+            return false;
+        int propCount = propertyColumnCount();
+        if (propCount != propertyLabels.length)
+            return false;
+        boolean changed = false;
+        int propIndex = 0;
+        for (int i = 0; i < columns.size(); i++)
+        {
+            Column col = columns.get(i);
+            if (col.kind != Kind.PROPERTY)
+                continue;
+            String label = propertyLabels[propIndex++];
+            if (label == null || label.isBlank())
+                continue;
+            label = label.trim();
+            if (label.equals(col.header) && label.equals(col.propertyName))
+                continue;
+            columns.set(i, new Column(col.kind, label, label, col.modelIndex));
+            changed = true;
+        }
+        return changed;
+    }
+
+    /** Только {@code setText} существующих колонок — без сброса ширин. */
+    void refreshHeaderTexts(org.eclipse.swt.widgets.Table indexTable, org.eclipse.swt.widgets.Table dataTable)
+    {
+        if (indexTable != null && !indexTable.isDisposed())
+        {
+            int fixed = Math.min(fixedColumnCount(), indexTable.getColumnCount());
+            for (int i = 0; i < fixed; i++)
+            {
+                Column col = columnAt(i);
+                indexTable.getColumn(i).setText(col != null ? col.header : ""); //$NON-NLS-1$
+            }
+        }
+        if (dataTable != null && !dataTable.isDisposed())
+        {
+            int fixed = fixedColumnCount();
+            int dataCols = Math.min(dataColumnCount(), dataTable.getColumnCount());
+            for (int dataCol = 0; dataCol < dataCols; dataCol++)
+            {
+                Column col = columnAt(fixed + dataCol);
+                dataTable.getColumn(dataCol).setText(col != null ? col.header : ""); //$NON-NLS-1$
+            }
+        }
     }
 
     /** Скрытые model-колонки в порядке order. */

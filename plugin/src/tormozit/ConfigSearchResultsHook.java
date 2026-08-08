@@ -26,6 +26,7 @@ import org.eclipse.emf.ecore.EStructuralFeature;
 import org.eclipse.emf.ecore.resource.Resource;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.core.runtime.IPath;
+import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
@@ -153,6 +154,16 @@ public final class ConfigSearchResultsHook implements IStartup
 {
     private static final String SEARCH_VIEW_ID = "org.eclipse.search.ui.views.SearchView"; //$NON-NLS-1$
     private static final String PAGE_CLASS_MARKER = "ConfigurationSearchViewPage"; //$NON-NLS-1$
+    private static final String SETTINGS_SECTION = "ConfigSearchResults"; //$NON-NLS-1$
+    /** Второстепенные данные (положение разделителя, порядок/ширина колонок таблицы вхождений) — в
+     * {@link IDialogSettings}, сохраняются при закрытии/пересоздании панели, а не живьём. */
+    private static final String KEY_SASH_LEFT = "sashLeft"; //$NON-NLS-1$
+    private static final String KEY_SASH_RIGHT = "sashRight"; //$NON-NLS-1$
+    private static final String KEY_COL_ORDER = "matchColumnOrder"; //$NON-NLS-1$
+    private static final String KEY_COL_PATH_WIDTH = "matchColPathWidth"; //$NON-NLS-1$
+    private static final String KEY_COL_PROPERTY_WIDTH = "matchColPropertyWidth"; //$NON-NLS-1$
+    private static final String KEY_COL_LINE_WIDTH = "matchColLineWidth"; //$NON-NLS-1$
+    private static final String KEY_COL_TEXT_WIDTH = "matchColTextWidth"; //$NON-NLS-1$
 
     /**
      * Временно (по просьбе пользователя, на время тестирования нашей таблицы вхождений
@@ -386,45 +397,32 @@ public final class ConfigSearchResultsHook implements IStartup
         matchTable.setLinesVisible(true);
         matchTableStack.addControlListener(new org.eclipse.swt.events.ControlAdapter()
         {
-            // Раздвижка между деревом и нашей таблицей меняет размеры ДЕТЕЙ SashForm (в т.ч.
-            // matchTableStack), а не самого outer — слушать нужно здесь, не на outer.
-            private Runnable pendingSaveWeights;
-
             @Override
             public void controlResized(org.eclipse.swt.events.ControlEvent e)
             {
                 if (!matchTable.isDisposed())
                     matchTable.setBounds(matchTableStack.getClientArea());
-
-                if (outer.isDisposed())
-                    return;
-                Display display = Display.getDefault();
-                if (display == null || display.isDisposed())
-                    return;
-                if (pendingSaveWeights != null)
-                    display.timerExec(-1, pendingSaveWeights);
-                pendingSaveWeights = () -> {
-                    if (!outer.isDisposed())
-                    {
-                        int[] w = outer.getWeights();
-                        if (w.length == 2)
-                            ComfortSettings.setConfigSearchMatchSashWeights(w[0], w[1]);
-                    }
-                    pendingSaveWeights = null;
-                };
-                display.timerExec(300, pendingSaveWeights);
+            }
+        });
+        // Второстепенные данные — сохраняем при закрытии/пересоздании панели, не живьём на резайз.
+        outer.addDisposeListener(e ->
+        {
+            int[] w = outer.getWeights();
+            if (w.length == 2)
+            {
+                IDialogSettings settings = dialogSettings();
+                settings.put(KEY_SASH_LEFT, w[0]);
+                settings.put(KEY_SASH_RIGHT, w[1]);
             }
         });
         matchViewer.setContentProvider(org.eclipse.jface.viewers.ArrayContentProvider.getInstance());
 
+        IDialogSettings matchSettings = dialogSettings();
         TableViewerColumn pathCol = new TableViewerColumn(matchViewer, SWT.LEFT);
         pathCol.getColumn().setText("Путь"); //$NON-NLS-1$
         pathCol.getColumn().setToolTipText("Путь" + Global.pluginSignForTooltip());
-        pathCol.getColumn().setWidth(ComfortSettings.getConfigSearchMatchColumnWidth("path", MATCH_PATH_COLUMN_WIDTH)); //$NON-NLS-1$
-        pathCol.getColumn().addListener(SWT.Resize, e -> {
-            int w = pathCol.getColumn().getWidth();
-            if (w > 0) ComfortSettings.setConfigSearchMatchColumnWidth("path", w); //$NON-NLS-1$
-        });
+        pathCol.getColumn().setWidth(
+            FormTableColumnState.readWidth(matchSettings, KEY_COL_PATH_WIDTH, MATCH_PATH_COLUMN_WIDTH, 1));
         cachedMatchPathColumn = pathCol.getColumn();
         pathCol.setLabelProvider(new ColumnLabelProvider()
         {
@@ -440,11 +438,8 @@ public final class ConfigSearchResultsHook implements IStartup
         TableViewerColumn propertyCol = new TableViewerColumn(matchViewer, SWT.LEFT);
         propertyCol.getColumn().setText("Свойство"); //$NON-NLS-1$
         propertyCol.getColumn().setToolTipText("Свойство"); //$NON-NLS-1$
-        propertyCol.getColumn().setWidth(ComfortSettings.getConfigSearchMatchColumnWidth("property", 140)); //$NON-NLS-1$
-        propertyCol.getColumn().addListener(SWT.Resize, e -> {
-            int w = propertyCol.getColumn().getWidth();
-            if (w > 0) ComfortSettings.setConfigSearchMatchColumnWidth("property", w); //$NON-NLS-1$
-        });
+        propertyCol.getColumn().setWidth(
+            FormTableColumnState.readWidth(matchSettings, KEY_COL_PROPERTY_WIDTH, 140, 1));
         propertyCol.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
@@ -459,11 +454,8 @@ public final class ConfigSearchResultsHook implements IStartup
         TableViewerColumn lineCol = new TableViewerColumn(matchViewer, SWT.RIGHT);
         lineCol.getColumn().setText("Строка"); //$NON-NLS-1$
         lineCol.getColumn().setToolTipText("Номер строки" + Global.pluginSignForTooltip());
-        lineCol.getColumn().setWidth(ComfortSettings.getConfigSearchMatchColumnWidth("line", 60)); //$NON-NLS-1$
-        lineCol.getColumn().addListener(SWT.Resize, e -> {
-            int w = lineCol.getColumn().getWidth();
-            if (w > 0) ComfortSettings.setConfigSearchMatchColumnWidth("line", w); //$NON-NLS-1$
-        });
+        lineCol.getColumn().setWidth(
+            FormTableColumnState.readWidth(matchSettings, KEY_COL_LINE_WIDTH, 60, 1));
         lineCol.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
@@ -478,11 +470,8 @@ public final class ConfigSearchResultsHook implements IStartup
         TableViewerColumn textCol = new TableViewerColumn(matchViewer, SWT.LEFT);
         textCol.getColumn().setText("Текст"); //$NON-NLS-1$
         textCol.getColumn().setToolTipText("Текст"); //$NON-NLS-1$
-        textCol.getColumn().setWidth(ComfortSettings.getConfigSearchMatchColumnWidth("text", MATCH_TEXT_COLUMN_WIDTH)); //$NON-NLS-1$
-        textCol.getColumn().addListener(SWT.Resize, e -> {
-            int w = textCol.getColumn().getWidth();
-            if (w > 0) ComfortSettings.setConfigSearchMatchColumnWidth("text", w); //$NON-NLS-1$
-        });
+        textCol.getColumn().setWidth(
+            FormTableColumnState.readWidth(matchSettings, KEY_COL_TEXT_WIDTH, MATCH_TEXT_COLUMN_WIDTH, 1));
         textCol.setLabelProvider(new SelectionAwareStyledCellLabelProvider(new IStyledLabelProvider()
         {
             @Override
@@ -524,9 +513,10 @@ public final class ConfigSearchResultsHook implements IStartup
             }
         });
 
+        IDialogSettings sashSettings = dialogSettings();
         outer.setWeights(new int[] {
-            ComfortSettings.getConfigSearchMatchSashWeight("left", 40), //$NON-NLS-1$
-            ComfortSettings.getConfigSearchMatchSashWeight("right", 60) //$NON-NLS-1$
+            FormTableColumnState.readWidth(sashSettings, KEY_SASH_LEFT, 40, 1),
+            FormTableColumnState.readWidth(sashSettings, KEY_SASH_RIGHT, 60, 1)
         });
         if (!NATIVE_TABLE_ENABLED && nativeSplit instanceof SashForm nativeSashForm)
         {
@@ -538,9 +528,27 @@ public final class ConfigSearchResultsHook implements IStartup
             else
                 log("installMatchTableSplitPane: treePart недоступен, штатная таблица не скрыта"); //$NON-NLS-1$
         }
+        FormTableColumnState.loadOrder(matchSettings, KEY_COL_ORDER, matchTable);
         FormTableInteraction interaction = new FormTableInteraction(matchTable, matchViewer);
         interaction.setOwnerDrawColumns(textCol.getColumn());
+        // Авто-заполнение/сужение выключено: колонки «Путь»/«Текст» динамически прячутся установкой
+        // ширины 0 (см. ниже, applyResults) — авто-fill растянул бы их обратно, включив невидимую колонку.
+        interaction.setColumnAutoResizeEnabled(false);
         interaction.install();
+        outer.addDisposeListener(e ->
+        {
+            if (matchTable.isDisposed())
+                return;
+            // Путь/Текст могут быть временно скрыты (ширина 0, см. applyResults) — 0 не сохраняем,
+            // чтобы не потерять «настоящую» ширину, установленную пользователем до скрытия.
+            int pathWidth = pathCol.getColumn().isDisposed() ? 0 : pathCol.getColumn().getWidth();
+            int textWidth = textCol.getColumn().isDisposed() ? 0 : textCol.getColumn().getWidth();
+            int propertyWidth = propertyCol.getColumn().isDisposed() ? 0 : propertyCol.getColumn().getWidth();
+            int lineWidth = lineCol.getColumn().isDisposed() ? 0 : lineCol.getColumn().getWidth();
+            FormTableColumnState.saveOrderAndWidths(dialogSettings(), KEY_COL_ORDER,
+                new String[] { KEY_COL_PATH_WIDTH, KEY_COL_PROPERTY_WIDTH, KEY_COL_LINE_WIDTH, KEY_COL_TEXT_WIDTH },
+                new int[] { pathWidth, propertyWidth, lineWidth, textWidth }, matchTable);
+        });
 
         // Скролл/resize открывают новые строки — довычисляем "<Pending>" и для них
         // (см. scheduleVisibleDeferredCalculations).
@@ -623,7 +631,7 @@ public final class ConfigSearchResultsHook implements IStartup
         if (cachedMatchPathColumn != null && !cachedMatchPathColumn.isDisposed())
         {
             int desiredWidth = isTerminalTreeSelection(selectedNodes) ? 0
-                : ComfortSettings.getConfigSearchMatchColumnWidth("path", MATCH_PATH_COLUMN_WIDTH); //$NON-NLS-1$
+                : FormTableColumnState.readWidth(dialogSettings(), KEY_COL_PATH_WIDTH, MATCH_PATH_COLUMN_WIDTH, 1);
             if (cachedMatchPathColumn.getWidth() != desiredWidth)
                 cachedMatchPathColumn.setWidth(desiredWidth);
         }
@@ -635,7 +643,7 @@ public final class ConfigSearchResultsHook implements IStartup
         {
             boolean anyText = rows.stream().anyMatch(row -> row.text != null && !row.text.isBlank());
             int desiredWidth = (!rows.isEmpty() && !anyText) ? 0
-                : ComfortSettings.getConfigSearchMatchColumnWidth("text", MATCH_TEXT_COLUMN_WIDTH); //$NON-NLS-1$
+                : FormTableColumnState.readWidth(dialogSettings(), KEY_COL_TEXT_WIDTH, MATCH_TEXT_COLUMN_WIDTH, 1);
             if (cachedMatchTextColumn.getWidth() != desiredWidth)
                 cachedMatchTextColumn.setWidth(desiredWidth);
         }
@@ -4689,6 +4697,15 @@ public final class ConfigSearchResultsHook implements IStartup
     private static void log(String message)
     {
         Global.log("ConfigSearchResults", message); //$NON-NLS-1$
+    }
+
+    private static IDialogSettings dialogSettings()
+    {
+        IDialogSettings top = Activator.getDefault().getDialogSettings();
+        IDialogSettings section = top.getSection(SETTINGS_SECTION);
+        if (section == null)
+            section = top.addNewSection(SETTINGS_SECTION);
+        return section;
     }
 
     public ConfigSearchResultsHook() {}
