@@ -893,6 +893,22 @@ public final class StacktracesViewInteractionHook implements IStartup
             return;
         }
         installMementoGuard(view);
+        // Регистрация view как listener'а репозитория (перехваченная здесь) — надёжный сигнал о
+        // (пере)создании панели, срабатывает даже когда IPartListener2 (partOpened/partVisible/...)
+        // по какой-то причине не переустанавливает hookViewPages/installListPane при закрытии-
+        // переоткрытии штатного вида (закрытие+переоткрытие иначе оставляет нашу панель не установленной,
+        // см. topic "stacktraces-list"). На этом этапе createPartControl/restoreState ещё не закончены
+        // (страниц/CTabFolder может не быть) — откладываем на конец текущего цикла UI-потока.
+        Display display = Display.getDefault();
+        if (display != null && !display.isDisposed())
+        {
+            display.asyncExec(() ->
+            {
+                listLog("repoListenerWatch: deferred tryInstallView view@" //$NON-NLS-1$
+                        + System.identityHashCode(view));
+                tryInstallView(view);
+            });
+        }
     }
 
     /** Ключ как у CONTENT_DUP в refresh: первая строка ошибки + detail (дата). */
@@ -2317,6 +2333,10 @@ public final class StacktracesViewInteractionHook implements IStartup
         private static final String KEY_COL_FILL_MODE = "colFillMode"; //$NON-NLS-1$
         private static final String KEY_SASH_LEFT = "sashLeft"; //$NON-NLS-1$
         private static final String KEY_SASH_RIGHT = "sashRight"; //$NON-NLS-1$
+        /** Выделенная строка (стек) на момент закрытия — восстанавливается при следующем открытии по
+         * содержимому колонки «Дата» (см. {@link StackRow#date}), т.к. сам {@link CTabItem} не переживает
+         * закрытие/переоткрытие панели. */
+        private static final String KEY_SELECTED_STACK_DATE = "selectedStackDate"; //$NON-NLS-1$
 
         private final IViewPart view;
         private final CTabFolder folder;
@@ -2332,6 +2352,8 @@ public final class StacktracesViewInteractionHook implements IStartup
 
         private boolean syncingSelection;
         private String filterText = ""; //$NON-NLS-1$
+        /** Восстановление выделения, сохранённого при закрытии — пробуем не более одного раза за жизнь панели. */
+        private boolean initialSelectionApplied;
         /** Индекс строки после Del — не прыгать на первую из‑за folder.setSelection. */
         private int deleteAnchorIndex = -1;
 
@@ -2508,7 +2530,24 @@ public final class StacktracesViewInteractionHook implements IStartup
             // его можно было переиспользовать; удаляется именно sash (а с ним root/table/колонки).
             // Слушатель на folder.dispose() в этом (самом частом) сценарии не срабатывал вовсе —
             // сохранение ширины/порядка тихо никогда не происходило.
-            sash.addDisposeListener(e -> saveColumnLayout(table));
+            sash.addDisposeListener(e ->
+            {
+                saveColumnLayout(table);
+                saveSelectedStack();
+            });
+        }
+
+        /** Сохранить выделенный стек (по строке колонки «Дата») — второстепенные данные, при закрытии. */
+        private void saveSelectedStack()
+        {
+            if (viewer == null || viewer.getControl().isDisposed())
+                return;
+            Object first = viewer.getStructuredSelection().getFirstElement();
+            IDialogSettings settings = dialogSettings();
+            if (first instanceof StackRow row && !row.date.isEmpty())
+                settings.put(KEY_SELECTED_STACK_DATE, row.date);
+            else
+                settings.put(KEY_SELECTED_STACK_DATE, ""); //$NON-NLS-1$
         }
 
         private TableColumn createColumn(TableViewer tableViewer, TableColumnLayout layout,
@@ -2738,7 +2777,36 @@ public final class StacktracesViewInteractionHook implements IStartup
                         }
                     }
                 }
-                if (deleteAnchorIndex >= 0)
+                // Самый первый refresh новой панели — до чтения folder.getSelection() (см. выше)
+                // штатная панель 1С уже сама восстановила СВОЮ активную вкладку по своей памяти,
+                // поэтому folderRow тут почти всегда НЕ null и более поздняя проверка на "выбирать
+                // больше не из чего" никогда не срабатывала бы. Сохранённую строку (saveSelectedStack)
+                // проверяем и применяем ПЕРВОЙ, до остальной цепочки — если нашли, она и побеждает.
+                boolean isInitialRefresh = !initialSelectionApplied;
+                initialSelectionApplied = true;
+                StackRow restoredRow = null;
+                if (isInitialRefresh)
+                {
+                    String savedDate = dialogSettings().get(KEY_SELECTED_STACK_DATE);
+                    if (savedDate != null && !savedDate.isBlank())
+                    {
+                        for (StackRow row : rows)
+                        {
+                            if (savedDate.equals(row.date))
+                            {
+                                restoredRow = row;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (restoredRow != null)
+                {
+                    viewer.setSelection(new StructuredSelection(restoredRow), true);
+                    if (restoredRow.item != null && !restoredRow.item.isDisposed())
+                        folder.setSelection(restoredRow.item);
+                }
+                else if (deleteAnchorIndex >= 0)
                 {
                     StackRow byIndex = rowAtTableIndex(deleteAnchorIndex);
                     if (byIndex != null)

@@ -115,6 +115,39 @@ final class FormTableInteraction
         String filterText(Object element, int column);
     }
 
+    /**
+     * Внешний провайдер отбора по значению ячейки для таблиц БЕЗ {@link TableViewer} — напр.
+     * «Коллекция» отладчика со своей моделью строк ({@code BitSet} + фоновый скан), несовместимой с
+     * JFace {@link ViewerFilter}. Когда задан, команды отбора идут через него, а не через
+     * {@code multiSelectViewer}: состояние отбора (карта {@code column}→{@code value}) всё равно
+     * хранится в {@link FormTableInteraction} (единый источник для меню/счётчика/подписей), хост лишь
+     * применяет/снимает его и поставляет элемент модели активной строки + различные значения колонки.
+     *
+     * <p>Ключ колонки — тот же, что у {@link FormTableFilterTextResolver#filterText} и
+     * {@link FormTableCellAccess#cellText}: индекс колонки в {@link Table} (с точки зрения SWT).
+     */
+    interface ColumnValueFilterHost
+    {
+        /** Элемент модели активной строки (напр. {@code Integer} logical row) или {@code null}. */
+        Object activeElement();
+
+        /**
+         * Применить отбор AND по колонкам (копия карты; пустая → отбор снят). Хост сам пересчитывает
+         * видимые строки и обновляет таблицу, в т.ч. сохраняя активную ячейку по элементу из
+         * {@link #activeElement} (к моменту вызова он ещё соответствует ПРЕЖНЕЙ активной строке —
+         * хосту нужно запомнить его ДО пересчёта).
+         */
+        void applyFilters(java.util.Map<Integer, String> columnValueFilters);
+
+        /**
+         * Различные значения {@code column} (без дублей) + число строк с этим значением, СРЕДИ строк,
+         * проходящих все ОСТАЛЬНЫЕ фильтры (сторонний substring-поиск и отбор по другим колонкам);
+         * собственный отбор по {@code column} игнорируется — как у viewer-режима
+         * {@link FormTableInteraction}. {@code honorOtherFilters=false} — по ВСЕМ строкам источника.
+         */
+        java.util.List<ColumnValuesDialog.ValueRow> distinctValues(int column, boolean honorOtherFilters);
+    }
+
     private static final TableColumn[] NO_OWNER_DRAW_COLUMNS = new TableColumn[0];
 
     private final Table table;
@@ -141,6 +174,8 @@ final class FormTableInteraction
     private final Map<Integer, Canvas> filterIndicators = new LinkedHashMap<>();
     private final List<MenuItem> filterMenuItems = new ArrayList<>();
     private FormTableFilterTextResolver filterTextResolver;
+    private ColumnValueFilterHost columnValueFilterHost;
+    private boolean externalMenuPopulation;
     private ViewerFilter columnValueViewerFilter;
     private Runnable substringFilterClearer;
     private Image filterGlyph;
@@ -400,6 +435,27 @@ final class FormTableInteraction
     void setSubstringFilterClearer(Runnable substringFilterClearer)
     {
         this.substringFilterClearer = substringFilterClearer;
+    }
+
+    /**
+     * Внешний провайдер отбора для таблиц без {@link TableViewer} (см. {@link ColumnValueFilterHost}).
+     * Должен быть задан ДО {@link #install()} и вместе с {@link #setFilterTextResolver} — иначе
+     * {@code canFilterByActiveCell()} остаётся {@code false} (как без viewer).
+     */
+    void setColumnValueFilterHost(ColumnValueFilterHost columnValueFilterHost)
+    {
+        this.columnValueFilterHost = columnValueFilterHost;
+    }
+
+    /**
+     * Меню таблицы полностью контролирует хозяин (он стирает все пункты на каждом показе и зовёт
+     * {@link #populateFilterMenuItems} из своего rebuildContextMenu). Иначе {@link FormTableInteraction}
+     * сам создаёт «Копировать» и вешает SWT.Show-пересборщик пунктов отбора. Должно быть задано ДО
+     * {@link #install()}.
+     */
+    void setExternalMenuPopulation(boolean externalMenuPopulation)
+    {
+        this.externalMenuPopulation = externalMenuPopulation;
     }
 
     void install()
@@ -869,6 +925,11 @@ final class FormTableInteraction
 
     private void ensureCopyMenu()
     {
+        // Внешний режим: меню полностью контролирует хозяин (он стирает все пункты при каждом
+        // показе), поэтому здесь не создаём ни «Копировать», ни SWT.Show-пересборщик — хозяин
+        // зовёт {@link #populateFilterMenuItems(Menu)} из своего rebuildContextMenu.
+        if (externalMenuPopulation)
+            return;
         Menu menu = table.getMenu();
         if (menu == null)
         {
@@ -890,6 +951,22 @@ final class FormTableInteraction
         tableMenu.addListener(SWT.Show, ev -> rebuildFilterMenuItems(tableMenu));
     }
 
+    /**
+     * Для внешнего режима ({@link #setExternalMenuPopulation}): дополнить меню хозяина «Копировать»
+     * и пунктами отбора. Хозяин сам стирает все пункты перед показом, поэтому метод добавляет их
+     * заново при каждом вызове (в отличие от {@link #ensureCopyMenu}, где «Копировать» создаётся
+     * один раз). Вызывается из rebuildContextMenu хозяина — напр. {@code DebugCollectionWindow}.
+     */
+    void populateFilterMenuItems(Menu menu)
+    {
+        if (menu == null || menu.isDisposed() || table.isDisposed())
+            return;
+        MenuItem copyItem = new MenuItem(menu, SWT.PUSH);
+        copyItem.setText("Копировать\tCtrl+C"); //$NON-NLS-1$
+        copyItem.addListener(SWT.Selection, ev -> copyActiveCell());
+        rebuildFilterMenuItems(menu);
+    }
+
     private void rebuildFilterMenuItems(Menu menu)
     {
         for (MenuItem item : filterMenuItems)
@@ -904,17 +981,19 @@ final class FormTableInteraction
         filterMenuItems.add(new MenuItem(menu, SWT.SEPARATOR));
 
         boolean activeCellFiltered = isActiveCellFiltered();
+        boolean canFilter = canFilterByActiveCell();
         MenuItem filterItem = new MenuItem(menu, SWT.PUSH);
         filterItem.setText((activeCellFiltered
             ? "Снять отбор по значению ячейки" //$NON-NLS-1$
             : "Отобрать по значению ячейки") + shortcutSuffix(FILTER_COMMAND_ID)); //$NON-NLS-1$
-        filterItem.setEnabled(activeCellFiltered || canFilterByActiveCell());
+        filterItem.setEnabled(activeCellFiltered || canFilter);
         filterItem.addListener(SWT.Selection, ev -> toggleActiveCellFilter());
         filterMenuItems.add(filterItem);
 
+        boolean canBrowse = canBrowseColumnValues();
         MenuItem valuesItem = new MenuItem(menu, SWT.PUSH);
         valuesItem.setText("Различные значения колонки" + shortcutSuffix(COLUMN_VALUES_COMMAND_ID)); //$NON-NLS-1$
-        valuesItem.setEnabled(canBrowseColumnValues());
+        valuesItem.setEnabled(canBrowse);
         valuesItem.addListener(SWT.Selection, ev -> openColumnValuesDialog());
         filterMenuItems.add(valuesItem);
 
@@ -1032,15 +1111,36 @@ final class FormTableInteraction
         return currentSelectedRow();
     }
 
+    /** Доступен ли механизм отбора по значению ячейки (viewer ИЛИ внешний {@link ColumnValueFilterHost}). */
+    private boolean isColumnValueFilteringAvailable()
+    {
+        return multiSelectViewer != null || columnValueFilterHost != null;
+    }
+
+    /**
+     * Элемент модели активной строки для отбора: внешний хост — его {@link
+     * ColumnValueFilterHost#activeElement} (напр. {@code Integer} logical row, без живого
+     * {@code TableItem}); иначе {@link TableItem#getData} активной строки viewer-режима.
+     */
+    private Object activeFilterElement()
+    {
+        if (columnValueFilterHost != null)
+            return columnValueFilterHost.activeElement();
+        TableItem item = activeRow();
+        return item != null && !item.isDisposed() ? item.getData() : null;
+    }
+
     private boolean canFilterByActiveCell()
     {
-        if (multiSelectViewer == null || table.isDisposed())
+        if (!isColumnValueFilteringAvailable() || table.isDisposed())
             return false;
-        TableItem item = activeRow();
         int column = activeColumnIndex();
-        if (item == null || item.isDisposed() || column < 0)
+        if (column < 0)
             return false;
-        return filterElementText(item.getData(), column) != null;
+        Object element = activeFilterElement();
+        if (element == null)
+            return false;
+        return filterElementText(element, column) != null;
     }
 
     /** По активной колонке уже наложен отбор ровно по значению активной ячейки. */
@@ -1052,10 +1152,10 @@ final class FormTableInteraction
         String applied = columnValueFilters.get(Integer.valueOf(column));
         if (applied == null)
             return false;
-        TableItem item = activeRow();
-        if (item == null || item.isDisposed())
+        Object element = activeFilterElement();
+        if (element == null)
             return false;
-        String value = filterElementText(item.getData(), column);
+        String value = filterElementText(element, column);
         return value != null && applied.equals(value);
     }
 
@@ -1108,11 +1208,13 @@ final class FormTableInteraction
 
     private void filterByActiveCell()
     {
-        TableItem item = activeRow();
         int column = activeColumnIndex();
-        if (item == null || item.isDisposed() || column < 0)
+        if (column < 0)
             return;
-        String value = filterElementText(item.getData(), column);
+        Object element = activeFilterElement();
+        if (element == null)
+            return;
+        String value = filterElementText(element, column);
         if (value == null)
             return;
         applyColumnFilterValue(column, value);
@@ -1121,8 +1223,20 @@ final class FormTableInteraction
     /** Наложить отбор на {@code column} по конкретному значению — используется меню и {@link ColumnValuesDialog}. */
     void applyColumnFilterValue(int column, String value)
     {
-        if (multiSelectViewer == null || column < 0 || value == null)
+        if (!isColumnValueFilteringAvailable() || column < 0 || value == null)
             return;
+        if (columnValueFilterHost != null)
+        {
+            columnValueFilters.put(Integer.valueOf(column), value);
+            // Хост сам пересчитывает видимые строки, обновляет таблицу и восстанавливает активную
+            // ячейку (viewer-овский SelectionSnapshot/refreshKeepingActiveCell ему недоступен).
+            columnValueFilterHost.applyFilters(new LinkedHashMap<>(columnValueFilters));
+            // Индикатор-«крестик» в шапке колонки — без этого external-режим его не показывал:
+            // refreshKeepingActiveCell (с updateFilterIndicators внутри) зовётся только в viewer-ветке.
+            updateFilterIndicators();
+            redrawHeader();
+            return;
+        }
         // Снимок ДО любых мутаций фильтра: JFace-овский addFilter() внутри
         // installColumnValueViewerFilter() сам делает refresh() и перетасовывает TableItem —
         // после него activeRow() указывает уже на ЧУЖОЙ элемент.
@@ -1207,7 +1321,7 @@ final class FormTableInteraction
     private boolean canBrowseColumnValues()
     {
         int column = activeColumnIndex();
-        return multiSelectViewer != null && column >= 0 && supportsElementFilterText(column);
+        return isColumnValueFilteringAvailable() && column >= 0 && supportsElementFilterText(column);
     }
 
     /**
@@ -1231,7 +1345,16 @@ final class FormTableInteraction
     private List<ColumnValuesDialog.ValueRow> computeColumnValueRows(int column, boolean honorOtherFilters)
     {
         List<ColumnValuesDialog.ValueRow> result = new ArrayList<>();
-        if (multiSelectViewer == null || column < 0)
+        if (column < 0)
+            return result;
+        if (columnValueFilterHost != null)
+        {
+            // Внешняя модель (напр. коллекция отладчика): только хост знает, как обойти свои строки
+            // и учесть сторонний substring-поиск + отбор по другим колонкам.
+            List<ColumnValuesDialog.ValueRow> rows = columnValueFilterHost.distinctValues(column, honorOtherFilters);
+            return rows != null ? rows : result;
+        }
+        if (multiSelectViewer == null)
             return result;
         if (!(multiSelectViewer.getContentProvider() instanceof IStructuredContentProvider provider))
             return result;
@@ -1314,9 +1437,9 @@ final class FormTableInteraction
         if (!canBrowseColumnValues() || table.getShell() == null)
             return;
         String header = column < table.getColumnCount() ? table.getColumn(column).getText() : ""; //$NON-NLS-1$
-        TableItem active = activeRow();
-        String initialValue = active != null && !active.isDisposed()
-            ? filterElementText(active.getData(), column)
+        Object activeElement = activeFilterElement();
+        String initialValue = activeElement != null
+            ? filterElementText(activeElement, column)
             : null;
         List<ColumnValuesDialog.ValueRow> rows = computeColumnValueRows(column, true);
         String originalFilterValue = columnValueFilters.get(Integer.valueOf(column));
@@ -1367,21 +1490,38 @@ final class FormTableInteraction
 
     private void clearColumnFilter(int column)
     {
-        SelectionSnapshot snapshot = captureSelection();
         if (columnValueFilters.remove(Integer.valueOf(column)) == null)
             return;
+        if (columnValueFilterHost != null)
+        {
+            columnValueFilterHost.applyFilters(new LinkedHashMap<>(columnValueFilters));
+            updateFilterIndicators();
+            redrawHeader();
+            return;
+        }
+        SelectionSnapshot snapshot = captureSelection();
         refreshKeepingActiveCell(snapshot);
     }
 
     private void clearAllFilters()
     {
-        SelectionSnapshot snapshot = captureSelection();
         boolean hadColumnFilters = !columnValueFilters.isEmpty();
         columnValueFilters.clear();
         // Сначала снять посторонний отбор по подстроке (поле поиска над таблицей) — его слушатель
         // сам обновит viewer, а наш refresh ниже сведёт оба сброса в один визуальный апдейт.
         if (substringFilterClearer != null)
             substringFilterClearer.run();
+        if (columnValueFilterHost != null)
+        {
+            // Внешний хост: substringFilterClearer уже сбросил поле поиска; сообщаем хосту пустой
+            // набор column-value — он пересчитает строки уже без обоих отборов.
+            if (hadColumnFilters || substringFilterClearer != null)
+                columnValueFilterHost.applyFilters(new LinkedHashMap<>());
+            updateFilterIndicators();
+            redrawHeader();
+            return;
+        }
+        SelectionSnapshot snapshot = captureSelection();
         if (hadColumnFilters || substringFilterClearer != null)
             refreshKeepingActiveCell(snapshot);
     }
@@ -3059,8 +3199,12 @@ final class FormTableInteraction
      *
      * <p>Отдельный класс, а не вложенный анонимный: используется только отсюда (единственный
      * потребитель — {@link FormTableInteraction}), поэтому не выносится в свой файл.
+     *
+     * <p>Пакетный (не private): {@link ColumnValuesDialog.ValueRow} — тип возвращаемого значения
+     * {@link ColumnValueFilterHost#distinctValues}, его конструирует хост внешней таблицы
+     * (напр. {@code DebugCollectionWindow}) для диалога по своей модели.
      */
-    private static final class ColumnValuesDialog extends Dialog
+    static final class ColumnValuesDialog extends Dialog
     {
         private static final String SETTINGS_SECTION = "FormTableColumnValuesDialog"; //$NON-NLS-1$
         private static final String KEY_COL_VALUE_WIDTH = "colValueWidth"; //$NON-NLS-1$

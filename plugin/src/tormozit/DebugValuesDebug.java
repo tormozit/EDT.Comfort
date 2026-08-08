@@ -2,7 +2,6 @@ package tormozit;
 
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableColumn;
-import org.eclipse.swt.widgets.TableItem;
 
 /**
  * Диагностика панели «Значения» и команды «Инспектировать».
@@ -60,23 +59,23 @@ public final class DebugValuesDebug
         return (int) ((System.nanoTime() - startNano) / 1_000_000L);
     }
 
+    /**
+     * Краткое описание таблицы для лога. Без {@code getItem(i)} по всем строкам —
+     * на {@code SWT.VIRTUAL} это вызывает SetData на весь itemCount и блокирует UI
+     * (ПКМ по «Коллекция» с тысячами строк).
+     */
     public static String tableBrief(Table table)
     {
         if (table == null || table.isDisposed())
             return "table=disposed"; //$NON-NLS-1$
         int cols = table.getColumnCount();
         int items = table.getItemCount();
-        int visible = 0;
-        for (int i = 0; i < items; i++)
-        {
-            TableItem item = table.getItem(i);
-            if (item != null && !item.isDisposed() && table.getItemHeight() > 0)
-            {
-                if (item.getBounds(0).height > 0)
-                    visible++;
-            }
-        }
-        return "cols=" + cols + " rows=" + items + " visible=" + visible //$NON-NLS-1$ //$NON-NLS-2$
+        int itemH = table.getItemHeight();
+        int clientH = table.getClientArea().height;
+        int visibleEst = itemH > 0 ? Math.max(0, clientH / itemH + 1) : -1;
+        int top = table.getTopIndex();
+        return "cols=" + cols + " rows=" + items //$NON-NLS-1$ //$NON-NLS-2$
+            + " top=" + top + " visibleEst=" + visibleEst //$NON-NLS-1$ //$NON-NLS-2$
             + " headerW=" + sumColumnWidths(table); //$NON-NLS-1$
     }
 

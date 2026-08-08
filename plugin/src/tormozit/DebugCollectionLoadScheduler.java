@@ -1390,6 +1390,9 @@ final class DebugCollectionLoadScheduler
             return;
         }
 
+        SmartMatcher matcher = filter.matcher();
+        boolean hasSubstring = !matcher.isEmpty;
+        boolean hasColumnFilters = filter.hasColumnFilters();
         java.util.BitSet matches = new java.util.BitSet(total);
         for (int row = 0; row < total; row++)
         {
@@ -1397,8 +1400,18 @@ final class DebugCollectionLoadScheduler
                 break;
             try
             {
-                String text = model.rowFilterText(row, filter.isPresentationOnly());
-                if (filter.matcher().matches(text))
+                boolean ok = true;
+                if (hasSubstring)
+                {
+                    String text = model.rowFilterText(row, filter.isPresentationOnly());
+                    ok = matcher.matches(text);
+                }
+                if (ok && hasColumnFilters)
+                {
+                    final int logicalRow = row;
+                    ok = filter.columnFiltersMatch(col -> model.getCellDisplayText(logicalRow, col));
+                }
+                if (ok)
                     matches.set(row);
             }
             catch (DebugException e)

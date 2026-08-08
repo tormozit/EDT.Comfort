@@ -1,10 +1,15 @@
 package tormozit;
 
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
+import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableItem;
@@ -35,6 +40,58 @@ final class DebugCollectionTableInteraction
         this.interaction = new FormTableInteraction(table, this::cellText);
         interaction.setColumnReorderEnabled(false);
         interaction.setCopyHook(this::logCopy);
+        // Меню таблицы полностью контролирует окно (rebuildContextMenu стирает все пункты и
+        // пересобирает) — поэтому FormTableInteraction не вешает свой «Копировать» + SWT.Show.
+        interaction.setExternalMenuPopulation(true);
+    }
+
+    /**
+     * Подключить команды управления отбором из {@link FormTableInteraction} («Отобрать по значению
+     * ячейки», «Различные значения колонки», «Отключить все отборы») к этой таблице. Без вызова
+     * (напр. для fixed-панели «Индекс/Представление») отбор остаётся недоступен — {@code
+     * canFilterByActiveCell} всегда {@code false}. Делегирует хосту таблицы; ключи колонок на границе
+     * с {@link FormTableInteraction} — SWT-индексы этой таблицы, переводятся в видимые индексы модели
+     * через {@link DebugCollectionTableHost#firstVisibleColumnIndex}.
+     */
+    void enableColumnValueFilter()
+    {
+        interaction.setFilterTextResolver(this::filterCellText);
+        interaction.setColumnValueFilterHost(new FormTableInteraction.ColumnValueFilterHost()
+        {
+            @Override
+            public Object activeElement()
+            {
+                return host.activeLogicalElement(table);
+            }
+
+            @Override
+            public void applyFilters(Map<Integer, String> filters)
+            {
+                int base = host.firstVisibleColumnIndex(table);
+                Map<Integer, String> byVisible = new LinkedHashMap<>();
+                for (Map.Entry<Integer, String> e : filters.entrySet())
+                    byVisible.put(Integer.valueOf(base + e.getKey().intValue()), e.getValue());
+                host.applyColumnValueFilters(byVisible);
+            }
+
+            @Override
+            public List<FormTableInteraction.ColumnValuesDialog.ValueRow> distinctValues(
+                int column, boolean honorOtherFilters)
+            {
+                int base = host.firstVisibleColumnIndex(table);
+                return host.distinctColumnValues(base + column, honorOtherFilters);
+            }
+        });
+        interaction.setSubstringFilterClearer(() -> host.clearSubstringFilter());
+    }
+
+    /** Текст ячейки по элементу модели ({@code Integer} logical row) для внешнего отбора. */
+    private String filterCellText(Object element, int column)
+    {
+        if (!(element instanceof Integer logical))
+            return null;
+        int visibleCol = host.firstVisibleColumnIndex(table) + column;
+        return host.getCellDisplayText(logical.intValue(), visibleCol);
     }
 
     /** См. {@link FormTableInteraction#setColumnAutoResizeEnabled(boolean)}. */
@@ -47,6 +104,12 @@ final class DebugCollectionTableInteraction
     {
         interaction.install();
         installCellToolTip();
+    }
+
+    /** См. {@link FormTableInteraction#populateFilterMenuItems}. */
+    void populateFilterMenuItems(Menu menu)
+    {
+        interaction.populateFilterMenuItems(menu);
     }
 
     void dispose()

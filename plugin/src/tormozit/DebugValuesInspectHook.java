@@ -93,7 +93,10 @@ public final class DebugValuesInspectHook implements IStartup
         AbstractDebugView view = valuesViewForTable(table);
         if (view == null || !isIndexedValuesTable(table))
         {
-            DebugValuesDebug.step("MenuDetect", "skip no ValuesView " + DebugValuesDebug.tableBrief(table)); //$NON-NLS-1$ //$NON-NLS-2$
+            // tableBrief нельзя подставлять в аргумент step «вслепую»: выражение
+            // вычисляется до проверки isEnabled() внутри step.
+            if (DebugValuesDebug.isEnabled())
+                DebugValuesDebug.step("MenuDetect", "skip no ValuesView " + DebugValuesDebug.tableBrief(table)); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
 

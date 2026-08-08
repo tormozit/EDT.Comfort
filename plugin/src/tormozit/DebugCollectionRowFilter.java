@@ -1,10 +1,23 @@
 package tormozit;
 
 import java.util.BitSet;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.IntFunction;
 
 /**
  * Smart-фильтр строк коллекции с BitSet и прогрессом фонового скана.
+ *
+ * <p>Два слоя отбора, объединяемые по AND (см. {@link #acceptRow}):
+ * <ul>
+ *   <li>substring — {@link SmartMatcher} по агрегированному тексту строки;</li>
+ *   <li>column-value — точное равенство текста ячейки заданным значениям по одной или нескольким
+ *       колонкам ({@code visibleCol → value}, AND между колонками).</li>
+ * </ul>
+ * Состояние column-value хранит окно (переживает пересоздания фильтра); здесь — лишь носитель на
+ * время скана, устанавливается через {@link #setColumnFilters} и копируется в {@link #copyFrom}.
  */
 final class DebugCollectionRowFilter
 {
@@ -15,6 +28,8 @@ final class DebugCollectionRowFilter
     private volatile boolean scanning;
     private volatile boolean cancelled;
     private volatile boolean presentationOnly;
+    /** {@code visibleCol → эталонное значение}; AND между колонками. Пустая — слой снят. */
+    private volatile Map<Integer, String> columnFilters = Collections.emptyMap();
     private volatile DebugCollectionDisplayIndexMap displayIndexMap = DebugCollectionDisplayIndexMap.empty();
 
     DebugCollectionRowFilter(String pattern)
@@ -29,13 +44,50 @@ final class DebugCollectionRowFilter
         {
             DebugCollectionRowFilter copy = new DebugCollectionRowFilter(pattern);
             if (source != null)
+            {
                 copy.presentationOnly = source.presentationOnly;
+                copy.columnFilters = source.columnFilters;
+            }
             return copy;
         }
         DebugCollectionRowFilter copy = new DebugCollectionRowFilter(pattern);
         copy.presentationOnly = source.presentationOnly;
+        copy.columnFilters = source.columnFilters;
         copy.importFinishedState(source.matches(), source.progressTotal());
         return copy;
+    }
+
+    /** Текущий набор column-value фильтров (невозможен после {@code setColumnFilters}). */
+    void setColumnFilters(Map<Integer, String> columnFilters)
+    {
+        this.columnFilters = columnFilters != null && !columnFilters.isEmpty()
+            ? new LinkedHashMap<>(columnFilters)
+            : Collections.emptyMap();
+    }
+
+    boolean hasColumnFilters()
+    {
+        return !columnFilters.isEmpty();
+    }
+
+    /**
+     * Проходит ли {@code row} слой column-value: для каждой записи текст ячейки (через
+     * {@code cellText}, {@code visibleCol → text}) равен эталонному значению. Вызывается из скана
+     * {@code DebugCollectionLoadScheduler.runFilterScan}; {@code cellText} там —
+     * {@code col -> model.getCellDisplayText(row, col)}.
+     */
+    boolean columnFiltersMatch(IntFunction<String> cellText)
+    {
+        Map<Integer, String> filters = columnFilters;
+        if (filters.isEmpty())
+            return true;
+        for (Map.Entry<Integer, String> entry : filters.entrySet())
+        {
+            String text = cellText.apply(entry.getKey().intValue());
+            if (!entry.getValue().equals(text != null ? text : "")) //$NON-NLS-1$
+                return false;
+        }
+        return true;
     }
 
     void setPresentationOnly(boolean presentationOnly)
@@ -65,7 +117,7 @@ final class DebugCollectionRowFilter
 
     boolean isActive()
     {
-        return !matcher.isEmpty;
+        return !matcher.isEmpty || hasColumnFilters();
     }
 
     boolean isScanning()

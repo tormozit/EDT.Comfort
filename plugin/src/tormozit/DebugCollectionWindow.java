@@ -55,6 +55,7 @@ import org.eclipse.swt.widgets.Control;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -88,6 +89,8 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
     private DebugCollectionTableModel model;
     private DebugCollectionLoadScheduler scheduler;
     private DebugCollectionRowFilter rowFilter;
+    /** Отбор по значениям колонок ({@code visibleCol → эталонное значение}, AND между колонками). */
+    private Map<Integer, String> columnValueFilters = new LinkedHashMap<>();
     private DebugCollectionFindSession findSession;
     private DebugCollectionTableInteraction indexInteraction;
     private DebugCollectionTableInteraction dataInteraction;
@@ -168,6 +171,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         indexInteraction.setColumnAutoResizeEnabled(false);
         indexInteraction.install();
         dataInteraction = new DebugCollectionTableInteraction(splitTable.dataTable(), this);
+        dataInteraction.enableColumnValueFilter();
         dataInteraction.install();
         scheduler = new DebugCollectionLoadScheduler(model, display, this, this::onContextColumnsReady);
         scheduler.bindTable(splitTable.dataTable());
@@ -462,6 +466,99 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         {
             return null;
         }
+    }
+
+    @Override
+    public void clearSubstringFilter()
+    {
+        if (filterInput == null || filterInput.isDisposed())
+            return;
+        filterInput.setText(""); //$NON-NLS-1$
+    }
+
+    @Override
+    public Object activeLogicalElement(Table table)
+    {
+        DebugCollectionTableInteraction interaction = interactionForTable(table);
+        int logical = DebugCollectionFilterViewportAnchor.captureLogicalRow(
+            table, interaction, this::displayIndexToLogical);
+        return logical >= 0 ? Integer.valueOf(logical) : null;
+    }
+
+    @Override
+    public void applyColumnValueFilters(Map<Integer, String> filters)
+    {
+        columnValueFilters = filters != null && !filters.isEmpty()
+            ? new LinkedHashMap<>(filters)
+            : new LinkedHashMap<>();
+        applyCurrentFilters();
+    }
+
+    /**
+     * Различные значения {@code visibleCol} + число строк, СРЕДИ строк, проходящих остальные фильтры
+     * (substring-поиск и column-value по ДРУГИМ колонкам); собственный отбор по {@code visibleCol}
+     * игнорируется. {@code honorOtherFilters=false} — по всем строкам. Синхронно в UI-потоке (O(N×K));
+     * для крупных коллекций может задержать открытие окна «Различные значения колонки».
+     */
+    @Override
+    public List<FormTableInteraction.ColumnValuesDialog.ValueRow> distinctColumnValues(
+        int visibleCol, boolean honorOtherFilters)
+    {
+        List<FormTableInteraction.ColumnValuesDialog.ValueRow> result = new ArrayList<>();
+        if (model == null)
+            return result;
+        int total = effectiveTotalSize();
+        SmartMatcher matcher = (rowFilter != null && honorOtherFilters && !rowFilter.matcher().isEmpty)
+            ? rowFilter.matcher()
+            : null;
+        boolean presOnly = rowFilter != null && rowFilter.isPresentationOnly();
+        // Остальные column-value (кроме текущей колонки) — для режима «Учитывать отбор».
+        Map<Integer, String> others = new LinkedHashMap<>();
+        if (honorOtherFilters)
+        {
+            for (Map.Entry<Integer, String> e : columnValueFilters.entrySet())
+            {
+                if (e.getKey().intValue() != visibleCol)
+                    others.put(e.getKey(), e.getValue());
+            }
+        }
+        Map<String, Integer> counts = new LinkedHashMap<>();
+        for (int row = 0; row < total; row++)
+        {
+            boolean ok = true;
+            if (matcher != null)
+            {
+                try
+                {
+                    ok = matcher.matches(model.rowFilterText(row, presOnly));
+                }
+                catch (DebugException e)
+                {
+                    ok = false;
+                }
+            }
+            if (ok)
+            {
+                for (Map.Entry<Integer, String> e : others.entrySet())
+                {
+                    String t = model.getCellDisplayText(row, e.getKey().intValue());
+                    if (!e.getValue().equals(t != null ? t : "")) //$NON-NLS-1$
+                    {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if (!ok)
+                continue;
+            String value = model.getCellDisplayText(row, visibleCol);
+            if (value == null)
+                continue;
+            counts.merge(value, Integer.valueOf(1), Integer::sum);
+        }
+        for (Map.Entry<String, Integer> e : counts.entrySet())
+            result.add(new FormTableInteraction.ColumnValuesDialog.ValueRow(e.getKey(), e.getValue().intValue()));
+        return result;
     }
 
     void activate()
@@ -1037,12 +1134,17 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         installReadOnlyTextCopySupport(collectionPathField);
     }
 
+    /**
+     * Сброс ТОЛЬКО substring-поиска (поле фильтра); column-value отбор ({@link #columnValueFilters})
+     * сохраняется — это отдельный слой. Полный сброс — {@link #clearSubstringFilter} +
+     * {@link #applyColumnValueFilters} пустым набором (через «Отключить все отборы» в меню).
+     */
     private void clearFilter()
     {
         if (filterInput == null || filterInput.isDisposed())
             return;
         filterInput.setText(""); //$NON-NLS-1$
-        cancelFilterScan();
+        applyCurrentFilters();
     }
 
     private void updateColumnSettingsButton()
@@ -1557,6 +1659,9 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             menu = new Menu(table);
             table.setMenu(menu);
         }
+        // Menu.getParent() возвращает Decorations (shell), а не Table — поэтому связь меню↔таблица
+        // храним сами: rebuildContextMenu по ней решает, добавлять ли команды отбора (только data).
+        menu.setData("tormozit.collectionMenu.table", table); //$NON-NLS-1$
         ensureContextMenuItems(menu);
     }
 
@@ -1643,6 +1748,15 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
                 runInspectOnSelection();
             }
         });
+
+        // Команды управления отбором из FormTableInteraction — только для data-таблицы (там данные;
+        // fixed-панель «Индекс/Представление» отбора не поддерживает). «Копировать» и пункты отбора
+        // добавляет сам FormTableInteraction.populateFilterMenuItems; index-таблица остаётся без них
+        // (только watch+inspect выше), как и прежде.
+        boolean isData = dataInteraction != null
+            && menu.getData("tormozit.collectionMenu.table") == dataTable(); //$NON-NLS-1$
+        if (isData)
+            dataInteraction.populateFilterMenuItems(menu);
     }
 
     private void runInspectOnSelection()
@@ -1742,31 +1856,83 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
         return col != null ? col.header : ""; //$NON-NLS-1$
     }
 
-    private void cancelFilterScan()
+    /**
+     * Единый пересчёт видимых строк по ОБЕИМ слоям отбора: substring (поле фильтра) и column-value
+     * ({@link #columnValueFilters}). Прерывает текущий фоновый скан, строит новый {@link
+     * DebugCollectionRowFilter} с обоими слоями и запускает скан; при отсутствии отборов показывает
+     * все строки. Активная строка сохраняется по {@code logicalRow} (восстановление — по display-индексу).
+     */
+    private void applyCurrentFilters()
     {
-        int anchorLogical = -1;
         Table data = dataTable();
-        DebugCollectionTableInteraction interaction = activeInteraction();
-        if (rowFilter != null && rowFilter.isActive())
-            anchorLogical = DebugCollectionFilterViewportAnchor.captureLogicalRow(
-                data, interaction, this::displayIndexToLogical);
+        DebugCollectionTableInteraction interaction = dataInteraction;
+        // Якорь захватываем ВСЕГДА (даже когда фильтр ещё не активен) — иначе при наложении ПЕРВОГО
+        // отбора (переход «нет фильтра → есть») восстанавливать было бы нечего: до скана isActive()
+        // = false, anchor остался бы -1, и активная строка терялась бы на пересоздании TableItem.
+        int anchorLogical = DebugCollectionFilterViewportAnchor.captureLogicalRow(
+            data, interaction, this::displayIndexToLogical);
+        // final-копия для использования в callback-лямбде скана.
+        final int anchor = anchorLogical;
 
         if (rowFilter != null)
             rowFilter.cancelScan();
         if (scheduler != null)
             scheduler.cancelFilterScan();
-        rowFilter = new DebugCollectionRowFilter(""); //$NON-NLS-1$
+
+        String text = filterInput != null && !filterInput.isDisposed() ? filterInput.getText() : ""; //$NON-NLS-1$
+        rowFilter = new DebugCollectionRowFilter(text);
+        rowFilter.setPresentationOnly(isFilterByPresentationSelected());
+        rowFilter.setColumnFilters(columnValueFilters);
         int total = effectiveTotalSize();
-        updateTableItemCount(total);
-        if (splitTable != null)
+        if (!rowFilter.isActive())
         {
-            splitTable.clearAll();
-            if (anchorLogical >= 0)
+            // Ни substring, ни column-value — показать все строки (display == logical).
+            updateTableItemCount(total);
+            if (splitTable != null)
             {
-                DebugCollectionFilterViewportAnchor.restoreLogicalRow(data, anchorLogical, total, interaction);
-                splitTable.setTopIndex(data.getTopIndex());
+                splitTable.clearAll();
+                if (anchor >= 0)
+                {
+                    DebugCollectionFilterViewportAnchor.restoreLogicalRow(data, anchor, total, interaction);
+                    splitTable.setTopIndex(data.getTopIndex());
+                }
+                scheduleViewportCapture();
             }
-            scheduleViewportCapture();
+            DebugCollectionDebug.step("filter", "no filter; shown all"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        rowFilter.beginScan(total);
+        DebugCollectionDebug.step("filter", "beginScan total=" + total); //$NON-NLS-1$ //$NON-NLS-2$
+        scheduler.scheduleFilterScan(rowFilter, () -> {
+            if (rowFilter.isCancelled())
+                return;
+            int visible = rowFilter.visibleCount(total);
+            updateTableItemCount(visible);
+            if (splitTable != null)
+            {
+                splitTable.clearAll();
+                restoreAnchorByDisplay(data, anchor, visible, interaction);
+                scheduleViewportCapture();
+            }
+            DebugCollectionDebug.step("filter", "scanDone visible=" + visible); //$NON-NLS-1$ //$NON-NLS-2$
+        });
+    }
+
+    /** Восстановить активную строку после скана: по {@code display}-индексу логической строки. */
+    private void restoreAnchorByDisplay(Table data, int anchorLogical, int visibleCount,
+        DebugCollectionTableInteraction interaction)
+    {
+        if (data == null || data.isDisposed() || anchorLogical < 0 || rowFilter == null)
+            return;
+        int display = rowFilter.displayIndexForLogicalRow(anchorLogical, effectiveTotalSize());
+        if (display < 0 || display >= visibleCount || data.getItemCount() <= display)
+            return;
+        data.setTopIndex(display);
+        TableItem item = data.getItem(display);
+        if (item != null && interaction != null)
+        {
+            int column = Math.max(0, interaction.activeColumn());
+            interaction.selectCell(item, column);
         }
     }
 
@@ -1774,43 +1940,11 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
     {
         if (filterInput == null || filterInput.isDisposed())
         {
-            DebugCollectionDebug.step("filter", "SKIP filterInput null");
+            DebugCollectionDebug.step("filter", "SKIP filterInput null"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
-        String text = filterInput.getText();
-        DebugCollectionDebug.step("filter", "text=[" + text + "]");
-        if (text == null || text.isBlank())
-        {
-            cancelFilterScan();
-            return;
-        }
-        if (rowFilter != null)
-            rowFilter.cancelScan();
-        if (scheduler != null)
-            scheduler.cancelFilterScan();
-        rowFilter = new DebugCollectionRowFilter(text);
-        rowFilter.setPresentationOnly(isFilterByPresentationSelected());
-        int total = effectiveTotalSize();
-        if (!rowFilter.isActive())
-        {
-            updateTableItemCount(total);
-            if (splitTable != null)
-                splitTable.clearAll();
-            scheduleViewportCapture();
-            DebugCollectionDebug.step("filter", "scheduled viewport after filter");
-            return;
-        }
-        rowFilter.beginScan(total);
-        DebugCollectionDebug.step("filter", "beginScan total=" + total);
-        scheduler.scheduleFilterScan(rowFilter, () -> {
-            DebugCollectionDebug.step("filter", "scanDone visible=" + rowFilter.visibleCount(total) + " cancelled=" + rowFilter.isCancelled());
-            if (rowFilter.isCancelled())
-                return;
-            updateTableItemCount(rowFilter.visibleCount(total));
-            if (splitTable != null)
-                splitTable.clearAll();
-            scheduleViewportCapture();
-        });
+        DebugCollectionDebug.step("filter", "text=[" + filterInput.getText() + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        applyCurrentFilters();
     }
 
     private void onVerticalScroll()
