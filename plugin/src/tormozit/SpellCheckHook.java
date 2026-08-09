@@ -38,6 +38,8 @@ import org.eclipse.jface.text.Position;
 import org.eclipse.jface.text.Region;
 import org.eclipse.jface.text.contentassist.CompletionProposal;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
+import org.eclipse.jface.text.reconciler.DirtyRegion;
+import org.eclipse.jface.text.reconciler.IReconcilingStrategy;
 import org.eclipse.jface.text.source.Annotation;
 import org.eclipse.jface.text.source.IAnnotationModel;
 import org.eclipse.jface.text.source.ISourceViewer;
@@ -65,10 +67,15 @@ import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.ui.IEditorInput;
 import org.eclipse.ui.IEditorPart;
+import org.eclipse.ui.IEditorReference;
+import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IPropertyListener;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IWorkbenchPage;
+import org.eclipse.ui.IWorkbenchPart;
+import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
+import org.eclipse.ui.IWindowListener;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.editors.text.EditorsUI;
 import org.eclipse.ui.ide.IDE;
@@ -83,6 +90,11 @@ import org.eclipse.ui.texteditor.spelling.SpellingService;
  * Hunspell RU+EN через {@code registerDictionary}, пункт в combo через кэш locales
  * + переименование подписи на странице «Орфография».
  * Отдельный spelling engine плагин больше не регистрирует.
+ *
+ * <p>Побочный эффект глобального {@code spellingEnabled}: WST XML (.mdo и др.) тоже
+ * рисует волны, но по сырому тексту с порогом — UX бессмысленный. Поэтому штатный
+ * {@code SpellcheckStrategy} в XML глушим, не трогая флажок и нашу орфографию
+ * в BSL / свойствах / коммите.
  */
 public final class SpellCheckHook implements IStartup
 {
@@ -100,12 +112,29 @@ public final class SpellCheckHook implements IStartup
         "Пользовательский словарь — текст, по одному слову в строке"; //$NON-NLS-1$
     private static final int MAX_ENHANCE_ATTEMPTS = 40;
     private static final int ENHANCE_RETRY_MS = 100;
+    private static final int MAX_XML_SPELL_MUTE_ATTEMPTS = 100;
+    private static final String XML_SPELL_MUTE_KEY = "tormozit.comfort.xmlSpellMuted"; //$NON-NLS-1$
+    private static final String WST_TEMP_SPELLING_TYPE =
+        "org.eclipse.wst.sse.ui.temp.spelling"; //$NON-NLS-1$
+    private static final String DOCUMENT_REGION_PROCESSOR =
+        "org.eclipse.wst.sse.ui.internal.reconcile.DocumentRegionProcessor"; //$NON-NLS-1$
 
     private static final WeakHashMap<Shell, Boolean> pendingEnhance = new WeakHashMap<>();
     private static final WeakHashMap<PreferenceDialog, Boolean> pageListenersAttached =
         new WeakHashMap<>();
     private static final WeakHashMap<IEditorPart, Boolean> userDictEditorsHooked =
         new WeakHashMap<>();
+    /** Multipage XML, на которые уже повешен page-changed для mute. */
+    private static final Set<IEditorPart> XML_PAGE_MUTE_HOOKED =
+        Collections.newSetFromMap(new WeakHashMap<>());
+
+    /** Подмена {@code fSpellcheckStrategy}: getSpellcheckStrategy не создаст штатный заново. */
+    private static final IReconcilingStrategy XML_SPELL_NOOP = new IReconcilingStrategy()
+    {
+        @Override public void setDocument(IDocument document) {}
+        @Override public void reconcile(DirtyRegion dirtyRegion, IRegion subRegion) {}
+        @Override public void reconcile(IRegion partition) {}
+    };
 
     private static final String HOVER_COPY_FILTER_KEY = "tormozit.spellHover.copyFilter.v4"; //$NON-NLS-1$
     private static volatile boolean reloadingUserDictEditor;
@@ -128,9 +157,214 @@ public final class SpellCheckHook implements IStartup
             {
                 installPreferencePageEnhancements(display);
                 installAnnotationHoverCopyFilter(display);
+                installXmlSpellingMute();
             });
         }
         logDiagnostics();
+    }
+
+    /**
+     * Глушит штатный WST {@code SpellcheckStrategy} в редакторе XML (.mdo и т.п.):
+     * подмена {@code DocumentRegionProcessor.fSpellcheckStrategy} на no-op + сброс
+     * уже нарисованных spelling-аннотаций. Общий {@code spellingEnabled} не трогаем.
+     */
+    private static void installXmlSpellingMute()
+    {
+        IWorkbenchWindow[] windows = PlatformUI.getWorkbench().getWorkbenchWindows();
+        for (IWorkbenchWindow window : windows)
+            hookXmlSpellingMuteWindow(window);
+        PlatformUI.getWorkbench().addWindowListener(new IWindowListener()
+        {
+            @Override public void windowOpened(IWorkbenchWindow w) { hookXmlSpellingMuteWindow(w); }
+            @Override public void windowActivated(IWorkbenchWindow w) {}
+            @Override public void windowDeactivated(IWorkbenchWindow w) {}
+            @Override public void windowClosed(IWorkbenchWindow w) {}
+        });
+    }
+
+    private static void hookXmlSpellingMuteWindow(IWorkbenchWindow window)
+    {
+        if (window == null)
+            return;
+        for (IWorkbenchPage page : window.getPages())
+        {
+            if (page == null)
+                continue;
+            IEditorPart active = page.getActiveEditor();
+            if (active != null)
+                scheduleMuteXmlEditor(active, 0);
+            for (IEditorReference ref : page.getEditorReferences())
+            {
+                IEditorPart ed = ref.getEditor(false);
+                if (ed != null && ed != active)
+                    scheduleMuteXmlEditor(ed, 0);
+            }
+        }
+        window.getPartService().addPartListener(new IPartListener2()
+        {
+            @Override public void partOpened(IWorkbenchPartReference ref)    { muteFromRef(ref); }
+            @Override public void partActivated(IWorkbenchPartReference ref) { muteFromRef(ref); }
+            @Override public void partVisible(IWorkbenchPartReference ref)   { muteFromRef(ref); }
+            @Override public void partBroughtToTop(IWorkbenchPartReference ref) { muteFromRef(ref); }
+            @Override public void partInputChanged(IWorkbenchPartReference ref) { muteFromRef(ref); }
+            @Override public void partClosed(IWorkbenchPartReference ref) {}
+            @Override public void partDeactivated(IWorkbenchPartReference ref) {}
+            @Override public void partHidden(IWorkbenchPartReference ref) {}
+
+            private void muteFromRef(IWorkbenchPartReference ref)
+            {
+                if (!(ref instanceof IEditorReference))
+                    return;
+                IEditorPart ed = ((IEditorReference) ref).getEditor(false);
+                if (ed != null)
+                    scheduleMuteXmlEditor(ed, 0);
+            }
+        });
+    }
+
+    private static void scheduleMuteXmlEditor(IEditorPart editor, int attempt)
+    {
+        if (editor == null || !shouldMuteXmlSpelling(editor))
+            return;
+        hookXmlMultipagePageChanges(editor);
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() -> muteXmlEditorSpelling(editor, attempt));
+    }
+
+    private static boolean shouldMuteXmlSpelling(IEditorPart editor)
+    {
+        if (XmlEditorShowInNavigatorHandler.isXmlEditor(editor))
+            return true;
+        // .mdo/.form часто в XMLMultiPage; на всякий случай — по расширению.
+        org.eclipse.core.resources.IFile file =
+            XmlEditorShowInNavigatorHandler.resolveFile(editor);
+        if (file == null)
+            return false;
+        String ext = file.getFileExtension();
+        return ext != null
+            && ("mdo".equalsIgnoreCase(ext) //$NON-NLS-1$
+                || "form".equalsIgnoreCase(ext) //$NON-NLS-1$
+                || "xml".equalsIgnoreCase(ext)); //$NON-NLS-1$
+    }
+
+    private static void hookXmlMultipagePageChanges(IEditorPart editor)
+    {
+        if (!(editor instanceof IPageChangeProvider provider))
+            return;
+        if (!XML_PAGE_MUTE_HOOKED.add(editor))
+            return;
+        provider.addPageChangedListener(event ->
+        {
+            Object page = event.getSelectedPage();
+            if (page instanceof IEditorPart nested)
+                scheduleMuteXmlEditor(nested, 0);
+            else
+                scheduleMuteXmlEditor(editor, 0);
+        });
+    }
+
+    private static void muteXmlEditorSpelling(IEditorPart editor, int attempt)
+    {
+        if (editor == null || editor.getSite() == null)
+            return;
+        ITextEditor textEditor = TextEditor.resolveTextEditor(editor);
+        if (textEditor == null)
+        {
+            if (attempt < MAX_XML_SPELL_MUTE_ATTEMPTS)
+            {
+                Display display = Display.getDefault();
+                if (display != null && !display.isDisposed())
+                    display.asyncExec(() -> muteXmlEditorSpelling(editor, attempt + 1));
+            }
+            return;
+        }
+        ISourceViewer viewer = TextEditor.getSourceViewer(textEditor);
+        if (!(viewer instanceof SourceViewer sourceViewer))
+        {
+            if (attempt < MAX_XML_SPELL_MUTE_ATTEMPTS)
+            {
+                Display display = Display.getDefault();
+                if (display != null && !display.isDisposed())
+                    display.asyncExec(() -> muteXmlEditorSpelling(editor, attempt + 1));
+            }
+            return;
+        }
+        if (Boolean.TRUE.equals(sourceViewer.getTextWidget() != null
+            ? sourceViewer.getTextWidget().getData(XML_SPELL_MUTE_KEY) : null))
+        {
+            // Уже глушили; на всякий случай снова зафиксируем no-op (prefs/recreate).
+            ensureXmlSpellNoop(sourceViewer);
+            return;
+        }
+        Object reconciler = Global.getField(sourceViewer, "fReconciler"); //$NON-NLS-1$
+        if (reconciler == null)
+        {
+            if (attempt < MAX_XML_SPELL_MUTE_ATTEMPTS)
+            {
+                Display display = Display.getDefault();
+                if (display != null && !display.isDisposed())
+                    display.asyncExec(() -> muteXmlEditorSpelling(editor, attempt + 1));
+            }
+            return;
+        }
+        if (!isDocumentRegionProcessor(reconciler))
+            return;
+        if (!ensureXmlSpellNoop(sourceViewer))
+            return;
+        clearXmlSpellingAnnotations(sourceViewer);
+        StyledText widget = sourceViewer.getTextWidget();
+        if (widget != null && !widget.isDisposed())
+            widget.setData(XML_SPELL_MUTE_KEY, Boolean.TRUE);
+        Global.tempLog("xml-spell-mute", //$NON-NLS-1$
+            "ok attempt=" + attempt + " " + editor.getTitle()); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static boolean ensureXmlSpellNoop(SourceViewer viewer)
+    {
+        Object reconciler = Global.getField(viewer, "fReconciler"); //$NON-NLS-1$
+        if (reconciler == null || !isDocumentRegionProcessor(reconciler))
+            return false;
+        Object current = Global.getField(reconciler, "fSpellcheckStrategy"); //$NON-NLS-1$
+        if (current == XML_SPELL_NOOP)
+            return true;
+        // Снять preference listener штатной стратегии (иначе orphaned reconcile вернёт волны).
+        if (current != null)
+            Global.invoke(current, "setDocument", (Object) null); //$NON-NLS-1$
+        return Global.setFieldForce(reconciler, "fSpellcheckStrategy", XML_SPELL_NOOP); //$NON-NLS-1$
+    }
+
+    private static boolean isDocumentRegionProcessor(Object reconciler)
+    {
+        for (Class<?> c = reconciler.getClass(); c != null; c = c.getSuperclass())
+        {
+            if (DOCUMENT_REGION_PROCESSOR.equals(c.getName()))
+                return true;
+        }
+        return false;
+    }
+
+    private static void clearXmlSpellingAnnotations(ISourceViewer viewer)
+    {
+        if (viewer == null)
+            return;
+        IAnnotationModel model = viewer.getAnnotationModel();
+        if (model == null)
+            return;
+        List<Annotation> toRemove = new ArrayList<>();
+        Iterator<?> it = model.getAnnotationIterator();
+        while (it.hasNext())
+        {
+            Object next = it.next();
+            if (!(next instanceof Annotation ann))
+                continue;
+            String type = ann.getType();
+            if (SpellingAnnotation.TYPE.equals(type) || WST_TEMP_SPELLING_TYPE.equals(type))
+                toRemove.add(ann);
+        }
+        for (Annotation ann : toRemove)
+            model.removeAnnotation(ann);
     }
 
     /**
