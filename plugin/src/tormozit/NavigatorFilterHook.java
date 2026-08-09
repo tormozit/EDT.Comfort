@@ -6,9 +6,11 @@ import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.jface.viewers.StyledCellLabelProvider;
 import org.eclipse.jface.viewers.ViewerComparator;
+import org.eclipse.swt.SWT;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Tree;
+import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IViewPart;
@@ -59,6 +61,17 @@ public final class NavigatorFilterHook implements IStartup
     private static final String FILTER_ACTIVE_KEY = "tormozit.navigatorFilterActive"; //$NON-NLS-1$
     private static final String NATIVE_RECOVERY_HOLDER_KEY = "tormozit.navigatorNativeRecoveryHolder"; //$NON-NLS-1$
     private static final String CLEAR_IN_PROGRESS_KEY = "tormozit.navigatorSearchClearInProgress"; //$NON-NLS-1$
+    /**
+     * Метка окна между планированием {@link #scheduleAfterNativeSearchClear} и завершением
+     * отложенного {@code rebindNavigatorBridge} — пока фильтр подсистем ещё не переподключён
+     * к viewer'у после снятия текстового поиска. Только сигнал для других фич (например,
+     * динамической группировки общих модулей, issue #117), которым нужно на это время
+     * приостановить свою логику, чтобы не мигать неотфильтрованным результатом; не влияет
+     * на существующую логику снятия поиска.
+     */
+    private static final String SUBSYSTEMS_REBIND_PENDING_KEY = "tormozit.navigatorSubsystemsRebindPending"; //$NON-NLS-1$
+    /** Обёртка фильтра подсистем уже «прогрета» — см. {@link #warmUpSubsystemsBridge}. */
+    private static final String SUBSYSTEMS_WARMED_KEY = "tormozit.navigatorSubsystemsWarmed"; //$NON-NLS-1$
     private static volatile String lastGiveUpReason = ""; //$NON-NLS-1$
 
     @Override
@@ -327,7 +340,10 @@ public final class NavigatorFilterHook implements IStartup
             if (safePattern.isEmpty() && searchInput.isWidgetSearchEmpty())
                 onSearchCleared(navigator, viewer, tree, nativeRecoveryPending);
             else if (!safePattern.isEmpty())
+            {
+                warmUpSubsystemsBridge(navigator, tree);
                 NavigatorNativeSearchBridge.scheduleNativeFilterRecovery(navigator, viewer, nativeRecoveryPending);
+            }
         });
         NavigatorFilterDebug.log("patternListener attached=" + listenerOk + " mode=" + input.mode()); //$NON-NLS-1$ //$NON-NLS-2$
 
@@ -345,8 +361,63 @@ public final class NavigatorFilterHook implements IStartup
         tree.setData(SEARCH_CACHE_KEY, searchCache);
         tree.setData(HIGHLIGHT_KEY, highlight);
         NavigatorAttributePropertiesHook.ensureInstalled(navigator, viewer);
+        installScrollDiagnostics(tree);
         return true;
     }
+
+    // #region ВРЕМЕННАЯ диагностика фантомного скролла (issue #117) — удалить после фикса.
+    private static final String SCROLL_DIAG_KEY = "tormozit.scrollDiagInstalled"; //$NON-NLS-1$
+    private static final String SCROLL_DIAG_TOPIC = "phantomScroll"; //$NON-NLS-1$
+
+    private static void installScrollDiagnostics(Tree tree)
+    {
+        if (tree == null || tree.isDisposed() || Boolean.TRUE.equals(tree.getData(SCROLL_DIAG_KEY)))
+            return;
+        tree.setData(SCROLL_DIAG_KEY, Boolean.TRUE);
+
+        tree.addListener(SWT.MouseDown, e -> {
+            String before = scrollState(tree);
+            Global.tempLog(SCROLL_DIAG_TOPIC, "MouseDown BEFORE " + before); //$NON-NLS-1$
+            Display d = tree.getDisplay();
+            d.asyncExec(() -> {
+                if (!tree.isDisposed())
+                    Global.tempLog(SCROLL_DIAG_TOPIC, "MouseDown AFTER  " + scrollState(tree)); //$NON-NLS-1$
+            });
+        });
+        tree.addListener(SWT.FocusIn, e ->
+                Global.tempLog(SCROLL_DIAG_TOPIC, "FocusIn          " + scrollState(tree))); //$NON-NLS-1$
+        tree.addListener(SWT.Selection, e ->
+                Global.tempLog(SCROLL_DIAG_TOPIC, "Selection        " + scrollState(tree))); //$NON-NLS-1$
+        tree.getVerticalBar().addListener(SWT.Selection, e ->
+                Global.tempLog(SCROLL_DIAG_TOPIC, "VScroll          " + scrollState(tree))); //$NON-NLS-1$
+
+        Global.tempLog(SCROLL_DIAG_TOPIC, "diagnostics installed on tree"); //$NON-NLS-1$
+    }
+
+    private static String scrollState(Tree tree)
+    {
+        if (tree == null || tree.isDisposed())
+            return "disposed"; //$NON-NLS-1$
+        TreeItem top = tree.getTopItem();
+        TreeItem[] sel = tree.getSelection();
+        String topText = top == null ? "null" : safeText(top); //$NON-NLS-1$
+        String selText = sel.length == 0 ? "none" : safeText(sel[0]); //$NON-NLS-1$
+        return "top=\"" + topText + "\" scrollY=" + tree.getVerticalBar().getSelection() //$NON-NLS-1$ //$NON-NLS-2$
+                + " selection=\"" + selText + "\""; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static String safeText(TreeItem item)
+    {
+        try
+        {
+            return item.getText();
+        }
+        catch (RuntimeException e)
+        {
+            return "<err>"; //$NON-NLS-1$
+        }
+    }
+    // #endregion
 
     /** Только подсветка на UI; фильтрация — штатный SearchJob (не блокирует ввод). */
     private static void applyHighlightState(CommonViewer viewer, Tree tree, SmartLabelHighlight highlight,
@@ -568,11 +639,14 @@ public final class NavigatorFilterHook implements IStartup
             //
             // Не делать viewer.refresh(), пока search-filter ещё active: refresh при живом
             // NavigatorSearchFilter и уже пустом/полуочищенном trie даёт пустое дерево.
+            Global.tempLog(SCROLL_DIAG_TOPIC, "onSearchCleared START " + scrollState(tree)); //$NON-NLS-1$
             if (viewer != null && tree != null)
                 NavigatorNativeSearchBridge.reinstallComfortEngineOnly(navigator, viewer, tree);
             ObjectSetSubsystemsFilterBridge.adoptNativeAfterFilterUiChange(navigator,
                     "navigatorSearchCleared"); //$NON-NLS-1$
             NavigatorFilterDebug.log("searchCleared " + NavigatorFilterDebug.filtersDesc(viewer)); //$NON-NLS-1$
+            Global.tempLog(SCROLL_DIAG_TOPIC,
+                    "onSearchCleared after adoptNativeAfterFilterUiChange " + scrollState(tree)); //$NON-NLS-1$
 
             // После searchDelay штатной очистки — rebind+refresh и при необходимости force-clear.
             scheduleAfterNativeSearchClear(navigator, viewer, tree, display);
@@ -593,31 +667,114 @@ public final class NavigatorFilterHook implements IStartup
     {
         if (display == null || display.isDisposed() || navigator == null || tree == null)
             return;
+        // Set-clear пара строго вокруг фактически запланированного timerExec — иначе при раннем
+        // return выше флаг некому будет снять (см. SUBSYSTEMS_REBIND_PENDING_KEY).
+        tree.setData(SUBSYSTEMS_REBIND_PENDING_KEY, Boolean.TRUE);
         display.timerExec(700, () -> {
-            if (tree.isDisposed())
-                return;
-            Object searchBox = Global.getField(navigator, "searchBox"); //$NON-NLS-1$
-            SearchBoxFilterAccess input = SearchBoxFilterAccess.resolveQuiet(navigator, searchBox);
-            if (input == null || !input.isWidgetSearchEmpty())
-                return;
-            boolean active = Boolean.TRUE.equals(Global.invoke(navigator, "isSearchFilterActive")); //$NON-NLS-1$
-            String nativePattern = readNativeActivePattern(navigator);
-            if (Boolean.TRUE.equals(tree.getData(CLEAR_IN_PROGRESS_KEY)))
-                return;
-            tree.setData(CLEAR_IN_PROGRESS_KEY, Boolean.TRUE);
+            Global.tempLog(SCROLL_DIAG_TOPIC, "timerExec(700) FIRED " + scrollState(tree)); //$NON-NLS-1$
+            Object topElementBefore = topScrollElement(tree);
             try
             {
-                if (active || (nativePattern != null && !nativePattern.isEmpty()))
-                    triggerNativeSearchClear(navigator);
-                // Теперь search должен быть снят — можно refresh.
-                ObjectSetSubsystemsFilterBridge.rebindNavigatorBridge(navigator, "navigatorSearchClearedDeferred"); //$NON-NLS-1$
+                if (tree.isDisposed())
+                    return;
+                Object searchBox = Global.getField(navigator, "searchBox"); //$NON-NLS-1$
+                SearchBoxFilterAccess input = SearchBoxFilterAccess.resolveQuiet(navigator, searchBox);
+                if (input == null || !input.isWidgetSearchEmpty())
+                {
+                    Global.tempLog(SCROLL_DIAG_TOPIC, "timerExec GIVE UP input=" //$NON-NLS-1$
+                            + (input == null ? "null" : "notEmpty")); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
+                boolean active = Boolean.TRUE.equals(Global.invoke(navigator, "isSearchFilterActive")); //$NON-NLS-1$
+                String nativePattern = readNativeActivePattern(navigator);
+                if (Boolean.TRUE.equals(tree.getData(CLEAR_IN_PROGRESS_KEY)))
+                    return;
+                tree.setData(CLEAR_IN_PROGRESS_KEY, Boolean.TRUE);
+                try
+                {
+                    if (active || (nativePattern != null && !nativePattern.isEmpty()))
+                    {
+                        Global.tempLog(SCROLL_DIAG_TOPIC, "before triggerNativeSearchClear " + scrollState(tree)); //$NON-NLS-1$
+                        triggerNativeSearchClear(navigator);
+                        Global.tempLog(SCROLL_DIAG_TOPIC, "after  triggerNativeSearchClear " + scrollState(tree)); //$NON-NLS-1$
+                    }
+                    // Теперь search должен быть снят — можно refresh.
+                    Global.tempLog(SCROLL_DIAG_TOPIC, "before rebindNavigatorBridge     " + scrollState(tree)); //$NON-NLS-1$
+                    ObjectSetSubsystemsFilterBridge.rebindNavigatorBridge(navigator, "navigatorSearchClearedDeferred"); //$NON-NLS-1$
+                    Global.tempLog(SCROLL_DIAG_TOPIC, "after  rebindNavigatorBridge     " + scrollState(tree)); //$NON-NLS-1$
+                }
+                finally
+                {
+                    if (!tree.isDisposed())
+                        tree.setData(CLEAR_IN_PROGRESS_KEY, null);
+                }
             }
             finally
             {
                 if (!tree.isDisposed())
-                    tree.setData(CLEAR_IN_PROGRESS_KEY, null);
+                {
+                    tree.setData(SUBSYSTEMS_REBIND_PENDING_KEY, null);
+                    // Пока флаг был выставлен, зависимые фичи (например, группировка общих
+                    // модулей, issue #117) намеренно показывали "сырое" содержимое без себя —
+                    // досюда снять флаг мало, нужен ещё один refresh, чтобы они вернулись.
+                    // (asyncExec здесь пробовался и давал ДВОЙНОЙ рывок скролла — хуже, чем
+                    // синхронный вызов; вернули как было.)
+                    if (viewer != null)
+                    {
+                        Global.tempLog(SCROLL_DIAG_TOPIC, "before our extra refresh()       " + scrollState(tree)); //$NON-NLS-1$
+                        viewer.refresh();
+                        Global.tempLog(SCROLL_DIAG_TOPIC, "after  our extra refresh()       " + scrollState(tree)); //$NON-NLS-1$
+                        restoreTopScrollElement(viewer, tree, topElementBefore);
+                        Global.tempLog(SCROLL_DIAG_TOPIC, "after  restore top item          " + scrollState(tree)); //$NON-NLS-1$
+                    }
+                }
             }
         });
+    }
+
+    /**
+     * Разово ставит обёртку фильтра подсистем ещё во время НАБОРА текста поиска.
+     *
+     * <p>Её ленивая первичная установка ({@code installBridge} → {@code removeFilter}/{@code addFilter},
+     * каждый со своим {@code refresh()}) сворачивает дерево и теряет выделение, занимая ~375 мс
+     * вместо обычных ~2 мс. Раньше это приходилось на ПЕРВУЮ очистку поиска — поэтому первый цикл
+     * «фильтр → выделить строку → очистить фильтр» терял раскрытие и текущую строку, а все
+     * последующие работали правильно (issue #117). Во время набора дерево и так перестраивается
+     * штатным фильтром, поэтому здесь сброс незаметен.
+     */
+    private static void warmUpSubsystemsBridge(IViewPart navigator, Tree tree)
+    {
+        if (tree == null || tree.isDisposed() || Boolean.TRUE.equals(tree.getData(SUBSYSTEMS_WARMED_KEY)))
+            return;
+        tree.setData(SUBSYSTEMS_WARMED_KEY, Boolean.TRUE);
+        ObjectSetSubsystemsFilterBridge.adoptNativeAfterFilterUiChange(navigator, "navigatorSearchTyping"); //$NON-NLS-1$
+    }
+
+    /** Элемент модели в верхней видимой строке дерева — «якорь» прокрутки. */
+    private static Object topScrollElement(Tree tree)
+    {
+        if (tree == null || tree.isDisposed())
+            return null;
+        TreeItem top = tree.getTopItem();
+        return top != null && !top.isDisposed() ? top.getData() : null;
+    }
+
+    /**
+     * Возвращает дерево на ту же строку прокрутки, что была до перестроения.
+     *
+     * <p>И {@code rebindNavigatorBridge}, и {@code refresh()} внутри себя делают reveal текущего
+     * выделения, причём каждый — по-своему, из-за чего позиция прокрутки скачет дважды подряд
+     * («фантомный скролл» при снятии текстового фильтра, issue #117). Замеры: 121 → 234 → 93 при
+     * неизменном выделении. Без группировки общих модулей обе позиции совпадали, поэтому эффект
+     * был незаметен; с группировкой структура дерева между вызовами разная — рывки видны.
+     */
+    private static void restoreTopScrollElement(CommonViewer viewer, Tree tree, Object topElement)
+    {
+        if (viewer == null || topElement == null || tree == null || tree.isDisposed())
+            return;
+        org.eclipse.swt.widgets.Widget item = viewer.testFindItem(topElement);
+        if (item instanceof TreeItem treeItem && !treeItem.isDisposed())
+            tree.setTopItem(treeItem);
     }
 
     /** Сброс штатного SearchPerformer / SearchBox. */
@@ -656,6 +813,66 @@ public final class NavigatorFilterHook implements IStartup
     {
         Object viewer = Global.invoke(navigator, "getCommonViewer"); //$NON-NLS-1$
         return viewer instanceof CommonViewer ? (CommonViewer) viewer : null;
+    }
+
+    /**
+     * Обновляет все открытые навигаторы EDT во всех окнах — для настроек, которые сразу должны
+     * быть видны в уже построенном дереве без перезапуска EDT (например, флажок динамической
+     * группировки общих модулей, issue #117).
+     */
+    static void refreshAllNavigators()
+    {
+        IWorkbench wb = PlatformUI.getWorkbench();
+        if (wb == null)
+            return;
+        for (IWorkbenchWindow window : wb.getWorkbenchWindows())
+        {
+            if (window == null)
+                continue;
+            for (IWorkbenchPage page : window.getPages())
+            {
+                if (page == null)
+                    continue;
+                for (IViewReference ref : page.getViewReferences())
+                {
+                    IViewPart view = ref.getView(false);
+                    if (!isNavigatorView(view))
+                        continue;
+                    CommonViewer viewer = getCommonViewer(view);
+                    if (viewer != null && !viewer.getControl().isDisposed())
+                        viewer.refresh();
+                }
+            }
+        }
+    }
+
+    /**
+     * Активен ли сейчас паттерн умного фильтра навигатора (непустая строка в поиске) — только чтение,
+     * без побочных эффектов. Используется другими фичами навигатора (например, динамической
+     * группировкой общих модулей, issue #117), которым нужно временно отключать свою логику,
+     * пока пользователь ищет текст, — иначе результат поиска может не находить элементы,
+     * вложенные на дополнительный уровень.
+     */
+    static boolean isSmartFilterPatternActive(Tree tree)
+    {
+        if (tree == null || tree.isDisposed())
+            return false;
+        return Boolean.TRUE.equals(tree.getData(FILTER_ACTIVE_KEY));
+    }
+
+    /**
+     * Идёт ли сейчас переподключение фильтра по подсистемам после снятия текстового поиска
+     * (окно {@link #scheduleAfterNativeSearchClear}) — только чтение, без побочных эффектов.
+     * До завершения переподключения фильтр по подсистемам на viewer'е может отсутствовать или
+     * быть в переходном состоянии; фичам, которые сами фильтруют по его результату (динамическая
+     * группировка общих модулей, issue #117), лучше на это время придержать свою логику —
+     * иначе виден мусорный неотфильтрованный промежуточный результат.
+     */
+    static boolean isSubsystemsRebindPending(Tree tree)
+    {
+        if (tree == null || tree.isDisposed())
+            return false;
+        return Boolean.TRUE.equals(tree.getData(SUBSYSTEMS_REBIND_PENDING_KEY));
     }
 
 

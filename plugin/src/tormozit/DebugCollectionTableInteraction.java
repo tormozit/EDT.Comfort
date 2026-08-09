@@ -75,7 +75,7 @@ final class DebugCollectionTableInteraction
             }
 
             @Override
-            public List<FormTableInteraction.ColumnValuesDialog.ValueRow> distinctValues(
+            public List<ColumnValuesDialog.ValueRow> distinctValues(
                 int column, boolean honorOtherFilters)
             {
                 int base = host.firstVisibleColumnIndex(table);

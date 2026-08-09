@@ -1,5 +1,8 @@
 package tormozit;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import org.eclipse.core.runtime.preferences.InstanceScope;
 import org.eclipse.jface.preference.IPreferenceStore;
 import org.eclipse.swt.graphics.RGB;
@@ -42,6 +45,23 @@ public final class ComfortSettings
 
     /** Значение «Заменять фильтры в списках» по умолчанию. */
     public static final boolean DEFAULT_REPLACE_LIST_FILTERS = true;
+
+    /**
+     * Ключ: включена ли динамическая группировка общих модулей в навигаторе по имени/суффиксу
+     * (issue #117). Чисто визуально, ничего не хранится — см. {@link CommonModuleGrouping}.
+     */
+    public static final String PREF_GROUP_COMMON_MODULES_ENABLED = "comfort.navigator.groupCommonModules.enabled"; //$NON-NLS-1$
+
+    /** Ключ: список суффиксов имён общих модулей через запятую, используемых для группировки. */
+    public static final String PREF_GROUP_COMMON_MODULES_SUFFIXES = "comfort.navigator.groupCommonModules.suffixes"; //$NON-NLS-1$
+
+    /** Группировка общих модулей выключена по умолчанию (opt-in). */
+    public static final boolean DEFAULT_GROUP_COMMON_MODULES_ENABLED = false;
+
+    /** Суффиксы по умолчанию — стандартное соглашение 1С об именовании общих модулей. */
+    public static final String DEFAULT_GROUP_COMMON_MODULES_SUFFIXES =
+            "Клиент,Сервер,КлиентСервер,ПовтИсп,КлиентПовтИсп,ВызовСервера," //$NON-NLS-1$
+            + "Переопределяемый,Изменяемый,Кэш,Вызов"; //$NON-NLS-1$
 
     /**
      * Ключ: цвет подсветки вхождений smart-фильтра (хранятся RGB светлой темы, строка "R,G,B").
@@ -305,6 +325,34 @@ public final class ComfortSettings
         if (settings == null)
             return DEFAULT_REPLACE_LIST_FILTERS;
         return settings.preferenceStore.getBoolean(PREF_REPLACE_LIST_FILTERS);
+    }
+
+    /** Читает актуальное значение из хранилища (без кэша). */
+    public static boolean isGroupCommonModulesEnabled()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_GROUP_COMMON_MODULES_ENABLED;
+        return settings.preferenceStore.getBoolean(PREF_GROUP_COMMON_MODULES_ENABLED);
+    }
+
+    /** Разбирает список суффиксов из хранилища (через запятую, с обрезкой пробелов). */
+    public static List<String> getGroupCommonModulesSuffixes()
+    {
+        ComfortSettings settings = instance;
+        String raw = settings != null
+                ? settings.preferenceStore.getString(PREF_GROUP_COMMON_MODULES_SUFFIXES)
+                : DEFAULT_GROUP_COMMON_MODULES_SUFFIXES;
+        if (raw == null || raw.isBlank())
+            raw = DEFAULT_GROUP_COMMON_MODULES_SUFFIXES;
+        List<String> result = new ArrayList<>();
+        for (String part : raw.split(",")) //$NON-NLS-1$
+        {
+            String trimmed = part.trim();
+            if (!trimmed.isEmpty())
+                result.add(trimmed);
+        }
+        return result;
     }
 
     /**

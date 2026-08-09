@@ -121,9 +121,14 @@ import org.eclipse.ui.actions.ActionFactory;
  *
  * <p>Выбор ячейки, подсветка активной ячейки/строки и копирование по Ctrl+C — {@link
  * #GitStagingTreeInteraction}, по образцу {@code DebugInspectorTreeEnhancement} (control остаётся
- * штатным {@code Tree}/{@code TreeViewer} — drag&drop stage/unstage, контекстное меню, открытие
- * сравнения по двойному клику и автоподстановка commit message остаются штатными EGit, не
- * переопределяются).
+ * штатным {@code Tree}/{@code TreeViewer} — drag&drop stage/unstage, открытие сравнения по
+ * двойному клику и автоподстановка commit message остаются штатными EGit, не переопределяются).
+ * Штатное контекстное меню только дополняется группой пунктов отбора по значению ячейки (issue
+ * #266, п.2–5: «Отобрать/Снять отбор», «Различные значения колонки», «Отключить все отборы»,
+ * «Отобрано элементов: N») — {@link TreeColumnValueFilterSupport}, общий код с {@link
+ * FormTableInteraction} через {@link ColumnFilterMenuBuilder}. Группа идёт в КОРЕНЬ меню (не в
+ * подменю «Комфорт»), обрамлённая разделителями. Текст ячейки для отбора — тот же {@link
+ * #sortKey}, что и для сортировки колонок.
  *
  * <p>Логирование: Параметры → Комфорт → «Общее логирование».
  */
@@ -598,6 +603,11 @@ public final class GitStagingFilterHook implements IStartup
         GitStagingTreeInteraction interaction = new GitStagingTreeInteraction(tree, viewer);
         interaction.install();
         tree.addDisposeListener(e -> saveColumnState(tree, columnSettings()));
+
+        TreeColumnValueFilterSupport.CellTextResolver textResolver = (element, physicalColumn) ->
+            sortKey(element, logicalOfColumn(tree, physicalColumn));
+        new TreeColumnValueFilterSupport(viewer, tree, textResolver,
+            interaction::activeElement, interaction::activeColumnIndex).install();
 
         Debug.log("installColumnsAndInteraction " + viewerField + ": columns=" //$NON-NLS-1$ //$NON-NLS-2$
             + tree.getColumnCount());
@@ -1345,6 +1355,22 @@ public final class GitStagingFilterHook implements IStartup
             if (sel.length > 0)
                 return sel[0];
             return selectedItem;
+        }
+
+        /** Элемент модели активной строки — для {@link TreeColumnValueFilterSupport}. */
+        Object activeElement()
+        {
+            TreeItem row = currentSelectedRow();
+            return row != null && !row.isDisposed() ? row.getData() : null;
+        }
+
+        /** Индекс активной колонки (0, если ещё не выбрана) — для {@link TreeColumnValueFilterSupport}. */
+        int activeColumnIndex()
+        {
+            int column = activeColumn;
+            if (column < 0 || column >= tree.getColumnCount())
+                column = 0;
+            return column;
         }
 
         void copyActiveCellToClipboard()

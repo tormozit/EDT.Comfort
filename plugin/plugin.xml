@@ -1056,4 +1056,50 @@
   Точка расширения полностью нерабочая на этой сборке EDT/БСП_3, а не только конкретный биндинг.
   -->
 
+  <!-- Динамическая группировка общих модулей в навигаторе по имени/суффиксу (issue #117).
+       Механизм подтверждён рабочим прецедентом (DitriXNew/EDT-MCP): additive navigatorContent
+       + commonFilter, не подмена штатного content provider'а EDT. Включается флажком
+       ComfortSettings.PREF_GROUP_COMMON_MODULES_ENABLED (по умолчанию выключено). -->
+  <extension point="org.eclipse.ui.navigator.navigatorContent">
+    <navigatorContent
+          id="tormozit.groupCommonModules.content"
+          name="Группировка общих модулей (Комфорт)"
+          contentProvider="tormozit.CommonModuleGroupContentProvider"
+          labelProvider="tormozit.CommonModuleGroupLabelProvider"
+          activeByDefault="true"
+          priority="highest">
+      <commonSorter class="tormozit.CommonModuleGroupSorter"/>
+      <triggerPoints>
+        <or>
+          <instanceof value="org.eclipse.ui.model.IWorkbenchAdapter"/>
+          <instanceof value="com._1c.g5.v8.dt.metadata.mdclass.CommonModule"/>
+          <instanceof value="tormozit.CommonModuleGroupNode"/>
+        </or>
+      </triggerPoints>
+      <possibleChildren>
+        <or>
+          <instanceof value="tormozit.CommonModuleGroupNode"/>
+          <instanceof value="com._1c.g5.v8.dt.metadata.mdclass.CommonModule"/>
+        </or>
+      </possibleChildren>
+    </navigatorContent>
+    <commonFilter
+          id="tormozit.groupCommonModules.filter"
+          name="Скрывать сгруппированные общие модули (Комфорт)"
+          description="Прячет из папки «Общие модули» модули, попавшие в динамическую группу по имени"
+          class="tormozit.CommonModuleGroupedObjectsFilter"
+          activeByDefault="true"
+          visibleInUI="false">
+    </commonFilter>
+  </extension>
+
+  <extension point="org.eclipse.ui.navigator.viewer">
+    <viewerContentBinding viewerId="com._1c.g5.v8.dt.ui2.navigator">
+      <includes>
+        <contentExtension pattern="tormozit.groupCommonModules.content"/>
+        <contentExtension pattern="tormozit.groupCommonModules.filter"/>
+      </includes>
+    </viewerContentBinding>
+  </extension>
+
 </plugin>

@@ -84,6 +84,12 @@ public class Activator extends AbstractUIPlugin
         settings.getPreferenceStore().setDefault(
             ComfortSettings.PREF_COMPARE_FILTER_AWARE_CHECKS,
             ComfortSettings.DEFAULT_COMPARE_FILTER_AWARE_CHECKS);
+        settings.getPreferenceStore().setDefault(
+            ComfortSettings.PREF_GROUP_COMMON_MODULES_ENABLED,
+            ComfortSettings.DEFAULT_GROUP_COMMON_MODULES_ENABLED);
+        settings.getPreferenceStore().setDefault(
+            ComfortSettings.PREF_GROUP_COMMON_MODULES_SUFFIXES,
+            ComfortSettings.DEFAULT_GROUP_COMMON_MODULES_SUFFIXES);
         ContentAssistManager.init(settings);
         ComfortSettings.init(PLUGIN_ID);
         settings.getPreferenceStore().addPropertyChangeListener(event -> {

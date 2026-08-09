@@ -84,5 +84,11 @@ public class ComfortInitializer extends AbstractPreferenceInitializer
         store.setDefault(
             ComfortSettings.PREF_ENABLE_HOVER_HINTS,
             ComfortSettings.DEFAULT_ENABLE_HOVER_HINTS);
+        store.setDefault(
+            ComfortSettings.PREF_GROUP_COMMON_MODULES_ENABLED,
+            ComfortSettings.DEFAULT_GROUP_COMMON_MODULES_ENABLED);
+        store.setDefault(
+            ComfortSettings.PREF_GROUP_COMMON_MODULES_SUFFIXES,
+            ComfortSettings.DEFAULT_GROUP_COMMON_MODULES_SUFFIXES);
     }
 }

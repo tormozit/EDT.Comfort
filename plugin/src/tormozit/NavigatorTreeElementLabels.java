@@ -52,6 +52,8 @@ public final class NavigatorTreeElementLabels
             return false;
         if (element instanceof INavigatorContentProviderFolder)
             return true;
+        if (element instanceof CommonModuleGroupNode)
+            return true;
 
         String className = element.getClass().getName();
         if (className.endsWith("$Folder")) //$NON-NLS-1$

@@ -12,6 +12,7 @@ import org.eclipse.jface.preference.IPreferencePageContainer;
 import org.eclipse.jface.preference.IPreferenceStore;
 import org.eclipse.jface.preference.IntegerFieldEditor;
 import org.eclipse.jface.preference.PreferenceConverter;
+import org.eclipse.jface.preference.StringFieldEditor;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.ControlAdapter;
 import org.eclipse.swt.events.ControlEvent;
@@ -188,6 +189,8 @@ public class ComfortPreferencePage
             getFieldEditorParent());
         addField(improveDebuggerField);
         setFieldTooltip(improveDebuggerField, IMPROVE_DEBUGGER_WINDOWS_TOOLTIP);
+
+        createGroupCommonModulesFields();
 
         // === Группа «Редактор кода» ===
         Group codeEditorGroup = new Group(getFieldEditorParent(), SWT.NONE);
@@ -439,6 +442,29 @@ public class ComfortPreferencePage
                 return;
             ComfortPreferences.openChangesUrl(REPLACE_LIST_FILTERS_DOC_URL);
         });
+    }
+
+    /** Флажок + список суффиксов для динамической группировки общих модулей в навигаторе (issue #117). */
+    private void createGroupCommonModulesFields()
+    {
+        BooleanFieldEditor groupCommonModulesField = new BooleanFieldEditor(
+            ComfortSettings.PREF_GROUP_COMMON_MODULES_ENABLED,
+            "Группировать общие модули в навигаторе по имени", //$NON-NLS-1$
+            getFieldEditorParent());
+        addField(groupCommonModulesField);
+        setFieldTooltip(groupCommonModulesField,
+            "Чисто визуально сворачивает семейства общих модулей с одинаковой основой имени\n"
+            + "(например ВариантыОтветов / ВариантыОтветовКлиент / ВариантыОтветовКлиентСервер)\n"
+            + "в одну группу в дереве навигатора. Структура конфигурации не меняется."); //$NON-NLS-1$
+
+        StringFieldEditor groupCommonModulesSuffixesField = new StringFieldEditor(
+            ComfortSettings.PREF_GROUP_COMMON_MODULES_SUFFIXES,
+            "Суффиксы имён общих модулей (через запятую):", //$NON-NLS-1$
+            getFieldEditorParent());
+        addField(groupCommonModulesSuffixesField);
+        setFieldTooltip(groupCommonModulesSuffixesField,
+            "Суффикс отрезается от имени модуля, чтобы получить имя группы. Если у модуля\n"
+            + "подходит несколько суффиксов из списка, применяется самый длинный из них."); //$NON-NLS-1$
     }
 
     /** «Цвет фильтра» сразу под строкой «Улучшать списки». */
@@ -950,6 +976,7 @@ public class ComfortPreferencePage
             SmartMatchHighlight.clearColorCache();
             BslServerCallHighlightingHook.refreshAllEditors();
             BracketContentHintHook.refreshAllEditors();
+            NavigatorFilterHook.refreshAllNavigators();
         }
         return result;
     }

@@ -254,7 +254,7 @@ final class FilterInputBox
         return create(parent, opts, onSearch);
     }
 
-    /** Фильтр по подстроке в окне «Значения колонки» ({@code FormTableInteraction.ColumnValuesDialog}) — на всю ширину. */
+    /** Фильтр по подстроке в окне «Значения колонки» ({@code ColumnValuesDialog}) — на всю ширину. */
     static FilterInputBox forColumnValues(Composite parent, Runnable onSearch)
     {
         Options opts = new Options();

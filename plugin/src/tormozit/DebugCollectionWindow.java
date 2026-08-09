@@ -501,10 +501,10 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
      * для крупных коллекций может задержать открытие окна «Различные значения колонки».
      */
     @Override
-    public List<FormTableInteraction.ColumnValuesDialog.ValueRow> distinctColumnValues(
+    public List<ColumnValuesDialog.ValueRow> distinctColumnValues(
         int visibleCol, boolean honorOtherFilters)
     {
-        List<FormTableInteraction.ColumnValuesDialog.ValueRow> result = new ArrayList<>();
+        List<ColumnValuesDialog.ValueRow> result = new ArrayList<>();
         if (model == null)
             return result;
         int total = effectiveTotalSize();
@@ -557,7 +557,7 @@ public final class DebugCollectionWindow implements DebugCollectionLoadScheduler
             counts.merge(value, Integer.valueOf(1), Integer::sum);
         }
         for (Map.Entry<String, Integer> e : counts.entrySet())
-            result.add(new FormTableInteraction.ColumnValuesDialog.ValueRow(e.getKey(), e.getValue().intValue()));
+            result.add(new ColumnValuesDialog.ValueRow(e.getKey(), e.getValue().intValue()));
         return result;
     }
 

@@ -57,7 +57,7 @@ interface DebugCollectionTableHost
      * Различные значения колонки + число строк — для «Различные значения колонки». Реализация по
      * умолчанию — пустой список (скелет).
      */
-    default List<FormTableInteraction.ColumnValuesDialog.ValueRow> distinctColumnValues(
+    default List<ColumnValuesDialog.ValueRow> distinctColumnValues(
         int visibleCol, boolean honorOtherFilters)
     {
         return List.of();
