@@ -19,9 +19,6 @@ import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.IAction;
-import org.eclipse.jface.action.IMenuCreator;
-import org.eclipse.jface.action.IToolBarManager;
-import org.eclipse.jface.action.Separator;
 import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
@@ -57,15 +54,12 @@ import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
-import org.eclipse.swt.widgets.Menu;
-import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeColumn;
 import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.IActionBars;
 import org.eclipse.ui.IPartListener2;
-import org.eclipse.ui.ISharedImages;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.IViewReference;
@@ -121,10 +115,9 @@ import org.eclipse.ui.actions.ActionFactory;
  * <p>Дерево получает колонки «Имя»/«Тип»/«Путь»/«Время изменения»/«Статус»
  * ({@link #GitStagingLabelProvider}, {@link #installColumns}) — «Путь» через
  * {@link GetRef#resolveFullNameOrNull}, как в панели «Результаты поиска» ({@link FileSearchResultsHook}),
- * но отдельной колонкой, а не дописыванием в текст строки. Видимость «Тип»/«Путь»/«Время
- * изменения»/«Статус» — через выпадающее меню в тулбаре ({@link #installColumnVisibilityToolbar}),
- * «Имя» всегда видима. Порядок/ширины колонок — раздельно для {@code stagedViewer}/{@code
- * unstagedViewer} ({@link #saveColumnState}), видимость — общая на весь вид.
+ * но отдельной колонкой, а не дописыванием в текст строки. Порядок и ширины колонок
+ * синхронизируются между {@code stagedViewer}/{@code unstagedViewer}
+ * ({@link #saveColumnState}, {@link #syncWidthToPeer}/{@link #syncOrderToPeer}).
  *
  * <p>Выбор ячейки, подсветка активной ячейки/строки и копирование по Ctrl+C — {@link
  * #GitStagingTreeInteraction}, по образцу {@code DebugInspectorTreeEnhancement} (control остаётся
@@ -234,8 +227,7 @@ public final class GitStagingFilterHook implements IStartup
     }
 
     // -----------------------------------------------------------------------
-    // Настройки колонок (видимость/порядок/ширина) — общая видимость на весь вид,
-    // порядок и ширины — раздельно для stagedViewer/unstagedViewer.
+    // Настройки колонок (порядок/ширина) — общие для stagedViewer/unstagedViewer.
     // -----------------------------------------------------------------------
 
     private static IDialogSettings columnSettings()
@@ -245,11 +237,6 @@ public final class GitStagingFilterHook implements IStartup
         if (section == null)
             section = top.addNewSection(COLUMN_SETTINGS_SECTION);
         return section;
-    }
-
-    private static String visibilityKey(int logical)
-    {
-        return "colVisible" + COLUMN_KEYS[logical]; //$NON-NLS-1$
     }
 
     /** Общий ключ (не раздельно staged/unstaged) — колонки в обеих панелях синхронны по порядку/ширине. */
@@ -263,48 +250,26 @@ public final class GitStagingFilterHook implements IStartup
         return "colWidth" + COLUMN_KEYS[logical]; //$NON-NLS-1$
     }
 
-    private static boolean readVisible(IDialogSettings settings, String key)
+    private static int[] defaultOrder()
     {
-        String raw = settings.get(key);
-        return raw == null || Boolean.parseBoolean(raw);
-    }
-
-    /** [COL_NAME]=true всегда; остальные — сохранённая видимость (по умолчанию видимы). */
-    private static boolean[] loadVisibility(IDialogSettings settings)
-    {
-        boolean[] visible = new boolean[COLUMN_COUNT];
-        visible[COL_NAME] = true;
-        visible[COL_TYPE] = readVisible(settings, visibilityKey(COL_TYPE));
-        visible[COL_PATH] = readVisible(settings, visibilityKey(COL_PATH));
-        visible[COL_TIME] = readVisible(settings, visibilityKey(COL_TIME));
-        visible[COL_STATUS] = readVisible(settings, visibilityKey(COL_STATUS));
-        return visible;
-    }
-
-    private static int[] defaultOrder(boolean[] visible)
-    {
-        List<Integer> order = new ArrayList<>();
-        for (int logical = 0; logical < COLUMN_COUNT; logical++)
-            if (logical == COL_NAME || visible[logical])
-                order.add(logical);
-        int[] result = new int[order.size()];
-        for (int i = 0; i < result.length; i++)
-            result[i] = order.get(i);
+        int[] result = new int[COLUMN_COUNT];
+        for (int i = 0; i < COLUMN_COUNT; i++)
+            result[i] = i;
         return result;
     }
 
-    /** Сохранённый порядок — только если это перестановка ровно ТЕКУЩЕГО набора видимых колонок. */
-    private static int[] loadOrder(IDialogSettings settings, boolean[] visible)
+    /** Сохранённый порядок — только если это перестановка всех {@link #COLUMN_COUNT} колонок. */
+    private static int[] loadOrder(IDialogSettings settings)
     {
-        int[] def = defaultOrder(visible);
+        int[] def = defaultOrder();
         String raw = settings.get(orderKey());
         if (raw == null || raw.isBlank())
             return def;
         String[] parts = raw.split(","); //$NON-NLS-1$
-        if (parts.length != def.length)
+        if (parts.length != COLUMN_COUNT)
             return def;
         boolean[] seen = new boolean[COLUMN_COUNT];
-        int[] order = new int[parts.length];
+        int[] order = new int[COLUMN_COUNT];
         for (int i = 0; i < parts.length; i++)
         {
             int logical;
@@ -316,8 +281,7 @@ public final class GitStagingFilterHook implements IStartup
             {
                 return def;
             }
-            boolean shouldBeVisible = logical == COL_NAME || (logical >= 0 && logical < COLUMN_COUNT && visible[logical]);
-            if (logical < 0 || logical >= COLUMN_COUNT || seen[logical] || !shouldBeVisible)
+            if (logical < 0 || logical >= COLUMN_COUNT || seen[logical])
                 return def;
             seen[logical] = true;
             order[i] = logical;
@@ -325,14 +289,14 @@ public final class GitStagingFilterHook implements IStartup
         return order;
     }
 
-    /** Пересоздаёт TreeColumn по сохранённым видимости/порядку/ширинам (идемпотентно). */
-    private static void installColumns(Tree tree, boolean[] visible, IDialogSettings settings, IViewPart view)
+    /** Пересоздаёт TreeColumn по сохранённым порядку/ширинам (идемпотентно). */
+    private static void installColumns(Tree tree, IDialogSettings settings, IViewPart view)
     {
         if (tree == null || tree.isDisposed())
             return;
         for (TreeColumn c : tree.getColumns())
             c.dispose();
-        int[] order = loadOrder(settings, visible);
+        int[] order = loadOrder(settings);
         for (int logical : order)
         {
             TreeColumn col = new TreeColumn(tree, SWT.LEFT);
@@ -368,7 +332,7 @@ public final class GitStagingFilterHook implements IStartup
         tree.setLinesVisible(true);
     }
 
-    /** Порядок (по текущим видимым логическим колонкам) + ширины — одним проходом (ключи общие, не per-viewer). */
+    /** Порядок + ширины — одним проходом (ключи общие, не per-viewer). */
     private static void saveColumnState(Tree tree, IDialogSettings settings)
     {
         if (tree == null || tree.isDisposed() || tree.getColumnCount() <= 0)
@@ -447,7 +411,7 @@ public final class GitStagingFilterHook implements IStartup
         return order;
     }
 
-    /** {@code false} — набор логических колонок на дереве не совпал с {@code logicalOrder} (рассинхрон видимости). */
+    /** {@code false} — набор логических колонок на дереве не совпал с {@code logicalOrder}. */
     private static boolean applyLogicalOrder(Tree tree, int[] logicalOrder)
     {
         if (tree.getColumnCount() != logicalOrder.length)
@@ -555,7 +519,6 @@ public final class GitStagingFilterHook implements IStartup
             addHistoryButton(filterText);
 
             installCopyOverride(view);
-            installColumnVisibilityToolbar(view);
 
             session.onModify();
 
@@ -630,8 +593,7 @@ public final class GitStagingFilterHook implements IStartup
     private static void installColumnsAndInteraction(IViewPart view, TreeViewer viewer, Tree tree, String viewerField)
     {
         IDialogSettings settings = columnSettings();
-        boolean[] visible = loadVisibility(settings);
-        installColumns(tree, visible, settings, view);
+        installColumns(tree, settings, view);
 
         GitStagingTreeInteraction interaction = new GitStagingTreeInteraction(tree, viewer);
         interaction.install();
@@ -1317,16 +1279,6 @@ public final class GitStagingFilterHook implements IStartup
             tree.addDisposeListener(e -> invalidateColors());
         }
 
-        /** После пересоздания TreeColumn (переключение видимости) — привести activeColumn в валидный диапазон. */
-        void onColumnsRebuilt()
-        {
-            if (activeColumn < 0 || activeColumn >= tree.getColumnCount())
-                activeColumn = 0;
-            invalidateColors();
-            syncSortIndicator();
-            tree.redraw();
-        }
-
         // ---- сортировка по клику на заголовке колонки ----
 
         /** Клик по заголовку: переключить/сменить сортировку, сохранив текущее выделение. */
@@ -1367,27 +1319,6 @@ public final class GitStagingFilterHook implements IStartup
             if (elements.length == 0)
                 return;
             viewer.setSelection(new StructuredSelection(elements), true);
-        }
-
-        /** Индикатор сортировки (стрелка на заголовке) — TreeColumn пересоздаётся при переключении видимости. */
-        private void syncSortIndicator()
-        {
-            if (sortLogical < 0)
-            {
-                tree.setSortColumn(null);
-                return;
-            }
-            for (TreeColumn col : tree.getColumns())
-            {
-                Object data = col.getData(COLUMN_LOGICAL_KEY);
-                if (data instanceof Integer li && li == sortLogical)
-                {
-                    tree.setSortColumn(col);
-                    tree.setSortDirection(sortAscending ? SWT.UP : SWT.DOWN);
-                    return;
-                }
-            }
-            tree.setSortColumn(null);
         }
 
         private void selectCell(TreeItem item, int column)
@@ -1581,7 +1512,7 @@ public final class GitStagingFilterHook implements IStartup
     }
 
     // -----------------------------------------------------------------------
-    // Тулбар: копирование активной ячейки (Ctrl+C / Edit>Copy) + видимость колонок
+    // Тулбар: копирование активной ячейки (Ctrl+C / Edit>Copy)
     // -----------------------------------------------------------------------
 
     /** Заменяет глобальный обработчик Copy на активной ячейке того Tree, в котором сейчас фокус. */
@@ -1616,123 +1547,10 @@ public final class GitStagingFilterHook implements IStartup
         }
     }
 
-    /** Выпадающее меню в тулбаре вида — пометки видимости колонок «Тип»/«Путь»/«Время изменения»/«Статус». */
-    private static void installColumnVisibilityToolbar(IViewPart view)
-    {
-        try
-        {
-            IActionBars bars = view.getViewSite().getActionBars();
-            if (bars == null)
-                return;
-            IToolBarManager tbm = bars.getToolBarManager();
-            if (tbm == null)
-                return;
-
-            Action columnsAction = new Action(null, IAction.AS_DROP_DOWN_MENU)
-            {
-                @Override
-                public void run()
-                {
-                }
-            };
-            columnsAction.setText("Колонки"); //$NON-NLS-1$
-            columnsAction.setToolTipText("Видимость колонок" + Global.pluginSignForTooltip()); //$NON-NLS-1$
-            columnsAction.setImageDescriptor(
-                PlatformUI.getWorkbench().getSharedImages().getImageDescriptor(ISharedImages.IMG_OBJ_ELEMENT));
-            columnsAction.setMenuCreator(new ColumnsMenuCreator(view));
-
-            tbm.add(new Separator());
-            tbm.add(columnsAction);
-            bars.updateActionBars();
-            Debug.log("installColumnVisibilityToolbar OK"); //$NON-NLS-1$
-        }
-        catch (Exception e)
-        {
-            Debug.log("installColumnVisibilityToolbar EXCEPTION: " + e); //$NON-NLS-1$
-        }
-    }
-
     private static TreeViewer treeViewerOf(IViewPart view, String field)
     {
         Object obj = Global.getField(view, field);
         return obj instanceof TreeViewer tv && !tv.getControl().isDisposed() ? tv : null;
-    }
-
-    private static void toggleColumnVisibility(int logical, IViewPart view)
-    {
-        IDialogSettings settings = columnSettings();
-        TreeViewer stagedViewer = treeViewerOf(view, "stagedViewer"); //$NON-NLS-1$
-        TreeViewer unstagedViewer = treeViewerOf(view, "unstagedViewer"); //$NON-NLS-1$
-        // Ключи общие — порядок/ширины у обеих панелей и так синхронны (см. syncWidthToPeer/syncOrderToPeer),
-        // сохраняем из любой доступной, второй раз не нужно.
-        Tree sourceTree = stagedViewer != null ? stagedViewer.getTree()
-            : unstagedViewer != null ? unstagedViewer.getTree() : null;
-        if (sourceTree != null)
-            saveColumnState(sourceTree, settings);
-
-        boolean current = readVisible(settings, visibilityKey(logical));
-        settings.put(visibilityKey(logical), !current);
-        boolean[] visible = loadVisibility(settings);
-
-        rebuildTreeColumns(stagedViewer, visible, settings, view);
-        rebuildTreeColumns(unstagedViewer, visible, settings, view);
-        Debug.log("toggleColumnVisibility logical=" + logical + " visible=" + !current); //$NON-NLS-1$ //$NON-NLS-2$
-    }
-
-    private static void rebuildTreeColumns(TreeViewer viewer, boolean[] visible, IDialogSettings settings,
-        IViewPart view)
-    {
-        if (viewer == null || viewer.getTree().isDisposed())
-            return;
-        Tree tree = viewer.getTree();
-        installColumns(tree, visible, settings, view);
-        Object data = tree.getData(INTERACTION_KEY);
-        if (data instanceof GitStagingTreeInteraction interaction)
-            interaction.onColumnsRebuilt();
-        viewer.refresh();
-    }
-
-    /** Выпадающее меню тулбара: чекбоксы «Тип»/«Путь»/«Время изменения»/«Статус» («Имя» всегда видима). */
-    private static final class ColumnsMenuCreator implements IMenuCreator
-    {
-        private final IViewPart view;
-        private Menu menu;
-
-        ColumnsMenuCreator(IViewPart view)
-        {
-            this.view = view;
-        }
-
-        @Override
-        public Menu getMenu(Menu parent)
-        {
-            return null;
-        }
-
-        @Override
-        public Menu getMenu(Control parent)
-        {
-            if (menu != null && !menu.isDisposed())
-                menu.dispose();
-            menu = new Menu(parent);
-            for (int logical : new int[] { COL_TYPE, COL_PATH, COL_TIME, COL_STATUS })
-            {
-                MenuItem item = new MenuItem(menu, SWT.CHECK);
-                item.setText(COLUMN_HEADERS[logical]);
-                item.setSelection(readVisible(columnSettings(), visibilityKey(logical)));
-                int logicalFinal = logical;
-                item.addListener(SWT.Selection, e -> toggleColumnVisibility(logicalFinal, view));
-            }
-            return menu;
-        }
-
-        @Override
-        public void dispose()
-        {
-            if (menu != null && !menu.isDisposed())
-                menu.dispose();
-            menu = null;
-        }
     }
 
     // -----------------------------------------------------------------------

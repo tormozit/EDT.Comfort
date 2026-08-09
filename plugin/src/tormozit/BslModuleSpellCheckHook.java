@@ -45,6 +45,8 @@ import org.eclipse.jface.action.ActionContributionItem;
 import org.eclipse.jface.action.IContributionItem;
 import org.eclipse.jface.action.IToolBarManager;
 import org.eclipse.jface.action.ToolBarManager;
+import org.eclipse.jface.dialogs.IPageChangedListener;
+import org.eclipse.jface.dialogs.PageChangedEvent;
 import org.eclipse.jface.resource.ImageDescriptor;
 import org.eclipse.jface.text.AbstractInformationControlManager;
 import org.eclipse.jface.text.DocumentEvent;
@@ -180,12 +182,17 @@ public final class BslModuleSpellCheckHook implements IStartup
     private static final int SUGGEST_MAX = 12;
     private static final int SUGGEST_UI_THROTTLE_MS = 300;
     private static final String LOADING_MARKER = "..."; //$NON-NLS-1$
+    /** Повторы ожидания viewer/document через asyncExec (restore при старте EDT). */
+    private static final int MAX_ATTACH_ATTEMPTS = 100;
     /** Выше вариантов; Xtext {@code sortQuickfixes} иначе сортирует по алфавиту. */
     private static final int PRIORITY_ADD_TO_DICTIONARY = 1000;
     private static final int PRIORITY_SUGGESTION = 100;
     private static final int PRIORITY_LOADING = 1;
 
     private static final Map<BslXtextEditor, EditorSession> SESSIONS = new WeakHashMap<>();
+    /** Granular-редакторы, на которые уже повешен {@link IPageChangedListener}. */
+    private static final Set<DtGranularEditor<?>> HOOKED_GRANULAR =
+        Collections.newSetFromMap(new WeakHashMap<>());
     private static final String ANNOTATION_HOVER_WRAP_KEY = "tormozit.comfort.annotationHoverWrapped"; //$NON-NLS-1$
     /** Состояние навигации маркеров в sticky annotation hover. */
     private static volatile AnnotationHoverNavState annotationHoverNav;
@@ -440,8 +447,17 @@ public final class BslModuleSpellCheckHook implements IStartup
         {
             if (page == null)
                 continue;
+            // Активный редактор при старте часто уже материализован; ref.getEditor(false)
+            // для него всё равно может вернуть null из-за гонки с restore — берём напрямую.
+            IEditorPart active = page.getActiveEditor();
+            if (active != null)
+                tryAttach(active);
             for (IEditorReference ref : page.getEditorReferences())
-                tryAttach(ref.getPart(false));
+            {
+                IEditorPart ed = ref.getEditor(false);
+                if (ed != null && ed != active)
+                    tryAttach(ed);
+            }
         }
         window.getPartService().addPartListener(new IPartListener2()
         {
@@ -460,7 +476,9 @@ public final class BslModuleSpellCheckHook implements IStartup
 
             private void tryAttachFromRef(IWorkbenchPartReference ref)
             {
-                tryAttach(ref != null ? ref.getPart(false) : null);
+                if (!(ref instanceof IEditorReference))
+                    return;
+                tryAttach(((IEditorReference) ref).getEditor(false));
             }
         });
     }
@@ -469,45 +487,124 @@ public final class BslModuleSpellCheckHook implements IStartup
     {
         if (part instanceof BslXtextEditor bsl)
         {
-            attachEditor(bsl);
+            scheduleAttachEditor(bsl);
             return;
         }
         if (part instanceof DtGranularEditor<?> granular)
+            hookGranularEditor(granular);
+    }
+
+    private static void hookGranularEditor(DtGranularEditor<?> granular)
+    {
+        hookGranularActivePage(granular);
+        if (!HOOKED_GRANULAR.add(granular))
+            return;
+        granular.addPageChangedListener(new IPageChangedListener()
         {
-            Object page = granular.getActivePageInstance();
-            if (page instanceof DtGranularEditorXtextEditorPage<?> xtextPage)
+            @Override
+            public void pageChanged(PageChangedEvent event)
             {
+                Object selectedPage = event.getSelectedPage();
+                if (!(selectedPage instanceof DtGranularEditorXtextEditorPage<?> xtextPage))
+                    return;
                 IEditorPart embedded = xtextPage.getEmbeddedEditor();
                 if (embedded instanceof BslXtextEditor bsl)
-                    attachEditor(bsl);
+                    scheduleAttachEditor(bsl);
             }
-        }
+        });
+        Global.tempLog("bsl-spell-attach", "pageListener+ " + partLabel(granular)); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static void hookGranularActivePage(DtGranularEditor<?> granular)
+    {
+        Object page = granular.getActivePageInstance();
+        if (!(page instanceof DtGranularEditorXtextEditorPage<?> xtextPage))
+            return;
+        IEditorPart embedded = xtextPage.getEmbeddedEditor();
+        if (embedded instanceof BslXtextEditor bsl)
+            scheduleAttachEditor(bsl);
+        else
+            Global.tempLog("bsl-spell-attach", "granular no-embedded " + partLabel(granular)); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static void detachPart(IWorkbenchPart part)
     {
         if (part instanceof BslXtextEditor bsl)
+        {
             detachEditor(bsl);
+            return;
+        }
+        if (part instanceof DtGranularEditor<?> granular)
+        {
+            HOOKED_GRANULAR.remove(granular);
+            Object page = granular.getActivePageInstance();
+            if (page instanceof DtGranularEditorXtextEditorPage<?> xtextPage)
+            {
+                IEditorPart embedded = xtextPage.getEmbeddedEditor();
+                if (embedded instanceof BslXtextEditor bsl)
+                    detachEditor(bsl);
+            }
+        }
     }
 
-    private static void attachEditor(BslXtextEditor editor)
+    private static void scheduleAttachEditor(BslXtextEditor editor)
     {
-        if (editor == null)
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() -> attachEditor(editor, 0));
+    }
+
+    private static void attachEditor(BslXtextEditor editor, int attempt)
+    {
+        if (editor == null || editor.getSite() == null)
             return;
         ISourceViewer viewer = editor.getInternalSourceViewer();
-        if (viewer == null)
+        IDocument document = viewer != null ? viewer.getDocument() : null;
+        if (viewer == null || document == null)
+        {
+            if (attempt >= MAX_ATTACH_ATTEMPTS)
+            {
+                Global.tempLog("bsl-spell-attach", //$NON-NLS-1$
+                    "give-up viewer/doc attempt=" + attempt //$NON-NLS-1$
+                        + " viewer=" + (viewer != null) //$NON-NLS-1$
+                        + " doc=" + (document != null) //$NON-NLS-1$
+                        + " " + partLabel(editor)); //$NON-NLS-1$
+                return;
+            }
+            if (attempt == 0 || attempt % 10 == 0)
+            {
+                Global.tempLog("bsl-spell-attach", //$NON-NLS-1$
+                    "retry viewer/doc attempt=" + attempt //$NON-NLS-1$
+                        + " viewer=" + (viewer != null) //$NON-NLS-1$
+                        + " doc=" + (document != null) //$NON-NLS-1$
+                        + " " + partLabel(editor)); //$NON-NLS-1$
+            }
+            Display display = Display.getDefault();
+            if (display != null && !display.isDisposed())
+                display.asyncExec(() -> attachEditor(editor, attempt + 1));
             return;
+        }
         wrapAnnotationHover(viewer);
         if (SESSIONS.containsKey(editor))
         {
             EditorSession existing = SESSIONS.get(editor);
             if (existing != null && SpellCheckHook.isComfortPlatformSpellingActive())
                 existing.schedule(0);
+            if (attempt > 0)
+            {
+                Global.tempLog("bsl-spell-attach", //$NON-NLS-1$
+                    "already attempt=" + attempt + " " + partLabel(editor)); //$NON-NLS-1$ //$NON-NLS-2$
+            }
             return;
         }
         EditorSession session = new EditorSession(editor, viewer);
         SESSIONS.put(editor, session);
         session.install();
+        Global.tempLog("bsl-spell-attach", //$NON-NLS-1$
+            "ok attempt=" + attempt + " active=" //$NON-NLS-1$ //$NON-NLS-2$
+                + SpellCheckHook.isComfortPlatformSpellingActive()
+                + " " + partLabel(editor)); //$NON-NLS-1$
         if (SpellCheckHook.isComfortPlatformSpellingActive())
         {
             session.schedule(0);
@@ -524,6 +621,16 @@ public final class BslModuleSpellCheckHook implements IStartup
                 });
             }
         }
+    }
+
+    private static String partLabel(IWorkbenchPart part)
+    {
+        if (part == null)
+            return "null"; //$NON-NLS-1$
+        String title = part.getTitle();
+        if (title == null || title.isBlank())
+            title = part.getClass().getSimpleName();
+        return title + "/" + System.identityHashCode(part); //$NON-NLS-1$
     }
 
     private static void detachEditor(BslXtextEditor editor)
