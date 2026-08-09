@@ -5,6 +5,7 @@ import java.util.Collections;
 import java.util.Map;
 import java.util.Set;
 import java.util.WeakHashMap;
+import java.util.function.Consumer;
 
 import com._1c.g5.v8.dt.debug.core.model.IBslStackFrame;
 import com._1c.g5.v8.dt.debug.core.model.IBslVariable;
@@ -19,6 +20,7 @@ import com._1c.g5.v8.dt.debug.model.calculations.CalculationResultBaseData;
 import com._1c.g5.v8.dt.debug.model.calculations.ViewInterface;
 import org.eclipse.debug.core.model.IValue;
 import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
 
@@ -32,7 +34,9 @@ import org.eclipse.swt.widgets.TreeItem;
  * запроса при любой активации строки, не только при первой (см. issue #258).
  * <p>
  * Общий код для окна «Инспектор» ({@link DebugInspectorTreeEnhancement}) и панелей «Переменные» /
- * «Выражения» / «Выражения встроенного языка» ({@link DebugDetailPaneFullTextHook}).
+ * «Выражения» / «Выражения встроенного языка» ({@link DebugDetailPaneFullTextHook}), а также для
+ * {@code TextPropertyEditMenuHook} ({@link DebugInspectorTreeEnhancement}) — команды «Редактировать
+ * текст ИР» / «Редактировать текст запроса» должны получать полный, а не усечённый текст свойства.
  */
 final class DebugDetailPaneFullTextSupport
 {
@@ -82,6 +86,72 @@ final class DebugDetailPaneFullTextSupport
         if (!(value instanceof IBslValue bsl) || !DebugStringValueFormat.isStringValue(bsl))
             return null;
         return bsl;
+    }
+
+    /**
+     * Полный (неусечённый) текст строкового свойства — асинхронно, {@code callback} вызывается
+     * на UI-потоке. Тот же запрос к отладчику ({@code setMaxTestSize} без EDT-ограничения), что
+     * используется для панели деталей (см. класс-javadoc); используется, когда нужен именно текст
+     * (не отображение), например для «Редактировать текст ИР» / «Редактировать текст запроса».
+     *
+     * @param callback получает {@code null}, если свойство не строковое или текст получить не удалось
+     */
+    static void fetchFullText(IBslVariable variable, Consumer<String> callback)
+    {
+        IBslValue bsl;
+        try
+        {
+            IValue value = variable.getValue();
+            if (!(value instanceof IBslValue b) || !DebugStringValueFormat.isStringValue(b))
+            {
+                callback.accept(null);
+                return;
+            }
+            bsl = b;
+        }
+        catch (Exception e)
+        {
+            callback.accept(null);
+            return;
+        }
+
+        // Всегда свежий запрос с большим setMaxTestSize: кэш ({@code detailString}/{@code primitiveValue})
+        // может быть как усечён EDT, так и (после {@link #patchValueDetailString}) обёрнут в кавычки —
+        // для текста, который пойдёт в редактор как есть, нужен именно "сырой" ответ отладчика.
+        BslValuePath path = bsl.getPath();
+        IBslStackFrame stackFrame = bsl.getStackFrame();
+        if (path == null || stackFrame == null)
+        {
+            callback.accept(null);
+            return;
+        }
+
+        IEvaluationRequest request = EvaluationRequest.builder(path)
+            .setStackFrame(stackFrame)
+            .setExpressionUuid(bsl.getParentUuid())
+            .setInterface(ViewInterface.NONE)
+            .setMaxTestSize(FULL_DETAIL_MAX_TEXT_SIZE)
+            .setMultiLine(true)
+            .setEvaluationListener(result -> onFullTextResolved(bsl, result, callback))
+            .build();
+        new EvaluationJob(request).schedule();
+    }
+
+    private static void onFullTextResolved(IBslValue bsl, IEvaluationResult result, Consumer<String> callback)
+    {
+        String text = extractText(result);
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() ->
+        {
+            if (text != null)
+            {
+                RESOLVED.put(bsl, Boolean.TRUE);
+                patchValueDetailString(bsl, text);
+            }
+            callback.accept(text);
+        });
     }
 
     private static void requestFullDetailText(Tree tree, Object viewer, Object detailPaneHost,

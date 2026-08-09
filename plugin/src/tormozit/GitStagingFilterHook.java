@@ -1,33 +1,71 @@
 package tormozit;
 
+import java.io.File;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.function.IntSupplier;
 
+import org.eclipse.core.resources.IFile;
+import org.eclipse.core.runtime.IPath;
 import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.jface.dialogs.IDialogSettings;
+import org.eclipse.jface.action.Action;
+import org.eclipse.jface.action.IAction;
+import org.eclipse.jface.action.IMenuCreator;
+import org.eclipse.jface.action.IToolBarManager;
+import org.eclipse.jface.action.Separator;
 import org.eclipse.jface.viewers.CellLabelProvider;
+import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.jface.viewers.ILabelProviderListener;
+import org.eclipse.jface.viewers.ISelection;
+import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.ITreeContentProvider;
+import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.StyledCellLabelProvider;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.viewers.ViewerCell;
+import org.eclipse.jface.viewers.ViewerComparator;
 import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.dnd.Clipboard;
+import org.eclipse.swt.dnd.TextTransfer;
+import org.eclipse.swt.dnd.Transfer;
+import org.eclipse.swt.events.ControlAdapter;
+import org.eclipse.swt.events.ControlEvent;
+import org.eclipse.swt.events.MouseAdapter;
+import org.eclipse.swt.events.MouseEvent;
+import org.eclipse.swt.graphics.Color;
+import org.eclipse.swt.graphics.Device;
 import org.eclipse.swt.graphics.Image;
+import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.graphics.RGB;
+import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
+import org.eclipse.swt.widgets.Menu;
+import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Text;
+import org.eclipse.swt.widgets.Tree;
+import org.eclipse.swt.widgets.TreeColumn;
+import org.eclipse.swt.widgets.TreeItem;
+import org.eclipse.ui.IActionBars;
 import org.eclipse.ui.IPartListener2;
+import org.eclipse.ui.ISharedImages;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.IViewReference;
@@ -37,6 +75,7 @@ import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.actions.ActionFactory;
 
 /**
  * Многословный фильтр ({@link SmartMatcher}, AND по словам) в панели «Индексирование Git»
@@ -79,10 +118,19 @@ import org.eclipse.ui.PlatformUI;
  * откатывается на старый инлайн-подсчёт (тот же код, что был до этой правки) — только для
  * непокрытых узлов, не для всего дерева.
  *
- * <p>Дополнительно к подсветке — {@link #GitStagingLabelWrapper} дописывает к штатному тексту
- * строки полное имя объекта метаданных через « - » (см. {@link GetRef#resolveFullNameOrNull}),
- * как в панели «Результаты поиска» ({@link FileSearchResultsHook}), но не отдельной колонкой —
- * прямо в тексте единственной колонки дерева (по просьбе пользователя).
+ * <p>Дерево получает колонки «Имя»/«Тип»/«Путь»/«Время изменения»/«Статус»
+ * ({@link #GitStagingLabelProvider}, {@link #installColumns}) — «Путь» через
+ * {@link GetRef#resolveFullNameOrNull}, как в панели «Результаты поиска» ({@link FileSearchResultsHook}),
+ * но отдельной колонкой, а не дописыванием в текст строки. Видимость «Тип»/«Путь»/«Время
+ * изменения»/«Статус» — через выпадающее меню в тулбаре ({@link #installColumnVisibilityToolbar}),
+ * «Имя» всегда видима. Порядок/ширины колонок — раздельно для {@code stagedViewer}/{@code
+ * unstagedViewer} ({@link #saveColumnState}), видимость — общая на весь вид.
+ *
+ * <p>Выбор ячейки, подсветка активной ячейки/строки и копирование по Ctrl+C — {@link
+ * #GitStagingTreeInteraction}, по образцу {@code DebugInspectorTreeEnhancement} (control остаётся
+ * штатным {@code Tree}/{@code TreeViewer} — drag&drop stage/unstage, контекстное меню, открытие
+ * сравнения по двойному клику и автоподстановка commit message остаются штатными EGit, не
+ * переопределяются).
  *
  * <p>Логирование: Параметры → Комфорт → «Общее логирование».
  */
@@ -94,6 +142,35 @@ public final class GitStagingFilterHook implements IStartup
 
     /** Пауза после последнего нажатия клавиши, прежде чем реально пересчитать фильтр. */
     private static final int DEBOUNCE_MS = 200;
+
+    // -----------------------------------------------------------------------
+    // Колонки дерева (Имя/Тип/Путь/Время изменения/Статус)
+    // -----------------------------------------------------------------------
+
+    private static final int COL_NAME = 0;
+    private static final int COL_TYPE = 1;
+    private static final int COL_PATH = 2;
+    private static final int COL_TIME = 3;
+    private static final int COL_STATUS = 4;
+    private static final int COLUMN_COUNT = 5;
+
+    private static final String[] COLUMN_KEYS =
+        { "Name", "Type", "Path", "Time", "Status" }; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+    private static final String[] COLUMN_HEADERS =
+        { "Имя", "Тип", "Путь", "Время изменения", "Статус" }; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$
+    private static final String[] COLUMN_TOOLTIPS =
+    {
+        "Имя файла", //$NON-NLS-1$
+        "Расширение файла", //$NON-NLS-1$
+        "Полное имя объекта метаданных", //$NON-NLS-1$
+        "Время изменения файла на диске", //$NON-NLS-1$
+        "Статус изменения" //$NON-NLS-1$
+    };
+    private static final int[] COLUMN_DEFAULT_WIDTHS = { 220, 55, 220, 95, 100 };
+
+    private static final String COLUMN_LOGICAL_KEY = "tormozit.gitStagingColumnLogical"; //$NON-NLS-1$
+    private static final String INTERACTION_KEY = "tormozit.gitStagingTreeInteraction"; //$NON-NLS-1$
+    private static final String COLUMN_SETTINGS_SECTION = "GitStagingColumns"; //$NON-NLS-1$
 
     @Override
     public void earlyStartup()
@@ -156,6 +233,279 @@ public final class GitStagingFilterHook implements IStartup
         return VIEW_ID.equals(view.getSite().getId());
     }
 
+    // -----------------------------------------------------------------------
+    // Настройки колонок (видимость/порядок/ширина) — общая видимость на весь вид,
+    // порядок и ширины — раздельно для stagedViewer/unstagedViewer.
+    // -----------------------------------------------------------------------
+
+    private static IDialogSettings columnSettings()
+    {
+        IDialogSettings top = Activator.getDefault().getDialogSettings();
+        IDialogSettings section = top.getSection(COLUMN_SETTINGS_SECTION);
+        if (section == null)
+            section = top.addNewSection(COLUMN_SETTINGS_SECTION);
+        return section;
+    }
+
+    private static String visibilityKey(int logical)
+    {
+        return "colVisible" + COLUMN_KEYS[logical]; //$NON-NLS-1$
+    }
+
+    /** Общий ключ (не раздельно staged/unstaged) — колонки в обеих панелях синхронны по порядку/ширине. */
+    private static String orderKey()
+    {
+        return "columnOrder"; //$NON-NLS-1$
+    }
+
+    private static String widthKey(int logical)
+    {
+        return "colWidth" + COLUMN_KEYS[logical]; //$NON-NLS-1$
+    }
+
+    private static boolean readVisible(IDialogSettings settings, String key)
+    {
+        String raw = settings.get(key);
+        return raw == null || Boolean.parseBoolean(raw);
+    }
+
+    /** [COL_NAME]=true всегда; остальные — сохранённая видимость (по умолчанию видимы). */
+    private static boolean[] loadVisibility(IDialogSettings settings)
+    {
+        boolean[] visible = new boolean[COLUMN_COUNT];
+        visible[COL_NAME] = true;
+        visible[COL_TYPE] = readVisible(settings, visibilityKey(COL_TYPE));
+        visible[COL_PATH] = readVisible(settings, visibilityKey(COL_PATH));
+        visible[COL_TIME] = readVisible(settings, visibilityKey(COL_TIME));
+        visible[COL_STATUS] = readVisible(settings, visibilityKey(COL_STATUS));
+        return visible;
+    }
+
+    private static int[] defaultOrder(boolean[] visible)
+    {
+        List<Integer> order = new ArrayList<>();
+        for (int logical = 0; logical < COLUMN_COUNT; logical++)
+            if (logical == COL_NAME || visible[logical])
+                order.add(logical);
+        int[] result = new int[order.size()];
+        for (int i = 0; i < result.length; i++)
+            result[i] = order.get(i);
+        return result;
+    }
+
+    /** Сохранённый порядок — только если это перестановка ровно ТЕКУЩЕГО набора видимых колонок. */
+    private static int[] loadOrder(IDialogSettings settings, boolean[] visible)
+    {
+        int[] def = defaultOrder(visible);
+        String raw = settings.get(orderKey());
+        if (raw == null || raw.isBlank())
+            return def;
+        String[] parts = raw.split(","); //$NON-NLS-1$
+        if (parts.length != def.length)
+            return def;
+        boolean[] seen = new boolean[COLUMN_COUNT];
+        int[] order = new int[parts.length];
+        for (int i = 0; i < parts.length; i++)
+        {
+            int logical;
+            try
+            {
+                logical = Integer.parseInt(parts[i].trim());
+            }
+            catch (NumberFormatException ex)
+            {
+                return def;
+            }
+            boolean shouldBeVisible = logical == COL_NAME || (logical >= 0 && logical < COLUMN_COUNT && visible[logical]);
+            if (logical < 0 || logical >= COLUMN_COUNT || seen[logical] || !shouldBeVisible)
+                return def;
+            seen[logical] = true;
+            order[i] = logical;
+        }
+        return order;
+    }
+
+    /** Пересоздаёт TreeColumn по сохранённым видимости/порядку/ширинам (идемпотентно). */
+    private static void installColumns(Tree tree, boolean[] visible, IDialogSettings settings, IViewPart view)
+    {
+        if (tree == null || tree.isDisposed())
+            return;
+        for (TreeColumn c : tree.getColumns())
+            c.dispose();
+        int[] order = loadOrder(settings, visible);
+        for (int logical : order)
+        {
+            TreeColumn col = new TreeColumn(tree, SWT.LEFT);
+            col.setText(COLUMN_HEADERS[logical]);
+            col.setToolTipText(COLUMN_TOOLTIPS[logical] + Global.pluginSignForTooltip());
+            col.setResizable(true);
+            col.setMoveable(true);
+            col.setWidth(FormTableColumnState.readWidth(settings, widthKey(logical),
+                COLUMN_DEFAULT_WIDTHS[logical], 20));
+            col.setData(COLUMN_LOGICAL_KEY, Integer.valueOf(logical));
+            col.addListener(SWT.Selection, e ->
+            {
+                Object data = tree.getData(INTERACTION_KEY);
+                if (data instanceof GitStagingTreeInteraction interaction)
+                    interaction.sortBy(logical, col);
+            });
+            col.addControlListener(new ControlAdapter()
+            {
+                @Override
+                public void controlResized(ControlEvent e)
+                {
+                    syncWidthToPeer(view, tree, logical, col.getWidth());
+                }
+
+                @Override
+                public void controlMoved(ControlEvent e)
+                {
+                    syncOrderToPeer(view, tree);
+                }
+            });
+        }
+        tree.setHeaderVisible(true);
+        tree.setLinesVisible(true);
+    }
+
+    /** Порядок (по текущим видимым логическим колонкам) + ширины — одним проходом (ключи общие, не per-viewer). */
+    private static void saveColumnState(Tree tree, IDialogSettings settings)
+    {
+        if (tree == null || tree.isDisposed() || tree.getColumnCount() <= 0)
+            return;
+        int[] visualOrder = tree.getColumnOrder();
+        StringBuilder orderStr = new StringBuilder();
+        for (int i = 0; i < visualOrder.length; i++)
+        {
+            TreeColumn col = tree.getColumn(visualOrder[i]);
+            Object logicalObj = col.getData(COLUMN_LOGICAL_KEY);
+            int logical = logicalObj instanceof Integer li ? li : COL_NAME;
+            if (i > 0)
+                orderStr.append(','); //$NON-NLS-1$
+            orderStr.append(logical);
+            settings.put(widthKey(logical), Integer.toString(col.getWidth()));
+        }
+        settings.put(orderKey(), orderStr.toString());
+    }
+
+    private static int logicalOfColumn(Tree tree, int physicalCol)
+    {
+        if (tree == null || tree.isDisposed() || physicalCol < 0 || physicalCol >= tree.getColumnCount())
+            return COL_NAME;
+        Object data = tree.getColumn(physicalCol).getData(COLUMN_LOGICAL_KEY);
+        return data instanceof Integer li ? li : COL_NAME;
+    }
+
+    // -----------------------------------------------------------------------
+    // Живая синхронизация ширины/порядка колонок между stagedViewer/unstagedViewer
+    // -----------------------------------------------------------------------
+
+    private static final String SYNC_SUPPRESS_KEY = "tormozit.gitStagingColumnSyncSuppress"; //$NON-NLS-1$
+
+    private static Tree otherTree(IViewPart view, Tree tree)
+    {
+        TreeViewer staged = treeViewerOf(view, "stagedViewer"); //$NON-NLS-1$
+        TreeViewer unstaged = treeViewerOf(view, "unstagedViewer"); //$NON-NLS-1$
+        Tree stagedTree = staged != null ? staged.getTree() : null;
+        Tree unstagedTree = unstaged != null ? unstaged.getTree() : null;
+        if (tree == stagedTree)
+            return unstagedTree;
+        if (tree == unstagedTree)
+            return stagedTree;
+        return null;
+    }
+
+    private static TreeColumn columnByLogical(Tree tree, int logical)
+    {
+        for (TreeColumn c : tree.getColumns())
+        {
+            Object data = c.getData(COLUMN_LOGICAL_KEY);
+            if (data instanceof Integer li && li == logical)
+                return c;
+        }
+        return null;
+    }
+
+    private static int indexOf(Tree tree, TreeColumn col)
+    {
+        TreeColumn[] cols = tree.getColumns();
+        for (int i = 0; i < cols.length; i++)
+            if (cols[i] == col)
+                return i;
+        return 0;
+    }
+
+    private static int[] currentLogicalOrder(Tree tree)
+    {
+        int[] visual = tree.getColumnOrder();
+        int[] order = new int[visual.length];
+        for (int i = 0; i < visual.length; i++)
+        {
+            Object data = tree.getColumn(visual[i]).getData(COLUMN_LOGICAL_KEY);
+            order[i] = data instanceof Integer li ? li : COL_NAME;
+        }
+        return order;
+    }
+
+    /** {@code false} — набор логических колонок на дереве не совпал с {@code logicalOrder} (рассинхрон видимости). */
+    private static boolean applyLogicalOrder(Tree tree, int[] logicalOrder)
+    {
+        if (tree.getColumnCount() != logicalOrder.length)
+            return false;
+        int[] physicalOrder = new int[logicalOrder.length];
+        for (int i = 0; i < logicalOrder.length; i++)
+        {
+            TreeColumn col = columnByLogical(tree, logicalOrder[i]);
+            if (col == null)
+                return false;
+            physicalOrder[i] = indexOf(tree, col);
+        }
+        tree.setColumnOrder(physicalOrder);
+        return true;
+    }
+
+    /** Ширина колонки изменена drag'ом (или программно) — переносим на ту же логическую колонку соседнего дерева. */
+    private static void syncWidthToPeer(IViewPart view, Tree sourceTree, int logical, int width)
+    {
+        if (Boolean.TRUE.equals(sourceTree.getData(SYNC_SUPPRESS_KEY)))
+            return;
+        Tree peer = otherTree(view, sourceTree);
+        if (peer == null || peer.isDisposed())
+            return;
+        TreeColumn peerCol = columnByLogical(peer, logical);
+        if (peerCol == null || peerCol.getWidth() == width)
+            return;
+        peer.setData(SYNC_SUPPRESS_KEY, Boolean.TRUE);
+        try
+        {
+            peerCol.setWidth(width);
+        }
+        finally
+        {
+            peer.setData(SYNC_SUPPRESS_KEY, null);
+        }
+    }
+
+    /** Колонка перетащена на новое место — переносим тот же порядок на соседнее дерево. */
+    private static void syncOrderToPeer(IViewPart view, Tree sourceTree)
+    {
+        if (Boolean.TRUE.equals(sourceTree.getData(SYNC_SUPPRESS_KEY)))
+            return;
+        Tree peer = otherTree(view, sourceTree);
+        if (peer == null || peer.isDisposed())
+            return;
+        int[] logicalOrder = currentLogicalOrder(sourceTree);
+        peer.setData(SYNC_SUPPRESS_KEY, Boolean.TRUE);
+        try
+        {
+            applyLogicalOrder(peer, logicalOrder);
+        }
+        finally
+        {
+            peer.setData(SYNC_SUPPRESS_KEY, null);
+        }
+    }
+
     private static void schedulePatch(IViewPart view, int attempt)
     {
         Display display = Display.getDefault();
@@ -203,6 +553,9 @@ public final class GitStagingFilterHook implements IStartup
                 FilterInputBox.FLAT_FILTER_TOOLTIP + "\nCtrl+↓ — история запросов."); //$NON-NLS-1$
             FilterHistoryUi.wireKeyboard(filterText, HISTORY_SCOPE_ID);
             addHistoryButton(filterText);
+
+            installCopyOverride(view);
+            installColumnVisibilityToolbar(view);
 
             session.onModify();
 
@@ -255,7 +608,7 @@ public final class GitStagingFilterHook implements IStartup
             return null;
 
         IBaseLabelProvider current = viewer.getLabelProvider();
-        if (current instanceof GitStagingLabelWrapper)
+        if (current instanceof GitStagingLabelProvider)
         {
             GitStagingSearchFilter filter = findExistingFilter(viewer);
             return filter != null ? filter : attachFilter(viewer);
@@ -267,8 +620,25 @@ public final class GitStagingFilterHook implements IStartup
             return null;
         }
 
-        viewer.setLabelProvider(new GitStagingLabelWrapper(cellLp));
+        Tree tree = viewer.getTree();
+        viewer.setLabelProvider(new GitStagingLabelProvider(cellLp, tree));
+        installColumnsAndInteraction(view, viewer, tree, viewerField);
         return attachFilter(viewer);
+    }
+
+    /** Первичная установка колонок + Tree-взаимодействия (выбор ячейки/подсветка/копирование/сортировка) — один раз на дерево. */
+    private static void installColumnsAndInteraction(IViewPart view, TreeViewer viewer, Tree tree, String viewerField)
+    {
+        IDialogSettings settings = columnSettings();
+        boolean[] visible = loadVisibility(settings);
+        installColumns(tree, visible, settings, view);
+
+        GitStagingTreeInteraction interaction = new GitStagingTreeInteraction(tree, viewer);
+        interaction.install();
+        tree.addDisposeListener(e -> saveColumnState(tree, columnSettings()));
+
+        Debug.log("installColumnsAndInteraction " + viewerField + ": columns=" //$NON-NLS-1$ //$NON-NLS-2$
+            + tree.getColumnCount());
     }
 
     private static GitStagingSearchFilter findExistingFilter(TreeViewer viewer)
@@ -374,8 +744,8 @@ public final class GitStagingFilterHook implements IStartup
                 return;
             filter.setPattern(""); //$NON-NLS-1$
             IBaseLabelProvider lp = viewer.getLabelProvider();
-            if (lp instanceof GitStagingLabelWrapper wrapper)
-                wrapper.setHighlightPattern(""); //$NON-NLS-1$
+            if (lp instanceof GitStagingLabelProvider provider)
+                provider.setHighlightPattern(""); //$NON-NLS-1$
             viewer.getTree().setRedraw(false);
             try
             {
@@ -472,8 +842,8 @@ public final class GitStagingFilterHook implements IStartup
             }
             filter.installPrecomputed(text, results);
             IBaseLabelProvider lp = viewer.getLabelProvider();
-            if (lp instanceof GitStagingLabelWrapper wrapper)
-                wrapper.setHighlightPattern(text);
+            if (lp instanceof GitStagingLabelProvider provider)
+                provider.setHighlightPattern(text);
             viewer.getTree().setRedraw(false);
             try
             {
@@ -570,6 +940,105 @@ public final class GitStagingFilterHook implements IStartup
     {
         int idx = path.lastIndexOf('/');
         return idx >= 0 ? path.substring(idx + 1) : path;
+    }
+
+    // -----------------------------------------------------------------------
+    // Данные для колонок «Тип»/«Путь»/«Время изменения»/«Статус»
+    // -----------------------------------------------------------------------
+
+    private static String pathOf(Object element)
+    {
+        Object pathObj = Global.invoke(element, "getPath"); //$NON-NLS-1$
+        return pathObj instanceof String s ? s : ""; //$NON-NLS-1$
+    }
+
+    private static String fullNameOf(Object element)
+    {
+        String path = pathOf(element);
+        if (path.isEmpty())
+            return ""; //$NON-NLS-1$
+        String fullName = GetRef.resolveFullNameOrNull(path);
+        return fullName != null ? fullName : ""; //$NON-NLS-1$
+    }
+
+    /** Текст колонки «Имя» для сортировки: {@code StagingFolderEntry.getLabel()} / {@code StagingEntry.getName()}. */
+    private static String nameText(Object element)
+    {
+        Object label = Global.invoke(element, "getLabel"); //$NON-NLS-1$
+        if (label instanceof String s)
+            return s;
+        Object name = Global.invoke(element, "getName"); //$NON-NLS-1$
+        return name instanceof String s2 ? s2 : ""; //$NON-NLS-1$
+    }
+
+    private static String sortKey(Object element, int logical)
+    {
+        return switch (logical)
+        {
+            case COL_TYPE -> extensionOf(pathOf(element));
+            case COL_PATH -> fullNameOf(element);
+            case COL_TIME -> timeText(element);
+            case COL_STATUS -> statusText(element);
+            default -> nameText(element);
+        };
+    }
+
+    /** Расширение файла (без точки); пусто, если точки нет или путь пуст (папка). */
+    private static String extensionOf(String path)
+    {
+        if (path == null || path.isEmpty())
+            return ""; //$NON-NLS-1$
+        String name = fileNameOf(path);
+        int dot = name.lastIndexOf('.');
+        return dot >= 0 ? name.substring(dot + 1) : ""; //$NON-NLS-1$
+    }
+
+    /** Формат колонки «Время изменения» — как в панели «Приложения» ({@code ApplicationsViewHook.DATE_FMT}). */
+    private static final DateTimeFormatter TIME_COLUMN_FMT = DateTimeFormatter.ofPattern("dd'д'HH:mm:ss"); //$NON-NLS-1$
+
+    /**
+     * Timestamp изменения рабочего файла на диске (мс, epoch); {@code 0} — файл недоступен
+     * (папка, отсутствующий/удалённый файл, субмодуль). Для сортировки по дате — {@link #timeText}
+     * форматирует ТОЛЬКО для отображения и для сортировки не годится (без года/месяца).
+     */
+    private static long timeMillis(Object element)
+    {
+        Object fileObj = Global.invoke(element, "getFile"); //$NON-NLS-1$
+        long ts = fileObj instanceof IFile file ? file.getLocalTimeStamp() : 0L;
+        if (ts <= 0)
+        {
+            Object locObj = Global.invoke(element, "getLocation"); //$NON-NLS-1$
+            if (locObj instanceof IPath p)
+                ts = new File(p.toOSString()).lastModified();
+        }
+        return Math.max(ts, 0L);
+    }
+
+    /** Время изменения рабочего файла на диске ({@code ддДчч:мм:сс}); пусто — файл недоступен. */
+    private static String timeText(Object element)
+    {
+        long ts = timeMillis(element);
+        if (ts <= 0)
+            return ""; //$NON-NLS-1$
+        return TIME_COLUMN_FMT.format(Instant.ofEpochMilli(ts).atZone(ZoneId.systemDefault()));
+    }
+
+    /** Текст статуса по {@code StagingEntry.State} (получен рефлексией — без compile-зависимости от egit-ui). */
+    private static String statusText(Object element)
+    {
+        Object stateObj = Global.invoke(element, "getState"); //$NON-NLS-1$
+        if (stateObj == null)
+            return ""; //$NON-NLS-1$
+        String name = stateObj.toString();
+        return switch (name)
+        {
+            case "ADDED", "UNTRACKED" -> "Добавлен"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            case "MODIFIED", "CHANGED", "MODIFIED_AND_CHANGED" -> "Изменён"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            case "REMOVED", "MISSING", "MISSING_AND_CHANGED" -> "Удалён"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+            case "MODIFIED_AND_ADDED" -> "Добавлен, изменён"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "CONFLICTING" -> "Конфликт"; //$NON-NLS-1$ //$NON-NLS-2$
+            default -> ""; //$NON-NLS-1$
+        };
     }
 
     /**
@@ -675,18 +1144,23 @@ public final class GitStagingFilterHook implements IStartup
     // -----------------------------------------------------------------------
 
     /**
-     * Дописывает « - <ПолноеИмя>» к штатному тексту строки (для листьев дерева — {@code getPath()}
-     * есть) и подсвечивает совпавшие фрагменты {@link SmartMatcher} во всём получившемся тексте.
+     * Multi-column label provider дерева «Индексирование Git»: колонка «Имя» — оригинальный текст/иконка
+     * штатного {@code StagingViewLabelProvider} ({@code base}), «Тип»/«Путь»/«Время изменения»/«Статус» —
+     * вычисляются здесь (см. {@link #extensionOf}/{@link #fullNameOf}/{@link #timeText}/{@link #statusText}).
+     * Логическая колонка ячейки резолвится через {@link #logicalOfColumn} — не по физическому индексу
+     * (тот меняется при drag-реордере/скрытии колонок).
      */
-    private static final class GitStagingLabelWrapper extends StyledCellLabelProvider
+    private static final class GitStagingLabelProvider extends StyledCellLabelProvider
         implements ILabelProvider
     {
         private final CellLabelProvider base;
+        private final Tree tree;
         private SmartMatcher highlightMatcher = new SmartMatcher(""); //$NON-NLS-1$
 
-        GitStagingLabelWrapper(CellLabelProvider base)
+        GitStagingLabelProvider(CellLabelProvider base, Tree tree)
         {
             this.base = base;
+            this.tree = tree;
         }
 
         void setHighlightPattern(String pattern)
@@ -694,31 +1168,52 @@ public final class GitStagingFilterHook implements IStartup
             highlightMatcher = new SmartMatcher(pattern != null ? pattern : ""); //$NON-NLS-1$
         }
 
-        private String appendFullName(String baseText, Object element)
-        {
-            Object pathObj = Global.invoke(element, "getPath"); //$NON-NLS-1$
-            if (!(pathObj instanceof String path) || path.isEmpty())
-                return baseText;
-            String fullName = GetRef.resolveFullNameOrNull(path);
-            return fullName != null && !fullName.isEmpty() ? baseText + " - " + fullName : baseText; //$NON-NLS-1$
-        }
-
         @Override
         public void update(ViewerCell cell)
         {
-            if (base != null)
-                base.update(cell);
             if (cell == null)
                 return;
-            String text = appendFullName(cell.getText() != null ? cell.getText() : "", cell.getElement()); //$NON-NLS-1$
-            if (!text.equals(cell.getText()))
-                cell.setText(text);
+            Object element = cell.getElement();
+            int logical = logicalOfColumn(tree, cell.getColumnIndex());
+            String text;
+            switch (logical)
+            {
+                case COL_TYPE -> text = extensionOf(pathOf(element));
+                case COL_PATH -> text = fullNameOf(element);
+                case COL_TIME -> text = timeText(element);
+                case COL_STATUS -> text = statusText(element);
+                default -> text = getText(element);
+            }
+            cell.setText(text != null ? text : ""); //$NON-NLS-1$
+            cell.setImage(logical == COL_NAME ? getImage(element) : null);
+            copyRowStyle(cell, element);
+
             // Вызываем всегда, а не только при непустом фильтре — иначе при очистке поля старые
             // StyleRange (SWT переиспользует TreeItem между refresh-ами) остаются висеть.
             // appendMatchRanges сам корректно очищает ячейку при пустом списке диапазонов.
-            List<SmartMatcher.HighlightRange> ranges = !highlightMatcher.isEmpty && !text.isEmpty()
-                ? highlightMatcher.getHighlightRanges(text) : List.of();
+            // В «Время изменения» / «Статус» подсветку не делаем: там дата и фиксированные метки.
+            boolean highlightColumn = logical != COL_TIME && logical != COL_STATUS;
+            List<SmartMatcher.HighlightRange> ranges = highlightColumn
+                && !highlightMatcher.isEmpty && text != null && !text.isEmpty()
+                && highlightMatcher.matches(matchText(element))
+                    ? highlightMatcher.getHighlightRanges(text) : List.of();
             SmartMatchHighlight.appendMatchRanges(cell, ranges);
+        }
+
+        /** Копирует foreground/background/font штатного провайдера (dim/конфликт и т.п.) на всю строку. */
+        private void copyRowStyle(ViewerCell cell, Object element)
+        {
+            if (base instanceof ColumnLabelProvider clp)
+            {
+                cell.setForeground(clp.getForeground(element));
+                cell.setBackground(clp.getBackground(element));
+                cell.setFont(clp.getFont(element));
+                return;
+            }
+            Object fg = Global.invoke(base, "getForeground", element); //$NON-NLS-1$
+            cell.setForeground(fg instanceof Color c ? c : null);
+            Object bg = Global.invoke(base, "getBackground", element); //$NON-NLS-1$
+            cell.setBackground(bg instanceof Color c ? c : null);
         }
 
         @Override
@@ -732,7 +1227,7 @@ public final class GitStagingFilterHook implements IStartup
                 Object text = Global.invoke(base, "getText", element); //$NON-NLS-1$
                 baseText = text instanceof String s ? s : ""; //$NON-NLS-1$
             }
-            return appendFullName(baseText != null ? baseText : "", element); //$NON-NLS-1$
+            return baseText != null ? baseText : ""; //$NON-NLS-1$
         }
 
         @Override
@@ -766,6 +1261,477 @@ public final class GitStagingFilterHook implements IStartup
         public void dispose()
         {
             base.dispose();
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tree-взаимодействие: выбор ячейки, подсветка активной ячейки/строки, копирование
+    // (по образцу DebugInspectorTreeEnhancement — см. javadoc класса).
+    // -----------------------------------------------------------------------
+
+    private static final class GitStagingTreeInteraction
+    {
+        private final Tree tree;
+        private final TreeViewer viewer;
+        private TreeItem selectedItem;
+        private int activeColumn;
+        private Color ownedRowBg;
+        private Color ownedActiveCellBg;
+        private int sortLogical = -1;
+        private boolean sortAscending = true;
+
+        GitStagingTreeInteraction(Tree tree, TreeViewer viewer)
+        {
+            this.tree = tree;
+            this.viewer = viewer;
+        }
+
+        void install()
+        {
+            tree.setData(INTERACTION_KEY, this);
+            ListSelectionThemeColors.markOptOut(tree);
+
+            tree.addMouseListener(new MouseAdapter()
+            {
+                @Override
+                public void mouseDown(MouseEvent e)
+                {
+                    if (e.button != 1)
+                        return;
+                    TreeItem item = itemAt(tree, e.x, e.y);
+                    if (item == null)
+                        return;
+                    int column = columnAt(tree, e.x, e.y, item);
+                    if (column < 0)
+                        column = 0;
+                    selectCell(item, column);
+                }
+            });
+
+            tree.addListener(SWT.EraseItem, this::onEraseItem);
+            tree.addListener(SWT.PaintItem, this::onPaintItem);
+            tree.addListener(SWT.FocusIn, e -> { invalidateColors(); tree.redraw(); });
+            tree.addListener(SWT.FocusOut, e -> { invalidateColors(); tree.redraw(); });
+            tree.addListener(SWT.Selection, e -> { syncFromSelection(); invalidateColors(); tree.redraw(); });
+
+            tree.addDisposeListener(e -> invalidateColors());
+        }
+
+        /** После пересоздания TreeColumn (переключение видимости) — привести activeColumn в валидный диапазон. */
+        void onColumnsRebuilt()
+        {
+            if (activeColumn < 0 || activeColumn >= tree.getColumnCount())
+                activeColumn = 0;
+            invalidateColors();
+            syncSortIndicator();
+            tree.redraw();
+        }
+
+        // ---- сортировка по клику на заголовке колонки ----
+
+        /** Клик по заголовку: переключить/сменить сортировку, сохранив текущее выделение. */
+        void sortBy(int logical, TreeColumn column)
+        {
+            sortAscending = sortLogical == logical ? !sortAscending : true;
+            sortLogical = logical;
+
+            Object[] selection = captureSelection();
+            int sortLogicalFinal = logical;
+            boolean ascendingFinal = sortAscending;
+            viewer.setComparator(new ViewerComparator()
+            {
+                @Override
+                public int compare(Viewer v, Object e1, Object e2)
+                {
+                    // «Время» — по timestamp (с учётом даты), не по отформатированной строке (без года/месяца).
+                    int cmp = sortLogicalFinal == COL_TIME
+                        ? Long.compare(timeMillis(e1), timeMillis(e2))
+                        : String.CASE_INSENSITIVE_ORDER.compare(
+                            sortKey(e1, sortLogicalFinal), sortKey(e2, sortLogicalFinal));
+                    return ascendingFinal ? cmp : -cmp;
+                }
+            });
+            tree.setSortColumn(column);
+            tree.setSortDirection(sortAscending ? SWT.UP : SWT.DOWN);
+            restoreSelection(selection);
+        }
+
+        private Object[] captureSelection()
+        {
+            ISelection sel = viewer.getSelection();
+            return sel instanceof IStructuredSelection ss ? ss.toArray() : new Object[0];
+        }
+
+        private void restoreSelection(Object[] elements)
+        {
+            if (elements.length == 0)
+                return;
+            viewer.setSelection(new StructuredSelection(elements), true);
+        }
+
+        /** Индикатор сортировки (стрелка на заголовке) — TreeColumn пересоздаётся при переключении видимости. */
+        private void syncSortIndicator()
+        {
+            if (sortLogical < 0)
+            {
+                tree.setSortColumn(null);
+                return;
+            }
+            for (TreeColumn col : tree.getColumns())
+            {
+                Object data = col.getData(COLUMN_LOGICAL_KEY);
+                if (data instanceof Integer li && li == sortLogical)
+                {
+                    tree.setSortColumn(col);
+                    tree.setSortDirection(sortAscending ? SWT.UP : SWT.DOWN);
+                    return;
+                }
+            }
+            tree.setSortColumn(null);
+        }
+
+        private void selectCell(TreeItem item, int column)
+        {
+            selectedItem = item;
+            activeColumn = column;
+            invalidateColors();
+            tree.setSelection(item);
+            tree.redraw();
+        }
+
+        private void syncFromSelection()
+        {
+            TreeItem[] sel = tree.getSelection();
+            if (sel.length > 0)
+                selectedItem = sel[0];
+            if (activeColumn < 0 || activeColumn >= tree.getColumnCount())
+                activeColumn = 0;
+        }
+
+        private TreeItem currentSelectedRow()
+        {
+            TreeItem[] sel = tree.getSelection();
+            if (sel.length > 0)
+                return sel[0];
+            return selectedItem;
+        }
+
+        void copyActiveCellToClipboard()
+        {
+            TreeItem[] sel = tree.getSelection();
+            if (sel.length > 0)
+                selectedItem = sel[0];
+            if (selectedItem == null || selectedItem.isDisposed())
+                return;
+            int column = activeColumn;
+            if (column < 0 || column >= tree.getColumnCount())
+                column = 0;
+            String text = selectedItem.getText(column);
+            if (text == null)
+                text = ""; //$NON-NLS-1$
+            Clipboard clipboard = new Clipboard(tree.getDisplay());
+            try
+            {
+                clipboard.setContents(new Object[] { text }, new Transfer[] { TextTransfer.getInstance() });
+            }
+            finally
+            {
+                clipboard.dispose();
+            }
+        }
+
+        // ---- подсветка активной ячейки/строки (см. DebugInspectorTreeEnhancement) ----
+
+        private void onEraseItem(Event e)
+        {
+            if (!(e.item instanceof TreeItem item))
+                return;
+            TreeItem row = currentSelectedRow();
+            if (row == null || item != row)
+                return;
+            Color rowBg = rowSelectionBackground();
+            Color bg = e.index == activeColumn ? activeCellBackground(rowBg) : rowBg;
+            e.gc.setBackground(bg);
+            e.gc.fillRectangle(e.x, e.y, e.width, e.height);
+            e.detail &= ~SWT.BACKGROUND;
+        }
+
+        private void onPaintItem(Event e)
+        {
+            if (!(e.item instanceof TreeItem item) || item != currentSelectedRow() || e.index != activeColumn)
+                return;
+            Rectangle bounds = item.getBounds(e.index);
+            if (bounds == null || bounds.isEmpty())
+                return;
+            Color rowBg = rowSelectionBackground();
+            Color base = activeCellBackground(rowBg);
+            Color frame = slightlyDarker(base, 0.12);
+            try
+            {
+                e.gc.setForeground(frame);
+                e.gc.drawRectangle(bounds.x, bounds.y, Math.max(0, bounds.width - 1), Math.max(0, bounds.height - 1));
+            }
+            finally
+            {
+                if (!frame.isDisposed())
+                    frame.dispose();
+            }
+        }
+
+        private Color rowSelectionBackground()
+        {
+            if (ownedRowBg != null && !ownedRowBg.isDisposed())
+                return ownedRowBg;
+            if (ListSelectionThemeColors.isDarkList(tree))
+            {
+                ownedRowBg = ListSelectionThemeColors.listSelectionBackground(tree, tree.isFocusControl());
+                return ownedRowBg;
+            }
+            Display display = tree.getDisplay();
+            Color base = tree.getBackground();
+            if (base == null || base.isDisposed())
+                base = display.getSystemColor(SWT.COLOR_LIST_BACKGROUND);
+            double factor = tree.isFocusControl() ? 0.12 : 0.08;
+            ownedRowBg = slightlyDarker(base, factor);
+            return ownedRowBg;
+        }
+
+        private Color activeCellBackground(Color rowBg)
+        {
+            if (ownedActiveCellBg != null && !ownedActiveCellBg.isDisposed())
+                return ownedActiveCellBg;
+            if (ListSelectionThemeColors.isDarkList(tree))
+            {
+                ownedActiveCellBg = ListSelectionThemeColors.activeCellBackground(tree, rowBg);
+                return ownedActiveCellBg;
+            }
+            ownedActiveCellBg = slightlyDarker(rowBg, tree.isFocusControl() ? 0.08 : 0.06);
+            return ownedActiveCellBg;
+        }
+
+        private static Color slightlyDarker(Color base, double factor)
+        {
+            Device device = base.getDevice();
+            RGB rgb = base.getRGB();
+            int r = clampChannel((int) (rgb.red * (1.0 - factor)));
+            int g = clampChannel((int) (rgb.green * (1.0 - factor)));
+            int b = clampChannel((int) (rgb.blue * (1.0 - factor)));
+            return new Color(device, r, g, b);
+        }
+
+        private static int clampChannel(int value)
+        {
+            return Math.max(0, Math.min(255, value));
+        }
+
+        private void invalidateColors()
+        {
+            if (ownedRowBg != null && !ownedRowBg.isDisposed())
+                ownedRowBg.dispose();
+            if (ownedActiveCellBg != null && !ownedActiveCellBg.isDisposed())
+                ownedActiveCellBg.dispose();
+            ownedRowBg = null;
+            ownedActiveCellBg = null;
+        }
+
+        // ---- hit-test (см. DebugInspectorTreeEnhancement.itemAt/columnAt) ----
+
+        private static TreeItem itemAt(Tree tree, int x, int y)
+        {
+            TreeItem item = tree.getItem(new Point(x, y));
+            if (item != null)
+                return item;
+            for (TreeItem root : tree.getItems())
+            {
+                TreeItem found = findInItem(root, x, y);
+                if (found != null)
+                    return found;
+            }
+            return null;
+        }
+
+        private static TreeItem findInItem(TreeItem item, int x, int y)
+        {
+            for (int i = 0; i < item.getParent().getColumnCount(); i++)
+            {
+                Rectangle bounds = item.getBounds(i);
+                if (bounds != null && bounds.contains(x, y))
+                    return item;
+            }
+            if (item.getExpanded())
+                for (TreeItem child : item.getItems())
+                {
+                    TreeItem found = findInItem(child, x, y);
+                    if (found != null)
+                        return found;
+                }
+            return null;
+        }
+
+        private static int columnAt(Tree tree, int x, int y, TreeItem item)
+        {
+            for (int i = 0; i < tree.getColumnCount(); i++)
+            {
+                Rectangle bounds = item.getBounds(i);
+                if (bounds != null && bounds.contains(x, y))
+                    return i;
+            }
+            return 0;
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Тулбар: копирование активной ячейки (Ctrl+C / Edit>Copy) + видимость колонок
+    // -----------------------------------------------------------------------
+
+    /** Заменяет глобальный обработчик Copy на активной ячейке того Tree, в котором сейчас фокус. */
+    private static void installCopyOverride(IViewPart view)
+    {
+        try
+        {
+            IActionBars bars = view.getViewSite().getActionBars();
+            if (bars == null)
+                return;
+            IAction copyAction = new Action()
+            {
+                @Override
+                public void run()
+                {
+                    Display display = Display.getCurrent();
+                    Control focus = display != null ? display.getFocusControl() : null;
+                    if (!(focus instanceof Tree tree))
+                        return;
+                    Object data = tree.getData(INTERACTION_KEY);
+                    if (data instanceof GitStagingTreeInteraction interaction)
+                        interaction.copyActiveCellToClipboard();
+                }
+            };
+            bars.setGlobalActionHandler(ActionFactory.COPY.getId(), copyAction);
+            bars.updateActionBars();
+            Debug.log("installCopyOverride OK"); //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+            Debug.log("installCopyOverride EXCEPTION: " + e); //$NON-NLS-1$
+        }
+    }
+
+    /** Выпадающее меню в тулбаре вида — пометки видимости колонок «Тип»/«Путь»/«Время изменения»/«Статус». */
+    private static void installColumnVisibilityToolbar(IViewPart view)
+    {
+        try
+        {
+            IActionBars bars = view.getViewSite().getActionBars();
+            if (bars == null)
+                return;
+            IToolBarManager tbm = bars.getToolBarManager();
+            if (tbm == null)
+                return;
+
+            Action columnsAction = new Action(null, IAction.AS_DROP_DOWN_MENU)
+            {
+                @Override
+                public void run()
+                {
+                }
+            };
+            columnsAction.setText("Колонки"); //$NON-NLS-1$
+            columnsAction.setToolTipText("Видимость колонок" + Global.pluginSignForTooltip()); //$NON-NLS-1$
+            columnsAction.setImageDescriptor(
+                PlatformUI.getWorkbench().getSharedImages().getImageDescriptor(ISharedImages.IMG_OBJ_ELEMENT));
+            columnsAction.setMenuCreator(new ColumnsMenuCreator(view));
+
+            tbm.add(new Separator());
+            tbm.add(columnsAction);
+            bars.updateActionBars();
+            Debug.log("installColumnVisibilityToolbar OK"); //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+            Debug.log("installColumnVisibilityToolbar EXCEPTION: " + e); //$NON-NLS-1$
+        }
+    }
+
+    private static TreeViewer treeViewerOf(IViewPart view, String field)
+    {
+        Object obj = Global.getField(view, field);
+        return obj instanceof TreeViewer tv && !tv.getControl().isDisposed() ? tv : null;
+    }
+
+    private static void toggleColumnVisibility(int logical, IViewPart view)
+    {
+        IDialogSettings settings = columnSettings();
+        TreeViewer stagedViewer = treeViewerOf(view, "stagedViewer"); //$NON-NLS-1$
+        TreeViewer unstagedViewer = treeViewerOf(view, "unstagedViewer"); //$NON-NLS-1$
+        // Ключи общие — порядок/ширины у обеих панелей и так синхронны (см. syncWidthToPeer/syncOrderToPeer),
+        // сохраняем из любой доступной, второй раз не нужно.
+        Tree sourceTree = stagedViewer != null ? stagedViewer.getTree()
+            : unstagedViewer != null ? unstagedViewer.getTree() : null;
+        if (sourceTree != null)
+            saveColumnState(sourceTree, settings);
+
+        boolean current = readVisible(settings, visibilityKey(logical));
+        settings.put(visibilityKey(logical), !current);
+        boolean[] visible = loadVisibility(settings);
+
+        rebuildTreeColumns(stagedViewer, visible, settings, view);
+        rebuildTreeColumns(unstagedViewer, visible, settings, view);
+        Debug.log("toggleColumnVisibility logical=" + logical + " visible=" + !current); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static void rebuildTreeColumns(TreeViewer viewer, boolean[] visible, IDialogSettings settings,
+        IViewPart view)
+    {
+        if (viewer == null || viewer.getTree().isDisposed())
+            return;
+        Tree tree = viewer.getTree();
+        installColumns(tree, visible, settings, view);
+        Object data = tree.getData(INTERACTION_KEY);
+        if (data instanceof GitStagingTreeInteraction interaction)
+            interaction.onColumnsRebuilt();
+        viewer.refresh();
+    }
+
+    /** Выпадающее меню тулбара: чекбоксы «Тип»/«Путь»/«Время изменения»/«Статус» («Имя» всегда видима). */
+    private static final class ColumnsMenuCreator implements IMenuCreator
+    {
+        private final IViewPart view;
+        private Menu menu;
+
+        ColumnsMenuCreator(IViewPart view)
+        {
+            this.view = view;
+        }
+
+        @Override
+        public Menu getMenu(Menu parent)
+        {
+            return null;
+        }
+
+        @Override
+        public Menu getMenu(Control parent)
+        {
+            if (menu != null && !menu.isDisposed())
+                menu.dispose();
+            menu = new Menu(parent);
+            for (int logical : new int[] { COL_TYPE, COL_PATH, COL_TIME, COL_STATUS })
+            {
+                MenuItem item = new MenuItem(menu, SWT.CHECK);
+                item.setText(COLUMN_HEADERS[logical]);
+                item.setSelection(readVisible(columnSettings(), visibilityKey(logical)));
+                int logicalFinal = logical;
+                item.addListener(SWT.Selection, e -> toggleColumnVisibility(logicalFinal, view));
+            }
+            return menu;
+        }
+
+        @Override
+        public void dispose()
+        {
+            if (menu != null && !menu.isDisposed())
+                menu.dispose();
+            menu = null;
         }
     }
 

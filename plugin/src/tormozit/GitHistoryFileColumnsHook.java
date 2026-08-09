@@ -45,7 +45,7 @@ import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.preferences.ScopedPreferenceStore;
 
 /**
- * Колонки «Файл» + «Путь» и многословный фильтр ({@link SmartMatcher}, AND по словам)
+ * Колонки «Файл»/«Тип»/«Путь»/«Статус» и многословный фильтр ({@link SmartMatcher}, AND по словам)
  * в таблице файлов коммита панели «История Git»
  * ({@code org.eclipse.egit.ui.internal.history.GitHistoryPage} → {@code CommitFileDiffViewer}).
  *
@@ -56,8 +56,10 @@ import org.eclipse.ui.preferences.ScopedPreferenceStore;
  *
  * <p>Патч добавляет:
  * <ul>
- *   <li>Заголовки + 2 колонки: «Файл» (repo-путь, штатная иконка) и «Путь»
- *       (полное имя метаданных через {@link GetRef#resolveFullNameOrNull}).</li>
+ *   <li>Заголовки + 4 колонки: «Файл» (repo-путь, штатная иконка), «Тип» (расширение), «Путь»
+ *       (полное имя метаданных через {@link GetRef#resolveFullNameOrNull}) и «Статус»
+ *       (Добавлен/Изменён/Удалён/Переименован/Скопирован — {@code FileDiff.getChange()},
+ *       по образцу колонки «Статус» в панели «Индексирование Git», см. {@code GitStagingFilterHook}).</li>
  *   <li>{@link FormTableInteraction}: выбор ячейки, подсветка активной колонки,
  *       копирование текста ячейки (Ctrl+C / меню).</li>
  *   <li>Поле фильтра {@link FilterInputBox} ({@code SearchBox} с лупой) над таблицей
@@ -87,6 +89,7 @@ public final class GitHistoryFileColumnsHook implements IStartup
     private static final String KEY_COL_FILE_WIDTH = "colFileWidth"; //$NON-NLS-1$
     private static final String KEY_COL_TYPE_WIDTH = "colTypeWidth"; //$NON-NLS-1$
     private static final String KEY_COL_PATH_WIDTH = "colPathWidth"; //$NON-NLS-1$
+    private static final String KEY_COL_STATUS_WIDTH = "colStatusWidth"; //$NON-NLS-1$
 
     private static final String EGIT_UI_PLUGIN_ID = "org.eclipse.egit.ui"; //$NON-NLS-1$
 
@@ -251,7 +254,7 @@ public final class GitHistoryFileColumnsHook implements IStartup
                 origLabelProvider = clp;
 
             TableColumn[] cols = installColumns(table);
-            installFilterComposite(fileViewer, table, origLabelProvider, cols[0], cols[1], cols[2]);
+            installFilterComposite(fileViewer, table, origLabelProvider, cols[0], cols[1], cols[2], cols[3]);
 
             Debug.log("tryPatch: OK"); //$NON-NLS-1$
             return true;
@@ -272,7 +275,7 @@ public final class GitHistoryFileColumnsHook implements IStartup
     // Колонки
     // -----------------------------------------------------------------------
 
-    /** @return [0]=«Файл», [1]=«Тип», [2]=«Путь» */
+    /** @return [0]=«Файл», [1]=«Тип», [2]=«Путь», [3]=«Статус» */
     private static TableColumn[] installColumns(Table table)
     {
         // Реальные ширины/порядок/режим заполнения выставляются и персистятся в installFilterComposite
@@ -295,9 +298,15 @@ public final class GitHistoryFileColumnsHook implements IStartup
         pathCol.setResizable(true);
         pathCol.setWidth(250);
 
+        TableColumn statusCol = new TableColumn(table, SWT.LEFT, 3);
+        statusCol.setText("Статус"); //$NON-NLS-1$
+        statusCol.setToolTipText("Статус изменения файла в коммите" + Global.pluginSignForTooltip()); //$NON-NLS-1$
+        statusCol.setResizable(true);
+        statusCol.setWidth(90);
+
         table.setHeaderVisible(true);
         table.setLinesVisible(true);
-        return new TableColumn[] { fileCol, typeCol, pathCol };
+        return new TableColumn[] { fileCol, typeCol, pathCol, statusCol };
     }
 
     // -----------------------------------------------------------------------
@@ -305,7 +314,8 @@ public final class GitHistoryFileColumnsHook implements IStartup
     // -----------------------------------------------------------------------
 
     private static void installFilterComposite(TableViewer fileViewer, Table table,
-        CellLabelProvider origLabelProvider, TableColumn fileCol, TableColumn typeCol, TableColumn pathCol)
+        CellLabelProvider origLabelProvider, TableColumn fileCol, TableColumn typeCol, TableColumn pathCol,
+        TableColumn statusCol)
     {
         Composite revInfoSplit = table.getParent();
         if (revInfoSplit == null || revInfoSplit.isDisposed())
@@ -435,9 +445,11 @@ public final class GitHistoryFileColumnsHook implements IStartup
         int fileWidth = FormTableColumnState.readWidth(columnSettings, KEY_COL_FILE_WIDTH, 300, 1);
         int typeWidth = FormTableColumnState.readWidth(columnSettings, KEY_COL_TYPE_WIDTH, 60, 1);
         int pathWidth = FormTableColumnState.readWidth(columnSettings, KEY_COL_PATH_WIDTH, 250, 1);
+        int statusWidth = FormTableColumnState.readWidth(columnSettings, KEY_COL_STATUS_WIDTH, 90, 1);
         columnLayout.setColumnData(fileCol, new ColumnPixelData(fileWidth, true, true));
         columnLayout.setColumnData(typeCol, new ColumnPixelData(typeWidth, true, true));
         columnLayout.setColumnData(pathCol, new ColumnPixelData(pathWidth, true, true));
+        columnLayout.setColumnData(statusCol, new ColumnPixelData(statusWidth, true, true));
 
         FormTableInteraction interaction =
             new FormTableInteraction(table, fileViewer, (item, col) ->
@@ -447,7 +459,7 @@ public final class GitHistoryFileColumnsHook implements IStartup
                 String text = item.getText(col);
                 return text != null ? text : ""; //$NON-NLS-1$
             });
-        interaction.setOwnerDrawColumns(fileCol, typeCol, pathCol);
+        interaction.setOwnerDrawColumns(fileCol, typeCol, pathCol, statusCol);
         interaction.setColumnReorderEnabled(true);
         // Отбор/«Различные значения колонки» работают по ЭЛЕМЕНТУ модели (FileDiff), а не по
         // TableItem — тот же расчёт, что и в GitHistoryFileLabelProvider.update() для колонок
@@ -470,19 +482,21 @@ public final class GitHistoryFileColumnsHook implements IStartup
                 String fullName = GetRef.resolveFullNameOrNull(path);
                 return fullName != null ? fullName : ""; //$NON-NLS-1$
             }
+            if (col == 3)
+                return statusText(element);
             return ""; //$NON-NLS-1$
         });
         FormTableColumnState.loadOrder(columnSettings, KEY_COL_ORDER, table);
         boolean hasSavedColumnWidths = FormTableColumnState.hasSavedColumnWidths(columnSettings, KEY_COL_FILL_MODE,
-            KEY_COL_FILE_WIDTH, KEY_COL_TYPE_WIDTH, KEY_COL_PATH_WIDTH);
+            KEY_COL_FILE_WIDTH, KEY_COL_TYPE_WIDTH, KEY_COL_PATH_WIDTH, KEY_COL_STATUS_WIDTH);
         interaction.install(hasSavedColumnWidths);
         interactionRef[0] = interaction;
         table.addDisposeListener(e ->
         {
             boolean fillMode = interaction.isColumnsExactFill();
             FormTableColumnState.saveOrderAndWidths(dialogSettings(), KEY_COL_ORDER, KEY_COL_FILL_MODE, fillMode,
-                new String[] { KEY_COL_FILE_WIDTH, KEY_COL_TYPE_WIDTH, KEY_COL_PATH_WIDTH },
-                new TableColumn[] { fileCol, typeCol, pathCol }, table);
+                new String[] { KEY_COL_FILE_WIDTH, KEY_COL_TYPE_WIDTH, KEY_COL_PATH_WIDTH, KEY_COL_STATUS_WIDTH },
+                new TableColumn[] { fileCol, typeCol, pathCol, statusCol }, table);
         });
 
         horizontalSplit.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
@@ -658,6 +672,27 @@ public final class GitHistoryFileColumnsHook implements IStartup
         return dot >= 0 ? name.substring(dot + 1) : ""; //$NON-NLS-1$
     }
 
+    /**
+     * Текст статуса по {@code FileDiff.getChange()} ({@code org.eclipse.jgit.diff.DiffEntry.ChangeType} —
+     * получен рефлексией, как и остальные поля {@code FileDiff}, без прямой compile-зависимости от
+     * внутреннего API egit-ui).
+     */
+    private static String statusText(Object fileDiff)
+    {
+        Object change = Global.call(fileDiff, "getChange"); //$NON-NLS-1$
+        if (change == null)
+            return ""; //$NON-NLS-1$
+        return switch (change.toString())
+        {
+            case "ADD" -> "Добавлен"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "MODIFY" -> "Изменён"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "DELETE" -> "Удалён"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "RENAME" -> "Переименован"; //$NON-NLS-1$ //$NON-NLS-2$
+            case "COPY" -> "Скопирован"; //$NON-NLS-1$ //$NON-NLS-2$
+            default -> ""; //$NON-NLS-1$
+        };
+    }
+
     // -----------------------------------------------------------------------
     // ViewerFilter
     // -----------------------------------------------------------------------
@@ -694,8 +729,9 @@ public final class GitHistoryFileColumnsHook implements IStartup
     /**
      * Multi-column label provider: column 0 — оригинальный
      * {@code FileDiffLabelProvider} (иконки, dimmed foreground, tooltip rename),
-     * column 1 — {@code resolveFullNameOrNull(path)}. Подсветка совпадений
-     * {@link SmartMatchHighlight} по тексту каждой колонки.
+     * column 1 — расширение, column 2 — {@code resolveFullNameOrNull(path)},
+     * column 3 — статус. Подсветка совпадений {@link SmartMatchHighlight}
+     * только в колонках «Файл»/«Тип»/«Путь» (не в «Статус»).
      */
     private static final class GitHistoryFileLabelProvider
         extends StyledCellLabelProvider
@@ -750,11 +786,19 @@ public final class GitHistoryFileColumnsHook implements IStartup
                 // Как у штатной колонки «Файл»: dimmed foreground для unmarked FileDiff.
                 copyFileColumnStyle(cell, element);
             }
+            else if (col == 3)
+            {
+                Object element = cell.getElement();
+                cell.setText(statusText(element));
+                copyFileColumnStyle(cell, element);
+            }
 
             // Всегда вызываем appendMatchRanges — иначе при очистке фильтра
             // старые StyleRange (SWT переиспользует TableItem) остаются висеть.
+            // В «Статус» (col 3) подсветку не делаем: там фиксированные метки, не текст фильтра.
             String text = cell.getText();
-            List<SmartMatcher.HighlightRange> ranges = !highlightMatcher.isEmpty
+            List<SmartMatcher.HighlightRange> ranges = col != 3
+                && !highlightMatcher.isEmpty
                 && text != null && !text.isEmpty()
                 && highlightMatcher.matches(matchText(cell.getElement()))
                     ? highlightMatcher.getHighlightRanges(text)

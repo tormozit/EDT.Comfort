@@ -1295,6 +1295,9 @@ public final class IRApplication
     {
         if (result == null)
             return true;
+        // Неопределено (отмена модальной формы ИР): toString даёт литерал "null"
+        if (ComBridge.isVariantUndefined(result))
+            return true;
         if (result instanceof Boolean b)
             return !b;
         String text = ComBridge.toString(result);

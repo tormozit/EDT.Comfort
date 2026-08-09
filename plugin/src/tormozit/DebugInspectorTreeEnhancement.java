@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.ResourceBundle;
 
+import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.Adapters;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.text.IFindReplaceTarget;
@@ -14,6 +15,7 @@ import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.dialogs.InputDialog;
 import org.eclipse.debug.core.model.IValueModification;
 import org.eclipse.jface.viewers.ColumnViewerEditorActivationEvent;
+import org.eclipse.jface.window.Window;
 import org.eclipse.jface.viewers.TreePath;
 import org.eclipse.jface.viewers.TreeSelection;
 import org.eclipse.jface.viewers.Viewer;
@@ -24,8 +26,12 @@ import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
+import org.eclipse.swt.events.MenuAdapter;
+import org.eclipse.swt.events.MenuEvent;
 import org.eclipse.swt.events.MouseAdapter;
 import org.eclipse.swt.events.MouseEvent;
+import org.eclipse.swt.events.SelectionAdapter;
+import org.eclipse.swt.events.SelectionEvent;
 import org.eclipse.swt.graphics.Color;
 import org.eclipse.swt.graphics.Device;
 import org.eclipse.swt.graphics.Point;
@@ -42,9 +48,16 @@ import org.eclipse.swt.widgets.Text;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.texteditor.FindReplaceAction;
 import org.osgi.framework.FrameworkUtil;
+
+import com._1c.g5.v8.dt.debug.core.model.IBslVariable;
+import com._1c.g5.v8.dt.debug.core.model.values.BslValueType;
+import com._1c.g5.v8.dt.debug.core.model.values.IBslPrimitiveValue;
+import com._1c.g5.v8.dt.debug.core.model.values.IBslValue;
+import com._1c.g5.v8.dt.qw.ui.dialogs.QueryTextEditDialog;
 
 /**
  * Улучшения дерева инспектора отладки: выбор строки по клику в любой колонке,
@@ -95,6 +108,7 @@ final class DebugInspectorTreeEnhancement
     private Listener changeValueInspectorDisposeListener;
     private FindDialogDeactivateGuard changeValueModalGuard;
     private int changeValueGuardGeneration;
+    private FindDialogDeactivateGuard textEditModalGuard;
     private MouseAdapter mouseListener;
     private Color ownedRowBg;
     private Color ownedActiveCellBg;
@@ -345,6 +359,7 @@ final class DebugInspectorTreeEnhancement
         tree.addListener(SWT.KeyDown, treeKeyListener);
 
         DebugInspectorCollectionMenuHook.install(tree, viewer);
+        TextPropertyEditMenuHook.install(tree, viewer, this::beginTextEditModalGuard, this::endTextEditModalGuard);
 
         if (viewer instanceof Viewer treeViewer)
             DebugVariablePresentationHook.hookInspectorTreeViewer(treeViewer, tree);
@@ -1647,6 +1662,7 @@ final class DebugInspectorTreeEnhancement
                 changeValueInspectorDisposeListener = null;
             }
             DebugInspectorCollectionMenuHook.uninstall(tree);
+            TextPropertyEditMenuHook.uninstall(tree);
             tree.setData(ENHANCED_KEY, null);
             tree.setData(COPY_HOOKED_KEY, null);
             doubleClickListener = null;
@@ -1660,6 +1676,7 @@ final class DebugInspectorTreeEnhancement
             keyFilter = null;
         }
         closeChangeValueModalGuard();
+        endTextEditModalGuard();
         if (changeValueSelectionFilter != null)
         {
             Display display = Display.getCurrent();
@@ -1990,6 +2007,31 @@ final class DebugInspectorTreeEnhancement
             tree.setFocus();
     }
 
+    /**
+     * Suppress автозакрытия попапа инспектора на время фонового вызова внешнего приложения ИР
+     * ({@code TextPropertyEditMenuHook.openInIrEditor}) — без таймера {@link #attachChangeValueGuardRelease},
+     * т.к. окно ИР не является вложенным SWT Shell и никогда не станет {@code display.getActiveShell()}.
+     * Снимать явно через {@link #endTextEditModalGuard()} по завершении вызова (успех/ошибка/отмена).
+     */
+    private void beginTextEditModalGuard()
+    {
+        if (!shouldKeepDeactivateOff())
+            return;
+        suppressInspectorAutoClose();
+        if (textEditModalGuard != null)
+            textEditModalGuard.close();
+        textEditModalGuard = new FindDialogDeactivateGuard(shouldKeepDeactivateOff());
+    }
+
+    private void endTextEditModalGuard()
+    {
+        if (textEditModalGuard != null)
+        {
+            textEditModalGuard.close();
+            textEditModalGuard = null;
+        }
+    }
+
     private static boolean isChangeValueMenuItem(MenuItem item)
     {
         if (item == null || item.isDisposed())
@@ -1998,12 +2040,330 @@ final class DebugInspectorTreeEnhancement
         if (label != null)
         {
             String trimmed = label.trim();
+            // IR_ITEM_TEXT сюда намеренно не входит: «Редактировать текст ИР» открывает внешнее
+            // (не SWT) окно приложения ИР — attachChangeValueGuardRelease() ждёт появления
+            // вложенного SWT Shell, которого для внешнего окна никогда не будет. Suppress для
+            // этого пункта делается отдельно, на время самого фонового вызова (см. openInIrEditor).
             if (trimmed.contains("Изменить значение") //$NON-NLS-1$
                 || trimmed.contains("Change value") //$NON-NLS-1$
-                || trimmed.contains("Change Value")) //$NON-NLS-1$
+                || trimmed.contains("Change Value") //$NON-NLS-1$
+                || trimmed.contains(TextPropertyEditMenuHook.QUERY_ITEM_TEXT))
                 return true;
         }
         Object data = item.getData();
         return data != null && data.getClass().getName().contains("ChangeVariableValueAction"); //$NON-NLS-1$
+    }
+
+    /**
+     * Пункты «Редактировать текст ИР» / «Редактировать текст запроса» в подменю «Комфорт»
+     * контекстного меню дерева инспектора (попап и отдельное окно) — только для текстовых
+     * (BSL «Строка») редактируемых свойств.
+     */
+    private static final class TextPropertyEditMenuHook
+    {
+        private static final String HOOK_KEY = "tormozit.debugInspectorTextEditMenuHook"; //$NON-NLS-1$
+        static final String IR_ITEM_TEXT = "Редактировать текст ИР"; //$NON-NLS-1$
+        static final String QUERY_ITEM_TEXT = "Редактировать текст запроса"; //$NON-NLS-1$
+
+        private final Tree tree;
+        private final Object viewer;
+        /** Suppress автозакрытия попапа на время фонового вызова ИР — {@link #beginTextEditModalGuard()}. */
+        private final Runnable beginIrGuard;
+        /** Снять suppress по завершении вызова ИР — {@link #endTextEditModalGuard()}. */
+        private final Runnable endIrGuard;
+        private Listener menuDetectListener;
+        private MenuAdapter menuAdapter;
+        private int menuAttachAttempts;
+
+        private TextPropertyEditMenuHook(Tree tree, Object viewer, Runnable beginIrGuard, Runnable endIrGuard)
+        {
+            this.tree = tree;
+            this.viewer = viewer;
+            this.beginIrGuard = beginIrGuard;
+            this.endIrGuard = endIrGuard;
+        }
+
+        static void install(Tree tree, Object viewer, Runnable beginIrGuard, Runnable endIrGuard)
+        {
+            if (tree == null || tree.isDisposed())
+                return;
+            if (tree.getData(HOOK_KEY) instanceof TextPropertyEditMenuHook existing
+                && existing.isAttached())
+                return;
+
+            TextPropertyEditMenuHook hook = new TextPropertyEditMenuHook(tree, viewer, beginIrGuard, endIrGuard);
+            if (hook.attach())
+                tree.setData(HOOK_KEY, hook);
+        }
+
+        static void uninstall(Tree tree)
+        {
+            if (tree == null || tree.isDisposed())
+                return;
+            Object data = tree.getData(HOOK_KEY);
+            if (data instanceof TextPropertyEditMenuHook hook)
+                hook.detach();
+            tree.setData(HOOK_KEY, null);
+        }
+
+        private boolean isAttached()
+        {
+            return tree != null && !tree.isDisposed() && tree.getData(HOOK_KEY) == this;
+        }
+
+        private boolean attach()
+        {
+            if (tree.isDisposed())
+                return false;
+
+            menuDetectListener = this::onMenuDetect;
+            tree.addListener(SWT.MenuDetect, menuDetectListener);
+            scheduleMenuListenerAttach();
+            return true;
+        }
+
+        private void scheduleMenuListenerAttach()
+        {
+            Display display = tree.getDisplay();
+            if (display == null || display.isDisposed())
+                return;
+            int delay = menuAttachAttempts == 0 ? 0 : 50 * menuAttachAttempts;
+            display.timerExec(delay, this::ensureMenuListener);
+        }
+
+        private void ensureMenuListener()
+        {
+            if (!isAttached() || tree.isDisposed())
+                return;
+            Menu menu = tree.getMenu();
+            if (menu == null || menu.isDisposed())
+            {
+                if (menuAttachAttempts < 8)
+                {
+                    menuAttachAttempts++;
+                    scheduleMenuListenerAttach();
+                }
+                return;
+            }
+            if (menuAdapter != null)
+                return;
+
+            menuAdapter = buildMenuListener();
+            menu.addMenuListener(menuAdapter);
+        }
+
+        private void onMenuDetect(Event e)
+        {
+            if (e.widget != tree || tree.isDisposed())
+                return;
+            ensureMenuListener();
+        }
+
+        private MenuAdapter buildMenuListener()
+        {
+            return new MenuAdapter()
+            {
+                private final List<MenuItem> addedItems = new ArrayList<>(2);
+
+                @Override
+                public void menuShown(MenuEvent e)
+                {
+                    if (!DebugSessionHelper.isDebugSuspended(null))
+                        return;
+
+                    Object element = DebugCollectionShowSupport.resolveSelectedElement(tree, viewer);
+                    IBslVariable variable = resolveEditableStringVariable(element);
+                    if (variable == null)
+                        return;
+
+                    Menu menu = (Menu) e.widget;
+                    Shell shell = tree.getShell();
+
+                    // Корень меню — не подменю «Комфорт»: у дерева инспектора собственное меню
+                    // короткое, лишний уровень вложенности только мешает.
+                    MenuItem irItem = new MenuItem(menu, SWT.PUSH, 0);
+                    irItem.setText(IR_ITEM_TEXT);
+                    irItem.setToolTipText(
+                        "Открыть текст свойства в текстовом редакторе ИР" + Global.pluginSignForTooltip()); //$NON-NLS-1$
+                    irItem.addSelectionListener(new SelectionAdapter()
+                    {
+                        @Override
+                        public void widgetSelected(SelectionEvent ev)
+                        {
+                            DebugDetailPaneFullTextSupport.fetchFullText(variable,
+                                text -> openInIrEditor(variable,
+                                    text != null ? text : currentTextOf(variable), shell));
+                        }
+                    });
+                    addedItems.add(irItem);
+
+                    MenuItem queryItem = new MenuItem(menu, SWT.PUSH, 1);
+                    queryItem.setText(QUERY_ITEM_TEXT);
+                    queryItem.setToolTipText(
+                        "Открыть текст свойства в редакторе запроса" + Global.pluginSignForTooltip()); //$NON-NLS-1$
+                    queryItem.addSelectionListener(new SelectionAdapter()
+                    {
+                        @Override
+                        public void widgetSelected(SelectionEvent ev)
+                        {
+                            DebugDetailPaneFullTextSupport.fetchFullText(variable,
+                                text -> openInQueryEditor(variable,
+                                    text != null ? text : currentTextOf(variable), shell));
+                        }
+                    });
+                    addedItems.add(queryItem);
+                }
+
+                @Override
+                public void menuHidden(MenuEvent e)
+                {
+                    List<MenuItem> snapshot = new ArrayList<>(addedItems);
+                    addedItems.clear();
+                    Menu menu = (Menu) e.widget;
+                    menu.getDisplay().asyncExec(() ->
+                    {
+                        for (MenuItem item : snapshot)
+                        {
+                            if (!item.isDisposed())
+                                item.dispose();
+                        }
+                    });
+                }
+            };
+        }
+
+        private static IBslVariable resolveEditableStringVariable(Object element)
+        {
+            if (!(element instanceof IBslVariable variable))
+                return null;
+            if (!(element instanceof IValueModification modification) || !modification.supportsValueModification())
+                return null;
+            try
+            {
+                IBslValue value = variable.getValue();
+                if (value == null
+                    || value.getType() != BslValueType.STRING)
+                    return null;
+            }
+            catch (Exception e)
+            {
+                return null;
+            }
+            return variable;
+        }
+
+        private static String currentTextOf(IBslVariable variable)
+        {
+            try
+            {
+                IBslValue value = variable.getValue();
+                if (value instanceof IBslPrimitiveValue primitive
+                    && primitive.getPrimitiveValue() instanceof String text)
+                    return text;
+                return value != null ? value.getValueString() : ""; //$NON-NLS-1$
+            }
+            catch (Exception e)
+            {
+                return ""; //$NON-NLS-1$
+            }
+        }
+
+        private static void openInQueryEditor(IBslVariable variable,
+            String currentText, Shell shell)
+        {
+            IProject project =
+                Global.getActiveProject((IWorkbenchPage) null, false);
+            if (project == null)
+            {
+                toast(QUERY_ITEM_TEXT, "Не удалось определить проект EDT"); //$NON-NLS-1$
+                return;
+            }
+
+            QueryTextEditDialog dialog =
+                new QueryTextEditDialog(project, shell,
+                    currentText != null ? currentText : "", false, 0, false); //$NON-NLS-1$
+            if (dialog.open() == Window.OK)
+                applyNewValue(variable, dialog.getQueryText());
+        }
+
+        /**
+         * Окно ИР — внешний (не SWT) процесс, поэтому пока фоновый вызов не завершится, попап
+         * инспектора держим открытым явно ({@link #beginIrGuard}/{@link #endIrGuard}), не через
+         * определение вложенного Shell — его для внешнего окна не будет. Сам вызов ИР —
+         * {@link IrQueryTextEditorHandler#openTextInIrEditor}, общий с редактором запроса
+         * ({@code QueryTextEditDialogHook}). Заголовок окна ИР — полное имя свойства
+         * ({@link BslInspectSupport#resolveVariableInspectExpression}), а не заголовок Shell'а
+         * попапа инспектора (у попапа его обычно и нет).
+         */
+        private void openInIrEditor(IBslVariable variable, String currentText, Shell shell)
+        {
+            String title = BslInspectSupport.resolveVariableInspectExpression(variable);
+            if (title == null || title.isBlank())
+                title = shell != null ? shell.getText() : ""; //$NON-NLS-1$
+            IrQueryTextEditorHandler.openTextInIrEditor(null, title, currentText,
+                normalized -> applyNewValue(variable, normalized), beginIrGuard, endIrGuard);
+        }
+
+        /**
+         * {@link IValueModification#setValue(String)} принимает не литеральное значение, а BSL-выражение
+         * (тот же ввод, что в inline-редакторе «Значение»): парсится и вычисляется в контексте отладки.
+         * Поэтому текст нужно обернуть в корректный строковый литерал — экранировать кавычки удвоением
+         * и, если строка многострочная, продолжить каждую следующую строку с {@code |} (синтаксис
+         * многострочного строкового литерала BSL), иначе парсер падает на первом же непустом токене.
+         */
+        private static void applyNewValue(IBslVariable variable, String newText)
+        {
+            try
+            {
+                ((IValueModification) variable).setValue(toBslStringLiteral(newText));
+            }
+            catch (Exception e)
+            {
+                toast(QUERY_ITEM_TEXT, "Не удалось установить значение свойства: " + e.getMessage(), 5_000); //$NON-NLS-1$
+            }
+        }
+
+        private static String toBslStringLiteral(String raw)
+        {
+            String normalized = Global.normalizeLineSeparators(raw != null ? raw : ""); //$NON-NLS-1$
+            String escaped = normalized.replace("\"", "\"\""); //$NON-NLS-1$ //$NON-NLS-2$
+            String[] lines = escaped.split("\n", -1); //$NON-NLS-1$
+            StringBuilder sb = new StringBuilder(escaped.length() + lines.length + 2);
+            sb.append('"');
+            for (int i = 0; i < lines.length; i++)
+            {
+                if (i > 0)
+                    sb.append("\n|"); //$NON-NLS-1$
+                sb.append(lines[i]);
+            }
+            sb.append('"');
+            return sb.toString();
+        }
+
+        private static void toast(String title, String message)
+        {
+            toast(title, message, 3_000);
+        }
+
+        private static void toast(String title, String message, int durationMs)
+        {
+            Display display = Display.getDefault();
+            if (display != null && !display.isDisposed())
+                display.asyncExec(() -> ToastNotification.show(title, message, durationMs));
+        }
+
+        private void detach()
+        {
+            if (tree != null && !tree.isDisposed())
+            {
+                if (menuDetectListener != null)
+                    tree.removeListener(SWT.MenuDetect, menuDetectListener);
+                Menu menu = tree.getMenu();
+                if (menu != null && !menu.isDisposed() && menuAdapter != null)
+                    menu.removeMenuListener(menuAdapter);
+            }
+            menuDetectListener = null;
+            menuAdapter = null;
+        }
     }
 }
