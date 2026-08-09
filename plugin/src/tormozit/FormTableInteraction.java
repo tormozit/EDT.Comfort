@@ -19,6 +19,7 @@ import org.eclipse.jface.viewers.ColumnLabelProvider;
 import org.eclipse.jface.viewers.ColumnPixelData;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.ILabelProvider;
+import org.eclipse.jface.viewers.ISelectionChangedListener;
 import org.eclipse.jface.viewers.IStructuredContentProvider;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.LabelProvider;
@@ -197,6 +198,8 @@ final class FormTableInteraction
     private Listener menuDetectListener;
     private Listener keyFilter;
     private Listener mouseDownListener;
+    /** Programmatic {@code viewer.setSelection} часто не шлёт SWT.Selection — см. {@link #syncActiveCellFromSelection}. */
+    private ISelectionChangedListener viewerSelectionListener;
     private TableColumn[] ownerDrawColumns = NO_OWNER_DRAW_COLUMNS;
 
     /** Ширины колонок (визуальный порядок) на момент последнего фактического применения (commit) сужения/fill. */
@@ -498,6 +501,12 @@ final class FormTableInteraction
         selectionListener = this::onSelection;
         table.addListener(SWT.Selection, selectionListener);
 
+        if (multiSelectViewer != null)
+        {
+            viewerSelectionListener = event -> syncActiveCellFromSelection();
+            multiSelectViewer.addSelectionChangedListener(viewerSelectionListener);
+        }
+
         menuDetectListener = this::onMenuDetect;
         table.addListener(SWT.MenuDetect, menuDetectListener);
 
@@ -525,6 +534,11 @@ final class FormTableInteraction
     {
         if (table != null)
             INSTANCES.remove(table);
+        if (viewerSelectionListener != null && multiSelectViewer != null)
+        {
+            multiSelectViewer.removeSelectionChangedListener(viewerSelectionListener);
+            viewerSelectionListener = null;
+        }
         if (keyFilter != null && table != null && !table.isDisposed())
             table.getDisplay().removeFilter(SWT.KeyDown, keyFilter);
         if (pendingAutoFill != null && table != null && !table.isDisposed())
@@ -559,12 +573,60 @@ final class FormTableInteraction
      */
     void resyncSelectionTheme()
     {
+        syncActiveCellFromSelection();
         if (!table.isDisposed() && ListSelectionThemeColors.isDarkList(table))
         {
             for (TableItem item : table.getItems())
                 syncCellBackgrounds(item);
         }
         redrawSelectedRows();
+    }
+
+    /**
+     * Подтянуть рамку «активной ячейки» к текущему нативному/viewer-выделению.
+     * {@code viewer.setSelection(...)} после {@code setInput}/{@code refresh} часто не шлёт
+     * {@code SWT.Selection}, а {@link #selectedItem} остаётся на старом (переиспользованном)
+     * {@code TableItem} — фон строки уже на новой, рамка ячейки на старой.
+     * Если активная строка ещё в выделении — не трогаем (Ctrl+клик по другой строке).
+     */
+    void syncActiveCellFromSelection()
+    {
+        if (table == null || table.isDisposed())
+            return;
+        if (selectedItem != null && selectedItem.isDisposed())
+            selectedItem = null;
+        if (selectedItem != null && isRowSelected(selectedItem))
+            return;
+        TableItem row = null;
+        TableItem[] sel = table.getSelection();
+        if (sel.length > 0)
+            row = sel[0];
+        else if (useViewerForMultiSelect())
+        {
+            Object first = multiSelectViewer.getStructuredSelection().getFirstElement();
+            if (first != null)
+            {
+                for (TableItem item : table.getItems())
+                {
+                    if (first.equals(item.getData()))
+                    {
+                        row = item;
+                        break;
+                    }
+                }
+            }
+        }
+        if (row == null || row.isDisposed())
+            return;
+        int col = activeColumnIndex();
+        if (col < 0)
+            col = 0;
+        TableItem previous = selectedItem;
+        updateActiveCell(row, col);
+        if (previous != null && previous != row && !previous.isDisposed())
+            redrawRow(previous);
+        redrawRow(row);
+        redrawHeader();
     }
 
     void selectCell(TableItem item, int column)
@@ -3641,11 +3703,56 @@ final class FormTableInteraction
         /** Флажок «Учитывать отбор» переключён — пересчитать список различных значений с нуля. */
         private void reloadRows()
         {
+            // ValueRow после пересчёта — новые объекты без equals по value: штатный
+            // preservingSelection() у TableViewer не находит прежнее выделение → строка теряется.
+            String keepValue = currentSelectedValue();
             boolean honorOtherFilters = honorOtherFiltersCheckbox != null && honorOtherFiltersCheckbox.getSelection();
             List<ValueRow> recomputed = owner.computeColumnValueRows(column, honorOtherFilters);
             rows.clear();
             rows.addAll(recomputed);
             applySort();
+            restoreSelectionByValue(keepValue);
+        }
+
+        /** Значение активной (или первой выделенной) строки — ключ для восстановления после reload. */
+        private String currentSelectedValue()
+        {
+            if (dialogInteraction != null)
+            {
+                TableItem active = dialogInteraction.selectedItem();
+                if (active != null && !active.isDisposed() && active.getData() instanceof ValueRow row)
+                    return row.value;
+            }
+            if (dialogTable != null && !dialogTable.isDisposed())
+            {
+                TableItem[] sel = dialogTable.getSelection();
+                if (sel.length > 0 && sel[0].getData() instanceof ValueRow row)
+                    return row.value;
+            }
+            return null;
+        }
+
+        /**
+         * После {@link #reloadRows()} вернуть выделение на то же значение (по строке value среди
+         * видимых {@code TableItem}). Если значения больше нет в списке — первая видимая строка.
+         */
+        private void restoreSelectionByValue(String value)
+        {
+            if (dialogTable == null || dialogTable.isDisposed() || dialogTable.getItemCount() == 0)
+                return;
+            if (value != null)
+            {
+                TableItem[] items = dialogTable.getItems();
+                for (int i = 0; i < items.length; i++)
+                {
+                    if (items[i].getData() instanceof ValueRow row && value.equals(row.value))
+                    {
+                        selectTableIndexAndNotify(i);
+                        return;
+                    }
+                }
+            }
+            FilterInputBoxListNavigation.selectFirstRowIfSelectionLost(dialogTable);
         }
 
         private void selectInitialValue()

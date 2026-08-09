@@ -5,8 +5,11 @@ import java.io.InputStreamReader;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.StandardOpenOption;
 import java.text.DateFormat;
 import java.text.ParseException;
+import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.Date;
@@ -159,6 +162,13 @@ public final class StacktracesViewInteractionHook implements IStartup
     private static final String MEMENTO_GUARD_KEY = "tormozit.comfort.stacktraces.mementoGuard"; //$NON-NLS-1$
     private static final String FOLDER_TAB_PROBE_KEY = "tormozit.comfort.stacktraces.folderTabProbe"; //$NON-NLS-1$
     private static final String LIST_LOG_TOPIC = "stacktraces-list"; //$NON-NLS-1$
+    /**
+     * Аудит memento save/load в {@code .tmp/stacktraces-memento-audit.log} — только при включённом
+     * «Общее логирование» ({@link Global#isLogEnabled()}); файл не чистится при старте плагина
+     * (в отличие от temp-logs).
+     */
+    private static final java.nio.file.Path MEMENTO_AUDIT_PATH =
+            java.nio.file.Path.of("C:\\VC\\EDT.Comfort\\.tmp\\stacktraces-memento-audit.log"); //$NON-NLS-1$
     /** Тип дочернего узла memento = {@code IStacktrace.class.getSimpleName()}. */
     private static final String MEMENTO_STACKTRACE_TYPE = "IStacktrace"; //$NON-NLS-1$
     private static final java.util.Set<IViewPart> MEMENTO_GUARD_VIEWS =
@@ -649,6 +659,89 @@ public final class StacktracesViewInteractionHook implements IStartup
         Global.tempLog(LIST_LOG_TOPIC, text);
     }
 
+    /** Аудит в постоянный файл — только при {@link Global#isLogEnabled()}. */
+    private static void mementoAudit(String text)
+    {
+        if (!Global.isLogEnabled())
+            return;
+        listLog(text);
+        try
+        {
+            Files.createDirectories(MEMENTO_AUDIT_PATH.getParent());
+            String line = LocalDateTime.now() + " " + text + System.lineSeparator(); //$NON-NLS-1$
+            Files.writeString(MEMENTO_AUDIT_PATH, line, StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+        }
+        catch (Exception e)
+        {
+            listLog("mementoAudit WRITE_FAIL " + e); //$NON-NLS-1$
+        }
+    }
+
+    private static String stacktraceAuditLine(Object stacktrace, int index)
+    {
+        if (stacktrace == null)
+            return "#" + index + " null"; //$NON-NLS-1$ //$NON-NLS-2$
+        String name = ""; //$NON-NLS-1$
+        String detail = ""; //$NON-NLS-1$
+        String project = ""; //$NON-NLS-1$
+        String error = ""; //$NON-NLS-1$
+        try
+        {
+            if (stacktrace instanceof IStacktrace st)
+            {
+                name = st.getName() != null ? st.getName() : ""; //$NON-NLS-1$
+                detail = st.getDetail() != null ? st.getDetail() : ""; //$NON-NLS-1$
+                project = st.getProjectName() != null ? st.getProjectName() : ""; //$NON-NLS-1$
+                error = BreakpointListHook.firstLine(findStacktraceErrorText(st));
+                if (error == null)
+                    error = ""; //$NON-NLS-1$
+            }
+            else
+            {
+                Object n = Global.invoke(stacktrace, "getName"); //$NON-NLS-1$
+                Object d = Global.invoke(stacktrace, "getDetail"); //$NON-NLS-1$
+                Object p = Global.invoke(stacktrace, "getProjectName"); //$NON-NLS-1$
+                name = n != null ? String.valueOf(n) : ""; //$NON-NLS-1$
+                detail = d != null ? String.valueOf(d) : ""; //$NON-NLS-1$
+                project = p != null ? String.valueOf(p) : ""; //$NON-NLS-1$
+            }
+        }
+        catch (Exception e)
+        {
+            return "#" + index + " id=" + Integer.toHexString(System.identityHashCode(stacktrace)) //$NON-NLS-1$ //$NON-NLS-2$
+                    + " AUDIT_FAIL " + e; //$NON-NLS-1$
+        }
+        return "#" + index //$NON-NLS-1$
+                + " id=" + Integer.toHexString(System.identityHashCode(stacktrace)) //$NON-NLS-1$
+                + " name='" + auditShort(name) + "'" //$NON-NLS-1$ //$NON-NLS-2$
+                + " detail='" + detail + "'" //$NON-NLS-1$ //$NON-NLS-2$
+                + " err='" + auditShort(error) + "'" //$NON-NLS-1$ //$NON-NLS-2$
+                + " project='" + auditShort(project) + "'"; //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static void auditRepositoryInventory(String phase, Object repository)
+    {
+        Object all = repository != null ? Global.invoke(repository, "getStacktraces") : null; //$NON-NLS-1$
+        if (!(all instanceof List<?> list))
+        {
+            mementoAudit(phase + " inventory repo=nullOrBad"); //$NON-NLS-1$
+            return;
+        }
+        mementoAudit(phase + " inventory size=" + list.size()); //$NON-NLS-1$
+        int i = 0;
+        for (Object st : list)
+            mementoAudit(phase + " " + stacktraceAuditLine(st, i++)); //$NON-NLS-1$
+    }
+
+    private static String auditShort(String text)
+    {
+        if (text == null)
+            return ""; //$NON-NLS-1$
+        String oneLine = text.replace('\r', ' ').replace('\n', ' ');
+        return oneLine.length() <= 60 ? oneLine : oneLine.substring(0, 57) + "..."; //$NON-NLS-1$
+    }
+
     private static String shortStack()
     {
         StackTraceElement[] st = Thread.currentThread().getStackTrace();
@@ -700,9 +793,9 @@ public final class StacktracesViewInteractionHook implements IStartup
     }
 
     /**
-     * (1) save — в memento только уникальные по ключу «ошибка+дата», живой репозиторий не трогаем.
-     * (2) load — если репозиторий уже не пуст, повторный add из memento пропускаем и восстанавливаем
+     * load — если репозиторий уже не пуст, повторный add из memento пропускаем и восстанавливаем
      * вкладки из текущего репозитория (иначе singleton + load без очистки удваивает список).
+     * save — в memento только уникальные по ключу «ошибка+дата» (живой репозиторий не трогаем).
      * Guard ставится в {@link #installSingletonRepoListenerWatch} на init() view — до createPartControl.
      */
     private static void installMementoGuard(IViewPart view)
@@ -747,23 +840,62 @@ public final class StacktracesViewInteractionHook implements IStartup
                 }
                 if ("save".equals(name) && args != null && args.length == 1 && args[0] instanceof IMemento memento) //$NON-NLS-1$
                 {
-                    int beforeKids = countMementoStacktraces(memento);
-                    int cleared = clearMementoStacktraceChildren(memento);
                     Object liveRepo = Global.getField(real, "repository"); //$NON-NLS-1$
+                    int beforeKids = countMementoStacktraces(memento);
                     Object allObj = liveRepo != null ? Global.invoke(liveRepo, "getStacktraces") : null; //$NON-NLS-1$
                     List<?> all = allObj instanceof List<?> list ? list : List.of();
                     List<Object> unique = uniqueStacktracesForPersist(all);
-                    listLog("memento.save beforeKids=" + beforeKids //$NON-NLS-1$
-                            + " clearedKids=" + cleared //$NON-NLS-1$
+                    mementoAudit("memento.save BEGIN beforeKids=" + beforeKids //$NON-NLS-1$
                             + " repo=" + all.size() //$NON-NLS-1$
                             + " unique=" + unique.size() //$NON-NLS-1$
                             + " " + shortStack()); //$NON-NLS-1$
+                    auditRepositoryInventory("memento.save.repo", liveRepo); //$NON-NLS-1$
+                    for (int i = 0; i < unique.size(); i++)
+                        mementoAudit("memento.save.unique " + stacktraceAuditLine(unique.get(i), i)); //$NON-NLS-1$
+                    if (unique.isEmpty() && !all.isEmpty())
+                    {
+                        mementoAudit("memento.save ALERT uniqueEmptyKeepFull repo=" + all.size()); //$NON-NLS-1$
+                        unique = new ArrayList<>(all);
+                    }
+                    else if (unique.size() < all.size())
+                    {
+                        int dropped = all.size() - unique.size();
+                        mementoAudit("memento.save DEDUP fired repo=" + all.size() //$NON-NLS-1$
+                                + " unique=" + unique.size() //$NON-NLS-1$
+                                + " dropped=" + dropped); //$NON-NLS-1$
+                        Global.log("StacktracesMemento", //$NON-NLS-1$
+                                "save dedup: repo=" + all.size() //$NON-NLS-1$
+                                        + " -> unique=" + unique.size() //$NON-NLS-1$
+                                        + " dropped=" + dropped); //$NON-NLS-1$
+                        java.util.Set<Object> keptIds = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+                        for (Object kept : unique)
+                            keptIds.add(kept);
+                        int dropIndex = 0;
+                        for (Object st : all)
+                        {
+                            if (st == null || keptIds.contains(st))
+                                continue;
+                            String key = stacktracePersistKey(st);
+                            mementoAudit("memento.save DEDUP drop " //$NON-NLS-1$
+                                    + stacktraceAuditLine(st, dropIndex++) //$NON-NLS-1$
+                                    + " key='" + auditShort(key) + "'"); //$NON-NLS-1$ //$NON-NLS-2$
+                        }
+                    }
+                    else
+                        mementoAudit("memento.save DEDUP none repo=" + all.size()); //$NON-NLS-1$
+                    int cleared = clearMementoStacktraceChildren(memento);
                     Object filterRepo = filteringRepositoryProxy(liveRepo, unique, repoIface, cl);
                     Global.setFieldForce(real, "repository", filterRepo); //$NON-NLS-1$
                     try
                     {
                         Object result = method.invoke(real, args);
-                        listLog("memento.save afterKids=" + countMementoStacktraces(memento)); //$NON-NLS-1$
+                        int afterKids = countMementoStacktraces(memento);
+                        mementoAudit("memento.save END clearedKids=" + cleared //$NON-NLS-1$
+                                + " afterKids=" + afterKids //$NON-NLS-1$
+                                + " repo=" + all.size() //$NON-NLS-1$
+                                + " unique=" + unique.size()); //$NON-NLS-1$
+                        if (afterKids == 0 && !all.isEmpty())
+                            mementoAudit("memento.save ALERT emptyMementoWhileRepoHad=" + all.size()); //$NON-NLS-1$
                         return result;
                     }
                     finally
@@ -779,17 +911,22 @@ public final class StacktracesViewInteractionHook implements IStartup
                     int repoBefore = repoSizeOf(liveRepo);
                     if (repoBefore > 0)
                     {
-                        listLog("memento.load SKIP kids=" + kids //$NON-NLS-1$
+                        mementoAudit("memento.load SKIP kids=" + kids //$NON-NLS-1$
                                 + " repo=" + repoBefore //$NON-NLS-1$
                                 + " " + shortStack()); //$NON-NLS-1$
+                        auditRepositoryInventory("memento.load.skip", liveRepo); //$NON-NLS-1$
                         recreatePagesFromRepository(view, liveRepo);
                         return null;
                     }
-                    listLog("memento.load kids=" + kids //$NON-NLS-1$
+                    mementoAudit("memento.load BEGIN kids=" + kids //$NON-NLS-1$
                             + " repoBefore=" + repoBefore //$NON-NLS-1$
                             + " " + shortStack()); //$NON-NLS-1$
                     Object result = method.invoke(real, args);
-                    listLog("memento.load afterRepo=" + repoSizeOf(liveRepo)); //$NON-NLS-1$
+                    int repoAfter = repoSizeOf(liveRepo);
+                    mementoAudit("memento.load END afterRepo=" + repoAfter); //$NON-NLS-1$
+                    auditRepositoryInventory("memento.load", liveRepo); //$NON-NLS-1$
+                    if (kids > 0 && repoAfter == 0)
+                        mementoAudit("memento.load ALERT mementoHadKidsButRepoEmpty kids=" + kids); //$NON-NLS-1$
                     return result;
                 }
                 return method.invoke(real, args);
@@ -911,7 +1048,7 @@ public final class StacktracesViewInteractionHook implements IStartup
         }
     }
 
-    /** Ключ как у CONTENT_DUP в refresh: первая строка ошибки + detail (дата). */
+    /** Ключ как у CONTENT_DUP: первая строка ошибки + detail (дата). */
     private static String stacktracePersistKey(Object stacktraceObj)
     {
         if (stacktraceObj instanceof IStacktrace stacktrace)
@@ -1156,11 +1293,57 @@ public final class StacktracesViewInteractionHook implements IStartup
                                 + " repoSize=" + repoSizeOf(realRepo) //$NON-NLS-1$
                                 + " listeners=" + listenerCount(realRepo) //$NON-NLS-1$
                                 + " " + shortStack()); //$NON-NLS-1$
+                        // «Анализировать» добавляет вкладку через EDT listener, но Selection/Resize
+                        // на скрытом CTabFolder может не прийти — таблица слева иначе отстаёт.
+                        scheduleListPanesRefresh("repo." + evName); //$NON-NLS-1$
                     }
                     return null;
                 });
         Global.invoke(realRepo, "addChangedListener", diag); //$NON-NLS-1$
         listLog("repoProbe: diagListener added listeners=" + listenerCount(realRepo)); //$NON-NLS-1$
+    }
+
+    /** Обновить все установленные панели списка после add/remove в репозитории. */
+    private static void scheduleListPanesRefresh(String reason)
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() ->
+        {
+            listLog("listPanes.refresh reason=" + reason); //$NON-NLS-1$
+            refreshAllListPanes();
+        });
+    }
+
+    private static void refreshAllListPanes()
+    {
+        IWorkbench wb = PlatformUI.getWorkbench();
+        if (wb == null)
+            return;
+        for (IWorkbenchWindow window : wb.getWorkbenchWindows())
+        {
+            if (window == null)
+                continue;
+            for (IWorkbenchPage page : window.getPages())
+            {
+                if (page == null)
+                    continue;
+                for (IViewReference ref : page.getViewReferences())
+                {
+                    IWorkbenchPart part = ref != null ? ref.getPart(false) : null;
+                    if (!(part instanceof IViewPart view) || !VIEW_ID.equals(view.getViewSite().getId()))
+                        continue;
+                    Object folderObj = Global.invoke(view, "getPageContainer"); //$NON-NLS-1$
+                    if (!(folderObj instanceof CTabFolder folder) || folder.isDisposed())
+                        continue;
+                    updateFolderTabTitles(folder);
+                    StacktracesListPane pane = listPaneOf(folder);
+                    if (pane != null)
+                        pane.refreshFromFolder();
+                }
+            }
+        }
     }
 
     /** Лог при появлении/удалении CTabItem (Dispose на item + периодический контроль через refresh). */
@@ -1183,6 +1366,9 @@ public final class StacktracesViewInteractionHook implements IStartup
                         + " " + shortStack()); //$NON-NLS-1$
                 lastCount[0] = now;
                 wireTabItemDisposeProbes(folder, lastCount);
+                StacktracesListPane pane = listPaneOf(folder);
+                if (pane != null)
+                    pane.refreshFromFolder();
             }
         });
         folder.addDisposeListener(e -> listLog("folder.dispose tabsWere=" + lastCount[0])); //$NON-NLS-1$
@@ -1217,6 +1403,9 @@ public final class StacktracesViewInteractionHook implements IStartup
         {
             listLog("folder.tabsGrew " + lastCount[0] + "->" + now); //$NON-NLS-1$ //$NON-NLS-2$
             lastCount[0] = now;
+            StacktracesListPane pane = listPaneOf(folder);
+            if (pane != null)
+                pane.refreshFromFolder();
         }
     }
 
@@ -2832,6 +3021,9 @@ public final class StacktracesViewInteractionHook implements IStartup
             finally
             {
                 syncingSelection = false;
+                // setInput + setSelection часто без SWT.Selection — рамка активной ячейки иначе
+                // остаётся на старом TableItem (переиспользованном SWT).
+                interaction.resyncSelectionTheme();
             }
         }
 

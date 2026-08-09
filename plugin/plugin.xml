@@ -3,6 +3,7 @@
 <plugin>
   <extension point="org.eclipse.ui.startup">
     <startup class="tormozit.ComfortShutdownHook"/>
+    <startup class="tormozit.LwtComboSelectedColorFixHook"/>
     <startup class="tormozit.ActiveProjectTracker"/>
     <startup class="tormozit.CompareConfigMenuHook"/>
     <startup class="tormozit.ApplicationsViewHook"/>
