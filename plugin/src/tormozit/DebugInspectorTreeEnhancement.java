@@ -334,6 +334,7 @@ final class DebugInspectorTreeEnhancement
             syncFromTreeSelection();
             invalidateHighlightColor();
             tree.redraw();
+            scheduleDetailPaneFullTextRefresh();
         };
         tree.addListener(SWT.Selection, selectionListener);
 
@@ -1148,6 +1149,15 @@ final class DebugInspectorTreeEnhancement
         selectedItem = selection[0];
         if (activeColumn < 0 || activeColumn >= tree.getColumnCount())
             activeColumn = 0;
+    }
+
+    /** Довыгрузка полного текста в панель деталей инспектора — общая логика в {@link DebugDetailPaneFullTextSupport} (см. issue #258). */
+    private void scheduleDetailPaneFullTextRefresh()
+    {
+        Object host = resolveElementDialogHost();
+        if (host == null)
+            host = dialog;
+        DebugDetailPaneFullTextSupport.onTreeSelectionChanged(tree, viewer, host, "detailPane"); //$NON-NLS-1$
     }
 
     private void applyViewerSelection(TreeItem item)
