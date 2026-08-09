@@ -1453,6 +1453,17 @@ return resolveProposalList(viewer, probeOffset, caret, filter, smart);
      */
     ICompletionProposal[] filterCachedProposalsForPopup(ITextViewer viewer, int caret, String filter)
     {
+        if (irOnlyManualMode || selectionIrOnlyActive())
+        {
+            boolean forceFull = selectionForcesIrOnlyFullList();
+            ICompletionProposal[] irOnly = mergeIrForDisplay(EMPTY);
+            ICompletionProposal[] result = (forceFull || filter == null || filter.isEmpty())
+                ? finalizeListForIrAssistDisplay(irOnly)
+                : filterAndSort(irOnly, filter);
+            debugFilterCachedExit(viewer, caret, filter,
+                viewer != null ? viewer.getDocument() : null, irOnly.length, "irOnly", result); //$NON-NLS-1$
+            return result;
+        }
         if (isStringLiteralAssistContext(viewer, caret)
             && !irOnlyManualMode
             && !hasIrProposalsForCurrentContext()
@@ -1715,10 +1726,25 @@ ContentAssistSessionReloader reloader = viewer instanceof SourceViewer sv
             ? ContentAssistSessionReloader.forViewer(sv) : null;
         boolean manualDetect = ManualInvocationDetect.isActive();
         debugLiteralContext(viewer, literalCaret);
-if (manualDetect && reloader != null)
+        boolean selectionIrOnly = reloader != null && reloader.isSelectionIrOnlyContext();
+ if ((manualDetect || selectionIrOnly) && reloader != null)
             reloader.tryBeginManualDualAssist(literalCaret);
         boolean diagIrPending = reloader != null && reloader.isManualIrAssistPending();
         boolean diagIrResolved = isIrWordsResolvedForContext();
+        // #region agent log — trace selection Ctrl+Space (временное, безусловное)
+        {
+            int selLen = reloader != null ? reloader.widgetSelectionLength() : -2;
+            if (selLen > 0)
+            {
+                boolean irConn = reloader != null && reloader.irConnectedForAssist();
+                Global.tempLog("assist-trace", "compute: off=" + offset //$NON-NLS-1$ //$NON-NLS-2$
+                    + " caret=" + literalCaret + " selLen=" + selLen
+                    + " inLit=" + inLiteral + " manual=" + manualDetect
+                    + " irOnly=" + irOnlyManualMode + " irPending=" + diagIrPending
+                    + " irResolved=" + diagIrResolved + " irConn=" + irConn);
+            }
+        }
+        // #endregion
 if (reloader != null && reloader.isManualIrAssistPending()
             && !isIrWordsResolvedForContext())
         {
@@ -1728,7 +1754,17 @@ return EMPTY;
         {
 return EMPTY;
         }
-        if (irOnlyManualMode)
+        // Повторный Ctrl+Space (toggle фильтра) в режиме выделения+ИР: сохраняем штатное
+        // переключение флажка «Фильтр», но список ниже остаётся только ИР (не EDT+ИР).
+        if (selectionIrOnly && RepeatedInvocationDetect.isActive())
+        {
+ContentAssistant assistant = ContentAssistSessionReloader.getActiveAssistant();
+            if (assistant != null)
+                ContentAssistPopupSync.captureSelectionBeforeFilterToggle(assistant);
+            SmartAssistFilterState.toggle();
+            ContentAssistSessionReloader.scheduleFilterToggleUiSync();
+        }
+        if (irOnlyManualMode || selectionIrOnly)
             return computeIrOnlyProposals(viewer, literalCaret);
         if (ContentAssistSessionReloader.consumeLiteralRepeatFromCommand() && inLiteral)
         {
@@ -3328,9 +3364,48 @@ if (!isIrAssistOrderingEnabled())
     private static final ThreadLocal<SmartCodeMatcher> VALIDATE_MATCHER = new ThreadLocal<>();
     private static final ThreadLocal<String> VALIDATE_FILTER = new ThreadLocal<>();
 
+    /**
+     * Выделение фрагмента в режиме IR-only (ручной Ctrl+Space при подключённом ИР):
+     * префикс фильтрации принудительно пустой — показываем полный список слов ИР,
+     * не сужая его по тексту выделения. Список EDT уже исключён через
+     * {@link #irOnlyManualMode} (см. {@code ContentAssistSessionReloader.beginManualDualAssist}).
+     */
+    private static volatile int lastLoggedSelectionLen = Integer.MIN_VALUE;
+
+    /** Выделение фрагмента + подключённый ИР + replaceListFilters (см. {@code ContentAssistSessionReloader#isSelectionIrOnlyContext}). */
+    private static boolean selectionIrOnlyActive()
+    {
+        ContentAssistSessionReloader reloader = ContentAssistSessionReloader.getActiveReloader();
+        return reloader != null && reloader.isSelectionIrOnlyContext();
+    }
+
+    private static boolean selectionForcesIrOnlyFullList()
+    {
+        SmartContentAssistProcessor proc = ContentAssistSessionReloader.getActiveProcessor();
+        boolean irOnly = proc != null && proc.isIrOnlyManualMode();
+        if (!irOnly && !selectionIrOnlyActive())
+            return false;
+        SourceViewer sv = ContentAssistSessionReloader.getActiveViewer();
+        if (sv == null)
+            return false;
+        org.eclipse.swt.graphics.Point sel = sv.getSelectedRange();
+        int len = sel != null ? sel.y : -1;
+        if (len <= 0)
+            return false;
+        if (len != lastLoggedSelectionLen)
+        {
+            lastLoggedSelectionLen = len;
+            Global.tempLog("assist-sel", "proposalMatchesFilter: irOnly + selection len=" //$NON-NLS-1$ //$NON-NLS-2$
+                + len + " -> full IR list"); //$NON-NLS-1$
+        }
+        return true;
+    }
+
     static boolean proposalMatchesFilter(ICompletionProposal proposal, IDocument document,
                                          int offset, DocumentEvent event)
     {
+        if (selectionForcesIrOnlyFullList())
+            return true;
         int caret = resolveFilterCaret(document, offset, event);
         boolean inLiteralValidate = isStringLiteralAssistContext(document, caret);
 if (!SmartAssistFilterState.isSmartFilterEnabled())

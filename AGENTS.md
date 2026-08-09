@@ -112,7 +112,7 @@ C:\VC\EDT.Comfort\.tmp\chat-snapshots\<chat-id>\
 
 Файлы на диске — **CRLF**. В patch/write-тулах — `\n` между строками (не `\r\n`, не `\n\n` между строками кода).
 
-Поломка: «шахматка» пустых строк, `0D 0D 0A` / `\r\n\r\n` — не копировать в патч, сначала ремонт.
+Поломка: «шахматка» пустых строк, `0D 0D 0A` / `\r\r\n` — не копировать в патч, сначала ремонт. Тот же скрипт приводит LF/mixed → CRLF (токены Read не растут).
 
 Git hook: см. `.cursor/scripts/install-git-eol-hook.ps1`, проверка — `check-double-eol.ps1`.
 
@@ -122,7 +122,7 @@ Git hook: см. `.cursor/scripts/install-git-eol-hook.ps1`, проверка —
 powershell -NoProfile -File "C:\VC\EDT.Comfort\.cursor\scripts\repair-double-eol.ps1" -Path "C:\VC\EDT.Comfort\plugin\src\tormozit\Foo.java"
 ```
 
-При `REPAIRED` — проверить плотность строк через `Read`. `plugin/.gitattributes`: `text=auto`, локально CRLF.
+При `REPAIRED` (шахматка/spacing) — проверить плотность строк через `Read`. Сообщение `LF/mixed -> CRLF` — только нормализация EOL, плотность не менялась. `plugin/.gitattributes`: `text=auto`, локально CRLF.
 
 ## Логирование плагина Комфорт
 

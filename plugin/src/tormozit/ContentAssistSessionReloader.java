@@ -3123,6 +3123,29 @@ openManualDualAssistPopupOnce(caret);
         return manualIrAssistPending;
     }
 
+    // #region agent log — trace selection Ctrl+Space (временное, безусловное)
+    boolean irConnectedForAssist()
+    {
+        return IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer) != null;
+    }
+
+    int widgetSelectionLength()
+    {
+        StyledText st = viewer.getTextWidget() instanceof StyledText s ? s : null;
+        return st != null && !st.isDisposed() ? st.getSelectionCount() : -1;
+    }
+
+    /** Выделение фрагмента + подключённый ИР + replaceListFilters → режим «только ИР». */
+    boolean isSelectionIrOnlyContext()
+    {
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+            return false;
+        if (!irConnectedForAssist())
+            return false;
+        return widgetSelectionLength() > 0;
+    }
+    // #endregion
+
     private IrBslCompletionSupport.Snapshot buildSnapshotFromRaw(
         int caret, IrBslCompletionSupport.Snapshot raw)
     {
@@ -3874,7 +3897,12 @@ scheduleFilterToggleUiSync();
             boolean popupVisible = ContentAssistPopupSync.isPopupVisible(assistant);
             boolean inLiteralProbe = probeCaret >= 0
                 && SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, probeCaret);
-if (popupVisible)
+            boolean hasTextSelection = text != null && !text.isDisposed()
+                && text.getSelectionCount() > 0;
+            if (hasTextSelection)
+                Global.tempLog("assist-sel", "CtrlSpace: selection caret=" + probeCaret //$NON-NLS-1$ //$NON-NLS-2$
+                    + " popup=" + popupVisible + " inLiteral=" + inLiteralProbe);
+ if (popupVisible)
             {
 event.doit = false;
                 return;

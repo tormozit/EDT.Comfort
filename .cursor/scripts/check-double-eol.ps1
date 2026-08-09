@@ -1,4 +1,4 @@
-# Scan repository for CR+CRLF EOL damage. Exit 1 if any found.
+# Scan repository for EOL damage: CR+CRLF and LF/mixed (non-CRLF). Exit 1 if any found.
 param(
     [string[]]$Path = @()
 )
@@ -37,24 +37,36 @@ function Get-ScanFiles {
     }
 }
 
+function Get-EolIssues {
+    param([string]$Raw)
+    $issues = @()
+    $crcrlf = ([regex]::Matches($Raw, "`r`r`n")).Count
+    if ($crcrlf -gt 0) { $issues += "CR+CRLF=$crcrlf" }
+    $loneLf = ([regex]::Matches($Raw, '(?<!\r)\n')).Count
+    if ($loneLf -gt 0) { $issues += "LF=$loneLf" }
+    $bareCr = ([regex]::Matches($Raw, '\r(?!\n)')).Count
+    if ($bareCr -gt 0) { $issues += "bareCR=$bareCr" }
+    return $issues
+}
+
 $hits = @()
 foreach ($file in @(Get-ScanFiles -InputPath $Path | Sort-Object FullName -Unique)) {
     $raw = [System.IO.File]::ReadAllText($file.FullName)
-    $count = ([regex]::Matches($raw, "`r`r`n")).Count
-    if ($count -gt 0) {
+    $issues = @(Get-EolIssues -Raw $raw)
+    if ($issues.Count -gt 0) {
         $hits += [PSCustomObject]@{
             Path = $file.FullName.Replace($repoRoot + '\', '')
-            Count = $count
+            Issues = ($issues -join ', ')
         }
     }
 }
 
 if ($hits.Count -eq 0) {
-    Write-Host 'OK: no CR+CRLF damage found.'
+    Write-Host 'OK: no EOL damage found (CR+CRLF / LF / bare CR).'
     exit 0
 }
 
-Write-Host "FAIL: $($hits.Count) file(s) with CR+CRLF:" -ForegroundColor Red
+Write-Host "FAIL: $($hits.Count) file(s) with EOL issues:" -ForegroundColor Red
 $hits | Format-Table -AutoSize
 Write-Host "Repair: powershell -NoProfile -File `"$PSScriptRoot\repair-double-eol.ps1`" -Path `"$repoRoot\plugin\src`""
 exit 1

@@ -1,12 +1,27 @@
-# Repair alternating blank lines (double CRLF artifact) in text files.
+# Repair EOL issues in text files:
+# - CR+CRLF (0D 0D 0A) -> CRLF
+# - LF / mixed -> CRLF
+# - alternating blank lines ("chessboard") from double-EOL artifacts
 param(
     [Parameter(Mandatory = $false)]
     [string[]]$Path = @(),
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$RemainingPaths = @(),
     [switch]$Scan,
     [switch]$WhatIf
 )
 
 $ErrorActionPreference = 'Stop'
+# powershell -File binds only the first -Path value; extra paths arrive as remaining args.
+if ($RemainingPaths -and $RemainingPaths.Count -gt 0) {
+    $Path = @($Path) + @($RemainingPaths)
+}
+
+function Test-NeedsCrlfNormalize {
+    param([string]$Raw)
+    # Lone LF (not part of CRLF) or bare CR (not part of CRLF).
+    return [bool]([regex]::IsMatch($Raw, '(?<!\r)\n') -or [regex]::IsMatch($Raw, '\r(?!\n)'))
+}
 
 function Test-DoubleSpacedContent {
     param(
@@ -97,7 +112,7 @@ function Get-TargetFiles {
             }
             elseif (Test-Path -LiteralPath $p -PathType Container) {
                 Get-ChildItem -LiteralPath $p -Recurse -File |
-                    Where-Object { $_.Extension -match '^\.(java|xml|properties)$' }
+                    Where-Object { $_.Extension -match '^\.(java|xml|properties|mdc|ps1|md|txt|launch)$' }
             }
         }
         return
@@ -112,6 +127,22 @@ function Get-TargetFiles {
     }
 }
 
+function Write-CrlfText {
+    param(
+        [string]$FilePath,
+        [string[]]$Lines,
+        [string]$Reason,
+        [switch]$WhatIf
+    )
+    $text = ($Lines -join "`r`n") + "`r`n"
+    if ($WhatIf) {
+        Write-Host "WOULD REPAIR $FilePath ($Reason)"
+        return
+    }
+    [System.IO.File]::WriteAllText($FilePath, $text, [System.Text.UTF8Encoding]::new($false))
+    Write-Host "REPAIRED $FilePath ($Reason)"
+}
+
 $files = @(Get-TargetFiles -InputPath $Path | Sort-Object FullName -Unique)
 $hits = @()
 
@@ -124,55 +155,56 @@ foreach ($file in $files) {
         $raw = $raw -replace "`r`r`n", "`r`n"
     } while ($raw -ne $prev)
     $hadCrCrLf = ($raw -ne $rawOriginal)
-    $normalized = $raw -replace "`r`n", "`n"
+    $needsCrlf = Test-NeedsCrlfNormalize -Raw $raw
+    $normalized = $raw -replace "`r`n", "`n" -replace "`r", "`n"
     $lines = $normalized -split "`n", -1
     if ($lines.Length -gt 0 -and $lines[$lines.Length - 1] -eq '') {
         $lines = $lines[0..($lines.Length - 2)]
     }
-    $doubleSpaced = Test-DoubleSpacedContent -Raw $raw -Lines $lines -Extension $file.Extension
-    if (-not $hadCrCrLf -and -not $doubleSpaced) { continue }
+    $doubleSpaced = $false
+    if ($file.Extension -eq '.java') {
+        $doubleSpaced = Test-DoubleSpacedContent -Raw $raw -Lines $lines -Extension $file.Extension
+    }
+    if (-not $hadCrCrLf -and -not $doubleSpaced -and -not $needsCrlf) { continue }
     $hits += $file
-    if ($Scan) { continue }
-
-    if ($hadCrCrLf -and -not $doubleSpaced) {
-        $text = $raw
-        if (-not $text.EndsWith("`r`n")) { $text += "`r`n" }
-        if ($WhatIf) {
-            Write-Host "WOULD REPAIR $($file.FullName) (CR+CRLF -> CRLF)"
-            continue
-        }
-        [System.IO.File]::WriteAllText($file.FullName, $text, [System.Text.UTF8Encoding]::new($false))
-        Write-Host "REPAIRED $($file.FullName) (CR+CRLF -> CRLF)"
+    if ($Scan) {
+        $tags = @()
+        if ($hadCrCrLf) { $tags += 'CR+CRLF' }
+        if ($needsCrlf) { $tags += 'LF/mixed' }
+        if ($doubleSpaced) { $tags += 'double-spaced' }
+        Write-Host ("SUSPECT {0} ({1})" -f $file.FullName, ($tags -join ', '))
         continue
     }
 
-    $repaired = $lines
-    do {
-        $before = $repaired.Count
-        $repaired = Repair-Lines -Lines $repaired
-    } while ($repaired.Count -lt $before)
-    $rawRepaired = ($repaired -join "`r`n") + "`r`n"
-    while ((Test-DoubleSpacedContent -Raw $rawRepaired -Lines $repaired -Extension $file.Extension)) {
-        $before = $repaired.Count
-        $repaired = Repair-Lines -Lines $repaired
-        if ($repaired.Count -ge $before) { break }
+    if ($doubleSpaced) {
+        $repaired = $lines
+        do {
+            $before = $repaired.Count
+            $repaired = Repair-Lines -Lines $repaired
+        } while ($repaired.Count -lt $before)
         $rawRepaired = ($repaired -join "`r`n") + "`r`n"
-    }
-    $text = ($repaired -join "`r`n") + "`r`n"
-    if ($WhatIf) {
-        Write-Host "WOULD REPAIR $($file.FullName) ($($lines.Count) -> $($repaired.Count) lines)"
+        while ((Test-DoubleSpacedContent -Raw $rawRepaired -Lines $repaired -Extension $file.Extension)) {
+            $before = $repaired.Count
+            $repaired = Repair-Lines -Lines $repaired
+            if ($repaired.Count -ge $before) { break }
+            $rawRepaired = ($repaired -join "`r`n") + "`r`n"
+        }
+        $reason = "$($lines.Count) -> $($repaired.Count) lines"
+        if ($hadCrCrLf -or $needsCrlf) { $reason = "EOL+spacing; $reason" }
+        Write-CrlfText -FilePath $file.FullName -Lines $repaired -Reason $reason -WhatIf:$WhatIf
         continue
     }
-    [System.IO.File]::WriteAllText($file.FullName, $text, [System.Text.UTF8Encoding]::new($false))
-    Write-Host "REPAIRED $($file.FullName) ($($lines.Count) -> $($repaired.Count) lines)"
+
+    $reasons = @()
+    if ($hadCrCrLf) { $reasons += 'CR+CRLF -> CRLF' }
+    if ($needsCrlf) { $reasons += 'LF/mixed -> CRLF' }
+    if ($reasons.Count -eq 0) { $reasons += 'normalize CRLF' }
+    Write-CrlfText -FilePath $file.FullName -Lines $lines -Reason ($reasons -join '; ') -WhatIf:$WhatIf
 }
 
 if ($Scan) {
-    foreach ($f in $hits) {
-        Write-Host "SUSPECT $($f.FullName)"
-    }
     if ($hits.Count -eq 0) {
-        Write-Host 'No double-spaced files found.'
+        Write-Host 'No EOL issues found.'
     }
 }
 

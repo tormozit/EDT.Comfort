@@ -21,4 +21,5 @@ final class BreakpointPropertiesDebug
             Global.log(TAG, "[!] " + msg); //$NON-NLS-1$
     }
 }
-
+
+
