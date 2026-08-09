@@ -148,20 +148,10 @@ public final class DebugInspectorHook implements IStartup
             return;
         if (!mightBeInspectorShell(shell))
             return;
-        if (attempt == 0)
-        {
-            if (!isInspectorCandidateShell(shell))
-            {
-                schedulePatchAttempt(display, shell, 1);
-                return;
-            }
-            DebugInspectorDebug.step("patch", "try a=0"); //$NON-NLS-1$ //$NON-NLS-2$
-            if (tryPatch(shell, 0))
-                return;
-            schedulePatchAttempt(display, shell, 1);
-            return;
-        }
-        int delay = attempt < 8 ? 50 : 100;
+        // Show/Activate приходит из nested gtk_main_iteration_do внутри Shell.setVisible —
+        // sync tryPatch/setVisible на GTK подвешивает open инспектора (Linux).
+        // attempt 0: 1 ms, чтобы выйти из nested loop; дальше — как раньше.
+        int delay = attempt == 0 ? 1 : (attempt < 8 ? 50 : 100);
         display.timerExec(delay, () ->
         {
             if (shell.isDisposed())
@@ -1415,12 +1405,10 @@ public final class DebugInspectorHook implements IStartup
             ensureHoverReplaceSuppressed();
             applyInspectorModeForTargets();
             maintainHeaderControls(menuBar);
+            // Не вызывать shell.setVisible: на GTK nested setVisible из Show/finalize
+            // блокирует DebugPopup.open (gtk_main_iteration_do). Видимость — у EDT open.
             if (!shell.isDisposed())
-            {
-                if (!shell.getVisible())
-                    shell.setVisible(true);
                 shell.layout(true, true);
-            }
             DebugInspectorDebug.step("PATCH OK", //$NON-NLS-1$
                 "a=" + attempt //$NON-NLS-1$
                     + " dialog=" + targets.dialog.getClass().getSimpleName() //$NON-NLS-1$
