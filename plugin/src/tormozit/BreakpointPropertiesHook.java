@@ -7,6 +7,7 @@ import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IMarker;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.core.runtime.CoreException;
+import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.preference.PreferenceDialog;
 import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.ITextSelection;
@@ -53,6 +54,10 @@ public final class BreakpointPropertiesHook implements IStartup
     private static final String RESIZE_KEY = "tormozit.breakpointPaneResize"; //$NON-NLS-1$
     private static final String RESIZE_PANES_KEY = "tormozit.breakpointResizePanes"; //$NON-NLS-1$
     private static final String RESIZE_LISTENER_KEY = "tormozit.breakpointResizeListener"; //$NON-NLS-1$
+    private static final String SIZE_MEMORY_KEY = "tormozit.breakpointSizeMemory"; //$NON-NLS-1$
+    private static final String SETTINGS_SECTION = "tormozit.breakpointPropertiesDialog"; //$NON-NLS-1$
+    private static final String KEY_DIALOG_WIDTH = "DIALOG_WIDTH"; //$NON-NLS-1$
+    private static final String KEY_DIALOG_HEIGHT = "DIALOG_HEIGHT"; //$NON-NLS-1$
     private static final int EDITOR_PANE_MIN_HEIGHT = 48;
     private static final int EDITOR_PANE_HEIGHT_HINT = 64;
     private static final int COMBO_FIELD_MAX_WIDTH = 200;
@@ -89,6 +94,7 @@ public final class BreakpointPropertiesHook implements IStartup
                 return;
             if (!isBreakpointPropertiesShell(shell))
                 return;
+            installShellSizeMemory(shell);
             schedulePatchAttempt(display, shell, 0);
         };
 
@@ -122,6 +128,74 @@ public final class BreakpointPropertiesHook implements IStartup
             if (attempt < 12)
                 schedulePatchAttempt(display, shell, attempt + 1);
         });
+    }
+
+    /** Размер окна «Свойства для …» — восстановление при открытии и запоминание при закрытии. */
+    private static void installShellSizeMemory(Shell shell)
+    {
+        if (Boolean.TRUE.equals(shell.getData(SIZE_MEMORY_KEY)))
+            return;
+        shell.setData(SIZE_MEMORY_KEY, Boolean.TRUE);
+
+        restoreShellSize(shell);
+
+        // Размер запоминается по событию Resize: в DisposeListener окно ОС уже уничтожено
+        // и getSize() отдаёт неверные значения.
+        Point[] lastSize = { null };
+        shell.addListener(SWT.Resize, e ->
+        {
+            if (shell.getMaximized() || shell.getMinimized())
+                return;
+            Point size = shell.getSize();
+            if (size.x > 0 && size.y > 0)
+                lastSize[0] = size;
+        });
+        shell.addDisposeListener(e -> saveShellSize(lastSize[0]));
+    }
+
+    private static void restoreShellSize(Shell shell)
+    {
+        IDialogSettings settings = dialogSettings();
+        if (settings.get(KEY_DIALOG_WIDTH) == null || settings.get(KEY_DIALOG_HEIGHT) == null)
+            return;
+
+        int width;
+        int height;
+        try
+        {
+            width = settings.getInt(KEY_DIALOG_WIDTH);
+            height = settings.getInt(KEY_DIALOG_HEIGHT);
+        }
+        catch (NumberFormatException e)
+        {
+            return;
+        }
+        if (width <= 0 || height <= 0)
+            return;
+
+        Rectangle screen = shell.getMonitor().getClientArea();
+        Point minimum = shell.getMinimumSize();
+        width = Math.max(minimum.x, Math.min(width, screen.width));
+        height = Math.max(minimum.y, Math.min(height, screen.height));
+        shell.setSize(width, height);
+    }
+
+    private static void saveShellSize(Point size)
+    {
+        if (size == null || size.x <= 0 || size.y <= 0)
+            return;
+        IDialogSettings settings = dialogSettings();
+        settings.put(KEY_DIALOG_WIDTH, size.x);
+        settings.put(KEY_DIALOG_HEIGHT, size.y);
+    }
+
+    private static IDialogSettings dialogSettings()
+    {
+        IDialogSettings top = Activator.getDefault().getDialogSettings();
+        IDialogSettings section = top.getSection(SETTINGS_SECTION);
+        if (section == null)
+            section = top.addNewSection(SETTINGS_SECTION);
+        return section;
     }
 
     private static boolean tryPatch(Shell shell)
