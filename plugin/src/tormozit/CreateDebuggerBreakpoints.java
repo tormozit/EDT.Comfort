@@ -199,7 +199,7 @@ final class CreateDebuggerBreakpoints
     }
 
     /** Открывает панель "Точки останова", очищает там выделение и выделяет все созданные/применённые точки. */
-    private static void revealInBreakpointsView(List<IBslLineBreakpoint> breakpoints)
+    static void revealInBreakpointsView(List<? extends IBreakpoint> breakpoints)
     {
         try
         {
@@ -222,7 +222,7 @@ final class CreateDebuggerBreakpoints
     }
 
     private static void trySelectInBreakpointsView(ISelectionProvider selectionProvider,
-        List<IBslLineBreakpoint> breakpoints, int attempt)
+        List<? extends IBreakpoint> breakpoints, int attempt)
     {
         StructuredSelection selection = new StructuredSelection(breakpoints);
         selectionProvider.setSelection(selection);

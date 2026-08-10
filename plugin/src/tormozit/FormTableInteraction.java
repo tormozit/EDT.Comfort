@@ -75,12 +75,18 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     private static final String COPY_MENU_KEY = "tormozit.formTableCopyMenu"; //$NON-NLS-1$
     private static final String COLUMN_HEADER_KEY = "tormozit.formTableColHeader"; //$NON-NLS-1$
     private static final String AUTO_HEADER_TOOLTIP_KEY = "tormozit.formTableColAutoHeaderTip"; //$NON-NLS-1$
+    /** Колонка скрыта хозяином таблицы через {@link #setColumnHidden} (не пользователем drag'ом до нуля). */
+    private static final String COLUMN_HIDDEN_KEY = "tormozit.formTableColHidden"; //$NON-NLS-1$
     private static final int HEADER_ACCENT_HEIGHT = 2;
     private static final int HEADER_SEPARATOR_HEIGHT = 1;
     /** Горизонтальный запас шапки Win32 (отступы без sort-иконки). */
     private static final int HEADER_TEXT_INSET = 16;
     /** Абсолютный пол минимальной ширины колонки (px) — ниже не сужаем, даже если символ шрифта уже. */
     private static final int MIN_COLUMN_WIDTH_FLOOR_PX = 15;
+    /** Минимальная ширина колонки в символах текущего шрифта таблицы. */
+    private static final int MIN_COLUMN_WIDTH_CHARS = 2;
+    /** Горизонтальные отступы текста в ячейке Win32 (слева+справа) — прибавляются к минимуму в символах. */
+    private static final int CELL_TEXT_INSET_PX = 8;
     /** Пауза без новых {@code Resize}-событий колонки, после которой накопленное сужение применяется (мс). */
     private static final int RESIZE_COMMIT_DEBOUNCE_MS = 60;
 
@@ -2071,8 +2077,8 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     /** Подтянуть ширину колонки до {@link #minColumnWidth()}, если native drag увёл её ниже (в т.ч. до 0). */
     private void clampColumnMinWidth(TableColumn col)
     {
-        if (col == null || col.isDisposed())
-            return;
+        if (col == null || col.isDisposed() || isHiddenColumn(col))
+            return; // скрытую хозяином колонку (нулевая ширина по метке) до минимума не подтягиваем
         int minWidth = minColumnWidth();
         if (col.getWidth() >= minWidth)
             return;
@@ -2094,8 +2100,9 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     }
 
     /**
-     * Минимальная ширина колонки: не уже {@link #MIN_COLUMN_WIDTH_FLOOR_PX} и не уже одного символа
-     * текущего шрифта таблицы (средняя ширина символа шрифта, {@link org.eclipse.swt.graphics.FontMetrics}).
+     * Минимальная ширина колонки: {@link #MIN_COLUMN_WIDTH_CHARS} символов текущего шрифта таблицы плюс
+     * горизонтальные отступы ячейки ({@link #CELL_TEXT_INSET_PX}) — чтобы эти символы реально были видны,
+     * а не съедались отступами. Не уже {@link #MIN_COLUMN_WIDTH_FLOOR_PX}.
      */
     private int minColumnWidth()
     {
@@ -2104,7 +2111,9 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         GC gc = new GC(table);
         try
         {
-            return Math.max(MIN_COLUMN_WIDTH_FLOOR_PX, (int) Math.ceil(gc.getFontMetrics().getAverageCharacterWidth()));
+            int charsWidth = (int) Math.ceil(
+                MIN_COLUMN_WIDTH_CHARS * (double) gc.textExtent("00").x / 2); //$NON-NLS-1$
+            return Math.max(MIN_COLUMN_WIDTH_FLOOR_PX, charsWidth + CELL_TEXT_INSET_PX);
         }
         finally
         {
@@ -2131,6 +2140,54 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
             widths[v] = c.isDisposed() ? 0 : c.getWidth();
         }
         return widths;
+    }
+
+    /**
+     * Скрыта ли колонка хозяином таблицы (нулевая ширина + метка {@link #COLUMN_HIDDEN_KEY} от
+     * {@link #setColumnHidden}). Такие колонки авто-заполнение/сужение не трогает: любой рост (в т.ч. до
+     * {@link #minColumnWidth()}) снова сделал бы их видимыми. Нулевая ширина БЕЗ метки — это пользователь
+     * увёл границу drag'ом в ноль, её как раз надо подтянуть до минимума ({@link #clampColumnMinWidth}).
+     */
+    private static boolean isHiddenColumn(TableColumn column)
+    {
+        return column.getWidth() <= 0 && column.getData(COLUMN_HIDDEN_KEY) != null;
+    }
+
+    /**
+     * Скрыть/показать колонку — вместо прямого {@code column.setWidth(0)} у хозяина таблицы. Приём штатной
+     * панели результатов поиска (см. {@code ConfigSearchResultsHook}: «Путь» скрывается на терминальном узле
+     * дерева, «Текст» — для структурных вхождений без текста): колонка остаётся в таблице, но нулевой ширины.
+     *
+     * <p>Ширина таблицы при этом не меняется, поэтому обычная защита от повторных срабатываний по неизменному
+     * {@code clientArea} ({@link #lastAutoFillClientWidth}) заблокировала бы пересчёт заполнения — сбрасываем
+     * её: после скрытия освободившееся место отдаётся остальным колонкам (если режим заполнения был активен),
+     * после показа общая ширина снова подгоняется под таблицу.
+     *
+     * @param widthWhenVisible ширина при показе ({@code hidden=false}); при скрытии игнорируется.
+     */
+    void setColumnHidden(TableColumn column, boolean hidden, int widthWhenVisible)
+    {
+        if (column == null || column.isDisposed())
+            return;
+        column.setData(COLUMN_HIDDEN_KEY, hidden ? Boolean.TRUE : null);
+        int width = hidden ? 0 : Math.max(minColumnWidth(), widthWhenVisible);
+        if (column.getWidth() != width)
+        {
+            // selfAdjusting — чтобы наш же setWidth не был принят за пользовательский drag границы
+            // (иначе commitPendingResize подтянул бы скрываемую колонку до minColumnWidth()).
+            selfAdjusting = true;
+            try
+            {
+                column.setWidth(width);
+            }
+            finally
+            {
+                selfAdjusting = false;
+            }
+        }
+        rememberVisualWidths();
+        lastAutoFillClientWidth = -1;
+        scheduleAutoFill();
     }
 
     /**
@@ -2229,7 +2286,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         for (int i = 0; i < cols; i++)
         {
             TableColumn c = table.getColumn(i);
-            if (c.isDisposed() || !c.getResizable() || c.getWidth() <= 0)
+            if (c.isDisposed() || !c.getResizable() || isHiddenColumn(c))
                 continue;
             idx[stretchCount++] = i;
             stretchSum += c.getWidth();
@@ -2278,7 +2335,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         for (int i = 0; i < cols; i++)
         {
             TableColumn c = table.getColumn(i);
-            if (c.isDisposed() || !c.getResizable())
+            if (c.isDisposed() || !c.getResizable() || isHiddenColumn(c))
                 continue;
             idx[shrinkCount++] = i;
             shrinkSum += c.getWidth();
@@ -2419,7 +2476,14 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
             TableColumn c = table.getColumn(order[v]);
             if (c.isDisposed())
                 continue;
-            if (c.getResizable())
+            if (isHiddenColumn(c))
+            {
+                // Скрытая нулевой шириной колонка (см. isHiddenColumn) — не кандидат на сужение/рост:
+                // из остатка вычитается её ФАКТИЧЕСКАЯ (нулевая) ширина, а не before[v], иначе при
+                // скрытии во время drag остаток уменьшился бы на уже отсутствующие пиксели.
+                resizableTarget -= c.getWidth();
+            }
+            else if (c.getResizable())
             {
                 rcVisual[rc] = v;
                 rcStart[rc] = before[v];
@@ -2538,8 +2602,10 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
             TableColumn c = table.getColumn(i);
             if (c.isDisposed())
                 continue;
-            layout.setColumnData(c, new ColumnPixelData(Math.max(1, c.getWidth()),
-                c.getResizable(), i < cols - 1));
+            // Скрытая нулевой шириной колонка (см. isHiddenColumn) остаётся нулевой — иначе layout
+            // при следующей раскладке вернул бы ей 1 px и сделал видимой.
+            int width = isHiddenColumn(c) ? 0 : Math.max(1, c.getWidth());
+            layout.setColumnData(c, new ColumnPixelData(width, c.getResizable(), i < cols - 1));
         }
     }
 

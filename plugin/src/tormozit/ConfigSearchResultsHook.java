@@ -164,6 +164,8 @@ public final class ConfigSearchResultsHook implements IStartup
     private static final String KEY_COL_PROPERTY_WIDTH = "matchColPropertyWidth"; //$NON-NLS-1$
     private static final String KEY_COL_LINE_WIDTH = "matchColLineWidth"; //$NON-NLS-1$
     private static final String KEY_COL_TEXT_WIDTH = "matchColTextWidth"; //$NON-NLS-1$
+    /** Был ли при закрытии активен режим заполнения по ширине (см. {@link FormTableColumnState}). */
+    private static final String KEY_COL_FILL_MODE = "matchColFillMode"; //$NON-NLS-1$
 
     /**
      * Временно (по просьбе пользователя, на время тестирования нашей таблицы вхождений
@@ -531,10 +533,11 @@ public final class ConfigSearchResultsHook implements IStartup
         FormTableColumnState.loadOrder(matchSettings, KEY_COL_ORDER, matchTable);
         FormTableInteraction interaction = new FormTableInteraction(matchTable, matchViewer);
         interaction.setOwnerDrawColumns(textCol.getColumn());
-        // Авто-заполнение/сужение выключено: колонки «Путь»/«Текст» динамически прячутся установкой
-        // ширины 0 (см. ниже, applyResults) — авто-fill растянул бы их обратно, включив невидимую колонку.
-        interaction.setColumnAutoResizeEnabled(false);
-        interaction.install();
+        // Колонки «Путь»/«Текст» динамически прячутся (см. ниже, applyResults) — прячем их через
+        // FormTableInteraction.setColumnHidden, тогда авто-заполнение их не растягивает обратно.
+        boolean hasSavedColumnWidths = FormTableColumnState.hasSavedColumnWidths(matchSettings, KEY_COL_FILL_MODE,
+            KEY_COL_PATH_WIDTH, KEY_COL_PROPERTY_WIDTH, KEY_COL_LINE_WIDTH, KEY_COL_TEXT_WIDTH);
+        interaction.install(hasSavedColumnWidths);
         outer.addDisposeListener(e ->
         {
             if (matchTable.isDisposed())
@@ -546,6 +549,7 @@ public final class ConfigSearchResultsHook implements IStartup
             int propertyWidth = propertyCol.getColumn().isDisposed() ? 0 : propertyCol.getColumn().getWidth();
             int lineWidth = lineCol.getColumn().isDisposed() ? 0 : lineCol.getColumn().getWidth();
             FormTableColumnState.saveOrderAndWidths(dialogSettings(), KEY_COL_ORDER,
+                KEY_COL_FILL_MODE, interaction.isColumnsExactFill(),
                 new String[] { KEY_COL_PATH_WIDTH, KEY_COL_PROPERTY_WIDTH, KEY_COL_LINE_WIDTH, KEY_COL_TEXT_WIDTH },
                 new int[] { pathWidth, propertyWidth, lineWidth, textWidth }, matchTable);
         });
@@ -628,24 +632,23 @@ public final class ConfigSearchResultsHook implements IStartup
 
         // При терминальном узле путь у всех строк одинаковый (сам узел и есть этот путь) — как и
         // у штатной таблицы (см. hidePathColumn/showPathColumn), колонку тогда прячем.
-        if (cachedMatchPathColumn != null && !cachedMatchPathColumn.isDisposed())
+        if (cachedMatchPathColumn != null && !cachedMatchPathColumn.isDisposed()
+            && cachedMatchTableInteraction != null)
         {
-            int desiredWidth = isTerminalTreeSelection(selectedNodes) ? 0
-                : FormTableColumnState.readWidth(dialogSettings(), KEY_COL_PATH_WIDTH, MATCH_PATH_COLUMN_WIDTH, 1);
-            if (cachedMatchPathColumn.getWidth() != desiredWidth)
-                cachedMatchPathColumn.setWidth(desiredWidth);
+            cachedMatchTableInteraction.setColumnHidden(cachedMatchPathColumn,
+                isTerminalTreeSelection(selectedNodes),
+                FormTableColumnState.readWidth(dialogSettings(), KEY_COL_PATH_WIDTH, MATCH_PATH_COLUMN_WIDTH, 1));
         }
 
         // «Найти ссылки на объект» (BmReferenceMatch) — структурные вхождения без текста/смещения,
         // колонка «Текст» у них всегда пустая (в отличие от текстового поиска, TextSearchModelMatch/
         // TextSearchFileMatch) — прячем её для ТАКОГО набора результатов, тем же приёмом, что и «Путь».
-        if (cachedMatchTextColumn != null && !cachedMatchTextColumn.isDisposed())
+        if (cachedMatchTextColumn != null && !cachedMatchTextColumn.isDisposed()
+            && cachedMatchTableInteraction != null)
         {
             boolean anyText = rows.stream().anyMatch(row -> row.text != null && !row.text.isBlank());
-            int desiredWidth = (!rows.isEmpty() && !anyText) ? 0
-                : FormTableColumnState.readWidth(dialogSettings(), KEY_COL_TEXT_WIDTH, MATCH_TEXT_COLUMN_WIDTH, 1);
-            if (cachedMatchTextColumn.getWidth() != desiredWidth)
-                cachedMatchTextColumn.setWidth(desiredWidth);
+            cachedMatchTableInteraction.setColumnHidden(cachedMatchTextColumn, !rows.isEmpty() && !anyText,
+                FormTableColumnState.readWidth(dialogSettings(), KEY_COL_TEXT_WIDTH, MATCH_TEXT_COLUMN_WIDTH, 1));
         }
         scheduleVisibleDeferredCalculations(matchViewer);
         return tableItems.size();

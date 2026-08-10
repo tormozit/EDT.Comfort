@@ -460,6 +460,7 @@ public class ComfortPreferencePage
         StringFieldEditor groupCommonModulesSuffixesField = new StringFieldEditor(
             ComfortSettings.PREF_GROUP_COMMON_MODULES_SUFFIXES,
             "Суффиксы имён общих модулей (через запятую):", //$NON-NLS-1$
+            50,
             getFieldEditorParent());
         addField(groupCommonModulesSuffixesField);
         setFieldTooltip(groupCommonModulesSuffixesField,

@@ -24,8 +24,11 @@ import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.ResourcesPlugin;
+import org.eclipse.core.runtime.CoreException;
 import org.eclipse.core.runtime.Path;
 import org.eclipse.core.runtime.Platform;
+import org.eclipse.debug.core.DebugPlugin;
+import org.eclipse.debug.core.model.IBreakpoint;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.util.EcoreUtil;
 import org.eclipse.jface.dialogs.IDialogSettings;
@@ -48,6 +51,7 @@ import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.viewers.ViewerComparator;
 import org.eclipse.jface.viewers.ViewerFilter;
+import org.eclipse.jface.window.Window;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.CTabFolder;
 import org.eclipse.swt.custom.CTabItem;
@@ -96,6 +100,8 @@ import org.w3c.dom.NodeList;
 import com._1c.g5.v8.dt.bsl.model.Module;
 import com._1c.g5.v8.dt.core.platform.IV8Project;
 import com._1c.g5.v8.dt.core.platform.IV8ProjectManager;
+import com._1c.g5.v8.dt.debug.core.model.breakpoints.IBslBreakpointFactory;
+import com._1c.g5.v8.dt.debug.core.model.breakpoints.IBslExceptionBreakpoint;
 import com._1c.g5.v8.dt.stacktraces.model.IStacktrace;
 import com._1c.g5.v8.dt.stacktraces.model.IStacktraceElement;
 import com._1c.g5.v8.dt.stacktraces.model.IStacktraceError;
@@ -118,6 +124,9 @@ import com.google.inject.Injector;
  * открывает модуль (штатно {@code StacktracesViewPage.selectionChanged} вызывал
  * {@code IBslSourceDisplay.displayBslSource(..., forceSelect=false)}); открытие — по двойному
  * клику с учётом выбранного проекта;</li>
+ * <li>корневая строка (узел причины) — суффикс « ...», если у описания ошибки есть строки ниже
+ * первой: дерево рисует только первую строку, полное описание видно в подсказке при наведении
+ * и копируется по Ctrl+C;</li>
  * <li>двойной клик по строке узла причины ({@link IStacktraceError}) — берёт причину ошибки
  * трассировки и запускает штатное действие EDT «Добавить точку останова по исключению» (открывшийся
  * диалог «Остановка по ошибке» сам подставит причину, см. {@link ExceptionSelectionDialogHook#setPendingReason},
@@ -162,6 +171,8 @@ public final class StacktracesViewInteractionHook implements IStartup
     private static final String MEMENTO_GUARD_KEY = "tormozit.comfort.stacktraces.mementoGuard"; //$NON-NLS-1$
     private static final String FOLDER_TAB_PROBE_KEY = "tormozit.comfort.stacktraces.folderTabProbe"; //$NON-NLS-1$
     private static final String LIST_LOG_TOPIC = "stacktraces-list"; //$NON-NLS-1$
+    /** Признак невидимых строк описания ошибки в строке дерева (issue 276). */
+    static final String HIDDEN_LINES_MARK = " ..."; //$NON-NLS-1$
     /**
      * Аудит memento save/load в {@code .tmp/stacktraces-memento-audit.log} — только при включённом
      * «Общее логирование» ({@link Global#isLogEnabled()}); файл не чистится при старте плагина
@@ -184,8 +195,10 @@ public final class StacktracesViewInteractionHook implements IStartup
     private static final WeakHashMap<Composite, PageState> PAGE_STATES = new WeakHashMap<>();
 
     private static final String ADD_ACTION_BUNDLE = "com._1c.g5.v8.dt.debug.ui"; //$NON-NLS-1$
-    private static final String ADD_ACTION_CLASS =
-            "com._1c.g5.v8.dt.internal.debug.ui.actions.AddBslExceptionBreakpointAction"; //$NON-NLS-1$
+    private static final String EXCEPTION_DIALOG_CLASS =
+            "com._1c.g5.v8.dt.internal.debug.ui.dialogs.BslExceptionSelectionDialog"; //$NON-NLS-1$
+    /** Как {@code BslExceptionBreakpoint.getModelIdentifier()}. */
+    private static final String BSL_DEBUG_MODEL_ID = "com._1c.g5.v8.dt.debug"; //$NON-NLS-1$
     private static final String STOP_ON_ERROR_TITLE = "Остановка по ошибке"; //$NON-NLS-1$
     private static final String NO_REASON_MESSAGE =
             "В выбранной трассировке не найдено описания ошибки"; //$NON-NLS-1$
@@ -237,17 +250,22 @@ public final class StacktracesViewInteractionHook implements IStartup
         Object data = selection[0].getData();
         if (data instanceof IStacktraceError error)
         {
-            triggerStopOnException(error);
+            // Строка причины обрезана деревом до первой строки — показываем описание целиком;
+            // «Остановка по ошибке» теперь кнопка этого окна (issue 276).
+            ErrorDescriptionWindow.open(tree.getShell(), findErrorText(error));
             return;
         }
         if (data instanceof IStacktraceFrame frame)
             openFrameModule(tree, state, frame);
     }
 
-    /** Причина ошибки трассировки, к которой относится {@code element} → диалог «Остановка по ошибке». */
-    private static void triggerStopOnException(IStacktraceElement element)
+    /**
+     * Штатный диалог «Остановка по ошибке» с подставленной причиной — первой строкой описания
+     * ошибки (см. {@link ExceptionSelectionDialogHook#setPendingReason}, без буфера обмена).
+     * Вызывается кнопкой окна {@link ErrorDescriptionWindow}.
+     */
+    static void openStopOnErrorForReason(String errorText)
     {
-        String errorText = findErrorText(element);
         String reason = BreakpointListHook.firstLine(errorText);
         if (reason.isEmpty())
         {
@@ -256,7 +274,7 @@ public final class StacktracesViewInteractionHook implements IStartup
         }
 
         ExceptionSelectionDialogHook.setPendingReason(reason);
-        runAddExceptionBreakpointAction();
+        openStopOnErrorDialog();
     }
 
     /** Текст ошибки трассировки, к которой относится {@code element} (см. {@link IStacktraceError}). */
@@ -274,25 +292,104 @@ public final class StacktracesViewInteractionHook implements IStartup
     }
 
     /**
-     * Штатное действие «Добавить точку останова по исключению» не привязано ни к одной команде
-     * EDT (нет {@code definitionId}) — открываем тот же диалог, что и оно, напрямую его вызовом
-     * через рефлексию (как {@code CreateDebuggerBreakpoints.resolveFactory()} для {@code DebugCorePlugin}).
+     * Штатное действие «Добавить точку останова по исключению» ({@code AddBslExceptionBreakpointAction})
+     * не привязано ни к одной команде EDT (нет {@code definitionId}), а созданный нами вручную его
+     * экземпляр непригоден: точку останова оно создаёт через своё поле {@code breakpointFactory},
+     * которое заполняет только инжектор при штатном создании делегата — у нашего экземпляра оно
+     * {@code null}, и создание падало NPE внутри системного {@code Job} (то есть молча: диалог
+     * закрывался по ОК, точка не появлялась). Поэтому воспроизводим шаги действия сами: тот же
+     * штатный диалог + фабрика из инжектора {@code DebugCorePlugin}
+     * ({@link CreateDebuggerBreakpoints#resolveFactory()}).
      */
-    private static void runAddExceptionBreakpointAction()
+    private static void openStopOnErrorDialog()
     {
         try
         {
             Bundle bundle = Platform.getBundle(ADD_ACTION_BUNDLE);
             if (bundle == null)
                 return;
-            Class<?> actionClass = bundle.loadClass(ADD_ACTION_CLASS);
-            Object action = actionClass.getDeclaredConstructor().newInstance();
-            Global.invokeVoid(action, "run", new Object[] { null }); //$NON-NLS-1$
+            IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            if (window == null)
+                return;
+            Class<?> dialogClass = bundle.loadClass(EXCEPTION_DIALOG_CLASS);
+            Object dialog = dialogClass.getDeclaredConstructor(Shell.class).newInstance(window.getShell());
+            Global.invokeVoid(dialog, "create"); //$NON-NLS-1$
+            Object code = Global.invoke(dialog, "open"); //$NON-NLS-1$
+            if (!(code instanceof Integer result) || result.intValue() != Window.OK)
+                return;
+            Object first = Global.invoke(dialog, "getFirstResult"); //$NON-NLS-1$
+            boolean catchAll = Boolean.TRUE.equals(Global.invoke(dialog, "isCatchAllExceptions")); //$NON-NLS-1$
+            Global.tempLog("stop-on-error", "dialog OK first=[" + first + "] catchAll=" + catchAll); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            createExceptionBreakpoint(first instanceof String message ? message : null, catchAll);
         }
         catch (Exception e)
         {
-            Global.log("StacktracesViewInteraction", "runAddExceptionBreakpointAction: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.log("StacktracesViewInteraction", "openStopOnErrorDialog: " + e); //$NON-NLS-1$ //$NON-NLS-2$
         }
+    }
+
+    /**
+     * Как {@code AddBslExceptionBreakpointAction.createBreakpoint}: существующую точку с той же
+     * причиной переиспользуем (только включаем), новую — создаём и регистрируем в
+     * {@code IBreakpointManager} (без регистрации точка есть, но её нет в панели «Точки останова»).
+     * В отличие от штатного действия делаем это синхронно, а не в системном {@code Job} — чтобы
+     * сразу показать точку в панели «Точки останова».
+     */
+    private static void createExceptionBreakpoint(String message, boolean catchAllExceptions)
+    {
+        Global.tempLog("stop-on-error", "create message=[" + message + "] catchAll=" + catchAllExceptions); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        if (!catchAllExceptions && (message == null || message.isEmpty()))
+            return;
+        IBslBreakpointFactory factory = CreateDebuggerBreakpoints.resolveFactory();
+        Global.tempLog("stop-on-error", "factory=" + factory); //$NON-NLS-1$ //$NON-NLS-2$
+        if (factory == null)
+            return;
+        try
+        {
+            IBslExceptionBreakpoint existing = findExceptionBreakpoint(message, catchAllExceptions);
+            Global.tempLog("stop-on-error", "existing=" + existing); //$NON-NLS-1$ //$NON-NLS-2$
+            if (existing != null)
+            {
+                existing.setEnabled(true);
+                CreateDebuggerBreakpoints.revealInBreakpointsView(List.of(existing));
+                return;
+            }
+            IBslExceptionBreakpoint created = catchAllExceptions
+                    ? factory.createExceptionBreakpoint()
+                    : factory.createExceptionBreakpoint(message);
+            Global.tempLog("stop-on-error", "created=" + created //$NON-NLS-1$ //$NON-NLS-2$
+                    + " marker=" + created.getMarker() //$NON-NLS-1$
+                    + " markerExists=" + (created.getMarker() != null && created.getMarker().exists()) //$NON-NLS-1$
+                    + " msg=[" + created.getExceptionMessage() + "]"); //$NON-NLS-1$ //$NON-NLS-2$
+            DebugPlugin.getDefault().getBreakpointManager().addBreakpoint(created);
+            Global.tempLog("stop-on-error", "added registered=" //$NON-NLS-1$ //$NON-NLS-2$
+                    + DebugPlugin.getDefault().getBreakpointManager().isRegistered(created)
+                    + " total=" //$NON-NLS-1$
+                    + DebugPlugin.getDefault().getBreakpointManager().getBreakpoints(BSL_DEBUG_MODEL_ID).length);
+            CreateDebuggerBreakpoints.revealInBreakpointsView(List.of(created));
+        }
+        catch (CoreException e)
+        {
+            Global.tempLog("stop-on-error", "CoreException " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            Global.log("StacktracesViewInteraction", "createExceptionBreakpoint: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    /** Порт {@code AddBslExceptionBreakpointAction.checkExisting}: точка с той же причиной. */
+    private static IBslExceptionBreakpoint findExceptionBreakpoint(String message, boolean catchAllExceptions)
+            throws CoreException
+    {
+        for (IBreakpoint breakpoint : DebugPlugin.getDefault().getBreakpointManager()
+                .getBreakpoints(BSL_DEBUG_MODEL_ID))
+        {
+            if (!(breakpoint instanceof IBslExceptionBreakpoint exceptionBreakpoint))
+                continue;
+            if (exceptionBreakpoint.isCatchAllExceptions() && catchAllExceptions)
+                return exceptionBreakpoint;
+            if (message != null && message.equals(exceptionBreakpoint.getExceptionMessage()))
+                return exceptionBreakpoint;
+        }
+        return null;
     }
 
     private static void openFrameModule(Tree tree, PageState state, IStacktraceFrame frame)
@@ -1303,17 +1400,27 @@ public final class StacktracesViewInteractionHook implements IStartup
         listLog("repoProbe: diagListener added listeners=" + listenerCount(realRepo)); //$NON-NLS-1$
     }
 
-    /** Обновить все установленные панели списка после add/remove в репозитории. */
+    /**
+     * Обновить все установленные панели списка после add/remove в репозитории и доработать
+     * активную страницу. «Добавить трассировку…»/«Анализировать» создают вкладку программно —
+     * {@code CTabFolder.setSelection} не шлёт {@link SWT#Selection}, поэтому без этого вызова
+     * Combo проекта появлялось только после ручной переактивации строки списка. Дерево страницы
+     * создаётся не всегда сразу — повторяем несколько раз (enhance идемпотентен).
+     */
     private static void scheduleListPanesRefresh(String reason)
     {
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;
-        display.asyncExec(() ->
+        Runnable pass = () ->
         {
             listLog("listPanes.refresh reason=" + reason); //$NON-NLS-1$
             refreshAllListPanes();
-        });
+        };
+        display.asyncExec(pass);
+        display.timerExec(50, pass);
+        display.timerExec(200, pass);
+        display.timerExec(500, pass);
     }
 
     private static void refreshAllListPanes()
@@ -1341,6 +1448,8 @@ public final class StacktracesViewInteractionHook implements IStartup
                     StacktracesListPane pane = listPaneOf(folder);
                     if (pane != null)
                         pane.refreshFromFolder();
+                    // Новая вкладка выбирается программно (без SWT.Selection) — дорабатываем сами.
+                    enhanceActivePage(view, folder);
                 }
             }
         }
@@ -1501,6 +1610,25 @@ public final class StacktracesViewInteractionHook implements IStartup
     }
 
     /**
+     * Признак скрытых строк описания ошибки: дерево (нативный Tree Windows) рисует только первую
+     * строку многострочного текста, и остальное описание («по причине: …») никак не обозначено.
+     * Возвращает первую строку с суффиксом {@value #HIDDEN_LINES_MARK}, если ниже есть непустой
+     * текст; однострочный текст — без изменений (issue 276).
+     */
+    static String markHiddenLines(String text)
+    {
+        if (text == null)
+            return null;
+        String normalized = text.replace("\r\n", "\n").replace('\r', '\n'); //$NON-NLS-1$ //$NON-NLS-2$
+        int nl = normalized.indexOf('\n');
+        if (nl < 0)
+            return text;
+        String tail = normalized.substring(nl + 1).strip();
+        String head = normalized.substring(0, nl).strip();
+        return tail.isEmpty() ? head : head + HIDDEN_LINES_MARK;
+    }
+
+    /**
      * Доработка и резолв (Combo проектов, иконки кадров) — только для видимой вкладки.
      * Неактивные стеки не трогаем, пока пользователь на них не переключится.
      */
@@ -1603,7 +1731,15 @@ public final class StacktracesViewInteractionHook implements IStartup
         // Сразу, до combo/viewer: иначе повторный enhanceActivePage удвоит шапку «Проект».
         page.setData(PAGE_ENHANCED_KEY, Boolean.TRUE);
 
-        installProjectCombo(page, tree, state);
+        // Сбой заполнения Combo проектов не должен обрывать остальную доработку страницы.
+        try
+        {
+            installProjectCombo(page, tree, state);
+        }
+        catch (RuntimeException e)
+        {
+            listLog("installProjectCombo failed " + e); //$NON-NLS-1$
+        }
         installFrameStatusLabelProvider(page, state);
         page.addDisposeListener(e -> PAGE_STATES.remove(page));
         scheduleEnsureFrameIcons(page);
@@ -1974,9 +2110,29 @@ public final class StacktracesViewInteractionHook implements IStartup
         String symlink = frame.getSymlink();
         if (symlink == null || symlink.isBlank())
             return false;
-        Object module = Global.invoke(locator, "getModule", symlink, project, //$NON-NLS-1$
-                Boolean.valueOf(frame.isExtension()));
-        return module != null;
+        return resolveModule(locator, symlink, project, frame.isExtension()) != null;
+    }
+
+    /**
+     * Модуль по symlink в проекте. Штатный {@code BslModuleLocator.getModule} падает
+     * {@code IllegalStateException} («External property manager … is not active») по проекту,
+     * модель которого ещё не поднята (сразу после старта EDT). Такой проект — просто «модуль не
+     * найден»: без перехвата исключение уходило в цикл событий и обрывало доработку панели
+     * (не ставился провайдер иконок и признака скрытых строк).
+     */
+    private static Object resolveModule(Object locator, String symlink, IV8Project project, boolean extension)
+    {
+        try
+        {
+            return Global.invoke(locator, "getModule", symlink, project, Boolean.valueOf(extension)); //$NON-NLS-1$
+        }
+        catch (RuntimeException e)
+        {
+            listLog("getModule failed project=" //$NON-NLS-1$
+                    + (project != null && project.getProject() != null ? project.getProject().getName() : "?") //$NON-NLS-1$
+                    + " symlink=" + symlink + " " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            return null;
+        }
     }
 
     private static List<IStacktraceFrame> collectFrames(IStacktrace stacktrace)
@@ -2059,7 +2215,11 @@ public final class StacktracesViewInteractionHook implements IStartup
         TreeItem[] selection = tree.getSelection();
         if (selection.length == 0)
             return;
-        String text = selection[0].getText();
+        // Текст элемента модели, а не строки дерева: в строке дерева стоит признак скрытых строк
+        // (« ...»), а копировать надо полное описание ошибки (issue 276).
+        String text = selection[0].getData() instanceof IStacktraceElement element && element.getName() != null
+                ? element.getName()
+                : selection[0].getText();
         if (text == null || text.isBlank())
             return;
 
@@ -2144,8 +2304,7 @@ public final class StacktracesViewInteractionHook implements IStartup
         if (project == null)
             return null;
 
-        Object module = Global.invoke(locator, "getModule", symlink, project, //$NON-NLS-1$
-                Boolean.valueOf(frame.isExtension()));
+        Object module = resolveModule(locator, symlink, project, frame.isExtension());
         return module instanceof Module found ? found : null;
     }
 
@@ -2157,7 +2316,16 @@ public final class StacktracesViewInteractionHook implements IStartup
         Object locator = resolveModuleLocator();
         if (locator == null)
             return List.of();
-        Object all = Global.invoke(locator, "getModules", frame); //$NON-NLS-1$
+        Object all;
+        try
+        {
+            all = Global.invoke(locator, "getModules", frame); //$NON-NLS-1$
+        }
+        catch (RuntimeException e)
+        {
+            listLog("getModules failed " + e); //$NON-NLS-1$
+            return List.of();
+        }
         if (!(all instanceof List<?> modules) || modules.isEmpty())
             return List.of();
 
@@ -2412,9 +2580,9 @@ public final class StacktracesViewInteractionHook implements IStartup
         @Override
         public String getText(Object element)
         {
-            if (delegate instanceof ILabelProvider labelProvider)
-                return labelProvider.getText(element);
-            return super.getText(element);
+            String text = delegate instanceof ILabelProvider labelProvider ? labelProvider.getText(element)
+                    : super.getText(element);
+            return markHiddenLines(text);
         }
 
         @Override

@@ -1035,27 +1035,9 @@ public class SmartOutlineHook implements IStartup {
         });
 
         if (commonItem != null)
-        {
-            commonItem.addListener(SWT.Selection, e -> {
-                filterControl.getDisplay().asyncExec(() -> {
-                    BslXtextEditor editor = IrMethodListHandler.resolveBslEditor(dialog);
-                    IrMethodListHandler.openCommonMethods(editor, getFilterPattern(filterControl));
-                    if (!filterControl.isDisposed())
-                        filterControl.forceFocus();
-                });
-            });
-        }
+            commonItem.addListener(SWT.Selection, e -> runIrCommandAndCloseOutline(filterControl, dialog, shell, false));
         if (detailedItem != null)
-        {
-            detailedItem.addListener(SWT.Selection, e -> {
-                filterControl.getDisplay().asyncExec(() -> {
-                    BslXtextEditor editor = IrMethodListHandler.resolveBslEditor(dialog);
-                    IrMethodListHandler.openModuleMethods(editor, getFilterPattern(filterControl));
-                    if (!filterControl.isDisposed())
-                        filterControl.forceFocus();
-                });
-            });
-        }
+            detailedItem.addListener(SWT.Selection, e -> runIrCommandAndCloseOutline(filterControl, dialog, shell, true));
 
         if (menuBar.getParent() == titleArea)
             comfortBar.moveAbove(menuBar);
@@ -1296,31 +1278,57 @@ public class SmartOutlineHook implements IStartup {
         });
 
         if (commonBtn != null)
-        {
-            commonBtn.addListener(SWT.Selection, e -> {
-                filterControl.getDisplay().asyncExec(() -> {
-                    BslXtextEditor editor = IrMethodListHandler.resolveBslEditor(dialog);
-                    IrMethodListHandler.openCommonMethods(editor, getFilterPattern(filterControl));
-                    if (!filterControl.isDisposed())
-                        filterControl.forceFocus();
-                });
-            });
-        }
+            commonBtn.addListener(SWT.Selection, e -> runIrCommandAndCloseOutline(filterControl, dialog, shell, false));
         if (detailedBtn != null)
-        {
-            detailedBtn.addListener(SWT.Selection, e -> {
-                filterControl.getDisplay().asyncExec(() -> {
-                    BslXtextEditor editor = IrMethodListHandler.resolveBslEditor(dialog);
-                    IrMethodListHandler.openModuleMethods(editor, getFilterPattern(filterControl));
-                    if (!filterControl.isDisposed())
-                        filterControl.forceFocus();
-                });
-            });
-        }
+            detailedBtn.addListener(SWT.Selection, e -> runIrCommandAndCloseOutline(filterControl, dialog, shell, true));
 
         parent.layout(true, true);
         if (shell != null && !shell.isDisposed())
             shell.layout(true, true);
+    }
+
+    /**
+     * Команды «Общие ИР» / «Подробно ИР» открывают отдельное окно, поэтому попап быстрой схемы модуля
+     * закрываем сразу. Текст фильтра и редактор читаем до закрытия — после dispose они недоступны.
+     */
+    private static void runIrCommandAndCloseOutline(Control filterControl, Object dialog, Shell shell,
+            boolean onlyThisModule)
+    {
+        Display display = filterControl != null && !filterControl.isDisposed()
+            ? filterControl.getDisplay() : Display.getDefault();
+        String pattern = getFilterPattern(filterControl);
+        BslXtextEditor editor = IrMethodListHandler.resolveBslEditor(dialog);
+        closeQuickOutlinePopup(dialog, shell);
+        display.asyncExec(() -> {
+            if (onlyThisModule)
+                IrMethodListHandler.openModuleMethods(editor, pattern);
+            else
+                IrMethodListHandler.openCommonMethods(editor, pattern);
+        });
+    }
+
+    private static void closeQuickOutlinePopup(Object dialog, Shell shell)
+    {
+        Shell popupShell = shell;
+        if (dialog != null)
+        {
+            if (popupShell == null || popupShell.isDisposed())
+            {
+                Object candidate = Global.invoke(dialog, "getShell"); //$NON-NLS-1$
+                if (candidate instanceof Shell resolved)
+                    popupShell = resolved;
+            }
+            try
+            {
+                Global.invoke(dialog, "dispose"); //$NON-NLS-1$
+            }
+            catch (RuntimeException ignored)
+            {
+                // штатный dispose может зависеть от состояния попапа — закроем shell напрямую ниже
+            }
+        }
+        if (popupShell != null && !popupShell.isDisposed())
+            popupShell.dispose();
     }
 
     private static ToolBar resolveOutlineToolBar(Object dialog, Control filterControl)

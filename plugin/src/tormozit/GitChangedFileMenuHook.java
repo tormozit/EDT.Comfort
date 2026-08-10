@@ -37,6 +37,7 @@ import org.eclipse.egit.core.project.RepositoryMapping;
 import org.eclipse.emf.common.util.URI;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.dialogs.IDialogConstants;
+import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.dialogs.MessageDialog;
 import org.eclipse.jface.layout.GridDataFactory;
 import org.eclipse.jface.viewers.AbstractTreeViewer;
@@ -54,6 +55,7 @@ import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
 import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.events.SelectionEvent;
+import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
@@ -182,6 +184,12 @@ public final class GitChangedFileMenuHook implements IStartup
      * окно называется «Select a Commit».
      */
     private static final String COMMIT_DIALOG_RUSSIAN_TITLE = "Выбор коммита"; //$NON-NLS-1$
+    /** Секция {@code IDialogSettings} с запомненным размером окна «Выбор коммита». */
+    private static final String COMMIT_DIALOG_SETTINGS_SECTION = "tormozit.compareWithCommitDialog"; //$NON-NLS-1$
+    private static final String KEY_COMMIT_DIALOG_WIDTH = "width"; //$NON-NLS-1$
+    private static final String KEY_COMMIT_DIALOG_HEIGHT = "height"; //$NON-NLS-1$
+    private static final int COMMIT_DIALOG_MIN_WIDTH = 400;
+    private static final int COMMIT_DIALOG_MIN_HEIGHT = 300;
     private static final String COMPARE_UTILS_CLASS =
         "com._1c.g5.v8.dt.internal.compare.git.ui.handler.Utils"; //$NON-NLS-1$
     private static final String COMPARE_UI_PLUGIN_CLASS =
@@ -1689,6 +1697,9 @@ public final class GitChangedFileMenuHook implements IStartup
                 });
             }
 
+            // Размер окна — после всех pack()/layout() выше, иначе его затрёт штатная упаковка.
+            installCommitDialogSizeMemory(dialog);
+
             if ((int) Global.call(dialog, "open") != IDialogConstants.OK_ID) //$NON-NLS-1$
                 return;
 
@@ -2178,6 +2189,77 @@ public final class GitChangedFileMenuHook implements IStartup
             Global.log("CompareWithCommit: checkbox: " + ex); //$NON-NLS-1$
             return null;
         }
+    }
+
+    /**
+     * Запоминание размера окна «Выбор коммита»: штатный
+     * {@code DtCommitSelectionDialog} размер не сохраняет (нет
+     * {@code getDialogBoundsSettings()}), поэтому окно каждый раз открывается
+     * упакованным по минимуму. Восстанавливаем сохранённый размер до
+     * {@code open()} (центр окна сохраняется), а при закрытии запоминаем текущий.
+     */
+    private static void installCommitDialogSizeMemory(Object dialog)
+    {
+        try
+        {
+            Shell shell = (Shell) Global.call(dialog, "getShell"); //$NON-NLS-1$
+            if (shell == null || shell.isDisposed())
+                return;
+            applyStoredCommitDialogSize(shell);
+            shell.addDisposeListener(e -> saveCommitDialogSize((Shell) e.widget));
+        }
+        catch (Exception ex)
+        {
+            Global.log("CompareWithCommit: size memory: " + ex); //$NON-NLS-1$
+        }
+    }
+
+    private static void applyStoredCommitDialogSize(Shell shell)
+    {
+        IDialogSettings settings = commitDialogSettings();
+        if (settings.get(KEY_COMMIT_DIALOG_WIDTH) == null || settings.get(KEY_COMMIT_DIALOG_HEIGHT) == null)
+            return;
+
+        int width = settings.getInt(KEY_COMMIT_DIALOG_WIDTH);
+        int height = settings.getInt(KEY_COMMIT_DIALOG_HEIGHT);
+        if (width <= 0 || height <= 0)
+            return;
+
+        Rectangle old = shell.getBounds();
+        // Центр окна не сдвигаем — иначе увеличенное окно «уползает» вправо-вниз.
+        Rectangle target = new Rectangle(old.x + (old.width - width) / 2,
+            old.y + (old.height - height) / 2, width, height);
+        shell.setBounds(clampCommitDialogToMonitor(shell, target));
+    }
+
+    private static void saveCommitDialogSize(Shell shell)
+    {
+        if (shell == null || shell.isDisposed() || shell.getMinimized())
+            return;
+        Rectangle bounds = shell.getBounds();
+        if (bounds.width <= 0 || bounds.height <= 0)
+            return;
+        IDialogSettings settings = commitDialogSettings();
+        settings.put(KEY_COMMIT_DIALOG_WIDTH, bounds.width);
+        settings.put(KEY_COMMIT_DIALOG_HEIGHT, bounds.height);
+    }
+
+    /** Не даёт восстановленному окну вылезти за границы монитора, на котором оно открывается. */
+    private static Rectangle clampCommitDialogToMonitor(Shell shell, Rectangle bounds)
+    {
+        Rectangle area = shell.getMonitor().getClientArea();
+        int width = Math.max(COMMIT_DIALOG_MIN_WIDTH, Math.min(bounds.width, area.width));
+        int height = Math.max(COMMIT_DIALOG_MIN_HEIGHT, Math.min(bounds.height, area.height));
+        int x = Math.max(area.x, Math.min(bounds.x, area.x + area.width - width));
+        int y = Math.max(area.y, Math.min(bounds.y, area.y + area.height - height));
+        return new Rectangle(x, y, width, height);
+    }
+
+    private static IDialogSettings commitDialogSettings()
+    {
+        IDialogSettings top = Activator.getDefault().getDialogSettings();
+        IDialogSettings section = top.getSection(COMMIT_DIALOG_SETTINGS_SECTION);
+        return section != null ? section : top.addNewSection(COMMIT_DIALOG_SETTINGS_SECTION);
     }
 
     /**

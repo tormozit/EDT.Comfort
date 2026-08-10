@@ -5,9 +5,11 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.function.IntSupplier;
 
 import org.eclipse.core.resources.IFile;
@@ -67,6 +69,7 @@ import org.eclipse.ui.IWorkbench;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
+import org.eclipse.ui.IWorkbenchPartSite;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.actions.ActionFactory;
@@ -140,6 +143,13 @@ public final class GitStagingFilterHook implements IStartup
 
     /** Пауза после последнего нажатия клавиши, прежде чем реально пересчитать фильтр. */
     private static final int DEBOUNCE_MS = 200;
+
+    /** Бюджет ожидания готовности вида: 30×100 мс + 90×500 мс ≈ 48 с (холодный старт EDT). */
+    private static final int MAX_PATCH_ATTEMPTS = 120;
+
+    /** Виды с активной цепочкой ретраев (UI-поток) — одна цепочка на вид. */
+    private static final Set<IViewPart> pendingRetries =
+        Collections.newSetFromMap(new IdentityHashMap<>());
 
     // -----------------------------------------------------------------------
     // Колонки дерева (Имя/Тип/Путь/Время изменения/Статус)
@@ -475,17 +485,54 @@ public final class GitStagingFilterHook implements IStartup
         }
     }
 
+    /**
+     * Ретраи установки патча. При восстановлении вида на старте EDT {@code filterText} и оба
+     * {@code TreeViewer}'а готовы далеко не сразу (панель ждёт загрузки репозитория), а прежний
+     * бюджет 20×100 мс = 2 с на холодном старте истекал раньше — патч «иногда не применялся».
+     * Поэтому ждём десятки секунд с замедлением и прекращаем только когда вид закрыт.
+     *
+     * <p>Цепочка ретраев на вид ровно одна: {@code partVisible}/{@code partActivated} приходят
+     * пачками, и без этого каждый event плодил бы свою цепочку.
+     */
     private static void schedulePatch(IViewPart view, int attempt)
     {
+        if (attempt == 0 && !pendingRetries.add(view))
+            return;
         Display display = Display.getDefault();
-        int delay = attempt == 0 ? 0 : 100;
+        int delay = attempt == 0 ? 0 : attempt < 30 ? 100 : 500;
         display.timerExec(delay, () ->
         {
-            if (!tryPatch(view) && attempt < 20)
-                schedulePatch(view, attempt + 1);
-            else if (attempt >= 20)
-                Debug.log("tryPatch GIVE UP after 20 attempts"); //$NON-NLS-1$
+            if (isViewGone(view))
+            {
+                pendingRetries.remove(view);
+                Debug.log("tryPatch STOP: вид закрыт"); //$NON-NLS-1$
+                return;
+            }
+            if (tryPatch(view))
+            {
+                pendingRetries.remove(view);
+                return;
+            }
+            if (attempt >= MAX_PATCH_ATTEMPTS)
+            {
+                pendingRetries.remove(view);
+                Debug.log("tryPatch GIVE UP after " + MAX_PATCH_ATTEMPTS + " attempts"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
+            }
+            schedulePatch(view, attempt + 1);
         });
+    }
+
+    /** Вид закрыт (или уже не принадлежит своей странице) — ретраи больше не нужны. */
+    private static boolean isViewGone(IViewPart view)
+    {
+        IWorkbenchPartSite site = view.getSite();
+        if (site == null || site.getPage() == null)
+            return true;
+        for (IViewReference ref : site.getPage().getViewReferences())
+            if (ref.getPart(false) == view)
+                return false;
+        return true;
     }
 
     private static boolean tryPatch(IViewPart view)
@@ -504,9 +551,14 @@ public final class GitStagingFilterHook implements IStartup
 
             GitStagingSearchFilter stagedFilter = installViewer(view, "stagedViewer"); //$NON-NLS-1$
             GitStagingSearchFilter unstagedFilter = installViewer(view, "unstagedViewer"); //$NON-NLS-1$
-            if (stagedFilter == null && unstagedFilter == null)
+            // Нужны ОБА дерева: FilterSession держит оба фильтра (при null второго — NPE в
+            // clearViewer), а PATCHED_KEY закрыл бы повтор, и «опоздавшее» дерево осталось бы
+            // без колонок и фильтра навсегда. installViewer идемпотентен — уже пропатченное
+            // дерево на следующей попытке вернёт свой существующий фильтр.
+            if (stagedFilter == null || unstagedFilter == null)
             {
-                Debug.log("tryPatch WAIT: no viewers ready"); //$NON-NLS-1$
+                Debug.log("tryPatch WAIT: viewers staged=" + (stagedFilter != null) //$NON-NLS-1$
+                    + " unstaged=" + (unstagedFilter != null)); //$NON-NLS-1$
                 return false;
             }
 

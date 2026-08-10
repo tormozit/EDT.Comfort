@@ -205,8 +205,16 @@ public final class ErrorDialogLinksHook implements IStartup
     {
         if (shell.isDisposed())
             return;
+        openLinksForText(shell, collectErrorText(shell, dialog));
+    }
 
-        List<String> fullNames = extractFullNames(collectErrorText(shell, dialog));
+    /** То же для произвольного текста ошибки (окно {@link ErrorDescriptionWindow}). */
+    static void openLinksForText(Shell shell, String errorText)
+    {
+        if (shell == null || shell.isDisposed())
+            return;
+
+        List<String> fullNames = extractFullNames(errorText);
         if (fullNames.isEmpty())
         {
             ToastNotification.show("Ссылки", "В тексте ошибки не найдены пути к объектам метаданных", 5000); //$NON-NLS-1$ //$NON-NLS-2$

@@ -38,6 +38,8 @@ import com._1c.g5.v8.dt.stacktraces.model.IStacktraceParser;
  * <ul>
  * <li>штатное поле фильтра заменяется на общий {@link FilterInputBox} (как обычно в этом плагине)
  * с многословным AND-фильтром {@link BslExceptionSmartFilter} вместо штатного подстрочного;</li>
+ * <li>штатный флажок «Останавливаться по ошибке» переименовывается в «Без фильтра» — штатная
+ * подпись не передаёт его поведение (он означает точку «Все исключения» и очищает причину);</li>
  * <li>в заголовок дописывается « (Новая)» — отличать от редактора существующей точки
  * ({@link BreakpointListHook}, окно «Сообщение исключения»);</li>
  * <li>добавляется кнопка «Вставить из буфера» — читает буфер обмена и разбирает его штатным
@@ -57,6 +59,13 @@ public final class ExceptionSelectionDialogHook implements IStartup
     private static final String TITLE_SUFFIX = " (Новая)"; //$NON-NLS-1$
     private static final String PATCHED_KEY = "tormozit.exceptionSelectionDialogPatched"; //$NON-NLS-1$
     private static final String SHADOW_PATTERN_KEY = "tormozit.exceptionSelectionShadowPattern"; //$NON-NLS-1$
+    /**
+     * ОПАСНО удлинять: контейнер флажка в штатном диалоге узкий (клиентская область ~189 px при
+     * отступе 5 px), и подпись длиннее ~180 px просто обрезается. Растягивание флажка
+     * ({@code GridData} FILL + grab) и расширение окна ({@code shell.setSize}) уже пробовались и
+     * дают либо обрезку, либо пустое поле справа от контролов. Держать подпись короткой.
+     */
+    private static final String CATCH_ALL_LABEL = "Без фильтра"; //$NON-NLS-1$
     private static final String PASTE_BUTTON_LABEL = "Вставить из буфера"; //$NON-NLS-1$
     private static final String PASTE_BUTTON_TOOLTIP =
             "Извлечь причину ошибки из буфера обмена и подставить в поле фильтра"; //$NON-NLS-1$
@@ -155,6 +164,8 @@ public final class ExceptionSelectionDialogHook implements IStartup
         installFilterModifyListener(filterControl, dialog, smartFilter, shadowPattern);
         FilterInputBoxListNavigation.installTableNavigation(filterControl, table, null);
 
+        renameCatchAllCheckbox(shell);
+
         shell.setText(DIALOG_TITLE + TITLE_SUFFIX);
         shell.setData(PATCHED_KEY, Boolean.TRUE);
 
@@ -162,6 +173,41 @@ public final class ExceptionSelectionDialogHook implements IStartup
         filterInput.scheduleFocusWhenReady();
         fillOnOpen(filterInput, shell, shadowPattern);
         return true;
+    }
+
+    /**
+     * Штатная подпись флажка «Останавливаться по ошибке» ({@code Messages.BslExceptionSelectionDialog_Catch_all})
+     * читается как «сделать остановку по этой ошибке», хотя флажок означает остановку на
+     * <em>любых</em> ошибках (штатный {@code catchAllExceptions}: очищает поле причины и создаёт
+     * точку «Все исключения»). Подпись «Без фильтра» короткая — умещается в штатный узкий
+     * контейнер, поэтому ширины окна и флажка не трогаем.
+     */
+    private static void renameCatchAllCheckbox(Shell shell)
+    {
+        Button checkbox = findCatchAllCheckbox(shell);
+        if (checkbox == null)
+            return;
+        // Подпись короче штатной — помещается в узкий контейнер как есть, без подгонки ширин.
+        checkbox.setText(CATCH_ALL_LABEL);
+        Composite parent = checkbox.getParent();
+        if (parent != null && !parent.isDisposed())
+            parent.layout(true);
+    }
+
+    private static Button findCatchAllCheckbox(Composite parent)
+    {
+        for (Control child : parent.getChildren())
+        {
+            if (child instanceof Button button && (button.getStyle() & SWT.CHECK) != 0)
+                return button;
+            if (child instanceof Composite composite)
+            {
+                Button found = findCatchAllCheckbox(composite);
+                if (found != null)
+                    return found;
+            }
+        }
+        return null;
     }
 
     /**

@@ -79,6 +79,7 @@
     <startup class="tormozit.DebugVariablePresentationHook"/>
     <startup class="tormozit.DebugDetailPaneFullTextHook"/>
     <startup class="tormozit.DebugExpressionsChangeValueHook"/>
+    <startup class="tormozit.DebugErrorSuffixHook"/>
     <startup class="tormozit.DebugAreasConfigureHook"/>
     <startup class="tormozit.BreakpointPropertiesHook"/>
     <startup class="tormozit.BreakpointListHook"/>

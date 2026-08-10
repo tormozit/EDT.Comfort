@@ -112,6 +112,7 @@ import com._1c.g5.v8.bm.integration.AbstractBmTask;
 import com._1c.g5.v8.dt.compare.core.ComparisonUtils;
 import com._1c.g5.v8.dt.compare.core.IComparisonManager;
 import com._1c.g5.v8.dt.compare.core.IComparisonSession;
+import com._1c.g5.v8.dt.compare.core.IComparisonTreeFilter;
 import com._1c.g5.v8.dt.compare.datasource.IActiveComparisonDataSource;
 import com._1c.g5.v8.dt.compare.datasource.IComparisonDataSource;
 import com._1c.g5.v8.dt.compare.merge.ExternalPropertyUtils;
@@ -856,10 +857,16 @@ public class CompareConfigMenuHook implements IStartup
 
         private void onMouseDown(Event e)
         {
-            if (e.button != 1) return;
+            if (e.button != 1 && e.button != 3) return;
             TreeItem item = tree.getItem(new Point(e.x, e.y));
             if (item == null || item.isDisposed()) return;
             if (!(item.getData() instanceof IPartialModelNode node)) return;
+
+            if (e.button == 3)
+            {
+                onRightMouseDown(item, node);
+                return;
+            }
 
             boolean ctrl = (e.stateMask & SWT.MOD1) != 0;
             boolean shift = (e.stateMask & SWT.SHIFT) != 0;
@@ -880,6 +887,29 @@ public class CompareConfigMenuHook implements IStartup
                 selected.add(node);
                 anchor = node;
             }
+            tree.redraw();
+        }
+
+        /**
+         * ПКМ: сначала сделать кликнутую строку текущей (штатный {@code Tree} на Win32
+         * при правом клике только рисует рамку, но выделение не меняет — команды меню
+         * работали бы над прежней строкой), и лишь затем показывается контекстное меню.
+         *
+         * <p>Если строка уже входит в псевдо-мультивыделение, набор сохраняется —
+         * иначе ПКМ по одной из выделенных веток обнулял бы групповые команды.
+         */
+        private void onRightMouseDown(TreeItem item, IPartialModelNode node)
+        {
+            if (!selected.contains(node))
+            {
+                selected.clear();
+                selected.add(node);
+                anchor = node;
+            }
+            tree.setSelection(item);
+            Event selectionEvent = new Event();
+            selectionEvent.item = item;
+            tree.notifyListeners(SWT.Selection, selectionEvent);
             tree.redraw();
         }
 
@@ -1076,6 +1106,7 @@ public class CompareConfigMenuHook implements IStartup
      * 5. Открываем через OpenHelper
      */
 
+
     /**
      * В 3-way комбо «Фильтр» нет пунктов «Показывать только присутствующие в 'X'»
      * ({@link ComparisonFilterKind#ONLY_MAIN}/{@link ComparisonFilterKind#ONLY_OTHER}
@@ -1159,7 +1190,7 @@ public class CompareConfigMenuHook implements IStartup
                     }
 
                     INamedViewerFilter[] patched = insertOnlyPresentFilters(current, mainName, otherName,
-                        onlyMain, onlyOther);
+                        new ViewOnlyNamedFilter(onlyMain), new ViewOnlyNamedFilter(onlyOther));
                     if (patched == current)
                     {
                         view.setData(FLAG, Boolean.TRUE);
@@ -1204,6 +1235,45 @@ public class CompareConfigMenuHook implements IStartup
             Display display = Display.getDefault();
             if (attempt < MAX_ATTEMPTS)
                 display.timerExec(RETRY_MS, () -> install(editor, attempt + 1));
+        }
+
+        /**
+         * Выбор пункта комбо «Фильтр» не только отбирает дерево: {@code PartialModelController
+         * .changeComparisonViewerFilter} отдаёт {@code convertToComparisonTreeFilter()} в сессию
+         * через {@code addComparisonTreeFilter} — это сужает область сравнения, из которой
+         * работает объединение. Двусторонний фильтр, добавленный нами в трёхстороннее сравнение,
+         * в таком качестве неприменим: пометки остаются в модели ({@code mustBeMerged=true} в BM),
+         * но «Объединить» по ним ничего не делает.
+         *
+         * <p>Обёртка оставляет отбор дерева двусторонним (как и просили), а в сессию отдаёт
+         * {@link IComparisonTreeFilter#ALL} — сравнение не сужается, объединение работает.
+         */
+        private static final class ViewOnlyNamedFilter implements INamedViewerFilter
+        {
+            private final INamedViewerFilter delegate;
+
+            ViewOnlyNamedFilter(INamedViewerFilter delegate)
+            {
+                this.delegate = delegate;
+            }
+
+            @Override
+            public String getName()
+            {
+                return delegate.getName();
+            }
+
+            @Override
+            public ViewerFilter getViewerFilter()
+            {
+                return delegate.getViewerFilter();
+            }
+
+            @Override
+            public IComparisonTreeFilter convertToComparisonTreeFilter()
+            {
+                return IComparisonTreeFilter.ALL;
+            }
         }
 
         private static boolean isThreeWay(Object editorInput)
@@ -3166,16 +3236,25 @@ public class CompareConfigMenuHook implements IStartup
                     IPartialModelNode clicked, boolean want,
                     List<IPartialModelNode> targets, IComparisonSession session)
             {
-                ArrayList<IPartialModelNode> leafFallback = new ArrayList<>();
-                runComparisonTreeWrite(session, () ->
+                ArrayList<IPartialModelNode> sessionRefused = new ArrayList<>();
+                for (IPartialModelNode t : targets)
                 {
-                    for (IPartialModelNode t : targets)
+                    if (!setMustBeMergedViaSession(session, t, want))
+                        sessionRefused.add(t);
+                }
+                ArrayList<IPartialModelNode> leafFallback = new ArrayList<>();
+                if (!sessionRefused.isEmpty())
+                {
+                    runComparisonTreeWrite(session, () ->
                     {
-                        if (!setMergeSettingsOnNode(t, want)
-                                && !hasContainmentChildren(t))
-                            leafFallback.add(t);
-                    }
-                });
+                        for (IPartialModelNode t : sessionRefused)
+                        {
+                            if (!setMergeSettingsOnNode(t, want)
+                                    && !hasContainmentChildren(t))
+                                leafFallback.add(t);
+                        }
+                    });
+                }
                 for (IPartialModelNode leaf : leafFallback)
                     setMergeFlagOnLeaf(leaf, want);
                 // BM записан — sync красил по старому mustBeMerged; пересчёт UI обязателен.
@@ -3376,6 +3455,44 @@ public class CompareConfigMenuHook implements IStartup
                         return true;
                 }
                 return false;
+            }
+
+            /**
+             * Пометка через {@code session.setMustBeMerged(id, want, false)} — тот же вызов, что
+             * делает штатный EDT ({@code AbstractPartialModelNode.check}). Только он регистрирует
+             * узел в {@code session.getNodesWithChangedMergeSettings()} и выставляет штатное
+             * {@code MergeRule}; именно этот набор перебирает объединение.
+             *
+             * <p>Прямая запись {@code MergeSettings.setMustBeMerged} (см.
+             * {@link #setMergeSettingsOnNode}) меняет только EObject: {@code mustBeMerged=true}
+             * читается и из BM, галка в дереве стоит, но набор изменённых настроек остаётся пустым,
+             * {@code MergeRule} — {@code DoNotMerge}, и «Объединить» такие пометки не переносит.
+             * Поэтому прямая запись осталась только как резерв, если сессия отказала.
+             *
+             * <p>Вызывать вне {@link #runComparisonTreeWrite}: сессия открывает свою
+             * BM-транзакцию, вложенная даёт «Cannot open more than one transaction».
+             */
+            private static boolean setMustBeMergedViaSession(IComparisonSession session,
+                    IPartialModelNode node, boolean want)
+            {
+                if (session == null || node == null)
+                    return false;
+                long id = node.getNodeId();
+                if (id == -1L)
+                    return false;
+                try
+                {
+                    if (!session.setMustBeMerged(id, want, false))
+                        return false;
+                    node.setChecked(want);
+                    if (!want)
+                        Global.invoke(node, "setGrayed", Boolean.FALSE); //$NON-NLS-1$
+                    return true;
+                }
+                catch (RuntimeException ex)
+                {
+                    return false;
+                }
             }
 
             /**

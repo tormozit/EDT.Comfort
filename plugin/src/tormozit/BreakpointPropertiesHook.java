@@ -34,6 +34,7 @@ import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.ide.IDE;
 import org.eclipse.ui.part.FileEditorInput;
+import org.eclipse.ui.forms.widgets.ExpandableComposite;
 import org.eclipse.ui.texteditor.ITextEditor;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
@@ -141,6 +142,7 @@ public final class BreakpointPropertiesHook implements IStartup
         }
 
         installEditorPanesVerticalStretch(shell, actionsEditor);
+        expandGroupsWithCheckedOptions(shell, actionsEditor);
         if (!installIrOutputLink(actionsEditor, evaluateButton))
             return false;
 
@@ -235,6 +237,58 @@ public final class BreakpointPropertiesHook implements IStartup
 
         Control expressionPane = (Control) Global.getField(actionsEditor, "expressionPane"); //$NON-NLS-1$
         installPaneVerticalStretch(shell, expressionPane);
+    }
+
+    /**
+     * Группы «Условия» и «Действия» — автоматическое разворачивание при открытии диалога,
+     * если внутри группы включена хотя бы одна пометка.
+     */
+    private static void expandGroupsWithCheckedOptions(Shell shell, Object actionsEditor)
+    {
+        Object conditionEditor = resolveBreakpointSubEditor(shell, CONDITION_EDITOR);
+        if (conditionEditor != null)
+            expandGroupIfHasCheckedOption((Control) Global.getField(conditionEditor, "conditionPane")); //$NON-NLS-1$
+        expandGroupIfHasCheckedOption((Control) Global.getField(actionsEditor, "expressionPane")); //$NON-NLS-1$
+    }
+
+    private static void expandGroupIfHasCheckedOption(Control insideGroup)
+    {
+        ExpandableComposite group = findExpandableAncestor(insideGroup);
+        if (group == null || group.isDisposed() || group.isExpanded())
+            return;
+        if (!hasCheckedOption(group.getClient()))
+            return;
+
+        group.setExpanded(true);
+        relayoutPaneHierarchy(group);
+    }
+
+    private static ExpandableComposite findExpandableAncestor(Control control)
+    {
+        for (Control current = control; current != null && !(current instanceof Shell);
+                current = current.getParent())
+        {
+            if (current instanceof ExpandableComposite expandable)
+                return expandable;
+        }
+        return null;
+    }
+
+    private static boolean hasCheckedOption(Control control)
+    {
+        if (control == null || control.isDisposed())
+            return false;
+        if (control instanceof Button button)
+            return (button.getStyle() & SWT.CHECK) != 0 && button.getSelection();
+        if (control instanceof Composite composite)
+        {
+            for (Control child : composite.getChildren())
+            {
+                if (hasCheckedOption(child))
+                    return true;
+            }
+        }
+        return false;
     }
 
     private static void installPaneVerticalStretch(Shell shell, Control pane)
