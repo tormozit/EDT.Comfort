@@ -81,12 +81,6 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     private static final int HEADER_SEPARATOR_HEIGHT = 1;
     /** Горизонтальный запас шапки Win32 (отступы без sort-иконки). */
     private static final int HEADER_TEXT_INSET = 16;
-    /** Абсолютный пол минимальной ширины колонки (px) — ниже не сужаем, даже если символ шрифта уже. */
-    private static final int MIN_COLUMN_WIDTH_FLOOR_PX = 15;
-    /** Минимальная ширина колонки в символах текущего шрифта таблицы. */
-    private static final int MIN_COLUMN_WIDTH_CHARS = 2;
-    /** Горизонтальные отступы текста в ячейке Win32 (слева+справа) — прибавляются к минимуму в символах. */
-    private static final int CELL_TEXT_INSET_PX = 8;
     /** Пауза без новых {@code Resize}-событий колонки, после которой накопленное сужение применяется (мс). */
     private static final int RESIZE_COMMIT_DEBOUNCE_MS = 60;
 
@@ -2099,26 +2093,16 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         return (OS.GetKeyState(OS.VK_CONTROL) & 0x8000) != 0;
     }
 
-    /**
-     * Минимальная ширина колонки: {@link #MIN_COLUMN_WIDTH_CHARS} символов текущего шрифта таблицы плюс
-     * горизонтальные отступы ячейки ({@link #CELL_TEXT_INSET_PX}) — чтобы эти символы реально были видны,
-     * а не съедались отступами. Не уже {@link #MIN_COLUMN_WIDTH_FLOOR_PX}.
-     */
+    /** Минимальная ширина колонки по шрифту таблицы — общий расчёт, см. {@link ColumnWidthFit#minColumnWidth}. */
     private int minColumnWidth()
     {
-        if (table == null || table.isDisposed())
-            return MIN_COLUMN_WIDTH_FLOOR_PX;
-        GC gc = new GC(table);
-        try
-        {
-            int charsWidth = (int) Math.ceil(
-                MIN_COLUMN_WIDTH_CHARS * (double) gc.textExtent("00").x / 2); //$NON-NLS-1$
-            return Math.max(MIN_COLUMN_WIDTH_FLOOR_PX, charsWidth + CELL_TEXT_INSET_PX);
-        }
-        finally
-        {
-            gc.dispose();
-        }
+        return ColumnWidthFit.minColumnWidth(table);
+    }
+
+    /** Доступ к колонкам таблицы для общего расчёта ширин ({@link ColumnWidthFit}). */
+    private ColumnWidthFit.Columns columnAccess()
+    {
+        return new ColumnWidthFit.TableColumns(table, i -> isHiddenColumn(table.getColumn(i)));
     }
 
     /** Запомнить текущие ширины колонок (визуальный порядок) — база до-драг снимка для следующей серии. */
@@ -2279,98 +2263,41 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
 
     private void growColumnsToFill(int total, int clientW, int cols)
     {
-        int extra = clientW - total;
-        int[] idx = new int[cols];
-        int stretchCount = 0;
-        int stretchSum = 0;
-        for (int i = 0; i < cols; i++)
-        {
-            TableColumn c = table.getColumn(i);
-            if (c.isDisposed() || !c.getResizable() || isHiddenColumn(c))
-                continue;
-            idx[stretchCount++] = i;
-            stretchSum += c.getWidth();
-        }
-        if (stretchCount == 0)
-            return;
+        int stretchCount;
         selfAdjusting = true;
         try
         {
-            int assigned = 0;
-            for (int s = 0; s < stretchCount; s++)
-            {
-                TableColumn c = table.getColumn(idx[s]);
-                int share = stretchSum > 0
-                    ? (int) ((long) extra * c.getWidth() / stretchSum)
-                    : extra / stretchCount;
-                if (share < 0)
-                    share = 0;
-                c.setWidth(c.getWidth() + share);
-                assigned += share;
-            }
-            int remainder = extra - assigned;
-            if (remainder != 0)
-            {
-                TableColumn last = table.getColumn(idx[stretchCount - 1]);
-                last.setWidth(Math.max(minColumnWidth(), last.getWidth() + remainder));
-            }
-            clampTotalToClientWidth();
-            rebindColumnLayoutData();
+            stretchCount = ColumnWidthFit.grow(columnAccess(), total, clientW, minColumnWidth());
+            if (stretchCount > 0)
+                rebindColumnLayoutData();
         }
         finally
         {
             selfAdjusting = false;
         }
+        if (stretchCount == 0)
+            return;
         Global.tempLog("formTable-fill", "grow total=" + total + " clientW=" + clientW //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " extra=" + extra + " stretch=" + stretchCount); //$NON-NLS-1$ //$NON-NLS-2$
+            + " extra=" + (clientW - total) + " stretch=" + stretchCount); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private void shrinkColumnsToFit(int total, int clientW, int cols)
     {
-        int minWidth = minColumnWidth();
         int deficit = total - clientW;
-        int[] idx = new int[cols];
-        int shrinkCount = 0;
-        int shrinkSum = 0;
-        for (int i = 0; i < cols; i++)
-        {
-            TableColumn c = table.getColumn(i);
-            if (c.isDisposed() || !c.getResizable() || isHiddenColumn(c))
-                continue;
-            idx[shrinkCount++] = i;
-            shrinkSum += c.getWidth();
-        }
-        if (shrinkCount == 0)
-            return;
+        int shrinkCount;
         selfAdjusting = true;
         try
         {
-            int assigned = 0;
-            for (int s = 0; s < shrinkCount; s++)
-            {
-                TableColumn c = table.getColumn(idx[s]);
-                int cut = shrinkSum > 0
-                    ? (int) ((long) deficit * c.getWidth() / shrinkSum)
-                    : deficit / shrinkCount;
-                if (cut < 0)
-                    cut = 0;
-                int newWidth = Math.max(minWidth, c.getWidth() - cut);
-                assigned += c.getWidth() - newWidth;
-                c.setWidth(newWidth);
-            }
-            int remainder = deficit - assigned;
-            if (remainder > 0)
-            {
-                TableColumn last = table.getColumn(idx[shrinkCount - 1]);
-                last.setWidth(Math.max(minWidth, last.getWidth() - remainder));
-            }
-            clampTotalToClientWidth();
-            rebindColumnLayoutData();
+            shrinkCount = ColumnWidthFit.shrink(columnAccess(), total, clientW, minColumnWidth());
+            if (shrinkCount > 0)
+                rebindColumnLayoutData();
         }
         finally
         {
             selfAdjusting = false;
         }
+        if (shrinkCount == 0)
+            return;
         int actualTotal = 0;
         for (int i = 0; i < cols; i++)
             actualTotal += table.getColumn(i).getWidth();
@@ -2559,27 +2486,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
     {
         if (table == null || table.isDisposed())
             return;
-        int cols = table.getColumnCount();
-        int total = 0;
-        for (int i = 0; i < cols; i++)
-            total += table.getColumn(i).getWidth();
-        int clientW = table.getClientArea().width;
-        int overshoot = total - clientW;
-        if (overshoot <= 0)
-            return;
-        int minWidth = minColumnWidth();
-        for (int i = cols - 1; i >= 0 && overshoot > 0; i--)
-        {
-            TableColumn c = table.getColumn(i);
-            if (c.isDisposed() || !c.getResizable())
-                continue;
-            int reducible = c.getWidth() - minWidth;
-            if (reducible <= 0)
-                continue;
-            int cut = Math.min(reducible, overshoot);
-            c.setWidth(c.getWidth() - cut);
-            overshoot -= cut;
-        }
+        ColumnWidthFit.clampTotalToClientWidth(columnAccess(), minColumnWidth());
     }
 
     /**

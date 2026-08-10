@@ -370,8 +370,7 @@ final class DebugInspectorTreeEnhancement
 
         installChangeValueModalGuard();
 
-        if (isIndependentElementDialog())
-            columnAutoFit = ColumnAutoFit.install(tree);
+        columnAutoFit = ColumnAutoFit.install(tree);
 
         return true;
     }
@@ -1901,16 +1900,20 @@ final class DebugInspectorTreeEnhancement
     }
 
     /**
-     * Растягивание/сужение колонок дерева инспектора вместе с окном (issue #273). Штатный
+     * Растягивание/сужение колонок дерева инспектора вместе с окном (issue #273) — во всех окнах
+     * инспектора: и в независимом (F9/«Инспектировать»), и в попапе по наведению. Штатный
      * {@code InternalTreeModelViewer} задаёт ширины колонок ОДИН раз при их построении
      * ({@code initColumns}: сохранённая ширина, либо {@code IColumnPresentation2.getInitialColumnWidth},
      * либо равные доли) и больше их не трогает — при изменении размера окна справа остаётся пустое
      * место, а при сужении появляется горизонтальный скролл.
      *
-     * <p>Логика повторяет авто-заполнение таблиц плагина ({@code FormTableInteraction.autoFillColumns}):
-     * расширение окна — растягиваем колонки пропорционально их текущим ширинам до правой границы;
-     * сужение — сужаем пропорционально (не уже {@link #MIN_COLUMN_WIDTH_PX}), но только если до этого
-     * колонки умещались: уже существовавшее переполнение (пользователь сам растащил колонки) не трогаем.
+     * <p>Сам пересчёт ширин — общий с таблицами плагина: {@link ColumnWidthFit#grow} /
+     * {@link ColumnWidthFit#shrink} над {@link ColumnWidthFit.TreeColumns}, минимальная ширина колонки —
+     * {@link ColumnWidthFit#minColumnWidth}. Отличается только политика: {@code FormTableInteraction}
+     * лишь ПОДДЕРЖИВАЕТ ранее активный режим заполнения по ширине (был запас свободного места — так и
+     * остаётся), а здесь колонки заполняют ширину окна всегда — именно этого не делает штатная EDT.
+     * Общее с таблицами — уважение ручных ширин: если пользователь сам растащил колонки за границу окна,
+     * подгонка их не сужает.
      *
      * <p>Наши {@code setWidth} штатный viewer видит как обычный ресайз колонки и запоминает ширины
      * ({@code persistColumnSizes}), поэтому перестроение колонок при смене выражения в окне
@@ -1918,20 +1921,20 @@ final class DebugInspectorTreeEnhancement
      */
     private static final class ColumnAutoFit
     {
-        /** Минимальная ширина колонки при сужении окна. */
-        private static final int MIN_COLUMN_WIDTH_PX = 40;
-
         /** Задержки первичной подгонки: колонки строятся штатным viewer'ом не сразу (см. его PaintListener). */
         private static final int[] INITIAL_FIT_DELAYS_MS = { 0, 50, 150, 400, 800 };
 
         private final Tree tree;
+        private final ColumnWidthFit.Columns columns;
         private final Listener resizeListener;
         private boolean adjusting;
-        private boolean columnsFitBefore = true;
+        /** Ширина клиентской области при прошлой подгонке — база для «умещались ли колонки ДО» (см. {@link #fit()}). */
+        private int lastClientWidth;
 
         private ColumnAutoFit(Tree tree)
         {
             this.tree = tree;
+            this.columns = new ColumnWidthFit.TreeColumns(tree, null);
             this.resizeListener = e -> fit();
         }
 
@@ -1963,71 +1966,34 @@ final class DebugInspectorTreeEnhancement
         {
             if (adjusting || tree.isDisposed())
                 return;
-            int columns = tree.getColumnCount();
-            if (columns <= 0)
+            if (columns.count() <= 0)
                 return;
-            int clientWidth = tree.getClientArea().width;
+            int clientWidth = columns.clientWidth();
             if (clientWidth <= 0)
                 return;
-            int total = totalColumnsWidth();
+            int total = ColumnWidthFit.totalWidth(columns);
+            // Умещались ли колонки ДО этого изменения — считаем по ПРОШЛОЙ ширине клиентской области:
+            // так переполнение, созданное самим пользователем (растащил границу колонки между двумя
+            // ресайзами окна), видно и не «схлопывается» обратно нашей подгонкой.
+            boolean fitBefore = lastClientWidth <= 0 || total <= lastClientWidth;
+            lastClientWidth = clientWidth;
             if (total == clientWidth)
-            {
-                columnsFitBefore = true;
                 return;
-            }
-            if (total > clientWidth && !columnsFitBefore)
+            if (total > clientWidth && !fitBefore)
                 return; // переполнение было и до изменения размера окна — это выбор пользователя
             adjusting = true;
             try
             {
-                applyProportionalWidths(total, clientWidth, columns);
+                int minWidth = ColumnWidthFit.minColumnWidth(tree);
+                if (total < clientWidth)
+                    ColumnWidthFit.grow(columns, total, clientWidth, minWidth);
+                else
+                    ColumnWidthFit.shrink(columns, total, clientWidth, minWidth);
             }
             finally
             {
                 adjusting = false;
             }
-            columnsFitBefore = totalColumnsWidth() <= tree.getClientArea().width;
-        }
-
-        /** Пропорциональный пересчёт ширин всех колонок так, чтобы их сумма стала равна {@code clientWidth}. */
-        private void applyProportionalWidths(int total, int clientWidth, int columns)
-        {
-            if (total <= 0)
-                return;
-            int assigned = 0;
-            int last = -1;
-            for (int i = 0; i < columns; i++)
-            {
-                org.eclipse.swt.widgets.TreeColumn column = tree.getColumn(i);
-                if (column == null || column.isDisposed())
-                    continue;
-                int width = (int)((long)column.getWidth() * clientWidth / total);
-                if (width < MIN_COLUMN_WIDTH_PX)
-                    width = MIN_COLUMN_WIDTH_PX;
-                column.setWidth(width);
-                assigned += width;
-                last = i;
-            }
-            if (last < 0)
-                return;
-            int remainder = clientWidth - assigned;
-            if (remainder == 0)
-                return;
-            org.eclipse.swt.widgets.TreeColumn lastColumn = tree.getColumn(last);
-            if (lastColumn != null && !lastColumn.isDisposed())
-                lastColumn.setWidth(Math.max(MIN_COLUMN_WIDTH_PX, lastColumn.getWidth() + remainder));
-        }
-
-        private int totalColumnsWidth()
-        {
-            int total = 0;
-            for (int i = 0; i < tree.getColumnCount(); i++)
-            {
-                org.eclipse.swt.widgets.TreeColumn column = tree.getColumn(i);
-                if (column != null && !column.isDisposed())
-                    total += column.getWidth();
-            }
-            return total;
         }
     }
 
