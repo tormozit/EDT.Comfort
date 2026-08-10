@@ -39,11 +39,6 @@
 
 ![Стабильный hover без пересоздания окна при наведении](images/issue-72-1.png)
 
-## Исправления
-
-- Устранено долгое открытие окна инспектора на ОС Linux ([#270](https://github.com/tormozit/EDT.Comfort/issues/270)).
-- В дочерних свойствах инспектора и в панели «Выражения» больше не обрезается текст запроса и другие длинные строковые значения ([#258](https://github.com/tormozit/EDT.Comfort/issues/258)).
-
 ## Связанные разделы
 
 - [Улучшения окон отладчика](obshchie-mekhanizmy.md#uluchsheniya-okon-otladchika)

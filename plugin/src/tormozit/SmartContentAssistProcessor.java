@@ -5153,11 +5153,7 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             if (event == null || event.getText() == null || event.getText().isEmpty())
                 return;
             if (Boolean.TRUE.equals(SmartCompletionProposal.IR_PROPOSAL_APPLY_IN_PROGRESS.get()))
-            {
-                Global.tempLog("ctor-min-params", "ensureSkipIrApply text=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + event.getText());
                 return;
-            }
             EObject pending = PENDING_SIGNATURE.get();
             if (pending == null)
                 return;
@@ -5166,10 +5162,7 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             IDocument doc = event.getDocument();
             IDocumentListener listener = findBslDocumentListener(doc);
             if (listener == null)
-            {
-                Global.tempLog("ctor-min-params", "ensureFail noListener"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
-            }
             try
             {
                 Field mapField = listener.getClass().getDeclaredField("map"); //$NON-NLS-1$
@@ -5183,17 +5176,13 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
                 if (existing != null)
                 {
                     setDataEventObjects(existing, pending);
-                    Global.tempLog("ctor-min-params", "ensureObjectsOnly key=" + text //$NON-NLS-1$ //$NON-NLS-2$
-                        + " sig=" + signatureLabel(pending)); //$NON-NLS-1$
                     return;
                 }
-                Global.tempLog("ctor-min-params", "ensureMigrate text=" + text //$NON-NLS-1$ //$NON-NLS-2$
-                    + " oldKey=" + oldKey); //$NON-NLS-1$
                 migrateDataEvent(listener, doc, text, oldKey, pending, event.getOffset());
             }
             catch (Exception ex)
             {
-                Global.tempLog("ctor-min-params", "ensureEx " + ex); //$NON-NLS-1$ //$NON-NLS-2$
+                // рефлексия по внутренностям EDT — при несовпадении просто не подставляем сигнатуру
             }
         }
 
@@ -5225,13 +5214,7 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
                 return;
             int minParams = resolveMinParams(signature, currentSlots);
             if (minParams < 0 || minParams >= currentSlots)
-            {
-                Global.tempLog("ctor-min-params", "trimSkip minParams=" + minParams //$NON-NLS-1$ //$NON-NLS-2$
-                    + " currentSlots=" + currentSlots //$NON-NLS-1$
-                    + " sig=" + signatureLabel(signature) //$NON-NLS-1$
-                    + " class=" + cp.getClass().getSimpleName()); //$NON-NLS-1$
                 return;
-            }
             String commaStr = detectCommaStr(inside);
             String newInside = buildEmptyInside(minParams, commaStr);
             String newRepl = oldRepl.substring(0, open + 1) + newInside + oldRepl.substring(close);
@@ -5247,11 +5230,6 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             cp.setReplacementString(newRepl);
             cp.setCursorPosition(open + 1);
             syncInitialReplacementContent(cp, newRepl);
-            Global.tempLog("ctor-min-params", "trimOk minParams=" + minParams //$NON-NLS-1$ //$NON-NLS-2$
-                + " sig=" + signatureLabel(signature) //$NON-NLS-1$
-                + " oldKey=" + ORIGINAL_DATA_EVENT_KEY.get(cp) //$NON-NLS-1$
-                + " newRepl=" + newRepl //$NON-NLS-1$
-                + " class=" + cp.getClass().getSimpleName()); //$NON-NLS-1$
         }
 
         /**
@@ -5267,11 +5245,6 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             String oldKey = ORIGINAL_DATA_EVENT_KEY.get(cp);
             if (oldKey == null)
                 oldKey = readStringField(cp, "linkModelContent"); //$NON-NLS-1$
-            Global.tempLog("ctor-min-params", "bindEnter sig=" + signatureLabel(signature) //$NON-NLS-1$ //$NON-NLS-2$
-                + " key=" + key //$NON-NLS-1$
-                + " oldKey=" + oldKey //$NON-NLS-1$
-                + " additional=" + additionalClass(cp) //$NON-NLS-1$
-                + " class=" + raw.getClass().getSimpleName()); //$NON-NLS-1$
             if (signature == null || key == null || key.isEmpty())
                 return;
             PENDING_SIGNATURE.set(signature);
@@ -5283,17 +5256,12 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
                 SourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
                 doc = viewer != null ? viewer.getDocument() : null;
             }
+            // без документа/слушателя — подстановка отложена до ensureDataEventForInsert
             if (doc == null)
-            {
-                Global.tempLog("ctor-min-params", "bindDefer noDoc (ensure on insert)"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
-            }
             IDocumentListener listener = resolveDocEventListener(cp, doc);
             if (listener == null)
-            {
-                Global.tempLog("ctor-min-params", "bindDefer noListener (ensure on insert)"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
-            }
             try
             {
                 boolean needMigrate = oldKey != null && !oldKey.equals(key);
@@ -5310,7 +5278,7 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             }
             catch (Exception ex)
             {
-                Global.tempLog("ctor-min-params", "bindEx " + ex); //$NON-NLS-1$ //$NON-NLS-2$
+                // рефлексия по внутренностям EDT — при несовпадении оставляем штатное поведение
             }
         }
 
@@ -5365,8 +5333,6 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
                 }
                 map.put(newKey, dataEvent);
             }
-            Global.tempLog("ctor-min-params", "bindObjectsOnly key=" + newKey //$NON-NLS-1$ //$NON-NLS-2$
-                + " sig=" + signatureLabel(signature)); //$NON-NLS-1$
             return true;
         }
 
@@ -5430,11 +5396,7 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
                 donorKey = bestKey;
             }
             if (dataEvent == null)
-            {
-                Global.tempLog("ctor-min-params", "migrateFail noDataEvent mapSize=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + map.size() + " newKey=" + newKey + " oldKey=" + oldKey); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
-            }
             int open = newKey.indexOf('(');
             int close = newKey.lastIndexOf(')');
             String inside = open >= 0 && close > open ? newKey.substring(open + 1, close) : ""; //$NON-NLS-1$
@@ -5453,10 +5415,7 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             else
                 base = -1;
             if (base < 0)
-            {
-                Global.tempLog("ctor-min-params", "migrateFail badBase"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
-            }
 
             List<LinkedPosition> trimmed = new ArrayList<>(slots);
             LinkedModeModel model = new LinkedModeModel();
@@ -5477,19 +5436,12 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
                 if (donorKey != null && !donorKey.equals(newKey))
                     map.remove(donorKey);
                 map.put(newKey, dataEvent);
-                Global.tempLog("ctor-min-params", "migrateFallback objectsOnly donor=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + donorKey + " newKey=" + newKey); //$NON-NLS-1$
                 return;
             }
             if (donorKey != null)
                 map.remove(donorKey);
             map.remove(newKey);
             map.put(newKey, newEvent);
-            Global.tempLog("ctor-min-params", "migrateOk slots=" + slots //$NON-NLS-1$ //$NON-NLS-2$
-                + " donor=" + donorKey //$NON-NLS-1$
-                + " newKey=" + newKey //$NON-NLS-1$
-                + " base=" + base //$NON-NLS-1$
-                + " sig=" + signatureLabel(signature)); //$NON-NLS-1$
         }
 
         private static String insertNamePrefix(String key)
@@ -5579,12 +5531,6 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             return null;
         }
 
-        private static String additionalClass(ConfigurableCompletionProposal cp)
-        {
-            Object additional = Global.getField(cp, "additionalProposalInfo"); //$NON-NLS-1$
-            return additional == null ? "null" : additional.getClass().getName(); //$NON-NLS-1$
-        }
-
         private static EObject readSignatureObject(ConfigurableCompletionProposal cp)
         {
             Object additional = Global.getField(cp, "additionalProposalInfo"); //$NON-NLS-1$
@@ -5606,18 +5552,6 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
                 }
             }
             return null;
-        }
-
-        private static String signatureLabel(EObject signature)
-        {
-            if (signature instanceof FakeCtor fake)
-                return "FakeCtor:" + fake.getTypeName() //$NON-NLS-1$
-                    + fakeParamNames(fake);
-            if (signature instanceof ParamSet set)
-                return "ParamSet:min=" + set.getMinParams() //$NON-NLS-1$
-                    + "/max=" + set.getMaxParams() //$NON-NLS-1$
-                    + paramSetNames(set);
-            return String.valueOf(signature);
         }
 
         private static int signatureSlotHint(EObject signature)
@@ -5729,23 +5663,6 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
                     continue;
                 String name = p.getName();
                 names.add(name != null ? name : ""); //$NON-NLS-1$
-            }
-            return names;
-        }
-
-        private static List<String> paramSetNames(ParamSet set)
-        {
-            EList<Parameter> params = set.getParams();
-            if (params == null || params.isEmpty())
-                return Collections.emptyList();
-            List<String> names = new ArrayList<>(params.size());
-            for (Parameter p : params)
-            {
-                if (p == null)
-                    continue;
-                String ru = p.getNameRu();
-                String en = p.getName();
-                names.add(ru != null && !ru.isEmpty() ? ru : (en != null ? en : "")); //$NON-NLS-1$
             }
             return names;
         }

@@ -6,7 +6,6 @@ import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.ILabelProvider;
 import org.eclipse.jface.viewers.StyledCellLabelProvider;
 import org.eclipse.jface.viewers.ViewerComparator;
-import org.eclipse.swt.SWT;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Tree;
@@ -361,63 +360,8 @@ public final class NavigatorFilterHook implements IStartup
         tree.setData(SEARCH_CACHE_KEY, searchCache);
         tree.setData(HIGHLIGHT_KEY, highlight);
         NavigatorAttributePropertiesHook.ensureInstalled(navigator, viewer);
-        installScrollDiagnostics(tree);
         return true;
     }
-
-    // #region ВРЕМЕННАЯ диагностика фантомного скролла (issue #117) — удалить после фикса.
-    private static final String SCROLL_DIAG_KEY = "tormozit.scrollDiagInstalled"; //$NON-NLS-1$
-    private static final String SCROLL_DIAG_TOPIC = "phantomScroll"; //$NON-NLS-1$
-
-    private static void installScrollDiagnostics(Tree tree)
-    {
-        if (tree == null || tree.isDisposed() || Boolean.TRUE.equals(tree.getData(SCROLL_DIAG_KEY)))
-            return;
-        tree.setData(SCROLL_DIAG_KEY, Boolean.TRUE);
-
-        tree.addListener(SWT.MouseDown, e -> {
-            String before = scrollState(tree);
-            Global.tempLog(SCROLL_DIAG_TOPIC, "MouseDown BEFORE " + before); //$NON-NLS-1$
-            Display d = tree.getDisplay();
-            d.asyncExec(() -> {
-                if (!tree.isDisposed())
-                    Global.tempLog(SCROLL_DIAG_TOPIC, "MouseDown AFTER  " + scrollState(tree)); //$NON-NLS-1$
-            });
-        });
-        tree.addListener(SWT.FocusIn, e ->
-                Global.tempLog(SCROLL_DIAG_TOPIC, "FocusIn          " + scrollState(tree))); //$NON-NLS-1$
-        tree.addListener(SWT.Selection, e ->
-                Global.tempLog(SCROLL_DIAG_TOPIC, "Selection        " + scrollState(tree))); //$NON-NLS-1$
-        tree.getVerticalBar().addListener(SWT.Selection, e ->
-                Global.tempLog(SCROLL_DIAG_TOPIC, "VScroll          " + scrollState(tree))); //$NON-NLS-1$
-
-        Global.tempLog(SCROLL_DIAG_TOPIC, "diagnostics installed on tree"); //$NON-NLS-1$
-    }
-
-    private static String scrollState(Tree tree)
-    {
-        if (tree == null || tree.isDisposed())
-            return "disposed"; //$NON-NLS-1$
-        TreeItem top = tree.getTopItem();
-        TreeItem[] sel = tree.getSelection();
-        String topText = top == null ? "null" : safeText(top); //$NON-NLS-1$
-        String selText = sel.length == 0 ? "none" : safeText(sel[0]); //$NON-NLS-1$
-        return "top=\"" + topText + "\" scrollY=" + tree.getVerticalBar().getSelection() //$NON-NLS-1$ //$NON-NLS-2$
-                + " selection=\"" + selText + "\""; //$NON-NLS-1$ //$NON-NLS-2$
-    }
-
-    private static String safeText(TreeItem item)
-    {
-        try
-        {
-            return item.getText();
-        }
-        catch (RuntimeException e)
-        {
-            return "<err>"; //$NON-NLS-1$
-        }
-    }
-    // #endregion
 
     /** Только подсветка на UI; фильтрация — штатный SearchJob (не блокирует ввод). */
     private static void applyHighlightState(CommonViewer viewer, Tree tree, SmartLabelHighlight highlight,
@@ -639,14 +583,11 @@ public final class NavigatorFilterHook implements IStartup
             //
             // Не делать viewer.refresh(), пока search-filter ещё active: refresh при живом
             // NavigatorSearchFilter и уже пустом/полуочищенном trie даёт пустое дерево.
-            Global.tempLog(SCROLL_DIAG_TOPIC, "onSearchCleared START " + scrollState(tree)); //$NON-NLS-1$
             if (viewer != null && tree != null)
                 NavigatorNativeSearchBridge.reinstallComfortEngineOnly(navigator, viewer, tree);
             ObjectSetSubsystemsFilterBridge.adoptNativeAfterFilterUiChange(navigator,
                     "navigatorSearchCleared"); //$NON-NLS-1$
             NavigatorFilterDebug.log("searchCleared " + NavigatorFilterDebug.filtersDesc(viewer)); //$NON-NLS-1$
-            Global.tempLog(SCROLL_DIAG_TOPIC,
-                    "onSearchCleared after adoptNativeAfterFilterUiChange " + scrollState(tree)); //$NON-NLS-1$
 
             // После searchDelay штатной очистки — rebind+refresh и при необходимости force-clear.
             scheduleAfterNativeSearchClear(navigator, viewer, tree, display);
@@ -671,7 +612,6 @@ public final class NavigatorFilterHook implements IStartup
         // return выше флаг некому будет снять (см. SUBSYSTEMS_REBIND_PENDING_KEY).
         tree.setData(SUBSYSTEMS_REBIND_PENDING_KEY, Boolean.TRUE);
         display.timerExec(700, () -> {
-            Global.tempLog(SCROLL_DIAG_TOPIC, "timerExec(700) FIRED " + scrollState(tree)); //$NON-NLS-1$
             Object topElementBefore = topScrollElement(tree);
             try
             {
@@ -680,11 +620,7 @@ public final class NavigatorFilterHook implements IStartup
                 Object searchBox = Global.getField(navigator, "searchBox"); //$NON-NLS-1$
                 SearchBoxFilterAccess input = SearchBoxFilterAccess.resolveQuiet(navigator, searchBox);
                 if (input == null || !input.isWidgetSearchEmpty())
-                {
-                    Global.tempLog(SCROLL_DIAG_TOPIC, "timerExec GIVE UP input=" //$NON-NLS-1$
-                            + (input == null ? "null" : "notEmpty")); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
-                }
                 boolean active = Boolean.TRUE.equals(Global.invoke(navigator, "isSearchFilterActive")); //$NON-NLS-1$
                 String nativePattern = readNativeActivePattern(navigator);
                 if (Boolean.TRUE.equals(tree.getData(CLEAR_IN_PROGRESS_KEY)))
@@ -693,15 +629,9 @@ public final class NavigatorFilterHook implements IStartup
                 try
                 {
                     if (active || (nativePattern != null && !nativePattern.isEmpty()))
-                    {
-                        Global.tempLog(SCROLL_DIAG_TOPIC, "before triggerNativeSearchClear " + scrollState(tree)); //$NON-NLS-1$
                         triggerNativeSearchClear(navigator);
-                        Global.tempLog(SCROLL_DIAG_TOPIC, "after  triggerNativeSearchClear " + scrollState(tree)); //$NON-NLS-1$
-                    }
                     // Теперь search должен быть снят — можно refresh.
-                    Global.tempLog(SCROLL_DIAG_TOPIC, "before rebindNavigatorBridge     " + scrollState(tree)); //$NON-NLS-1$
                     ObjectSetSubsystemsFilterBridge.rebindNavigatorBridge(navigator, "navigatorSearchClearedDeferred"); //$NON-NLS-1$
-                    Global.tempLog(SCROLL_DIAG_TOPIC, "after  rebindNavigatorBridge     " + scrollState(tree)); //$NON-NLS-1$
                 }
                 finally
                 {
@@ -721,11 +651,8 @@ public final class NavigatorFilterHook implements IStartup
                     // синхронный вызов; вернули как было.)
                     if (viewer != null)
                     {
-                        Global.tempLog(SCROLL_DIAG_TOPIC, "before our extra refresh()       " + scrollState(tree)); //$NON-NLS-1$
                         viewer.refresh();
-                        Global.tempLog(SCROLL_DIAG_TOPIC, "after  our extra refresh()       " + scrollState(tree)); //$NON-NLS-1$
                         restoreTopScrollElement(viewer, tree, topElementBefore);
-                        Global.tempLog(SCROLL_DIAG_TOPIC, "after  restore top item          " + scrollState(tree)); //$NON-NLS-1$
                     }
                 }
             }

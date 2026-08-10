@@ -479,14 +479,6 @@ public final class RecentPlacesView extends ViewPart
             entryIconResolver.clearCache();
         allEntries = RecentPlaces.getInstance().getAll();
         boolean preserve = shouldPreserveViewport();
-        Table table = listViewer.getTable();
-        Global.tempLog("recent-places-scroll", //$NON-NLS-1$
-            "refreshFromStore preserve=" + preserve //$NON-NLS-1$
-                + " top=" + (!table.isDisposed() ? table.getTopIndex() : -1) //$NON-NLS-1$
-                + " sel=" + (!table.isDisposed() ? table.getSelectionIndex() : -1) //$NON-NLS-1$
-                + " items=" + (!table.isDisposed() ? table.getItemCount() : -1) //$NON-NLS-1$
-                + " all=" + allEntries.size() //$NON-NLS-1$
-                + " focusCtrl=" + describeFocusControl(table, viewRoot)); //$NON-NLS-1$
         // При фокусе в панели (таблица или фильтр) не сдвигать viewport и текущую строку.
         applyFilterFromField(preserve);
     }
@@ -522,21 +514,6 @@ public final class RecentPlacesView extends ViewPart
                 return true;
         }
         return false;
-    }
-
-    private static String describeFocusControl(Table table, Composite viewRoot)
-    {
-        if (table == null || table.isDisposed())
-            return "tableDisposed"; //$NON-NLS-1$
-        Display display = table.getDisplay();
-        if (display == null || display.isDisposed())
-            return "noDisplay"; //$NON-NLS-1$
-        Control focus = display.getFocusControl();
-        if (focus == null)
-            return "null"; //$NON-NLS-1$
-        return focus.getClass().getName()
-            + " isTable=" + (focus == table) //$NON-NLS-1$
-            + " underView=" + isUnder(focus, viewRoot); //$NON-NLS-1$
     }
 
     private void activateKeyContext()
@@ -927,23 +904,11 @@ public final class RecentPlacesView extends ViewPart
         String viewportAnchorKey = null;
         Integer selectionOffsetFromTop = null;
         Table table = listViewer.getTable();
-        int topBefore = !table.isDisposed() ? table.getTopIndex() : -1;
-        int selBefore = !table.isDisposed() ? table.getSelectionIndex() : -1;
-        int itemsBefore = !table.isDisposed() ? table.getItemCount() : -1;
         if (preserveViewport)
         {
             viewportAnchorKey = captureViewportAnchorKey();
             selectionOffsetFromTop = captureSelectionOffsetFromTop();
         }
-        Global.tempLog("recent-places-scroll", //$NON-NLS-1$
-            "applyFilter START preserve=" + preserveViewport //$NON-NLS-1$
-                + " topBefore=" + topBefore //$NON-NLS-1$
-                + " selBefore=" + selBefore //$NON-NLS-1$
-                + " itemsBefore=" + itemsBefore //$NON-NLS-1$
-                + " selectedKey=" + selectedKey //$NON-NLS-1$
-                + " anchorKey=" + viewportAnchorKey //$NON-NLS-1$
-                + " selOffset=" + selectionOffsetFromTop //$NON-NLS-1$
-                + " patternLen=" + (pattern != null ? pattern.length() : -1)); //$NON-NLS-1$
         SmartMatcher m = new SmartMatcher(pattern);
         nameLabelProvider.setMatcher(m);
         boolean filterByProject = filterByProjectCheckbox != null
@@ -970,74 +935,18 @@ public final class RecentPlacesView extends ViewPart
         {
             listViewer.setInput(filtered);
             listViewer.refresh();
-            int topAfterInput = !table.isDisposed() ? table.getTopIndex() : -1;
-            Global.tempLog("recent-places-scroll", //$NON-NLS-1$
-                "after setInput/refresh top=" + topAfterInput //$NON-NLS-1$
-                    + " items=" + filtered.size() //$NON-NLS-1$
-                    + " sel=" + (!table.isDisposed() ? table.getSelectionIndex() : -1)); //$NON-NLS-1$
             if (preserveViewport)
             {
                 if (viewportAnchorKey != null)
                     restoreTopIndexByKey(viewportAnchorKey);
-                int topAfterAnchor = !table.isDisposed() ? table.getTopIndex() : -1;
-                Global.tempLog("recent-places-scroll", //$NON-NLS-1$
-                    "after restoreTopIndexByKey anchor=" + viewportAnchorKey //$NON-NLS-1$
-                        + " top=" + topAfterAnchor); //$NON-NLS-1$
                 restoreSelectionByScreenOffset(selectionOffsetFromTop, savedActiveColumn);
-                int topAfterSel = !table.isDisposed() ? table.getTopIndex() : -1;
-                Global.tempLog("recent-places-scroll", //$NON-NLS-1$
-                    "after restoreSelectionByScreenOffset top=" + topAfterSel //$NON-NLS-1$
-                        + " sel=" + (!table.isDisposed() ? table.getSelectionIndex() : -1) //$NON-NLS-1$
-                        + " offset=" + selectionOffsetFromTop); //$NON-NLS-1$
             }
             else if (!restoreSelectionByKey(selectedKey, savedActiveColumn, true))
-            {
                 selectFirst();
-                Global.tempLog("recent-places-scroll", //$NON-NLS-1$
-                    "noPreserve selectFirst/restoreKey top=" //$NON-NLS-1$
-                        + (!table.isDisposed() ? table.getTopIndex() : -1) //$NON-NLS-1$
-                        + " sel=" + (!table.isDisposed() ? table.getSelectionIndex() : -1)); //$NON-NLS-1$
-            }
-            else
-            {
-                Global.tempLog("recent-places-scroll", //$NON-NLS-1$
-                    "noPreserve restoreSelectionByKey top=" //$NON-NLS-1$
-                        + (!table.isDisposed() ? table.getTopIndex() : -1) //$NON-NLS-1$
-                        + " sel=" + (!table.isDisposed() ? table.getSelectionIndex() : -1)); //$NON-NLS-1$
-            }
         }
         finally
         {
             table.setRedraw(true);
-            int topFinally = !table.isDisposed() ? table.getTopIndex() : -1;
-            Global.tempLog("recent-places-scroll", //$NON-NLS-1$
-                "applyFilter FINALLY(after redraw) top=" + topFinally //$NON-NLS-1$
-                    + " sel=" + (!table.isDisposed() ? table.getSelectionIndex() : -1) //$NON-NLS-1$
-                    + " topBefore=" + topBefore //$NON-NLS-1$
-                    + " shifted=" + (topFinally != topBefore)); //$NON-NLS-1$
-            if (!table.isDisposed() && preserveViewport)
-            {
-                Display display = table.getDisplay();
-                if (display != null && !display.isDisposed())
-                {
-                    final int expectedTop = topFinally;
-                    final String anchor = viewportAnchorKey;
-                    display.asyncExec(() ->
-                    {
-                        if (listViewer == null || listViewer.getControl().isDisposed())
-                            return;
-                        Table t = listViewer.getTable();
-                        if (t.isDisposed())
-                            return;
-                        Global.tempLog("recent-places-scroll", //$NON-NLS-1$
-                            "async+1 top=" + t.getTopIndex() //$NON-NLS-1$
-                                + " expected=" + expectedTop //$NON-NLS-1$
-                                + " sel=" + t.getSelectionIndex() //$NON-NLS-1$
-                                + " drifted=" + (t.getTopIndex() != expectedTop) //$NON-NLS-1$
-                                + " anchor=" + anchor); //$NON-NLS-1$
-                    });
-                }
-            }
         }
     }
 
@@ -1088,16 +997,10 @@ public final class RecentPlacesView extends ViewPart
         {
             if (key.equals(filtered.get(i).key))
             {
-                int before = table.getTopIndex();
                 table.setTopIndex(i);
-                Global.tempLog("recent-places-scroll", //$NON-NLS-1$
-                    "setTopIndex key=" + key + " idx=" + i //$NON-NLS-1$ //$NON-NLS-2$
-                        + " before=" + before + " after=" + table.getTopIndex()); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
         }
-        Global.tempLog("recent-places-scroll", //$NON-NLS-1$
-            "restoreTopIndexByKey MISS key=" + key); //$NON-NLS-1$
     }
 
     private void restoreSelectionByScreenOffset(Integer offsetFromTop, int savedActiveColumn)
@@ -1109,16 +1012,9 @@ public final class RecentPlacesView extends ViewPart
             return;
         int index = table.getTopIndex() + offsetFromTop.intValue();
         if (index < 0 || index >= filtered.size() || index >= table.getItemCount())
-        {
-            Global.tempLog("recent-places-scroll", //$NON-NLS-1$
-                "restoreSelectionByScreenOffset OUT_OF_RANGE index=" + index //$NON-NLS-1$
-                    + " top=" + table.getTopIndex() + " offset=" + offsetFromTop); //$NON-NLS-1$ //$NON-NLS-2$
             return;
-        }
         RecentPlaces.Entry entry = filtered.get(index);
-        int topBeforeSel = table.getTopIndex();
         listViewer.setSelection(new StructuredSelection(entry), false);
-        int topAfterSetSel = table.getTopIndex();
         if (tableInteraction == null)
             return;
         TableItem item = table.getItem(index);
@@ -1128,12 +1024,6 @@ public final class RecentPlacesView extends ViewPart
         if (col < 0)
             col = visualColumnIndex(table, placeColumn);
         tableInteraction.selectCell(item, col);
-        Global.tempLog("recent-places-scroll", //$NON-NLS-1$
-            "restoreSelectionByScreenOffset index=" + index //$NON-NLS-1$
-                + " key=" + entry.key //$NON-NLS-1$
-                + " topBeforeSel=" + topBeforeSel //$NON-NLS-1$
-                + " topAfterSetSel=" + topAfterSetSel //$NON-NLS-1$
-                + " topAfterSelectCell=" + table.getTopIndex()); //$NON-NLS-1$
     }
 
     private boolean restoreSelectionByKey(String key, int savedActiveColumn, boolean revealItem)

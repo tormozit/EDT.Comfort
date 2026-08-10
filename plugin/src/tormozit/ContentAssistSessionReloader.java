@@ -807,11 +807,7 @@ suppressDisplay.asyncExec(
             return;
         // ИР-вставка: не трогать EDT DataEvent/LinkedMode (ключ Структура() после trim).
         if (Boolean.TRUE.equals(SmartCompletionProposal.IR_PROPOSAL_APPLY_IN_PROGRESS.get()))
-        {
-            Global.tempLog("ctor-min-params", "prepareStock skipIrApply text=" //$NON-NLS-1$ //$NON-NLS-2$
-                + ContentAssistDebug.jsonEscapeForLog(event.getText()));
             return;
-        }
         String text = event.getText();
         if (text.isEmpty() || text.indexOf('(') < 0)
             return;

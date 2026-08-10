@@ -5,7 +5,6 @@ import org.eclipse.core.runtime.NullProgressMonitor;
 import org.eclipse.jface.text.BadLocationException;
 import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.IDocument;
-import org.eclipse.jface.text.IDocumentListener;
 import org.eclipse.jface.text.ITextViewer;
 import org.eclipse.jface.text.IInformationControlCreator;
 import org.eclipse.jface.text.contentassist.ContentAssistant;
@@ -331,10 +330,7 @@ public class SmartCompletionProposal implements
     {
         // Bare-ctor ИР (Структура/Массив): не через адаптер — только имя, без ()/("").
         if (isBareCtorIrWord(ir))
-        {
-            logIrStructureApply("adapterSkipBareCtor", ir, null, null);
             return false;
-        }
 
         BslXtextEditor activeBslEditor = GetRef.getActiveBslEditor(PlatformUI.getWorkbench().getActiveWorkbenchWindow().getActivePage().getActivePart());
         IRSession session = IrBslExpressionHtmlSupport.resolveConnectedSession(activeBslEditor); 
@@ -363,8 +359,6 @@ public class SmartCompletionProposal implements
 
         if (result == null)
             return false;
-
-        logIrStructureApply("adapterResult", ir, result.newTemplate, null);
 
         // Отступ строки вставки — вычисляем ДО любых изменений документа
         String lineIndent = result.formatText ? computeLineIndent(document, offset) : ""; //$NON-NLS-1$
@@ -436,12 +430,9 @@ public class SmartCompletionProposal implements
             String bare = ir.getFilterName() != null && !ir.getFilterName().isEmpty()
                 ? ir.getFilterName()
                 : ir.getWordValue();
-            logIrStructureApply("bareInsert", ir, null, bare);
             applyIrInsertion(ir, document, bare, caret, false, false, "", false, null); //$NON-NLS-1$
             return;
         }
-        logIrStructureApply("delegateApply", ir, null,
-            ir.buildInsertPlan() != null ? ir.buildInsertPlan().text : null);
         if (viewer != null && delegate instanceof ICompletionProposalExtension2)
             ((ICompletionProposalExtension2) delegate).apply(viewer, trigger, stateMask, offset);
         else if (document != null && delegate instanceof ICompletionProposalExtension && offset >= 0)
@@ -486,35 +477,10 @@ public class SmartCompletionProposal implements
             || trimmed.equalsIgnoreCase(emptyMarker)
             || trimmed.equalsIgnoreCase(emptyBang)
             || trimmed.equalsIgnoreCase(emptyParens))
-        {
-            Global.tempLog("ctor-min-params", "irNormalizeBareTpl word=" + name //$NON-NLS-1$ //$NON-NLS-2$
-                + " old=" + template + " new=" + name); //$NON-NLS-1$ //$NON-NLS-2$
             return name;
-        }
         return template;
     }
 
-    private static void logIrStructureApply(String phase, IrCompletionProposal ir,
-        String newTemplate, String planText)
-    {
-        if (ir == null)
-            return;
-        String word = ir.getWordValue() != null ? ir.getWordValue() : ir.getFilterName();
-        if (word == null)
-            return;
-        String lc = word.toLowerCase(java.util.Locale.ROOT);
-        if (!lc.equals("структура") && !lc.equals("structure") //$NON-NLS-1$ //$NON-NLS-2$
-            && !lc.equals("массив") && !lc.equals("array")) //$NON-NLS-1$ //$NON-NLS-2$
-            return;
-        Global.tempLog("ctor-min-params", "irApply phase=" + phase //$NON-NLS-1$ //$NON-NLS-2$
-            + " word=" + word //$NON-NLS-1$
-            + " method=" + ir.isMethod() //$NON-NLS-1$
-            + " templateText=" + ir.getTemplateText() //$NON-NLS-1$
-            + " newTemplate=" + newTemplate //$NON-NLS-1$
-            + " planText=" + planText //$NON-NLS-1$
-            + " bareCtor=" + isBareCtorIrWord(ir)); //$NON-NLS-1$
-    }
-    
     /**
      * Вычисляет диапазон [from, to) для удаления перед вставкой генератора.
      * <p>Порт блока {@code ЛиГенераторСПоглощениемНачалаСтроки} из {@code ПриВыбореЗначенияТΟ}.
@@ -582,8 +548,6 @@ public class SmartCompletionProposal implements
             if (normalized != null && !normalized.equals(source))
                 plan = new IrCompletionProposal.InsertPlan(normalized, normalized.length());
         }
-        logIrStructureApply("insertion", ir, template, plan.text);
-        installIrApplyDocumentProbe(document);
         int replaceFrom;
         int replaceLen;
         // Для явного шаблона (в т.ч. bare-имя) — заменить идентификаторный префикс.
@@ -621,40 +585,6 @@ public class SmartCompletionProposal implements
         {
             IrCompletionDebug.problem("адаптер applyInsertion: " + e.getMessage()); //$NON-NLS-1$
         }
-    }
-
-    /** Лог всех DocumentEvent на время IR apply (ловим второй insert {@code ""}). */
-    private static void installIrApplyDocumentProbe(IDocument document)
-    {
-        if (document == null || !Boolean.TRUE.equals(IR_PROPOSAL_APPLY_IN_PROGRESS.get()))
-            return;
-        IDocumentListener probe = new IDocumentListener()
-        {
-            @Override
-            public void documentAboutToBeChanged(DocumentEvent event)
-            {
-                if (event == null || event.getText() == null)
-                    return;
-                Global.tempLog("ctor-min-params", "irDocAbout offset=" + event.getOffset() //$NON-NLS-1$ //$NON-NLS-2$
-                    + " len=" + event.getLength() //$NON-NLS-1$
-                    + " text=" + ContentAssistDebug.jsonEscapeForLog(event.getText())); //$NON-NLS-1$
-            }
-
-            @Override
-            public void documentChanged(DocumentEvent event)
-            {
-            }
-        };
-        document.addDocumentListener(probe);
-        Display.getDefault().asyncExec(() -> {
-            try
-            {
-                document.removeDocumentListener(probe);
-            }
-            catch (Exception ignored)
-            {
-            }
-        });
     }
 
     /**
