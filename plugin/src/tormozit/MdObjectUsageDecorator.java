@@ -20,9 +20,12 @@ import org.eclipse.ui.PlatformUI;
  * (см. {@link GitChangedFileMenuHook#isAttachedToConfiguration});</li>
  * <li>{@code <?>} — mdo-файл есть на диске, но объекта в конфигурации нет.</li>
  * </ul>
- * Папки без mdo-файла не декорируются. Для папок-групп без своего mdo (Tasks,
- * Catalogs, Forms, Commands…) выводится RU мн.ч. типа МД
- * ({@link MdTypeMapping#ruSingularToGroupPlural}). Элементы этого дерева — обычные
+ * Папки дочерних объектов (внутри {@code Forms} / {@code Commands} / {@code Templates})
+ * своего mdo не имеют — для них связь определяется по mdo объекта-владельца
+ * (см. {@link #isChildObjectIntegrated}), суффиксы те же.
+ * <p>
+ * Для папок-групп без своего mdo (Tasks, Catalogs, Forms, Commands…) выводится RU мн.ч.
+ * типа МД ({@link MdTypeMapping#ruSingularToGroupPlural}). Элементы этого дерева — обычные
  * {@link IFolder}/{@link IFile} (не модельные обёртки), поэтому проверка идёт не
  * через резолв модели элемента навигатора, а через путь к файлу на диске.
  */
@@ -70,6 +73,12 @@ public final class MdObjectUsageDecorator extends LabelProvider implements ILigh
         {
             if (resource instanceof IFolder folder)
             {
+                Boolean childIntegrated = isChildObjectIntegrated(folder);
+                if (childIntegrated != null)
+                {
+                    decoration.addSuffix(childIntegrated.booleanValue() ? " <объект>" : " <?>"); //$NON-NLS-1$ //$NON-NLS-2$
+                    return;
+                }
                 String groupLabel = groupLabelFor(folder);
                 if (groupLabel != null)
                     decoration.addSuffix(" <" + groupLabel + ">"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -79,6 +88,34 @@ public final class MdObjectUsageDecorator extends LabelProvider implements ILigh
 
         boolean integrated = isIntegrated(mdoFile);
         decoration.addSuffix(integrated ? " <объект>" : " <?>"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * Папка дочернего объекта — формы, команды или макета (лежит внутри {@code Forms} /
+     * {@code Commands} / {@code Templates} папки объекта-владельца). Своего mdo у неё нет,
+     * поэтому связь с родителем определяется по mdo владельца
+     * (см. {@link GitChangedFileMenuHook#isChildObjectDeclared}).
+     *
+     * @return {@code null}, если это не папка дочернего объекта — тогда применяется обычная
+     *         логика подписи папки-группы
+     */
+    private static Boolean isChildObjectIntegrated(IFolder folder)
+    {
+        if (!(folder.getParent() instanceof IFolder collectionFolder))
+            return null;
+        String enSing = MdTypeMapping.folderToEnSing(collectionFolder.getName());
+        String containerTag = enSing != null ? MdTypeMapping.subObjectTypeToEmfFeature(enSing) : null;
+        if (containerTag == null)
+            return null;
+
+        if (!(collectionFolder.getParent() instanceof IFolder ownerFolder))
+            return null;
+        IFile ownerMdo = NavigatorResourceResolver.findMdoFileInFolder(ownerFolder);
+        if (ownerMdo == null)
+            return null;
+
+        return Boolean.valueOf(
+            GitChangedFileMenuHook.isChildObjectDeclared(ownerMdo, containerTag, folder.getName()));
     }
 
     /** RU мн.ч. типа МД для папки-группы (например «Tasks» → «Задачи»), либо {@code null}. */

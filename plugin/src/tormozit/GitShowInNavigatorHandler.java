@@ -54,7 +54,7 @@ public class GitShowInNavigatorHandler extends AbstractHandler {
             return null;
         }
 
-        NavigatorReveal.reveal(eObject, true);
+        NavigatorReveal.revealAndActivateIfHidden(eObject);
         Global.log("GitShowInNavigator: reveal OK"); //$NON-NLS-1$
         return null;
     }

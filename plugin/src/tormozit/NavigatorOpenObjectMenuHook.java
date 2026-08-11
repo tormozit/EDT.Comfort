@@ -176,25 +176,34 @@ public final class NavigatorOpenObjectMenuHook implements IStartup
                 ISelection selection = viewer.getSelection();
                 EObject eObject = resolveEObjectFromSelection(selection);
                 if (eObject != null)
-                    NavigatorReveal.reveal(eObject, true);
+                    NavigatorReveal.revealAndActivateIfHidden(eObject);
                 return null;
             }
         });
     }
 
+    /**
+     * У папки объекта верхнего уровня есть свой mdo — резолвим по нему. У папки дочернего
+     * объекта (форма/команда/макет внутри {@code Forms} / {@code Commands} / {@code Templates})
+     * mdo нет — там полное имя строится прямо по пути папки
+     * ({@link GitChangedFileMenuHook#resolveEObjectForResource}).
+     */
     private static EObject resolveEObjectFromSelection(ISelection selection)
     {
         if (!(selection instanceof IStructuredSelection structured) || structured.size() != 1)
             return null;
 
         IResource resource = NavigatorResourceResolver.resolveFirst(structured);
-        IFile file = resource instanceof IFile ? (IFile) resource
-                : resource instanceof IFolder folder ? NavigatorResourceResolver.findMdoFileInFolder(folder)
-                : null;
-        if (file == null)
+        if (resource instanceof IFile file)
+            return GitChangedFileMenuHook.resolveEObject(file);
+        if (!(resource instanceof IFolder folder))
             return null;
 
-        return GitChangedFileMenuHook.resolveEObject(file);
+        IFile mdoFile = NavigatorResourceResolver.findMdoFileInFolder(folder);
+        if (mdoFile != null)
+            return GitChangedFileMenuHook.resolveEObject(mdoFile);
+
+        return GitChangedFileMenuHook.resolveEObjectForResource(folder);
     }
 
     private static void hookComfortSubmenu(Menu contextMenu, CommonViewer viewer)
@@ -240,7 +249,7 @@ public final class NavigatorOpenObjectMenuHook implements IStartup
                     @Override
                     public void widgetSelected(SelectionEvent ev)
                     {
-                        NavigatorReveal.reveal(eObject, true);
+                        NavigatorReveal.revealAndActivateIfHidden(eObject);
                     }
                 });
                 added.add(revealItem);

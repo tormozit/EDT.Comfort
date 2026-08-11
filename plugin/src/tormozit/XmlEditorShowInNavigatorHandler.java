@@ -93,6 +93,6 @@ public class XmlEditorShowInNavigatorHandler extends AbstractHandler
                 "Не удалось определить объект метаданных для файла"); //$NON-NLS-1$
             return;
         }
-        NavigatorReveal.reveal(target, true);
+        NavigatorReveal.revealAndActivateIfHidden(target);
     }
 }

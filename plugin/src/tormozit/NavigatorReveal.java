@@ -10,6 +10,9 @@ import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IViewPart;
+import org.eclipse.ui.IWorkbenchPage;
+import org.eclipse.ui.IWorkbenchWindow;
+import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.navigator.CommonNavigator;
 
 /**
@@ -22,6 +25,55 @@ public final class NavigatorReveal
     public static void reveal(EObject eObject, boolean force)
     {
         reveal(eObject, force, null);
+    }
+
+    /**
+     * Единое поведение команды «Показать в навигаторе» во всех местах плагина:
+     * <ul>
+     * <li>панель «Навигатор» видна — только выделяем объект, фокус ей НЕ передаём
+     * (пользователь остаётся там, откуда вызвал команду);</li>
+     * <li>панель скрыта (закрыта или вытеснена другой вкладкой стека) — активируем её,
+     * иначе показывать объект бессмысленно: результата не видно.</li>
+     * </ul>
+     * Отличие от {@link #reveal(EObject, boolean)}: тот предназначен для реактивного показа
+     * по смене выделения в редакторе (linking), учитывает {@code isLinkingEnabled} и не
+     * открывает закрытую панель ({@link Global#getViewById} намеренно не создаёт view).
+     */
+    public static void revealAndActivateIfHidden(EObject eObject)
+    {
+        if (eObject == null)
+            return;
+
+        Display.getDefault().asyncExec(() -> {
+            IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+            if (window == null)
+                return;
+            IWorkbenchPage page = window.getActivePage();
+            if (page == null)
+                return;
+
+            IViewPart view = page.findView(Global.NAVIGATOR_VIEW_ID);
+            if (view == null)
+            {
+                try
+                {
+                    // showView сам делает панель видимой и активной
+                    view = page.showView(Global.NAVIGATOR_VIEW_ID);
+                }
+                catch (Exception ex)
+                {
+                    Global.log("NavigatorReveal revealAndActivateIfHidden showView error: " + ex); //$NON-NLS-1$
+                    return;
+                }
+            }
+            else if (!page.isPartVisible(view))
+            {
+                page.activate(view);
+            }
+
+            if (view instanceof CommonNavigator navigator)
+                navigator.selectReveal(new StructuredSelection(eObject));
+        });
     }
 
     /**

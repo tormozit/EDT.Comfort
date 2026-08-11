@@ -1224,7 +1224,7 @@ public final class ObjectSetsView extends ViewPart
                 "Не удалось найти в навигаторе:\n" + item.displayName, 5000); //$NON-NLS-1$
             return;
         }
-        NavigatorReveal.reveal(eObject, true);
+        NavigatorReveal.revealAndActivateIfHidden(eObject);
     }
 
     private void executeShowInNavigatorCommand()

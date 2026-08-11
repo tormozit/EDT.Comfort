@@ -69,7 +69,7 @@ public final class RecentPlacesShowInNavigatorHandler extends AbstractHandler
             return null;
         }
 
-        NavigatorReveal.reveal(eObject, true);
+        NavigatorReveal.revealAndActivateIfHidden(eObject);
         return null;
     }
 }

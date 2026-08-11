@@ -43,11 +43,23 @@ public class CompareConfigSelectionListener implements ISelectionChangedListener
        showObjectInNavigator(event.getSelection(), false);
     }
 
+    /**
+     * @param ifForced {@code true} — явная команда «Показать в навигаторе» (Ctrl+T): единое
+     *        поведение со всеми остальными местами плагина, см.
+     *        {@link NavigatorReveal#revealAndActivateIfHidden}. {@code false} — реактивный показ
+     *        по смене выделения в дереве сравнения (linking): учитывает «Связать с редактором»
+     *        и возвращает фокус в редактор сравнения.
+     */
     public void showObjectInNavigator(ISelection selection, boolean ifForced)
     {
         EObject eObject = resolveNavigatorEObject(selection, null);
-        if (eObject != null && editor != null)
-            NavigatorReveal.reveal(eObject, ifForced, editor);
+        if (eObject == null || editor == null)
+            return;
+
+        if (ifForced)
+            NavigatorReveal.revealAndActivateIfHidden(eObject);
+        else
+            NavigatorReveal.reveal(eObject, false, editor);
     }
 
     /**

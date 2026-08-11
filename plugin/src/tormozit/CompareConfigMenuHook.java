@@ -61,6 +61,7 @@ import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
+import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
@@ -71,6 +72,8 @@ import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.swt.widgets.TypedListener;
 import org.eclipse.swt.widgets.Widget;
 import org.eclipse.swt.layout.GridData;
+import org.eclipse.swt.layout.RowData;
+import org.eclipse.swt.layout.RowLayout;
 import org.eclipse.ui.IActionBars;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
@@ -1611,7 +1614,7 @@ public class CompareConfigMenuHook implements IStartup
                     viewer.addFilter(correction);
                     viewer.setData(CORRECTION_DATA_KEY, correction);
                     if (viewer instanceof CheckboxTreeViewer ctv && treeControl != null
-                            && ComfortSettings.isCompareFilterAwareChecksEnabled())
+                            && isFilterAwareChecksEnabled(editor))
                         correction.installCheckHooks(ctv, treeControl, editor);
                     viewer.setData(FILTER_FLAG, Boolean.TRUE);
                 }
@@ -1628,15 +1631,35 @@ public class CompareConfigMenuHook implements IStartup
 
         private static final String FILTER_AWARE_CHECKBOX_LABEL =
             "Каскадный пересчет пометок с учетом фильтра (экспериментально)"; //$NON-NLS-1$
-        private static final String FILTER_AWARE_CHECKBOX_TOOLTIP = 
+        private static final String FILTER_AWARE_CHECKBOX_TOOLTIP =
             "При активном отборе по подсистемам или combo «Показывать…»\n"
                 + "пометки и серые предки — только по видимым узлам;\n"
                 + "«Отметить все»/клик по папке не трогают скрытые.\n"
                 + "Выключено — штатное поведение EDT."; //$NON-NLS-1$
 
         /**
+         * Временно: состояние флажка «Каскадный пересчёт…» — только на время жизни
+         * окна сравнения (не переживает ни закрытие окна, ни сеанс EDT), т.к.
+         * поведение флажка нестабильное. Каждое новое окно открывается со снятым
+         * флажком. Убрать вместе с этим комментарием, когда поведение станет
+         * стабильным и понадобится персистентность.
+         */
+        private static final Map<IEditorPart, Boolean> FILTER_AWARE_CHECKS_STATE =
+            new IdentityHashMap<>();
+
+        private static boolean isFilterAwareChecksEnabled(IEditorPart editor)
+        {
+            return Boolean.TRUE.equals(FILTER_AWARE_CHECKS_STATE.get(editor));
+        }
+
+        private static void setFilterAwareChecksEnabled(IEditorPart editor, boolean enabled)
+        {
+            FILTER_AWARE_CHECKS_STATE.put(editor, enabled);
+        }
+
+        /**
          * Checkbox справа от combo «Фильтр» в {@code DtComparisonView.filterControl}.
-         * Состояние — глобальный PreferenceStore ({@link ComfortSettings}).
+         * Состояние — {@link #FILTER_AWARE_CHECKS_STATE}, только на время жизни окна.
          */
         private static void installFilterAwareChecksCheckbox(IEditorPart editor, int attempt)
         {
@@ -1679,16 +1702,18 @@ public class CompareConfigMenuHook implements IStartup
             Button check = new Button(host, SWT.CHECK);
             check.setText(FILTER_AWARE_CHECKBOX_LABEL);
             check.setToolTipText(FILTER_AWARE_CHECKBOX_TOOLTIP + Global.pluginSignForTooltip());
-            check.setSelection(ComfortSettings.isCompareFilterAwareChecksEnabled());
-            Object layoutData = combo.getLayoutData();
-            if (layoutData instanceof GridData)
-            {
-                GridData gd = new GridData(SWT.BEGINNING, SWT.CENTER, false, false);
-                gd.horizontalIndent = 8;
-                check.setLayoutData(gd);
-            }
+            check.setSelection(isFilterAwareChecksEnabled(editor));
             check.moveBelow(combo);
-            host.layout(true, true);
+            host.addDisposeListener(e -> FILTER_AWARE_CHECKS_STATE.remove(editor));
+
+            // host — RowLayout (не Grid), поэтому чтобы флажок остался в той же
+            // строке, а не переносился вниз, ширину combo пересчитываем вручную
+            // под доступное место при каждом изменении размеров host.
+            Label label = findFirstLabel(host);
+            Runnable relayout = () -> resizeFilterComboForCheckbox(host, label, combo, check);
+            host.addListener(SWT.Resize, e -> relayout.run());
+            relayout.run();
+
             Composite outer = host.getParent();
             if (outer != null && !outer.isDisposed())
                 outer.layout(true, true);
@@ -1696,11 +1721,79 @@ public class CompareConfigMenuHook implements IStartup
             check.addListener(SWT.Selection, e ->
             {
                 boolean on = check.getSelection();
-                ComfortSettings.setCompareFilterAwareChecksEnabled(on);
+                setFilterAwareChecksEnabled(editor, on);
                 applyFilterAwareChecksToggle(editor, on);
             });
             host.setData(FILTER_AWARE_CHECKBOX_FLAG, Boolean.TRUE);
             filterControl.setData(FILTER_AWARE_CHECKBOX_FLAG, Boolean.TRUE);
+        }
+
+        private static Label findFirstLabel(Composite host)
+        {
+            for (Control child : host.getChildren())
+                if (child instanceof Label label)
+                    return label;
+            return null;
+        }
+
+        private static final int FILTER_ROW_MIN_COMBO_WIDTH = 60;
+
+        /** Запас, чтобы округления не выталкивали флажок за границу строки. */
+        private static final int FILTER_ROW_WIDTH_SLACK = 4;
+
+        /**
+         * Win32 {@code Button(SWT.CHECK).computeSize} недооценивает ширину длинного
+         * текста на несколько пикселей — без запаса хвост подписи обрезается.
+         */
+        private static final int FILTER_ROW_CHECK_PADDING = 12;
+
+        /**
+         * RowLayout host не умеет «прижимать» элемент вправо с ужиманием соседа,
+         * поэтому ширину combo под флажок считаем сами: доступная ширина минус
+         * label, минус флажок, минус собственные отступы RowLayout.
+         * <p>
+         * {@code wrap = false} обязателен: иначе при малейшем расхождении расчёта
+         * с реальными размерами флажок переносится на вторую строку, а высота
+         * host при этом не пересчитывается — флажок оказывается за границей
+         * видимой области и выглядит «пропавшим». В отличие от {@code pack},
+         * {@code wrap} не выравнивает элементы по общему размеру.
+         */
+        private static void resizeFilterComboForCheckbox(Composite host, Label label, Combo combo,
+                Button check)
+        {
+            if (host.isDisposed() || combo.isDisposed() || check.isDisposed())
+                return;
+            if (!(host.getLayout() instanceof RowLayout rowLayout))
+                return;
+            rowLayout.wrap = false;
+            int available = host.getClientArea().width;
+            if (available <= 0)
+                return;
+            int labelWidth = label != null && !label.isDisposed()
+                    ? label.computeSize(SWT.DEFAULT, SWT.DEFAULT).x : 0;
+            int checkWidth = check.computeSize(SWT.DEFAULT, SWT.DEFAULT).x
+                    + FILTER_ROW_CHECK_PADDING;
+            int margins = rowLayout.marginLeft + rowLayout.marginRight + rowLayout.marginWidth * 2;
+            int spacing = rowLayout.spacing * (label != null ? 2 : 1);
+            int comboWidth = Math.max(FILTER_ROW_MIN_COMBO_WIDTH, available - labelWidth
+                    - checkWidth - margins - spacing - FILTER_ROW_WIDTH_SLACK);
+            if (combo.getLayoutData() instanceof RowData existing && existing.width == comboWidth)
+                return;
+            // Флажку задаём ту же ширину, что учли в расчёте: иначе разница между
+            // computeSize и реально выданной шириной обрезает хвост подписи.
+            check.setLayoutData(new RowData(checkWidth, SWT.DEFAULT));
+            combo.setLayoutData(new RowData(comboWidth, SWT.DEFAULT));
+            host.layout(true, true);
+            // Ширина строки изменила её preferred-высоту — родителю нужен пересчёт,
+            // иначе host остаётся прежней высоты и обрезает содержимое.
+            Composite outer = host.getParent();
+            if (outer != null && !outer.isDisposed())
+                outer.layout(true, true);
+            Global.tempLog("compare-filter-checkbox", //$NON-NLS-1$
+                    "available=" + available + " label=" + labelWidth + " check=" + checkWidth //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                        + " combo=" + comboWidth + " hostBounds=" + host.getBounds() //$NON-NLS-1$ //$NON-NLS-2$
+                        + " checkBounds=" + check.getBounds() //$NON-NLS-1$
+                        + " checkVisible=" + check.isVisible()); //$NON-NLS-1$
         }
 
         private static void applyFilterAwareChecksToggle(IEditorPart editor, boolean enabled)
@@ -1838,7 +1931,7 @@ public class CompareConfigMenuHook implements IStartup
             {
                 if (Boolean.TRUE.equals(ctv.getData(CHECK_HOOK_FLAG)))
                     return;
-                if (!ComfortSettings.isCompareFilterAwareChecksEnabled())
+                if (!isFilterAwareChecksEnabled(editor))
                 {
                     return;
                 }
@@ -3647,14 +3740,48 @@ public class CompareConfigMenuHook implements IStartup
 
             private void paintAncestorChainUpward(CheckboxTreeViewer ctv, IPartialModelNode from)
             {
+                scheduleBurstPaintedAncestorsClear(ctv);
                 ArrayList<IPartialModelNode> toRefresh = new ArrayList<>();
                 for (IPartialModelNode p = from.getParent(); p != null; p = p.getParent())
                 {
+                    // Предок уже обработан в этой синхронной пачке (массовая
+                    // простановка галок из результатов поиска и т.п.) — выше
+                    // по цепочке тоже всё уже обработано, дальше идти незачем.
+                    if (!burstPaintedAncestors.add(p))
+                        break;
                     if (isFilterAwareAggregateUi(p))
                         paintAggregateFromChildren(ctv, p);
                     toRefresh.add(p);
                 }
                 refreshNodeImages(ctv, toRefresh);
+            }
+
+            /**
+             * Набор предков, уже перерисованных в текущей синхронной пачке вызовов
+             * {@link #paintAncestorChainUpward}. Без него массовая простановка
+             * галок (несколько узлов подряд в одном synchronous-проходе, например
+             * из результатов поиска) на каждый узел заново пересчитывает агрегаты
+             * всех общих предков — квадратичный рост и зависание UI-потока.
+             * Сбрасывается на следующем тике диспетчера ({@link #scheduleBurstPaintedAncestorsClear}),
+             * то есть работает только внутри одной синхронной пачки.
+             */
+            private final Set<IPartialModelNode> burstPaintedAncestors =
+                    Collections.newSetFromMap(new IdentityHashMap<>());
+            private boolean burstClearScheduled;
+
+            private void scheduleBurstPaintedAncestorsClear(CheckboxTreeViewer ctv)
+            {
+                if (burstClearScheduled || ctv == null)
+                    return;
+                Control control = ctv.getControl();
+                if (control == null || control.isDisposed())
+                    return;
+                burstClearScheduled = true;
+                control.getDisplay().asyncExec(() ->
+                {
+                    burstPaintedAncestors.clear();
+                    burstClearScheduled = false;
+                });
             }
 
             /**
@@ -3713,7 +3840,7 @@ public class CompareConfigMenuHook implements IStartup
              */
             private boolean shouldRestrictChecksToVisible()
             {
-                if (!ComfortSettings.isCompareFilterAwareChecksEnabled())
+                if (!isFilterAwareChecksEnabled(hookedEditor))
                     return false;
                 return !isFilterEmpty() || isNamedComparisonFilterActive();
             }
@@ -4581,8 +4708,6 @@ public class CompareConfigMenuHook implements IStartup
 
             BslModuleComparisonNode bslModule = (BslModuleComparisonNode) moduleComparison;
             boolean selectSection = section != null && bslModule.isParseModuleStructure();
-            if (section != null && !bslModule.isParseModuleStructure())
-
             pendingSection = selectSection ? section : null;
             try
             {
@@ -4799,9 +4924,18 @@ public class CompareConfigMenuHook implements IStartup
                 if (idA > 0 && idA == idB)
                     return true;
             }
-            String na = a.getMainName();
-            String nb = b.getMainName();
-            return na != null && na.equals(nb);
+            if (a.getSectionType() != b.getSectionType())
+                return false;
+            // У одностороннего узла имя заполнено только на своей стороне,
+            // поэтому сверяем все три имени, а не только основное.
+            return namesEqual(a.getMainName(), b.getMainName())
+                || namesEqual(a.getOtherName(), b.getOtherName())
+                || namesEqual(a.getAncestorName(), b.getAncestorName());
+        }
+
+        private static boolean namesEqual(String a, String b)
+        {
+            return a != null && a.equals(b);
         }
 
         private static Object findInSubtree(ITreeContentProvider cp, Object element,

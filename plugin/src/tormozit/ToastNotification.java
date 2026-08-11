@@ -103,9 +103,11 @@ public final class ToastNotification
     }
 
     /**
-     * @param inputParentShell для кликабельности поверх modal — child конкретного shell
-     *        (тот же расчёт targetX/targetY, координаты через {@link #screenToShellLocation});
-     *        {@code null} — display-root + {@link Shell#setLocation}
+     * @param inputParentShell для кликабельности поверх modal — child конкретного shell;
+     *        {@code null} — display-root. Позиция в обоих случаях одна и та же, в экранных
+     *        координатах ({@link Shell#setLocation}).
+     *        Тост в обоих случаях {@code NO_FOCUS}: клик по фону и крестику не активирует
+     *        окно-владельца, приложение поднимает только гиперссылка действия.
      */
     public static Shell show(String title, String message, int durationMs, Runnable action,
         String actionLabel, Shell inputParentShell)
@@ -118,8 +120,10 @@ public final class ToastNotification
         display.syncExec(() ->
         {
             boolean inputChild = inputParentShell != null && !inputParentShell.isDisposed();
+            // NO_FOCUS и для child-варианта: иначе клик по тосту (фон, крестик) активирует
+            // окно-владельца. Окно приложения поднимает только гиперссылка действия.
             Shell shell = inputChild
-                ? new Shell(inputParentShell, SWT.NO_TRIM | SWT.ON_TOP)
+                ? new Shell(inputParentShell, SWT.NO_TRIM | SWT.ON_TOP | SWT.NO_FOCUS)
                 : new Shell(display, SWT.NO_TRIM | SWT.ON_TOP | SWT.NO_FOCUS);
             holder[0] = shell;
 
@@ -249,7 +253,7 @@ public final class ToastNotification
 
             // Тост выезжает СНИЗУ ВВЕРХ
             int startY = targetY + finalSize.y;
-            applyToastLocation(shell, targetX, startY, inputChild);
+            applyToastLocation(shell, targetX, startY);
             shell.setAlpha(0);
             shell.setVisible(true);
 
@@ -263,7 +267,7 @@ public final class ToastNotification
                     if (!shell.isDisposed())
                     {
                         int y = startY + (targetY - startY) * step / slideSteps;
-                        applyToastLocation(shell, targetX, y, inputChild);
+                        applyToastLocation(shell, targetX, y);
                         shell.setAlpha(255 * step / slideSteps);
                     }
                 });
@@ -425,25 +429,14 @@ public final class ToastNotification
         return candidateTop;
     }
 
-    private static void applyToastLocation(Shell shell, int screenX, int screenY, boolean inputChild)
+    /**
+     * Координаты всегда экранные — {@link Shell} даже с родительским shell остаётся
+     * отдельным окном (owned, не child-контрол). Пересчёт относительно родителя сдвигал
+     * тост на позицию модального окна — тост уезжал в середину экрана.
+     */
+    private static void applyToastLocation(Shell shell, int screenX, int screenY)
     {
-        if (inputChild)
-        {
-            Point loc = screenToShellLocation(shell, screenX, screenY);
-            shell.setLocation(loc.x, loc.y);
-        }
-        else
-            shell.setLocation(screenX, screenY);
-    }
-
-    /** Экранные координаты → {@link Shell#setLocation} для child shell modal-parent. */
-    private static Point screenToShellLocation(Shell shell, int screenX, int screenY)
-    {
-        Composite parent = shell.getParent();
-        if (parent == null || parent.isDisposed())
-            return new Point(screenX, screenY);
-        Point origin = parent.getLocation();
-        return new Point(screenX - origin.x, screenY - origin.y);
+        shell.setLocation(screenX, screenY);
     }
 
     // =======================================================================

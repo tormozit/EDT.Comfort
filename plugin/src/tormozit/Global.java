@@ -62,6 +62,9 @@ public final class Global
     /** ID панели истории коммитов EGit. */
     static final String TEAM_HISTORY_VIEW_ID = "org.eclipse.team.ui.GenericHistoryView"; //$NON-NLS-1$
 
+    /** ID собственной панели истории EGit (в EDT панель «История гит» открывается именно с ним). */
+    static final String EGIT_HISTORY_VIEW_ID = "org.eclipse.egit.ui.HistoryView"; //$NON-NLS-1$
+
     private Global() {}
 
     /**
@@ -518,7 +521,11 @@ public final class Global
                     if (!p.isOpen())
                         continue;
                     String projAbs = p.getLocation().toFile().getAbsolutePath().replace('\\', '/');
-                    if (repoAbs.equals(projAbs) || repoAbs.startsWith(projAbs + "/"))
+                    // Проект лежит внутри рабочего каталога репозитория (обычный случай),
+                    // либо совпадает с ним. Обратное направление (рабочий каталог внутри
+                    // проекта) практически не встречается и раньше давало null → откат
+                    // на проект активного редактора, часто чужой.
+                    if (repoAbs.equals(projAbs) || projAbs.startsWith(repoAbs + "/"))
                         return p;
                 }
             }
@@ -610,7 +617,8 @@ public final class Global
                         return p;
                 }
             }
-            if (TEAM_HISTORY_VIEW_ID.equals(part.getSite().getId()))
+            if (TEAM_HISTORY_VIEW_ID.equals(part.getSite().getId())
+                || EGIT_HISTORY_VIEW_ID.equals(part.getSite().getId()))
             {
                 IProject p = getProjectFromHistoryView(part);
                 if (p != null)

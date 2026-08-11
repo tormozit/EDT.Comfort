@@ -540,6 +540,9 @@ public final class TreeAutoExpand implements IStartup
             return;
 
         Tree tree = resolveTree(viewer);
+        Global.tempLog(LOG_TOPIC, "install(expand-hook): tree=" + tree //$NON-NLS-1$
+            + ", disposed=" + (tree != null && tree.isDisposed()) //$NON-NLS-1$
+            + ", уже установлен=" + (tree != null && Boolean.TRUE.equals(tree.getData(MARKER_KEY)))); //$NON-NLS-1$
         if (tree == null || tree.isDisposed() || Boolean.TRUE.equals(tree.getData(MARKER_KEY)))
             return;
 
@@ -549,17 +552,25 @@ public final class TreeAutoExpand implements IStartup
             @Override
             public void treeExpanded(TreeEvent event)
             {
+                Object element = event.item != null ? event.item.getData() : null;
+                Global.tempLog(LOG_TOPIC, "treeExpanded: item=" + event.item //$NON-NLS-1$
+                    + ", element=" + element //$NON-NLS-1$
+                    + ", enabled=" + (enabled == null ? "null" : enabled.getAsBoolean()) //$NON-NLS-1$ //$NON-NLS-2$
+                    + ", suppressed=" + SUPPRESSED.get() //$NON-NLS-1$
+                    + ", inAutoExpand=" + IN_AUTO_EXPAND.get()); //$NON-NLS-1$
                 if (enabled == null || !enabled.getAsBoolean()
                         || Boolean.TRUE.equals(SUPPRESSED.get())
                         || Boolean.TRUE.equals(IN_AUTO_EXPAND.get()))
                     return;
 
-                Object element = event.item != null ? event.item.getData() : null;
                 if (element == null)
                     return;
 
                 Display display = tree.getDisplay();
                 display.timerExec(150, () -> {
+                    Global.tempLog(LOG_TOPIC, "treeExpanded/timer: disposed=" + tree.isDisposed() //$NON-NLS-1$
+                        + ", suppressed=" + SUPPRESSED.get() //$NON-NLS-1$
+                        + ", inAutoExpand=" + IN_AUTO_EXPAND.get()); //$NON-NLS-1$
                     if (tree.isDisposed() || Boolean.TRUE.equals(SUPPRESSED.get())
                             || Boolean.TRUE.equals(IN_AUTO_EXPAND.get()))
                         return;

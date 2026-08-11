@@ -55,9 +55,6 @@ public class ComfortInitializer extends AbstractPreferenceInitializer
             ComfortSettings.PREF_COMPARE_CURRENT_LINES_VISIBLE,
             ComfortSettings.DEFAULT_COMPARE_CURRENT_LINES_VISIBLE);
         store.setDefault(
-            ComfortSettings.PREF_COMPARE_FILTER_AWARE_CHECKS,
-            ComfortSettings.DEFAULT_COMPARE_FILTER_AWARE_CHECKS);
-        store.setDefault(
             ComfortSettings.PREF_SPELLING_DICT_BASE_PATHS,
             ComfortSettings.DEFAULT_SPELLING_DICT_BASE_PATHS);
         store.setDefault(

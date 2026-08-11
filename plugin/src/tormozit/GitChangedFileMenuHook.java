@@ -44,7 +44,9 @@ import org.eclipse.jface.viewers.AbstractTreeViewer;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.ISelectionProvider;
 import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.LabelProvider;
 import org.eclipse.jface.viewers.StructuredSelection;
+import org.eclipse.jface.window.Window;
 import org.eclipse.jgit.lib.ObjectId;
 import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jgit.revwalk.RevCommit;
@@ -78,6 +80,7 @@ import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.contexts.IContextActivation;
+import org.eclipse.ui.dialogs.ElementListSelectionDialog;
 import org.eclipse.ui.contexts.IContextService;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IPartListener2;
@@ -188,6 +191,8 @@ public final class GitChangedFileMenuHook implements IStartup
     private static final String COMMIT_DIALOG_SETTINGS_SECTION = "tormozit.compareWithCommitDialog"; //$NON-NLS-1$
     private static final String KEY_COMMIT_DIALOG_WIDTH = "width"; //$NON-NLS-1$
     private static final String KEY_COMMIT_DIALOG_HEIGHT = "height"; //$NON-NLS-1$
+    /** Запомненное состояние флажка «Сравнивать модули с учетом структуры». */
+    private static final String KEY_COMMIT_DIALOG_PARSE_BSL = "parseBslModuleStructure"; //$NON-NLS-1$
     private static final int COMMIT_DIALOG_MIN_WIDTH = 400;
     private static final int COMMIT_DIALOG_MIN_HEIGHT = 300;
     private static final String COMPARE_UTILS_CLASS =
@@ -204,6 +209,14 @@ public final class GitChangedFileMenuHook implements IStartup
     private static final String MAIN_SIDE_OBJECTS_DELETION_ALLOWED_TOOLTIP =
         "При выключении слияние объектов, присутствующих только в главном источнике " //$NON-NLS-1$
         + "(рабочем каталоге), будет запрещено"; //$NON-NLS-1$
+    /** Выбор проекта, когда репозиторию соответствует несколько открытых проектов. */
+    private static final String CHOOSE_PROJECT_TITLE = "Выбор проекта"; //$NON-NLS-1$
+    private static final String CHOOSE_PROJECT_MESSAGE =
+        "Репозиторию соответствует несколько проектов. Выберите проект для сравнения:"; //$NON-NLS-1$
+    /** Репозиторию панели «История» не соответствует ни один открытый проект. */
+    private static final String NO_PROJECT_TITLE = "Сравнение с коммитом"; //$NON-NLS-1$
+    private static final String NO_PROJECT_MESSAGE =
+        "В рабочей области нет открытого проекта из этого репозитория Git — сравнивать нечего."; //$NON-NLS-1$
     /** Окно «изменения не найдены» (как у {@code CompareWithPerformer}). */
     private static final String NOTHING_TO_COMPARE_TITLE = "Синхронизация с Git завершена"; //$NON-NLS-1$
     private static final String NOTHING_TO_COMPARE_MESSAGE = "Синхронизация с Git: изменения не найдены."; //$NON-NLS-1$
@@ -944,7 +957,7 @@ public final class GitChangedFileMenuHook implements IStartup
                                 @Override
                                 public void widgetSelected(SelectionEvent ev)
                                 {
-                                    NavigatorReveal.reveal(captured, true);
+                                    NavigatorReveal.revealAndActivateIfHidden(captured);
                                 }
                             });
                             addedItems.add(navItem);
@@ -1401,25 +1414,91 @@ public final class GitChangedFileMenuHook implements IStartup
         IFile configurationMdo = findConfigurationMdo(mdoFile);
         if (configurationMdo == null)
             return true;
-        String content = readConfigurationMdoCached(configurationMdo);
+        String content = readMdoContentCached(configurationMdo);
         if (content == null)
             return true;
         return content.contains(">" + enFullName + "<"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
-    /** Кэш содержимого {@code Configuration.mdo} по штампу модификации (декоратор зовёт часто). */
-    private static final Map<IFile, String> CONFIGURATION_MDO_CACHE = new HashMap<>();
-    private static final Map<IFile, Long> CONFIGURATION_MDO_STAMP = new HashMap<>();
-
-    private static String readConfigurationMdoCached(IFile configurationMdo)
+    /**
+     * Объявлен ли дочерний объект (форма/команда/макет) в mdo-файле своего владельца.
+     * <p>
+     * В отличие от объектов верхнего уровня (плоские теги {@code >Тип.Имя<} в
+     * {@code Configuration.mdo}, см. {@link #isAttachedToConfiguration}), дочерние объекты
+     * записаны в mdo владельца вложенными блоками — проверено на реальных проектах:
+     * <pre>
+     *   &lt;forms uuid="0fe51c5a-…"&gt;
+     *     &lt;name&gt;ФормаСписка&lt;/name&gt;
+     * </pre>
+     * Имя — всегда первый элемент блока, поэтому сравниваем именно первый {@code <name>}
+     * (иначе можно поймать {@code <name>} вложенного элемента и получить ложное совпадение).
+     *
+     * @param ownerMdo mdo-файл объекта-владельца
+     * @param containerTag тег коллекции: {@code forms} / {@code commands} / {@code templates}
+     * @param childName имя папки дочернего объекта
+     * @return {@code true}, если объявлен; при невозможности определить — тоже {@code true}
+     *         (без уверенности «отвязан» не показываем, как и в {@link #isAttachedToConfiguration})
+     */
+    public static boolean isChildObjectDeclared(IFile ownerMdo, String containerTag, String childName)
     {
-        long stamp = configurationMdo.exists() ? configurationMdo.getModificationStamp() : Long.MIN_VALUE;
-        Long cachedStamp = CONFIGURATION_MDO_STAMP.get(configurationMdo);
+        if (ownerMdo == null || containerTag == null || childName == null)
+            return true;
+        String content = readMdoContentCached(ownerMdo);
+        if (content == null)
+            return true;
+
+        String closeTag = "</" + containerTag + ">"; //$NON-NLS-1$ //$NON-NLS-2$
+        int from = 0;
+        while (true)
+        {
+            int start = indexOfContainerOpenTag(content, containerTag, from);
+            if (start < 0)
+                return false;
+            int end = content.indexOf(closeTag, start);
+            if (end < 0)
+                return false;
+            String firstName = firstNameElement(content.substring(start, end));
+            if (childName.equals(firstName))
+                return true;
+            from = end + closeTag.length();
+        }
+    }
+
+    /** Начало блока {@code <tag …>} или {@code <tag>} — но не {@code <tagOther>}. */
+    private static int indexOfContainerOpenTag(String content, String tag, int from)
+    {
+        String prefix = "<" + tag; //$NON-NLS-1$
+        for (int idx = content.indexOf(prefix, from); idx >= 0; idx = content.indexOf(prefix, idx + 1))
+        {
+            char next = idx + prefix.length() < content.length() ? content.charAt(idx + prefix.length()) : '\0';
+            if (next == ' ' || next == '>' || next == '\r' || next == '\n' || next == '\t')
+                return idx;
+        }
+        return -1;
+    }
+
+    private static String firstNameElement(String block)
+    {
+        int start = block.indexOf("<name>"); //$NON-NLS-1$
+        if (start < 0)
+            return null;
+        int end = block.indexOf("</name>", start); //$NON-NLS-1$
+        return end < 0 ? null : block.substring(start + "<name>".length(), end); //$NON-NLS-1$
+    }
+
+    /** Кэш содержимого mdo-файлов по штампу модификации (декоратор зовёт часто). */
+    private static final Map<IFile, String> MDO_CONTENT_CACHE = new HashMap<>();
+    private static final Map<IFile, Long> MDO_CONTENT_STAMP = new HashMap<>();
+
+    private static String readMdoContentCached(IFile mdoFile)
+    {
+        long stamp = mdoFile.exists() ? mdoFile.getModificationStamp() : Long.MIN_VALUE;
+        Long cachedStamp = MDO_CONTENT_STAMP.get(mdoFile);
         if (cachedStamp != null && cachedStamp.longValue() == stamp)
-            return CONFIGURATION_MDO_CACHE.get(configurationMdo);
-        String content = readWorkingCopyContent(configurationMdo);
-        CONFIGURATION_MDO_STAMP.put(configurationMdo, stamp);
-        CONFIGURATION_MDO_CACHE.put(configurationMdo, content);
+            return MDO_CONTENT_CACHE.get(mdoFile);
+        String content = readWorkingCopyContent(mdoFile);
+        MDO_CONTENT_STAMP.put(mdoFile, stamp);
+        MDO_CONTENT_CACHE.put(mdoFile, content);
         return content;
     }
 
@@ -1654,10 +1733,17 @@ public final class GitChangedFileMenuHook implements IStartup
                 return;
             }
 
-            IProject project = resolveProject(view, commitElement);
+            // Проект берётся только из проектов самого репозитория: активный проект
+            // (в т.ч. из открытого редактора другого проекта) здесь не годится — путь
+            // чужого проекта не релативизуется в рабочий каталог, и сравнение молча
+            // заканчивалось окном «изменения не найдены».
+            IProject project = resolveProjectOfRepository(shell, view, repository);
             if (project == null)
             {
-                Global.log("CompareWithCommit: project не найден"); //$NON-NLS-1$
+                Global.log("CompareWithCommit: проект репозитория " //$NON-NLS-1$
+                    + repository.getWorkTree() + " не найден"); //$NON-NLS-1$
+                MessageDialog.openInformation(shell, Global.withPluginWindowTitle(NO_PROJECT_TITLE),
+                    NO_PROJECT_MESSAGE);
                 return;
             }
 
@@ -1697,10 +1783,16 @@ public final class GitChangedFileMenuHook implements IStartup
                 });
             }
 
+            // Штатный флажок «Сравнивать модули с учетом структуры» — до open(),
+            // но после create() (композит появляется в createDialogArea).
+            applyStoredParseBslModuleStructure(dialog);
+
             // Размер окна — после всех pack()/layout() выше, иначе его затрёт штатная упаковка.
             installCommitDialogSizeMemory(dialog);
 
-            if ((int) Global.call(dialog, "open") != IDialogConstants.OK_ID) //$NON-NLS-1$
+            int dialogResult = (int) Global.call(dialog, "open"); //$NON-NLS-1$
+            saveParseBslModuleStructure(dialog);
+            if (dialogResult != IDialogConstants.OK_ID)
                 return;
 
             Object commitIdObj = Global.call(dialog, "getCommitId"); //$NON-NLS-1$
@@ -1970,15 +2062,9 @@ public final class GitChangedFileMenuHook implements IStartup
                 Object workTree = Global.call(repo, "getWorkTree"); //$NON-NLS-1$
                 if (workTree instanceof java.io.File workDir)
                 {
-                    String repoPath = workDir.getAbsolutePath().replace('\\', '/');
-                    for (IProject p : ResourcesPlugin.getWorkspace().getRoot().getProjects())
-                    {
-                        if (!p.isOpen())
-                            continue;
-                        String projPath = p.getLocation().toFile().getAbsolutePath().replace('\\', '/');
-                        if (repoPath.equals(projPath) || repoPath.startsWith(projPath + "/"))
-                            return p;
-                    }
+                    List<IProject> candidates = projectsOfWorkTree(workDir);
+                    if (!candidates.isEmpty())
+                        return candidates.get(0);
                 }
             }
         }
@@ -1987,6 +2073,73 @@ public final class GitChangedFileMenuHook implements IStartup
         }
 
         return null;
+    }
+
+    /**
+     * Открытые проекты, лежащие внутри рабочего каталога репозитория (или совпадающие
+     * с ним). Порядок — как в рабочей области.
+     */
+    private static List<IProject> projectsOfWorkTree(java.io.File workTree)
+    {
+        List<IProject> result = new ArrayList<>();
+        if (workTree == null)
+            return result;
+        String repoPath = workTree.getAbsolutePath().replace('\\', '/');
+        for (IProject p : ResourcesPlugin.getWorkspace().getRoot().getProjects())
+        {
+            if (!p.isOpen() || p.getLocation() == null)
+                continue;
+            String projPath = p.getLocation().toFile().getAbsolutePath().replace('\\', '/');
+            if (repoPath.equals(projPath) || projPath.startsWith(repoPath + "/")) //$NON-NLS-1$
+                result.add(p);
+        }
+        return result;
+    }
+
+    /**
+     * Проект для сравнения с коммитом — только из проектов самого репозитория панели
+     * «История». Активный проект берётся лишь тогда, когда он принадлежит этому
+     * репозиторию: иначе сравнение шло бы по чужому проекту, путь которого не
+     * релативизуется в рабочий каталог, и результат всегда был бы «изменения не
+     * найдены» (проект брался из активного редактора, каким бы он ни был).
+     *
+     * @return проект или {@code null}, если репозиторию не соответствует ни один
+     *         открытый проект либо пользователь отказался от выбора
+     */
+    private static IProject resolveProjectOfRepository(Shell shell, IWorkbenchPart view,
+        Repository repository)
+    {
+        List<IProject> candidates = projectsOfWorkTree(repository.getWorkTree());
+        if (candidates.isEmpty())
+            return null;
+        if (candidates.size() == 1)
+            return candidates.get(0);
+        IProject active = Global.getActiveProject(view, false);
+        if (active != null && candidates.contains(active))
+            return active;
+        return chooseProject(shell, candidates);
+    }
+
+    /** Выбор проекта, когда репозиторию соответствует несколько открытых проектов. */
+    private static IProject chooseProject(Shell shell, List<IProject> candidates)
+    {
+        ElementListSelectionDialog dialog = new ElementListSelectionDialog(shell, new LabelProvider()
+        {
+            @Override
+            public String getText(Object element)
+            {
+                return element instanceof IProject project ? project.getName() : String.valueOf(element);
+            }
+        });
+        dialog.setTitle(Global.withPluginWindowTitle(CHOOSE_PROJECT_TITLE));
+        dialog.setMessage(CHOOSE_PROJECT_MESSAGE);
+        dialog.setElements(candidates.toArray());
+        dialog.setInitialSelections(new Object[] { candidates.get(0) });
+        if (dialog.open() != Window.OK)
+            return null;
+        Object[] selected = dialog.getResult();
+        return selected != null && selected.length > 0 && selected[0] instanceof IProject project
+            ? project : null;
     }
 
     /**
@@ -2004,13 +2157,34 @@ public final class GitChangedFileMenuHook implements IStartup
      */
     public static EObject resolveEObject(IFile file)
     {
+        return resolveEObjectForResource(file, file);
+    }
+
+    /**
+     * {@link EObject} по папке объекта метаданных. Нужно для папок дочерних объектов
+     * (форма/команда/макет внутри {@code Forms} / {@code Commands} / {@code Templates}):
+     * своего mdo у них нет, но {@link GetRef#pathToFullName} умеет строить полное имя прямо
+     * по пути папки — например {@code src/Catalogs/X/Forms/ФормаСписка} →
+     * {@code Справочник.X.Форма.ФормаСписка}.
+     */
+    public static EObject resolveEObjectForResource(IResource resource)
+    {
+        return resolveEObjectForResource(resource, null);
+    }
+
+    /**
+     * @param fallbackFile файл для запасного {@link GoToDefinition#fullNameFromFile} —
+     *        только когда полное имя не строится по пути; для папок {@code null}
+     */
+    private static EObject resolveEObjectForResource(IResource resource, IFile fallbackFile)
+    {
         try
         {
-            String relPath = file.getProjectRelativePath().toString();
+            String relPath = resource.getProjectRelativePath().toString();
             if (GetRef.isConfigurationRootPath(relPath))
                 return null;
 
-            IProject project = file.getProject();
+            IProject project = resource.getProject();
             IV8ProjectManager projectManager =
                 (IV8ProjectManager) Global.getServiceByClass(IV8ProjectManager.class);
             if (projectManager == null)
@@ -2020,8 +2194,8 @@ public final class GitChangedFileMenuHook implements IStartup
                 return null;
 
             String fullName = GetRef.pathToFullName(relPath);
-            if (fullName == null || fullName.isBlank())
-                fullName = GoToDefinition.fullNameFromFile(file);
+            if ((fullName == null || fullName.isBlank()) && fallbackFile != null)
+                fullName = GoToDefinition.fullNameFromFile(fallbackFile);
             if (fullName == null || fullName.isBlank())
                 return null;
 
@@ -2253,6 +2427,63 @@ public final class GitChangedFileMenuHook implements IStartup
         int x = Math.max(area.x, Math.min(bounds.x, area.x + area.width - width));
         int y = Math.max(area.y, Math.min(bounds.y, area.y + area.height - height));
         return new Rectangle(x, y, width, height);
+    }
+
+    /**
+     * Восстанавливает состояние штатного флажка «Сравнивать модули с учетом
+     * структуры»: {@code ParseBslModuleStructureComposite} берёт начальное
+     * значение из настройки {@code com._1c.g5.v8.dt.compare.ui.parseBslModuleStructure},
+     * но её никто не записывает (в EDT есть только значение по умолчанию
+     * {@code false}), поэтому флажок каждый раз сбрасывается. Само значение
+     * композит хранит в приватном поле, обновляемом слушателем кнопки, — поэтому
+     * после {@code setSelection(...)} слушателю посылается событие выбора.
+     */
+    private static void applyStoredParseBslModuleStructure(Object dialog)
+    {
+        IDialogSettings settings = commitDialogSettings();
+        if (settings.get(KEY_COMMIT_DIALOG_PARSE_BSL) == null)
+            return;
+        boolean stored = settings.getBoolean(KEY_COMMIT_DIALOG_PARSE_BSL);
+        Button button = parseBslModuleStructureButton(dialog);
+        if (button == null || button.getSelection() == stored)
+            return;
+        button.setSelection(stored);
+        button.notifyListeners(SWT.Selection, new Event());
+    }
+
+    private static void saveParseBslModuleStructure(Object dialog)
+    {
+        try
+        {
+            Object value = Global.call(dialog, "isParseBslModuleStructure"); //$NON-NLS-1$
+            if (value instanceof Boolean parseBsl)
+                commitDialogSettings().put(KEY_COMMIT_DIALOG_PARSE_BSL, parseBsl.booleanValue());
+        }
+        catch (Exception ex)
+        {
+            Global.log("CompareWithCommit: сохранение флажка структуры модулей: " + ex); //$NON-NLS-1$
+        }
+    }
+
+    /** Кнопка внутри штатного {@code ParseBslModuleStructureComposite} (единственный его потомок). */
+    private static Button parseBslModuleStructureButton(Object dialog)
+    {
+        try
+        {
+            Object composite = Global.getField(dialog, "parseBslModuleStructureComposite"); //$NON-NLS-1$
+            if (!(composite instanceof Composite parent) || parent.isDisposed())
+                return null;
+            for (Control child : parent.getChildren())
+            {
+                if (child instanceof Button button && (button.getStyle() & SWT.CHECK) != 0)
+                    return button;
+            }
+        }
+        catch (Exception ex)
+        {
+            Global.log("CompareWithCommit: флажок структуры модулей: " + ex); //$NON-NLS-1$
+        }
+        return null;
     }
 
     private static IDialogSettings commitDialogSettings()
@@ -2573,6 +2804,11 @@ public final class GitChangedFileMenuHook implements IStartup
             Path workTree = repository.getWorkTree().toPath();
             monitor.setTaskName(MessageFormat.format(SEARCH_CHANGES_TASK_NAME, project.getName()));
             Path projectDir = project.getLocation().toFile().toPath();
+            // Страховка: проект вне рабочего каталога дал бы путь вида «../…», пустой diff
+            // и молчаливое «изменения не найдены» вместо явной ошибки.
+            if (!projectDir.startsWith(workTree))
+                throw new IllegalStateException("Проект " + project.getName() //$NON-NLS-1$
+                    + " находится вне рабочего каталога репозитория " + workTree); //$NON-NLS-1$
             String projectRelativePath =
                 GitCompareUtils.replaceBackslash(workTree.relativize(projectDir).toString());
             boolean isIndex = "Index".equals(revisionToCompareWith); //$NON-NLS-1$

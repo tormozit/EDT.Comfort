@@ -33,7 +33,6 @@ import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.Widget;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IStartup;
-import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.actions.CompoundContributionItem;
 
@@ -822,7 +821,7 @@ public class FormEditorHook implements IStartup
         PropertyInfo selected = tree != null ? getSelectedPropertyInfo(tree) : null;
         EObject target = resolveMetadataNavigatorTarget(selected);
         if (target != null)
-            showMetadataInNavigator(target, editor);
+            showMetadataInNavigator(target);
     }
 
     private static PropertyInfo getSelectedPropertyInfo(Tree attributesTree)
@@ -1125,23 +1124,18 @@ public class FormEditorHook implements IStartup
         return items.length;
     }
 
-    private static void showMetadataInNavigator(EObject eObject, IEditorPart editorHint)
+    /**
+     * Явная команда «Показать в навигаторе» (Ctrl+T в дереве реквизитов формы) — единое
+     * поведение со всеми остальными местами плагина, см.
+     * {@link NavigatorReveal#revealAndActivateIfHidden}. Возврат фокуса в редактор через
+     * {@code editorToReactivate} больше не нужен: видимую панель команда и так не активирует.
+     */
+    private static void showMetadataInNavigator(EObject eObject)
     {
         if (!PlatformUI.isWorkbenchRunning())
             return;
 
-        IEditorPart editor = editorHint;
-        if (editor == null)
-        {
-            var window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
-            if (window != null)
-            {
-                IWorkbenchPage page = window.getActivePage();
-                if (page != null)
-                    editor = page.getActiveEditor();
-            }
-        }
-        NavigatorReveal.reveal(eObject, true, editor);
+        NavigatorReveal.revealAndActivateIfHidden(eObject);
     }
 
     // -----------------------------------------------------------------------
