@@ -1841,8 +1841,7 @@ if (filtered == 0)
         if (inserted == 0)
             return;
 //        int startOffset = event.start; // У клавиатурного слушателя тут 0 всегда
-        int widgetOffset = viewer.getTextWidget().getCaretOffset();
-        int startOffset = toModelOffset(widgetOffset);
+        int startOffset = toModelOffset(viewer.getTextWidget().getCaretOffset());
         int caretAfter = startOffset + 1;
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         boolean popupWasOpen = ContentAssistPopupSync.isPopupVisible(assistant);
@@ -1854,7 +1853,6 @@ if (filtered == 0)
             + " caretAfter=" + caretAfter + " popup=" + popupWasOpen //$NON-NLS-1$ //$NON-NLS-2$
             + " branch=" + branch + " pending=" + pendingAutoOpen //$NON-NLS-1$ //$NON-NLS-2$
             + " mask=" + event.stateMask); //$NON-NLS-1$
-        logAutoOpenOffsetDiagnostics(doc, inserted, widgetOffset, caretAfter);
         int seq = completionAutoOpenActiveSeq > 0
             ? completionAutoOpenActiveSeq : completionAutoOpenSeq.get();
 if ((inserted == '(' || inserted == ',') && !popupWasOpen)
@@ -1898,62 +1896,6 @@ if ((inserted == '(' || inserted == ',') && !popupWasOpen)
         if (!(widget instanceof StyledText st) || st.isDisposed())
             return -1;
         return toModelOffset(st.getCaretOffset());
-    }
-
-    /**
-     * Диагностика свёрнутых (folding) участков: {@code StyledText.getCaretOffset()} возвращает
-     * ОФСЕТ ВИДИМОГО документа, а {@link CompletionAutoOpenTrigger#diagnoseFetch} работает
-     * с МОДЕЛЬНЫМ. При свёрнутом комментарии перед методом они расходятся на длину свёртки,
-     * и префикс строки берётся не там, где стоит каретка.
-     * Логирование безусловное (временная инструментализация текущей сессии).
-     */
-    private void logAutoOpenOffsetDiagnostics(IDocument doc, char inserted, int widgetCaret,
-                                              int caretAfter)
-    {
-        try
-        {
-            int modelCaret = -1;
-            String mapper = "none"; //$NON-NLS-1$
-            if (viewer instanceof ITextViewerExtension5 ext5)
-            {
-                mapper = "ext5"; //$NON-NLS-1$
-                modelCaret = ext5.widgetOffset2ModelOffset(widgetCaret);
-            }
-            int usedOffset = caretAfter - 1;
-            String widgetPrefix = BslAssistSourceHeuristics.linePrefixToCaret(
-                doc, widgetCaret + 1, inserted, widgetCaret);
-            String usedPrefix = BslAssistSourceHeuristics.linePrefixToCaret(
-                doc, caretAfter, inserted, usedOffset);
-            Global.tempLog("autoopen", "verifyKey.offsets: mapper=" + mapper //$NON-NLS-1$ //$NON-NLS-2$
-                + " widgetCaret=" + widgetCaret + " modelCaret=" + modelCaret //$NON-NLS-1$ //$NON-NLS-2$
-                + " usedOffset=" + usedOffset //$NON-NLS-1$
-                + " delta=" + (modelCaret >= 0 ? modelCaret - widgetCaret : -1) //$NON-NLS-1$
-                + " docLen=" + (doc != null ? doc.getLength() : -1) //$NON-NLS-1$
-                + " widgetLine=" + safeLineOfOffset(doc, widgetCaret + 1) //$NON-NLS-1$
-                + " usedLine=" + safeLineOfOffset(doc, caretAfter) //$NON-NLS-1$
-                + " widgetComment=" + BslAssistSourceHeuristics.isInsideLineComment(widgetPrefix) //$NON-NLS-1$
-                + " usedComment=" + BslAssistSourceHeuristics.isInsideLineComment(usedPrefix) //$NON-NLS-1$
-                + " widgetPrefix=[" + widgetPrefix + "]" //$NON-NLS-1$ //$NON-NLS-2$
-                + " usedPrefix=[" + usedPrefix + "]"); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-        catch (Exception e)
-        {
-            Global.tempLog("autoopen", "verifyKey.offsets: EX " + e); //$NON-NLS-1$ //$NON-NLS-2$
-        }
-    }
-
-    private static int safeLineOfOffset(IDocument doc, int offset)
-    {
-        if (doc == null || offset < 0 || offset > doc.getLength())
-            return -1;
-        try
-        {
-            return doc.getLineOfOffset(offset);
-        }
-        catch (Exception e)
-        {
-            return -1;
-        }
     }
 
     /**
@@ -2025,14 +1967,7 @@ if ((inserted == '(' || inserted == ',') && !popupWasOpen)
     private void onDocumentChangedForCompletionAutoOpenImpl(DocumentEvent event)
     {
 if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
-        {
-            String changed = event != null && event.getText() != null ? event.getText() : ""; //$NON-NLS-1$
-            if (!changed.isEmpty() && changed.length() <= 4)
-                Global.tempLog("autoopen", "docChanged: skip pending=" + pendingAutoOpen //$NON-NLS-1$ //$NON-NLS-2$
-                    + " replaceListFilters=" + ComfortSettings.isReplaceListFiltersEnabled() //$NON-NLS-1$
-                    + " off=" + event.getOffset() + " text=[" + changed + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
-        }
         pendingAutoOpen = false;
         ContentAssistSettings settings = ContentAssistSettings.getInstance();
         if (settings == null || !settings.isEnabled())
