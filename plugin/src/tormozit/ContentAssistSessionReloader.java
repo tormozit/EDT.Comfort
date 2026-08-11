@@ -8,6 +8,7 @@ import org.eclipse.jface.text.IDocumentExtension4;
 import org.eclipse.jface.text.IDocumentListener;
 import org.eclipse.jface.text.DocumentEvent;
 import org.eclipse.jface.text.IInformationControlCreator;
+import org.eclipse.jface.text.ITextViewerExtension5;
 import org.eclipse.jface.text.link.LinkedModeModel;
 import org.eclipse.jface.text.link.ProposalPosition;
 import org.eclipse.jface.text.contentassist.ContentAssistant;
@@ -1840,7 +1841,8 @@ if (filtered == 0)
         if (inserted == 0)
             return;
 //        int startOffset = event.start; // У клавиатурного слушателя тут 0 всегда
-        int startOffset = viewer.getTextWidget().getCaretOffset();
+        int widgetOffset = viewer.getTextWidget().getCaretOffset();
+        int startOffset = toModelOffset(widgetOffset);
         int caretAfter = startOffset + 1;
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         boolean popupWasOpen = ContentAssistPopupSync.isPopupVisible(assistant);
@@ -1852,6 +1854,7 @@ if (filtered == 0)
             + " caretAfter=" + caretAfter + " popup=" + popupWasOpen //$NON-NLS-1$ //$NON-NLS-2$
             + " branch=" + branch + " pending=" + pendingAutoOpen //$NON-NLS-1$ //$NON-NLS-2$
             + " mask=" + event.stateMask); //$NON-NLS-1$
+        logAutoOpenOffsetDiagnostics(doc, inserted, widgetOffset, caretAfter);
         int seq = completionAutoOpenActiveSeq > 0
             ? completionAutoOpenActiveSeq : completionAutoOpenSeq.get();
 if ((inserted == '(' || inserted == ',') && !popupWasOpen)
@@ -1864,6 +1867,92 @@ if ((inserted == '(' || inserted == ',') && !popupWasOpen)
                 pendingParamHintOnChar = true;
                 pendingParamHintOnCharCaret = caretAfter;
             }
+        }
+    }
+
+    /**
+     * Перевод офсета ВИДИМОГО документа (координаты {@link StyledText}) в офсет МОДЕЛЬНОГО.
+     * При свёрнутых (folding) участках выше каретки {@code StyledText.getCaretOffset()} меньше
+     * модельного офсета на суммарную длину свёрток, а вся логика автооткрытия
+     * ({@link CompletionAutoOpenTrigger}, {@code IDocument}, {@code DocumentEvent.getOffset()})
+     * работает с модельным документом. Без перевода префикс строки берётся внутри свёрнутого
+     * комментария — и автодополнение молча не открывается.
+     */
+    private int toModelOffset(int widgetOffset)
+    {
+        if (widgetOffset < 0)
+            return widgetOffset;
+        if (viewer instanceof ITextViewerExtension5 ext5)
+        {
+            int mapped = ext5.widgetOffset2ModelOffset(widgetOffset);
+            if (mapped >= 0)
+                return mapped;
+        }
+        return widgetOffset;
+    }
+
+    /** Модельный офсет каретки виджета, или {@code -1} если виджета нет. */
+    private int modelCaretOffset()
+    {
+        Control widget = viewer != null ? (Control)viewer.getTextWidget() : null;
+        if (!(widget instanceof StyledText st) || st.isDisposed())
+            return -1;
+        return toModelOffset(st.getCaretOffset());
+    }
+
+    /**
+     * Диагностика свёрнутых (folding) участков: {@code StyledText.getCaretOffset()} возвращает
+     * ОФСЕТ ВИДИМОГО документа, а {@link CompletionAutoOpenTrigger#diagnoseFetch} работает
+     * с МОДЕЛЬНЫМ. При свёрнутом комментарии перед методом они расходятся на длину свёртки,
+     * и префикс строки берётся не там, где стоит каретка.
+     * Логирование безусловное (временная инструментализация текущей сессии).
+     */
+    private void logAutoOpenOffsetDiagnostics(IDocument doc, char inserted, int widgetCaret,
+                                              int caretAfter)
+    {
+        try
+        {
+            int modelCaret = -1;
+            String mapper = "none"; //$NON-NLS-1$
+            if (viewer instanceof ITextViewerExtension5 ext5)
+            {
+                mapper = "ext5"; //$NON-NLS-1$
+                modelCaret = ext5.widgetOffset2ModelOffset(widgetCaret);
+            }
+            int usedOffset = caretAfter - 1;
+            String widgetPrefix = BslAssistSourceHeuristics.linePrefixToCaret(
+                doc, widgetCaret + 1, inserted, widgetCaret);
+            String usedPrefix = BslAssistSourceHeuristics.linePrefixToCaret(
+                doc, caretAfter, inserted, usedOffset);
+            Global.tempLog("autoopen", "verifyKey.offsets: mapper=" + mapper //$NON-NLS-1$ //$NON-NLS-2$
+                + " widgetCaret=" + widgetCaret + " modelCaret=" + modelCaret //$NON-NLS-1$ //$NON-NLS-2$
+                + " usedOffset=" + usedOffset //$NON-NLS-1$
+                + " delta=" + (modelCaret >= 0 ? modelCaret - widgetCaret : -1) //$NON-NLS-1$
+                + " docLen=" + (doc != null ? doc.getLength() : -1) //$NON-NLS-1$
+                + " widgetLine=" + safeLineOfOffset(doc, widgetCaret + 1) //$NON-NLS-1$
+                + " usedLine=" + safeLineOfOffset(doc, caretAfter) //$NON-NLS-1$
+                + " widgetComment=" + BslAssistSourceHeuristics.isInsideLineComment(widgetPrefix) //$NON-NLS-1$
+                + " usedComment=" + BslAssistSourceHeuristics.isInsideLineComment(usedPrefix) //$NON-NLS-1$
+                + " widgetPrefix=[" + widgetPrefix + "]" //$NON-NLS-1$ //$NON-NLS-2$
+                + " usedPrefix=[" + usedPrefix + "]"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (Exception e)
+        {
+            Global.tempLog("autoopen", "verifyKey.offsets: EX " + e); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+    }
+
+    private static int safeLineOfOffset(IDocument doc, int offset)
+    {
+        if (doc == null || offset < 0 || offset > doc.getLength())
+            return -1;
+        try
+        {
+            return doc.getLineOfOffset(offset);
+        }
+        catch (Exception e)
+        {
+            return -1;
         }
     }
 
@@ -1936,7 +2025,14 @@ if ((inserted == '(' || inserted == ',') && !popupWasOpen)
     private void onDocumentChangedForCompletionAutoOpenImpl(DocumentEvent event)
     {
 if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
+        {
+            String changed = event != null && event.getText() != null ? event.getText() : ""; //$NON-NLS-1$
+            if (!changed.isEmpty() && changed.length() <= 4)
+                Global.tempLog("autoopen", "docChanged: skip pending=" + pendingAutoOpen //$NON-NLS-1$ //$NON-NLS-2$
+                    + " replaceListFilters=" + ComfortSettings.isReplaceListFiltersEnabled() //$NON-NLS-1$
+                    + " off=" + event.getOffset() + " text=[" + changed + "]"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
+        }
         pendingAutoOpen = false;
         ContentAssistSettings settings = ContentAssistSettings.getInstance();
         if (settings == null || !settings.isEnabled())
@@ -2043,7 +2139,8 @@ display.timerExec(delay, () -> fireCompletionAutoOpenTimer(expectedCaretAfter, a
     {
         int genGlobal = completionAutoOpenScheduleGen.get();
         StyledText text = viewer.getTextWidget() instanceof StyledText st ? st : null;
-        int liveCaret = text != null && !text.isDisposed() ? text.getCaretOffset() : -1;
+        // expectedCaretAfter пришёл из DocumentEvent — модельный офсет, поэтому и live тоже модельный
+        int liveCaret = text != null && !text.isDisposed() ? toModelOffset(text.getCaretOffset()) : -1;
         boolean popupVisible = ContentAssistPopupSync.isPopupVisible(assistant);
         if (gen != genGlobal)
         {
@@ -2224,7 +2321,7 @@ openCompletionAutoEdtPopup(caret, autoOpenSeq);
         Control widget = (Control)viewer.getTextWidget();
         if (widget == null || widget.isDisposed())
             return;
-        int liveCaret = widget instanceof StyledText st ? st.getCaretOffset() : caret;
+        int liveCaret = modelCaretOffset();
         if (liveCaret < 0)
             liveCaret = caret;
         boolean inLiteral = SmartContentAssistProcessor.isStringLiteralAssistContext(
@@ -2417,7 +2514,7 @@ return false;
         StyledText text = viewer.getTextWidget() instanceof StyledText st ? st : null;
         if (text == null || text.isDisposed())
             return;
-        int caret = text.getCaretOffset();
+        int caret = toModelOffset(text.getCaretOffset());
         boolean inLiteral = caret >= 0
             && SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret);
 if (!inLiteral)
@@ -3160,7 +3257,7 @@ openManualDualAssistPopupOnce(caret);
         Control widget = (Control) viewer.getTextWidget();
         if (widget == null || widget.isDisposed())
             return;
-        int liveCaret = widget instanceof StyledText st ? st.getCaretOffset() : -1;
+        int liveCaret = modelCaretOffset();
         if (liveCaret >= 0 && expectedCaret >= 0 && liveCaret != expectedCaret)
         {
 return;
@@ -3194,10 +3291,7 @@ return;
             return false;
         if (snapshotCaret == manualIrAssistCaret)
             return true;
-        Control widget = (Control) viewer.getTextWidget();
-        if (widget instanceof StyledText st && !st.isDisposed())
-            return st.getCaretOffset() == manualIrAssistCaret;
-        return false;
+        return modelCaretOffset() == manualIrAssistCaret;
     }
 
     private void openDeferredIrAssistPopup(IrBslCompletionSupport.Snapshot snapshot,
@@ -3206,7 +3300,7 @@ return;
         Control widget = (Control) viewer.getTextWidget();
         if (widget == null || widget.isDisposed())
             return;
-        int liveCaret = widget instanceof StyledText st ? st.getCaretOffset() : snapshotCaret;
+        int liveCaret = modelCaretOffset();
         if (liveCaret < 0)
             liveCaret = snapshotCaret;
         processor.enterIrOnlyManualMode(liveCaret);
@@ -3249,7 +3343,7 @@ if (stillVisible)
         Control widget = (Control) viewer.getTextWidget();
         if (widget == null || widget.isDisposed())
             return;
-        int liveCaret = widget instanceof StyledText st ? st.getCaretOffset() : snapshotCaret;
+        int liveCaret = modelCaretOffset();
         if (liveCaret < 0)
             liveCaret = snapshotCaret;
         boolean pendingBefore = manualIrAssistPending;
