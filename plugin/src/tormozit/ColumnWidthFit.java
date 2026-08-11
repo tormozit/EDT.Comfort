@@ -3,6 +3,7 @@ package tormozit;
 import java.util.function.IntPredicate;
 
 import org.eclipse.swt.graphics.GC;
+import org.eclipse.swt.internal.win32.OS;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableColumn;
@@ -57,6 +58,9 @@ final class ColumnWidthFit
         boolean excluded(int index);
 
         int clientWidth();
+
+        /** Индексы колонок (в порядке создания) в ВИЗУАЛЬНОМ порядке — {@code getColumnOrder()} контрола. */
+        int[] visualOrder();
 
         Control control();
     }
@@ -115,6 +119,12 @@ final class ColumnWidthFit
         public int clientWidth()
         {
             return table.isDisposed() ? 0 : table.getClientArea().width;
+        }
+
+        @Override
+        public int[] visualOrder()
+        {
+            return table.isDisposed() ? new int[0] : table.getColumnOrder();
         }
 
         @Override
@@ -178,10 +188,26 @@ final class ColumnWidthFit
         }
 
         @Override
+        public int[] visualOrder()
+        {
+            return tree.isDisposed() ? new int[0] : tree.getColumnOrder();
+        }
+
+        @Override
         public Control control()
         {
             return tree;
         }
+    }
+
+    /**
+     * Зажата ли клавиша Ctrl в данный момент (Win32, состояние клавиши на момент применения). С Ctrl
+     * перетаскивание границы колонки не трогает соседей — пользователь осознанно делает колонку шире
+     * контрола, вместе с горизонтальной прокруткой.
+     */
+    static boolean isCtrlPressed()
+    {
+        return (OS.GetKeyState(OS.VK_CONTROL) & 0x8000) != 0;
     }
 
     /** Суммарная ширина всех колонок (включая non-resizable и скрытые — это фактическая занятая ширина). */
@@ -292,6 +318,141 @@ final class ColumnWidthFit
         }
         clampTotalToClientWidth(columns, minWidth);
         return count;
+    }
+
+    /**
+     * Перетаскивание границы колонки: колонки ПРАВЕЕ перетаскиваемой сужаются (или растут) так, чтобы
+     * сохранить заполнение по ширине и не породить горизонтальную прокрутку. Колонки трогаются ТОЛЬКО на
+     * величину, которую не удалось поглотить/освободить за счёт уже имеющегося запаса:
+     * <ul>
+     * <li>граница вправо (колонка выросла) — если было свободное место, рост сначала расходует его,
+     * соседей не трогая; сужение соседей применяется только к части роста, это место превысившей;</li>
+     * <li>граница влево (колонка сузилась), а до этого было свободное место — соседи не трогаются вообще,
+     * освободившееся место остаётся пустым;</li>
+     * <li>граница влево при переполнении или точном совпадении — сужение сначала расходуется на
+     * устранение переполнения, а его ИЗБЫТОК идёт на пропорциональный рост соседей.</li>
+     * </ul>
+     * Non-resizable и исключённые колонки не трогаются, их ширина вычитается из перераспределяемого
+     * остатка. При нехватке места соседи сужаются до {@code minWidth}.
+     *
+     * @param draggedIndex индекс перетаскиваемой колонки в порядке создания.
+     * @param before ширины колонок в ВИЗУАЛЬНОМ порядке на начало серии событий текущего перетаскивания.
+     * @param clientWidth ширина, под которую держим колонки (у деревьев с общими колонками — их общий
+     *            бюджет, см. {@code ColumnAutoFit}).
+     * @return {@code true}, если ширины соседей действительно изменились.
+     */
+    static boolean applyProportionalShrink(Columns columns, int draggedIndex, int[] before, int minWidth,
+        int clientWidth)
+    {
+        int[] order = columns.visualOrder();
+        if (before == null || before.length != order.length || draggedIndex < 0)
+            return false;
+        int draggedPos = -1;
+        for (int v = 0; v < order.length; v++)
+        {
+            if (order[v] == draggedIndex)
+            {
+                draggedPos = v;
+                break;
+            }
+        }
+        if (draggedPos < 0 || draggedPos >= order.length - 1)
+            return false; // колонок правее нет
+        int rawDelta = columns.width(draggedIndex) - before[draggedPos];
+        if (rawDelta == 0)
+            return false;
+        int totalBefore = 0;
+        for (int w : before)
+            totalBefore += w;
+        int effectiveDelta;
+        if (rawDelta > 0)
+        {
+            int freeSpace = Math.max(0, clientWidth - totalBefore);
+            effectiveDelta = rawDelta - Math.min(rawDelta, freeSpace);
+            if (effectiveDelta <= 0)
+                return false; // рост поглощён свободным местом — соседей не трогаем
+        }
+        else if (totalBefore < clientWidth)
+        {
+            return false; // запас свободного места уже был — сужение просто уменьшает общую ширину
+        }
+        else
+        {
+            int shrinkAmount = -rawDelta;
+            int overflow = Math.max(0, totalBefore - clientWidth);
+            int excessShrink = shrinkAmount - Math.min(shrinkAmount, overflow);
+            if (excessShrink <= 0)
+                return false; // весь shrink ушёл на устранение переполнения
+            effectiveDelta = -excessShrink;
+        }
+        int rightBefore = 0;
+        for (int v = draggedPos + 1; v < order.length; v++)
+            rightBefore += before[v];
+        int resizableTarget = rightBefore - effectiveDelta;
+        int minResizable = 0;
+        int rc = 0;
+        int[] rcVisual = new int[order.length - draggedPos - 1];
+        int[] rcStart = new int[order.length - draggedPos - 1];
+        for (int v = draggedPos + 1; v < order.length; v++)
+        {
+            int index = order[v];
+            if (columns.excluded(index))
+            {
+                // Скрытая нулевой шириной колонка — не кандидат: вычитаем её ФАКТИЧЕСКУЮ ширину, а не
+                // before[v], иначе при скрытии во время перетаскивания остаток уменьшился бы на уже
+                // отсутствующие пиксели.
+                resizableTarget -= columns.width(index);
+            }
+            else if (columns.resizable(index))
+            {
+                rcVisual[rc] = v;
+                rcStart[rc] = before[v];
+                rc++;
+                minResizable += minWidth;
+            }
+            else
+            {
+                resizableTarget -= before[v];
+            }
+        }
+        if (rc == 0)
+            return false;
+        if (resizableTarget < minResizable)
+            resizableTarget = minResizable;
+        int startSum = 0;
+        for (int s = 0; s < rc; s++)
+            startSum += rcStart[s];
+        int[] shares = new int[rc];
+        int assigned = 0;
+        for (int s = 0; s < rc; s++)
+        {
+            int share = startSum > 0
+                ? (int)((long)resizableTarget * rcStart[s] / startSum)
+                : resizableTarget / rc;
+            share = Math.max(minWidth, share);
+            shares[s] = share;
+            assigned += share;
+        }
+        int remainder = resizableTarget - assigned;
+        if (remainder != 0)
+            shares[rc - 1] = Math.max(minWidth, shares[rc - 1] + remainder);
+        // Соседи уже упёрлись в пол и целевые ширины не изменились — применять нечего (иначе на каждый
+        // пиксель перетаскивания шёл бы лишний setWidth на неизменные значения, что давало дёргание).
+        boolean anyChange = false;
+        for (int s = 0; s < rc; s++)
+        {
+            if (columns.width(order[rcVisual[s]]) != shares[s])
+            {
+                anyChange = true;
+                break;
+            }
+        }
+        if (!anyChange)
+            return false;
+        for (int s = 0; s < rc; s++)
+            columns.setWidth(order[rcVisual[s]], shares[s]);
+        clampTotalToClientWidth(columns, minWidth);
+        return true;
     }
 
     /**

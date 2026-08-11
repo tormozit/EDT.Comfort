@@ -47,7 +47,6 @@ import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.RGB;
 import org.eclipse.swt.graphics.Rectangle;
-import org.eclipse.swt.internal.win32.OS;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Button;
@@ -2030,7 +2029,7 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         }
         clampColumnMinWidth(col); // и при зажатом Ctrl тоже — native drag ничем не ограничен снизу
         boolean beforeValid = before != null && before.length == table.getColumnCount();
-        if (beforeValid && !isCtrlPressed())
+        if (beforeValid && !ColumnWidthFit.isCtrlPressed())
             applyProportionalShrink(col, before);
         rememberVisualWidths();
         updateFitState(); // для последующего сужения ТАБЛИЦЫ — знать, было ли переполнение уже до него
@@ -2085,12 +2084,6 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         {
             selfAdjusting = false;
         }
-    }
-
-    /** Зажата ли клавиша Ctrl в данный момент (Win32, состояние клавиши на момент commit'а). */
-    private static boolean isCtrlPressed()
-    {
-        return (OS.GetKeyState(OS.VK_CONTROL) & 0x8000) != 0;
     }
 
     /** Минимальная ширина колонки по шрифту таблицы — общий расчёт, см. {@link ColumnWidthFit#minColumnWidth}. */
@@ -2328,6 +2321,11 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
      * Non-resizable правые колонки не трогаются — их ширина вычитается из перераспределяемого остатка.
      * При нехватке места правые сужаются до {@link #minColumnWidth()}. База ({@code before}) — снимок на
      * начало серии событий текущего drag, применяется одним commit'ом ({@link #commitPendingResize}).
+     *
+     * <p>Сам расчёт — общий с деревьями ({@link ColumnWidthFit#applyProportionalShrink}); здесь только
+     * специфика таблицы: подавление собственных событий ресайза и синхронизация {@link TableColumnLayout}.
+     * Собственная ширина {@code dragged} к моменту вызова уже подтянута к минимуму в
+     * {@link #commitPendingResize} ({@link #clampColumnMinWidth}).
      */
     private void applyProportionalShrink(TableColumn dragged, int[] before)
     {
@@ -2335,144 +2333,18 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
             return;
         if (dragged == null || dragged.isDisposed())
             return;
-        int[] order = table.getColumnOrder();
-        if (before.length != order.length)
-            return;
-        int draggedCreation = table.indexOf(dragged);
-        int draggedPos = -1;
-        for (int v = 0; v < order.length; v++)
-        {
-            if (order[v] == draggedCreation)
-            {
-                draggedPos = v;
-                break;
-            }
-        }
-        if (draggedPos < 0 || draggedPos >= order.length - 1)
-            return; // колонок правее нет
-        // Собственная ширина dragged уже подтянута к минимуму в commitPendingResize (clampColumnMinWidth)
-        // до вызова этого метода — здесь дальше используется уже скорректированное значение.
-        int minWidth = minColumnWidth();
-        int rawDelta = dragged.getWidth() - before[draggedPos];
-        if (rawDelta == 0)
-            return;
-        int totalBefore = 0;
-        for (int w : before)
-            totalBefore += w;
-        int clientW = table.getClientArea().width;
-        int effectiveDelta;
-        if (rawDelta > 0)
-        {
-            int freeSpace = Math.max(0, clientW - totalBefore);
-            effectiveDelta = rawDelta - Math.min(rawDelta, freeSpace);
-            if (effectiveDelta <= 0)
-                return; // рост поглощён свободным местом таблицы — соседей не трогаем
-        }
-        else if (totalBefore < clientW)
-        {
-            // Правая граница последней колонки НЕ совпадает с границей таблицы — свободное место уже
-            // есть, режим заполнения по ширине не активен. Сужение просто уменьшает общую ширину,
-            // соседей не трогаем вообще (освободившееся место остаётся пустым).
-            return;
-        }
-        else
-        {
-            // totalBefore >= clientW: либо точное совпадение (режим заполнения по ширине), либо
-            // переполнение. Сначала весь shrink идёт на устранение УЖЕ имевшегося переполнения (overflow)
-            // — соседей не трогаем, просто уменьшаем общую ширину. Как только переполнение устранено
-            // (достигнуто точное совпадение границ), дальнейший ИЗБЫТОК сужения поддерживает заполнение
-            // по ширине — идёт на пропорциональный рост соседей, как обычно.
-            int shrinkAmount = -rawDelta;
-            int overflow = Math.max(0, totalBefore - clientW);
-            int absorbedByOverflow = Math.min(shrinkAmount, overflow);
-            int excessShrink = shrinkAmount - absorbedByOverflow;
-            if (excessShrink <= 0)
-                return; // весь shrink ушёл на устранение overflow — соседей не трогаем
-            effectiveDelta = -excessShrink;
-        }
-        int rightBefore = 0;
-        for (int v = draggedPos + 1; v < order.length; v++)
-            rightBefore += before[v];
-        int resizableTarget = rightBefore - effectiveDelta;
-        int minResizable = 0;
-        int rc = 0;
-        int[] rcVisual = new int[order.length - draggedPos - 1];
-        int[] rcStart = new int[order.length - draggedPos - 1];
-        for (int v = draggedPos + 1; v < order.length; v++)
-        {
-            TableColumn c = table.getColumn(order[v]);
-            if (c.isDisposed())
-                continue;
-            if (isHiddenColumn(c))
-            {
-                // Скрытая нулевой шириной колонка (см. isHiddenColumn) — не кандидат на сужение/рост:
-                // из остатка вычитается её ФАКТИЧЕСКАЯ (нулевая) ширина, а не before[v], иначе при
-                // скрытии во время drag остаток уменьшился бы на уже отсутствующие пиксели.
-                resizableTarget -= c.getWidth();
-            }
-            else if (c.getResizable())
-            {
-                rcVisual[rc] = v;
-                rcStart[rc] = before[v];
-                rc++;
-                minResizable += minWidth;
-            }
-            else
-            {
-                resizableTarget -= before[v];
-            }
-        }
-        if (rc == 0)
-            return;
-        if (resizableTarget < minResizable)
-            resizableTarget = minResizable;
-        int startSum = 0;
-        for (int s = 0; s < rc; s++)
-            startSum += rcStart[s];
-        int[] shares = new int[rc];
-        int assigned = 0;
-        for (int s = 0; s < rc; s++)
-        {
-            int share = startSum > 0
-                ? (int) ((long) resizableTarget * rcStart[s] / startSum)
-                : resizableTarget / rc;
-            share = Math.max(minWidth, share);
-            shares[s] = share;
-            assigned += share;
-        }
-        int remainder = resizableTarget - assigned;
-        if (remainder != 0)
-            shares[rc - 1] = Math.max(minWidth, shares[rc - 1] + remainder);
-        // Соседи уже упёрлись в пол и их целевые ширины не изменились относительно текущих — нечего
-        // применять. Без этой проверки на каждый пиксель драга при упоре в пол шёл лишний setWidth +
-        // rebindColumnLayoutData на неизменные значения, что и давало видимое дёргание.
-        boolean anyChange = false;
-        for (int s = 0; s < rc; s++)
-        {
-            TableColumn c = table.getColumn(order[rcVisual[s]]);
-            if (c.getWidth() != shares[s])
-            {
-                anyChange = true;
-                break;
-            }
-        }
-        if (!anyChange)
-            return;
         selfAdjusting = true;
         try
         {
-            for (int s = 0; s < rc; s++)
-                table.getColumn(order[rcVisual[s]]).setWidth(shares[s]);
-            clampTotalToClientWidth();
-            rebindColumnLayoutData();
+            boolean applied = ColumnWidthFit.applyProportionalShrink(columnAccess(), table.indexOf(dragged),
+                before, minColumnWidth(), table.getClientArea().width);
+            if (applied)
+                rebindColumnLayoutData();
         }
         finally
         {
             selfAdjusting = false;
         }
-        Global.tempLog("formTable-shrink", "dragged=" + draggedPos + " rawDelta=" + rawDelta //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " effectiveDelta=" + effectiveDelta + " totalBefore=" + totalBefore + " clientW=" + clientW //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + " resizableTarget=" + resizableTarget + " candidates=" + rc + " minWidth=" + minWidth); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     /**

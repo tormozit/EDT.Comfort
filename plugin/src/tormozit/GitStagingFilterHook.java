@@ -654,6 +654,9 @@ public final class GitStagingFilterHook implements IStartup
 
         GitStagingTreeInteraction interaction = new GitStagingTreeInteraction(tree, viewer);
         interaction.install();
+        // Колонки растягиваются с панелью (issue #273). Ставится после installColumns: подгонка живёт на
+        // дереве, поэтому переживает их пересоздание, а первичный проход идёт по уже готовым колонкам.
+        ColumnAutoFit.install(tree, t -> stagingWidthBudget(view, t));
         tree.addDisposeListener(e -> saveColumnState(tree, columnSettings()));
 
         TreeColumnValueFilterSupport.CellTextResolver textResolver = (element, physicalColumn) ->
@@ -663,6 +666,33 @@ public final class GitStagingFilterHook implements IStartup
 
         Debug.log("installColumnsAndInteraction " + viewerField + ": columns=" //$NON-NLS-1$ //$NON-NLS-2$
             + tree.getColumnCount());
+    }
+
+    /**
+     * Ширина, под которую авто-подгонка ({@link ColumnAutoFit}) растягивает колонки в обоих списках —
+     * МИНИМУМ клиентских областей staged и unstaged, то есть с запасом на вертикальную полосу прокрутки,
+     * если она есть хотя бы в одном из них.
+     *
+     * <p>Ширины колонок здесь общие: любая {@code setWidth} переносится на соседний список
+     * ({@link #syncWidthToPeer}). Клиентские области при этом разные — в списке с вертикальной полосой она
+     * уже на её ширину. Если подгонять каждый список под свою ширину, синхронизация тут же приносит соседу
+     * ширины, в его клиентскую область не влезающие, и в нём навсегда остаётся горизонтальная полоса
+     * (issue #273). Общий бюджет по минимуму снимает это: одинаковые ширины умещаются в обоих.
+     */
+    private static int stagingWidthBudget(IViewPart view, Tree tree)
+    {
+        if (tree == null || tree.isDisposed())
+            return 0;
+        int budget = tree.getClientArea().width;
+        Tree peer = otherTree(view, tree);
+        if (peer != null && !peer.isDisposed())
+        {
+            int peerWidth = peer.getClientArea().width;
+            // Ноль — сосед ещё не разложен (или скрыт): по нему не ограничиваем.
+            if (peerWidth > 0 && peerWidth < budget)
+                budget = peerWidth;
+        }
+        return budget;
     }
 
     private static GitStagingSearchFilter findExistingFilter(TreeViewer viewer)

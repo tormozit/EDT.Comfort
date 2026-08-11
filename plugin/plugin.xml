@@ -77,6 +77,7 @@
     <startup class="tormozit.DebugCollectionSessionHook"/>
     <startup class="tormozit.DebugInspectorHook"/>
     <startup class="tormozit.DebugVariablePresentationHook"/>
+    <startup class="tormozit.ColumnAutoFitViewsHook"/>
     <startup class="tormozit.DebugDetailPaneFullTextHook"/>
     <startup class="tormozit.DebugExpressionsChangeValueHook"/>
     <startup class="tormozit.DebugErrorSuffixHook"/>
