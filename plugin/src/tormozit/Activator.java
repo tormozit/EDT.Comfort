@@ -85,8 +85,11 @@ public class Activator extends AbstractUIPlugin
             ComfortSettings.PREF_GROUP_COMMON_MODULES_ENABLED,
             ComfortSettings.DEFAULT_GROUP_COMMON_MODULES_ENABLED);
         settings.getPreferenceStore().setDefault(
-            ComfortSettings.PREF_GROUP_COMMON_MODULES_SUFFIXES,
-            ComfortSettings.DEFAULT_GROUP_COMMON_MODULES_SUFFIXES);
+            ComfortSettings.PREF_GROUP_COMMON_MODULES_SUFFIXES_1,
+            ComfortSettings.DEFAULT_GROUP_COMMON_MODULES_SUFFIXES_1);
+        settings.getPreferenceStore().setDefault(
+            ComfortSettings.PREF_GROUP_COMMON_MODULES_SUFFIXES_2,
+            ComfortSettings.DEFAULT_GROUP_COMMON_MODULES_SUFFIXES_2);
         ContentAssistManager.init(settings);
         ComfortSettings.init(PLUGIN_ID);
         settings.getPreferenceStore().addPropertyChangeListener(event -> {

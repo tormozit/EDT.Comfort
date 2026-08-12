@@ -163,16 +163,19 @@ public final class CommonModuleGroupContentProvider implements ICommonContentPro
         private static final long IDLE_MS = 500;
         private static final long MAX_AGE_MS = 3000;
 
-        final List<String> suffixes;
+        final List<String> suffixes1;
+        final List<String> suffixes2;
         final Map<CommonModule, CommonModuleGroupNode> nodeByModule = new HashMap<>();
         final List<CommonModuleGroupNode> nodes = new ArrayList<>();
         final long builtAt = System.currentTimeMillis();
         volatile long lastAccess = builtAt;
 
-        GroupingSnapshot(Object folder, List<CommonModule> modules, List<String> suffixes)
+        GroupingSnapshot(Object folder, List<CommonModule> modules, List<String> suffixes1, List<String> suffixes2)
         {
-            this.suffixes = new ArrayList<>(suffixes == null ? List.of() : suffixes);
-            Map<String, List<CommonModule>> groups = CommonModuleGrouping.groupBySuffix(modules, this.suffixes);
+            this.suffixes1 = new ArrayList<>(suffixes1 == null ? List.of() : suffixes1);
+            this.suffixes2 = new ArrayList<>(suffixes2 == null ? List.of() : suffixes2);
+            Map<String, List<CommonModule>> groups =
+                    CommonModuleGrouping.groupBySuffix(modules, this.suffixes1, this.suffixes2);
             for (Map.Entry<String, List<CommonModule>> entry : groups.entrySet())
             {
                 CommonModuleGroupNode node = new CommonModuleGroupNode(entry.getKey(), entry.getValue(), folder);
@@ -185,10 +188,11 @@ public final class CommonModuleGroupContentProvider implements ICommonContentPro
                 nodeByModule.putIfAbsent(module, null);
         }
 
-        boolean isFresh(List<String> currentSuffixes)
+        boolean isFresh(List<String> current1, List<String> current2)
         {
             long now = System.currentTimeMillis();
-            return suffixes.equals(currentSuffixes == null ? List.of() : currentSuffixes)
+            return suffixes1.equals(current1 == null ? List.of() : current1)
+                    && suffixes2.equals(current2 == null ? List.of() : current2)
                     && now - lastAccess <= IDLE_MS
                     && now - builtAt <= MAX_AGE_MS;
         }
@@ -217,11 +221,13 @@ public final class CommonModuleGroupContentProvider implements ICommonContentPro
      */
     static CommonModuleGroupNode groupNodeFor(CommonModule module)
     {
-        List<String> suffixes = ComfortSettings.getGroupCommonModulesSuffixes();
+        List<String> suffixes1 = ComfortSettings.getGroupCommonModulesSuffixes1();
+        List<String> suffixes2 = ComfortSettings.getGroupCommonModulesSuffixes2();
         synchronized (CACHE_LOCK)
         {
             GroupingSnapshot snapshot = SNAPSHOT_BY_MODULE.get(module);
-            if (snapshot != null && snapshot.nodeByModule.containsKey(module) && snapshot.isFresh(suffixes))
+            if (snapshot != null && snapshot.nodeByModule.containsKey(module)
+                    && snapshot.isFresh(suffixes1, suffixes2))
             {
                 snapshot.lastAccess = System.currentTimeMillis();
                 return snapshot.nodeByModule.get(module);
@@ -240,18 +246,20 @@ public final class CommonModuleGroupContentProvider implements ICommonContentPro
      */
     private static GroupingSnapshot snapshotFor(Object folderElement)
     {
-        List<String> suffixes = ComfortSettings.getGroupCommonModulesSuffixes();
+        List<String> suffixes1 = ComfortSettings.getGroupCommonModulesSuffixes1();
+        List<String> suffixes2 = ComfortSettings.getGroupCommonModulesSuffixes2();
         synchronized (CACHE_LOCK)
         {
             GroupingSnapshot cached = SNAPSHOTS.get(folderElement);
-            if (cached != null && cached.isFresh(suffixes))
+            if (cached != null && cached.isFresh(suffixes1, suffixes2))
             {
                 cached.lastAccess = System.currentTimeMillis();
                 return cached;
             }
         }
 
-        GroupingSnapshot built = new GroupingSnapshot(folderElement, realCommonModules(folderElement), suffixes);
+        GroupingSnapshot built = new GroupingSnapshot(
+                folderElement, realCommonModules(folderElement), suffixes1, suffixes2);
         synchronized (CACHE_LOCK)
         {
             GroupingSnapshot stale = SNAPSHOTS.put(folderElement, built);

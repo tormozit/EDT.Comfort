@@ -444,7 +444,7 @@ public class ComfortPreferencePage
         });
     }
 
-    /** Флажок + список суффиксов для динамической группировки общих модулей в навигаторе (issue #117). */
+    /** Флажок + два набора суффиксов для динамической группировки общих модулей (issue #117). */
     private void createGroupCommonModulesFields()
     {
         BooleanFieldEditor groupCommonModulesField = new BooleanFieldEditor(
@@ -457,15 +457,25 @@ public class ComfortPreferencePage
             + "(например ВариантыОтветов / ВариантыОтветовКлиент / ВариантыОтветовКлиентСервер)\n"
             + "в одну группу в дереве навигатора. Структура конфигурации не меняется."); //$NON-NLS-1$
 
-        StringFieldEditor groupCommonModulesSuffixesField = new StringFieldEditor(
-            ComfortSettings.PREF_GROUP_COMMON_MODULES_SUFFIXES,
-            "Суффиксы имён общих модулей (через запятую):", //$NON-NLS-1$
+        StringFieldEditor suffixes1Field = new StringFieldEditor(
+            ComfortSettings.PREF_GROUP_COMMON_MODULES_SUFFIXES_1,
+            "Суффиксы набора 1 (через запятую):", //$NON-NLS-1$
             50,
             getFieldEditorParent());
-        addField(groupCommonModulesSuffixesField);
-        setFieldTooltip(groupCommonModulesSuffixesField,
-            "Суффикс отрезается от имени модуля, чтобы получить имя группы. Если у модуля\n"
-            + "подходит несколько суффиксов из списка, применяется самый длинный из них."); //$NON-NLS-1$
+        addField(suffixes1Field);
+        setFieldTooltip(suffixes1Field,
+            "Комбинируемые суффиксы хвоста имени. Могут идти цепочкой в любом количестве\n"
+            + "(например Клиент + Сервер → …КлиентСервер, Клиент + ПовтИсп → …КлиентПовтИсп)."); //$NON-NLS-1$
+
+        StringFieldEditor suffixes2Field = new StringFieldEditor(
+            ComfortSettings.PREF_GROUP_COMMON_MODULES_SUFFIXES_2,
+            "Суффиксы набора 2 (через запятую):", //$NON-NLS-1$
+            50,
+            getFieldEditorParent());
+        addField(suffixes2Field);
+        setFieldTooltip(suffixes2Field,
+            "Не более одного суффикса из набора в хвосте имени — в любой позиции относительно\n"
+            + "элементов набора 1 (до, между или после): …СлужебныйКлиент, …КлиентСлужебныйСервер."); //$NON-NLS-1$
     }
 
     /** «Цвет фильтра» сразу под строкой «Улучшать списки». */

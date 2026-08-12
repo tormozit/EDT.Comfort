@@ -85,7 +85,10 @@ public class ComfortInitializer extends AbstractPreferenceInitializer
             ComfortSettings.PREF_GROUP_COMMON_MODULES_ENABLED,
             ComfortSettings.DEFAULT_GROUP_COMMON_MODULES_ENABLED);
         store.setDefault(
-            ComfortSettings.PREF_GROUP_COMMON_MODULES_SUFFIXES,
-            ComfortSettings.DEFAULT_GROUP_COMMON_MODULES_SUFFIXES);
+            ComfortSettings.PREF_GROUP_COMMON_MODULES_SUFFIXES_1,
+            ComfortSettings.DEFAULT_GROUP_COMMON_MODULES_SUFFIXES_1);
+        store.setDefault(
+            ComfortSettings.PREF_GROUP_COMMON_MODULES_SUFFIXES_2,
+            ComfortSettings.DEFAULT_GROUP_COMMON_MODULES_SUFFIXES_2);
     }
 }

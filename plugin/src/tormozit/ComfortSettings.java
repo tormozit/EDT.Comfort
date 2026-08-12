@@ -52,16 +52,30 @@ public final class ComfortSettings
      */
     public static final String PREF_GROUP_COMMON_MODULES_ENABLED = "comfort.navigator.groupCommonModules.enabled"; //$NON-NLS-1$
 
-    /** Ключ: список суффиксов имён общих модулей через запятую, используемых для группировки. */
-    public static final String PREF_GROUP_COMMON_MODULES_SUFFIXES = "comfort.navigator.groupCommonModules.suffixes"; //$NON-NLS-1$
+    /**
+     * Ключ: набор 1 комбинируемых суффиксов (через запятую). Элементы могут идти цепочкой
+     * в любом количестве; см. {@link CommonModuleGrouping}.
+     */
+    public static final String PREF_GROUP_COMMON_MODULES_SUFFIXES_1 =
+            "comfort.navigator.groupCommonModules.suffixes1"; //$NON-NLS-1$
+
+    /**
+     * Ключ: набор 2 комбинируемых суффиксов (через запятую). Не более одного элемента из набора
+     * в хвосте имени, в любой позиции относительно элементов набора 1.
+     */
+    public static final String PREF_GROUP_COMMON_MODULES_SUFFIXES_2 =
+            "comfort.navigator.groupCommonModules.suffixes2"; //$NON-NLS-1$
 
     /** Группировка общих модулей выключена по умолчанию (opt-in). */
     public static final boolean DEFAULT_GROUP_COMMON_MODULES_ENABLED = false;
 
-    /** Суффиксы по умолчанию — стандартное соглашение 1С об именовании общих модулей. */
-    public static final String DEFAULT_GROUP_COMMON_MODULES_SUFFIXES =
-            "Клиент,Сервер,КлиентСервер,ПовтИсп,КлиентПовтИсп,ВызовСервера," //$NON-NLS-1$
-            + "Переопределяемый,Изменяемый,Кэш,Вызов,Глобальный,Служебный"; //$NON-NLS-1$
+    /** Набор 1 по умолчанию — контекстные/режимные суффиксы соглашения 1С. */
+    public static final String DEFAULT_GROUP_COMMON_MODULES_SUFFIXES_1 =
+            "Клиент,Сервер,ПовтИсп,ВызовСервера,Кэш,Глобальный"; //$NON-NLS-1$
+
+    /** Набор 2 по умолчанию — роль модуля в семействе (не более одного в хвосте). */
+    public static final String DEFAULT_GROUP_COMMON_MODULES_SUFFIXES_2 =
+            "Переопределяемый,Изменяемый,Служебный"; //$NON-NLS-1$
 
     /**
      * Ключ: цвет подсветки вхождений smart-фильтра (хранятся RGB светлой темы, строка "R,G,B").
@@ -326,15 +340,27 @@ public final class ComfortSettings
         return settings.preferenceStore.getBoolean(PREF_GROUP_COMMON_MODULES_ENABLED);
     }
 
+    /** Набор 1 комбинируемых суффиксов группировки общих модулей. */
+    public static List<String> getGroupCommonModulesSuffixes1()
+    {
+        return parseSuffixList(PREF_GROUP_COMMON_MODULES_SUFFIXES_1, DEFAULT_GROUP_COMMON_MODULES_SUFFIXES_1);
+    }
+
+    /** Набор 2 комбинируемых суффиксов группировки общих модулей (не более одного в хвосте). */
+    public static List<String> getGroupCommonModulesSuffixes2()
+    {
+        return parseSuffixList(PREF_GROUP_COMMON_MODULES_SUFFIXES_2, DEFAULT_GROUP_COMMON_MODULES_SUFFIXES_2);
+    }
+
     /** Разбирает список суффиксов из хранилища (через запятую, с обрезкой пробелов). */
-    public static List<String> getGroupCommonModulesSuffixes()
+    private static List<String> parseSuffixList(String prefKey, String defaultValue)
     {
         ComfortSettings settings = instance;
         String raw = settings != null
-                ? settings.preferenceStore.getString(PREF_GROUP_COMMON_MODULES_SUFFIXES)
-                : DEFAULT_GROUP_COMMON_MODULES_SUFFIXES;
+                ? settings.preferenceStore.getString(prefKey)
+                : defaultValue;
         if (raw == null || raw.isBlank())
-            raw = DEFAULT_GROUP_COMMON_MODULES_SUFFIXES;
+            raw = defaultValue;
         List<String> result = new ArrayList<>();
         for (String part : raw.split(",")) //$NON-NLS-1$
         {
