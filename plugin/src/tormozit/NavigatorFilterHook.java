@@ -749,6 +749,9 @@ public final class NavigatorFilterHook implements IStartup
      */
     static void refreshAllNavigators()
     {
+        // Явное обновление (в т.ч. после «Применить и закрыть») — кэш группировки общих модулей
+        // может быть построен по старым настройкам/составу объектов (issue #285).
+        CommonModuleGroupContentProvider.invalidateGroupingCache();
         IWorkbench wb = PlatformUI.getWorkbench();
         if (wb == null)
             return;

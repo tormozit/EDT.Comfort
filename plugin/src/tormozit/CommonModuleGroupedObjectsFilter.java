@@ -2,10 +2,8 @@ package tormozit;
 
 import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 
 import org.eclipse.jface.viewers.StructuredViewer;
 import org.eclipse.jface.viewers.TreePath;
@@ -40,29 +38,20 @@ public final class CommonModuleGroupedObjectsFilter extends ViewerFilter
         return result;
     }
 
+    /**
+     * Принадлежность модуля группе берётся из того же кэша, что и сами узлы-группы
+     * ({@link CommonModuleGroupContentProvider#groupNodeFor}), а не пересчитывается заново по
+     * переданному набору элементов (issue #285): пересчёт стоил {@code getName()} из BM на каждый
+     * модуль при каждом вызове фильтра, а результат к тому же мог разойтись с составом групп, если
+     * другой фильтр уже отсеял часть модулей из набора.
+     */
     private static Object[] hideGroupedModules(Object[] elements)
     {
-        List<CommonModule> siblings = new ArrayList<>();
-        for (Object element : elements)
-            if (element instanceof CommonModule cm)
-                siblings.add(cm);
-        if (siblings.isEmpty())
-            return elements;
-
-        Map<String, List<CommonModule>> groups =
-                CommonModuleGrouping.groupBySuffix(siblings, ComfortSettings.getGroupCommonModulesSuffixes());
-        if (groups.isEmpty())
-            return elements;
-
-        Set<CommonModule> grouped = new HashSet<>();
-        for (List<CommonModule> members : groups.values())
-            grouped.addAll(members);
-
         List<Object> result = new ArrayList<>(elements.length);
         for (Object element : elements)
-            if (!(element instanceof CommonModule cm) || !grouped.contains(cm))
+            if (!(element instanceof CommonModule cm) || CommonModuleGroupContentProvider.groupNodeFor(cm) == null)
                 result.add(element);
-        return result.toArray();
+        return result.size() == elements.length ? elements : result.toArray();
     }
 
     /**
@@ -95,11 +84,19 @@ public final class CommonModuleGroupedObjectsFilter extends ViewerFilter
      * при снятии текстового фильтра (issue #117). Ключ — список участников группы (у {@link List}
      * {@code equals()} по содержимому, а сам список у {@link CommonModuleGrouping} строится в
      * стабильном порядке из тех же EObject, так что кэш реально «бьёт» между проходами).
-     * Короткий TTL + сброс при смене экземпляра {@code subsystemsFilter} — чтобы не залипнуть
-     * на устаревшем результате при реальном изменении выбранных подсистем.
+     * Сброс при смене экземпляра {@code subsystemsFilter} — чтобы не залипнуть на устаревшем
+     * результате при реальном изменении выбранных подсистем.
+     *
+     * <p>Устаревание — по ПАУЗЕ без обращений, а не по возрасту записи (issue #285): пересборка
+     * дерева на большой конфигурации длится дольше прежних 300 мс, поэтому «возрастной» TTL
+     * истекал прямо посреди неё и кэш чистился, ни разу толком не сработав. Пауза
+     * {@link #EMPTY_CACHE_IDLE_MS} означает, что пересборка закончилась;
+     * {@link #EMPTY_CACHE_MAX_AGE_MS} — жёсткий предел на случай непрерывного потока обращений.
      */
-    private static final long EMPTY_CACHE_TTL_MS = 300;
-    private static long emptyCacheTimestamp;
+    private static final long EMPTY_CACHE_IDLE_MS = 500;
+    private static final long EMPTY_CACHE_MAX_AGE_MS = 3000;
+    private static long emptyCacheBuiltAt;
+    private static long emptyCacheLastUse;
     private static Object emptyCacheFilterKey;
     private static final Map<List<CommonModule>, Boolean> emptyCache = new HashMap<>();
 
@@ -107,12 +104,15 @@ public final class CommonModuleGroupedObjectsFilter extends ViewerFilter
             ObjectSetSubsystemsFilterBridge.CombinedSubsystemsFilter subsystemsFilter, CommonModuleGroupNode group)
     {
         long now = System.currentTimeMillis();
-        if (subsystemsFilter != emptyCacheFilterKey || now - emptyCacheTimestamp > EMPTY_CACHE_TTL_MS)
+        if (subsystemsFilter != emptyCacheFilterKey
+                || now - emptyCacheLastUse > EMPTY_CACHE_IDLE_MS
+                || now - emptyCacheBuiltAt > EMPTY_CACHE_MAX_AGE_MS)
         {
             emptyCache.clear();
             emptyCacheFilterKey = subsystemsFilter;
-            emptyCacheTimestamp = now;
+            emptyCacheBuiltAt = now;
         }
+        emptyCacheLastUse = now;
         List<CommonModule> members = group.getMembers();
         Boolean cached = emptyCache.get(members);
         if (cached != null)

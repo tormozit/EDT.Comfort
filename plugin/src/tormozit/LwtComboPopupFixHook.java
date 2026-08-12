@@ -15,15 +15,16 @@ import org.eclipse.ui.IStartup;
 import org.osgi.framework.Bundle;
 
 /**
- * Фикс для https://github.com/1C-Company/1c-edt-issues/issues/2186 — пропадает подсветка
- * наведения в выпадающих списках LWT-комбобоксов ({@code com._1c.g5.lwt.controls.LightCombo}
- * и {@code LightImageCombo}) в светлой теме. Механизм используется практически везде, где AEF2
- * рисует поле выбора значения (палитра свойств, редакторы объектов метаданных) — см.
+ * Фиксы штатных выпадающих списков LWT-комбобоксов ({@code com._1c.g5.lwt.controls.LightCombo}
+ * и {@code LightImageCombo}) — подсветка текущей строки в светлой теме
+ * (https://github.com/1C-Company/1c-edt-issues/issues/2186) и прокрутка колесом мыши.
+ * Механизм используется практически везде, где AEF2 рисует поле выбора значения (палитра
+ * свойств, редакторы объектов метаданных) — см.
  * {@code com._1c.g5.aef2.standard.lwt.views.LwtComboView.createControl()}, который создаёт
  * {@code LightCombo} и красит границу/фон/текст поля, но ни разу не вызывает
  * {@code combo.setSelectedColor(...)}.
  *
- * <p>Корень проблемы: при заполнении попап-списка {@code LightCombo} делает
+ * <p><b>Подсветка.</b> При заполнении попап-списка {@code LightCombo} делает
  * {@code item.setSelectedColor(this.getSelectedColor())} — затирает корректный цвет, который
  * {@code AbstractLightItem.initColors()} уже взял из {@code ColorRegistry}
  * ({@code listItemSelectedColor}), своим собственным полем {@code selectedColor}. Раз AEF2 его не
@@ -31,15 +32,22 @@ import org.osgi.framework.Bundle;
  * даёт {@code color=null}, и {@code GC.fillRectangle} просто не вызывается: элемент визуально не
  * подсвечивается, хотя модель ({@code isSelected}) реально меняется при наведении.
  *
- * <p>Фикс: при первой встрече каждого {@code LightCombo}/{@code LightImageCombo} (через живую
- * модель попап-списка — {@code SwtLightComposite.getSwtLightComposite} + обход
+ * <p>Фикс подсветки: при первой встрече каждого {@code LightCombo}/{@code LightImageCombo} (через
+ * живую модель попап-списка — {@code SwtLightComposite.getSwtLightComposite} + обход
  * {@code getChildren()}, синтетическое поле {@code this$0} у {@code LightComboList} ведёт к
  * владеющему combo) — если у combo {@code getSelectedColor()==null}, проставляем светлый цвет
  * через публичный {@code setSelectedColor(Color)}. Дополнительно чиним уже созданные (заполненные
  * с {@code null}) элементы текущего списка напрямую и просим перерисовку — чтобы уже открытый
  * в этот момент попап тоже сразу поправился, а не только следующие открытия.
+ *
+ * <p><b>Прокрутка колесом.</b> ОС шлёт {@code WM_MOUSEWHEEL} в активное окно, а не в попап под
+ * курсором; фокус обычно остаётся в поле комбо. Штатный {@code LightPopup} вешает Display-фильтр
+ * на {@code SWT.MouseWheel}, но только гасит {@code event.doit} у «чужих» виджетов — сам
+ * {@code scrollVertically} не вызывает, поэтому длинный список не крутится. Фикс: тот же приём,
+ * что в {@link TypeComboOverlayHook} — Display-фильтр смотрит контрол под курсором, находит
+ * открытый попап через модель списка и зовёт публичный {@code LightPopup.scrollVertically}.
  */
-public final class LwtComboSelectedColorFixHook implements IStartup
+public final class LwtComboPopupFixHook implements IStartup
 {
     private static final String LWT_BUNDLE_ID = "com._1c.g5.lwt"; //$NON-NLS-1$
 
@@ -56,12 +64,16 @@ public final class LwtComboSelectedColorFixHook implements IStartup
     {
         try
         {
-            Display.getDefault().asyncExec(
-                () -> Display.getDefault().addFilter(SWT.Paint, LwtComboSelectedColorFixHook::onGlobalPaint));
+            Display.getDefault().asyncExec(() ->
+            {
+                Display display = Display.getDefault();
+                display.addFilter(SWT.Paint, LwtComboPopupFixHook::onGlobalPaint);
+                display.addFilter(SWT.MouseWheel, LwtComboPopupFixHook::onGlobalMouseWheel);
+            });
         }
         catch (Exception e)
         {
-            // молча — при сбое просто не появится подсветка, штатное поведение не ломается
+            // молча — при сбое просто не появится подсветка/прокрутка, штатное поведение не ломается
         }
     }
 
@@ -93,6 +105,55 @@ public final class LwtComboSelectedColorFixHook implements IStartup
         catch (Exception e)
         {
             // молча — диагностику см. в истории чата/снимках при необходимости
+        }
+    }
+
+    /**
+     * Display-фильтр {@link SWT#MouseWheel}: событие приходит активному виджету (обычно полю
+     * комбо), а не попапу под курсором. Если курсор над открытым списком LightCombo — крутим
+     * {@code LightPopup.scrollVertically} и гасим дальнейшую доставку, чтобы не скроллился фон.
+     */
+    private static void onGlobalMouseWheel(Event event)
+    {
+        try
+        {
+            Display display = event.display != null ? event.display : Display.getCurrent();
+            if (display == null)
+                return;
+            Control underCursor = display.getCursorControl();
+            if (underCursor == null || underCursor.isDisposed())
+                return;
+
+            Object list = resolveLightListModel(underCursor);
+            if (list == null)
+                return;
+            if (!list.getClass().getName().startsWith("com._1c.g5.lwt.controls.")) //$NON-NLS-1$
+                return;
+
+            Object combo = getFieldValue(list, "this$0", Object.class); //$NON-NLS-1$
+            if (combo == null)
+                return;
+
+            Object popup = getFieldValue(combo, "popup", Object.class); //$NON-NLS-1$
+            if (popup == null)
+                return;
+            Boolean visible = invoke(popup, "isVisible"); //$NON-NLS-1$
+            if (visible == null || !visible.booleanValue())
+                return;
+
+            int lineHeight = 16;
+            Integer measured = invoke(list, "getLineHeight"); //$NON-NLS-1$
+            if (measured != null && measured.intValue() > 0)
+                lineHeight = measured.intValue();
+            // count > 0 — колесо «от себя» (к началу списка); scrollVertically добавляет к origin.y
+            int delta = -event.count * Math.max(1, lineHeight / 3);
+            Method scrollVertically = popup.getClass().getMethod("scrollVertically", int.class); //$NON-NLS-1$
+            scrollVertically.invoke(popup, Integer.valueOf(delta));
+            event.doit = false;
+        }
+        catch (Exception e)
+        {
+            // молча — при сбое остаётся штатное (нерабочее) поведение колеса
         }
     }
 

@@ -1,5 +1,7 @@
 package tormozit;
 
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 
 import org.eclipse.core.runtime.preferences.InstanceScope;
@@ -16,8 +18,10 @@ import org.eclipse.jface.viewers.ILabelProviderListener;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.StyledCellLabelProvider;
 import org.eclipse.jface.viewers.TableViewer;
+import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.viewers.ViewerCell;
 import org.eclipse.jface.viewers.ViewerColumn;
+import org.eclipse.jface.viewers.ViewerComparator;
 import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.SashForm;
@@ -60,6 +64,8 @@ import org.eclipse.ui.preferences.ScopedPreferenceStore;
  *       (полное имя метаданных через {@link GetRef#resolveFullNameOrNull}) и «Статус»
  *       (Добавлен/Изменён/Удалён/Переименован/Скопирован — {@code FileDiff.getChange()},
  *       по образцу колонки «Статус» в панели «Индексирование Git», см. {@code GitStagingFilterHook}).</li>
+ *   <li>Сортировка по клику на заголовок колонки (как в {@link GitStagingFilterHook}):
+ *       повторный клик меняет направление; индикатор в шапке.</li>
  *   <li>{@link FormTableInteraction}: выбор ячейки, подсветка активной колонки,
  *       копирование текста ячейки (Ctrl+C / меню).</li>
  *   <li>Поле фильтра {@link FilterInputBox} ({@code SearchBox} с лупой) над таблицей
@@ -90,6 +96,12 @@ public final class GitHistoryFileColumnsHook implements IStartup
     private static final String KEY_COL_TYPE_WIDTH = "colTypeWidth"; //$NON-NLS-1$
     private static final String KEY_COL_PATH_WIDTH = "colPathWidth"; //$NON-NLS-1$
     private static final String KEY_COL_STATUS_WIDTH = "colStatusWidth"; //$NON-NLS-1$
+
+    private static final String COLUMN_LOGICAL_KEY = "tormozit.gitHistoryColumnLogical"; //$NON-NLS-1$
+    private static final int COL_FILE = 0;
+    private static final int COL_TYPE = 1;
+    private static final int COL_PATH = 2;
+    private static final int COL_STATUS = 3;
 
     private static final String EGIT_UI_PLUGIN_ID = "org.eclipse.egit.ui"; //$NON-NLS-1$
 
@@ -284,29 +296,189 @@ public final class GitHistoryFileColumnsHook implements IStartup
         fileCol.setText("Файл"); //$NON-NLS-1$
         fileCol.setToolTipText("Путь к файлу в репозитории" + Global.pluginSignForTooltip()); //$NON-NLS-1$
         fileCol.setResizable(true);
+        fileCol.setMoveable(true);
         fileCol.setWidth(300);
+        fileCol.setData(COLUMN_LOGICAL_KEY, Integer.valueOf(COL_FILE));
 
         TableColumn typeCol = new TableColumn(table, SWT.LEFT, 1);
         typeCol.setText("Тип"); //$NON-NLS-1$
         typeCol.setToolTipText("Расширение файла" + Global.pluginSignForTooltip()); //$NON-NLS-1$
         typeCol.setResizable(true);
+        typeCol.setMoveable(true);
         typeCol.setWidth(60);
+        typeCol.setData(COLUMN_LOGICAL_KEY, Integer.valueOf(COL_TYPE));
 
         TableColumn pathCol = new TableColumn(table, SWT.LEFT, 2);
         pathCol.setText("Путь"); //$NON-NLS-1$
         pathCol.setToolTipText("Полное имя объекта метаданных" + Global.pluginSignForTooltip()); //$NON-NLS-1$
         pathCol.setResizable(true);
+        pathCol.setMoveable(true);
         pathCol.setWidth(250);
+        pathCol.setData(COLUMN_LOGICAL_KEY, Integer.valueOf(COL_PATH));
 
         TableColumn statusCol = new TableColumn(table, SWT.LEFT, 3);
         statusCol.setText("Статус"); //$NON-NLS-1$
         statusCol.setToolTipText("Статус изменения файла в коммите" + Global.pluginSignForTooltip()); //$NON-NLS-1$
         statusCol.setResizable(true);
+        statusCol.setMoveable(true);
         statusCol.setWidth(90);
+        statusCol.setData(COLUMN_LOGICAL_KEY, Integer.valueOf(COL_STATUS));
 
         table.setHeaderVisible(true);
         table.setLinesVisible(true);
         return new TableColumn[] { fileCol, typeCol, pathCol, statusCol };
+    }
+
+    // -----------------------------------------------------------------------
+    // Сортировка по клику на заголовок
+    // -----------------------------------------------------------------------
+
+    /** Состояние сортировки на одну таблицу (повторный клик — смена направления). */
+    private static final class SortState
+    {
+        int logical = -1;
+        boolean ascending = true;
+    }
+
+    /**
+     * Клик по заголовку: сортировка по логической колонке (не по visual index после reorder).
+     * Выделение сохраняем по значениям «Файл» — без {@link TableViewer#setSelection}
+     * (VIRTUAL+hashlookup сбрасывает).
+     */
+    private static void installColumnSort(TableViewer viewer, Table table, TableColumn[] cols,
+        FormTableInteraction[] interactionRef)
+    {
+        SortState state = new SortState();
+        for (TableColumn col : cols)
+        {
+            col.addListener(SWT.Selection, e ->
+            {
+                Object data = col.getData(COLUMN_LOGICAL_KEY);
+                if (!(data instanceof Integer logicalObj))
+                    return;
+                sortBy(viewer, table, state, logicalObj.intValue(), col, interactionRef);
+            });
+        }
+    }
+
+    private static void sortBy(TableViewer viewer, Table table, SortState state, int logical,
+        TableColumn column, FormTableInteraction[] interactionRef)
+    {
+        if (viewer == null || table == null || table.isDisposed() || column == null || column.isDisposed())
+            return;
+        state.ascending = state.logical == logical ? !state.ascending : true;
+        state.logical = logical;
+
+        String[] savedFiles = captureSelectedFileColumnValues(table);
+        final int sortLogical = logical;
+        final boolean ascending = state.ascending;
+        viewer.setComparator(new ViewerComparator()
+        {
+            @Override
+            public int compare(Viewer v, Object e1, Object e2)
+            {
+                int cmp = String.CASE_INSENSITIVE_ORDER.compare(
+                    sortKey(e1, sortLogical), sortKey(e2, sortLogical));
+                return ascending ? cmp : -cmp;
+            }
+        });
+        table.setSortColumn(column);
+        table.setSortDirection(ascending ? SWT.UP : SWT.DOWN);
+        selectRowsByFileColumnValues(table, savedFiles);
+        FormTableInteraction interaction = interactionRef != null ? interactionRef[0] : null;
+        if (interaction != null)
+            interaction.resyncSelectionTheme();
+        Debug.log("sortBy logical=" + logical + " ascending=" + ascending //$NON-NLS-1$ //$NON-NLS-2$
+            + " saved=" + savedFiles.length); //$NON-NLS-1$
+    }
+
+    /** Ключ сортировки — тот же текст, что в колонке / filterTextResolver. */
+    private static String sortKey(Object element, int logical)
+    {
+        Object pathObj = Global.call(element, "getPath"); //$NON-NLS-1$
+        String path = pathObj instanceof String s ? s : ""; //$NON-NLS-1$
+        return switch (logical)
+        {
+            case COL_TYPE -> extensionOf(path);
+            case COL_PATH ->
+            {
+                String fullName = GetRef.resolveFullNameOrNull(path);
+                yield fullName != null ? fullName : ""; //$NON-NLS-1$
+            }
+            case COL_STATUS -> statusText(element);
+            default -> path;
+        };
+    }
+
+    private static String[] captureSelectedFileColumnValues(Table table)
+    {
+        if (table == null || table.isDisposed())
+            return new String[0];
+        TableItem[] sel = table.getSelection();
+        if (sel == null || sel.length == 0)
+            return new String[0];
+        ArrayList<String> paths = new ArrayList<>(sel.length);
+        for (TableItem item : sel)
+        {
+            if (item == null || item.isDisposed())
+                continue;
+            String file = captureFileColumnValueFromItem(item);
+            if (file != null && !file.isEmpty())
+                paths.add(file);
+        }
+        return paths.toArray(new String[0]);
+    }
+
+    private static String captureFileColumnValueFromItem(TableItem item)
+    {
+        // Материализация VIRTUAL, затем путь из модели (не getText(0) — после reorder индекс
+        // визуальной колонки ≠ «Файл»).
+        Object data = item.getData();
+        String fromModel = fileColumnValueOf(data);
+        if (fromModel != null && !fromModel.isEmpty())
+            return fromModel;
+        String fileCol = item.getText(0);
+        return fileCol != null && !fileCol.isEmpty() ? fileCol : null;
+    }
+
+    private static void selectRowsByFileColumnValues(Table table, String[] fileColumnValues)
+    {
+        if (fileColumnValues == null || fileColumnValues.length == 0
+            || table == null || table.isDisposed())
+            return;
+        LinkedHashSet<String> want = new LinkedHashSet<>();
+        for (String v : fileColumnValues)
+        {
+            if (v != null && !v.isEmpty())
+                want.add(v);
+        }
+        if (want.isEmpty())
+            return;
+        int count = table.getItemCount();
+        ArrayList<Integer> indices = new ArrayList<>(want.size());
+        for (int i = 0; i < count && indices.size() < want.size(); i++)
+        {
+            TableItem item = table.getItem(i);
+            if (item == null || item.isDisposed())
+                continue;
+            String col0 = captureFileColumnValueFromItem(item);
+            if (col0 != null && want.contains(col0))
+                indices.add(Integer.valueOf(i));
+        }
+        if (indices.isEmpty())
+            return;
+        int[] idx = new int[indices.size()];
+        for (int i = 0; i < indices.size(); i++)
+            idx[i] = indices.get(i).intValue();
+        table.setSelection(idx);
+        table.showSelection();
+        TableItem[] selItems = table.getSelection();
+        Event sel = new Event();
+        sel.type = SWT.Selection;
+        sel.widget = table;
+        if (selItems.length > 0)
+            sel.item = selItems[0];
+        table.notifyListeners(SWT.Selection, sel);
     }
 
     // -----------------------------------------------------------------------
@@ -491,6 +663,8 @@ public final class GitHistoryFileColumnsHook implements IStartup
             KEY_COL_FILE_WIDTH, KEY_COL_TYPE_WIDTH, KEY_COL_PATH_WIDTH, KEY_COL_STATUS_WIDTH);
         interaction.install(hasSavedColumnWidths);
         interactionRef[0] = interaction;
+        installColumnSort(fileViewer, table, new TableColumn[] { fileCol, typeCol, pathCol, statusCol },
+            interactionRef);
         table.addDisposeListener(e ->
         {
             boolean fillMode = interaction.isColumnsExactFill();
@@ -548,11 +722,7 @@ public final class GitHistoryFileColumnsHook implements IStartup
         if (item == null || item.isDisposed())
             return null;
         // Материализация VIRTUAL → текст колонки 0 = FileDiff.getPath().
-        item.getData();
-        String fileCol = item.getText(0);
-        if (fileCol != null && !fileCol.isEmpty())
-            return fileCol;
-        return fileColumnValueOf(item.getData());
+        return captureFileColumnValueFromItem(item);
     }
 
     /** Текст колонки «Файл» для элемента ({@code FileDiff.getPath()}). */

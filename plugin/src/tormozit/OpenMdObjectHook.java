@@ -151,7 +151,7 @@ public class OpenMdObjectHook implements IStartup {
             Global.invoke(dialog, "setListLabelProvider", smartLp);
             Global.invoke(dialog, "setListSelectionLabelDecorator", smartLp);
 
-            OpenMdObjectComparator comparator = new OpenMdObjectComparator(smartLp);
+            OpenMdObjectComparator comparator = new OpenMdObjectComparator(dialog, smartLp);
             installLazyListSortHook(dialog, comparator);
             installDedupeHooks(shell, dialog, comparator);
 
@@ -614,7 +614,11 @@ public class OpenMdObjectHook implements IStartup {
         });
     }
 
-    /** Схлопывает дубли ObjectDescriptionPair с одним EObjectURI (identity Set их не ловит). */
+    /**
+     * Схлопывает дубли ObjectDescriptionPair с одним EObjectURI (identity Set их не ловит).
+     * При коллизии оставляем экземпляр из SelectionHistory — иначе
+     * {@code isHistoryElement} (по identity) ломается и пропадает секция «последние».
+     */
     @SuppressWarnings("unchecked")
     private static int dedupeContentProviderItems(Object dialog)
     {
@@ -637,7 +641,11 @@ public class OpenMdObjectHook implements IStartup {
             String key = itemDedupeKey(item);
             if (key == null)
                 key = "anon-" + (++anon) + "-" + System.identityHashCode(item); //$NON-NLS-1$ //$NON-NLS-2$
-            unique.putIfAbsent(key, item);
+            Object prev = unique.get(key);
+            if (prev == null)
+                unique.put(key, item);
+            else if (!isSelectionHistoryElement(dialog, prev) && isSelectionHistoryElement(dialog, item))
+                unique.put(key, item);
         }
         int removed = snapshot.size() - unique.size();
         if (removed <= 0)
@@ -647,14 +655,14 @@ public class OpenMdObjectHook implements IStartup {
             items.clear();
             items.addAll(unique.values());
         }
-        dedupeProviderListByKey(cp, "lastFilteredItems"); //$NON-NLS-1$
-        dedupeProviderListByKey(cp, "lastSortedItems"); //$NON-NLS-1$
+        dedupeProviderListByKey(dialog, cp, "lastFilteredItems"); //$NON-NLS-1$
+        dedupeProviderListByKey(dialog, cp, "lastSortedItems"); //$NON-NLS-1$
         Global.tempLog("OpenMdObject", "dedupe removed=" + removed + " left=" + unique.size()); //$NON-NLS-1$ //$NON-NLS-2$
         return removed;
     }
 
     @SuppressWarnings("unchecked")
-    private static void dedupeProviderListByKey(Object cp, String fieldName)
+    private static void dedupeProviderListByKey(Object dialog, Object cp, String fieldName)
     {
         Object listObj = Global.getField(cp, fieldName);
         if (!(listObj instanceof List))
@@ -666,16 +674,49 @@ public class OpenMdObjectHook implements IStartup {
             int anon = 0;
             for (Object item : list)
             {
+                if (isItemsListSeparator(item))
+                {
+                    unique.put("sep-" + (++anon), item); //$NON-NLS-1$
+                    continue;
+                }
                 String key = itemDedupeKey(item);
                 if (key == null)
                     key = "anon-" + (++anon) + "-" + System.identityHashCode(item); //$NON-NLS-1$ //$NON-NLS-2$
-                unique.putIfAbsent(key, item);
+                Object prev = unique.get(key);
+                if (prev == null)
+                    unique.put(key, item);
+                else if (!isSelectionHistoryElement(dialog, prev) && isSelectionHistoryElement(dialog, item))
+                    unique.put(key, item);
             }
             if (unique.size() == list.size())
                 return;
             list.clear();
             list.addAll(unique.values());
         }
+    }
+
+    private static boolean isItemsListSeparator(Object item)
+    {
+        if (item == null)
+            return false;
+        String name = item.getClass().getName();
+        return name.contains("ItemsListSeparator"); //$NON-NLS-1$
+    }
+
+    private static boolean isSelectionHistoryElement(Object dialog, Object item)
+    {
+        if (dialog == null || item == null || isItemsListSeparator(item))
+            return false;
+        Object history = Global.invoke(dialog, "getSelectionHistory"); //$NON-NLS-1$
+        if (history == null)
+        {
+            Object cp = Global.getField(dialog, "contentProvider"); //$NON-NLS-1$
+            if (cp != null)
+                history = Global.invoke(cp, "getSelectionHistory"); //$NON-NLS-1$
+        }
+        if (history == null)
+            return false;
+        return Boolean.TRUE.equals(Global.invoke(history, "contains", item)); //$NON-NLS-1$
     }
 
     private static String itemDedupeKey(Object item)
@@ -701,13 +742,108 @@ public class OpenMdObjectHook implements IStartup {
     @SuppressWarnings("unchecked")
     private static void resortDialogLists(Object dialog, OpenMdObjectComparator comparator)
     {
-        if (dialog == null || comparator == null || comparator.matcher == null || comparator.matcher.isEmpty)
+        if (dialog == null || comparator == null)
             return;
         Object cp = Global.getField(dialog, "contentProvider"); //$NON-NLS-1$
         if (cp == null)
             return;
+        comparator.refreshHistoryOrder(dialog, cp);
+        // Пустой фильтр: только история — новейшие первыми (штатный HistoryComparator
+        // внутри getSortedItems сортирует историю алфавитом через getItemsComparator).
+        if (comparator.matcher == null || comparator.matcher.isEmpty)
+        {
+            sortProviderListsByHistory(dialog, cp);
+            return;
+        }
+        // История сверху (как HistoryComparator), иначе getFilteredItems не вставит
+        // разделитель «Совпадения в рабочей области».
         sortProviderList(cp, "lastSortedItems", comparator); //$NON-NLS-1$
         sortProviderList(cp, "lastFilteredItems", comparator); //$NON-NLS-1$
+    }
+
+    /**
+     * Заполняет {@code lastSortedItems} из {@code items} в порядке доступа истории
+     * (новые сверху), чтобы штатный {@code getSortedItems} не пересортировал алфавитом
+     * (пропуск, когда {@code lastSortedItems.size() == items.size()}).
+     */
+    @SuppressWarnings("unchecked")
+    private static void sortProviderListsByHistory(Object dialog, Object cp)
+    {
+        Map<String, Integer> orderByUri = buildHistoryAccessOrder(dialog, cp);
+        Object itemsObj = Global.getField(cp, "items"); //$NON-NLS-1$
+        Set<Object> items = itemsObj instanceof Set ? (Set<Object>) itemsObj : null;
+        fillAndSortByHistory(cp, "lastSortedItems", items, orderByUri); //$NON-NLS-1$
+        fillAndSortByHistory(cp, "lastFilteredItems", items, orderByUri); //$NON-NLS-1$
+    }
+
+    /** URI → индекс в SelectionHistory (больше = новее; LinkedHashSet: старые→новые). */
+    private static Map<String, Integer> buildHistoryAccessOrder(Object dialog, Object cp)
+    {
+        Map<String, Integer> order = new HashMap<>();
+        Object history = Global.invoke(cp, "getSelectionHistory"); //$NON-NLS-1$
+        if (history == null)
+            history = Global.invoke(dialog, "getSelectionHistory"); //$NON-NLS-1$
+        if (history == null)
+            return order;
+        Object raw = Global.invoke(history, "getHistoryItems"); //$NON-NLS-1$
+        if (!(raw instanceof Object[]))
+            return order;
+        Object[] historyItems = (Object[]) raw;
+        for (int i = 0; i < historyItems.length; i++)
+        {
+            String key = itemDedupeKey(historyItems[i]);
+            if (key != null)
+                order.put(key, i);
+        }
+        return order;
+    }
+
+    @SuppressWarnings("unchecked")
+    private static void fillAndSortByHistory(Object cp, String fieldName, Set<Object> items,
+            Map<String, Integer> orderByUri)
+    {
+        Object listObj = Global.getField(cp, fieldName);
+        if (!(listObj instanceof List))
+            return;
+        List<Object> list = (List<Object>) listObj;
+        synchronized (list)
+        {
+            // Всегда пересобираем из items: после reset lastFilteredItems не чистится,
+            // а совпадение size со старым содержимым оставило бы чужой порядок/состав.
+            if (items != null)
+            {
+                synchronized (items)
+                {
+                    list.clear();
+                    list.addAll(items);
+                }
+            }
+            list.sort((a, b) -> compareByHistoryAccess(a, b, orderByUri));
+        }
+    }
+
+    /** Новее (больший индекс истории) выше; вне истории — в конец, алфавит между собой. */
+    private static int compareByHistoryAccess(Object a, Object b, Map<String, Integer> orderByUri)
+    {
+        Integer ia = orderIndex(a, orderByUri);
+        Integer ib = orderIndex(b, orderByUri);
+        if (ia != null && ib != null)
+            return Integer.compare(ib, ia);
+        if (ia != null)
+            return -1;
+        if (ib != null)
+            return 1;
+        String ta = a != null ? a.toString() : ""; //$NON-NLS-1$
+        String tb = b != null ? b.toString() : ""; //$NON-NLS-1$
+        return ta.compareToIgnoreCase(tb);
+    }
+
+    private static Integer orderIndex(Object item, Map<String, Integer> orderByUri)
+    {
+        if (item == null || orderByUri.isEmpty())
+            return null;
+        String key = itemDedupeKey(item);
+        return key != null ? orderByUri.get(key) : null;
     }
 
     @SuppressWarnings("unchecked")
@@ -896,11 +1032,14 @@ public class OpenMdObjectHook implements IStartup {
 
     private static final class OpenMdObjectComparator {
 
+        private final Object dialog;
         private final ILabelProvider labelProvider;
         private SmartMatcher matcher;
+        private Map<String, Integer> historyOrder = Map.of();
         private final Map<Object, Integer> premiumCache = new HashMap<>();
 
-        public OpenMdObjectComparator(ILabelProvider labelProvider) {
+        public OpenMdObjectComparator(Object dialog, ILabelProvider labelProvider) {
+            this.dialog = dialog;
             this.labelProvider = labelProvider;
         }
 
@@ -909,22 +1048,43 @@ public class OpenMdObjectHook implements IStartup {
             this.premiumCache.clear();
         }
 
+        void refreshHistoryOrder(Object dialog, Object cp) {
+            this.historyOrder = buildHistoryAccessOrder(dialog != null ? dialog : this.dialog, cp);
+        }
+
         public int compareItems(Object o1, Object o2) {
             return compareElements(o1, o2);
         }
 
         private int compareElements(Object o1, Object o2) {
-            if (matcher == null || matcher.fullPattern.isEmpty()) {
-                return compareAlphabetically(o1, o2);
+            boolean sep1 = isItemsListSeparator(o1);
+            boolean sep2 = isItemsListSeparator(o2);
+            if (sep1 || sep2) {
+                if (sep1 && sep2)
+                    return 0;
+                // Разделитель — после истории, перед остальными (как штатный getFilteredItems).
+                if (sep1)
+                    return isSelectionHistoryElement(dialog, o2) ? 1 : -1;
+                return isSelectionHistoryElement(dialog, o1) ? -1 : 1;
             }
+
+            boolean h1 = isSelectionHistoryElement(dialog, o1);
+            boolean h2 = isSelectionHistoryElement(dialog, o2);
+            if (h1 != h2)
+                return h1 ? -1 : 1;
+
+            if (h1)
+                return compareByHistoryAccess(o1, o2, historyOrder);
+
+            if (matcher == null || matcher.isEmpty)
+                return compareAlphabetically(o1, o2);
 
             int p1 = premiumCache.computeIfAbsent(o1,
                     k -> matcher.computeNamePremium(getObjectName(labelProvider.getText(k))));
             int p2 = premiumCache.computeIfAbsent(o2,
                     k -> matcher.computeNamePremium(getObjectName(labelProvider.getText(k))));
-            if (p1 != p2) {
+            if (p1 != p2)
                 return Integer.compare(p2, p1);
-            }
             return compareAlphabetically(o1, o2);
         }
 

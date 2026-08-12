@@ -3,7 +3,7 @@
 <plugin>
   <extension point="org.eclipse.ui.startup">
     <startup class="tormozit.ComfortShutdownHook"/>
-    <startup class="tormozit.LwtComboSelectedColorFixHook"/>
+    <startup class="tormozit.LwtComboPopupFixHook"/>
     <startup class="tormozit.ActiveProjectTracker"/>
     <startup class="tormozit.CompareConfigMenuHook"/>
     <startup class="tormozit.ApplicationsViewHook"/>
@@ -52,6 +52,7 @@
          оставлен в src нетронутым, просто нигде не регистрируется. -->
     <!-- <startup class="tormozit.ListSelectionThemeHook"/> -->
     <startup class="tormozit.NavigatorFilterHook"/>
+    <startup class="tormozit.NavigatorCurrentRowKeeper"/>
     <startup class="tormozit.NavigatorShowInExplorerMenuHook"/>
     <startup class="tormozit.NavigatorOpenObjectMenuHook"/>
     <startup class="tormozit.FileSearchShowInProjectStructureMenuHook"/>
