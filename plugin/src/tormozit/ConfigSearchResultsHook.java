@@ -212,6 +212,8 @@ public final class ConfigSearchResultsHook implements IStartup
                 @Override public void queryAdded(ISearchQuery query)
                 {
                     Global.tempLog("search-tree-empty", "config.queryAdded: " + describeQuery(query)); //$NON-NLS-1$ //$NON-NLS-2$
+                    // История/повторный показ без Dispose панели — сначала зафиксировать текущие ширины.
+                    saveMatchColumnStateOnUiThread();
                     onQueryEvent("queryAdded"); //$NON-NLS-1$
                 }
                 @Override public void queryRemoved(ISearchQuery query)
@@ -307,6 +309,8 @@ public final class ConfigSearchResultsHook implements IStartup
 
     private static TableViewer cachedMatchTableViewer;
     private static TableColumn cachedMatchPathColumn;
+    private static TableColumn cachedMatchPropertyColumn;
+    private static TableColumn cachedMatchLineColumn;
     private static TableColumn cachedMatchTextColumn;
     private static FormTableInteraction cachedMatchTableInteraction;
     private static final int MATCH_PATH_COLUMN_WIDTH = 220;
@@ -538,21 +542,9 @@ public final class ConfigSearchResultsHook implements IStartup
         boolean hasSavedColumnWidths = FormTableColumnState.hasSavedColumnWidths(matchSettings, KEY_COL_FILL_MODE,
             KEY_COL_PATH_WIDTH, KEY_COL_PROPERTY_WIDTH, KEY_COL_LINE_WIDTH, KEY_COL_TEXT_WIDTH);
         interaction.install(hasSavedColumnWidths);
-        outer.addDisposeListener(e ->
-        {
-            if (matchTable.isDisposed())
-                return;
-            // Путь/Текст могут быть временно скрыты (ширина 0, см. applyResults) — 0 не сохраняем,
-            // чтобы не потерять «настоящую» ширину, установленную пользователем до скрытия.
-            int pathWidth = pathCol.getColumn().isDisposed() ? 0 : pathCol.getColumn().getWidth();
-            int textWidth = textCol.getColumn().isDisposed() ? 0 : textCol.getColumn().getWidth();
-            int propertyWidth = propertyCol.getColumn().isDisposed() ? 0 : propertyCol.getColumn().getWidth();
-            int lineWidth = lineCol.getColumn().isDisposed() ? 0 : lineCol.getColumn().getWidth();
-            FormTableColumnState.saveOrderAndWidths(dialogSettings(), KEY_COL_ORDER,
-                KEY_COL_FILL_MODE, interaction.isColumnsExactFill(),
-                new String[] { KEY_COL_PATH_WIDTH, KEY_COL_PROPERTY_WIDTH, KEY_COL_LINE_WIDTH, KEY_COL_TEXT_WIDTH },
-                new int[] { pathWidth, propertyWidth, lineWidth, textWidth }, matchTable);
-        });
+        // Второстепенные данные — при закрытии панели; при повторном поиске — явно в
+        // {@link #saveMatchColumnStateOnUiThread} (Dispose не срабатывает, панель остаётся открытой).
+        outer.addDisposeListener(e -> saveMatchColumnState());
 
         // Скролл/resize открывают новые строки — довычисляем "<Pending>" и для них
         // (см. scheduleVisibleDeferredCalculations).
@@ -563,6 +555,8 @@ public final class ConfigSearchResultsHook implements IStartup
 
         cachedMatchTableViewer = matchViewer;
         cachedMatchTextColumn = textCol.getColumn();
+        cachedMatchPropertyColumn = propertyCol.getColumn();
+        cachedMatchLineColumn = lineCol.getColumn();
         cachedMatchTableInteraction = interaction;
         pageContainer.setData(MATCH_PANE_HOOKED_KEY, Boolean.TRUE);
         matchTable.addDisposeListener(e -> {
@@ -571,6 +565,8 @@ public final class ConfigSearchResultsHook implements IStartup
                 cachedMatchTableViewer = null;
                 cachedMatchTextColumn = null;
                 cachedMatchPathColumn = null;
+                cachedMatchPropertyColumn = null;
+                cachedMatchLineColumn = null;
                 cachedMatchTableInteraction = null;
             }
         });
@@ -635,9 +631,13 @@ public final class ConfigSearchResultsHook implements IStartup
         if (cachedMatchPathColumn != null && !cachedMatchPathColumn.isDisposed()
             && cachedMatchTableInteraction != null)
         {
+            // Живая ширина важнее settings: иначе каждый refresh сбрасывал бы ручную подгонку.
+            int pathWhenVisible = cachedMatchPathColumn.getWidth();
+            if (pathWhenVisible <= 0)
+                pathWhenVisible = FormTableColumnState.readWidth(dialogSettings(), KEY_COL_PATH_WIDTH,
+                    MATCH_PATH_COLUMN_WIDTH, 1);
             cachedMatchTableInteraction.setColumnHidden(cachedMatchPathColumn,
-                isTerminalTreeSelection(selectedNodes),
-                FormTableColumnState.readWidth(dialogSettings(), KEY_COL_PATH_WIDTH, MATCH_PATH_COLUMN_WIDTH, 1));
+                isTerminalTreeSelection(selectedNodes), pathWhenVisible);
         }
 
         // «Найти ссылки на объект» (BmReferenceMatch) — структурные вхождения без текста/смещения,
@@ -647,11 +647,57 @@ public final class ConfigSearchResultsHook implements IStartup
             && cachedMatchTableInteraction != null)
         {
             boolean anyText = rows.stream().anyMatch(row -> row.text != null && !row.text.isBlank());
+            int textWhenVisible = cachedMatchTextColumn.getWidth();
+            if (textWhenVisible <= 0)
+                textWhenVisible = FormTableColumnState.readWidth(dialogSettings(), KEY_COL_TEXT_WIDTH,
+                    MATCH_TEXT_COLUMN_WIDTH, 1);
             cachedMatchTableInteraction.setColumnHidden(cachedMatchTextColumn, !rows.isEmpty() && !anyText,
-                FormTableColumnState.readWidth(dialogSettings(), KEY_COL_TEXT_WIDTH, MATCH_TEXT_COLUMN_WIDTH, 1));
+                textWhenVisible);
         }
         scheduleVisibleDeferredCalculations(matchViewer);
         return tableItems.size();
+    }
+
+    /**
+     * Сохранить порядок/ширины колонок таблицы вхождений и флаг fill-mode.
+     * Вызывать с UI-потока. Путь/Текст могут быть временно скрыты (ширина 0) — 0 не пишем,
+     * чтобы не затереть последнюю видимую ширину пользователя.
+     */
+    private static void saveMatchColumnState()
+    {
+        TableViewer matchViewer = cachedMatchTableViewer;
+        if (matchViewer == null)
+            return;
+        Table matchTable = matchViewer.getTable();
+        if (matchTable == null || matchTable.isDisposed())
+            return;
+        FormTableInteraction interaction = cachedMatchTableInteraction;
+        boolean fillMode = interaction != null && interaction.isColumnsExactFill();
+        int pathWidth = columnWidthOrZero(cachedMatchPathColumn);
+        int propertyWidth = columnWidthOrZero(cachedMatchPropertyColumn);
+        int lineWidth = columnWidthOrZero(cachedMatchLineColumn);
+        int textWidth = columnWidthOrZero(cachedMatchTextColumn);
+        FormTableColumnState.saveOrderAndWidths(dialogSettings(), KEY_COL_ORDER,
+            KEY_COL_FILL_MODE, fillMode,
+            new String[] { KEY_COL_PATH_WIDTH, KEY_COL_PROPERTY_WIDTH, KEY_COL_LINE_WIDTH, KEY_COL_TEXT_WIDTH },
+            new int[] { pathWidth, propertyWidth, lineWidth, textWidth }, matchTable);
+    }
+
+    /** Как {@link #saveMatchColumnState()}, но безопасно из любого потока (query listener). */
+    private static void saveMatchColumnStateOnUiThread()
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        if (display.getThread() == Thread.currentThread())
+            saveMatchColumnState();
+        else
+            display.syncExec(ConfigSearchResultsHook::saveMatchColumnState);
+    }
+
+    private static int columnWidthOrZero(TableColumn column)
+    {
+        return column != null && !column.isDisposed() ? column.getWidth() : 0;
     }
 
     /**
@@ -2231,6 +2277,9 @@ public final class ConfigSearchResultsHook implements IStartup
         searchGeneration++;
         SAVED_TABLE_SELECTION_BY_VIEWER.clear();
         log("onSearchStarting: watch first root, gen=" + searchGeneration); //$NON-NLS-1$
+        // Панель не закрывается — Dispose не вызовется; сохранить ширины до прихода новых результатов
+        // (иначе refreshMatchTable/setColumnHidden подтянет устаревшие значения из settings).
+        saveMatchColumnStateOnUiThread();
         Display display = Display.getDefault();
         if (display == null || display.isDisposed())
             return;

@@ -52,7 +52,6 @@
          оставлен в src нетронутым, просто нигде не регистрируется. -->
     <!-- <startup class="tormozit.ListSelectionThemeHook"/> -->
     <startup class="tormozit.NavigatorFilterHook"/>
-    <startup class="tormozit.NavigatorCurrentRowKeeper"/>
     <startup class="tormozit.NavigatorShowInExplorerMenuHook"/>
     <startup class="tormozit.NavigatorOpenObjectMenuHook"/>
     <startup class="tormozit.FileSearchShowInProjectStructureMenuHook"/>
@@ -1006,6 +1005,7 @@
     <decorator
         id="tormozit.templateTypeSuffixDecorator"
         label="Тип макета (Комфорт)"
+        description="К имени макета добавляется краткий суффикс типа (HTML, табличный документ и др.) в навигаторе и в дереве макетов редактора объекта."
         lightweight="true"
         state="true"
         class="tormozit.TemplateTypeSuffixDecorator">
@@ -1019,6 +1019,7 @@
     <decorator
         id="tormozit.mdObjectUsageDecorator"
         label="Признак интегрированного объекта (Комфорт)"
+        description="В структуре проекта и в результатах поиска по файлам: «&lt;объект&gt;» — папка привязана к Configuration.mdo, «&lt;?&gt;» — mdo есть, но объекта в конфигурации нет; у групповых папок — русское название типа метаданных."
         lightweight="true"
         state="true"
         class="tormozit.MdObjectUsageDecorator">

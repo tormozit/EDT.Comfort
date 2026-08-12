@@ -87,7 +87,11 @@ public final class LongOperationNotifyHook implements IStartup
     private static final long DEDUP_MS = 5_000L;
     /** Показывать тост и при фокусе EDT, если ввода не было дольше этого порога. */
     private static final long IDLE_INPUT_MS = 30_000L;
-    /** Короткие Job (&lt; 3 с) не считаем «длительными» — тост не показываем. */
+    /**
+     * Короткие Job (&lt; 3 с) не считаем «длительными» — тост не показываем.
+     * Только для Job, стартовавших без фокуса ОС у окна EDT: то, что запустил сам
+     * пользователь из EDT, он ждёт — уведомляем независимо от длительности.
+     */
     private static final long MIN_DURATION_MS = 3_000L;
     /** Пауза после done перед подсчётом ошибок журнала (записи могут опоздать). */
     private static final int ERROR_LOG_SETTLE_MS = 1_000;
@@ -162,21 +166,25 @@ public final class LongOperationNotifyHook implements IStartup
         final long startMs;
         /** Имена проектов через {@code ", "}, либо пусто. */
         final String projectNames;
+        /** Окно EDT было на переднем плане в момент старта Job. */
+        final boolean edtForegroundAtStart;
         /** Ошибки журнала, записанные из потока именно этого Job. */
         final AtomicInteger errors;
         /** Первая из подсчитанных ошибок — её выделяем в журнале по ссылке в тосте. */
         final AtomicReference<ErrorRef> firstError;
 
-        JobTrack(long startMs, String projectNames)
+        JobTrack(long startMs, String projectNames, boolean edtForegroundAtStart)
         {
-            this(startMs, projectNames, new AtomicInteger(), new AtomicReference<>());
+            this(startMs, projectNames, edtForegroundAtStart, new AtomicInteger(),
+                new AtomicReference<>());
         }
 
-        JobTrack(long startMs, String projectNames, AtomicInteger errors,
-            AtomicReference<ErrorRef> firstError)
+        JobTrack(long startMs, String projectNames, boolean edtForegroundAtStart,
+            AtomicInteger errors, AtomicReference<ErrorRef> firstError)
         {
             this.startMs = startMs;
             this.projectNames = projectNames != null ? projectNames : ""; //$NON-NLS-1$
+            this.edtForegroundAtStart = edtForegroundAtStart;
             this.errors = errors;
             this.firstError = firstError;
         }
@@ -516,6 +524,7 @@ public final class LongOperationNotifyHook implements IStartup
                 final String projectNames = tracked.isEmpty() ? projectFromJobName(job) : tracked;
                 Global.tempLog("long-op-notify", "done op=" + operation //$NON-NLS-1$
                     + " ok=" + ok //$NON-NLS-1$
+                    + " fgAtStart=" + (track != null && track.edtForegroundAtStart) //$NON-NLS-1$
                     + " sev=" + (result != null ? result.getSeverity() : -1) //$NON-NLS-1$
                     + " durMs=" + durationMs //$NON-NLS-1$
                     + " projects=[" + projectNames + "]" //$NON-NLS-1$
@@ -536,7 +545,9 @@ public final class LongOperationNotifyHook implements IStartup
                     // Без ошибок — прежнее поведение (тост только при успехе).
                     if (errorCount == 0 && !ok)
                         return;
-                    notifyIfNeeded(operation, projectNames, durationMs, errorCount, firstError);
+                    boolean startedInBackground = finished != null && !finished.edtForegroundAtStart;
+                    notifyIfNeeded(operation, projectNames, durationMs, errorCount, firstError,
+                        startedInBackground);
                 }));
             }
         });
@@ -550,7 +561,7 @@ public final class LongOperationNotifyHook implements IStartup
         if (job == null)
             return;
         long now = System.currentTimeMillis();
-        jobTracks.putIfAbsent(job, new JobTrack(now, "")); //$NON-NLS-1$
+        jobTracks.putIfAbsent(job, new JobTrack(now, "", isEdtProcessForeground())); //$NON-NLS-1$
         String operation = matchOperation(job);
         if (operation == null)
             return;
@@ -564,7 +575,8 @@ public final class LongOperationNotifyHook implements IStartup
         if (projects.isEmpty())
             return;
         jobTracks.computeIfPresent(job, (j, prev) -> prev.projectNames.isEmpty()
-            ? new JobTrack(prev.startMs, projects, prev.errors, prev.firstError)
+            ? new JobTrack(prev.startMs, projects, prev.edtForegroundAtStart, prev.errors,
+                prev.firstError)
             : prev);
     }
 
@@ -697,7 +709,8 @@ public final class LongOperationNotifyHook implements IStartup
 
     private static void notifyIfNeeded(String operation, String projectNames, long durationMs)
     {
-        notifyIfNeeded(operation, projectNames, durationMs, 0, null);
+        // Визард «Экспорт»: операцию запускает сам пользователь из окна EDT.
+        notifyIfNeeded(operation, projectNames, durationMs, 0, null, false);
     }
 
     /**
@@ -706,13 +719,16 @@ public final class LongOperationNotifyHook implements IStartup
      *        не подавляют сообщение об ошибках)
      * @param firstError первая из подсчитанных ошибок — её строку выделяем в журнале
      *        по ссылке в тосте ({@code null} — просто открыть журнал)
+     * @param startedInBackground операция стартовала, когда окно EDT не было на переднем
+     *        плане (фоновая, не запущенная пользователем «здесь и сейчас») — только к таким
+     *        применяется отсечка по длительности
      */
     private static void notifyIfNeeded(String operation, String projectNames, long durationMs,
-        int errorCount, ErrorRef firstError)
+        int errorCount, ErrorRef firstError, boolean startedInBackground)
     {
         boolean hasErrors = errorCount > 0;
         // durationMs < 0 — старт не видели (не путать с коротким Job).
-        if (!hasErrors && durationMs >= 0L && durationMs < MIN_DURATION_MS)
+        if (!hasErrors && startedInBackground && durationMs >= 0L && durationMs < MIN_DURATION_MS)
         {
             Global.tempLog("long-op-notify", "skip short durMs=" + durationMs //$NON-NLS-1$
                 + " op=" + operation); //$NON-NLS-1$
@@ -992,6 +1008,30 @@ public final class LongOperationNotifyHook implements IStartup
         if (!isEdtWorkbenchFocused())
             return true;
         return System.currentTimeMillis() - lastInputMs.get() >= IDLE_INPUT_MS;
+    }
+
+    /**
+     * Окно EDT (любое окно нашего процесса) на переднем плане.
+     * <p>Отдельный метод от {@link #isEdtWorkbenchFocused()}: вызывается из потока Job,
+     * где обращаться к SWT-виджетам нельзя, поэтому только Win32 — окно переднего плана
+     * и его PID. Диалог, из которого пользователь запустил операцию, тоже считается EDT.
+     */
+    private static boolean isEdtProcessForeground()
+    {
+        if (!WinWindowActivator.isWindows())
+            return true;
+        try
+        {
+            HWND foreground = User32.INSTANCE.GetForegroundWindow();
+            if (foreground == null)
+                return false;
+            return WinWindowActivator.isProcessWindow(foreground, (int)ProcessHandle.current().pid());
+        }
+        catch (Throwable e)
+        {
+            Global.tempLog("long-op-notify", "process foreground check fail: " + e); //$NON-NLS-1$ //$NON-NLS-2$
+            return true;
+        }
     }
 
     /**

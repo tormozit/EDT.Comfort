@@ -3,11 +3,8 @@ package tormozit;
 import java.util.ArrayList;
 import java.util.List;
 
-import org.eclipse.core.resources.IFile;
-import org.eclipse.core.resources.IResource;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.IStructuredSelection;
-import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.search.ui.IQueryListener;
 import org.eclipse.search.ui.ISearchQuery;
@@ -38,7 +35,8 @@ import org.eclipse.ui.PlatformUI;
 /**
  * Добавляет «Показать в структуре проекта» в подменю «Комфорт» панели результатов
  * поиска по файлам ({@code org.eclipse.search.ui.views.SearchView}, страница
- * {@code FileSearchPage}) — выделяет файл в {@code org.eclipse.ui.navigator.ProjectExplorer}
+ * {@code FileSearchPage}) — выделяет файл или папку в
+ * {@code org.eclipse.ui.navigator.ProjectExplorer}
  * через {@link NavigatorShowInProjectStructureHandler}, как и одноимённая команда
  * в навигаторе EDT ({@link NavigatorShowInExplorerMenuHook}) и в панелях Git
  * ({@link GitChangedFileMenuHook}).
@@ -236,8 +234,9 @@ public final class FileSearchShowInProjectStructureMenuHook implements IStartup
                 ISelection selection = viewer.getSelection();
                 if (!(selection instanceof IStructuredSelection structured) || structured.isEmpty())
                     return;
-                IResource resource = NavigatorResourceResolver.resolve(structured.getFirstElement());
-                if (!(resource instanceof IFile file))
+                // Дерево поиска по файлам: проект/папка/файл (и строка совпадения → файл).
+                // Как в навигаторе — любой IResource, не только IFile.
+                if (NavigatorResourceResolver.resolveFirst(structured) == null)
                     return;
 
                 MenuItem item = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH, ITEM_TEXT);
@@ -247,8 +246,9 @@ public final class FileSearchShowInProjectStructureMenuHook implements IStartup
                     @Override
                     public void widgetSelected(SelectionEvent ev)
                     {
-                        NavigatorShowInProjectStructureHandler.showInProjectStructure(
-                            new StructuredSelection(file));
+                        ISelection current = viewer.getSelection();
+                        if (current instanceof IStructuredSelection currentStructured)
+                            NavigatorShowInProjectStructureHandler.showInProjectStructure(currentStructured);
                     }
                 });
                 added.add(item);

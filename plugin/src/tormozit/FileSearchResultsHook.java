@@ -84,6 +84,7 @@ public final class FileSearchResultsHook implements IStartup
     private static final String PAGE_CLASS_MARKER = "FileSearchPage";
     private static final String HOOKED_KEY = "tormozit.fileSearchResultsHooked";
     private static final String TREE_OPEN_HOOKED_KEY = "tormozit.fileSearchTreeOpenHooked";
+    private static final String REMOVE_BLOCK_KEY = "tormozit.fileSearchRemoveBlocked"; //$NON-NLS-1$
     private static final String SETTINGS_SECTION = "FileSearchResults"; //$NON-NLS-1$
     /** Второстепенные данные (положение разделителя, порядок/ширина колонок таблицы) — в
      * {@link IDialogSettings}, сохраняются при закрытии/пересоздании панели, а не живьём. */
@@ -112,6 +113,11 @@ public final class FileSearchResultsHook implements IStartup
     private static final Map<TableViewer, TableColumn> TABLE_COLUMNS_BY_VIEWER = new IdentityHashMap<>();
     private static TableViewer cachedResultTableViewer;
     private static FormTableInteraction cachedTableInteraction;
+    private static TableColumn cachedPathColumn;
+    private static TableColumn cachedFileColumn;
+    private static TableColumn cachedTypeColumn;
+    private static TableColumn cachedLineColumn;
+    private static TableColumn cachedTextColumn;
 
     @Override
     public void earlyStartup()
@@ -135,6 +141,12 @@ public final class FileSearchResultsHook implements IStartup
                 @Override public void queryAdded(ISearchQuery query)
                 {
                     Global.tempLog("search-tree-empty", "file.queryAdded: " + describeQuery(query));
+                    // Только поиск по файлам — иначе guard залипает после поиска по конфигурации
+                    // и каждый клик в дереве FileSearch редиректит на корень.
+                    if (!(query instanceof FileSearchQuery))
+                        return;
+                    // История/повторный показ без Dispose панели — сначала зафиксировать текущие ширины.
+                    saveResultColumnStateOnUiThread();
                     searchCoversMultipleProjects = computeCoversMultipleProjects(query);
                     // Переключение из истории не даёт queryStarting — поднимаем guard сами.
                     if (!searchQueryRunning)
@@ -145,6 +157,10 @@ public final class FileSearchResultsHook implements IStartup
                 @Override public void queryStarting(ISearchQuery query)
                 {
                     Global.tempLog("search-tree-empty", "file.queryStarting: " + describeQuery(query));
+                    if (!(query instanceof FileSearchQuery))
+                        return;
+                    // Панель не закрывается — Dispose не вызовется; сохранить ширины до новых результатов.
+                    saveResultColumnStateOnUiThread();
                     searchQueryRunning = true;
                     guardFirstRootSelection = true;
                     lastTableRefreshWhileSearchingMs = 0L;
@@ -156,6 +172,8 @@ public final class FileSearchResultsHook implements IStartup
                 @Override public void queryFinished(ISearchQuery query)
                 {
                     Global.tempLog("search-tree-empty", "file.queryFinished: " + describeQuery(query));
+                    if (!(query instanceof FileSearchQuery))
+                        return;
                     searchQueryRunning = false;
                     searchCoversMultipleProjects = computeCoversMultipleProjects(query);
                     onQueryEvent();
@@ -329,6 +347,8 @@ public final class FileSearchResultsHook implements IStartup
             {
                 Global.tempLog("search-tree-empty", "file.tryPatch: already hooked, treeItems=" + tree.getItemCount());
                 reinstallHandlers(activePage, view);
+                // EDT мог сменить label provider на новом поиске — вернуть decorating + счётчики.
+                installFileTreeMatchCount(treeViewer);
                 return true;
             }
 
@@ -410,6 +430,7 @@ public final class FileSearchResultsHook implements IStartup
         registerOpenHandler(tableViewer, treeViewer, page);
         registerContextMenu(tableViewer, treeViewer, page);
         registerTreeContextMenu(treeViewer, page);
+        blockRemoveMatches(page, treeViewer, tableViewer);
 
         IDialogSettings sashSettings = dialogSettings();
         sashForm.setWeights(new int[] {
@@ -437,10 +458,19 @@ public final class FileSearchResultsHook implements IStartup
                 return;
             // EDT при появлении результатов спускается к первому листу — сразу на корень,
             // не дожидаясь конца поиска и таймера watch (как ConfigSearchResultsHook).
-            if (guardFirstRootSelection && redirectSelectionToFirstRoot(treeViewer))
+            if (guardFirstRootSelection)
             {
-                updateTableFromSelection(treeViewer, tableViewer);
-                return;
+                if (redirectSelectionToFirstRoot(treeViewer))
+                {
+                    updateTableFromSelection(treeViewer, tableViewer);
+                    // После окончания поиска один редирект достаточен — иначе guard
+                    // залипает и каждый клик снова активирует корень + пересчёт декораций.
+                    if (!searchQueryRunning)
+                        guardFirstRootSelection = false;
+                    return;
+                }
+                if (!searchQueryRunning)
+                    guardFirstRootSelection = false;
             }
             updateTableFromSelection(treeViewer, tableViewer);
         });
@@ -624,21 +654,72 @@ public final class FileSearchResultsHook implements IStartup
         interaction.setOwnerDrawColumns(textCol.getColumn());
         interaction.install(hasSavedColumnWidths);
         cachedTableInteraction = interaction;
-        TableColumn pathColumn = pathCol.getColumn();
-        TableColumn fileColumn = fileCol.getColumn();
-        TableColumn typeColumn = typeCol.getColumn();
-        TableColumn lineColumn = lineCol.getColumn();
-        TableColumn textColumn = textCol.getColumn();
+        cachedPathColumn = pathCol.getColumn();
+        cachedFileColumn = fileCol.getColumn();
+        cachedTypeColumn = typeCol.getColumn();
+        cachedLineColumn = lineCol.getColumn();
+        cachedTextColumn = textCol.getColumn();
+        TableColumn pathColumn = cachedPathColumn;
+        TableColumn fileColumn = cachedFileColumn;
+        TableColumn typeColumn = cachedTypeColumn;
+        TableColumn lineColumn = cachedLineColumn;
+        TableColumn textColumn = cachedTextColumn;
+        // Второстепенные данные — при закрытии панели; при повторном поиске — явно в
+        // {@link #saveResultColumnStateOnUiThread} (Dispose не срабатывает, панель остаётся открытой).
         table.addDisposeListener(e ->
         {
-            boolean fillMode = interaction.isColumnsExactFill();
-            FormTableColumnState.saveOrderAndWidths(dialogSettings(), KEY_COL_ORDER, KEY_COL_FILL_MODE, fillMode,
-                new String[] { KEY_COL_PATH_WIDTH, KEY_COL_FILE_WIDTH, KEY_COL_TYPE_WIDTH,
-                    KEY_COL_LINE_WIDTH, KEY_COL_TEXT_WIDTH },
-                new TableColumn[] { pathColumn, fileColumn, typeColumn, lineColumn, textColumn }, table);
+            saveResultColumnState(table, interaction, pathColumn, fileColumn, typeColumn, lineColumn, textColumn);
+            if (cachedResultTableViewer == tableViewer)
+            {
+                cachedResultTableViewer = null;
+                cachedTableInteraction = null;
+                cachedPathColumn = null;
+                cachedFileColumn = null;
+                cachedTypeColumn = null;
+                cachedLineColumn = null;
+                cachedTextColumn = null;
+            }
         });
 
         return tableViewer;
+    }
+
+    /** Сохранить порядок/ширины колонок таблицы результатов поиска по файлам. UI-поток. */
+    private static void saveResultColumnState()
+    {
+        TableViewer tableViewer = cachedResultTableViewer;
+        if (tableViewer == null)
+            return;
+        Table table = tableViewer.getTable();
+        if (table == null || table.isDisposed())
+            return;
+        saveResultColumnState(table, cachedTableInteraction, cachedPathColumn, cachedFileColumn,
+            cachedTypeColumn, cachedLineColumn, cachedTextColumn);
+    }
+
+    private static void saveResultColumnState(Table table, FormTableInteraction interaction,
+            TableColumn pathColumn, TableColumn fileColumn, TableColumn typeColumn,
+            TableColumn lineColumn, TableColumn textColumn)
+    {
+        if (table == null || table.isDisposed())
+            return;
+        boolean fillMode = interaction != null && interaction.isColumnsExactFill();
+        FormTableColumnState.saveOrderAndWidths(dialogSettings(), KEY_COL_ORDER, KEY_COL_FILL_MODE, fillMode,
+            new String[] { KEY_COL_PATH_WIDTH, KEY_COL_FILE_WIDTH, KEY_COL_TYPE_WIDTH,
+                KEY_COL_LINE_WIDTH, KEY_COL_TEXT_WIDTH },
+            new TableColumn[] { pathColumn, fileColumn, typeColumn, lineColumn, textColumn }, table);
+    }
+
+    /** Как {@link #saveResultColumnState()}, но безопасно из любого потока (query listener). */
+    private static void saveResultColumnStateOnUiThread()
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        if (display.getThread() == Thread.currentThread())
+            saveResultColumnState();
+        else
+            display.syncExec(FileSearchResultsHook::saveResultColumnState);
     }
 
     private static int compareStrings(String a, String b)
@@ -1191,7 +1272,10 @@ public final class FileSearchResultsHook implements IStartup
     private static void startFirstRootWatch(IViewPart view, int attempt)
     {
         if (!ComfortSettings.isReplaceListFiltersEnabled())
+        {
+            guardFirstRootSelection = false;
             return;
+        }
         if (!searchQueryRunning && !guardFirstRootSelection)
             return;
         Display display = Display.getDefault();
@@ -1201,16 +1285,24 @@ public final class FileSearchResultsHook implements IStartup
         int delay = attempt == 0 ? 0 : 100;
         display.timerExec(delay, () -> {
             if (!ComfortSettings.isReplaceListFiltersEnabled())
+            {
+                guardFirstRootSelection = false;
                 return;
+            }
             if (!searchQueryRunning && !guardFirstRootSelection)
                 return;
             if (!(view instanceof ISearchResultViewPart))
+            {
+                guardFirstRootSelection = false;
                 return;
+            }
             ISearchResultPage activePage = ((ISearchResultViewPart) view).getActivePage();
             if (activePage == null || !activePage.getClass().getName().contains(PAGE_CLASS_MARKER))
             {
                 if (searchQueryRunning || attempt < 80)
                     startFirstRootWatch(view, attempt + 1);
+                else
+                    guardFirstRootSelection = false;
                 return;
             }
             Object viewerObj = Global.getField(activePage, "fViewer");
@@ -1218,6 +1310,8 @@ public final class FileSearchResultsHook implements IStartup
             {
                 if (searchQueryRunning || attempt < 80)
                     startFirstRootWatch(view, attempt + 1);
+                else
+                    guardFirstRootSelection = false;
                 return;
             }
             Tree tree = tv.getTree();
@@ -1226,6 +1320,8 @@ public final class FileSearchResultsHook implements IStartup
             {
                 if (searchQueryRunning || attempt < 80)
                     startFirstRootWatch(view, attempt + 1);
+                else
+                    guardFirstRootSelection = false;
                 return;
             }
 
@@ -1234,6 +1330,8 @@ public final class FileSearchResultsHook implements IStartup
             {
                 if (searchQueryRunning || attempt < 80)
                     startFirstRootWatch(view, attempt + 1);
+                else
+                    guardFirstRootSelection = false;
                 return;
             }
 
@@ -1316,8 +1414,87 @@ public final class FileSearchResultsHook implements IStartup
         {
             Object viewerObj = Global.getField(activePage, "fViewer");
             if (viewerObj instanceof TreeViewer treeViewer)
+            {
                 registerTreeContextMenu(treeViewer, activePage);
+                blockRemoveMatches(activePage, treeViewer, tv);
+            }
         }
+    }
+
+    /**
+     * Штатный {@code FileSearchPage} вешает Delete на {@code org.eclipse.ui.edit.delete} →
+     * {@code RemoveSelectedMatchesAction}: при выделении корня/папки снимаются все совпадения
+     * под узлом — панель почти опустошается. В поиске по конфигурации Delete ничего не делает;
+     * здесь повторяем то же: гасим действие удаления совпадений и глотаем клавишу.
+     */
+    private static void blockRemoveMatches(Object page, TreeViewer treeViewer, TableViewer tableViewer)
+    {
+        if (!ComfortSettings.isReplaceListFiltersEnabled())
+            return;
+        Tree tree = treeViewer.getTree();
+        Table table = tableViewer.getTable();
+        if (tree == null || tree.isDisposed() || table == null || table.isDisposed())
+            return;
+
+        disableRemoveMatchActions(page);
+
+        if (Boolean.TRUE.equals(tree.getData(REMOVE_BLOCK_KEY)))
+            return;
+        tree.setData(REMOVE_BLOCK_KEY, Boolean.TRUE);
+
+        // Снять глобальный handler Delete со страницы (иначе ActionBars всё ещё зовут remove).
+        if (page instanceof AbstractTextSearchViewPage searchPage)
+        {
+            var site = searchPage.getSite();
+            if (site != null)
+            {
+                var bars = site.getActionBars();
+                if (bars != null)
+                {
+                    bars.setGlobalActionHandler(
+                        org.eclipse.ui.actions.ActionFactory.DELETE.getId(), null);
+                    bars.updateActionBars();
+                }
+            }
+        }
+
+        // Штатный SelectionChangedListener снова включает fRemoveSelectedMatches — гасим после него.
+        treeViewer.addPostSelectionChangedListener(e -> {
+            if (ComfortSettings.isReplaceListFiltersEnabled())
+                disableRemoveMatchActions(page);
+        });
+        tableViewer.addSelectionChangedListener(e -> {
+            if (ComfortSettings.isReplaceListFiltersEnabled())
+                disableRemoveMatchActions(page);
+        });
+
+        Listener blockDel = e -> {
+            if (e.keyCode != SWT.DEL)
+                return;
+            if (!ComfortSettings.isReplaceListFiltersEnabled())
+                return;
+            e.doit = false;
+            disableRemoveMatchActions(page);
+        };
+        tree.addListener(SWT.KeyDown, blockDel);
+        table.addListener(SWT.KeyDown, blockDel);
+    }
+
+    private static void disableRemoveMatchActions(Object page)
+    {
+        if (page == null)
+            return;
+        Object removeSelected = Global.getField(page, "fRemoveSelectedMatches"); //$NON-NLS-1$
+        if (removeSelected instanceof Action action)
+        {
+            action.setEnabled(false);
+            // Иначе привязка Delete снова удалит совпадения, даже если пункт меню серый.
+            if (action.getActionDefinitionId() != null)
+                action.setActionDefinitionId(null);
+        }
+        Object removeCurrent = Global.getField(page, "fRemoveCurrentMatch"); //$NON-NLS-1$
+        if (removeCurrent instanceof Action action)
+            action.setEnabled(false);
     }
 
     private static void installFileTreeMatchCount(TreeViewer treeViewer)
@@ -1328,45 +1505,23 @@ public final class FileSearchResultsHook implements IStartup
         if (baseLp == null)
             return;
         IStyledLabelProvider innerStyled;
-        if (baseLp instanceof DelegatingStyledCellLabelProvider dscp)
+        if (baseLp instanceof DecoratingStyledCellLabelProvider dscp)
+        {
+            IStyledLabelProvider styled = dscp.getStyledStringProvider();
+            // Уже наши счётчики + штатный decorating — не переустанавливать.
+            if (styled instanceof MatchCountStyledLabelProvider)
+                return;
+            innerStyled = styled;
+        }
+        else if (baseLp instanceof DelegatingStyledCellLabelProvider dscp)
             innerStyled = dscp.getStyledStringProvider();
         else if (baseLp instanceof IStyledLabelProvider slp)
             innerStyled = slp;
         else
             return;
-        IStyledLabelProvider wrapper = new IStyledLabelProvider()
-        {
-            @Override
-            public StyledString getStyledText(Object element)
-            {
-                StyledString original = innerStyled.getStyledText(element);
-                if (!(element instanceof IResource resource) || element instanceof LineElement)
-                    return original;
-                int count = countMatchesForResource(resource, treeViewer);
-                if (count <= 0)
-                    return original;
-                String cleanText = stripCountSuffix(original.getString());
-                StyledString result = new StyledString();
-                result.append(cleanText);
-                result.append(" (" + count + ")");
-                return result;
-            }
-
-            @Override
-            public Image getImage(Object element) { return innerStyled.getImage(element); }
-
-            @Override
-            public void addListener(ILabelProviderListener listener) { innerStyled.addListener(listener); }
-
-            @Override
-            public void dispose() { innerStyled.dispose(); }
-
-            @Override
-            public boolean isLabelProperty(Object element, String property) { return innerStyled.isLabelProperty(element, property); }
-
-            @Override
-            public void removeListener(ILabelProviderListener listener) { innerStyled.removeListener(listener); }
-        };
+        if (innerStyled instanceof MatchCountStyledLabelProvider mc)
+            innerStyled = mc.inner;
+        MatchCountStyledLabelProvider wrapper = new MatchCountStyledLabelProvider(innerStyled, treeViewer);
         treeViewer.setLabelProvider(new DecoratingStyledCellLabelProvider(
             wrapper, PlatformUI.getWorkbench().getDecoratorManager().getLabelDecorator(), null));
         treeViewer.refresh();
@@ -1385,6 +1540,55 @@ public final class FileSearchResultsHook implements IStartup
      * логом). Поэтому здесь используется штатная {@link DecoratingStyledCellLabelProvider} —
      * она сама умеет ждать асинхронную декорацию и обновлять дерево по готовности.
      */
+    private static final class MatchCountStyledLabelProvider implements IStyledLabelProvider
+    {
+        private final IStyledLabelProvider inner;
+        private final TreeViewer treeViewer;
+
+        MatchCountStyledLabelProvider(IStyledLabelProvider inner, TreeViewer treeViewer)
+        {
+            this.inner = inner;
+            this.treeViewer = treeViewer;
+        }
+
+        @Override
+        public StyledString getStyledText(Object element)
+        {
+            StyledString original = inner.getStyledText(element);
+            if (!(element instanceof IResource resource) || element instanceof LineElement)
+                return original;
+            int count = countMatchesForResource(resource, treeViewer);
+            if (count <= 0)
+                return original;
+            String cleanText = stripCountSuffix(original.getString());
+            StyledString result = new StyledString();
+            result.append(cleanText);
+            result.append(" (" + count + ")");
+            return result;
+        }
+
+        @Override
+        public Image getImage(Object element) { return inner.getImage(element); }
+
+        @Override
+        public void addListener(ILabelProviderListener listener) { inner.addListener(listener); }
+
+        @Override
+        public void dispose() { inner.dispose(); }
+
+        @Override
+        public boolean isLabelProperty(Object element, String property)
+        {
+            return inner.isLabelProperty(element, property);
+        }
+
+        @Override
+        public void removeListener(ILabelProviderListener listener)
+        {
+            inner.removeListener(listener);
+        }
+    }
+
     private static String stripCountSuffix(String text)
     {
         String result = text.replaceAll("\\s*\\([^)]*\\)\\s*$", "").trim();

@@ -226,6 +226,9 @@ public class CompareConfigMenuHook implements IStartup
     /** Маркер: на дереве уже активированы Collapse All / Expand All. */
     private static final String COLLAPSE_EXPAND_HANDLERS_KEY =
             "tormozit.compareConf.collapseExpandHandlers"; //$NON-NLS-1$
+    /** Маркер: на дереве уже повешен MenuListener пунктов Комфорт. */
+    private static final String MENU_LISTENER_KEY =
+            "tormozit.compareConf.contextMenuListener"; //$NON-NLS-1$
     /** Id contribution item кнопки «Свернуть всё» в тулбаре редактора сравнения. */
     private static final String TOOLBAR_COLLAPSE_ID =
             "tormozit.compareConf.toolbar.collapseAll"; //$NON-NLS-1$
@@ -581,6 +584,8 @@ public class CompareConfigMenuHook implements IStartup
 
     private void attachMenuListener(IEditorPart editor, Tree tree)
     {
+        if (Boolean.TRUE.equals(tree.getData(MENU_LISTENER_KEY)))
+            return;
         Menu menu = tree.getMenu();
         if (menu == null || menu.isDisposed()) return;
 
@@ -712,6 +717,7 @@ public class CompareConfigMenuHook implements IStartup
         };
 
         menu.addMenuListener(listener);
+        tree.setData(MENU_LISTENER_KEY, Boolean.TRUE);
         tree.addDisposeListener(e ->
         {
             if (!menu.isDisposed()) menu.removeMenuListener(listener);
@@ -5133,27 +5139,22 @@ public class CompareConfigMenuHook implements IStartup
         /**
          * Возвращает {@code true} если объект присутствует только в одной стороне
          * сравнения (добавлен или удалён).
+         * <p>
+         * Если у элемента нет {@code isCheckable()} (дерево не из редактора сравнения,
+         * напр. {@code MatchTreeItem} в результатах поиска) — {@code false} без ошибок
+         * в журнале: для таких узлов критерий «добавлен/удалён» не применим.
          */
         private static boolean isAddedOrDeleted(Object element)
         {
-            boolean isCheckable = true;
-            try
-            {
-                Method methodDesc = element.getClass().getMethod("isCheckable"); //$NON-NLS-1$
-                isCheckable = (Boolean) methodDesc.invoke(element);
-            }
-            catch (Exception e)
-            {
-                Global.logError("CompareConfig", "isCheckable", e); //$NON-NLS-1$ //$NON-NLS-2$
-            }
-            boolean is = true;
-            if (isCheckable)
-            {
-                MatchedObjectsComparisonNode node = extractMatchedNode(element);
-                is = !(node == null || node.getNodeSide() == null)
-                    || (node != null && !node.getComparisonFlags().hasDiffsMainOther());
-            }
-            return is;
+            Object checkableResult = Global.call(element, "isCheckable"); //$NON-NLS-1$
+            if (!(checkableResult instanceof Boolean))
+                return false;
+            boolean isCheckable = ((Boolean) checkableResult).booleanValue();
+            if (!isCheckable)
+                return true;
+            MatchedObjectsComparisonNode node = extractMatchedNode(element);
+            return !(node == null || node.getNodeSide() == null)
+                || (node != null && !node.getComparisonFlags().hasDiffsMainOther());
         }
 
         /**
@@ -5770,11 +5771,6 @@ public class CompareConfigMenuHook implements IStartup
 
         private NavigatorDropSupport() {}
 
-        private static void log(String msg)
-        {
-            Global.tempLog("compare-nav-dnd", msg); //$NON-NLS-1$
-        }
-
         static void install(IEditorPart editor, Tree tree)
         {
             installDropFromNavigator(editor, tree);
@@ -5804,10 +5800,7 @@ public class CompareConfigMenuHook implements IStartup
 
             DropTarget target = ensureDropTarget(tree);
             if (target == null)
-            {
-                log("nav install: no DropTarget id=" + navigator.getViewSite().getId()); //$NON-NLS-1$
                 return;
-            }
             ensureLocalSelectionTransfer(target);
             target.addDropListener(new DropTargetAdapter()
             {
@@ -5835,14 +5828,11 @@ public class CompareConfigMenuHook implements IStartup
                     // CommonDropAdapter.validateDrop для узлов сравнения даёт false и
                     // в dropAccept ставит DROP_NONE — без нашего перехвата drop не приходит.
                     updateCompareDropDetail(event);
-                    log("nav dropAccept detail=" + event.detail); //$NON-NLS-1$
                 }
 
                 @Override
                 public void drop(DropTargetEvent event)
                 {
-                    log("nav drop editor=" + (dragSourceEditor != null) //$NON-NLS-1$
-                        + " eObject=" + (dragEObject != null)); //$NON-NLS-1$
                     EObject obj = dragEObject;
                     if (obj != null)
                     {
@@ -5859,8 +5849,6 @@ public class CompareConfigMenuHook implements IStartup
                 }
             });
             tree.setData(NAV_DROP_KEY, Boolean.TRUE);
-            log("nav install OK id=" + navigator.getViewSite().getId() //$NON-NLS-1$
-                + " reused=" + (tree.getData(DND.DROP_TARGET_KEY) == target)); //$NON-NLS-1$
         }
 
         private static boolean isNavigatorView(IViewPart view)
@@ -6048,7 +6036,6 @@ public class CompareConfigMenuHook implements IStartup
                     ISelection sel = viewer != null ? viewer.getSelection() : null;
                     if (!(sel instanceof IStructuredSelection ss) || !isCompareTreeSelection(ss))
                     {
-                        log("dragStart reject: selection"); //$NON-NLS-1$
                         event.doit = false;
                         return;
                     }
@@ -6056,7 +6043,6 @@ public class CompareConfigMenuHook implements IStartup
                     EObject obj = helper.resolveNavigatorEObject(ss, null);
                     if (obj == null)
                     {
-                        log("dragStart reject: resolveNavigatorEObject null"); //$NON-NLS-1$
                         event.doit = false;
                         return;
                     }
@@ -6064,7 +6050,6 @@ public class CompareConfigMenuHook implements IStartup
                     dragSourceEditor = editor;
                     dragEObject = obj;
                     event.doit = true;
-                    log("dragStart OK " + obj.eClass().getName()); //$NON-NLS-1$
                 }
 
                 @Override
@@ -6078,14 +6063,12 @@ public class CompareConfigMenuHook implements IStartup
                 @Override
                 public void dragFinished(DragSourceEvent event)
                 {
-                    log("dragFinished detail=" + event.detail); //$NON-NLS-1$
                     dragSourceEditor = null;
                     dragEObject = null;
                     LocalSelectionTransfer.getTransfer().setSelection(null);
                 }
             });
             tree.setData(DRAG_KEY, Boolean.TRUE);
-            log("compare DragSource installed"); //$NON-NLS-1$
         }
 
         private static void ensureDragLocalSelectionTransfer(DragSource source)

@@ -11,6 +11,7 @@ import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
 import org.eclipse.jface.action.Action;
 import org.eclipse.jface.action.MenuManager;
+import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.viewers.ArrayContentProvider;
 import org.eclipse.jface.viewers.CheckStateChangedEvent;
 import org.eclipse.jface.viewers.CheckboxTreeViewer;
@@ -105,6 +106,17 @@ public class CompareSearchResultPage implements ISearchResultPage
     private static final String KEY_CHECKED = "tormozit.compareSearchChecked"; //$NON-NLS-1$
     private static final String KEY_GRAYED = "tormozit.compareSearchGrayed"; //$NON-NLS-1$
 
+    private static final String SETTINGS_SECTION = "CompareSearchResults"; //$NON-NLS-1$
+    /** Второстепенные данные (порядок/ширина колонок) — в {@link IDialogSettings},
+     * сохраняются при закрытии панели и явно перед {@link #setInput} (повторный поиск). */
+    private static final String KEY_COL_ORDER = "columnOrder"; //$NON-NLS-1$
+    private static final String KEY_COL_FILL_MODE = "colFillMode"; //$NON-NLS-1$
+    private static final String KEY_COL_PATH_WIDTH = "colPathWidth"; //$NON-NLS-1$
+    private static final String KEY_COL_PROPERTY_WIDTH = "colPropertyWidth"; //$NON-NLS-1$
+    private static final String KEY_COL_TEXT_WIDTH = "colTextWidth"; //$NON-NLS-1$
+    private static final String KEY_COL_STATUS_WIDTH = "colStatusWidth"; //$NON-NLS-1$
+    private static final String KEY_COL_SIDE_WIDTH = "colSideWidth"; //$NON-NLS-1$
+    private static final int CHECK_COLUMN_WIDTH = 22;
     @Override
     public void init(IPageSite site)
     {
@@ -145,12 +157,14 @@ public class CompareSearchResultPage implements ISearchResultPage
         tableViewer.setContentProvider(ArrayContentProvider.getInstance());
 
         ensureCheckImages();
+        IDialogSettings columnSettings = dialogSettings();
         addCheckColumn();
-        addPathColumn();
-        addPropertyColumn();
-        addTextColumn();
-        addStatusColumn();
-        addColumnSideColumn();
+        addPathColumn(columnSettings);
+        addPropertyColumn(columnSettings);
+        addTextColumn(columnSettings);
+        addStatusColumn(columnSettings);
+        addColumnSideColumn(columnSettings);
+        FormTableColumnState.loadOrder(columnSettings, KEY_COL_ORDER, table);
         applyRestoredState();
 
         table.addListener(SWT.MouseDown, event ->
@@ -224,9 +238,13 @@ public class CompareSearchResultPage implements ISearchResultPage
         for (int i = 1; i < table.getColumnCount(); i++)
             ownerDraw[i - 1] = table.getColumn(i);
         tableInteraction.setOwnerDrawColumns(ownerDraw);
-        tableInteraction.install();
+        boolean hasSavedColumnWidths = FormTableColumnState.hasSavedColumnWidths(columnSettings, KEY_COL_FILL_MODE,
+            KEY_COL_PATH_WIDTH, KEY_COL_PROPERTY_WIDTH, KEY_COL_TEXT_WIDTH, KEY_COL_STATUS_WIDTH, KEY_COL_SIDE_WIDTH);
+        tableInteraction.install(hasSavedColumnWidths);
         if (checkColumn != null && !checkColumn.isDisposed())
             checkColumn.setMoveable(false);
+        // Второстепенные данные — при закрытии; при повторном поиске — явно в {@link #setInput}.
+        table.addDisposeListener(e -> saveColumnLayout());
     }
 
     private static boolean isTableItemSelected(TableItem item)
@@ -329,8 +347,6 @@ public class CompareSearchResultPage implements ISearchResultPage
             applyingCheckFromResults = false;
         }
     }
-
-    private static final int CHECK_COLUMN_WIDTH = 22;
 
     private void addCheckColumn()
     {
@@ -442,12 +458,12 @@ public class CompareSearchResultPage implements ISearchResultPage
         return node instanceof IPartialModelNode partial && partial.isGrayed();
     }
 
-    private void addPropertyColumn()
+    private void addPropertyColumn(IDialogSettings settings)
     {
         TableViewerColumn col = new TableViewerColumn(tableViewer, SWT.LEFT);
         col.getColumn().setText("Свойство");
         col.getColumn().setResizable(true);
-        col.getColumn().setWidth(200);
+        col.getColumn().setWidth(FormTableColumnState.readWidth(settings, KEY_COL_PROPERTY_WIDTH, 200, 1));
         col.setLabelProvider(new DelegatingStyledCellLabelProvider(new IStyledLabelProvider()
         {
             @Override
@@ -476,12 +492,12 @@ public class CompareSearchResultPage implements ISearchResultPage
         }));
     }
 
-    private void addPathColumn()
+    private void addPathColumn(IDialogSettings settings)
     {
         TableViewerColumn col = new TableViewerColumn(tableViewer, SWT.LEFT);
         col.getColumn().setText("Путь");
         col.getColumn().setResizable(true);
-        col.getColumn().setWidth(360);
+        col.getColumn().setWidth(FormTableColumnState.readWidth(settings, KEY_COL_PATH_WIDTH, 360, 1));
         col.setLabelProvider(new DelegatingStyledCellLabelProvider(new IStyledLabelProvider()
         {
             @Override
@@ -505,12 +521,12 @@ public class CompareSearchResultPage implements ISearchResultPage
         }));
     }
 
-    private void addTextColumn()
+    private void addTextColumn(IDialogSettings settings)
     {
         TableViewerColumn col = new TableViewerColumn(tableViewer, SWT.LEFT);
         col.getColumn().setText("Текст");
         col.getColumn().setResizable(true);
-        col.getColumn().setWidth(250);
+        col.getColumn().setWidth(FormTableColumnState.readWidth(settings, KEY_COL_TEXT_WIDTH, 250, 1));
         col.setLabelProvider(new DelegatingStyledCellLabelProvider(new IStyledLabelProvider()
         {
             @Override
@@ -534,12 +550,12 @@ public class CompareSearchResultPage implements ISearchResultPage
         }));
     }
 
-    private void addStatusColumn()
+    private void addStatusColumn(IDialogSettings settings)
     {
         TableViewerColumn col = new TableViewerColumn(tableViewer, SWT.LEFT);
         col.getColumn().setText("Статус");
         col.getColumn().setResizable(true);
-        col.getColumn().setWidth(100);
+        col.getColumn().setWidth(FormTableColumnState.readWidth(settings, KEY_COL_STATUS_WIDTH, 100, 1));
         col.setLabelProvider(new DelegatingStyledCellLabelProvider(new IStyledLabelProvider()
         {
             @Override
@@ -571,12 +587,12 @@ public class CompareSearchResultPage implements ISearchResultPage
         }));
     }
 
-    private void addColumnSideColumn()
+    private void addColumnSideColumn(IDialogSettings settings)
     {
         TableViewerColumn col = new TableViewerColumn(tableViewer, SWT.LEFT);
         col.getColumn().setText("Колонка");
         col.getColumn().setResizable(true);
-        col.getColumn().setWidth(100);
+        col.getColumn().setWidth(FormTableColumnState.readWidth(settings, KEY_COL_SIDE_WIDTH, 100, 1));
         col.setLabelProvider(new DelegatingStyledCellLabelProvider(new IStyledLabelProvider()
         {
             @Override
@@ -999,6 +1015,9 @@ public class CompareSearchResultPage implements ISearchResultPage
     @Override
     public void setInput(ISearchResult search, Object uiState)
     {
+        // Панель не закрывается при повторном «Найти все» — Dispose не вызовется;
+        // зафиксировать текущие ширины до подмены набора результатов.
+        saveColumnLayout();
         if (search instanceof CompareSearchResult csr)
         {
             this.searchResult = csr;
@@ -1061,6 +1080,7 @@ public class CompareSearchResultPage implements ISearchResultPage
     @Override
     public void dispose()
     {
+        saveColumnLayout();
         uninstallTreeCheckListener();
         disposeCheckImages();
         tableInteraction = null;
@@ -1159,5 +1179,34 @@ public class CompareSearchResultPage implements ISearchResultPage
             }
             memento.putInteger("colWidth" + i, cols[i].getWidth());
         }
+        // Дублируем в DialogSettings — основной канал (повторный поиск / закрытие панели).
+        saveColumnLayout();
+    }
+
+    /**
+     * Порядок и ширины колонок (без колонки-флажка) + флаг fill-mode.
+     * Колонка 0 — фиксированная пометка, в persist не входит.
+     */
+    private void saveColumnLayout()
+    {
+        if (table == null || table.isDisposed() || table.getColumnCount() < 6)
+            return;
+        boolean fillMode = tableInteraction != null && tableInteraction.isColumnsExactFill();
+        FormTableColumnState.saveOrderAndWidths(dialogSettings(), KEY_COL_ORDER, KEY_COL_FILL_MODE, fillMode,
+            new String[] { KEY_COL_PATH_WIDTH, KEY_COL_PROPERTY_WIDTH, KEY_COL_TEXT_WIDTH,
+                KEY_COL_STATUS_WIDTH, KEY_COL_SIDE_WIDTH },
+            new TableColumn[] {
+                table.getColumn(1), table.getColumn(2), table.getColumn(3),
+                table.getColumn(4), table.getColumn(5) },
+            table);
+    }
+
+    private static IDialogSettings dialogSettings()
+    {
+        IDialogSettings top = Activator.getDefault().getDialogSettings();
+        IDialogSettings section = top.getSection(SETTINGS_SECTION);
+        if (section == null)
+            section = top.addNewSection(SETTINGS_SECTION);
+        return section;
     }
 }

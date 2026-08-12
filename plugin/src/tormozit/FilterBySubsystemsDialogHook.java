@@ -35,12 +35,14 @@ import org.eclipse.jface.viewers.ILabelProviderListener;
 import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.ITreeContentProvider;
+import org.eclipse.jface.viewers.ITreeSelection;
 import org.eclipse.jface.viewers.StructuredViewer;
 import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.jface.viewers.TreePath;
 import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.jface.viewers.TreeSelection;
+import org.eclipse.ui.navigator.CommonViewer;
 import org.eclipse.jface.window.Window;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.dnd.Clipboard;
@@ -157,6 +159,14 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         "Скрывать объекты выбранных подсистем (чёрный список)"; //$NON-NLS-1$
     private static final String BLACKLIST_RESET_HOOK_KEY = "tormozit.filterBySubsystemsBlacklistReset"; //$NON-NLS-1$
 
+    /**
+     * Восстановление текущей строки навигатора после «Установить» / «Сбросить»:
+     * штатный {@code refresh} асинхронный, поэтому несколько отложенных попыток.
+     */
+    private static final String NAV_SEL_RESTORE_HOOK_KEY =
+        "tormozit.filterBySubsystemsNavSelRestore"; //$NON-NLS-1$
+    private static final int[] NAV_SEL_RESTORE_DELAYS_MS = { 0, 100, 300, 700, 1500 };
+
     private static final String INCLUDE_LABELS_KEY = "tormozit.filterBySubsystemsIncludeLabels"; //$NON-NLS-1$
     private static final String INCLUDE_SUBORDINATE_LABEL = "Включать подчинённые подсистемы"; //$NON-NLS-1$
     private static final String INCLUDE_PARENT_LABEL = "Включать родительские подсистемы"; //$NON-NLS-1$
@@ -239,6 +249,7 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         installGrayMarkHint(panel);
         installBlacklistCheckbox(dialog, panel);
         installStandardCheckboxLabels(shell, panel);
+        installNavigatorSelectionRestore(dialog);
         expandNavigatorProject(viewer, attempt);
         return installSmartFilter(panel, viewer);
     }
@@ -795,6 +806,114 @@ public final class FilterBySubsystemsDialogHook implements IStartup
         if (!(shellObj instanceof Shell shell) || shell.isDisposed())
             return null;
         return findButtonRecursive(shell, "Сбросить"); //$NON-NLS-1$
+    }
+
+    private static Button findOkButton(Object dialog)
+    {
+        Object btnObj = Global.invoke(dialog, "getButton", Integer.valueOf(IDialogConstants.OK_ID)); //$NON-NLS-1$
+        if (btnObj instanceof Button button && !button.isDisposed())
+            return button;
+        Object shellObj = Global.invoke(dialog, "getShell"); //$NON-NLS-1$
+        if (!(shellObj instanceof Shell shell) || shell.isDisposed())
+            return null;
+        Button byLabel = findButtonRecursive(shell, "Установить"); //$NON-NLS-1$
+        if (byLabel != null)
+            return byLabel;
+        return findButtonRecursive(shell, "OK"); //$NON-NLS-1$
+    }
+
+    /**
+     * Только для диалога навигатора (не сравнения): перед штатным применением/сбросом
+     * фильтра запомнить {@link TreePath} текущей строки и после асинхронного refresh
+     * вернуть выделение с reveal. Если объект отфильтрован — попытки заканчиваются без
+     * навязывания чужой строки.
+     */
+    private static void installNavigatorSelectionRestore(Object dialog)
+    {
+        if (dialog == null || isCompareFilterDialog(dialog))
+            return;
+        hookNavigatorSelectionRestoreButton(findOkButton(dialog));
+        hookNavigatorSelectionRestoreButton(findTurnOffButton(dialog));
+    }
+
+    private static void hookNavigatorSelectionRestoreButton(Button button)
+    {
+        if (button == null || button.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(button.getData(NAV_SEL_RESTORE_HOOK_KEY)))
+            return;
+        button.setData(NAV_SEL_RESTORE_HOOK_KEY, Boolean.TRUE);
+        button.addSelectionListener(new SelectionAdapter()
+        {
+            @Override public void widgetSelected(SelectionEvent e)
+            {
+                captureAndScheduleNavigatorSelectionRestore();
+            }
+        });
+        FilterBySubsystemsDialogDebug.log("navSelRestore: hook on " + button.getText()); //$NON-NLS-1$
+    }
+
+    private static void captureAndScheduleNavigatorSelectionRestore()
+    {
+        CommonViewer viewer = findNavigatorCommonViewer();
+        if (viewer == null)
+            return;
+        Control control = viewer.getControl();
+        if (control == null || control.isDisposed())
+            return;
+        ISelection selection = viewer.getSelection();
+        if (!(selection instanceof ITreeSelection treeSelection) || treeSelection.isEmpty())
+            return;
+        TreePath[] paths = treeSelection.getPaths();
+        if (paths == null || paths.length == 0)
+            return;
+        TreePath[] saved = Arrays.copyOf(paths, paths.length);
+        FilterBySubsystemsDialogDebug.step("navSelRestore", //$NON-NLS-1$
+            "capture paths=" + saved.length); //$NON-NLS-1$
+        scheduleNavigatorSelectionRestore(viewer, saved, 0);
+    }
+
+    private static void scheduleNavigatorSelectionRestore(
+            CommonViewer viewer, TreePath[] paths, int attempt)
+    {
+        if (viewer == null || paths == null || paths.length == 0
+                || attempt >= NAV_SEL_RESTORE_DELAYS_MS.length)
+            return;
+        Control control = viewer.getControl();
+        if (control == null || control.isDisposed())
+            return;
+        control.getDisplay().timerExec(NAV_SEL_RESTORE_DELAYS_MS[attempt], () ->
+        {
+            if (control.isDisposed())
+                return;
+            viewer.setSelection(new TreeSelection(paths), true);
+            ISelection after = viewer.getSelection();
+            if (after instanceof ITreeSelection treeSelection && !treeSelection.isEmpty())
+            {
+                FilterBySubsystemsDialogDebug.step("navSelRestore", //$NON-NLS-1$
+                    "restored attempt=" + attempt); //$NON-NLS-1$
+                return;
+            }
+            // Ещё не обновилось дерево, либо объект отфильтрован — пробуем дальше.
+            scheduleNavigatorSelectionRestore(viewer, paths, attempt + 1);
+        });
+    }
+
+    private static CommonViewer findNavigatorCommonViewer()
+    {
+        if (!PlatformUI.isWorkbenchRunning())
+            return null;
+        IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+        if (window == null)
+            return null;
+        IWorkbenchPage page = window.getActivePage();
+        if (page == null)
+            return null;
+        IViewPart navigator = page.findView(Global.NAVIGATOR_VIEW_ID);
+        if (navigator == null)
+            return null;
+        Object viewerObj = Global.invoke(navigator, "getCommonViewer"); //$NON-NLS-1$
+        return viewerObj instanceof CommonViewer commonViewer ? commonViewer : null;
     }
 
     private static Button findButtonRecursive(Composite root, String text)

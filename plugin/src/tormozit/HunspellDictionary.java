@@ -70,6 +70,8 @@ final class HunspellDictionary
     }
 
     private final Map<String, Set<String>> wordFlags = new HashMap<>();
+    /** Леммы, у которых есть хотя бы одна запись без флага FORBIDDENWORD. */
+    private final Set<String> allowedWords = new HashSet<>();
     private final Map<String, List<AffixRule>> suffixRules = new HashMap<>();
     private final Map<String, List<AffixRule>> prefixRules = new HashMap<>();
     private final Set<String> crossProductSuffixFlags = new HashSet<>();
@@ -278,8 +280,26 @@ final class HunspellDictionary
                 flags = parseFlags(entry.substring(slashIdx + 1));
             }
             if (!word.isEmpty())
-                wordFlags.put(word, flags);
+                putEntry(word, flags);
         }
+    }
+
+    /**
+     * Одна лемма может встречаться в {@code .dic} несколько раз — это омонимы с разными
+     * парадигмами (в AOT, например, {@code запрет/32} и бесфлаговый {@code запрет} —
+     * форма глагола «запреть»). Флаги таких записей объединяем: {@code put} затирал бы
+     * парадигму последней записью, и словоформы («запрета», «запретов») считались ошибкой.
+     */
+    private void putEntry(String word, Set<String> flags)
+    {
+        Set<String> known = wordFlags.get(word);
+        if (known == null)
+            wordFlags.put(word, new HashSet<>(flags));
+        else
+            known.addAll(flags);
+        // FORBIDDENWORD запрещает только свою запись, а не все омонимы леммы
+        if (forbiddenFlag == null || !flags.contains(forbiddenFlag))
+            allowedWords.add(word);
     }
 
     private Set<String> parseFlags(String token)
@@ -511,9 +531,15 @@ final class HunspellDictionary
         Set<String> flags = wordFlags.get(root);
         if (flags == null)
             return false;
-        if (forbiddenFlag != null && flags.contains(forbiddenFlag))
+        if (isForbidden(root, flags))
             return false;
         return requiredFlag == null || flags.contains(requiredFlag);
+    }
+
+    /** Лемма запрещена, только если все её записи в {@code .dic} помечены FORBIDDENWORD. */
+    private boolean isForbidden(String root, Set<String> flags)
+    {
+        return forbiddenFlag != null && flags.contains(forbiddenFlag) && !allowedWords.contains(root);
     }
 
     /** @return корень слова, если подходит правило суффикса, иначе null. */
@@ -592,7 +618,7 @@ final class HunspellDictionary
                         Set<String> flags = wordFlags.get(root);
                         if (flags == null)
                             continue;
-                        if (forbiddenFlag != null && flags.contains(forbiddenFlag))
+                        if (isForbidden(root, flags))
                             continue;
                         if (flags.contains(suffixFlag) && flags.contains(prefixFlag))
                             return true;

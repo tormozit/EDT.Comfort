@@ -32,7 +32,13 @@ import org.eclipse.ui.PlatformUI;
 public final class MdObjectUsageDecorator extends LabelProvider implements ILightweightLabelDecorator, IStartup
 {
     private static final String DECORATOR_ID = "tormozit.mdObjectUsageDecorator"; //$NON-NLS-1$
-    private static final String PREF_AUTO_ENABLED = "tormozit.mdObjectUsageDecorator.autoEnabled"; //$NON-NLS-1$
+    /**
+     * v2: прежний ключ {@code …autoEnabled} мог остаться {@code true} после экспериментального
+     * {@code setEnabled(false)} (август 2026) — тогда повторно декоратор уже не включался, а в
+     * {@code ENABLED_DECORATORS} рабочей области оставался {@code …mdObjectUsageDecorator:false}.
+     * Новый ключ один раз снова принудительно включает декоратор.
+     */
+    private static final String PREF_AUTO_ENABLED = "tormozit.mdObjectUsageDecorator.autoEnabled.v2"; //$NON-NLS-1$
 
     @Override
     public void earlyStartup()
@@ -42,25 +48,38 @@ public final class MdObjectUsageDecorator extends LabelProvider implements ILigh
             display.asyncExec(MdObjectUsageDecorator::ensureEnabledOnce);
     }
 
+    /**
+     * Декоратор {@code state="true"} в plugin.xml задаёт значение по умолчанию только для
+     * никогда не виденного id; если Eclipse (или наш код) однажды записал {@code false} в
+     * настройки рабочей области — суффиксы {@code <объект>}/{@code <?>} пропадают и в
+     * «Структуре проекта», и в дереве поиска по файлам, пока декоратор снова не включат.
+     */
     private static void ensureEnabledOnce()
     {
         Activator activator = Activator.getDefault();
         IPreferenceStore store = activator != null ? activator.getPreferenceStore() : null;
-        if (store == null || store.getBoolean(PREF_AUTO_ENABLED))
-            return;
         try
         {
             IDecoratorManager manager = PlatformUI.getWorkbench().getDecoratorManager();
-            if (!manager.getEnabled(DECORATOR_ID))
+            boolean enabled = manager.getEnabled(DECORATOR_ID);
+            Global.tempLog("md-usage-decorator", "ensureEnabledOnce: enabled=" + enabled //$NON-NLS-1$ //$NON-NLS-2$
+                + " autoDone=" + (store != null && store.getBoolean(PREF_AUTO_ENABLED))); //$NON-NLS-1$
+            if (store != null && store.getBoolean(PREF_AUTO_ENABLED))
+                return;
+            if (!enabled)
                 manager.setEnabled(DECORATOR_ID, true);
+            Global.tempLog("md-usage-decorator", "ensureEnabledOnce: after setEnabled=" //$NON-NLS-1$
+                + manager.getEnabled(DECORATOR_ID));
         }
         catch (Exception ex)
         {
             Global.log("MdObjectUsageDecorator ensureEnabledOnce error: " + ex); //$NON-NLS-1$
+            Global.tempLog("md-usage-decorator", "ensureEnabledOnce ERROR: " + ex); //$NON-NLS-1$
         }
         finally
         {
-            store.setValue(PREF_AUTO_ENABLED, true);
+            if (store != null)
+                store.setValue(PREF_AUTO_ENABLED, true);
         }
     }
 
