@@ -156,11 +156,19 @@ import org.eclipse.jface.util.LocalSelectionTransfer;
 import org.eclipse.swt.SWTError;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.DND;
+import org.eclipse.swt.dnd.DragSource;
+import org.eclipse.swt.dnd.DragSourceAdapter;
+import org.eclipse.swt.dnd.DragSourceEvent;
 import org.eclipse.swt.dnd.DropTarget;
 import org.eclipse.swt.dnd.DropTargetAdapter;
 import org.eclipse.swt.dnd.DropTargetEvent;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
+import org.eclipse.swt.dnd.TransferData;
+import org.eclipse.ui.IViewPart;
+import org.eclipse.ui.IViewReference;
+import org.eclipse.ui.IWorkbenchPart;
+import org.eclipse.ui.navigator.CommonViewer;
 import com._1c.g5.v8.dt.compare.model.TopComparisonNode;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IPath;
@@ -265,29 +273,57 @@ public class CompareConfigMenuHook implements IStartup
     {
         IWorkbenchPage page = window.getActivePage();
         if (page != null)
+        {
             for (IEditorReference ref : page.getEditorReferences())
             {
                 IEditorPart ed = ref.getEditor(false);
                 if (ed != null && isCompareEditor(ed)) hookEditor(ed);
             }
+            for (IViewReference ref : page.getViewReferences())
+            {
+                IViewPart view = ref.getView(false);
+                if (view != null)
+                    NavigatorDropSupport.installOnNavigator(view, 0);
+            }
+        }
 
         window.getPartService().addPartListener(new IPartListener2()
         {
             @Override
             public void partOpened(IWorkbenchPartReference ref)
             {
-                if (!(ref instanceof IEditorReference)) return;
-                IEditorPart ed = ((IEditorReference) ref).getEditor(false);
-                if (ed != null && isCompareEditor(ed)) hookEditor(ed);
+                hookPartRef(ref);
             }
-            @Override public void partActivated(IWorkbenchPartReference r)    {}
+            @Override
+            public void partVisible(IWorkbenchPartReference ref)
+            {
+                hookPartRef(ref);
+            }
+            @Override
+            public void partActivated(IWorkbenchPartReference ref)
+            {
+                hookPartRef(ref);
+            }
             @Override public void partBroughtToTop(IWorkbenchPartReference r) {}
             @Override public void partClosed(IWorkbenchPartReference r)       {}
             @Override public void partDeactivated(IWorkbenchPartReference r)  {}
             @Override public void partHidden(IWorkbenchPartReference r)       {}
-            @Override public void partVisible(IWorkbenchPartReference r)      {}
             @Override public void partInputChanged(IWorkbenchPartReference r) {}
         });
+    }
+
+    private void hookPartRef(IWorkbenchPartReference ref)
+    {
+        if (ref instanceof IEditorReference)
+        {
+            IEditorPart ed = ((IEditorReference) ref).getEditor(false);
+            if (ed != null && isCompareEditor(ed))
+                hookEditor(ed);
+            return;
+        }
+        IWorkbenchPart part = ref != null ? ref.getPart(false) : null;
+        if (part instanceof IViewPart view)
+            NavigatorDropSupport.installOnNavigator(view, 0);
     }
 
     private boolean isCompareEditor(IEditorPart editor)
@@ -5713,21 +5749,211 @@ public class CompareConfigMenuHook implements IStartup
     }
 
     /**
-     * DnD из навигатора на дерево сравнения: выделяет строку соответствующего объекта
-     * ({@code IComparisonSession#getTopNode} + материализация пути через content provider).
+     * Двусторонний DnD навигатор ↔ дерево сравнения:
+     * <ul>
+     * <li>навигатор → сравнение — выделить строку объекта в дереве;</li>
+     * <li>сравнение → навигатор — то же, что «Показать в навигаторе»
+     * ({@link CompareConfigSelectionListener#showObjectInNavigator}).</li>
+     * </ul>
      */
     private static final class NavigatorDropSupport
     {
-        private static final String DATA_KEY = "tormozit.compareConfigNavigatorDrop"; //$NON-NLS-1$
+        private static final String DROP_KEY = "tormozit.compareConfigNavigatorDrop"; //$NON-NLS-1$
+        private static final String DRAG_KEY = "tormozit.compareConfigNavigatorDrag"; //$NON-NLS-1$
+        private static final String NAV_DROP_KEY = "tormozit.compareConfigNavDropFromCompare"; //$NON-NLS-1$
         private static final String TOAST_TITLE = "Сравнение конфигураций"; //$NON-NLS-1$
+
+        /** Редактор сравнения, из которого идёт текущий drag (для drop в навигатор). */
+        private static volatile IEditorPart dragSourceEditor;
+        /** Объект МД, резолвнутый на dragStart — та же логика, что «Показать в навигаторе». */
+        private static volatile EObject dragEObject;
 
         private NavigatorDropSupport() {}
 
+        private static void log(String msg)
+        {
+            Global.tempLog("compare-nav-dnd", msg); //$NON-NLS-1$
+        }
+
         static void install(IEditorPart editor, Tree tree)
+        {
+            installDropFromNavigator(editor, tree);
+            installDragToNavigator(editor, tree);
+        }
+
+        static void installOnNavigator(IViewPart navigator, int attempt)
+        {
+            if (navigator == null || !isNavigatorView(navigator))
+                return;
+            Object rawViewer = Global.invoke(navigator, "getCommonViewer"); //$NON-NLS-1$
+            if (!(rawViewer instanceof CommonViewer viewer))
+            {
+                if (attempt < 30)
+                {
+                    Display display = Display.getDefault();
+                    if (display != null)
+                        display.timerExec(150, () -> installOnNavigator(navigator, attempt + 1));
+                }
+                return;
+            }
+            Tree tree = viewer.getTree();
+            if (tree == null || tree.isDisposed())
+                return;
+            if (Boolean.TRUE.equals(tree.getData(NAV_DROP_KEY)))
+                return;
+
+            DropTarget target = ensureDropTarget(tree);
+            if (target == null)
+            {
+                log("nav install: no DropTarget id=" + navigator.getViewSite().getId()); //$NON-NLS-1$
+                return;
+            }
+            ensureLocalSelectionTransfer(target);
+            target.addDropListener(new DropTargetAdapter()
+            {
+                @Override
+                public void dragEnter(DropTargetEvent event)
+                {
+                    updateCompareDropDetail(event);
+                }
+
+                @Override
+                public void dragOperationChanged(DropTargetEvent event)
+                {
+                    updateCompareDropDetail(event);
+                }
+
+                @Override
+                public void dragOver(DropTargetEvent event)
+                {
+                    updateCompareDropDetail(event);
+                }
+
+                @Override
+                public void dropAccept(DropTargetEvent event)
+                {
+                    // CommonDropAdapter.validateDrop для узлов сравнения даёт false и
+                    // в dropAccept ставит DROP_NONE — без нашего перехвата drop не приходит.
+                    updateCompareDropDetail(event);
+                    log("nav dropAccept detail=" + event.detail); //$NON-NLS-1$
+                }
+
+                @Override
+                public void drop(DropTargetEvent event)
+                {
+                    log("nav drop editor=" + (dragSourceEditor != null) //$NON-NLS-1$
+                        + " eObject=" + (dragEObject != null)); //$NON-NLS-1$
+                    EObject obj = dragEObject;
+                    if (obj != null)
+                    {
+                        NavigatorReveal.revealAndActivateIfHidden(obj);
+                        return;
+                    }
+                    Object selObj = LocalSelectionTransfer.getTransfer().getSelection();
+                    if (!(selObj instanceof IStructuredSelection sel) || !isCompareTreeSelection(sel))
+                        return;
+                    IEditorPart editor = dragSourceEditor;
+                    if (editor == null)
+                        return;
+                    new CompareConfigSelectionListener(editor).showObjectInNavigator(sel, true);
+                }
+            });
+            tree.setData(NAV_DROP_KEY, Boolean.TRUE);
+            log("nav install OK id=" + navigator.getViewSite().getId() //$NON-NLS-1$
+                + " reused=" + (tree.getData(DND.DROP_TARGET_KEY) == target)); //$NON-NLS-1$
+        }
+
+        private static boolean isNavigatorView(IViewPart view)
+        {
+            String id = view.getViewSite().getId();
+            return Global.NAVIGATOR_VIEW_ID.equals(id)
+                || view.getClass().getName().contains("internal.navigator.ui.Navigator"); //$NON-NLS-1$
+        }
+
+        /**
+         * Для выделения из дерева сравнения: выбрать {@link LocalSelectionTransfer} и
+         * {@link DND#DROP_MOVE} (курсор перемещения — не «копирование/добавление»).
+         * Иначе detail не трогаем (штатный DnD навигатора).
+         */
+        private static void updateCompareDropDetail(DropTargetEvent event)
+        {
+            Object selObj = LocalSelectionTransfer.getTransfer().getSelection();
+            if (!(selObj instanceof IStructuredSelection sel) || !isCompareTreeSelection(sel))
+                return;
+            preferLocalSelectionDataType(event);
+            // MOVE, не COPY: жест «найти/показать», а не «добавить копию».
+            if ((event.operations & DND.DROP_MOVE) != 0)
+                event.detail = DND.DROP_MOVE;
+            else if ((event.operations & DND.DROP_COPY) != 0)
+                event.detail = DND.DROP_COPY;
+            else
+                event.detail = DND.DROP_NONE;
+        }
+
+        private static void preferLocalSelectionDataType(DropTargetEvent event)
+        {
+            Transfer local = LocalSelectionTransfer.getTransfer();
+            if (event.currentDataType != null && local.isSupportedType(event.currentDataType))
+                return;
+            TransferData[] types = event.dataTypes;
+            if (types == null)
+                return;
+            for (TransferData td : types)
+            {
+                if (local.isSupportedType(td))
+                {
+                    event.currentDataType = td;
+                    return;
+                }
+            }
+        }
+
+        private static boolean isCompareTreeSelection(IStructuredSelection sel)
+        {
+            return sel != null && !sel.isEmpty()
+                && sel.getFirstElement() instanceof IPartialModelNode;
+        }
+
+        private static DropTarget ensureDropTarget(Tree tree)
+        {
+            Object existing = tree.getData(DND.DROP_TARGET_KEY);
+            if (existing instanceof DropTarget target)
+                return target;
+            try
+            {
+                return new DropTarget(tree, DND.DROP_COPY | DND.DROP_MOVE | DND.DROP_DEFAULT);
+            }
+            catch (RuntimeException | SWTError e)
+            {
+                Global.log("CompareConfigNavigatorDrop: nav DropTarget init error: " + e); //$NON-NLS-1$
+                return null;
+            }
+        }
+
+        private static void ensureLocalSelectionTransfer(DropTarget target)
+        {
+            Transfer local = LocalSelectionTransfer.getTransfer();
+            Transfer[] current = target.getTransfer();
+            if (current != null)
+            {
+                for (Transfer t : current)
+                {
+                    if (t == local)
+                        return;
+                }
+                Transfer[] expanded = Arrays.copyOf(current, current.length + 1);
+                expanded[current.length] = local;
+                target.setTransfer(expanded);
+            }
+            else
+                target.setTransfer(new Transfer[] { local });
+        }
+
+        private static void installDropFromNavigator(IEditorPart editor, Tree tree)
         {
             if (editor == null || tree == null || tree.isDisposed())
                 return;
-            if (Boolean.TRUE.equals(tree.getData(DATA_KEY)))
+            if (Boolean.TRUE.equals(tree.getData(DROP_KEY)))
                 return;
 
             DropTarget target;
@@ -5767,22 +5993,121 @@ public class CompareConfigMenuHook implements IStartup
                     Object selObj = LocalSelectionTransfer.getTransfer().getSelection();
                     if (!(selObj instanceof IStructuredSelection sel) || sel.isEmpty())
                         return;
-                    handleDrop(editor, sel);
+                    handleDropFromNavigator(editor, sel);
                 }
 
                 private void updateDetail(DropTargetEvent event)
                 {
                     Object selObj = LocalSelectionTransfer.getTransfer().getSelection();
                     if (selObj instanceof IStructuredSelection sel && resolveFqn(sel.getFirstElement()) != null)
-                        event.detail = event.detail == DND.DROP_DEFAULT ? DND.DROP_COPY : event.detail;
+                    {
+                        // MOVE: жест «найти строку», не «скопировать/добавить».
+                        if ((event.operations & DND.DROP_MOVE) != 0)
+                            event.detail = DND.DROP_MOVE;
+                        else
+                            event.detail = DND.DROP_COPY;
+                    }
                     else
                         event.detail = DND.DROP_NONE;
                 }
             });
-            tree.setData(DATA_KEY, Boolean.TRUE);
+            tree.setData(DROP_KEY, Boolean.TRUE);
         }
 
-        private static void handleDrop(IEditorPart editor, IStructuredSelection selection)
+        private static void installDragToNavigator(IEditorPart editor, Tree tree)
+        {
+            if (editor == null || tree == null || tree.isDisposed())
+                return;
+            if (Boolean.TRUE.equals(tree.getData(DRAG_KEY)))
+                return;
+
+            DragSource source;
+            Object existing = tree.getData(DND.DRAG_SOURCE_KEY);
+            if (existing instanceof DragSource ds)
+                source = ds;
+            else
+            {
+                try
+                {
+                    source = new DragSource(tree, DND.DROP_COPY | DND.DROP_MOVE);
+                }
+                catch (RuntimeException | SWTError e)
+                {
+                    Global.log("CompareConfigNavigatorDrop: DragSource init error: " + e); //$NON-NLS-1$
+                    return;
+                }
+                source.setTransfer(new Transfer[] { LocalSelectionTransfer.getTransfer() });
+            }
+            ensureDragLocalSelectionTransfer(source);
+            source.addDragListener(new DragSourceAdapter()
+            {
+                @Override
+                public void dragStart(DragSourceEvent event)
+                {
+                    AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
+                    ISelection sel = viewer != null ? viewer.getSelection() : null;
+                    if (!(sel instanceof IStructuredSelection ss) || !isCompareTreeSelection(ss))
+                    {
+                        log("dragStart reject: selection"); //$NON-NLS-1$
+                        event.doit = false;
+                        return;
+                    }
+                    CompareConfigSelectionListener helper = new CompareConfigSelectionListener(editor);
+                    EObject obj = helper.resolveNavigatorEObject(ss, null);
+                    if (obj == null)
+                    {
+                        log("dragStart reject: resolveNavigatorEObject null"); //$NON-NLS-1$
+                        event.doit = false;
+                        return;
+                    }
+                    LocalSelectionTransfer.getTransfer().setSelection(ss);
+                    dragSourceEditor = editor;
+                    dragEObject = obj;
+                    event.doit = true;
+                    log("dragStart OK " + obj.eClass().getName()); //$NON-NLS-1$
+                }
+
+                @Override
+                public void dragSetData(DragSourceEvent event)
+                {
+                    AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
+                    if (viewer != null)
+                        LocalSelectionTransfer.getTransfer().setSelection(viewer.getSelection());
+                }
+
+                @Override
+                public void dragFinished(DragSourceEvent event)
+                {
+                    log("dragFinished detail=" + event.detail); //$NON-NLS-1$
+                    dragSourceEditor = null;
+                    dragEObject = null;
+                    LocalSelectionTransfer.getTransfer().setSelection(null);
+                }
+            });
+            tree.setData(DRAG_KEY, Boolean.TRUE);
+            log("compare DragSource installed"); //$NON-NLS-1$
+        }
+
+        private static void ensureDragLocalSelectionTransfer(DragSource source)
+        {
+            Transfer local = LocalSelectionTransfer.getTransfer();
+            Transfer[] current = source.getTransfer();
+            if (current != null)
+            {
+                for (Transfer t : current)
+                {
+                    if (t == local)
+                        return;
+                }
+                Transfer[] expanded = Arrays.copyOf(current, current.length + 1);
+                expanded[current.length] = local;
+                source.setTransfer(expanded);
+            }
+            else
+                source.setTransfer(new Transfer[] { local });
+        }
+
+        private static void handleDropFromNavigator(IEditorPart editor, IStructuredSelection selection)
         {
             String fqn = resolveFqn(selection.getFirstElement());
             if (fqn == null || fqn.isBlank())
