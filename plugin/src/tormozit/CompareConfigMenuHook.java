@@ -152,9 +152,16 @@ import org.eclipse.compare.internal.CompareEditorSelectionProvider;
 import org.eclipse.core.commands.AbstractHandler;
 import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.commands.ExecutionException;
+import org.eclipse.jface.util.LocalSelectionTransfer;
+import org.eclipse.swt.SWTError;
 import org.eclipse.swt.dnd.Clipboard;
+import org.eclipse.swt.dnd.DND;
+import org.eclipse.swt.dnd.DropTarget;
+import org.eclipse.swt.dnd.DropTargetAdapter;
+import org.eclipse.swt.dnd.DropTargetEvent;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
+import com._1c.g5.v8.dt.compare.model.TopComparisonNode;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.IPath;
 import org.eclipse.core.runtime.IProgressMonitor;
@@ -320,6 +327,7 @@ public class CompareConfigMenuHook implements IStartup
         CompareConfigOpenModuleMergeHandler.attachDoubleClickListener(editor, tree);
         CompareModuleStructureColumnHook.install(tree);
         CompareConfigMultiMarkSupport.install(editor, tree);
+        NavigatorDropSupport.install(editor, tree);
     }
 
     private void wireTreeViewerToListener(IEditorPart editor, CompareConfigSelectionListener listener)
@@ -776,6 +784,15 @@ public class CompareConfigMenuHook implements IStartup
             if (tree == null || tree.isDisposed()) return null;
             Object data = tree.getData(DATA_KEY);
             return data instanceof CompareConfigMultiMarkSupport support ? support : null;
+        }
+
+        /** Сброс псевдо-мультивыделения (например, после DnD из навигатора). */
+        void clearSelectionHighlight()
+        {
+            selected.clear();
+            anchor = null;
+            if (tree != null && !tree.isDisposed())
+                tree.redraw();
         }
 
         // ---- Ctrl+C — копирование текстов выделенных строк ----
@@ -5692,6 +5709,262 @@ public class CompareConfigMenuHook implements IStartup
                 }
             }
             return matches;
+        }
+    }
+
+    /**
+     * DnD из навигатора на дерево сравнения: выделяет строку соответствующего объекта
+     * ({@code IComparisonSession#getTopNode} + материализация пути через content provider).
+     */
+    private static final class NavigatorDropSupport
+    {
+        private static final String DATA_KEY = "tormozit.compareConfigNavigatorDrop"; //$NON-NLS-1$
+        private static final String TOAST_TITLE = "Сравнение конфигураций"; //$NON-NLS-1$
+
+        private NavigatorDropSupport() {}
+
+        static void install(IEditorPart editor, Tree tree)
+        {
+            if (editor == null || tree == null || tree.isDisposed())
+                return;
+            if (Boolean.TRUE.equals(tree.getData(DATA_KEY)))
+                return;
+
+            DropTarget target;
+            try
+            {
+                target = new DropTarget(tree, DND.DROP_COPY | DND.DROP_MOVE | DND.DROP_DEFAULT);
+            }
+            catch (RuntimeException | SWTError e)
+            {
+                Global.log("CompareConfigNavigatorDrop: DropTarget init error: " + e); //$NON-NLS-1$
+                return;
+            }
+            target.setTransfer(new Transfer[] { LocalSelectionTransfer.getTransfer() });
+            target.addDropListener(new DropTargetAdapter()
+            {
+                @Override
+                public void dragEnter(DropTargetEvent event)
+                {
+                    updateDetail(event);
+                }
+
+                @Override
+                public void dragOperationChanged(DropTargetEvent event)
+                {
+                    updateDetail(event);
+                }
+
+                @Override
+                public void dragOver(DropTargetEvent event)
+                {
+                    updateDetail(event);
+                }
+
+                @Override
+                public void drop(DropTargetEvent event)
+                {
+                    Object selObj = LocalSelectionTransfer.getTransfer().getSelection();
+                    if (!(selObj instanceof IStructuredSelection sel) || sel.isEmpty())
+                        return;
+                    handleDrop(editor, sel);
+                }
+
+                private void updateDetail(DropTargetEvent event)
+                {
+                    Object selObj = LocalSelectionTransfer.getTransfer().getSelection();
+                    if (selObj instanceof IStructuredSelection sel && resolveFqn(sel.getFirstElement()) != null)
+                        event.detail = event.detail == DND.DROP_DEFAULT ? DND.DROP_COPY : event.detail;
+                    else
+                        event.detail = DND.DROP_NONE;
+                }
+            });
+            tree.setData(DATA_KEY, Boolean.TRUE);
+        }
+
+        private static void handleDrop(IEditorPart editor, IStructuredSelection selection)
+        {
+            String fqn = resolveFqn(selection.getFirstElement());
+            if (fqn == null || fqn.isBlank())
+            {
+                ToastNotification.show(TOAST_TITLE, "Не удалось определить объект метаданных", 4000); //$NON-NLS-1$
+                return;
+            }
+
+            AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
+            IComparisonSession session = CompareConfigSelectionListener.getSession(editor);
+            if (viewer == null || session == null)
+                return;
+
+            TopComparisonNode top = findTopNode(session, fqn);
+            if (top == null)
+            {
+                ToastNotification.show(TOAST_TITLE, "Объект не найден в дереве сравнения", 4000); //$NON-NLS-1$
+                return;
+            }
+
+            ensurePartialModel(editor);
+            IPartialModelNode node = resolvePartialNode(editor, viewer, top);
+            if (node == null)
+            {
+                ToastNotification.show(TOAST_TITLE,
+                    "Объект есть в сравнении, но строка недоступна (возможно, скрыта фильтром)", 5000); //$NON-NLS-1$
+                return;
+            }
+
+            Control control = viewer.getControl();
+            CompareConfigMultiMarkSupport multi =
+                control instanceof Tree t ? CompareConfigMultiMarkSupport.get(t) : null;
+            if (multi != null)
+                multi.clearSelectionHighlight();
+
+            // Раскрываем только предков (reveal/setSelection(reveal=true) ещё и сам узел).
+            expandAncestorsOnly(viewer, node);
+            viewer.setSelection(new StructuredSelection(node), false);
+            if (control instanceof Tree tree && !tree.isDisposed())
+            {
+                TreeItem[] selected = tree.getSelection();
+                if (selected.length > 0)
+                    tree.showItem(selected[0]);
+            }
+            if (editor.getSite() != null && editor.getSite().getPage() != null)
+                editor.getSite().getPage().activate(editor);
+            if (control != null && !control.isDisposed())
+                control.setFocus();
+        }
+
+        /** Развернуть цепочку родителей, не трогая сам {@code node}. */
+        private static void expandAncestorsOnly(AbstractTreeViewer viewer, IPartialModelNode node)
+        {
+            ArrayList<IPartialModelNode> ancestors = new ArrayList<>();
+            for (IPartialModelNode p = node.getParent(); p != null; p = p.getParent())
+                ancestors.add(p);
+            for (int i = ancestors.size() - 1; i >= 0; i--)
+                viewer.setExpandedState(ancestors.get(i), true);
+        }
+
+        private static String resolveFqn(Object navigatorElement)
+        {
+            if (navigatorElement == null)
+                return null;
+            String fullName = GetRef.fullNameFromNavigatorElement(navigatorElement);
+            if (fullName == null || fullName.isBlank())
+                return null;
+            return MdTypeMapping.anyFullNameToBmFqn(fullName);
+        }
+
+        private static TopComparisonNode findTopNode(IComparisonSession session, String fqn)
+        {
+            TopComparisonNode top = session.getTopNode(fqn, ComparisonSide.MAIN);
+            if (top != null)
+                return top;
+            top = session.getTopNode(fqn, ComparisonSide.OTHER);
+            if (top != null)
+                return top;
+            return session.getTopNode(fqn, ComparisonSide.COMMON_ANCESTOR);
+        }
+
+        private static void ensurePartialModel(IEditorPart editor)
+        {
+            Object listObj = Global.getField(editor, "comparisonArtifactsList"); //$NON-NLS-1$
+            if (!(listObj instanceof List<?> list) || list.isEmpty())
+                return;
+            Object artifact = list.get(0);
+            if (artifact == null)
+                return;
+            if (Global.call(artifact, "getPartialModel") != null) //$NON-NLS-1$
+                return;
+            Global.invokeVoid(editor, "createPartialModelForArtifact", artifact); //$NON-NLS-1$
+        }
+
+        private static IPartialModel partialModelOf(IEditorPart editor)
+        {
+            Object listObj = Global.getField(editor, "comparisonArtifactsList"); //$NON-NLS-1$
+            if (!(listObj instanceof List<?> list))
+                return null;
+            for (Object artifact : list)
+            {
+                Object pm = Global.call(artifact, "getPartialModel"); //$NON-NLS-1$
+                if (pm instanceof IPartialModel model)
+                    return model;
+            }
+            return null;
+        }
+
+        /**
+         * Находит UI-узел для {@code top}: сначала {@link IPartialModel#getDirectNode},
+         * иначе материализует предков через {@link ITreeContentProvider#getChildren}.
+         */
+        private static IPartialModelNode resolvePartialNode(
+                IEditorPart editor, AbstractTreeViewer viewer, TopComparisonNode top)
+        {
+            long targetId = top.bmGetId();
+            IPartialModel pm = partialModelOf(editor);
+            if (pm != null)
+            {
+                IDirectPartialModelNode direct = pm.getDirectNode(targetId);
+                if (direct != null)
+                    return direct;
+                ICollectionPartialNode collection = pm.getCollectionNode(targetId);
+                if (collection != null)
+                    return collection;
+            }
+
+            if (!(viewer.getContentProvider() instanceof ITreeContentProvider cp))
+                return null;
+
+            HashSet<Long> pathIds = new HashSet<>();
+            for (ComparisonNode n = top; n != null; n = n.getParent())
+                pathIds.add(n.bmGetId());
+
+            Object[] roots = cp.getElements(viewer.getInput());
+            return findAlongPath(cp, roots, pathIds, targetId, pm);
+        }
+
+        private static IPartialModelNode findAlongPath(
+                ITreeContentProvider cp,
+                Object[] siblings,
+                Set<Long> pathIds,
+                long targetId,
+                IPartialModel pm)
+        {
+            if (siblings == null)
+                return null;
+            for (Object sibling : siblings)
+            {
+                if (sibling instanceof IPartialModelNode node && node.getNodeId() == targetId)
+                    return node;
+            }
+            boolean pathChildPresent = false;
+            for (Object sibling : siblings)
+            {
+                if (sibling instanceof IPartialModelNode node && pathIds.contains(node.getNodeId()))
+                {
+                    pathChildPresent = true;
+                    break;
+                }
+            }
+            for (Object sibling : siblings)
+            {
+                if (!(sibling instanceof IPartialModelNode node))
+                    continue;
+                if (pathChildPresent && !pathIds.contains(node.getNodeId()))
+                    continue;
+                Object[] children = cp.getChildren(node);
+                if (pm != null)
+                {
+                    IDirectPartialModelNode direct = pm.getDirectNode(targetId);
+                    if (direct != null)
+                        return direct;
+                    ICollectionPartialNode collection = pm.getCollectionNode(targetId);
+                    if (collection != null)
+                        return collection;
+                }
+                IPartialModelNode found = findAlongPath(cp, children, pathIds, targetId, pm);
+                if (found != null)
+                    return found;
+            }
+            return null;
         }
     }
 }
