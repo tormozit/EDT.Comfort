@@ -53,6 +53,7 @@
     <!-- <startup class="tormozit.ListSelectionThemeHook"/> -->
     <startup class="tormozit.NavigatorFilterHook"/>
     <startup class="tormozit.NavigatorShowInExplorerMenuHook"/>
+    <startup class="tormozit.NavigatorCollapseOthersMenuHook"/>
     <startup class="tormozit.NavigatorOpenObjectMenuHook"/>
     <startup class="tormozit.FileSearchShowInProjectStructureMenuHook"/>
     <startup class="tormozit.InfobasesViewHook"/>
