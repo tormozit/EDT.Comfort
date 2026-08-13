@@ -52,6 +52,9 @@ public class ComfortInitializer extends AbstractPreferenceInitializer
             ComfortSettings.PREF_BRACKET_CONTENT_HINT_MIN_LINES,
             ComfortSettings.DEFAULT_BRACKET_CONTENT_HINT_MIN_LINES);
         store.setDefault(
+            ComfortSettings.PREF_CTRL_CLICK_SELECT_WORD,
+            ComfortSettings.DEFAULT_CTRL_CLICK_SELECT_WORD);
+        store.setDefault(
             ComfortSettings.PREF_COMPARE_CURRENT_LINES_VISIBLE,
             ComfortSettings.DEFAULT_COMPARE_CURRENT_LINES_VISIBLE);
         store.setDefault(

@@ -207,10 +207,14 @@ public class ComfortPreferencePage
         groupLayout.verticalSpacing = 4;    // расстояние между строками
         codeEditorGroup.setLayout(groupLayout);
 
-        addField(new BooleanFieldEditor(
+        BooleanFieldEditor autoOpenField = new BooleanFieldEditor(
             ContentAssistSettings.PREF_ENABLED,
             "Автооткрытие подсказок при вводе",
-            codeEditorGroup));
+            codeEditorGroup);
+        addField(autoOpenField);
+        setFieldTooltip(autoOpenField,
+            "Открывать список автодополнения и описание параметров метода при вводе символов", //$NON-NLS-1$
+            codeEditorGroup);
 
         IntegerFieldEditor timeoutField = new IntegerFieldEditor(
             ContentAssistSettings.PREF_TIMEOUT,
@@ -226,28 +230,39 @@ public class ComfortPreferencePage
         timeoutTextData.horizontalAlignment = SWT.LEFT;
         timeoutText.setLayoutData(timeoutTextData);
 
+        BooleanFieldEditor ctrlClickSelectWordField = new BooleanFieldEditor(
+            ComfortSettings.PREF_CTRL_CLICK_SELECT_WORD,
+            "Ctrl+клик выделяет слово", //$NON-NLS-1$
+            codeEditorGroup);
+        addField(ctrlClickSelectWordField);
+        setFieldTooltip(ctrlClickSelectWordField,
+            "Ctrl+клик в текстовом поле выделяет слово под курсором — как двойной клик, —\n"
+            + "если это слово ещё не выделено. Если оно уже выделено, клик работает штатно:\n"
+            + "в редакторе модуля рисуется гиперссылка, указатель принимает форму руки.", //$NON-NLS-1$
+            codeEditorGroup);
+
         BooleanFieldEditor serverCallField = new BooleanFieldEditor(
             ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_ENABLED,
             "Подсвечивать серверные вызовы", //$NON-NLS-1$
             codeEditorGroup);
         addField(serverCallField);
         setFieldTooltip(serverCallField,
-            "Подсвечивать серверные вызовы в клиентском коде другим цветом.\n"
-            + "При выключении серверные вызовы подсвечиваются стандартным стилем builtin-функций EDT."); //$NON-NLS-1$
+            "Подсвечивать серверные вызовы в клиентском коде особыми цветами", //$NON-NLS-1$
+            codeEditorGroup);
 
         ThemeAwareColorFieldEditor serverCallColorField = new ThemeAwareColorFieldEditor(
             ComfortSettings.PREF_SERVER_CALL_HIGHLIGHTING_COLOR,
             "Цвет серверных вызовов:", //$NON-NLS-1$
             codeEditorGroup);
         addField(serverCallColorField);
-        setFieldTooltip(serverCallColorField, SERVER_CALL_COLOR_TOOLTIP);
+        setFieldTooltip(serverCallColorField, SERVER_CALL_COLOR_TOOLTIP, codeEditorGroup);
 
         ThemeAwareColorFieldEditor serverCallContextColorField = new ThemeAwareColorFieldEditor(
             ComfortSettings.PREF_SERVER_CALL_CONTEXT_HIGHLIGHTING_COLOR,
             "Цвет серверных вызовов с контекстом:", //$NON-NLS-1$
             codeEditorGroup);
         addField(serverCallContextColorField);
-        setFieldTooltip(serverCallContextColorField, SERVER_CALL_CONTEXT_COLOR_TOOLTIP);
+        setFieldTooltip(serverCallContextColorField, SERVER_CALL_CONTEXT_COLOR_TOOLTIP, codeEditorGroup);
 
         BooleanFieldEditor bracketHintField = new BooleanFieldEditor(
             ComfortSettings.PREF_BRACKET_CONTENT_HINT_ENABLED,
@@ -257,9 +272,8 @@ public class ComfortPreferencePage
         setFieldTooltip(bracketHintField,
             "Показывать начало блочной конструкции (Процедура, Если, Пока, Для, Попытка, #Область, #Если)\n"
             + "полупрозрачным текстом рядом с её закрывающим словом (КонецПроцедуры, КонецЕсли и т.д.),\n"
-            + "если конструкция занимает много видимых строк. Цвет подсказки берётся из подсветки\n"
-            + "самого закрывающего слова. Подсказка не показывается, если справа от закрывающего\n"
-            + "слова есть ещё код/комментарий, или если на её строке стоит каретка."); //$NON-NLS-1$
+            + "если конструкция занимает много видимых строк.", //$NON-NLS-1$
+            codeEditorGroup);
 
         IntegerFieldEditor bracketHintMinLinesField = new IntegerFieldEditor(
             ComfortSettings.PREF_BRACKET_CONTENT_HINT_MIN_LINES,
@@ -271,9 +285,8 @@ public class ComfortPreferencePage
         String bracketHintMinLinesTooltip =
             "Минимальное количество ВИДИМЫХ строк (с учётом свёрнутых блоков) между началом\n"
             + "и концом конструкции, при котором показывается подсказка. Если открывающая часть\n"
-            + "вообще не видна на экране (прокручена или свёрнута), подсказка показывается всегда,\n"
-            + "независимо от этого значения."; //$NON-NLS-1$
-        setFieldTooltip(bracketHintMinLinesField, bracketHintMinLinesTooltip);
+            + "вообще не видна, подсказка показывается всегда."; //$NON-NLS-1$
+        setFieldTooltip(bracketHintMinLinesField, bracketHintMinLinesTooltip, codeEditorGroup);
         Text bracketHintMinLinesText = bracketHintMinLinesField.getTextControl(codeEditorGroup);
         bracketHintMinLinesText.setToolTipText(bracketHintMinLinesTooltip);
         GridData bracketHintMinLinesTextData = new GridData();
@@ -932,7 +945,10 @@ public class ComfortPreferencePage
 
     /**
      * Устанавливает tooltip на управляющий элемент {@link FieldEditor}.
-     * Для {@link BooleanFieldEditor} — на чекбокс и подпись.
+     * Для {@link BooleanFieldEditor} — на флажок (подпись на самой кнопке).
+     * {@code parent} — подсказка, где искали контрол; если он уже создан на другом
+     * родителе (группа «Редактор кода»), берётся существующий виджет, без
+     * {@code checkParent}.
      */
     private void setFieldTooltip(FieldEditor field, String tooltip)
     {
@@ -950,32 +966,112 @@ public class ComfortPreferencePage
     {
         if (parent.isDisposed() || field == null)
             return;
+        Control change = existingChangeControl(field);
+        if (change == null)
+            change = invokeControlGetter(field, "getChangeControl", parent); //$NON-NLS-1$
+        if (change != null && !change.isDisposed())
+            change.setToolTipText(tooltip);
+        Control label = existingLabelControl(field);
+        if (label == null)
+            label = invokeControlGetter(field, "getLabelControl", parent); //$NON-NLS-1$
+        if (label != null && !label.isDisposed())
+            label.setToolTipText(tooltip);
+    }
+
+    /** Уже созданная кнопка/поле, без {@code getXxxControl(parent)} — тот бросает при чужом parent. */
+    private static Control existingChangeControl(FieldEditor field)
+    {
+        Control button = readControlField(field, "changeControl"); //$NON-NLS-1$
+        if (button != null)
+            return button;
+        Control text = readControlField(field, "textField"); //$NON-NLS-1$
+        if (text != null)
+            return text;
+        Object selector = readInstanceField(field, "colorSelector"); //$NON-NLS-1$
+        if (selector == null)
+            return null;
         try
         {
-            java.lang.reflect.Method changeMethod = field.getClass().getDeclaredMethod(
-                "getChangeControl", Composite.class); //$NON-NLS-1$
-            changeMethod.setAccessible(true);
-            Control change = (Control) changeMethod.invoke(field, parent);
-            if (change != null && !change.isDisposed())
-                change.setToolTipText(tooltip);
+            Object btn = selector.getClass().getMethod("getButton").invoke(selector); //$NON-NLS-1$
+            if (btn instanceof Control control && !control.isDisposed())
+                return control;
         }
         catch (Exception ignored)
         {
-            // getChangeControl недоступен
+            // ColorSelector без getButton
         }
+        return null;
+    }
+
+    private static Control existingLabelControl(FieldEditor field)
+    {
+        return readControlField(field, "label"); //$NON-NLS-1$
+    }
+
+    private static Control invokeControlGetter(FieldEditor field, String methodName, Composite parent)
+    {
+        java.lang.reflect.Method method = findDeclaredMethod(field.getClass(), methodName, Composite.class);
+        if (method == null)
+            return null;
         try
         {
-            java.lang.reflect.Method labelMethod = field.getClass().getDeclaredMethod(
-                "getLabelControl", Composite.class); //$NON-NLS-1$
-            labelMethod.setAccessible(true);
-            Control label = (Control) labelMethod.invoke(field, parent);
-            if (label != null && !label.isDisposed())
-                label.setToolTipText(tooltip);
+            Object result = method.invoke(field, parent);
+            if (result instanceof Control control && !control.isDisposed())
+                return control;
         }
         catch (Exception ignored)
         {
-            // getLabelControl недоступен
+            // checkParent / метод недоступен
         }
+        return null;
+    }
+
+    private static java.lang.reflect.Method findDeclaredMethod(Class<?> type, String name, Class<?>... params)
+    {
+        for (Class<?> c = type; c != null; c = c.getSuperclass())
+        {
+            try
+            {
+                java.lang.reflect.Method method = c.getDeclaredMethod(name, params);
+                method.setAccessible(true);
+                return method;
+            }
+            catch (NoSuchMethodException ignored)
+            {
+                // ищем выше
+            }
+        }
+        return null;
+    }
+
+    private static Control readControlField(Object target, String fieldName)
+    {
+        Object value = readInstanceField(target, fieldName);
+        if (value instanceof Control control && !control.isDisposed())
+            return control;
+        return null;
+    }
+
+    private static Object readInstanceField(Object target, String fieldName)
+    {
+        for (Class<?> c = target.getClass(); c != null; c = c.getSuperclass())
+        {
+            try
+            {
+                java.lang.reflect.Field declared = c.getDeclaredField(fieldName);
+                declared.setAccessible(true);
+                return declared.get(target);
+            }
+            catch (NoSuchFieldException ignored)
+            {
+                // ищем выше
+            }
+            catch (Exception ignored)
+            {
+                return null;
+            }
+        }
+        return null;
     }
 
     @Override

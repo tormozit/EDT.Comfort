@@ -30,6 +30,7 @@
 |----------|----------|
 | Автооткрытие автодополнения при вводе | [Автодополнение](avtodopolnenie.md) — работает вместе с **Улучшать списки** |
 | Автооткрытие автодополнения: Задержка (мс) | 0–10000; 0 — без паузы |
+| Ctrl+клик выделяет слово | См. [Редакторы текста → Ctrl+клик выделяет слово](redaktory-teksta.md#ctrl-klik-vydelyaet-slovo) |
 | Серверные вызовы отдельным цветом | См. [Редактор модуля → Оформление серверных вызовов](redaktor-modulya.md#oformlenie-servernyh-vyzovov) ([#66](https://github.com/tormozit/EDT.Comfort/issues/66)) |
 | Отображать начало конструкции в её конце | См. [Редактор модуля → Подсказка начала конструкции](redaktor-modulya.md#podskazka-nachala-konstrukcii) ([#80](https://github.com/tormozit/EDT.Comfort/issues/80)) |
 | Проверять орфографию в идентификаторах в видимой области | См. [Орфография](orfografiya.md) ([#175](https://github.com/tormozit/EDT.Comfort/issues/175)) |

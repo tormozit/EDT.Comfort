@@ -157,6 +157,17 @@ public final class ComfortSettings
     /** Минимальное число строк по умолчанию — 50. */
     public static final int DEFAULT_BRACKET_CONTENT_HINT_MIN_LINES = 50;
 
+    // ---- Ctrl+клик в текстовых полях ----
+
+    /**
+     * Ключ: Ctrl+клик выделяет слово под курсором, если оно ещё не выделено
+     * (см. {@link TextEditorCtrlClickSelectWordHook}).
+     */
+    public static final String PREF_CTRL_CLICK_SELECT_WORD = "comfort.editor.ctrlClickSelectWord"; //$NON-NLS-1$
+
+    /** Выделение слова по Ctrl+клику включено по умолчанию. */
+    public static final boolean DEFAULT_CTRL_CLICK_SELECT_WORD = true;
+
     // ---- Hover hints (подсказки при наведении) ----
 
     /** Ключ: показывать ли всплывающие подсказки при удержании мыши на слове в модуле. */
@@ -756,6 +767,17 @@ public final class ComfortSettings
         if (settings == null)
             return DEFAULT_BRACKET_CONTENT_HINT_ENABLED;
         return settings.preferenceStore.getBoolean(PREF_BRACKET_CONTENT_HINT_ENABLED);
+    }
+
+    // ---- Ctrl+click accessors ----
+
+    /** Ctrl+клик выделяет слово под курсором, если оно ещё не выделено. */
+    public static boolean isCtrlClickSelectWordEnabled()
+    {
+        ComfortSettings settings = instance;
+        if (settings == null)
+            return DEFAULT_CTRL_CLICK_SELECT_WORD;
+        return settings.preferenceStore.getBoolean(PREF_CTRL_CLICK_SELECT_WORD);
     }
 
     // ---- Spell checking accessors ----

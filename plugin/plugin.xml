@@ -16,6 +16,7 @@
     <startup class="tormozit.BslEditorRevealScrollFixHook"/>
     <startup class="tormozit.BlameHyperlinkOpenFixHook"/>
     <startup class="tormozit.TextEditorRightClickCaretHook"/>
+    <startup class="tormozit.TextEditorCtrlClickSelectWordHook"/>
     <startup class="tormozit.TextEditorIdentifierSelectionHook"/>
     <startup class="tormozit.TextEditorMenuHook"/>
     <startup class="tormozit.XmlEditorShowInNavigatorHook"/>
