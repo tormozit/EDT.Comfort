@@ -1,8 +1,11 @@
 package tormozit;
 
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 import org.eclipse.core.runtime.preferences.InstanceScope;
 import org.eclipse.jface.dialogs.IDialogSettings;
@@ -33,9 +36,14 @@ import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
+import org.eclipse.swt.widgets.Label;
+import org.eclipse.swt.widgets.Listener;
+import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableColumn;
 import org.eclipse.swt.widgets.TableItem;
+import org.eclipse.swt.widgets.Text;
+import org.eclipse.swt.widgets.ToolBar;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IViewPart;
@@ -75,16 +83,32 @@ import org.eclipse.ui.preferences.ScopedPreferenceStore;
  *   <li>Фильтр по склейке {@code resolveFullNameOrNull(path) + ";" + FileDiff.getPath()}
  *       ({@code null} → пустая строка) с подсветкой совпадений
  *       ({@link SmartMatchHighlight}).</li>
+ *   <li>История запросов в штатном поле «Найти» ({@code FindToolbar#patternField}):
+ *       кнопка ▾ и Ctrl+↓ ({@link FilterHistoryUi}), отдельно от фильтра файлов.</li>
  * </ul>
  *
- * <p>Включение: Параметры → Комфорт → «Улучшать списки»
- * ({@link ComfortSettings#PREF_REPLACE_LIST_FILTERS}).
- * Логирование: Параметры → Комфорт → «Общее логирование».
+ * <p>Колонки и фильтр файлов: Параметры → Комфорт → «Улучшать списки»
+ * ({@link ComfortSettings#PREF_REPLACE_LIST_FILTERS}). История поиска коммитов
+ * ставится всегда. Логирование: Параметры → Комфорт → «Общее логирование».
  */
-public final class GitHistoryFileColumnsHook implements IStartup
+public final class GitHistoryHook implements IStartup
 {
     private static final String TEAM_HISTORY_VIEW_ID = "org.eclipse.team.ui.GenericHistoryView"; //$NON-NLS-1$
     private static final String PATCHED_KEY = "tormozit.gitHistoryFileColumnsPatched"; //$NON-NLS-1$
+    private static final String SEARCH_HISTORY_PATCHED_KEY =
+        "tormozit.gitHistorySearchHistoryPatched"; //$NON-NLS-1$
+    private static final String SEARCH_HISTORY_WRAP_KEY =
+        "tormozit.gitHistorySearchHistoryWrap"; //$NON-NLS-1$
+    private static final String FIND_TOOLBAR_CLASS =
+        "org.eclipse.egit.ui.internal.history.FindToolbar"; //$NON-NLS-1$
+    private static final String SEARCH_HISTORY_SCOPE_ID = "gitHistoryCommitSearch"; //$NON-NLS-1$
+    private static final String SEARCH_HISTORY_BUTTON_TOOLTIP =
+        "История поиска коммитов (или Ctrl+↓ в поле)"; //$NON-NLS-1$
+
+    /** Окна, на которые уже повешен part-listener переустановки ▾. */
+    private static final Set<IWorkbenchWindow> searchHistoryWindows =
+        Collections.newSetFromMap(new IdentityHashMap<>());
+    private static int findToolbarRescanGen;
     private static final String SORT_STATE_KEY = "tormozit.gitHistorySortState"; //$NON-NLS-1$
     private static final String SETTINGS_SECTION = "GitHistoryFileColumns"; //$NON-NLS-1$
     /** Второстепенные данные (положение разделителя) — в {@link IDialogSettings}, сохраняются при
@@ -118,6 +142,7 @@ public final class GitHistoryFileColumnsHook implements IStartup
         Display.getDefault().asyncExec(() ->
         {
             bootstrapCommitListPrefsOnce();
+            installSearchHistory(Display.getDefault());
             if (!ComfortSettings.isReplaceListFiltersEnabled())
                 return;
             IWorkbench wb = PlatformUI.getWorkbench();
@@ -1166,6 +1191,355 @@ public final class GitHistoryFileColumnsHook implements IStartup
             sb.append(ch.getBounds());
         }
         return sb.append("]").toString(); //$NON-NLS-1$
+    }
+
+    // -----------------------------------------------------------------------
+    // История запросов в поле «Найти» (FindToolbar)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Панель поиска создаётся при первом показе и пересоздаётся при скрытии
+     * ({@code HistorySearchBar.isDynamic()}). Ctrl+↓ — через {@code Display.addFilter}:
+     * у {@code FindToolbar} свой {@code KeyListener} на голую стрелку вниз.
+     * Кнопка ▾ живёт в той же колонке, что и поле ({@code [поле][▾]|тулбар}),
+     * иначе третья колонка GridLayout обрезается шириной CoolBar.
+     * Смена активной части (клик в редакторе) вызывает {@code updateActionBars}
+     * и пересоздание dynamic-вклада — патч повторяем с задержкой.
+     */
+    private static void installSearchHistory(Display display)
+    {
+        if (display == null || display.isDisposed())
+            return;
+
+        Listener appear = event ->
+        {
+            if (!(event.widget instanceof Control control) || control.isDisposed())
+                return;
+            Composite toolbar = locateFindToolbar(control);
+            if (toolbar != null)
+                tryPatchFindToolbar(toolbar);
+        };
+        display.addFilter(SWT.Show, appear);
+        display.addFilter(SWT.Activate, appear);
+
+        display.addFilter(SWT.KeyDown, event ->
+        {
+            if (!(event.widget instanceof Text text) || text.isDisposed())
+                return;
+            if (!Boolean.TRUE.equals(text.getData(SEARCH_HISTORY_PATCHED_KEY)))
+                return;
+            if (event.keyCode != SWT.ARROW_DOWN || (event.stateMask & SWT.CTRL) == 0)
+                return;
+            event.doit = false;
+            FilterHistoryUi.openPopup(text, text, SEARCH_HISTORY_SCOPE_ID);
+        });
+
+        IWorkbench wb = PlatformUI.getWorkbench();
+        if (wb == null)
+            return;
+        for (IWorkbenchWindow window : wb.getWorkbenchWindows())
+            hookSearchHistoryWindow(window);
+        wb.addWindowListener(new org.eclipse.ui.IWindowListener()
+        {
+            @Override public void windowOpened(IWorkbenchWindow w) { hookSearchHistoryWindow(w); }
+            @Override public void windowActivated(IWorkbenchWindow w) {}
+            @Override public void windowDeactivated(IWorkbenchWindow w) {}
+            @Override public void windowClosed(IWorkbenchWindow w)
+            {
+                if (w != null)
+                    searchHistoryWindows.remove(w);
+            }
+        });
+    }
+
+    private static void hookSearchHistoryWindow(IWorkbenchWindow window)
+    {
+        if (window == null || !searchHistoryWindows.add(window))
+            return;
+        Shell shell = window.getShell();
+        if (shell != null && !shell.isDisposed())
+            scanFindToolbar(shell);
+        window.getPartService().addPartListener(new IPartListener2()
+        {
+            @Override public void partActivated(IWorkbenchPartReference ref) { scheduleFindToolbarRescan(); }
+            @Override public void partDeactivated(IWorkbenchPartReference ref) { scheduleFindToolbarRescan(); }
+            @Override public void partBroughtToTop(IWorkbenchPartReference ref) { scheduleFindToolbarRescan(); }
+            @Override public void partVisible(IWorkbenchPartReference ref) { scheduleFindToolbarRescan(); }
+            @Override public void partOpened(IWorkbenchPartReference ref) { scheduleFindToolbarRescan(); }
+            @Override public void partClosed(IWorkbenchPartReference r) {}
+            @Override public void partHidden(IWorkbenchPartReference r) {}
+            @Override public void partInputChanged(IWorkbenchPartReference r) {}
+        });
+    }
+
+    /**
+     * {@code HistorySearchBar.isDynamic()} — после {@code updateActionBars}
+     * createControl ещё не успел вернуть новый FindToolbar.
+     */
+    private static void scheduleFindToolbarRescan()
+    {
+        int gen = ++findToolbarRescanGen;
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.timerExec(50, () ->
+        {
+            if (gen == findToolbarRescanGen)
+                rescanFindToolbars();
+        });
+        display.timerExec(200, () ->
+        {
+            if (gen == findToolbarRescanGen)
+                rescanFindToolbars();
+        });
+    }
+
+    private static void rescanFindToolbars()
+    {
+        IWorkbench wb = PlatformUI.getWorkbench();
+        if (wb == null)
+            return;
+        for (IWorkbenchWindow window : wb.getWorkbenchWindows())
+        {
+            if (window == null)
+                continue;
+            for (IWorkbenchPage page : window.getPages())
+            {
+                for (IViewReference ref : page.getViewReferences())
+                {
+                    IViewPart view = ref.getView(false);
+                    if (isHistoryView(view))
+                        tryPatchFindFromView(view);
+                }
+            }
+        }
+    }
+
+    private static void tryPatchFindFromView(IViewPart view)
+    {
+        if (view == null)
+            return;
+        try
+        {
+            Object historyPage = Global.call(view, "getHistoryPage"); //$NON-NLS-1$
+            Object searchBar = historyPage != null ? Global.getField(historyPage, "searchBar") : null; //$NON-NLS-1$
+            Object toolbar = searchBar != null ? Global.getField(searchBar, "toolbar") : null; //$NON-NLS-1$
+            if (toolbar instanceof Composite findToolbar && !findToolbar.isDisposed())
+                tryPatchFindToolbar(findToolbar);
+        }
+        catch (Exception ignored)
+        {
+            // страница ещё не создана
+        }
+        try
+        {
+            Object bars = view.getViewSite().getActionBars();
+            Object manager = Global.call(bars, "getToolBarManager"); //$NON-NLS-1$
+            Object control = Global.call(manager, "getControl"); //$NON-NLS-1$
+            if (control instanceof Control root && !root.isDisposed())
+                scanFindToolbar(root);
+        }
+        catch (Exception ignored)
+        {
+            // тулбар ещё не создан
+        }
+    }
+
+    private static void scanFindToolbar(Control root)
+    {
+        if (root == null || root.isDisposed())
+            return;
+        if (isFindToolbar(root))
+            tryPatchFindToolbar((Composite) root);
+        if (root instanceof Composite composite)
+        {
+            for (Control child : composite.getChildren())
+                scanFindToolbar(child);
+        }
+    }
+
+    private static Composite findFindToolbar(Control start)
+    {
+        for (Control current = start; current != null; current = current.getParent())
+        {
+            if (isFindToolbar(current))
+                return (Composite) current;
+        }
+        return null;
+    }
+
+    /**
+     * Show/Activate часто приходит на родительский {@code ToolBar} после
+     * {@code isDynamic()} recreate — вверх по родителям FindToolbar не видно.
+     */
+    private static Composite locateFindToolbar(Control start)
+    {
+        Composite found = findFindToolbar(start);
+        if (found != null)
+            return found;
+        if (start instanceof ToolBar || start.getClass().getSimpleName().contains("CoolBar"))
+            return findFindToolbarInTree(start, 0);
+        return null;
+    }
+
+    private static Composite findFindToolbarInTree(Control root, int depth)
+    {
+        if (root == null || root.isDisposed() || depth > 4)
+            return null;
+        if (isFindToolbar(root))
+            return (Composite) root;
+        if (root instanceof Composite composite)
+        {
+            for (Control child : composite.getChildren())
+            {
+                Composite found = findFindToolbarInTree(child, depth + 1);
+                if (found != null)
+                    return found;
+            }
+        }
+        return null;
+    }
+
+    private static boolean isFindToolbar(Control control)
+    {
+        return control instanceof Composite
+            && FIND_TOOLBAR_CLASS.equals(control.getClass().getName());
+    }
+
+    private static void tryPatchFindToolbar(Composite findToolbar)
+    {
+        if (findToolbar == null || findToolbar.isDisposed())
+            return;
+        Object field = Global.getField(findToolbar, "patternField"); //$NON-NLS-1$
+        if (!(field instanceof Text text) || text.isDisposed())
+            return;
+
+        if (!Boolean.TRUE.equals(text.getData(SEARCH_HISTORY_PATCHED_KEY)))
+        {
+            text.setData(SEARCH_HISTORY_PATCHED_KEY, Boolean.TRUE);
+            FilterHistoryUi.wireKeyboard(text, SEARCH_HISTORY_SCOPE_ID);
+            text.addListener(SWT.DefaultSelection, e ->
+            {
+                if (e.detail == SWT.ICON_CANCEL)
+                    return;
+                FilterHistoryStore.remember(SEARCH_HISTORY_SCOPE_ID, text.getText());
+            });
+        }
+
+        Composite wrap = wrapOf(text);
+        if (wrap != null)
+        {
+            if (!hasHistoryLabel(wrap))
+                restoreHistoryButton(wrap, text);
+            findToolbar.layout(true, true);
+            Composite parent = findToolbar.getParent();
+            if (parent != null && !parent.isDisposed())
+                parent.layout(true, true);
+            return;
+        }
+        if (text.getParent() != findToolbar)
+            return;
+        if (Boolean.TRUE.equals(text.getData(SEARCH_HISTORY_WRAP_KEY)))
+            return;
+        wrapPatternField(text, findToolbar);
+    }
+
+    private static Composite wrapOf(Text text)
+    {
+        Composite parent = text.getParent();
+        if (parent == null || parent.isDisposed())
+            return null;
+        if (Boolean.TRUE.equals(parent.getData(SEARCH_HISTORY_WRAP_KEY)))
+            return parent;
+        return null;
+    }
+
+    private static boolean hasHistoryLabel(Composite wrap)
+    {
+        if (wrap == null || wrap.isDisposed())
+            return false;
+        for (Control child : wrap.getChildren())
+        {
+            if (child instanceof Label && !child.isDisposed())
+                return true;
+            if (child instanceof Composite composite)
+            {
+                for (Control nested : composite.getChildren())
+                {
+                    if (nested instanceof Label && !nested.isDisposed())
+                        return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    private static void restoreHistoryButton(Composite wrap, Text text)
+    {
+        Composite buttonsRow = null;
+        for (Control child : wrap.getChildren())
+        {
+            if (child instanceof Composite composite && child != text)
+            {
+                buttonsRow = composite;
+                break;
+            }
+        }
+        if (buttonsRow == null)
+            buttonsRow = FilterHistoryUi.createButtonsRow(wrap);
+        FilterHistoryUi.addHistoryButton(buttonsRow, text, SEARCH_HISTORY_SCOPE_ID,
+            SEARCH_HISTORY_BUTTON_TOOLTIP + Global.pluginSignForTooltip());
+    }
+
+    /**
+     * Ряд {@code [поле][▾]} занимает первую колонку FindToolbar — штатный
+     * {@code GridLayout} на 2 колонки не трогаем (CoolBar считает ширину
+     * вклада до нашего патча и обрезает лишнюю колонку).
+     */
+    private static void wrapPatternField(Text text, Composite findToolbar)
+    {
+        text.setData(SEARCH_HISTORY_WRAP_KEY, Boolean.TRUE);
+        Control after = siblingAfter(text);
+        Object layoutData = text.getLayoutData();
+
+        Composite row = new Composite(findToolbar, SWT.NONE);
+        row.setData(SEARCH_HISTORY_WRAP_KEY, Boolean.TRUE);
+        GridLayout rowLayout = new GridLayout(1, false);
+        rowLayout.marginWidth = 0;
+        rowLayout.marginHeight = 0;
+        rowLayout.horizontalSpacing = 2;
+        row.setLayout(rowLayout);
+        if (layoutData != null)
+            row.setLayoutData(layoutData);
+        else
+            row.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+
+        text.setParent(row);
+        text.setLayoutData(new GridData(SWT.FILL, SWT.CENTER, true, false));
+        if (after != null && !after.isDisposed())
+            row.moveAbove(after);
+
+        Composite buttonsRow = FilterHistoryUi.createButtonsRow(row);
+        FilterHistoryUi.addHistoryButton(buttonsRow, text, SEARCH_HISTORY_SCOPE_ID,
+            SEARCH_HISTORY_BUTTON_TOOLTIP + Global.pluginSignForTooltip());
+        findToolbar.layout(true, true);
+        Composite parent = findToolbar.getParent();
+        if (parent != null && !parent.isDisposed())
+            parent.layout(true, true);
+    }
+
+    private static Control siblingAfter(Control control)
+    {
+        Composite parent = control.getParent();
+        if (parent == null || parent.isDisposed())
+            return null;
+        Control[] children = parent.getChildren();
+        for (int i = 0; i < children.length; i++)
+        {
+            if (children[i] == control)
+                return i + 1 < children.length ? children[i + 1] : null;
+        }
+        return null;
     }
 
     private static IDialogSettings dialogSettings()

@@ -21,7 +21,8 @@ import org.eclipse.ui.dialogs.FilteredTree;
  * Общий UI истории фильтра: сохранение по потере фокуса, попап по Ctrl+↓ и/
  * или по клику на кнопку — переиспользуется и для поиска по «Параметрам»
  * ({@code PreferenceSearchFilterAugmenter}), и для фильтра страницы «Клавиши»
- * ({@code ComfortKeysPreferences}). Хранилище — {@link FilterHistoryStore},
+ * ({@code ComfortKeysPreferences}), и для поля «Найти» панели «История Git»
+ * ({@code GitHistoryHook}). Хранилище — {@link FilterHistoryStore},
  * с отдельным {@code scopeId} на каждое место использования.
  */
 final class FilterHistoryUi
@@ -46,6 +47,16 @@ final class FilterHistoryUi
             e.doit = false;
             showPopup(filterControl, filterControl, scopeId);
         });
+    }
+
+    /**
+     * Показать попап истории. Нужен, когда Ctrl+↓ перехватывается
+     * {@code Display.addFilter} раньше виджетного {@link #wireKeyboard}
+     * (штатный KeyListener поля иначе тоже обработает стрелку).
+     */
+    static void openPopup(Control anchor, Text filterControl, String scopeId)
+    {
+        showPopup(anchor, filterControl, scopeId);
     }
 
     /**

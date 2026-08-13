@@ -102,7 +102,7 @@
     <startup class="tormozit.TextEditorFastSearchKeyBindingHook"/> 
     <startup class="tormozit.ConfigSearchResultsHook"/>
     <startup class="tormozit.FileSearchResultsHook"/>
-    <startup class="tormozit.GitHistoryFileColumnsHook"/>
+    <startup class="tormozit.GitHistoryHook"/>
     <startup class="tormozit.ConfigSearchDialogHook"/>
     <startup class="tormozit.PictureDialogHook"/>
     <startup class="tormozit.RightsDialogFilterHook"/>
