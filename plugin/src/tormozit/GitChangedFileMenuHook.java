@@ -57,6 +57,7 @@ import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
 import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.events.SelectionEvent;
+import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
@@ -243,6 +244,9 @@ public final class GitChangedFileMenuHook implements IStartup
      */
     static IStructuredSelection multiSelectionSnapshot;
 
+    /** Строка под курсором в момент MenuDetect — «текущая» при мультивыделении. */
+    private static Object menuDetectRowElement;
+
     private static final String GIT_CONTEXT_ID = "tormozit.gitChangedFile.context"; //$NON-NLS-1$
 
     @Override
@@ -358,6 +362,8 @@ public final class GitChangedFileMenuHook implements IStartup
                 + (event.widget != null ? event.widget.getClass().getName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
+
+        menuDetectRowElement = rowElementAt(event);
 
         Global.log("GitChangedFileMenu: MenuDetect widget="
             + target.getClass().getName() //$NON-NLS-1$
@@ -856,21 +862,8 @@ public final class GitChangedFileMenuHook implements IStartup
     /** @return full selection (all items) from the widget's own Table/Tree, or null */
     private static ISelection selectionOfClickedControl(Widget menuWidget)
     {
-        if (!(menuWidget instanceof Menu menu))
-            return null;
-        // Поднимаемся до корневого контекстного меню (у него нет parentItem) — там хранится
-        // control, из которого реально вызвано меню (см. tryAttachMenuListener). Для самого
-        // корневого меню цикл не выполняется ни разу.
-        Menu rootMenu = menu;
-        for (MenuItem parentItem = rootMenu.getParentItem(); parentItem != null;
-            parentItem = rootMenu.getParentItem())
-        {
-            rootMenu = parentItem.getParent();
-            if (rootMenu == null)
-                return null;
-        }
-        Object data = rootMenu.getData("menuControl"); //$NON-NLS-1$
-        if (!(data instanceof Control control) || control.isDisposed())
+        Control control = menuControlOf(menuWidget);
+        if (control == null)
             return null;
 
         List<Object> elements = new ArrayList<>();
@@ -893,6 +886,76 @@ public final class GitChangedFileMenuHook implements IStartup
 
         if (!elements.isEmpty())
             return new StructuredSelection(elements);
+        return null;
+    }
+
+    /**
+     * Элемент текущей строки для команд «Показать в навигаторе» / «Открыть объект» /
+     * «История ИР»: строка под курсором в MenuDetect, иначе активная строка
+     * {@link FormTableInteraction}, иначе единственный элемент выделения.
+     */
+    private static Object currentRowElement(Widget menuWidget, IStructuredSelection structured)
+    {
+        if (menuDetectRowElement != null)
+            return menuDetectRowElement;
+        Control control = menuControlOf(menuWidget);
+        if (control instanceof Table table)
+        {
+            FormTableInteraction interaction = FormTableInteraction.of(table);
+            if (interaction != null)
+            {
+                TableItem item = interaction.selectedItem();
+                if (item != null && !item.isDisposed() && item.getData() != null)
+                    return item.getData();
+            }
+        }
+        if (structured != null && structured.size() == 1)
+            return structured.getFirstElement();
+        return null;
+    }
+
+    /**
+     * Control, из которого открыто контекстное меню: поднимаемся до корневого {@link Menu}
+     * (у него нет parentItem) — там {@code menuControl} из {@code tryAttachMenuListener}.
+     */
+    private static Control menuControlOf(Widget menuWidget)
+    {
+        if (!(menuWidget instanceof Menu menu))
+            return null;
+        Menu rootMenu = menu;
+        for (MenuItem parentItem = rootMenu.getParentItem(); parentItem != null;
+            parentItem = rootMenu.getParentItem())
+        {
+            rootMenu = parentItem.getParent();
+            if (rootMenu == null)
+                return null;
+        }
+        Object data = rootMenu.getData("menuControl"); //$NON-NLS-1$
+        if (data instanceof Control control && !control.isDisposed())
+            return control;
+        return null;
+    }
+
+    private static Object rowElementAt(Event event)
+    {
+        if (!(event.widget instanceof Control start) || start.isDisposed())
+            return null;
+        Control c = start;
+        while (c != null && !c.isDisposed() && !(c instanceof Table) && !(c instanceof Tree))
+            c = c.getParent();
+        if (c == null || c.isDisposed())
+            return null;
+        Point pt = c.toControl(event.x, event.y);
+        if (c instanceof Table table)
+        {
+            TableItem item = table.getItem(pt);
+            return item != null && !item.isDisposed() ? item.getData() : null;
+        }
+        if (c instanceof Tree tree)
+        {
+            TreeItem item = tree.getItem(pt);
+            return item != null && !item.isDisposed() ? item.getData() : null;
+        }
         return null;
     }
 
@@ -931,12 +994,14 @@ public final class GitChangedFileMenuHook implements IStartup
                 Menu submenu = (Menu) e.widget;
                 Shell shell = submenu.getShell();
 
-                // === Одиночное выделение: "Показать в навигаторе", "Показать в структуре проекта" и "Открыть объект" ===
-                if (structured.size() == 1)
+                // Текущая строка (под курсором / активная ячейка), а не только одиночное выделение:
+                // при нескольких выделенных файлах команды открытия и навигации относятся к ней.
+                Object element = currentRowElement(e.widget, structured);
+                if (element != null)
                 {
-                    Object element = structured.getFirstElement();
-                    Global.log("GitChangedFileMenu: resolve single element class="
-                        + element.getClass().getName() + " toString=" + element); //$NON-NLS-1$
+                    Global.log("GitChangedFileMenu: resolve current element class="
+                        + element.getClass().getName() + " toString=" + element //$NON-NLS-1$
+                        + " selectionSize=" + structured.size()); //$NON-NLS-1$
 
                     IFile file = resolveFile(view, element);
                     if (file != null && file.exists())
@@ -994,7 +1059,7 @@ public final class GitChangedFileMenuHook implements IStartup
 
                         addIrHistoryItemIfNeeded(submenu, view, file, addedItems);
                     }
-                    else if (isHistoryView(view) && isCommitRowElement(element)
+                    else if (structured.size() == 1 && isHistoryView(view) && isCommitRowElement(element)
                         && HistoryViewHandler.extractCommitSha(element) != null)
                     {
                         addCompareWithCommitItem(submenu, view, element, addedItems);
@@ -1005,9 +1070,9 @@ public final class GitChangedFileMenuHook implements IStartup
                 MenuItem addToSetItem = new MenuItem(submenu, SWT.PUSH);
                 // Определяем проект из первого подходящего элемента selection
                 String pName = null;
-                for (Object element : structured.toList())
+                for (Object selElement : structured.toList())
                 {
-                    IFile f = resolveFile(view, element);
+                    IFile f = resolveFile(view, selElement);
                     if (f != null && f.exists())
                     {
                         IProject p = f.getProject();

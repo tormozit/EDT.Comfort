@@ -699,6 +699,13 @@ final class FormTableInteraction implements ColumnValuesDialog.Owner, ColumnFilt
         return table.getColumn(column);
     }
 
+    static FormTableInteraction of(Control control)
+    {
+        if (control == null || control.isDisposed())
+            return null;
+        return INSTANCES.get(control);
+    }
+
     TableItem selectedItem()
     {
         return selectedItem;
