@@ -1,5 +1,6 @@
 package tormozit;
 
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -45,19 +46,38 @@ public final class ToastNotification
 
     private static final int MAX_MESSAGE_LINES = 3;
     private static final String ELLIPSIS = "..."; //$NON-NLS-1$
+    private static final int BLOCKING_MODAL = SWT.APPLICATION_MODAL | SWT.SYSTEM_MODAL;
 
     // =======================================================================
     // РЕЕСТР АКТИВНЫХ ТОСТОВ (читается/пишется только из display-потока)
     // =======================================================================
     private static final List<ToastEntry> activeToasts = new CopyOnWriteArrayList<>();
+    private static boolean modalAdoptFilterInstalled;
+    private static boolean adoptingToasts;
 
     private static final class ToastEntry
     {
         final Shell shell;
-        final int   y;      // целевая Y верхней границы (конечная позиция после анимации)
+        final int   y;
         final int   height;
+        final String title;
+        final String message;
+        final int durationMs;
+        final Runnable action;
+        final String actionLabel;
 
-        ToastEntry(Shell s, int y, int h) { shell = s; this.y = y; this.height = h; }
+        ToastEntry(Shell s, int y, int h, String title, String message, int durationMs,
+            Runnable action, String actionLabel)
+        {
+            shell = s;
+            this.y = y;
+            height = h;
+            this.title = title;
+            this.message = message;
+            this.durationMs = durationMs;
+            this.action = action;
+            this.actionLabel = actionLabel;
+        }
     }
 
     private ToastNotification() {}
@@ -103,27 +123,34 @@ public final class ToastNotification
     }
 
     /**
-     * @param inputParentShell для кликабельности поверх modal — child конкретного shell;
-     *        {@code null} — display-root. Позиция в обоих случаях одна и та же, в экранных
-     *        координатах ({@link Shell#setLocation}).
-     *        Тост в обоих случаях {@code NO_FOCUS}: клик по фону и крестику не активирует
-     *        окно-владельца, приложение поднимает только гиперссылка действия.
+     * @param inputParentShell явный владелец; {@code null} — текущее APPLICATION/SYSTEM_MODAL
+     *        окно (не workbench). Нужен именно потомок модалки: иначе SWT
+     *        {@code Shell.WM_NCHITTEST} даёт {@code HTNOWHERE} и клик не доходит до SWT.
      */
     public static Shell show(String title, String message, int durationMs, Runnable action,
         String actionLabel, Shell inputParentShell)
     {
+        return show(title, message, durationMs, action, actionLabel, inputParentShell, false);
+    }
+
+    private static Shell show(String title, String message, int durationMs, Runnable action,
+        String actionLabel, Shell inputParentShell, boolean skipSlide)
+    {
         Display display = Display.getDefault();
         if (display == null || display.isDisposed()) return null;
         Shell[] holder = new Shell[1];
-        logNotification(title, message);
+        if (!skipSlide)
+            logNotification(title, message);
 
         display.syncExec(() ->
         {
-            boolean inputChild = inputParentShell != null && !inputParentShell.isDisposed();
-            // NO_FOCUS и для child-варианта: иначе клик по тосту (фон, крестик) активирует
-            // окно-владельца. Окно приложения поднимает только гиперссылка действия.
+            ensureModalAdoptFilter(display);
+            Shell parent = inputParentShell;
+            if (parent == null || parent.isDisposed())
+                parent = findBlockingModal(display);
+            boolean inputChild = parent != null && !parent.isDisposed();
             Shell shell = inputChild
-                ? new Shell(inputParentShell, SWT.NO_TRIM | SWT.ON_TOP | SWT.NO_FOCUS)
+                ? new Shell(parent, SWT.NO_TRIM | SWT.ON_TOP | SWT.NO_FOCUS)
                 : new Shell(display, SWT.NO_TRIM | SWT.ON_TOP | SWT.NO_FOCUS);
             holder[0] = shell;
 
@@ -247,31 +274,39 @@ public final class ToastNotification
             int targetY  = findSlotTopY(ca, finalSize.y);
 
             // Регистрируем ДО показа, чтобы следующие тосты учитывали нашу позицию
-            ToastEntry entry = new ToastEntry(shell, targetY, finalSize.y);
+            ToastEntry entry = new ToastEntry(shell, targetY, finalSize.y,
+                title, message, durationMs, action, actionLabel);
             activeToasts.add(entry);
             shell.addDisposeListener(e -> activeToasts.remove(entry));
 
-            // Тост выезжает СНИЗУ ВВЕРХ
-            int startY = targetY + finalSize.y;
-            applyToastLocation(shell, targetX, startY);
-            shell.setAlpha(0);
-            shell.setVisible(true);
-
-            // --- 1. Анимация появления (снизу вверх) ---
-            int slideSteps = Math.max(1, SLIDE_IN_DURATION_MS / ANIMATION_STEP_MS);
-            for (int i = 0; i <= slideSteps; i++)
+            if (skipSlide)
             {
-                final int step = i;
-                display.timerExec(step * ANIMATION_STEP_MS, () ->
-                {
-                    if (!shell.isDisposed())
-                    {
-                        int y = startY + (targetY - startY) * step / slideSteps;
-                        applyToastLocation(shell, targetX, y);
-                        shell.setAlpha(255 * step / slideSteps);
-                    }
-                });
+                applyToastLocation(shell, targetX, targetY);
+                shell.setAlpha(255);
+                shell.setVisible(true);
             }
+            else
+            {
+                int startY = targetY + finalSize.y;
+                applyToastLocation(shell, targetX, startY);
+                shell.setAlpha(0);
+                shell.setVisible(true);
+                int slideSteps = Math.max(1, SLIDE_IN_DURATION_MS / ANIMATION_STEP_MS);
+                for (int i = 0; i <= slideSteps; i++)
+                {
+                    final int step = i;
+                    display.timerExec(step * ANIMATION_STEP_MS, () ->
+                    {
+                        if (!shell.isDisposed())
+                        {
+                            int y = startY + (targetY - startY) * step / slideSteps;
+                            applyToastLocation(shell, targetX, y);
+                            shell.setAlpha(255 * step / slideSteps);
+                        }
+                    });
+                }
+            }
+            WinWindowActivator.ensureToastClickable(shell);
 
             // --- 2–3. Ховер + таймер удержания/затухания (пропуск при sticky) ---
             if (durationMs > 0)
@@ -313,7 +348,7 @@ public final class ToastNotification
                 {
                     if (shell.isDisposed()) return;
 
-                    if (isHovered[0])
+                    if (isHovered[0] || shell.getBounds().contains(display.getCursorLocation()))
                     {
                         if (isFading[0] || currentAlpha[0] < 255)
                         {
@@ -343,7 +378,7 @@ public final class ToastNotification
                             shell.dispose();
                     }
                 };
-                display.timerExec(SLIDE_IN_DURATION_MS + 50, loop[0]);
+                display.timerExec(skipSlide ? 50 : SLIDE_IN_DURATION_MS + 50, loop[0]);
             }
         });
 
@@ -396,6 +431,116 @@ public final class ToastNotification
         if (hasMessage)
             return message;
         return ""; //$NON-NLS-1$
+    }
+
+    /**
+     * SWT {@code APPLICATION_MODAL} делает {@code Shell.WM_NCHITTEST=HTNOWHERE}
+     * для любого окна, которое не потомок модалки. Пересоздаём тост как owned-окно
+     * модалки и включаем HWND через {@link WinWindowActivator#ensureToastClickable}.
+     */
+    private static void ensureModalAdoptFilter(Display display)
+    {
+        if (modalAdoptFilterInstalled || display == null || display.isDisposed())
+            return;
+        modalAdoptFilterInstalled = true;
+        display.addFilter(SWT.Show, e ->
+        {
+            if (!(e.widget instanceof Shell modal) || !isBlockingModal(modal))
+                return;
+            display.asyncExec(() -> adoptActiveToasts(modal));
+        });
+    }
+
+    private static void adoptActiveToasts(Shell modal)
+    {
+        if (adoptingToasts || modal == null || modal.isDisposed() || !isBlockingModal(modal))
+            return;
+        if (!modal.getVisible())
+            return;
+        List<ToastEntry> toAdopt = new ArrayList<>();
+        for (ToastEntry entry : activeToasts)
+        {
+            if (entry.shell == null || entry.shell.isDisposed())
+                continue;
+            if (isOwnedBy(entry.shell, modal))
+            {
+                WinWindowActivator.ensureToastClickable(entry.shell);
+                continue;
+            }
+            toAdopt.add(entry);
+        }
+        if (toAdopt.isEmpty())
+            return;
+        adoptingToasts = true;
+        try
+        {
+            List<ToastEntry> recipes = new ArrayList<>(toAdopt);
+            for (ToastEntry entry : toAdopt)
+            {
+                if (!entry.shell.isDisposed())
+                    entry.shell.dispose();
+            }
+            for (ToastEntry entry : recipes)
+            {
+                show(entry.title, entry.message, entry.durationMs, entry.action,
+                    entry.actionLabel, modal, true);
+            }
+        }
+        finally
+        {
+            adoptingToasts = false;
+        }
+    }
+
+    private static boolean isBlockingModal(Shell shell)
+    {
+        return shell != null && !shell.isDisposed()
+            && (shell.getStyle() & BLOCKING_MODAL) != 0;
+    }
+
+    private static Shell findBlockingModal(Display display)
+    {
+        Shell active = display.getActiveShell();
+        if (isBlockingModal(active) && active.getVisible())
+            return active;
+        Shell best = null;
+        int bestDepth = -1;
+        for (Shell shell : display.getShells())
+        {
+            if (!isBlockingModal(shell) || !shell.getVisible())
+                continue;
+            int depth = ownershipDepth(shell);
+            if (depth >= bestDepth)
+            {
+                bestDepth = depth;
+                best = shell;
+            }
+        }
+        return best;
+    }
+
+    private static int ownershipDepth(Shell shell)
+    {
+        int depth = 0;
+        Control current = shell.getParent();
+        while (current != null)
+        {
+            depth++;
+            current = current.getParent();
+        }
+        return depth;
+    }
+
+    private static boolean isOwnedBy(Shell shell, Shell ancestor)
+    {
+        Control current = shell;
+        while (current != null)
+        {
+            if (current == ancestor)
+                return true;
+            current = current.getParent();
+        }
+        return false;
     }
 
     // =======================================================================

@@ -33,7 +33,9 @@ import org.eclipse.ui.texteditor.ITextEditor;
  *
  * <p>Документ берётся из {@code fTarget} диалога (viewer, для которого открыт поиск) — так счётчик
  * работает для любого {@link ITextViewer} (BSL, XML, язык запросов, вложенные EmbeddedEditor),
- * а не только для {@code ITextEditor} активного редактора Workbench.
+ * а не только для {@code ITextEditor} активного редактора Workbench. Для окон сравнения текстов
+ * (2-way {@code TextMergeViewer} и 3-way {@code ThreeSideTextMergeViewer}) {@code fTarget} —
+ * обёртка merge-вьюера: документ берётся из сфокусированной панели.
  *
  * <p>Прокрутка/выделение первого совпадения по мере ввода намеренно не реализованы — это уже
  * делает штатный флажок «Инкрементный» диалога.
@@ -168,7 +170,9 @@ public final class FindReplaceLiveMatchCountHook implements IStartup
 
         /**
          * Viewer, по которому ищет диалог: сначала {@code fTarget} → enclosing {@link ITextViewer}
-         * ({@code TextViewer$FindReplaceTarget.this$0}), иначе fallback через активный {@link ITextEditor}.
+         * ({@code TextViewer$FindReplaceTarget.this$0}); для сравнения текстов — сфокусированная
+         * панель merge-вьюера ({@code fFocusPart} / {@code focusViewer}); иначе fallback через
+         * активный {@link ITextEditor}.
          */
         private void resolveViewer()
         {
@@ -176,19 +180,36 @@ public final class FindReplaceLiveMatchCountHook implements IStartup
 
             Object target = Global.getField(dialog, "fTarget"); //$NON-NLS-1$
             if (target != null)
+                viewer = viewerFromFindTarget(target);
+            if (viewer == null)
             {
-                Object enclosing = Global.getField(target, "this$0"); //$NON-NLS-1$
-                if (enclosing instanceof ITextViewer textViewer)
-                    viewer = textViewer;
+                IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
+                IWorkbenchPage page = window != null ? window.getActivePage() : null;
+                IEditorPart editorPart = page != null ? page.getActiveEditor() : null;
+                ITextEditor textEditor = editorPart != null ? TextEditor.resolveTextEditor(editorPart) : null;
+                viewer = textEditor != null ? TextEditor.getSourceViewer(textEditor) : null;
             }
-            if (viewer != null)
-                return;
+            FindReplaceLiveCountDebug.log("resolveViewer: " //$NON-NLS-1$
+                + (viewer != null ? viewer.getClass().getSimpleName() : "null")); //$NON-NLS-1$
+        }
 
-            IWorkbenchWindow window = PlatformUI.getWorkbench().getActiveWorkbenchWindow();
-            IWorkbenchPage page = window != null ? window.getActivePage() : null;
-            IEditorPart editorPart = page != null ? page.getActiveEditor() : null;
-            ITextEditor textEditor = editorPart != null ? TextEditor.resolveTextEditor(editorPart) : null;
-            viewer = textEditor != null ? TextEditor.getSourceViewer(textEditor) : null;
+        /**
+         * Обычный редактор: {@code this$0} сам {@link ITextViewer}. Сравнение текстов:
+         * {@code this$0} — {@code TextMergeViewer} ({@code fFocusPart}) или
+         * {@code ThreeSideTextMergeViewer} ({@code focusViewer}), оба держат
+         * {@code MergeSourceViewer} сфокусированной панели.
+         */
+        private static ITextViewer viewerFromFindTarget(Object target)
+        {
+            Object enclosing = Global.getField(target, "this$0"); //$NON-NLS-1$
+            if (enclosing instanceof ITextViewer textViewer)
+                return textViewer;
+            if (enclosing == null)
+                return null;
+            ITextViewer focused = MergeViewerReflection.extractSourceViewer(enclosing, "fFocusPart"); //$NON-NLS-1$
+            if (focused != null)
+                return focused;
+            return MergeViewerReflection.extractSourceViewer(enclosing, "focusViewer"); //$NON-NLS-1$
         }
 
         private void onModify()

@@ -142,6 +142,7 @@ public final class GitChangedFileMenuHook implements IStartup
     private static final String OBJ_ITEM_TEXT = "Открыть объект";       //$NON-NLS-1$
     /** Для файлов коммита (панель «История») — уточняем, что открывается рабочая версия, а не версия из коммита. */
     private static final String OBJ_ITEM_TEXT_COMMIT = "Открыть рабочий объект"; //$NON-NLS-1$
+    private static final String IR_HISTORY_ITEM_TEXT = "История ИР"; //$NON-NLS-1$
     private static final String ADD_TO_SET_CMD = "tormozit.git.addToObjectSet"; //$NON-NLS-1$
     private static final String ADD_TO_SET_MARKER = "tormozit.gitAddToObjectSetItem"; //$NON-NLS-1$
 
@@ -989,9 +990,9 @@ public final class GitChangedFileMenuHook implements IStartup
                                 }
                             });
                             addedItems.add(objItem);
-
-                            addIrHistoryItemIfNeeded(submenu, view, capturedFile, addedItems);
                         }
+
+                        addIrHistoryItemIfNeeded(submenu, view, file, addedItems);
                     }
                     else if (isHistoryView(view) && isCommitRowElement(element)
                         && HistoryViewHandler.extractCommitSha(element) != null)
@@ -1637,8 +1638,11 @@ public final class GitChangedFileMenuHook implements IStartup
         if (!isHistoryView(view))
             return;
 
-        MenuItem irItem = new MenuItem(submenu, SWT.PUSH);
-        irItem.setText("История ИР");
+        String irText = ComfortSubmenuHelper.menuItemTextWithKeyBinding(
+            IR_HISTORY_ITEM_TEXT, HistoryViewHandler.COMMAND_ID);
+        MenuItem irItem = ComfortSubmenuHelper.createSortedMenuItem(submenu, SWT.PUSH, irText);
+        irItem.setToolTipText(
+            "Открыть историю выделенного коммита в приложении ИР" + Global.pluginSignForTooltip());
         irItem.addSelectionListener(new SelectionAdapter()
         {
             @Override
@@ -1949,12 +1953,29 @@ public final class GitChangedFileMenuHook implements IStartup
 
     private static IFile fileFromRepoPath(Repository repository, String relativePath)
     {
-        if (relativePath == null || relativePath.isBlank())
+        if (repository == null || relativePath == null || relativePath.isBlank())
             return null;
         java.io.File absolute = new java.io.File(repository.getWorkTree(), relativePath);
         IPath location = org.eclipse.core.runtime.Path.fromOSString(absolute.getAbsolutePath());
         IFile[] files = ResourcesPlugin.getWorkspace().getRoot().findFilesForLocation(location);
-        return files != null && files.length > 0 ? files[0] : null;
+        if (files != null && files.length > 0)
+            return files[0];
+        org.eclipse.core.resources.IContainer[] containers =
+            ResourcesPlugin.getWorkspace().getRoot().findContainersForLocation(location);
+        if (containers == null)
+            return null;
+        for (org.eclipse.core.resources.IContainer container : containers)
+        {
+            if (!(container instanceof org.eclipse.core.resources.IFolder folder) || !folder.exists())
+                continue;
+            IPath folderLoc = folder.getLocation();
+            if (folderLoc == null || !location.equals(folderLoc))
+                continue;
+            IFile mdo = folder.getFile(folder.getName() + ".mdo"); //$NON-NLS-1$
+            if (mdo.exists())
+                return mdo;
+        }
+        return null;
     }
 
     // ========================================================================
@@ -2021,13 +2042,25 @@ public final class GitChangedFileMenuHook implements IStartup
 
         if (path != null)
         {
+            String normalized = path.replace('\\', '/');
+            Repository repo = view != null ? resolveRepository(view) : null;
+            IFile located = fileFromRepoPath(repo, normalized);
+            if (located != null)
+                return located;
+
             IProject project = resolveProject(view, element);
             if (project != null)
             {
-                String normalized = path.replace('\\', '/');
                 IFile file = project.getFile(normalized);
                 if (file.exists())
                     return file;
+                String srcRelative = GetRef.normalizeToSrcRelative(normalized);
+                if (!srcRelative.equals(normalized))
+                {
+                    file = project.getFile(srcRelative);
+                    if (file.exists())
+                        return file;
+                }
             }
         }
 

@@ -34,6 +34,7 @@
     <startup class="tormozit.GlobalListCopyHook"/>
     <startup class="tormozit.SmartOutlineHook"/>
     <startup class="tormozit.TemplateTypeSuffixDecorator"/>
+    <startup class="tormozit.FormMainAttributeTypeDecorator"/>
     <startup class="tormozit.MdObjectUsageDecorator"/>
     <!-- ГЛОБАЛЬНЫЙ СКАН ОТКЛЮЧЁН ОКОНЧАТЕЛЬНО (issue #165), 2026-07-20. История фиксов: v1
          (guard+debounce SWT.Show), v2 (исключить редакторы из partOpened/partVisible), v3
@@ -54,7 +55,6 @@
     <!-- <startup class="tormozit.ListSelectionThemeHook"/> -->
     <startup class="tormozit.NavigatorFilterHook"/>
     <startup class="tormozit.NavigatorShowInExplorerMenuHook"/>
-    <startup class="tormozit.NavigatorCollapseOthersMenuHook"/>
     <startup class="tormozit.NavigatorOpenObjectMenuHook"/>
     <startup class="tormozit.FileSearchShowInProjectStructureMenuHook"/>
     <startup class="tormozit.InfobasesViewHook"/>
@@ -106,6 +106,7 @@
     <startup class="tormozit.ConfigSearchDialogHook"/>
     <startup class="tormozit.PictureDialogHook"/>
     <startup class="tormozit.RightsDialogFilterHook"/>
+    <startup class="tormozit.ModuleMergeStructureFilterHook"/>
     <startup class="tormozit.FilteredListDialogFilterHook"/>
     <startup class="tormozit.NewAttributeNameIdentifierHook"/>
     <startup class="tormozit.PropertyNameIdentifierHook"/>
@@ -221,6 +222,12 @@
           contextId="org.eclipse.xtext.ui.XtextEditorScope"
           schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
           sequence="M3+M2+F">
+    </key>
+    <key
+          commandId="tormozit.ResetFolding"
+          contextId="com._1c.g5.v8.dt.bsl.ui.editor.BslEditorScope"
+          schemeId="org.eclipse.ui.defaultAcceleratorConfiguration"
+          sequence="M1+M2+NUMPAD_MULTIPLY">
     </key>
     <key
           commandId="tormozit.showCollection"
@@ -464,6 +471,11 @@
         name="Объявить тип выражения ИР"
         categoryId="tormozit.commands.global"
         description="Явно объявить тип выражения под кареткой через приложение ИР. Активно только при подключённом ИР. Настраивайте только «Редактирование источника Xtext». Остальные контексты не редактируйте. (Комфорт)"/>
+    <command
+        id="tormozit.ResetFolding"
+        name="Сбросить сворачиваемые группы"
+        categoryId="tormozit.commands.global"
+        description="Вернуть сворачиваемые группы модуля к состоянию свёрнутости как при открытии. Настраивайте только «Контекст редактора встроенного языка». Остальные контексты не редактируйте. (Комфорт)"/>
     <command
         id="tormozit.showCollection"
         name="Показать коллекцию"
@@ -747,6 +759,17 @@
       </activeWhen>
     </handler>
     <handler
+        class="tormozit.ExecutableExtensionFactory:tormozit.ResetFoldingHandler"
+        commandId="tormozit.ResetFolding">
+      <activeWhen>
+        <with variable="activeContexts">
+          <iterate operator="or">
+            <equals value="com._1c.g5.v8.dt.bsl.ui.editor.BslEditorScope"/>
+          </iterate>
+        </with>
+      </activeWhen>
+    </handler>
+    <handler
         class="tormozit.ExecutableExtensionFactory:tormozit.DebugCollectionShowHandler"
         commandId="tormozit.showCollection">
     </handler>
@@ -1016,6 +1039,17 @@
           <objectClass name="com._1c.g5.v8.dt.metadata.mdclass.Template"/>
           <objectClass name="com._1c.g5.v8.dt.metadata.mdclass.CommonTemplate"/>
         </or>
+      </enablement>
+    </decorator>
+    <decorator
+        id="tormozit.formMainAttributeTypeDecorator"
+        label="Тип основного реквизита формы (Комфорт)"
+        description="К имени формы добавляется суффикс типа основного реквизита (первый фрагмент до точки) в навигаторе и в дереве форм редактора объекта."
+        lightweight="true"
+        state="true"
+        class="tormozit.FormMainAttributeTypeDecorator">
+      <enablement>
+        <objectClass name="com._1c.g5.v8.dt.metadata.mdclass.BasicForm"/>
       </enablement>
     </decorator>
     <decorator

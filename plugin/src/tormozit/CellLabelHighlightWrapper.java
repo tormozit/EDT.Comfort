@@ -1,6 +1,7 @@
 package tormozit;
 
 import java.util.List;
+import java.util.function.Predicate;
 
 import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.ILabelProvider;
@@ -20,6 +21,7 @@ final class CellLabelHighlightWrapper extends StyledCellLabelProvider
     private final CellLabelProvider base;
     private SmartMatcher highlightMatcher = new SmartMatcher(""); //$NON-NLS-1$
     private boolean treeSectionHighlight;
+    private Predicate<Object> skipHighlight;
 
     CellLabelHighlightWrapper(CellLabelProvider base)
     {
@@ -29,6 +31,11 @@ final class CellLabelHighlightWrapper extends StyledCellLabelProvider
     void setTreeSectionHighlight(boolean enabled)
     {
         treeSectionHighlight = enabled;
+    }
+
+    void setSkipHighlight(Predicate<Object> skip)
+    {
+        skipHighlight = skip;
     }
 
     @Override
@@ -47,6 +54,11 @@ final class CellLabelHighlightWrapper extends StyledCellLabelProvider
         // Вызываем всегда, а не только при непустом фильтре — иначе при очистке поля старые
         // StyleRange (SWT переиспользует TreeItem/TableItem между refresh-ами) остаются висеть.
         // appendMatchRanges сам корректно очищает ячейку при пустом списке диапазонов.
+        if (skipHighlight != null && skipHighlight.test(cell.getElement()))
+        {
+            SmartMatchHighlight.appendMatchRanges(cell, List.of());
+            return;
+        }
         String text = cell.getText();
         List<SmartMatcher.HighlightRange> ranges = !highlightMatcher.isEmpty && text != null && !text.isEmpty()
             ? (treeSectionHighlight

@@ -5,6 +5,7 @@ import java.util.Vector;
 import org.eclipse.jface.text.AbstractInformationControlManager;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.internal.win32.OS;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
@@ -33,7 +34,9 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
  * находится поле {@code fTextHoverManager} — наследник {@link AbstractInformationControlManager} —
  * и у него выставляется {@code setEnabled(...)}. Так гасятся и штатный doc-hover,
  * и ИР-обогащение ({@code IrBslTextHoverWrapper} живёт внутри того же менеджера).
- * Состояние Ctrl отслеживается глобальным Display-фильтром.
+ * Состояние Ctrl отслеживается глобальным Display-фильтром. На {@code MouseMove}
+ * нельзя полагаться на {@code event.stateMask}: {@code TextEditorCtrlClickSelectWordHook}
+ * снимает бит Ctrl, чтобы не рисовать гиперссылку до выделения слова.
  *
  * <p>{@code fInformationPresenter} (Ctrl+hover / Ctrl+F2) сознательно не трогаем:
  * это не «удержание указателя мыши», а осознанное действие с клавиатуры.
@@ -157,18 +160,24 @@ final class BslHoverHintState
         if (display == null || display.isDisposed())
             return;
         filterInstalled = true;
-        Listener listener = (Event event) ->
-        {
-            boolean now = (event.stateMask & SWT.CTRL) != 0;
-            if (event.type == SWT.KeyDown && event.keyCode == SWT.CTRL)
-                now = true;
-            else if (event.type == SWT.KeyUp && event.keyCode == SWT.CTRL)
-                now = false;
-            updateCtrlState(now);
-        };
+        Listener listener = (Event event) -> updateCtrlState(isCtrlHeld(event));
         display.addFilter(SWT.KeyDown, listener);
         display.addFilter(SWT.KeyUp, listener);
         display.addFilter(SWT.MouseMove, listener);
+    }
+
+    /**
+     * Реальное удержание Ctrl. {@code KeyDown}/{@code KeyUp} надёжны сами по себе;
+     * на {@code MouseMove} {@code stateMask} может быть уже без Ctrl — другой Display-фильтр
+     * снимает {@link SWT#MOD1}, чтобы {@code HyperlinkManager} не активировался.
+     */
+    private static boolean isCtrlHeld(Event event)
+    {
+        if (event.type == SWT.KeyDown && event.keyCode == SWT.CTRL)
+            return true;
+        if (event.type == SWT.KeyUp && event.keyCode == SWT.CTRL)
+            return false;
+        return (OS.GetKeyState(OS.VK_CONTROL) & 0x8000) != 0;
     }
 
     private static void updateCtrlState(boolean now)

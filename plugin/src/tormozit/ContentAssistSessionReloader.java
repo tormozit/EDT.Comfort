@@ -778,6 +778,13 @@ suppressDisplay.asyncExec(
             @Override
             public void documentChanged(DocumentEvent event)
             {
+                try
+                {
+                    logAssistInsertDocumentChanged(event);
+                }
+                catch (Exception ignored)
+                {
+                }
                 scheduleEnsureBslDocumentListenerAfterAssistInsert(event);
                 maybeShowParamHintOnChar();
                 onDocumentChangedForCompletionAutoOpen(event);
@@ -799,20 +806,39 @@ suppressDisplay.asyncExec(
         pendingParamHintDesiredCaret = -1;
         if (event == null || event.getDocument() == null || event.getText() == null)
             return;
-        if (!isAssistProposalInsertInProgress())
-            return;
-        // ИР-вставка: не трогать EDT DataEvent/LinkedMode (ключ Структура() после trim).
-        if (Boolean.TRUE.equals(SmartCompletionProposal.IR_PROPOSAL_APPLY_IN_PROGRESS.get()))
-            return;
         String text = event.getText();
-        if (text.isEmpty() || text.indexOf('(') < 0)
+        boolean hasParen = text.indexOf('(') >= 0;
+        boolean insertInProgress = isAssistProposalInsertInProgress();
+        boolean irApply = Boolean.TRUE.equals(
+            SmartCompletionProposal.IR_PROPOSAL_APPLY_IN_PROGRESS.get());
+        if (!insertInProgress && !hasParen)
+            return;
+        if (!insertInProgress)
+        {
+            logLinkedMode("prepare.skip", "{\"reason\":\"notInsert\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"suppress\":" + suppressDocumentAutoOpenAfterSession //$NON-NLS-1$
+                + ",\"applyFlag\":" //$NON-NLS-1$
+                + Boolean.TRUE.equals(SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get())
+                + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(clipLogText(text)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        // ИР-вставка: не трогать EDT DataEvent/LinkedMode (ключ Структура() после trim).
+        if (irApply)
+        {
+            logLinkedMode("prepare.skip", "{\"reason\":\"irApply\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(clipLogText(text)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
+        if (text.isEmpty() || !hasParen)
             return;
         SmartContentAssistProcessor.ensureCtorDataEventForInsert(event);
         IDocument doc = event.getDocument();
         IDocumentListener bslListener = findBslDocumentListener(doc);
         if (bslListener == null)
         {
-return;
+            logLinkedMode("prepare.skip", "{\"reason\":\"noBslListener\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(clipLogText(text)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
         }
         pendingBslDocumentListener = bslListener;
         DataEventDiag before = readDataEventDiag(bslListener, text);
@@ -828,7 +854,16 @@ return;
             pendingShowParamHintAfterInsert = true;
             pendingParamHintDesiredCaret = desiredCaret;
         }
-schedulePostDoItLinkedModeDiag(doc, event.getOffset(), text);
+        logLinkedMode("prepare", "{\"offset\":" + event.getOffset() //$NON-NLS-1$ //$NON-NLS-2$
+            + ",\"desired\":" + desiredCaret //$NON-NLS-1$
+            + ",\"clearedChoices\":" + clearedChoices //$NON-NLS-1$
+            + ",\"filtered\":" + filtered //$NON-NLS-1$
+            + ",\"pendingHint\":" + pendingShowParamHintAfterInsert //$NON-NLS-1$
+            + ",\"before\":" + before.toJson() //$NON-NLS-1$
+            + ",\"after\":" + after.toJson() //$NON-NLS-1$
+            + ",\"mapKeys\":" + sampleDataEventMapKeys(bslListener, 8) //$NON-NLS-1$
+            + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(clipLogText(text)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        schedulePostDoItLinkedModeDiag(doc, event.getOffset(), text);
     }
 
     /**
@@ -903,6 +938,7 @@ schedulePostDoItLinkedModeDiag(doc, event.getOffset(), text);
             return;
         pendingShowParamHintAfterInsert = true;
         pendingParamHintDesiredCaret = caret;
+        logLinkedMode("hint.onChar", "{\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         maybeShowParamHintAfterInsert(caret);
     }
 
@@ -913,22 +949,40 @@ schedulePostDoItLinkedModeDiag(doc, event.getOffset(), text);
      */
     private void maybeShowParamHintAfterInsert(int caret)
     {
-        if (!pendingShowParamHintAfterInsert)
-            return;
+        boolean pending = pendingShowParamHintAfterInsert;
         int desired = pendingParamHintDesiredCaret;
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        boolean hasModel = doc != null && LinkedModeModel.hasInstalledModel(doc);
+        if (!pending)
+        {
+            logLinkedMode("hint.skip", "{\"reason\":\"notPending\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"desired\":" + desired //$NON-NLS-1$
+                + ",\"hasModel\":" + hasModel //$NON-NLS-1$
+                + ",\"hover\":" + isParamHoverShellVisible() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
+        }
         pendingShowParamHintAfterInsert = false;
         pendingParamHintDesiredCaret = -1;
         if (desired < 0 || caret != desired)
         {
-return;
+            logLinkedMode("hint.skip", "{\"reason\":\"caretMismatch\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"desired\":" + desired //$NON-NLS-1$
+                + ",\"hasModel\":" + hasModel + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
         }
         StyledText widget = viewer != null ? viewer.getTextWidget() : null;
         Display display = widget != null && !widget.isDisposed() ? widget.getDisplay() : null;
         if (display == null || display.isDisposed())
+        {
+            logLinkedMode("hint.skip", "{\"reason\":\"noDisplay\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
-final int desiredCaret = desired;
+        }
+        final int desiredCaret = desired;
         final int gen = paramHintPostGen.incrementAndGet();
         final long startedMs = System.currentTimeMillis();
+        logLinkedMode("hint.poll", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+            + ",\"gen\":" + gen //$NON-NLS-1$
+            + ",\"hasModel\":" + hasModel + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         display.timerExec(0, () -> pollAstReadyThenShowParamHint(desiredCaret, gen, 0, startedMs));
     }
 
@@ -952,22 +1006,35 @@ final int desiredCaret = desired;
         int caret = modelCaretOffset();
         if (caret != desiredCaret)
         {
-return;
+            logLinkedMode("poll.skip", "{\"reason\":\"caretMismatch\",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"caret\":" + caret + ",\"desired\":" + desiredCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return;
         }
         if (isParamHoverShellVisible())
         {
             paramHintPostGen.incrementAndGet();
-return;
+            logLinkedMode("poll.skip", "{\"reason\":\"hoverVisible\",\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
         }
         boolean astReady = isInvocationAstReadyAt(desiredCaret);
         long waitMs = System.currentTimeMillis() - startedMs;
         if (!astReady && waitMs < PARAM_HINT_AST_TIMEOUT_MS)
         {
-display.timerExec(PARAM_HINT_AST_POLL_MS,
+            if (attempt == 0)
+            {
+                logLinkedMode("poll.waitAst", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"timeoutMs\":" + PARAM_HINT_AST_TIMEOUT_MS + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            display.timerExec(PARAM_HINT_AST_POLL_MS,
                 () -> pollAstReadyThenShowParamHint(desiredCaret, gen, attempt + 1, startedMs));
             return;
         }
-runInvocationParametersHoverCommand(desiredCaret, gen, attempt);
+        logLinkedMode("poll.run", "{\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+            + ",\"waitMs\":" + waitMs //$NON-NLS-1$
+            + ",\"astReady\":" + astReady //$NON-NLS-1$
+            + ",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        runInvocationParametersHoverCommand(desiredCaret, gen, attempt);
     }
 
     /**
@@ -1066,12 +1133,15 @@ return false;
         int caret = modelCaretOffset();
         if (caret != desiredCaret)
         {
-return;
+            logLinkedMode("hover.skip", "{\"reason\":\"caretMismatch\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"desired\":" + desiredCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
         }
         if (isParamHoverShellVisible() || isParamHoverInfoControlVisible())
         {
             paramHintPostGen.incrementAndGet();
-return;
+            logLinkedMode("hover.skip", "{\"reason\":\"alreadyVisible\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return;
         }
         ParamHoverProbe probe = new ParamHoverProbe();
         try
@@ -1098,7 +1168,14 @@ return;
             probe.execOk = false;
             probe.err = String.valueOf(ex);
         }
-}
+        logLinkedMode("hover.exec", "{\"attempt\":" + attempt //$NON-NLS-1$ //$NON-NLS-2$
+            + ",\"caret\":" + caret //$NON-NLS-1$
+            + ",\"execOk\":" + probe.execOk //$NON-NLS-1$
+            + ",\"popupShown\":" + probe.popupShown //$NON-NLS-1$
+            + ",\"infoControl\":\"" + ContentAssistDebug.jsonEscapeForLog(probe.infoControlState) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+            + ",\"handler\":\"" + ContentAssistDebug.jsonEscapeForLog(probe.handlerClass) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+            + ",\"err\":\"" + ContentAssistDebug.jsonEscapeForLog(probe.err) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
 
     /** Штатная команда BSL: Ctrl+Shift+Space — подсказка параметров вызова. */
     private static final String INVOCATION_PARAMETERS_HOVER_COMMAND =
@@ -1314,6 +1391,19 @@ return;
                     + ",\"objects\":" + mapDiag.objectsSize //$NON-NLS-1$
                     + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(
                         text != null && text.length() > 80 ? text.substring(0, 80) : text) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            logLinkedMode("diag." + phase, "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"desired\":" + desired //$NON-NLS-1$
+                + ",\"insertEnd\":" + insertEnd //$NON-NLS-1$
+                + ",\"hasModel\":" + hasModel //$NON-NLS-1$
+                + ",\"hover\":" + isParamHoverShellVisible() //$NON-NLS-1$
+                + ",\"pendingHint\":" + pendingShowParamHintAfterInsert //$NON-NLS-1$
+                + ",\"bslPresent\":" + bslPresent //$NON-NLS-1$
+                + ",\"hasKey\":" + mapDiag.hasKey //$NON-NLS-1$
+                + ",\"mapSize\":" + mapDiag.mapSize //$NON-NLS-1$
+                + ",\"objects\":" + mapDiag.objectsSize //$NON-NLS-1$
+                + ",\"allInfo\":" + mapDiag.allInfoSize //$NON-NLS-1$
+                + ",\"posStart\":" + mapDiag.posStart //$NON-NLS-1$
+                + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(clipLogText(text)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
         catch (Exception ignored)
         {
@@ -1382,7 +1472,13 @@ return;
         int caret = st != null && !st.isDisposed() ? st.getCaretOffset() : -1;
         IDocumentListener bslNow = findBslDocumentListener(doc);
         DataEventDiag mapDiag = readDataEventDiag(bslNow != null ? bslNow : remembered, text);
-logLinkedModeDiagPhase("async0", doc, insertOffset, text); //$NON-NLS-1$
+        logLinkedMode("ensureBsl", "{\"present\":" + present //$NON-NLS-1$ //$NON-NLS-2$
+            + ",\"readded\":" + readded //$NON-NLS-1$
+            + ",\"hasModel\":" + hasModel //$NON-NLS-1$
+            + ",\"caret\":" + caret //$NON-NLS-1$
+            + ",\"hasKey\":" + mapDiag.hasKey //$NON-NLS-1$
+            + ",\"objects\":" + mapDiag.objectsSize + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+        logLinkedModeDiagPhase("async0", doc, insertOffset, text); //$NON-NLS-1$
         maybeShowParamHintAfterInsert(caret);
     }
 
@@ -1390,6 +1486,55 @@ logLinkedModeDiagPhase("async0", doc, insertOffset, text); //$NON-NLS-1$
     {
         return suppressDocumentAutoOpenAfterSession
             || Boolean.TRUE.equals(SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get());
+    }
+
+    static void logLinkedMode(String location, String json)
+    {
+        try
+        {
+            Global.tempLog("linked-mode", location + " " + (json == null || json.isEmpty() ? "{}" : json)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+        catch (Exception ignored)
+        {
+        }
+    }
+
+    static void logAssistOpen(String location, String json)
+    {
+        try
+        {
+            Global.tempLog("assist-open", location + " " + (json == null || json.isEmpty() ? "{}" : json)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+        catch (Exception ignored)
+        {
+        }
+    }
+
+    private static String clipLogText(String text)
+    {
+        if (text == null)
+            return ""; //$NON-NLS-1$
+        return text.length() > 80 ? text.substring(0, 80) : text;
+    }
+
+    private void logAssistInsertDocumentChanged(DocumentEvent event)
+    {
+        if (event == null || event.getText() == null)
+            return;
+        String text = event.getText();
+        if (text.indexOf('(') < 0 || text.length() > 120)
+            return;
+        IDocument doc = event.getDocument();
+        StyledText st = viewer != null ? viewer.getTextWidget() : null;
+        int caret = st != null && !st.isDisposed() ? st.getCaretOffset() : -1;
+        boolean hasModel = doc != null && LinkedModeModel.hasInstalledModel(doc);
+        logLinkedMode("docChanged", "{\"offset\":" + event.getOffset() //$NON-NLS-1$ //$NON-NLS-2$
+            + ",\"caret\":" + caret //$NON-NLS-1$
+            + ",\"hasModel\":" + hasModel //$NON-NLS-1$
+            + ",\"suppress\":" + suppressDocumentAutoOpenAfterSession //$NON-NLS-1$
+            + ",\"applyFlag\":" //$NON-NLS-1$
+            + Boolean.TRUE.equals(SmartCompletionProposal.PROPOSAL_APPLY_IN_PROGRESS.get())
+            + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(clipLogText(text)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static final String BSL_DOCUMENT_LISTENER_SIMPLE =
@@ -1415,6 +1560,17 @@ logLinkedModeDiagPhase("async0", doc, insertOffset, text); //$NON-NLS-1$
             this.stopPos = stopPos;
             this.allInfoSize = allInfoSize;
             this.objectsSize = objectsSize;
+        }
+
+        String toJson()
+        {
+            return "{\"hasKey\":" + hasKey //$NON-NLS-1$
+                + ",\"mapSize\":" + mapSize //$NON-NLS-1$
+                + ",\"posStart\":" + posStart //$NON-NLS-1$
+                + ",\"length\":" + length //$NON-NLS-1$
+                + ",\"stopPos\":" + stopPos //$NON-NLS-1$
+                + ",\"allInfo\":" + allInfoSize //$NON-NLS-1$
+                + ",\"objects\":" + objectsSize + "}"; //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         static DataEventDiag missing()
@@ -1451,6 +1607,37 @@ logLinkedModeDiagPhase("async0", doc, insertOffset, text); //$NON-NLS-1$
         catch (Exception ex)
         {
             return DataEventDiag.missing();
+        }
+    }
+
+    private static String sampleDataEventMapKeys(IDocumentListener bslListener, int max)
+    {
+        if (bslListener == null)
+            return "[]"; //$NON-NLS-1$
+        try
+        {
+            Field mapField = bslListener.getClass().getDeclaredField("map"); //$NON-NLS-1$
+            mapField.setAccessible(true);
+            Object mapObj = mapField.get(bslListener);
+            if (!(mapObj instanceof Map<?, ?> map) || map.isEmpty())
+                return "[]"; //$NON-NLS-1$
+            StringBuilder sb = new StringBuilder("["); //$NON-NLS-1$
+            int n = 0;
+            for (Object key : map.keySet())
+            {
+                if (n > 0)
+                    sb.append(',');
+                sb.append('"').append(ContentAssistDebug.jsonEscapeForLog(clipLogText(String.valueOf(key))))
+                    .append('"');
+                n++;
+                if (n >= max)
+                    break;
+            }
+            return sb.append(']').toString();
+        }
+        catch (Exception ex)
+        {
+            return "[]"; //$NON-NLS-1$
         }
     }
 
@@ -1596,7 +1783,11 @@ logLinkedModeDiagPhase("async0", doc, insertOffset, text); //$NON-NLS-1$
                 idx++;
             }
             objectsDiag.append(']');
-if (filtered == 0)
+            logLinkedMode("sanitize", "{\"filtered\":" + filtered //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"kept\":" + kept.size() //$NON-NLS-1$
+                + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(clipLogText(replacementText)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"objects\":" + objectsDiag + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            if (filtered == 0)
                 return 0;
             objectsField.set(dataEvent, kept);
             return filtered;
@@ -1970,6 +2161,8 @@ if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
         // Вставка необёрнутого proposal (пустой префикс — делегат не подключён).
         if (suppressDocumentAutoOpenAfterSession)
         {
+            logAssistOpen("autoOpen.skip", "{\"reason\":\"suppressAfterSession\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"ch\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(inserted)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         int insertOffset = event.getOffset();
@@ -1986,6 +2179,13 @@ if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
         boolean popupWasOpen = ContentAssistPopupSync.isPopupVisible(assistant);
         String branch = CompletionAutoOpenTrigger.diagnoseFetch(
             doc, inserted, insertOffset, caretAfter, popupWasOpen, 0);
+        logAssistOpen("autoOpen.doc", "{\"ch\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(inserted)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + ",\"caret\":" + caretAfter //$NON-NLS-1$
+            + ",\"branch\":\"" + (branch == null ? "null" : branch) + "\"" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            + ",\"popupWasOpen\":" + popupWasOpen //$NON-NLS-1$
+            + ",\"irPending\":" + manualIrAssistPending //$NON-NLS-1$
+            + ",\"autoOpenPending\":" + completionAutoOpenPending //$NON-NLS-1$
+            + ",\"awaitingWords\":" + isCompletionAutoOpenAwaitingWords() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         int seq = completionAutoOpenSeq.incrementAndGet();
         completionAutoOpenActiveSeq = seq;
         completionAutoOpenAwaitingLogged = false;
@@ -2038,6 +2238,7 @@ display.timerExec(delay, () -> fireCompletionAutoOpenTimer(expectedCaretAfter, a
         boolean popupVisible = ContentAssistPopupSync.isPopupVisible(assistant);
         if (gen != genGlobal)
         {
+            logAssistOpen("autoOpen.timer.skip", "{\"reason\":\"genMismatch\",\"caret\":" + liveCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
         if (text == null || text.isDisposed())
@@ -2046,10 +2247,13 @@ display.timerExec(delay, () -> fireCompletionAutoOpenTimer(expectedCaretAfter, a
         }
         if (popupVisible)
         {
+            logAssistOpen("autoOpen.timer.skip", "{\"reason\":\"popupVisible\",\"caret\":" + liveCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
         if (liveCaret < expectedCaretAfter)
         {
+            logAssistOpen("autoOpen.timer.skip", "{\"reason\":\"caretBehind\",\"live\":" + liveCaret //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"expected\":" + expectedCaretAfter + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
         Display display = text.getDisplay();
@@ -2065,15 +2269,18 @@ display.timerExec(delay, () -> fireCompletionAutoOpenTimer(expectedCaretAfter, a
         completionAutoOpenActiveSeq = autoOpenSeq;
         if (caret < 0 || !ComfortSettings.isReplaceListFiltersEnabled())
         {
+            logAssistOpen("autoOpen.begin.skip", "{\"reason\":\"filtersOrCaret\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
         ContentAssistSettings settings = ContentAssistSettings.getInstance();
         if (settings == null || !settings.isEnabled())
         {
+            logAssistOpen("autoOpen.begin.skip", "{\"reason\":\"settingOff\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
         if (ContentAssistPopupSync.isPopupVisible(assistant))
         {
+            logAssistOpen("autoOpen.begin.skip", "{\"reason\":\"popupVisible\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
         completionAutoOpenPending = true;
@@ -2091,11 +2298,14 @@ display.timerExec(delay, () -> fireCompletionAutoOpenTimer(expectedCaretAfter, a
             if (irScheduled)
             {
                 completionAutoOpenIrScheduled = true;
+                logAssistOpen("autoOpen.begin", "{\"path\":\"waitIr\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
                 // Ждём ИР: открытие только при autoOpenSuggested (ЗаполнитьТаблицуСлов).
                 // Browser warmup — в openCompletionAutoIrPopup (preShowLiteralBrowserPatch).
-return;
+                return;
             }
         }
+        logAssistOpen("autoOpen.begin", "{\"path\":\"edt\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+            + ",\"irScheduled\":" + irScheduled + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         warmupAssistBrowserCreator(caret);
         completionAutoOpenEdtOpened = true;
 openCompletionAutoEdtPopup(caret, autoOpenSeq);
@@ -2956,21 +3166,24 @@ if (!inLiteral)
     {
         if (caret < 0)
         {
-return;
+            logAssistOpen("manual.skip", "{\"reason\":\"caret\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+            return;
         }
         if (!ComfortSettings.isReplaceListFiltersEnabled())
         {
-return;
+            logAssistOpen("manual.skip", "{\"reason\":\"filtersOff\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return;
         }
         if (ContentAssistPopupSync.isPopupVisible(assistant))
         {
-return;
+            logAssistOpen("manual.skip", "{\"reason\":\"popupVisible\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return;
         }
         IRSession session = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer);
         if (session == null)
         {
-            IDtProject dtProject = facade != null ? facade.getDtProject() : null;
-return;
+            logAssistOpen("manual.skip", "{\"reason\":\"noIrSession\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return;
         }
         manualIrAssistCaret = caret;
         manualIrAssistPending = true;
@@ -2978,7 +3191,7 @@ return;
         irWordsResolvedForCaret = -1;
         ContentAssistPopupSync.ensureEmptyListAllowed(assistant, true);
         warmupAssistBrowserCreator(caret);
-boolean irCachedForCaret = wordsTableReady && wordsTableCaret == caret
+        boolean irCachedForCaret = wordsTableReady && wordsTableCaret == caret
             && irCompletionSnapshot != null;
         if (irCachedForCaret)
         {
@@ -2993,11 +3206,15 @@ boolean irCachedForCaret = wordsTableReady && wordsTableCaret == caret
         boolean literal = SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, caret);
         if (!irCachedForCaret)
         {
-IrCompletionDebug.log("manualDualAssist defer caret=" + caret); //$NON-NLS-1$
+            logAssistOpen("manual.defer", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"literal\":" + literal //$NON-NLS-1$
+                + ",\"fetchInFlight\":" + isWordsTableFetchInFlightForCaret(caret) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            IrCompletionDebug.log("manualDualAssist defer caret=" + caret); //$NON-NLS-1$
             return;
         }
         processor.enterIrOnlyManualMode(caret);
-openManualDualAssistPopupOnce(caret);
+        logAssistOpen("manual.open", "{\"caret\":" + caret + ",\"literal\":" + literal + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
+        openManualDualAssistPopupOnce(caret);
         IrCompletionDebug.log("manualDualAssist caret=" + caret); //$NON-NLS-1$
     }
 
@@ -3250,12 +3467,13 @@ if (stillVisible)
         IRSession session = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer);
         if (session == null)
         {
-            IDtProject dtProject = facade.getDtProject();
-return false;
+            logAssistOpen("wordsTable.schedule", "{\"caret\":" + caret + ",\"ok\":false,\"reason\":\"noIr\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return false;
         }
         if (isWordsTableFetchInFlightForCaret(caret))
         {
-return false;
+            logAssistOpen("wordsTable.schedule", "{\"caret\":" + caret + ",\"ok\":false,\"reason\":\"inFlight\"}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return false;
         }
         irWordsRequestStartedAtMs = System.currentTimeMillis();
         wordsTableReady = false;
@@ -3271,6 +3489,8 @@ int syncCaretOffset = autoInvoke
             ? caret : IrBslCompletionSupport.SYNC_USE_EDITOR_SELECTION;
         IrBslCompletionSupport.prepareAssistContextAsync(session, facade, syncCaretOffset, autoInvoke,
             closePrevious, raw -> onWordsTablePrepared(caret, raw, fetchDiagSeq));
+        logAssistOpen("wordsTable.schedule", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+            + ",\"ok\":true,\"autoInvoke\":" + autoInvoke + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         return true;
     }
 
@@ -3288,6 +3508,12 @@ runPendingAfterWordsTable();
         irWordsResolvedForCaret = caret;
         IrBslCompletionSupport.Snapshot snapshot = buildSnapshotFromRaw(caret, raw);
         int irCount = snapshot.proposals != null ? snapshot.proposals.length : 0;
+        logAssistOpen("wordsTable", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+            + ",\"irN\":" + irCount //$NON-NLS-1$
+            + ",\"autoOpenSuggested\":" + (snapshot != null && snapshot.autoOpenSuggested) //$NON-NLS-1$
+            + ",\"irPending\":" + manualIrAssistPending //$NON-NLS-1$
+            + ",\"autoOpenPending\":" + completionAutoOpenPending //$NON-NLS-1$
+            + ",\"popup\":" + ContentAssistPopupSync.isPopupVisible(assistant) + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         int prevAppliedN = irSnapshotAppliedIrCount;
         int procIrN = processor.diagIrProposalCount();
         int procFullN = processor.diagFullListCacheCount();
@@ -3775,6 +4001,17 @@ scheduleFilterToggleUiSync();
                 && SmartContentAssistProcessor.isStringLiteralAssistContext(viewer, probeCaret);
             boolean hasTextSelection = text != null && !text.isDisposed()
                 && text.getSelectionCount() > 0;
+            boolean irConn = IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer) != null;
+            logAssistOpen("ctrlSpace", "{\"caret\":" + probeCaret //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"popup\":" + popupVisible //$NON-NLS-1$
+                + ",\"inLiteral\":" + inLiteralProbe //$NON-NLS-1$
+                + ",\"hasSel\":" + hasTextSelection //$NON-NLS-1$
+                + ",\"selCount\":" + (text != null && !text.isDisposed() ? text.getSelectionCount() : -1) //$NON-NLS-1$
+                + ",\"irConn\":" + irConn //$NON-NLS-1$
+                + ",\"filters\":" + ComfortSettings.isReplaceListFiltersEnabled() //$NON-NLS-1$
+                + ",\"irPending\":" + manualIrAssistPending //$NON-NLS-1$
+                + ",\"autoOpenPending\":" + completionAutoOpenPending //$NON-NLS-1$
+                + ",\"awaitingWords\":" + isCompletionAutoOpenAwaitingWords() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             if (hasTextSelection)
                 Global.tempLog("assist-sel", "CtrlSpace: selection caret=" + probeCaret //$NON-NLS-1$ //$NON-NLS-2$
                     + " popup=" + popupVisible + " inLiteral=" + inLiteralProbe);
@@ -3799,25 +4036,28 @@ beginManualDualAssist(caret);
                 event.doit = false;
 return;
             }
-if (!ComfortSettings.isReplaceListFiltersEnabled())
+            if (!ComfortSettings.isReplaceListFiltersEnabled())
             {
-return;
+                logAssistOpen("ctrlSpace.pass", "{\"reason\":\"filtersOff\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
             }
             if (IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer) == null)
             {
-return;
+                logAssistOpen("ctrlSpace.pass", "{\"reason\":\"noIr\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+                return;
             }
             if (text == null || text.isDisposed())
             {
-return;
+                return;
             }
             int caret = modelCaretOffset();
             if (caret < 0)
             {
-return;
+                return;
             }
-beginManualDualAssist(caret);
+            beginManualDualAssist(caret);
+            logAssistOpen("ctrlSpace.swallow", "{\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             event.doit = false;
-}
+        }
     }
 }

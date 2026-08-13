@@ -1178,7 +1178,8 @@ public class OpenMdObjectHook implements IStartup {
 
         @Override
         public String getText(Object element) {
-            return baseProvider != null ? baseProvider.getText(element) : super.getText(element);
+            String text = baseProvider != null ? baseProvider.getText(element) : super.getText(element);
+            return FormMainAttributeTypeDecorator.withSuffix(text, element);
         }
 
         @Override
@@ -1216,6 +1217,13 @@ public class OpenMdObjectHook implements IStartup {
             for (SmartMatcher.HighlightRange range : ranges) {
                 styledString.setStyle(nameOffset + range.offset, range.length, SmartMatchHighlight.styler());
             }
+            String suffix = FormMainAttributeTypeDecorator.suffixForElement(element);
+            if (suffix != null)
+            {
+                String add = " (" + suffix + ")";
+                if (!styledString.getString().endsWith(add))
+                    styledString.append(add, StyledString.DECORATIONS_STYLER);
+            }
             return styledString;
         }
 
@@ -1226,7 +1234,8 @@ public class OpenMdObjectHook implements IStartup {
 
         @Override
         public String decorateText(String text, Object element) {
-            return baseDecorator != null ? baseDecorator.decorateText(text, element) : text;
+            String decorated = baseDecorator != null ? baseDecorator.decorateText(text, element) : text;
+            return FormMainAttributeTypeDecorator.withSuffix(decorated, element);
         }
 
         @Override

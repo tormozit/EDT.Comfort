@@ -178,8 +178,12 @@ public class SmartCompletionProposal implements
         try
         {
             SmartContentAssistProcessor.bindCtorFakeCtorBeforeApply(delegate, document);
+            logApplyStart("doc"); //$NON-NLS-1$
             if (tryApplyWordOnly(document, null, -1, null))
+            {
+                logApplyWordOnly("doc"); //$NON-NLS-1$
                 return;
+            }
             if (irApply)
             {
                 applyIrBareCtorOrDelegate(document, null, (char) 0, 0, resolveApplyCaretOffset(document));
@@ -208,8 +212,12 @@ public class SmartCompletionProposal implements
         try
         {
             SmartContentAssistProcessor.bindCtorFakeCtorBeforeApply(delegate, document);
+            logApplyStart("docTrigger"); //$NON-NLS-1$
             if (tryApplyWordOnly(document, null, offset, null))
+            {
+                logApplyWordOnly("docTrigger"); //$NON-NLS-1$
                 return;
+            }
             if (irApply)
             {
                 applyIrBareCtorOrDelegate(document, null, trigger, 0, offset);
@@ -264,8 +272,12 @@ public class SmartCompletionProposal implements
         {
             SmartContentAssistProcessor.bindCtorFakeCtorBeforeApply(delegate,
                 viewer != null ? viewer.getDocument() : null);
+            logApplyStart("viewer"); //$NON-NLS-1$
             if (viewer != null && tryApplyWordOnly(viewer.getDocument(), viewer, offset, stateMask))
+            {
+                logApplyWordOnly("viewer"); //$NON-NLS-1$
                 return;
+            }
             if (irApply
                 && tryApplyWithIrAdapter((IrCompletionProposal) delegate, viewer, offset))
                 return;
@@ -841,6 +853,50 @@ public class SmartCompletionProposal implements
             return ((ICompletionProposalExtension3) delegate)
                 .getPrefixCompletionStart(document, completionOffset);
         return completionOffset;
+    }
+
+    private void logApplyStart(String overload)
+    {
+        try
+        {
+            ICompletionProposal raw = SmartContentAssistProcessor.unwrapProposal(delegate);
+            String rawClass = raw != null ? raw.getClass().getName() : "null"; //$NON-NLS-1$
+            String repl = ""; //$NON-NLS-1$
+            int cursor = -1;
+            String addClass = "none"; //$NON-NLS-1$
+            Object linked = null;
+            if (raw instanceof ConfigurableCompletionProposal cp)
+            {
+                repl = cp.getReplacementString();
+                cursor = cp.getCursorPosition();
+                Object add = Global.getField(cp, "additionalProposalInfo"); //$NON-NLS-1$
+                addClass = add == null ? "null" : add.getClass().getName(); //$NON-NLS-1$
+                linked = Global.getField(cp, "linkedMode"); //$NON-NLS-1$
+            }
+            else if (raw instanceof IrCompletionProposal ir)
+            {
+                repl = ir.getWordValue();
+                addClass = "IrCompletionProposal"; //$NON-NLS-1$
+            }
+            if (repl == null || repl.indexOf('(') < 0)
+                return;
+            String clipped = repl.length() > 80 ? repl.substring(0, 80) : repl;
+            ContentAssistSessionReloader.logLinkedMode("apply." + overload, //$NON-NLS-1$
+                "{\"raw\":\"" + ContentAssistDebug.jsonEscapeForLog(rawClass) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"add\":\"" + ContentAssistDebug.jsonEscapeForLog(addClass) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                    + ",\"cursor\":" + cursor //$NON-NLS-1$
+                    + ",\"linkedMode\":" + linked //$NON-NLS-1$
+                    + ",\"repl\":\"" + ContentAssistDebug.jsonEscapeForLog(clipped) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        catch (Exception ignored)
+        {
+        }
+    }
+
+    private static void logApplyWordOnly(String overload)
+    {
+        ContentAssistSessionReloader.logLinkedMode("apply.wordOnly", //$NON-NLS-1$
+            "{\"overload\":\"" + overload + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /**

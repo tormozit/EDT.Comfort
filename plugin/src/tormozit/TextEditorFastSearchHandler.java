@@ -1,6 +1,9 @@
 package tormozit;
 
 import java.util.function.Predicate;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 import org.eclipse.core.commands.AbstractHandler;
 import org.eclipse.core.commands.ExecutionEvent;
@@ -36,6 +39,10 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
     private static final String FIND_REPLACE_SECTION = "org.eclipse.ui.texteditor.FindReplaceDialog"; //$NON-NLS-1$
     private static final String KEY_CASE_SENSITIVE = "casesensitive"; //$NON-NLS-1$
     private static final String KEY_WHOLE_WORD = "wholeword"; //$NON-NLS-1$
+    private static final String KEY_REGEX = "isRegEx"; //$NON-NLS-1$
+    private static final String KEY_WRAP = "wrap"; //$NON-NLS-1$
+    private static final String KEY_SELECTION = "selection"; //$NON-NLS-1$
+    private static final String KEY_FIND_HISTORY = "findhistory"; //$NON-NLS-1$
 
     @Override
     public Object execute(ExecutionEvent event) throws ExecutionException
@@ -107,6 +114,38 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
                 Global.log(TAG, "executeSearch: searchString=null offset=" + widgetSelRange.x);
             return null;
         }
+        return executeSearchWithString(viewer, textWidget, searchString, forward, false, true);
+    }
+
+    /**
+     * Следующее/предыдущее вхождение строки из буфера диалога «Найти/Заменить»
+     * (не идентификатор под кареткой — это {@link #executeSearch}).
+     */
+    public static Object executeFindNextFromBuffer(StyledText textWidget, boolean forward)
+    {
+        if (textWidget == null || textWidget.isDisposed())
+            return null;
+        String searchString = readFindBufferNeedle();
+        if (searchString == null || searchString.isEmpty())
+        {
+            if (Global.isLogEnabled())
+                Global.log(TAG, "executeFindNextFromBuffer: empty find buffer"); //$NON-NLS-1$
+            return null;
+        }
+        return executeSearchWithString(
+            TextEditor.resolveViewerFromFocus(textWidget), textWidget, searchString, forward,
+            true, isWrapSearch());
+    }
+
+    private static Object executeSearchWithString(ITextViewer viewer, StyledText textWidget,
+        String searchString, boolean forward, boolean fromFindBuffer, boolean wrap)
+    {
+        if (textWidget == null || textWidget.isDisposed()
+            || searchString == null || searchString.isEmpty())
+            return null;
+
+        Point widgetSelRange = textWidget.getSelectionRange();
+        String selectionText = textWidget.getSelectionText();
 
         IDocument document = viewer != null ? viewer.getDocument() : null;
         String fullText;
@@ -129,26 +168,40 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
 
         boolean caseSensitive = isCaseSensitiveSearch();
         boolean wholeWord = isWholeWordSearch();
+        boolean regex = fromFindBuffer && isRegExSearch();
+        int searchFrom = forward ? (fromFindBuffer ? offset : offset + 1) : offset - 1;
 
         if (Global.isLogEnabled())
-            Global.log(TAG, "executeSearch: search='" + searchString
-                + "' from=" + offset + " forward=" + forward
-                + " caseSensitive=" + caseSensitive + " wholeWord=" + wholeWord
-                + " viaDocument=" + (document != null));
+            Global.log(TAG, "executeSearchWithString: search='" + searchString //$NON-NLS-1$
+                + "' from=" + searchFrom + " forward=" + forward //$NON-NLS-1$ //$NON-NLS-2$
+                + " caseSensitive=" + caseSensitive + " wholeWord=" + wholeWord //$NON-NLS-1$ //$NON-NLS-2$
+                + " regex=" + regex + " wrap=" + wrap //$NON-NLS-1$ //$NON-NLS-2$
+                + " viaDocument=" + (document != null)); //$NON-NLS-1$
 
-        int found = forward
-            ? indexOf(fullText, searchString, offset + 1, caseSensitive, wholeWord)
-            : lastIndexOf(fullText, searchString, offset - 1, caseSensitive, wholeWord);
-        if (found == -1)
+        int found;
+        int matchLength = searchString.length();
+        if (regex)
+        {
+            int[] match = findRegEx(fullText, searchString, searchFrom, forward, caseSensitive, wrap);
+            found = match[0];
+            matchLength = match[1];
+        }
+        else
+        {
             found = forward
-                ? indexOf(fullText, searchString, 0, caseSensitive, wholeWord)
-                : lastIndexOf(fullText, searchString, fullText.length() - 1, caseSensitive, wholeWord);
+                ? indexOf(fullText, searchString, searchFrom, caseSensitive, wholeWord)
+                : lastIndexOf(fullText, searchString, searchFrom, caseSensitive, wholeWord);
+            if (found < 0 && wrap)
+                found = forward
+                    ? indexOf(fullText, searchString, 0, caseSensitive, wholeWord)
+                    : lastIndexOf(fullText, searchString, fullText.length() - 1, caseSensitive, wholeWord);
+        }
 
         if (found >= 0)
-            selectFound(viewer, textWidget, found, searchString.length());
+            selectFound(viewer, textWidget, found, matchLength);
 
         if (Global.isLogEnabled())
-            Global.log(TAG, "executeSearch: result=" + found);
+            Global.log(TAG, "executeSearchWithString: result=" + found); //$NON-NLS-1$
         return null;
     }
 
@@ -177,25 +230,64 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
         return readFindReplaceFlag(KEY_WHOLE_WORD);
     }
 
+    private static boolean isRegExSearch()
+    {
+        return readFindReplaceFlag(KEY_REGEX);
+    }
+
+    /** Как {@code FindNextAction}: wrap по умолчанию включён, пока в настройках явно не false. */
+    private static boolean isWrapSearch()
+    {
+        IDialogSettings section = findReplaceSection();
+        if (section == null || section.get(KEY_WRAP) == null)
+            return true;
+        return section.getBoolean(KEY_WRAP);
+    }
+
+    private static String readFindBufferNeedle()
+    {
+        IDialogSettings section = findReplaceSection();
+        if (section == null)
+            return null;
+        String selection = section.get(KEY_SELECTION);
+        if (selection != null && !selection.isEmpty())
+            return selection;
+        String[] history = section.getArray(KEY_FIND_HISTORY);
+        if (history != null)
+        {
+            for (String entry : history)
+            {
+                if (entry != null && !entry.isEmpty())
+                    return entry;
+            }
+        }
+        return null;
+    }
+
     private static boolean readFindReplaceFlag(String key)
+    {
+        IDialogSettings section = findReplaceSection();
+        return section != null && section.getBoolean(key);
+    }
+
+    private static IDialogSettings findReplaceSection()
     {
         try
         {
             Bundle bundle = Platform.getBundle(FIND_REPLACE_BUNDLE);
             if (bundle == null)
-                return false;
+                return null;
             IDialogSettingsProvider provider = PlatformUI.getDialogSettingsProvider(bundle);
             if (provider == null)
-                return false;
+                return null;
             IDialogSettings settings = provider.getDialogSettings();
             if (settings == null)
-                return false;
-            IDialogSettings section = settings.getSection(FIND_REPLACE_SECTION);
-            return section != null && section.getBoolean(key);
+                return null;
+            return settings.getSection(FIND_REPLACE_SECTION);
         }
         catch (RuntimeException e)
         {
-            return false;
+            return null;
         }
     }
 
@@ -245,6 +337,59 @@ public final class TextEditorFastSearchHandler extends AbstractHandler
     }
 
     // ========= Поиск по строке (тексту документа/виджета) =========
+
+    /** @return {@code {start, length}} или {@code {-1, 0}} */
+    private static int[] findRegEx(String text, String regex, int from, boolean forward,
+        boolean caseSensitive, boolean wrap)
+    {
+        Pattern pattern;
+        try
+        {
+            pattern = Pattern.compile(regex, caseSensitive ? 0 : Pattern.CASE_INSENSITIVE);
+        }
+        catch (PatternSyntaxException e)
+        {
+            return new int[] { -1, 0 };
+        }
+        Matcher matcher = pattern.matcher(text);
+        if (forward)
+        {
+            int start = Math.max(from, 0);
+            if (start <= text.length() && matcher.find(start))
+                return new int[] { matcher.start(), matcher.end() - matcher.start() };
+            if (wrap && start > 0 && matcher.find(0))
+                return new int[] { matcher.start(), matcher.end() - matcher.start() };
+            return new int[] { -1, 0 };
+        }
+        int lastStart = -1;
+        int lastLength = 0;
+        int limit = Math.min(Math.max(from, 0), text.length());
+        int pos = 0;
+        while (pos <= limit && matcher.find(pos))
+        {
+            if (matcher.start() >= limit)
+                break;
+            lastStart = matcher.start();
+            lastLength = matcher.end() - matcher.start();
+            pos = matcher.end() > matcher.start() ? matcher.end() : matcher.end() + 1;
+        }
+        if (lastStart >= 0)
+            return new int[] { lastStart, lastLength };
+        if (wrap && limit < text.length())
+        {
+            pos = limit;
+            lastStart = -1;
+            while (pos <= text.length() && matcher.find(pos))
+            {
+                lastStart = matcher.start();
+                lastLength = matcher.end() - matcher.start();
+                pos = matcher.end() > matcher.start() ? matcher.end() : matcher.end() + 1;
+            }
+            if (lastStart >= 0)
+                return new int[] { lastStart, lastLength };
+        }
+        return new int[] { -1, 0 };
+    }
 
     private static int indexOf(String text, String search, int from,
         boolean caseSensitive, boolean wholeWord)

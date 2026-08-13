@@ -1727,10 +1727,11 @@ ContentAssistSessionReloader reloader = viewer instanceof SourceViewer sv
         boolean manualDetect = ManualInvocationDetect.isActive();
         debugLiteralContext(viewer, literalCaret);
         boolean selectionIrOnly = reloader != null && reloader.isSelectionIrOnlyContext();
- if ((manualDetect || selectionIrOnly) && reloader != null)
+        if ((manualDetect || selectionIrOnly) && reloader != null)
             reloader.tryBeginManualDualAssist(literalCaret);
         boolean diagIrPending = reloader != null && reloader.isManualIrAssistPending();
         boolean diagIrResolved = isIrWordsResolvedForContext();
+        boolean awaitingWords = reloader != null && reloader.isCompletionAutoOpenAwaitingWords();
         // #region agent log — trace selection Ctrl+Space (временное, безусловное)
         {
             int selLen = reloader != null ? reloader.widgetSelectionLength() : -2;
@@ -1745,14 +1746,21 @@ ContentAssistSessionReloader reloader = viewer instanceof SourceViewer sv
             }
         }
         // #endregion
-if (reloader != null && reloader.isManualIrAssistPending()
+        if (reloader != null && reloader.isManualIrAssistPending()
             && !isIrWordsResolvedForContext())
         {
-return EMPTY;
+            ContentAssistSessionReloader.logAssistOpen("compute.empty", "{\"reason\":\"irPending\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"caret\":" + literalCaret //$NON-NLS-1$
+                + ",\"off\":" + offset //$NON-NLS-1$
+                + ",\"inLiteral\":" + inLiteral //$NON-NLS-1$
+                + ",\"awaitingWords\":" + awaitingWords + "}"); //$NON-NLS-1$ //$NON-NLS-2$
+            return EMPTY;
         }
         if (reloader != null && reloader.isCompletionAutoOpenAwaitingWords())
         {
-return EMPTY;
+            ContentAssistSessionReloader.logAssistOpen("compute.empty", "{\"reason\":\"awaitingWords\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"caret\":" + literalCaret + ",\"off\":" + offset + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            return EMPTY;
         }
         // Повторный Ctrl+Space (toggle фильтра) в режиме выделения+ИР: сохраняем штатное
         // переключение флажка «Фильтр», но список ниже остаётся только ИР (не EDT+ИР).
@@ -5155,14 +5163,29 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             if (Boolean.TRUE.equals(SmartCompletionProposal.IR_PROPOSAL_APPLY_IN_PROGRESS.get()))
                 return;
             EObject pending = PENDING_SIGNATURE.get();
-            if (pending == null)
-                return;
             String text = event.getText();
+            if (pending == null)
+            {
+                if (text.indexOf('(') >= 0)
+                {
+                    ContentAssistSessionReloader.logLinkedMode("ctor.ensure.skip", //$NON-NLS-1$
+                        "{\"reason\":\"noPendingSignature\"" //$NON-NLS-1$
+                            + ",\"oldKey\":\"" + ContentAssistDebug.jsonEscapeForLog(PENDING_OLD_KEY.get()) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                            + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(clipCtorText(text)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+                }
+                return;
+            }
             String oldKey = PENDING_OLD_KEY.get();
             IDocument doc = event.getDocument();
             IDocumentListener listener = findBslDocumentListener(doc);
             if (listener == null)
+            {
+                ContentAssistSessionReloader.logLinkedMode("ctor.ensure.skip", //$NON-NLS-1$
+                    "{\"reason\":\"noBslListener\"" //$NON-NLS-1$
+                        + ",\"sig\":\"" + pending.eClass().getName() + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(clipCtorText(text)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
+            }
             try
             {
                 Field mapField = listener.getClass().getDeclaredField("map"); //$NON-NLS-1$
@@ -5176,14 +5199,31 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
                 if (existing != null)
                 {
                     setDataEventObjects(existing, pending);
+                    ContentAssistSessionReloader.logLinkedMode("ctor.ensure", //$NON-NLS-1$
+                        "{\"path\":\"existingKey\"" //$NON-NLS-1$
+                            + ",\"sig\":\"" + pending.eClass().getName() + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                            + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(clipCtorText(text)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
                     return;
                 }
+                ContentAssistSessionReloader.logLinkedMode("ctor.ensure", //$NON-NLS-1$
+                    "{\"path\":\"migrate\"" //$NON-NLS-1$
+                        + ",\"sig\":\"" + pending.eClass().getName() + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"oldKey\":\"" + ContentAssistDebug.jsonEscapeForLog(oldKey) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(clipCtorText(text)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
                 migrateDataEvent(listener, doc, text, oldKey, pending, event.getOffset());
             }
             catch (Exception ex)
             {
-                // рефлексия по внутренностям EDT — при несовпадении просто не подставляем сигнатуру
+                ContentAssistSessionReloader.logLinkedMode("ctor.ensure.error", //$NON-NLS-1$
+                    "{\"ex\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
             }
+        }
+
+        private static String clipCtorText(String text)
+        {
+            if (text == null)
+                return ""; //$NON-NLS-1$
+            return text.length() > 80 ? text.substring(0, 80) : text;
         }
 
         static void trimAll(ICompletionProposal[] proposals)
@@ -5230,6 +5270,9 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             cp.setReplacementString(newRepl);
             cp.setCursorPosition(open + 1);
             syncInitialReplacementContent(cp, newRepl);
+            ContentAssistSessionReloader.logLinkedMode("ctor.trim", "{\"minParams\":" + minParams //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"old\":\"" + ContentAssistDebug.jsonEscapeForLog(clipCtorText(oldRepl)) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"new\":\"" + ContentAssistDebug.jsonEscapeForLog(clipCtorText(newRepl)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         }
 
         /**
@@ -5245,8 +5288,19 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             String oldKey = ORIGINAL_DATA_EVENT_KEY.get(cp);
             if (oldKey == null)
                 oldKey = readStringField(cp, "linkModelContent"); //$NON-NLS-1$
+            Object additional = Global.getField(cp, "additionalProposalInfo"); //$NON-NLS-1$
+            String addClass = additional == null ? "null" : additional.getClass().getName(); //$NON-NLS-1$
             if (signature == null || key == null || key.isEmpty())
+            {
+                if (key != null && key.indexOf('(') >= 0)
+                {
+                    ContentAssistSessionReloader.logLinkedMode("ctor.bind.skip", //$NON-NLS-1$
+                        "{\"reason\":\"noSignature\"" //$NON-NLS-1$
+                            + ",\"add\":\"" + ContentAssistDebug.jsonEscapeForLog(addClass) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                            + ",\"key\":\"" + ContentAssistDebug.jsonEscapeForLog(clipCtorText(key)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
+                }
                 return;
+            }
             PENDING_SIGNATURE.set(signature);
             PENDING_INSERT_KEY.set(key);
             PENDING_OLD_KEY.set(oldKey);
@@ -5258,10 +5312,23 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             }
             // без документа/слушателя — подстановка отложена до ensureDataEventForInsert
             if (doc == null)
+            {
+                ContentAssistSessionReloader.logLinkedMode("ctor.bind", //$NON-NLS-1$
+                    "{\"path\":\"deferredNoDoc\"" //$NON-NLS-1$
+                        + ",\"sig\":\"" + signature.eClass().getName() + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"add\":\"" + ContentAssistDebug.jsonEscapeForLog(addClass) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"key\":\"" + ContentAssistDebug.jsonEscapeForLog(clipCtorText(key)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
+            }
             IDocumentListener listener = resolveDocEventListener(cp, doc);
             if (listener == null)
+            {
+                ContentAssistSessionReloader.logLinkedMode("ctor.bind", //$NON-NLS-1$
+                    "{\"path\":\"deferredNoListener\"" //$NON-NLS-1$
+                        + ",\"sig\":\"" + signature.eClass().getName() + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"key\":\"" + ContentAssistDebug.jsonEscapeForLog(clipCtorText(key)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
+            }
             try
             {
                 boolean needMigrate = oldKey != null && !oldKey.equals(key);
@@ -5270,15 +5337,27 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
                     if (bindObjectsOnly(listener, key, oldKey, signature))
                     {
                         ORIGINAL_DATA_EVENT_KEY.remove(cp);
+                        ContentAssistSessionReloader.logLinkedMode("ctor.bind", //$NON-NLS-1$
+                            "{\"path\":\"objectsOnly\"" //$NON-NLS-1$
+                                + ",\"sig\":\"" + signature.eClass().getName() + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                                + ",\"add\":\"" + ContentAssistDebug.jsonEscapeForLog(addClass) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                                + ",\"key\":\"" + ContentAssistDebug.jsonEscapeForLog(clipCtorText(key)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
                         return;
                     }
                 }
                 migrateDataEvent(listener, doc, key, oldKey, signature, cp.getReplacementOffset());
                 ORIGINAL_DATA_EVENT_KEY.remove(cp);
+                ContentAssistSessionReloader.logLinkedMode("ctor.bind", //$NON-NLS-1$
+                    "{\"path\":\"migrate\"" //$NON-NLS-1$
+                        + ",\"needMigrate\":" + needMigrate //$NON-NLS-1$
+                        + ",\"sig\":\"" + signature.eClass().getName() + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"oldKey\":\"" + ContentAssistDebug.jsonEscapeForLog(oldKey) + "\"" //$NON-NLS-1$ //$NON-NLS-2$
+                        + ",\"key\":\"" + ContentAssistDebug.jsonEscapeForLog(clipCtorText(key)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
             }
             catch (Exception ex)
             {
-                // рефлексия по внутренностям EDT — при несовпадении оставляем штатное поведение
+                ContentAssistSessionReloader.logLinkedMode("ctor.bind.error", //$NON-NLS-1$
+                    "{\"ex\":\"" + ContentAssistDebug.jsonEscapeForLog(String.valueOf(ex)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
             }
         }
 

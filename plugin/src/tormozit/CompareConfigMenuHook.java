@@ -119,6 +119,7 @@ import com._1c.g5.v8.dt.compare.core.IComparisonTreeFilter;
 import com._1c.g5.v8.dt.compare.datasource.IActiveComparisonDataSource;
 import com._1c.g5.v8.dt.compare.datasource.IComparisonDataSource;
 import com._1c.g5.v8.dt.compare.merge.ExternalPropertyUtils;
+import com._1c.g5.v8.dt.compare.model.ComparisonFlags;
 import com._1c.g5.v8.dt.compare.model.ComparisonNode;
 import com._1c.g5.v8.dt.compare.model.ComparisonSide;
 import com._1c.g5.v8.dt.compare.model.ExternalPropertyComparisonNode;
@@ -192,6 +193,7 @@ import org.osgi.framework.BundleContext;
 import org.osgi.framework.ServiceReference;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.AbstractDirectPartialModelNode;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.ProjectPartialModelNode;
+import com._1c.g5.v8.dt.compare.ui.partialmodel.node.RootPartialModelNode;
 
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.Viewer;
@@ -610,7 +612,7 @@ public class CompareConfigMenuHook implements IStartup
 
         MenuAdapter listener = new MenuAdapter()
         {
-            private final List<MenuItem> addedItems = new ArrayList<>(2);
+            private final List<MenuItem> addedItems = new ArrayList<>(8);
 
             @Override
             public void menuShown(MenuEvent e)
@@ -619,29 +621,97 @@ public class CompareConfigMenuHook implements IStartup
                 boolean hasMultiMark = multiMark != null && !multiMark.getSelected().isEmpty();
                 boolean hasNative = getSelectedMatchedNode(editor) != null;
                 Object nativeElement = getSelectedTreeElement(editor);
+                boolean collapseOthers = TreeCollapseOthers.isApplicable(tree);
+                boolean findLowest = hasMultiMark || hasNative;
+                boolean marks = multiMark != null && multiMark.getSelected().size() > 1;
 
-                if (hasMultiMark || hasNative)
-                {
+                // Один разделитель перед блоком команд Комфорт (свёртка / поиск / открытие).
+                if (collapseOthers || findLowest || hasNative)
                     addedItems.add(new MenuItem(menu, SWT.SEPARATOR));
 
-                    MenuItem findLowest = new MenuItem(menu, SWT.PUSH);
-                    findLowest.setText(ITEM_TEXT_findLowestCheckable);
-                    findLowest.addSelectionListener(new SelectionAdapter()
+                if (collapseOthers)
+                {
+                    MenuItem collapseItem = new MenuItem(menu, SWT.PUSH);
+                    TreeCollapseOthers.decorateMenuItem(collapseItem);
+                    collapseItem.addSelectionListener(new SelectionAdapter()
                     {
                         @Override
-                        public void widgetSelected(SelectionEvent e)
+                        public void widgetSelected(SelectionEvent ev)
+                        {
+                            AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
+                            if (viewer != null)
+                                TreeCollapseOthers.collapseOthers(viewer);
+                            else
+                                TreeCollapseOthers.collapseOthers(tree);
+                        }
+                    });
+                    addedItems.add(collapseItem);
+                }
+
+                if (findLowest)
+                {
+                    MenuItem findLowestItem = new MenuItem(menu, SWT.PUSH);
+                    findLowestItem.setText(ITEM_TEXT_findLowestCheckable);
+                    findLowestItem.addSelectionListener(new SelectionAdapter()
+                    {
+                        @Override
+                        public void widgetSelected(SelectionEvent ev)
                         {
                             CompareConfigLowestCheckableFinder.run(editor, tree.getShell(),
                                 CompareConfigLowestCheckableFinder.resolveRoots(
                                     hasMultiMark ? multiMark.getSelected() : null, nativeElement));
                         }
                     });
-                    addedItems.add(findLowest);
+                    addedItems.add(findLowestItem);
                 }
 
-                // Пометки — до early-return по hasNative: папки разделов («Регистры» и т.п.)
-                // часто без MatchedObjectsComparisonNode, но Ctrl/Shift-набор уже есть.
-                if (multiMark != null && multiMark.getSelected().size() > 1)
+                if (hasNative)
+                {
+                    MenuItem item1 = new MenuItem(menu, SWT.PUSH);
+                    item1.setText(ITEM_TEXT_OpenObject);
+                    item1.addSelectionListener(new SelectionAdapter()
+                    {
+                        @Override
+                        public void widgetSelected(SelectionEvent ev)
+                        {
+                            CompareConfigOpenObjectHandler.openObject(editor, tree.getShell());
+                        }
+                    });
+                    addedItems.add(item1);
+
+                    MenuItem item2 = new MenuItem(menu, SWT.PUSH);
+                    item2.setText(ITEM_TEXT_showInNavigator);
+                    item2.addSelectionListener(new SelectionAdapter()
+                    {
+                        @Override
+                        public void widgetSelected(SelectionEvent ev)
+                        {
+                            CompareConfigOpenObjectHandler.showInNavigator(editor, tree.getShell());
+                        }
+                    });
+                    addedItems.add(item2);
+
+                    ISelection selection = CompareConfigCompareInIRHandler.getSelection(editor);
+                    Object selectedElement = selection instanceof IStructuredSelection
+                        ? ((IStructuredSelection) selection).getFirstElement() : null;
+                    if (CompareConfigCompareInIRHandler.isMxlxNode(editor, selectedElement))
+                    {
+                        MenuItem item3 = new MenuItem(menu, SWT.PUSH);
+                        item3.setText(ITEM_TEXT_compareInIR);
+                        item3.addSelectionListener(new SelectionAdapter()
+                        {
+                            @Override
+                            public void widgetSelected(SelectionEvent ev)
+                            {
+                                CompareConfigCompareInIRHandler.runCompare(editor, tree.getShell());
+                            }
+                        });
+                        addedItems.add(item3);
+                    }
+                }
+
+                // Пометки — отдельная группа (в т.ч. для папок разделов без MatchedObjectsComparisonNode).
+                if (marks)
                 {
                     addedItems.add(new MenuItem(menu, SWT.SEPARATOR));
 
@@ -650,7 +720,7 @@ public class CompareConfigMenuHook implements IStartup
                     itemMark.addSelectionListener(new SelectionAdapter()
                     {
                         @Override
-                        public void widgetSelected(SelectionEvent e)
+                        public void widgetSelected(SelectionEvent ev)
                         {
                             AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
                             if (viewer instanceof CheckboxTreeViewer ctv)
@@ -664,7 +734,7 @@ public class CompareConfigMenuHook implements IStartup
                     itemUnmark.addSelectionListener(new SelectionAdapter()
                     {
                         @Override
-                        public void widgetSelected(SelectionEvent e)
+                        public void widgetSelected(SelectionEvent ev)
                         {
                             AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
                             if (viewer instanceof CheckboxTreeViewer ctv)
@@ -672,52 +742,6 @@ public class CompareConfigMenuHook implements IStartup
                         }
                     });
                     addedItems.add(itemUnmark);
-                }
-
-                if (!hasNative) return;
-
-                addedItems.add(new MenuItem(menu, SWT.SEPARATOR));
-
-                MenuItem item1 = new MenuItem(menu, SWT.PUSH);
-                item1.setText(ITEM_TEXT_OpenObject);
-                item1.addSelectionListener(new SelectionAdapter()
-                {
-                    @Override
-                    public void widgetSelected(SelectionEvent e)
-                    {
-                        CompareConfigOpenObjectHandler.openObject(editor, tree.getShell());
-                    }
-                });
-                addedItems.add(item1);
-
-                MenuItem item2 = new MenuItem(menu, SWT.PUSH);
-                item2.setText(ITEM_TEXT_showInNavigator);
-                item2.addSelectionListener(new SelectionAdapter()
-                {
-                    @Override
-                    public void widgetSelected(SelectionEvent e)
-                    {
-                        CompareConfigOpenObjectHandler.showInNavigator(editor, tree.getShell());
-                    }
-                });
-                addedItems.add(item2);
-
-                ISelection selection = CompareConfigCompareInIRHandler.getSelection(editor);
-                Object selectedElement = selection instanceof IStructuredSelection
-                    ? ((IStructuredSelection) selection).getFirstElement() : null;
-                if (CompareConfigCompareInIRHandler.isMxlxNode(editor, selectedElement))
-                {
-                    MenuItem item3 = new MenuItem(menu, SWT.PUSH);
-                    item3.setText(ITEM_TEXT_compareInIR);
-                    item3.addSelectionListener(new SelectionAdapter()
-                    {
-                        @Override
-                        public void widgetSelected(SelectionEvent e)
-                        {
-                            CompareConfigCompareInIRHandler.runCompare(editor, tree.getShell());
-                        }
-                    });
-                    addedItems.add(item3);
                 }
             }
 
@@ -816,6 +840,10 @@ public class CompareConfigMenuHook implements IStartup
             Collections.newSetFromMap(new IdentityHashMap<>());
         private IPartialModelNode anchor;
         private Color ownedBg;
+        /** Ctrl/Shift-набор расходится со штатным {@code SWT.SINGLE} — рисуем сами. */
+        private boolean customHighlightActive;
+        /** MouseDown уже обработал жест; {@code SWT.Selection} не должен свернуть набор. */
+        private boolean mouseGesture;
 
         private CompareConfigMultiMarkSupport(Tree tree)
         {
@@ -830,6 +858,8 @@ public class CompareConfigMenuHook implements IStartup
             CompareConfigMultiMarkSupport support = new CompareConfigMultiMarkSupport(tree);
             tree.setData(DATA_KEY, support);
             tree.addListener(SWT.MouseDown, support::onMouseDown);
+            tree.addListener(SWT.MouseUp, support::onMouseUp);
+            tree.addListener(SWT.Selection, support::onNativeSelection);
             tree.addListener(SWT.EraseItem, support::onEraseItem);
             tree.addListener(SWT.PaintItem, support::onPaintItem);
             tree.addDisposeListener(e ->
@@ -852,6 +882,7 @@ public class CompareConfigMenuHook implements IStartup
         {
             selected.clear();
             anchor = null;
+            customHighlightActive = false;
             if (tree != null && !tree.isDisposed())
                 tree.redraw();
         }
@@ -954,21 +985,63 @@ public class CompareConfigMenuHook implements IStartup
 
             if (shift && anchor != null)
             {
+                mouseGesture = true;
                 selectRange(anchor, node);
+                customHighlightActive = true;
+                tree.redraw();
             }
             else if (ctrl)
             {
+                mouseGesture = true;
                 if (!selected.remove(node))
                     selected.add(node);
                 anchor = node;
+                customHighlightActive = true;
+                tree.redraw();
             }
             else
             {
+                // MouseDown раньше штатной смены выделения: redraw здесь рисует
+                // новую строку кастомной подсветкой, пока старая ещё native-selected.
+                boolean clearExtras = customHighlightActive || selected.size() > 1;
                 selected.clear();
                 selected.add(node);
                 anchor = node;
+                customHighlightActive = false;
+                if (clearExtras)
+                    tree.redraw();
             }
-            tree.redraw();
+        }
+
+        private void onMouseUp(Event e)
+        {
+            mouseGesture = false;
+        }
+
+        /**
+         * Стрелки/программная смена native-выделения: держим набор в синхроне,
+         * иначе прежняя строка получает кастомную подсветку (уже не native, но ещё в {@code selected}).
+         */
+        private void onNativeSelection(Event e)
+        {
+            if (mouseGesture)
+                return;
+            TreeItem[] items = tree.getSelection();
+            if (items.length != 1 || items[0] == null || items[0].isDisposed())
+                return;
+            if (!(items[0].getData() instanceof IPartialModelNode node))
+                return;
+            if (customHighlightActive && selected.contains(node))
+                return;
+            if (selected.size() == 1 && selected.contains(node) && !customHighlightActive)
+                return;
+            boolean clearExtras = customHighlightActive || selected.size() > 1;
+            selected.clear();
+            selected.add(node);
+            anchor = node;
+            customHighlightActive = false;
+            if (clearExtras)
+                tree.redraw();
         }
 
         /**
@@ -981,11 +1054,13 @@ public class CompareConfigMenuHook implements IStartup
          */
         private void onRightMouseDown(TreeItem item, IPartialModelNode node)
         {
+            mouseGesture = true;
             if (!selected.contains(node))
             {
                 selected.clear();
                 selected.add(node);
                 anchor = node;
+                customHighlightActive = false;
             }
             tree.setSelection(item);
             Event selectionEvent = new Event();
@@ -1037,6 +1112,7 @@ public class CompareConfigMenuHook implements IStartup
 
         private void onEraseItem(Event e)
         {
+            if (!customHighlightActive) return;
             if (!(e.item instanceof TreeItem item) || item.isDisposed()) return;
             if (!(item.getData() instanceof IPartialModelNode node) || !selected.contains(node)) return;
             // Узел под штатным native-выделением уже подсвечен системой — не мешаем.
@@ -1080,6 +1156,7 @@ public class CompareConfigMenuHook implements IStartup
          */
         private void onPaintItem(Event e)
         {
+            if (!customHighlightActive) return;
             if (!(e.item instanceof TreeItem item) || item.isDisposed()) return;
             if (!(item.getData() instanceof IPartialModelNode node) || !selected.contains(node)) return;
             if (isNativelySelected(item)) return;
@@ -1165,11 +1242,9 @@ public class CompareConfigMenuHook implements IStartup
     }
 
     /**
-     * Возвращает {@code true}, если узел дерева сравнения присутствует только в одной
-     * стороне сравнения (добавлен или удалён) — тот же критерий, что использует команда
-     * «До изменённых» ({@link CompareConfigExpandMode#toBothElement}), чтобы не разворачивать
-     * в него дочерние узлы. Используется {@link TreeExpander} для остановки
-     * авторазворачивания цепочки единственных потомков на таких узлах.
+     * Узел только на одной стороне (добавлен или удалён) — как окраска дерева EDT.
+     * Тот же критерий, что у команды «До измененных»: такие узлы не разворачиваются.
+     * {@link TreeExpander} останавливает на них Ctrl+клик и авторазворот цепочки потомков.
      */
     public static boolean isAddedOrDeletedCompareNode(Object element)
     {
@@ -5079,7 +5154,14 @@ public class CompareConfigMenuHook implements IStartup
 
             for (Object root : cp.getElements(viewer.getInput()))
             {
-                collectElementsToExpand(cp, root, mode, toExpand, viewer);
+                try
+                {
+                    collectElementsToExpand(cp, root, mode, toExpand, viewer);
+                }
+                catch (RuntimeException e)
+                {
+                    Global.logError("CompareConfig", "collectElementsToExpand", e); //$NON-NLS-1$ //$NON-NLS-2$
+                }
             }
             TreeExpander.runSuppressed(() ->
             {
@@ -5097,6 +5179,7 @@ public class CompareConfigMenuHook implements IStartup
         /**
          * Как {@link #expand(IEditorPart, CompareConfigExpandMode)}, но только поддерево
          * {@code root}: уже развёрнутые соседние ветки не сворачиваются.
+         * Добавленный/удалённый корень не разворачивается (нативный плюсик мог уже открыть уровень).
          */
         static void expandSubtree(AbstractTreeViewer viewer, Object root, CompareConfigExpandMode mode)
         {
@@ -5106,12 +5189,22 @@ public class CompareConfigMenuHook implements IStartup
                 return;
 
             Set<Object> toExpand = new HashSet<>();
-            collectElementsToExpand(cp, root, mode, toExpand, viewer);
-            if (toExpand.isEmpty())
+            try
+            {
+                collectElementsToExpand(cp, root, mode, toExpand, viewer);
+            }
+            catch (RuntimeException e)
+            {
+                Global.logError("CompareConfig", "collectElementsToExpand", e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            boolean skipAddedRoot = mode == CompareConfigExpandMode.toBothElement && isAddedOrDeleted(root);
+            if (toExpand.isEmpty() && !skipAddedRoot)
                 return;
 
             TreeExpander.runSuppressed(() ->
             {
+                if (skipAddedRoot)
+                    viewer.setExpandedState(root, false);
                 for (Object element : toExpand)
                     viewer.setExpandedState(element, true);
             });
@@ -5122,19 +5215,17 @@ public class CompareConfigMenuHook implements IStartup
          * В {@code toExpand} попадают только узлы, видимые при текущих фильтрах дерева.
          * Обход модели — по полному дереву content provider; вызовов вьювера внутри нет.
          */
-        private static void collectElementsToExpand(ITreeContentProvider cp, Object element, CompareConfigExpandMode mode, Set<Object> toExpand, AbstractTreeViewer viewer)
+        private static void collectElementsToExpand(ITreeContentProvider cp, Object element,
+                CompareConfigExpandMode mode, Set<Object> toExpand, AbstractTreeViewer viewer)
         {
-            if (false
-                    || !cp.hasChildren(element)
+            if (!cp.hasChildren(element)
                     || mode == CompareConfigExpandMode.toBothElement && isAddedOrDeleted(element)
-                    || mode == CompareConfigExpandMode.toObject      && isObject(element)
-                    || mode == CompareConfigExpandMode.toMarked      && !isMarked(element))
+                    || mode == CompareConfigExpandMode.toObject && isObject(element)
+                    || mode == CompareConfigExpandMode.toMarked && !isMarked(element))
                 return;
 
             if (CompareConfigSearchDialogHook.isNodeMatchFilters(element, viewer))
-            {
                 toExpand.add(element);
-            }
             Object[] children;
             try
             {
@@ -5142,14 +5233,13 @@ public class CompareConfigMenuHook implements IStartup
             }
             catch (Exception e)
             {
-                // https://github.com/tormozit/EDT-Tormozit/issues/8
                 Global.logError("CompareConfig", "getChildren", e); //$NON-NLS-1$ //$NON-NLS-2$
                 return;
             }
+            if (children == null)
+                return;
             for (Object child : children)
-            {
                 collectElementsToExpand(cp, child, mode, toExpand, viewer);
-            }
         }
 
         /**
@@ -5195,24 +5285,57 @@ public class CompareConfigMenuHook implements IStartup
         }
 
         /**
-         * Возвращает {@code true} если объект присутствует только в одной стороне
-         * сравнения (добавлен или удалён).
-         * <p>
-         * Если у элемента нет {@code isCheckable()} (дерево не из редактора сравнения,
-         * напр. {@code MatchTreeItem} в результатах поиска) — {@code false} без ошибок
-         * в журнале: для таких узлов критерий «добавлен/удалён» не применим.
+         * Узел только на одной стороне (добавлен или удалён).
+         * Папки, корень, «Конфигурация» и коллекции не режут обход.
          */
         private static boolean isAddedOrDeleted(Object element)
         {
-            Object checkableResult = Global.call(element, "isCheckable"); //$NON-NLS-1$
-            if (!(checkableResult instanceof Boolean))
+            if (isExpandContainer(element))
                 return false;
-            boolean isCheckable = ((Boolean) checkableResult).booleanValue();
-            if (!isCheckable)
+            try
+            {
+                ComparisonNode cn = null;
+                if (element instanceof IPartialModelNode partial)
+                    cn = partial.retrieveComparisonNode();
+                if (cn == null)
+                    cn = extractMatchedNode(element);
+                if (cn instanceof TopComparisonNode top)
+                    return top.isOneSideNode();
+                if (cn instanceof MatchedObjectsComparisonNode matched)
+                {
+                    Long mainId = matched.getMainObjectId();
+                    Long otherId = matched.getOtherObjectId();
+                    boolean hasMain = mainId != null && mainId != -1L;
+                    boolean hasOther = otherId != null && otherId != -1L;
+                    return hasMain != hasOther;
+                }
+                if (cn == null)
+                    return false;
+                ComparisonFlags flags = cn.getComparisonFlags();
+                return flags != null
+                        && (flags.isOnOneSide(ComparisonSide.MAIN, ComparisonSide.OTHER)
+                                || flags.isOnOneSide(ComparisonSide.OTHER, ComparisonSide.MAIN));
+            }
+            catch (RuntimeException e)
+            {
+                Global.logError("CompareConfig", "isAddedOrDeleted", e); //$NON-NLS-1$ //$NON-NLS-2$
+                return false;
+            }
+        }
+
+        /** Корень, проект, «Конфигурация», виртуальные папки и коллекции — обходить дальше. */
+        private static boolean isExpandContainer(Object element)
+        {
+            if (element instanceof RootPartialModelNode
+                    || element instanceof ProjectPartialModelNode
+                    || element instanceof VirtualFolderPartialModelNode
+                    || element instanceof ICollectionPartialNode)
                 return true;
-            MatchedObjectsComparisonNode node = extractMatchedNode(element);
-            return !(node == null || node.getNodeSide() == null)
-                || (node != null && !node.getComparisonFlags().hasDiffsMainOther());
+            if (element == null)
+                return false;
+            String simple = element.getClass().getSimpleName();
+            return "ConfigurationPartialModelNode".equals(simple) //$NON-NLS-1$
+                    || "PropertiesVirtualFolderNode".equals(simple); //$NON-NLS-1$
         }
 
         /**

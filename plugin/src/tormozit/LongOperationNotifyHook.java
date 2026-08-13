@@ -58,7 +58,8 @@ import com.sun.jna.platform.win32.WinDef.HWND;
  * со ссылкой активации этого окна.
  * <p>Формат тоста: заголовок {@code EDT: <workspace>}, текст
  * {@code Завершено: <операция> [проект…] в HH:mm:ss за <длительность>}
- * (без даты — только время) и ссылка «Активировать окно».
+ * (без даты — только время) и ссылка «Активировать окно»; при ошибках —
+ * {@code Завершено с ошибками (N): …} и ссылка «Открыть журнал ошибок».
  * Для активации проектного контекста имена проектов снимаются в {@code aboutToRun}
  * из очереди {@code DefaultContextsStartJob} (у Job нет поля проекта — batch).
  * <p>Загрузка и сравнение — только {@link IJobChangeListener} (в EDT 2026 загрузка
@@ -361,9 +362,8 @@ public final class LongOperationNotifyHook implements IStartup
         Global.tempLog("long-op-notify", "SHOW decision job=" + jobName //$NON-NLS-1$ //$NON-NLS-2$
             + " shell=[" + decisionShell.getText() + "]"); //$NON-NLS-1$ //$NON-NLS-2$
         evictJobToastsBeyondLimit();
-        // inputParentShell = само модальное окно: иначе ссылка тоста поверх modal не нажимается.
         Shell toast = ToastNotification.show(toastTitle, DECISION_PREFIX + jobName, 0,
-            () -> activateDecisionShell(decisionShell), ACTIVATE_LINK, decisionShell);
+            () -> activateDecisionShell(decisionShell), ACTIVATE_LINK);
         registerJobToast(toast);
         // Решение принято — окно закрылось, тост больше не нужен.
         if (toast != null && !toast.isDisposed())
@@ -762,19 +762,13 @@ public final class LongOperationNotifyHook implements IStartup
             : "EDT: " + workspace; //$NON-NLS-1$
         String completedAt = LocalDateTime.now().format(COMPLETION_FMT);
         StringBuilder message = new StringBuilder(hasErrors
-            ? "Завершено с ошибками: " //$NON-NLS-1$
+            ? "Завершено с ошибками (" + errorCount + "): " //$NON-NLS-1$ //$NON-NLS-2$
             : "Завершено: ").append(operation); //$NON-NLS-1$
         if (projectNames != null && !projectNames.isEmpty())
             message.append(' ').append(projectNames);
         message.append(" в ").append(completedAt); //$NON-NLS-1$
         if (durationMs >= 0L)
             message.append(" за ").append(formatDuration(durationMs)); //$NON-NLS-1$
-        if (hasErrors)
-        {
-            message.append('\n')
-                .append("Ошибок в журнале: ") //$NON-NLS-1$
-                .append(errorCount);
-        }
 
         Global.tempLog("long-op-notify", "SHOW focused=" + focused //$NON-NLS-1$
             + " idleMs=" + idleMs + " errors=" + errorCount //$NON-NLS-1$

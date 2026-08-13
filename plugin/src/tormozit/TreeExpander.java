@@ -1038,6 +1038,8 @@ public final class TreeExpander implements IStartup
 
         Tree tree = resolveTree(viewer);
         Object current = element;
+        if (CompareConfigMenuHook.isAddedOrDeletedCompareNode(current))
+            return;
         int safety = 0;
         while (safety++ < 64)
         {
@@ -1062,7 +1064,7 @@ public final class TreeExpander implements IStartup
             if (isLabelCycle(viewer, current, onlyChild, labelsInChain))
                 break;
 
-            if (isCompareConfigAddedOrDeletedCheckable(onlyChild))
+            if (CompareConfigMenuHook.isAddedOrDeletedCompareNode(onlyChild))
                 break;
 
             boolean hasKids = nodeHasChildren(viewer, cp, tree, onlyChild);
@@ -1074,21 +1076,6 @@ public final class TreeExpander implements IStartup
             rememberLabel(labelsInChain, nodeLabel(viewer, onlyChild));
             current = onlyChild;
         }
-    }
-
-    /**
-     * Не разворачивать единственного потомка, если он одновременно: добавлен/удалён
-     * (тот же критерий, что у команды «До изменённых», см.
-     * {@link CompareConfigMenuHook#isAddedOrDeletedCompareNode(Object)}) и с чекбоксом
-     * ({@code isCheckable() == true}). Для деревьев не из редактора сравнения оба признака
-     * отсутствуют, поэтому ограничение не действует.
-     */
-    private static boolean isCompareConfigAddedOrDeletedCheckable(Object node)
-    {
-        if (!CompareConfigMenuHook.isAddedOrDeletedCompareNode(node))
-            return false;
-        Object checkable = Global.call(node, "isCheckable"); //$NON-NLS-1$
-        return checkable instanceof Boolean && ((Boolean) checkable).booleanValue();
     }
 
     private static boolean nodeHasChildren(AbstractTreeViewer viewer, ITreeContentProvider cp, Tree tree, Object node)

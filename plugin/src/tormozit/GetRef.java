@@ -328,7 +328,7 @@ public class GetRef extends AbstractHandler implements IElementUpdater
      * проектов в подпапках (например {@code WMS5/src/...}), префикс до {@code src/}
      * нужно обрезать, иначе {@link #pathToModuleRef}/{@link #pathToFullName} не резолвят путь.
      */
-    private static String normalizeToSrcRelative(String path)
+    static String normalizeToSrcRelative(String path)
     {
         if (path.startsWith("src/") || path.startsWith("src/ext/")) //$NON-NLS-1$ //$NON-NLS-2$
             return path;

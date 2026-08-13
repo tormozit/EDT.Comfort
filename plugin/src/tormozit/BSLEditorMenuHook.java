@@ -74,6 +74,7 @@ public class BSLEditorMenuHook implements IStartup
     private static final String ITEM_TEXT_ModuleCheck = IrModuleCheckHandler.MENU_LABEL;
     private static final String ITEM_TEXT_ModuleCheckClear = IrModuleCheckClearHandler.MENU_LABEL;
     private static final String ITEM_TEXT_DeclareExpressionType = IrDeclareExpressionTypeHandler.MENU_LABEL;
+    private static final String ITEM_TEXT_ResetFolding = ResetFoldingHandler.MENU_LABEL;
     private static final String ITEM_TEXT_HoverHints = "Подсказки при наведении без Ctrl"; //$NON-NLS-1$
 
     private static final String SURROUND_HINT =
@@ -525,6 +526,24 @@ public class BSLEditorMenuHook implements IStartup
                     });
                     addedItems.add(declareTypeItem);
 
+                    MenuItem resetFoldingItem = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.PUSH,
+                        ComfortSubmenuHelper.menuItemTextWithKeyBinding(
+                            ITEM_TEXT_ResetFolding,
+                            ResetFoldingHandler.COMMAND_ID,
+                            ResetFoldingHandler.BINDING_CONTEXT_ID));
+                    resetFoldingItem.setToolTipText(
+                        "Вернуть сворачиваемые группы к состоянию как при открытии модуля"
+                            + Global.pluginSignForTooltip());
+                    resetFoldingItem.addSelectionListener(new SelectionAdapter()
+                    {
+                        @Override
+                        public void widgetSelected(SelectionEvent ev)
+                        {
+                            runResetFoldingCommand(editor);
+                        }
+                    });
+                    addedItems.add(resetFoldingItem);
+
                     MenuItem hoverHintsItem =
                         ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.CHECK, ITEM_TEXT_HoverHints);
                     hoverHintsItem.setToolTipText(
@@ -777,5 +796,23 @@ public class BSLEditorMenuHook implements IStartup
             // fallback ниже
         }
         IrDeclareExpressionTypeHandler.declareExpressionType(editor);
+    }
+
+    private static void runResetFoldingCommand(BslXtextEditor editor)
+    {
+        try
+        {
+            IHandlerService handlerService = editor.getSite().getService(IHandlerService.class);
+            if (handlerService != null)
+            {
+                handlerService.executeCommand(ResetFoldingHandler.COMMAND_ID, null);
+                return;
+            }
+        }
+        catch (Exception ignored)
+        {
+            // fallback ниже
+        }
+        ResetFoldingHandler.resetFolding(editor);
     }
 }

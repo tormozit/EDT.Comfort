@@ -85,6 +85,7 @@ public final class GitHistoryFileColumnsHook implements IStartup
 {
     private static final String TEAM_HISTORY_VIEW_ID = "org.eclipse.team.ui.GenericHistoryView"; //$NON-NLS-1$
     private static final String PATCHED_KEY = "tormozit.gitHistoryFileColumnsPatched"; //$NON-NLS-1$
+    private static final String SORT_STATE_KEY = "tormozit.gitHistorySortState"; //$NON-NLS-1$
     private static final String SETTINGS_SECTION = "GitHistoryFileColumns"; //$NON-NLS-1$
     /** Второстепенные данные (положение разделителя) — в {@link IDialogSettings}, сохраняются при
      * закрытии/пересоздании панели, а не живьём при каждом драге. */
@@ -349,6 +350,7 @@ public final class GitHistoryFileColumnsHook implements IStartup
         FormTableInteraction[] interactionRef)
     {
         SortState state = new SortState();
+        table.setData(SORT_STATE_KEY, state);
         for (TableColumn col : cols)
         {
             col.addListener(SWT.Selection, e ->
@@ -368,9 +370,25 @@ public final class GitHistoryFileColumnsHook implements IStartup
             return;
         state.ascending = state.logical == logical ? !state.ascending : true;
         state.logical = logical;
+        applySortState(viewer, table, state, interactionRef, true);
+        Debug.log("sortBy logical=" + logical + " ascending=" + state.ascending); //$NON-NLS-1$ //$NON-NLS-2$
+    }
 
-        String[] savedFiles = captureSelectedFileColumnValues(table);
-        final int sortLogical = logical;
+    /**
+     * Повторно применяет уже выбранную пользователем сортировку (без смены направления).
+     * Нужно после смены коммита: EGit подставляет новый набор {@code FileDiff}, и без
+     * повторного {@code setComparator} список снова идёт в штатном порядке.
+     */
+    private static void applySortState(TableViewer viewer, Table table, SortState state,
+        FormTableInteraction[] interactionRef, boolean restoreSelection)
+    {
+        if (viewer == null || table == null || table.isDisposed() || state == null || state.logical < 0)
+            return;
+        TableColumn column = columnByLogical(table, state.logical);
+        if (column == null || column.isDisposed())
+            return;
+        String[] savedFiles = restoreSelection ? captureSelectedFileColumnValues(table) : new String[0];
+        final int sortLogical = state.logical;
         final boolean ascending = state.ascending;
         viewer.setComparator(new ViewerComparator()
         {
@@ -384,12 +402,26 @@ public final class GitHistoryFileColumnsHook implements IStartup
         });
         table.setSortColumn(column);
         table.setSortDirection(ascending ? SWT.UP : SWT.DOWN);
-        selectRowsByFileColumnValues(table, savedFiles);
+        if (restoreSelection)
+            selectRowsByFileColumnValues(table, savedFiles);
         FormTableInteraction interaction = interactionRef != null ? interactionRef[0] : null;
         if (interaction != null)
             interaction.resyncSelectionTheme();
-        Debug.log("sortBy logical=" + logical + " ascending=" + ascending //$NON-NLS-1$ //$NON-NLS-2$
-            + " saved=" + savedFiles.length); //$NON-NLS-1$
+    }
+
+    private static TableColumn columnByLogical(Table table, int logical)
+    {
+        if (table == null || table.isDisposed())
+            return null;
+        for (TableColumn col : table.getColumns())
+        {
+            if (col == null || col.isDisposed())
+                continue;
+            Object data = col.getData(COLUMN_LOGICAL_KEY);
+            if (data instanceof Integer value && value.intValue() == logical)
+                return col;
+        }
+        return null;
     }
 
     /** Ключ сортировки — тот же текст, что в колонке / filterTextResolver. */
@@ -479,6 +511,73 @@ public final class GitHistoryFileColumnsHook implements IStartup
         if (selItems.length > 0)
             sel.item = selItems[0];
         table.notifyListeners(SWT.Selection, sel);
+    }
+
+    /**
+     * После смены коммита EGit заново заполняет таблицу и (при отборе «Все изменения
+     * ресурса») выделяет связанные файлы. Сортировку по шапке нужно поставить снова,
+     * а первую выделенную строку — показать в видимой области: штатный reveal
+     * проигрывает гонке с асинхронной загрузкой diff.
+     */
+    private static void installCommitSwitchHooks(TableViewer viewer, Table table,
+        FormTableInteraction[] interactionRef)
+    {
+        final Object[] lastInput = { new Object() };
+        final boolean[] awaitingEgitSelect = { false };
+        viewer.addPostSelectionChangedListener(event ->
+        {
+            if (table.isDisposed())
+                return;
+            Object input = viewer.getInput();
+            if (input != lastInput[0])
+            {
+                lastInput[0] = input;
+                awaitingEgitSelect[0] = true;
+                Object data = table.getData(SORT_STATE_KEY);
+                if (data instanceof SortState state)
+                    applySortState(viewer, table, state, interactionRef, false);
+                scheduleRevealFirstSelected(table);
+                return;
+            }
+            if (awaitingEgitSelect[0] && table.getSelectionCount() > 0)
+            {
+                awaitingEgitSelect[0] = false;
+                scheduleRevealFirstSelected(table);
+            }
+        });
+    }
+
+    private static void scheduleRevealFirstSelected(Table table)
+    {
+        if (table == null || table.isDisposed())
+            return;
+        Display display = table.getDisplay();
+        Runnable reveal = () -> revealFirstSelectedRow(table);
+        display.asyncExec(reveal);
+        display.timerExec(50, reveal);
+        display.timerExec(200, reveal);
+        display.timerExec(600, reveal);
+        display.timerExec(1200, reveal);
+    }
+
+    private static void revealFirstSelectedRow(Table table)
+    {
+        if (table == null || table.isDisposed())
+            return;
+        int[] sel = table.getSelectionIndices();
+        if (sel == null || sel.length == 0)
+            return;
+        int first = sel[0];
+        for (int i = 1; i < sel.length; i++)
+        {
+            if (sel[i] < first)
+                first = sel[i];
+        }
+        if (first < 0 || first >= table.getItemCount())
+            return;
+        TableItem item = table.getItem(first);
+        if (item != null && !item.isDisposed())
+            table.showItem(item);
     }
 
     // -----------------------------------------------------------------------
@@ -665,6 +764,7 @@ public final class GitHistoryFileColumnsHook implements IStartup
         interactionRef[0] = interaction;
         installColumnSort(fileViewer, table, new TableColumn[] { fileCol, typeCol, pathCol, statusCol },
             interactionRef);
+        installCommitSwitchHooks(fileViewer, table, interactionRef);
         table.addDisposeListener(e ->
         {
             boolean fillMode = interaction.isColumnsExactFill();

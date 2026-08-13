@@ -276,7 +276,10 @@ final class ComfortSubmenuHelper
 
         Menu existing = findExistingComfortSubmenu(parentMenu);
         if (existing != null)
+        {
+            TreeCollapseOthers.ensureComfortMenuItem(existing);
             return existing;
+        }
 
         int index = anchor != null && !anchor.isDisposed() && anchor.getParent() == parentMenu
             ? parentMenu.indexOf(anchor) + 1
@@ -288,6 +291,7 @@ final class ComfortSubmenuHelper
         comfortRoot.setData(SUBMENU_MARKER, Boolean.TRUE);
         Menu comfortSub = new Menu(shell != null && !shell.isDisposed() ? shell : parentMenu.getShell(), SWT.DROP_DOWN);
         comfortRoot.setMenu(comfortSub);
+        TreeCollapseOthers.ensureComfortMenuItem(comfortSub);
         return comfortSub;
     }
 

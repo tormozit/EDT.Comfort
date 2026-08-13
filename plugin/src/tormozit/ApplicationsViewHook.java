@@ -1416,6 +1416,12 @@ public class ApplicationsViewHook implements IStartup
         addItem(menu, "Отключить конфигуратор", anySsh, () -> { //$NON-NLS-1$
             disconnectSsh(sel.toList(), viewer);
         });
+        Control control = viewer != null ? viewer.getControl() : null;
+        if (control instanceof Tree tree && TreeCollapseOthers.isApplicable(tree))
+        {
+            new MenuItem(menu, SWT.SEPARATOR);
+            TreeCollapseOthers.addPushItem(menu, tree);
+        }
     }
 
     /** Безопасно извлекает {@code InfobaseReference} из элемента дерева. */
