@@ -58,12 +58,14 @@ final class BslSurroundHandler
             int offset = textSel.getOffset();
             int length = textSel.getLength();
             String selected;
+            String trailingBreaks = "";
 
             if (length > 0)
             {
                 selected = doc.get(offset, length);
-                while (selected.endsWith("\n"))
-                    selected = selected.substring(0, selected.length() - 1);
+                int trailStart = trailingLineBreaksStart(selected);
+                trailingBreaks = selected.substring(trailStart);
+                selected = selected.substring(0, trailStart);
             }
             else
             {
@@ -90,14 +92,16 @@ final class BslSurroundHandler
                 String tryOpen = indent + "Попытка\n";
                 String tryExc = "\n" + indent + "Исключение\n";
                 String tryClose = indent + kind.closing;
-                replacement = tryOpen + body + tryExc + indent + "\n" + tryClose;
+                replacement = tryOpen + body + tryExc + indent + "\n" + tryClose
+                    + trailingBreaks;
                 cursorPos = offset + tryOpen.length() + body.length()
                     + tryExc.length() + indent.length();
             }
             else
             {
                 String opening = indent + kind.before + kind.after;
-                replacement = opening + "\n" + body + "\n" + indent + kind.closing;
+                replacement = opening + "\n" + body + "\n" + indent + kind.closing
+                    + trailingBreaks;
                 cursorPos = offset + indent.length() + kind.before.length();
             }
 
@@ -125,6 +129,19 @@ final class BslSurroundHandler
         {
             Global.logError("BslSurroundHandler", "surroundWith(" + kind.label + ")", e);
         }
+    }
+
+    private static int trailingLineBreaksStart(String text)
+    {
+        int end = text.length();
+        while (end > 0)
+        {
+            char c = text.charAt(end - 1);
+            if (c != '\n' && c != '\r')
+                break;
+            end--;
+        }
+        return end;
     }
 
     private static String extractIndent(String text)

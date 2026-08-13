@@ -2306,7 +2306,7 @@ public final class ConfigSearchResultsHook implements IStartup
     /**
      * {@code true}, если текущий поиск реально охватывает больше одного проекта — тогда
      * второй/третий корень дерева результатов (отдельный проект) может появиться значительно
-     * позже первого, и включать {@link TreeAutoExpand#notifyContentLoaded} по первому же
+     * позже первого, и включать {@link TreeExpander#notifyContentLoaded} по первому же
      * появившемуся корню преждевременно.
      * <p>
      * Реальный набор проектов запроса — {@code SearchQuery.searchInput} (внутренний, не
@@ -2379,17 +2379,17 @@ public final class ConfigSearchResultsHook implements IStartup
                 // редиректим — сбрасываем и разворачиваем заново по своим правилам. Если поиск идёт
                 // больше чем по одному проекту, второй/третий корень (проект) может появиться
                 // заметно позже первого — тогда «единственный корень» был бы преждевременным.
-                TreeAutoExpand.resetExpansionAfterReveal(viewers.tree,
+                TreeExpander.resetExpansionAfterReveal(viewers.tree,
                     !searchCoversMultipleProjects(viewers.tree));
             }
             else
             {
-                // Надёжный сигнал «результаты реально загружены» — собственный ретрай TreeAutoExpand
+                // Надёжный сигнал «результаты реально загружены» — собственный ретрай TreeExpander
                 // (3 с) при установке хука может не успеть, если поиск идёт дольше. Здесь выделение
                 // уже верное (редирект выше не потребовался), reveal не разворачивал ничего лишнего —
                 // просто применяем правила поверх текущего состояния.
                 if (!searchCoversMultipleProjects(viewers.tree))
-                    TreeAutoExpand.notifyContentLoaded(viewers.tree);
+                    TreeExpander.notifyContentLoaded(viewers.tree);
             }
             applyAggregationIfNeeded(viewers.tree, viewers.table,
                 Collections.singletonList(firstRoot), Collections.emptyList(), "watchLoop"); //$NON-NLS-1$
@@ -2705,8 +2705,8 @@ public final class ConfigSearchResultsHook implements IStartup
                 installPathColumn(tableViewer);
                 installTableCopyHandler(treeViewer, tableViewer);
             }
-            TreeAutoExpand.installWhitelisted(
-                    TreeAutoExpand.Target.SEARCH_CONFIG, treeViewer);
+            TreeExpander.installWhitelisted(
+                    TreeExpander.Target.SEARCH_CONFIG, treeViewer);
             installMatchTableSplitPane(view, activePage, treeLayout, treeViewer);
             CreateDebuggerBreakpoints.installToolbarAction(view);
             installTreeInputChangeWatch(treeViewer);
@@ -2821,7 +2821,7 @@ public final class ConfigSearchResultsHook implements IStartup
                         showFirstTreeItem(treeViewer);
                         // reveal у setSelection выше уже развернул путь до терминального узла,
                         // с которого редиректим — сбрасываем и разворачиваем заново по своим правилам.
-                        TreeAutoExpand.resetExpansionAfterReveal(treeViewer,
+                        TreeExpander.resetExpansionAfterReveal(treeViewer,
                             !searchCoversMultipleProjects(treeViewer));
                         // ВАЖНО: programmatic setSelection() не порождает новое post-selection
                         // событие (JFace фича — post-selection реагирует только на реальные SWT.Selection

@@ -232,6 +232,9 @@ public class CompareConfigMenuHook implements IStartup
     /** Id contribution item кнопки «Свернуть всё» в тулбаре редактора сравнения. */
     private static final String TOOLBAR_COLLAPSE_ID =
             "tormozit.compareConf.toolbar.collapseAll"; //$NON-NLS-1$
+    /** Id contribution item кнопки «Развернуть» в тулбаре редактора сравнения. */
+    private static final String TOOLBAR_EXPAND_ID =
+            "tormozit.compareConf.toolbar.expand"; //$NON-NLS-1$
     private static final String NAVIGATOR_BUNDLE_ID = "org.eclipse.ui.navigator"; //$NON-NLS-1$
     private static final String COLLAPSE_ALL_ICON_PATH =
             "icons/full/elcl16/collapseall.png"; //$NON-NLS-1$
@@ -366,6 +369,7 @@ public class CompareConfigMenuHook implements IStartup
         CompareConfigOpenModuleMergeHandler.attachDoubleClickListener(editor, tree);
         CompareModuleStructureColumnHook.install(tree);
         CompareConfigMultiMarkSupport.install(editor, tree);
+        TreeExpander.bindCompareConfigTree(tree, editor);
         NavigatorDropSupport.install(editor, tree);
     }
 
@@ -397,11 +401,14 @@ public class CompareConfigMenuHook implements IStartup
     {
         listener.setTreeViewer(viewer);
         // Разворот единственного корня и цепочек единственных потомков — общий механизм,
-        // см. TreeAutoExpand.installLoadAutoExpand (раньше был свой tryExpandCompareRoot/
+        // см. TreeExpander.installLoadAutoExpand (раньше был свой tryExpandCompareRoot/
         // scheduleExpandCompareRoot, теперь вынесено и обобщено на все деревья из белого списка).
-        TreeAutoExpand.installWhitelisted(
-                TreeAutoExpand.Target.COMPARE_CONFIG, viewer);
+        TreeExpander.installWhitelisted(
+                TreeExpander.Target.COMPARE_CONFIG, viewer);
         installCollapseExpandHandlers(editor, viewer);
+        Object widget = Global.call(viewer, "getTree"); //$NON-NLS-1$
+        if (widget instanceof Tree tree)
+            TreeExpander.bindCompareConfigTree(tree, editor);
     }
 
     /**
@@ -439,7 +446,7 @@ public class CompareConfigMenuHook implements IStartup
     }
 
     /**
-     * Свернуть дерево сравнения и заново применить {@link TreeAutoExpand}
+     * Свернуть дерево сравнения и заново применить {@link TreeExpander}
      * (единственный корень / sole-child). Общее действие для команды Collapse All и кнопки тулбара.
      */
     private static void collapseCompareTree(IEditorPart editor)
@@ -447,7 +454,7 @@ public class CompareConfigMenuHook implements IStartup
         AbstractTreeViewer viewer = getTreeViewerFromEditor(editor);
         if (viewer == null)
             return;
-        TreeAutoExpand.resetExpansionAfterReveal(viewer, true);
+        TreeExpander.resetExpansionAfterReveal(viewer, true);
     }
 
     private static AbstractTreeViewer getTreeViewerFromEditor(IEditorPart editor)
@@ -501,29 +508,41 @@ public class CompareConfigMenuHook implements IStartup
             toolbar.add(new Separator());
             toolbar.add(collapseAction);
         }
-        toolbar.add(new ContributionItem()
+        if (toolbar.find(TOOLBAR_EXPAND_ID) == null)
         {
-            @Override
-            public void fill(ToolBar bar, int index)
+            toolbar.add(new ContributionItem(TOOLBAR_EXPAND_ID)
             {
-                ToolItem item = index >= 0
-                    ? new ToolItem(bar, SWT.DROP_DOWN, index)
-                    : new ToolItem(bar, SWT.DROP_DOWN);
-                item.setText("Развернуть");
-                item.setToolTipText("Развернуть дерево сравнения до нужного уровня" + Global.pluginSignForTooltip());
+                private ToolItem item;
 
-                item.addSelectionListener(new SelectionAdapter()
+                @Override
+                public void fill(ToolBar bar, int index)
                 {
-                    @Override
-                    public void widgetSelected(SelectionEvent e)
+                    if (item != null && !item.isDisposed())
                     {
-                        // Открываем меню при ЛЮБОМ клике — и по тексту (e.detail == 0),
-                        // и по стрелке (e.detail == SWT.ARROW)
-                        showExpandMenu(item, bar, editor);
+                        if (item.getParent() == bar)
+                            return;
+                        item = null;
                     }
-                });
-            }
-        });
+                    item = index >= 0
+                        ? new ToolItem(bar, SWT.DROP_DOWN, index)
+                        : new ToolItem(bar, SWT.DROP_DOWN);
+                    item.setText("Развернуть");
+                    item.setToolTipText("Развернуть дерево сравнения до нужного уровня" + Global.pluginSignForTooltip());
+                    item.addDisposeListener(e -> item = null);
+
+                    item.addSelectionListener(new SelectionAdapter()
+                    {
+                        @Override
+                        public void widgetSelected(SelectionEvent e)
+                        {
+                            // Открываем меню при ЛЮБОМ клике — и по тексту (e.detail == 0),
+                            // и по стрелке (e.detail == SWT.ARROW)
+                            showExpandMenu(item, bar, editor);
+                        }
+                    });
+                }
+            });
+        }
         toolbar.update(true);
     }
 
@@ -1149,12 +1168,28 @@ public class CompareConfigMenuHook implements IStartup
      * Возвращает {@code true}, если узел дерева сравнения присутствует только в одной
      * стороне сравнения (добавлен или удалён) — тот же критерий, что использует команда
      * «До изменённых» ({@link CompareConfigExpandMode#toBothElement}), чтобы не разворачивать
-     * в него дочерние узлы. Используется {@link TreeAutoExpand} для остановки
+     * в него дочерние узлы. Используется {@link TreeExpander} для остановки
      * авторазворачивания цепочки единственных потомков на таких узлах.
      */
     public static boolean isAddedOrDeletedCompareNode(Object element)
     {
         return CompareConfigExpandHandler.isAddedOrDeleted(element);
+    }
+
+    /**
+     * Развернуть поддерево {@code root} командой «До измененных» — без свёртки соседних веток.
+     */
+    public static void expandSubtreeToChanged(IEditorPart editor, Object root)
+    {
+        expandSubtreeToChanged(getTreeViewerFromEditor(editor), root);
+    }
+
+    /**
+     * Как {@link #expandSubtreeToChanged(IEditorPart, Object)}, когда viewer уже известен.
+     */
+    public static void expandSubtreeToChanged(AbstractTreeViewer viewer, Object root)
+    {
+        CompareConfigExpandHandler.expandSubtree(viewer, root, CompareConfigExpandMode.toBothElement);
     }
 
     /**
@@ -5046,7 +5081,7 @@ public class CompareConfigMenuHook implements IStartup
             {
                 collectElementsToExpand(cp, root, mode, toExpand, viewer);
             }
-            TreeAutoExpand.runSuppressed(() ->
+            TreeExpander.runSuppressed(() ->
             {
                 viewer.collapseAll();
                 viewer.setExpandedElements(toExpand.toArray());
@@ -5057,6 +5092,29 @@ public class CompareConfigMenuHook implements IStartup
                 viewer.setSelection(selection, true);
             }
             return null;
+        }
+
+        /**
+         * Как {@link #expand(IEditorPart, CompareConfigExpandMode)}, но только поддерево
+         * {@code root}: уже развёрнутые соседние ветки не сворачиваются.
+         */
+        static void expandSubtree(AbstractTreeViewer viewer, Object root, CompareConfigExpandMode mode)
+        {
+            if (root == null || viewer == null)
+                return;
+            if (!(viewer.getContentProvider() instanceof ITreeContentProvider cp))
+                return;
+
+            Set<Object> toExpand = new HashSet<>();
+            collectElementsToExpand(cp, root, mode, toExpand, viewer);
+            if (toExpand.isEmpty())
+                return;
+
+            TreeExpander.runSuppressed(() ->
+            {
+                for (Object element : toExpand)
+                    viewer.setExpandedState(element, true);
+            });
         }
 
         /**

@@ -11,6 +11,7 @@ import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.ILabelProvider;
+import org.eclipse.jface.viewers.ILazyTreeContentProvider;
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.StyledString;
 import org.eclipse.jface.viewers.TreeViewer;
@@ -18,9 +19,14 @@ import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.TreeAdapter;
 import org.eclipse.swt.events.TreeEvent;
+import org.eclipse.swt.graphics.Point;
+import org.eclipse.swt.graphics.Rectangle;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Event;
+import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
+import org.eclipse.swt.widgets.TypedListener;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IPartListener2;
@@ -40,21 +46,33 @@ import com._1c.g5.v8.dt.form.ui.editor.FormEditor;
 import com._1c.g5.v8.dt.form.ui.editor.FormEditorPage;
 
 /**
- * Авторазворачивание в деревьях: цепочка единственных дочерних узлов (как при ручном expand, так
- * и при загрузке/обновлении дерева) и единственный корневой узел дерева независимо от числа его
- * детей.
- * <p>
- * Единая точка: белый список {@link Target}. Поведение включается только для
- * перечисленных деревьев и только при «Улучшать списки».
+ * Разворачивание и сворачивание деревьев SWT.
+ * <ul>
+ * <li>Авторазворот цепочки единственных потомков и единственного корня — белый список
+ * {@link Target}, только при «Улучшать списки».</li>
+ * <li>Ctrl+клик по плюсику/минусу — развернуть или свернуть всё поддерево во всех деревьях;
+ * в дереве сравнения конфигураций разворот идёт командой «До измененных».
+ * В деревьях доступных полей СКД и конструктора запроса не перехватывается (штатный один уровень).
+ * В дереве реквизитов формы разворот не заходит в узлы со ссылочным типом значения.
+ * В динамических деревьях (виртуальные, lazy, реквизиты формы) — не глубже 10 уровней.</li>
+ * </ul>
  */
-public final class TreeAutoExpand implements IStartup
+public final class TreeExpander implements IStartup
 {
     private static final String MARKER_KEY = "tormozit.treeSoleChildAutoExpand"; //$NON-NLS-1$
     private static final String LOAD_MARKER_KEY = "tormozit.treeSoleChildAutoExpand.onLoad"; //$NON-NLS-1$
+    private static final String CTRL_CLICK_FILTER_KEY = "tormozit.treeExpander.ctrlClickFilter"; //$NON-NLS-1$
+    private static final String COMPARE_TREE_EDITOR_KEY = "tormozit.treeExpander.compareEditor"; //$NON-NLS-1$
+    private static final String COMPARE_TREE_FLAG = "tormozit.treeExpander.compareTree"; //$NON-NLS-1$
+    private static final String VIEWER_KEY = "tormozit.treeExpander.viewer"; //$NON-NLS-1$
+    /** Минимальная ширина зоны плюсика; иначе берётся высота строки. */
+    private static final int EXPANDER_ZONE_MIN_PX = 16;
+    /** В динамическом дереве не спускаться глубже этого числа уровней. */
+    private static final int DYNAMIC_EXPAND_MAX_DEPTH = 10;
+    /** Ограничение числа развёрнутых узлов реквизитов формы за один Ctrl+клик. */
+    private static final int EXPAND_MAX_NODES = 4096;
     private static final int LOAD_DEBOUNCE_MS = 150;
     private static final int INITIAL_RETRY_ATTEMPTS = 20;
-    private static final String LOG_TOPIC = "tree-sole-child-autoexpand"; //$NON-NLS-1$
-
     private static final String COMPARE_EDITOR_ID = "com._1c.g5.v8.dt.compare.ui.editor"; //$NON-NLS-1$
     private static final String FORM_EDITOR_ID = "com._1c.g5.v8.dt.form.ui.formEditor"; //$NON-NLS-1$
     private static final String ORDINARY_FORM_EDITOR_ID =
@@ -98,7 +116,11 @@ public final class TreeAutoExpand implements IStartup
     @Override
     public void earlyStartup()
     {
-        Display.getDefault().asyncExec(TreeAutoExpand::bootstrap);
+        Display.getDefault().asyncExec(() ->
+        {
+            bootstrap();
+            installCtrlClickFilter(Display.getDefault());
+        });
     }
 
     private static void bootstrap()
@@ -174,7 +196,7 @@ public final class TreeAutoExpand implements IStartup
             scheduleResolve(Target.COMPARE_CONFIG, () -> resolveCompareTree(editor));
         else if ((FORM_EDITOR_ID.equals(id) || ORDINARY_FORM_EDITOR_ID.equals(id))
                 && part instanceof IEditorPart)
-            scheduleResolve(Target.FORM_ITEMS, TreeAutoExpand::resolveFormItemsTree);
+            scheduleResolve(Target.FORM_ITEMS, TreeExpander::resolveFormItemsTree);
         else if (SEARCH_VIEW_ID.equals(id) && part instanceof IViewPart view)
         {
             scheduleResolve(Target.SEARCH_CONFIG, () -> resolveSearchConfigTree(view));
@@ -209,16 +231,25 @@ public final class TreeAutoExpand implements IStartup
     }
 
     /**
-     * Устанавливает авторазворачивание, только если {@code target} в белом списке.
-     * Вызывается из доменных хуков, когда viewer уже найден (поиск и т.п.).
+     * Устанавливает авторазворачивание, только если {@code target} в белом списке
+     * и включено «Улучшать списки». Для дерева сравнения дополнительно помечает
+     * дерево, чтобы Ctrl+клик по плюсику вызывал «До измененных».
      */
     public static void installWhitelisted(Target target, AbstractTreeViewer viewer)
     {
-        if (target == null || !WHITELIST.contains(target) || viewer == null)
+        if (target == null || viewer == null)
+            return;
+        Tree tree = resolveTree(viewer);
+        if (target == Target.COMPARE_CONFIG && tree != null && !tree.isDisposed())
+        {
+            tree.setData(COMPARE_TREE_FLAG, Boolean.TRUE);
+            rememberViewer(tree, viewer);
+        }
+        if (!WHITELIST.contains(target))
             return;
         if (!ComfortSettings.isReplaceListFiltersEnabled())
             return;
-        install(viewer, TreeAutoExpand::defaultVisible, ComfortSettings::isReplaceListFiltersEnabled);
+        install(viewer, TreeExpander::defaultVisible, ComfortSettings::isReplaceListFiltersEnabled);
         installLoadAutoExpand(viewer);
     }
 
@@ -245,14 +276,8 @@ public final class TreeAutoExpand implements IStartup
     {
         Tree tree = resolveTree(viewer);
         if (tree == null || tree.isDisposed() || Boolean.TRUE.equals(tree.getData(LOAD_MARKER_KEY)))
-        {
-            Global.tempLog(LOG_TOPIC, "installLoadAutoExpand: пропуск, tree=" + tree //$NON-NLS-1$
-                + ", disposed=" + (tree != null && tree.isDisposed()) //$NON-NLS-1$
-                + ", уже установлен=" + (tree != null && Boolean.TRUE.equals(tree.getData(LOAD_MARKER_KEY)))); //$NON-NLS-1$
             return;
-        }
         tree.setData(LOAD_MARKER_KEY, Boolean.TRUE);
-        Global.tempLog(LOG_TOPIC, "installLoadAutoExpand: хук установлен, tree=" + tree); //$NON-NLS-1$
 
         Runnable[] pending = new Runnable[1];
         pending[0] = () -> expandAllRootsSoleChildChains(viewer, tree);
@@ -260,18 +285,12 @@ public final class TreeAutoExpand implements IStartup
         tree.addListener(SWT.SetData, event ->
         {
             TreeItem item = event.item instanceof TreeItem ti ? ti : null;
-            Global.tempLog(LOG_TOPIC, "SetData: item=" + item //$NON-NLS-1$
-                + ", parent=" + (item != null ? item.getParentItem() : null) //$NON-NLS-1$
-                + ", data=" + (item != null ? item.getData() : null) //$NON-NLS-1$
-                + ", enabled=" + ComfortSettings.isReplaceListFiltersEnabled() //$NON-NLS-1$
-                + ", suppressed=" + SUPPRESSED.get() + ", inAutoExpand=" + IN_AUTO_EXPAND.get()); //$NON-NLS-1$ //$NON-NLS-2$
             if (!ComfortSettings.isReplaceListFiltersEnabled()
                     || Boolean.TRUE.equals(SUPPRESSED.get())
                     || Boolean.TRUE.equals(IN_AUTO_EXPAND.get()))
                 return;
             if (item == null || item.getParentItem() != null)
-                return; // интересуют только корневые ветки
-            Global.tempLog(LOG_TOPIC, "SetData: корневой элемент, планирую debounce-проверку"); //$NON-NLS-1$
+                return;
             tree.getDisplay().timerExec(LOAD_DEBOUNCE_MS, pending[0]);
         });
 
@@ -296,13 +315,7 @@ public final class TreeAutoExpand implements IStartup
     {
         if (tree.isDisposed() || !ComfortSettings.isReplaceListFiltersEnabled()
                 || Boolean.TRUE.equals(SUPPRESSED.get()))
-        {
-            Global.tempLog(LOG_TOPIC, "expandAllRootsSoleChildChains: пропуск, disposed=" + tree.isDisposed() //$NON-NLS-1$
-                + ", enabled=" + ComfortSettings.isReplaceListFiltersEnabled() //$NON-NLS-1$
-                + ", suppressed=" + SUPPRESSED.get()); //$NON-NLS-1$
             return;
-        }
-        Global.tempLog(LOG_TOPIC, "expandAllRootsSoleChildChains: корневых элементов=" + tree.getItemCount()); //$NON-NLS-1$
         IN_AUTO_EXPAND.set(Boolean.TRUE);
         try
         {
@@ -311,10 +324,8 @@ public final class TreeAutoExpand implements IStartup
             for (TreeItem rootItem : tree.getItems())
             {
                 Object root = rootItem.getData();
-                Global.tempLog(LOG_TOPIC, "expandAllRootsSoleChildChains: root=" + root //$NON-NLS-1$
-                    + ", itemChildCount=" + rootItem.getItemCount()); //$NON-NLS-1$
                 if (root != null)
-                    expandSoleChildChain(viewer, root, TreeAutoExpand::defaultVisible);
+                    expandSoleChildChain(viewer, root, TreeExpander::defaultVisible);
             }
         }
         finally
@@ -347,16 +358,12 @@ public final class TreeAutoExpand implements IStartup
             if (input == null)
                 return;
             Object[] roots = cp.getElements(input);
-            Global.tempLog(LOG_TOPIC, "expandSingleRootIfAny: корней(cp)=" //$NON-NLS-1$
-                + (roots != null ? roots.length : -1));
             if (roots == null || roots.length != 1 || roots[0] == null)
                 return;
             root = roots[0];
         }
         else
         {
-            Global.tempLog(LOG_TOPIC, "expandSingleRootIfAny: корней(tree.getItemCount())=" //$NON-NLS-1$
-                + tree.getItemCount() + ", cp=" + cpObj); //$NON-NLS-1$
             if (tree.getItemCount() != 1)
                 return;
             root = tree.getItem(0).getData();
@@ -364,10 +371,7 @@ public final class TreeAutoExpand implements IStartup
                 return;
         }
         if (!viewer.getExpandedState(root))
-        {
-            Global.tempLog(LOG_TOPIC, "expandSingleRootIfAny: разворачиваю единственный корень " + root); //$NON-NLS-1$
             viewer.setExpandedState(root, true);
-        }
     }
 
     static void runSuppressed(Runnable action)
@@ -385,6 +389,431 @@ public final class TreeAutoExpand implements IStartup
         {
             SUPPRESSED.set(previous);
         }
+    }
+
+    /**
+     * Помечает дерево редактора сравнения: Ctrl+клик по плюсику разворачивает поддерево
+     * командой «До измененных», а не всех потомков.
+     */
+    public static void bindCompareConfigTree(Tree tree, IEditorPart editor)
+    {
+        if (tree == null || tree.isDisposed() || editor == null)
+            return;
+        tree.setData(COMPARE_TREE_EDITOR_KEY, editor);
+        tree.setData(COMPARE_TREE_FLAG, Boolean.TRUE);
+    }
+
+    // ---- Ctrl+клик по плюсику/минусу: всё поддерево ----
+
+    private static Tree pendingCtrlTree;
+    private static TreeItem pendingCtrlItem;
+    /** {@code null} — нет действия; {@code true} — свернуть поддерево; {@code false} — развернуть. */
+    private static Boolean pendingWantCollapse;
+    private static Object pendingElement;
+    private static Tree lastToggleTree;
+    private static TreeItem lastToggleItem;
+    private static boolean lastToggleWasExpand;
+    private static long lastToggleAtMs;
+
+    private static void installCtrlClickFilter(Display display)
+    {
+        if (display == null || display.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(display.getData(CTRL_CLICK_FILTER_KEY)))
+            return;
+        display.setData(CTRL_CLICK_FILTER_KEY, Boolean.TRUE);
+        display.addFilter(SWT.MouseDown, TreeExpander::handleCtrlClickExpander);
+        display.addFilter(SWT.MouseUp, TreeExpander::handleCtrlClickMouseUp);
+        display.addFilter(SWT.Expand, TreeExpander::recordNativeToggle);
+        display.addFilter(SWT.Collapse, TreeExpander::recordNativeToggle);
+    }
+
+    private static void handleCtrlClickExpander(Event e)
+    {
+        if (e.button != 1 || (e.stateMask & SWT.MOD1) == 0)
+            return;
+        if (!(e.widget instanceof Tree tree) || tree.isDisposed())
+            return;
+        TreeItem item = expanderItemAt(tree, e.x, e.y);
+        pendingCtrlTree = tree;
+        pendingCtrlItem = item;
+        pendingWantCollapse = null;
+        pendingElement = null;
+        if (item == null)
+            return;
+        AbstractTreeViewer viewerNow = findViewer(tree);
+        Object elementNow = item.getData();
+        if (isAvailableFieldsTree(viewerNow, elementNow))
+            return;
+        boolean nowExpanded = item.getExpanded();
+        pendingWantCollapse = originalExpandedState(tree, item, nowExpanded);
+        pendingElement = elementNow;
+        e.doit = false;
+        tree.getDisplay().timerExec(200, TreeExpander::applyPendingCtrlClickIfAny);
+    }
+
+    private static void handleCtrlClickMouseUp(Event e)
+    {
+        if (!(e.widget instanceof Tree tree) || tree.isDisposed())
+            return;
+        if (pendingCtrlTree != tree || e.button != 1)
+            return;
+        applyPendingCtrlClickIfAny();
+    }
+
+    private static void recordNativeToggle(Event e)
+    {
+        if (!(e.widget instanceof Tree tree) || tree.isDisposed())
+            return;
+        lastToggleTree = tree;
+        lastToggleItem = e.item instanceof TreeItem ti ? ti : null;
+        lastToggleWasExpand = e.type == SWT.Expand;
+        lastToggleAtMs = System.currentTimeMillis();
+    }
+
+    /**
+     * Win32 шлёт Expand/Collapse до MouseDown и без Ctrl в {@code stateMask}.
+     * Если только что был нативный toggle этого узла — исходное состояние противоположно ему.
+     */
+    private static boolean originalExpandedState(Tree tree, TreeItem item, boolean nowExpanded)
+    {
+        long dt = System.currentTimeMillis() - lastToggleAtMs;
+        boolean recent = lastToggleTree == tree && lastToggleItem == item && dt >= 0 && dt < 250;
+        return recent ? !lastToggleWasExpand : nowExpanded;
+    }
+
+    private static void applyPendingCtrlClickIfAny()
+    {
+        Boolean wantCollapse = pendingWantCollapse;
+        Tree tree = pendingCtrlTree;
+        TreeItem item = pendingCtrlItem;
+        Object element = pendingElement;
+        if (wantCollapse == null || tree == null || item == null)
+            return;
+        pendingWantCollapse = null;
+        Display display = tree.isDisposed() ? null : tree.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() -> applyCtrlClickAction(tree, item, element, wantCollapse));
+    }
+
+    private static void applyCtrlClickAction(Tree tree, TreeItem item, Object element, boolean wantCollapse)
+    {
+        if (tree.isDisposed() || item.isDisposed())
+            return;
+        if (wantCollapse)
+        {
+            collapseSubtree(tree, item, element);
+            return;
+        }
+        if (isCompareConfigTree(tree) && element != null)
+        {
+            AbstractTreeViewer compareViewer = findViewer(tree);
+            if (compareViewer != null)
+                CompareConfigMenuHook.expandSubtreeToChanged(compareViewer, element);
+            else
+                CompareConfigMenuHook.expandSubtreeToChanged(compareEditorOf(tree), element);
+            return;
+        }
+        expandSubtree(tree, item, element);
+    }
+
+    /**
+     * Плюсик/минус: {@code Tree.getItem(Point)} эту точку не возвращает
+     * ({@code TVHT_ONITEMBUTTON} не в маске), строка — по Y, зона — слева от
+     * {@code getBounds(0)}. При {@code SWT.CHECK} плюсик левее флажка, зона
+     * сдвигается на ширину строки.
+     */
+    private static TreeItem expanderItemAt(Tree tree, int x, int y)
+    {
+        TreeItem hit = tree.getItem(new Point(x, y));
+        if (hit != null)
+            return null;
+        TreeItem row = findVisibleRowAtY(tree.getItems(), y);
+        if (row == null)
+            return null;
+        Rectangle bounds = row.getBounds(0);
+        if (bounds == null || bounds.isEmpty() || x >= bounds.x)
+            return null;
+        int zone = Math.max(EXPANDER_ZONE_MIN_PX, bounds.height);
+        int checkPad = (tree.getStyle() & SWT.CHECK) != 0 ? zone : 0;
+        int expanderRight = bounds.x - checkPad;
+        if (x >= expanderRight || x < expanderRight - zone)
+            return null;
+        return row;
+    }
+
+    private static TreeItem findVisibleRowAtY(TreeItem[] items, int y)
+    {
+        for (TreeItem item : items)
+        {
+            if (item == null || item.isDisposed())
+                continue;
+            Rectangle bounds = item.getBounds(0);
+            if (bounds != null && !bounds.isEmpty()
+                    && y >= bounds.y && y < bounds.y + bounds.height)
+                return item;
+            if (item.getExpanded() && item.getItemCount() > 0)
+            {
+                TreeItem found = findVisibleRowAtY(item.getItems(), y);
+                if (found != null)
+                    return found;
+            }
+        }
+        return null;
+    }
+
+    private static void expandSubtree(Tree tree, TreeItem item, Object element)
+    {
+        AbstractTreeViewer viewer = findViewer(tree);
+        if (viewer != null && element != null)
+        {
+            runSuppressed(() ->
+            {
+                tree.setRedraw(false);
+                try
+                {
+                    if (FormEditorHook.isFormAttributeTreeElement(element))
+                        expandFormAttributesGuarded(viewer, tree, element);
+                    else if (isDynamicTree(tree, viewer, element))
+                        viewer.expandToLevel(element, DYNAMIC_EXPAND_MAX_DEPTH);
+                    else
+                        viewer.expandToLevel(element, AbstractTreeViewer.ALL_LEVELS);
+                }
+                finally
+                {
+                    if (!tree.isDisposed())
+                        tree.setRedraw(true);
+                }
+            });
+            return;
+        }
+        runSuppressed(() -> expandAllDescendantsSwt(item, 0,
+            isDynamicTree(tree, null, element) ? DYNAMIC_EXPAND_MAX_DEPTH : Integer.MAX_VALUE));
+    }
+
+    private static void collapseSubtree(Tree tree, TreeItem item, Object element)
+    {
+        AbstractTreeViewer viewer = findViewer(tree);
+        if (viewer != null && element != null)
+        {
+            runSuppressed(() ->
+            {
+                tree.setRedraw(false);
+                try
+                {
+                    viewer.collapseToLevel(element, AbstractTreeViewer.ALL_LEVELS);
+                }
+                finally
+                {
+                    if (!tree.isDisposed())
+                        tree.setRedraw(true);
+                }
+            });
+            return;
+        }
+        collapseAllDescendantsSwt(item);
+        if (!item.isDisposed())
+            item.setExpanded(false);
+    }
+
+    /**
+     * {@link TreeItem#setExpanded} на Win32 ставит {@code ignoreExpand} — SWT.Expand
+     * не уходит в JFace, дети не создаются. Для TreeViewer/CommonViewer нужен
+     * {@link AbstractTreeViewer#expandToLevel}.
+     */
+    private static AbstractTreeViewer findViewer(Tree tree)
+    {
+        if (tree == null || tree.isDisposed())
+            return null;
+        Object cached = tree.getData(VIEWER_KEY);
+        if (cached instanceof AbstractTreeViewer viewer && sameTree(viewer, tree))
+            return viewer;
+        AbstractTreeViewer found = findViewerFromListeners(tree);
+        if (found == null)
+            found = findViewerFromWorkbench(tree);
+        if (found != null)
+            rememberViewer(tree, found);
+        return found;
+    }
+
+    private static void rememberViewer(Tree tree, AbstractTreeViewer viewer)
+    {
+        if (tree != null && !tree.isDisposed() && viewer != null)
+            tree.setData(VIEWER_KEY, viewer);
+    }
+
+    private static boolean sameTree(AbstractTreeViewer viewer, Tree tree)
+    {
+        return resolveTree(viewer) == tree;
+    }
+
+    private static AbstractTreeViewer findViewerFromListeners(Tree tree)
+    {
+        for (int eventType : new int[] { SWT.Expand, SWT.Collapse })
+        {
+            for (Listener listener : tree.getListeners(eventType))
+            {
+                Object candidate = listener instanceof TypedListener typed
+                    ? typed.getEventListener() : listener;
+                if (candidate instanceof AbstractTreeViewer viewer && sameTree(viewer, tree))
+                    return viewer;
+                Object outer = Global.getField(candidate, "this$0"); //$NON-NLS-1$
+                if (outer instanceof AbstractTreeViewer viewer && sameTree(viewer, tree))
+                    return viewer;
+            }
+        }
+        return null;
+    }
+
+    private static AbstractTreeViewer findViewerFromWorkbench(Tree tree)
+    {
+        IWorkbench workbench = PlatformUI.getWorkbench();
+        if (workbench == null)
+            return null;
+        IWorkbenchWindow window = workbench.getActiveWorkbenchWindow();
+        if (window == null)
+            return null;
+        IWorkbenchPage page = window.getActivePage();
+        if (page == null)
+            return null;
+        AbstractTreeViewer fromActive = viewerFromPart(page.getActivePart(), tree);
+        if (fromActive != null)
+            return fromActive;
+        for (IViewReference ref : page.getViewReferences())
+        {
+            AbstractTreeViewer viewer = viewerFromPart(ref.getView(false), tree);
+            if (viewer != null)
+                return viewer;
+        }
+        for (IEditorReference ref : page.getEditorReferences())
+        {
+            AbstractTreeViewer viewer = viewerFromPart(ref.getEditor(false), tree);
+            if (viewer != null)
+                return viewer;
+        }
+        return null;
+    }
+
+    private static AbstractTreeViewer viewerFromPart(IWorkbenchPart part, Tree tree)
+    {
+        if (part == null)
+            return null;
+        Object adapted = part.getAdapter(TreeViewer.class);
+        if (adapted instanceof AbstractTreeViewer viewer && sameTree(viewer, tree))
+            return viewer;
+        Object common = Global.invoke(part, "getCommonViewer"); //$NON-NLS-1$
+        if (common instanceof AbstractTreeViewer viewer && sameTree(viewer, tree))
+            return viewer;
+        Object named = Global.invoke(part, "getTreeViewer"); //$NON-NLS-1$
+        if (named instanceof AbstractTreeViewer viewer && sameTree(viewer, tree))
+            return viewer;
+        return null;
+    }
+
+    private static void expandAllDescendantsSwt(TreeItem item, int depth, int maxDepth)
+    {
+        if (item == null || item.isDisposed() || depth >= maxDepth)
+            return;
+        item.setExpanded(true);
+        for (TreeItem child : item.getItems())
+            expandAllDescendantsSwt(child, depth + 1, maxDepth);
+    }
+
+    private static boolean isDynamicTree(Tree tree, AbstractTreeViewer viewer, Object element)
+    {
+        if (FormEditorHook.isFormAttributeTreeElement(element))
+            return true;
+        if (tree != null && !tree.isDisposed() && (tree.getStyle() & SWT.VIRTUAL) != 0)
+            return true;
+        return viewer != null && viewer.getContentProvider() instanceof ILazyTreeContentProvider;
+    }
+
+    /**
+     * Дерево реквизитов формы: не разворачивать узлы, чей тип значения — ссылка
+     * ({@code *Ссылка.*}), иначе вложенность бесконечна.
+     */
+    private static void expandFormAttributesGuarded(AbstractTreeViewer viewer, Tree tree, Object element)
+    {
+        ITreeContentProvider cp = viewer.getContentProvider() instanceof ITreeContentProvider p
+            ? p : null;
+        viewer.setExpandedState(element, true);
+        int[] remaining = { EXPAND_MAX_NODES };
+        expandFormAttributesGuarded(viewer, cp, tree, element, 0, remaining);
+    }
+
+    private static void expandFormAttributesGuarded(AbstractTreeViewer viewer, ITreeContentProvider cp,
+            Tree tree, Object parent, int depth, int[] remaining)
+    {
+        if (depth >= DYNAMIC_EXPAND_MAX_DEPTH || remaining[0] <= 0)
+            return;
+        Object[] children = getVisibleChildren(viewer, cp, tree, parent, TreeExpander::defaultVisible);
+        if (children == null || children.length == 0)
+            return;
+        for (Object child : children)
+        {
+            if (child == null || remaining[0] <= 0)
+                continue;
+            if (FormEditorHook.isFormAttributeReferenceNode(child))
+                continue;
+            if (!nodeHasChildren(viewer, cp, tree, child))
+                continue;
+            remaining[0]--;
+            viewer.setExpandedState(child, true);
+            expandFormAttributesGuarded(viewer, cp, tree, child, depth + 1, remaining);
+        }
+    }
+
+    /**
+     * Доступные поля СКД и деревья конструктора запроса ({@code QueryWizardTreeViewer},
+     * в т.ч. «База данных» / {@code AvailableTable}): Ctrl+клик не перехватывается.
+     */
+    private static boolean isAvailableFieldsTree(AbstractTreeViewer viewer, Object element)
+    {
+        if (element != null)
+        {
+            String elementName = element.getClass().getName();
+            if (elementName.contains("qw.ui.utils.AvailableTable") //$NON-NLS-1$
+                    || elementName.contains("DcsAvailableFieldInfo")) //$NON-NLS-1$
+                return true;
+        }
+        if (viewer == null)
+            return false;
+        String viewerName = viewer.getClass().getName();
+        if (viewerName.contains("QueryWizardTreeViewer") //$NON-NLS-1$
+                || viewerName.contains("AvailableFieldsViewer")) //$NON-NLS-1$
+            return true;
+        Object cp = viewer.getContentProvider();
+        if (cp == null)
+            return false;
+        String name = cp.getClass().getName();
+        return name.contains("AvailableFieldsContentProvider") //$NON-NLS-1$
+            || name.contains("qw.ui.contentproviders."); //$NON-NLS-1$
+    }
+
+    private static void collapseAllDescendantsSwt(TreeItem item)
+    {
+        if (item == null || item.isDisposed())
+            return;
+        for (TreeItem child : item.getItems())
+        {
+            collapseAllDescendantsSwt(child);
+            if (!child.isDisposed())
+                child.setExpanded(false);
+        }
+    }
+
+    private static boolean isCompareConfigTree(Tree tree)
+    {
+        return tree != null && !tree.isDisposed()
+            && (Boolean.TRUE.equals(tree.getData(COMPARE_TREE_FLAG))
+                || tree.getData(COMPARE_TREE_EDITOR_KEY) instanceof IEditorPart);
+    }
+
+    private static IEditorPart compareEditorOf(Tree tree)
+    {
+        Object data = tree.getData(COMPARE_TREE_EDITOR_KEY);
+        return data instanceof IEditorPart editor ? editor : null;
     }
 
     /**
@@ -422,7 +851,6 @@ public final class TreeAutoExpand implements IStartup
         Tree tree = resolveTree(viewer);
         if (tree == null || tree.isDisposed())
             return;
-        Global.tempLog(LOG_TOPIC, "resetExpansionAfterReveal: collapseAll, allowReexpand=" + allowReexpand); //$NON-NLS-1$
         viewer.collapseAll();
         if (allowReexpand)
             expandAllRootsSoleChildChains(viewer, tree);
@@ -434,7 +862,7 @@ public final class TreeAutoExpand implements IStartup
      */
     public static void expandSoleChildChainFrom(AbstractTreeViewer viewer, Object root)
     {
-        expandSoleChildChainFrom(viewer, root, TreeAutoExpand::defaultVisible);
+        expandSoleChildChainFrom(viewer, root, TreeExpander::defaultVisible);
     }
 
     public static void expandSoleChildChainFrom(AbstractTreeViewer viewer, Object root, VisibleChildFilter filter)
@@ -540,12 +968,10 @@ public final class TreeAutoExpand implements IStartup
             return;
 
         Tree tree = resolveTree(viewer);
-        Global.tempLog(LOG_TOPIC, "install(expand-hook): tree=" + tree //$NON-NLS-1$
-            + ", disposed=" + (tree != null && tree.isDisposed()) //$NON-NLS-1$
-            + ", уже установлен=" + (tree != null && Boolean.TRUE.equals(tree.getData(MARKER_KEY)))); //$NON-NLS-1$
         if (tree == null || tree.isDisposed() || Boolean.TRUE.equals(tree.getData(MARKER_KEY)))
             return;
 
+        rememberViewer(tree, viewer);
         tree.setData(MARKER_KEY, Boolean.TRUE);
         tree.addTreeListener(new TreeAdapter()
         {
@@ -553,11 +979,6 @@ public final class TreeAutoExpand implements IStartup
             public void treeExpanded(TreeEvent event)
             {
                 Object element = event.item != null ? event.item.getData() : null;
-                Global.tempLog(LOG_TOPIC, "treeExpanded: item=" + event.item //$NON-NLS-1$
-                    + ", element=" + element //$NON-NLS-1$
-                    + ", enabled=" + (enabled == null ? "null" : enabled.getAsBoolean()) //$NON-NLS-1$ //$NON-NLS-2$
-                    + ", suppressed=" + SUPPRESSED.get() //$NON-NLS-1$
-                    + ", inAutoExpand=" + IN_AUTO_EXPAND.get()); //$NON-NLS-1$
                 if (enabled == null || !enabled.getAsBoolean()
                         || Boolean.TRUE.equals(SUPPRESSED.get())
                         || Boolean.TRUE.equals(IN_AUTO_EXPAND.get()))
@@ -568,9 +989,6 @@ public final class TreeAutoExpand implements IStartup
 
                 Display display = tree.getDisplay();
                 display.timerExec(150, () -> {
-                    Global.tempLog(LOG_TOPIC, "treeExpanded/timer: disposed=" + tree.isDisposed() //$NON-NLS-1$
-                        + ", suppressed=" + SUPPRESSED.get() //$NON-NLS-1$
-                        + ", inAutoExpand=" + IN_AUTO_EXPAND.get()); //$NON-NLS-1$
                     if (tree.isDisposed() || Boolean.TRUE.equals(SUPPRESSED.get())
                             || Boolean.TRUE.equals(IN_AUTO_EXPAND.get()))
                         return;
@@ -621,16 +1039,11 @@ public final class TreeAutoExpand implements IStartup
         Tree tree = resolveTree(viewer);
         Object current = element;
         int safety = 0;
-        Global.tempLog(LOG_TOPIC, "expandSoleChildChain: старт, element=" + element //$NON-NLS-1$
-            + ", cp=" + cpObj); //$NON-NLS-1$
         while (safety++ < 64)
         {
             Object[] raw = getVisibleChildren(viewer, cp, tree, current, filter);
             if (raw == null || raw.length == 0)
-            {
-                Global.tempLog(LOG_TOPIC, "expandSoleChildChain: стоп — нет видимых детей у " + current); //$NON-NLS-1$
                 break;
-            }
 
             Object onlyChild = null;
             int visibleCount = 0;
@@ -644,35 +1057,18 @@ public final class TreeAutoExpand implements IStartup
                     break;
             }
             if (visibleCount != 1 || onlyChild == null)
-            {
-                Global.tempLog(LOG_TOPIC, "expandSoleChildChain: стоп — видимых детей=" + visibleCount //$NON-NLS-1$
-                    + " у " + current); //$NON-NLS-1$
                 break;
-            }
 
             if (isLabelCycle(viewer, current, onlyChild, labelsInChain))
-            {
-                Global.tempLog(LOG_TOPIC, "expandSoleChildChain: стоп — цикл по подписи, " + current //$NON-NLS-1$
-                    + " -> " + onlyChild); //$NON-NLS-1$
                 break;
-            }
 
             if (isCompareConfigAddedOrDeletedCheckable(onlyChild))
-            {
-                Global.tempLog(LOG_TOPIC, "expandSoleChildChain: стоп — добавлен/удалён+checkable, " //$NON-NLS-1$
-                    + onlyChild);
                 break;
-            }
 
             boolean hasKids = nodeHasChildren(viewer, cp, tree, onlyChild);
             if (!hasKids)
-            {
-                Global.tempLog(LOG_TOPIC, "expandSoleChildChain: стоп — у единственного потомка нет детей, " //$NON-NLS-1$
-                    + onlyChild);
                 break;
-            }
 
-            Global.tempLog(LOG_TOPIC, "expandSoleChildChain: разворачиваю " + onlyChild); //$NON-NLS-1$
             if (!viewer.getExpandedState(onlyChild))
                 viewer.setExpandedState(onlyChild, true);
             rememberLabel(labelsInChain, nodeLabel(viewer, onlyChild));

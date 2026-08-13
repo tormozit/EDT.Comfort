@@ -185,7 +185,7 @@ public final class FileSearchResultsHook implements IStartup
     /**
      * {@code true}, если поиск реально охватывает больше одного проекта — тогда второй/третий
      * корень дерева результатов (отдельный проект) может появиться значительно позже первого, и
-     * включать {@link TreeAutoExpand#notifyContentLoaded} по первому же появившемуся корню
+     * включать {@link TreeExpander#notifyContentLoaded} по первому же появившемуся корню
      * преждевременно (тот же случай, что для {@code ConfigSearchResultsHook.startFirstRootWatch}).
      * <p>
      * Без отбора по проекту (область «Рабочая область») {@code getRoots()} возвращает не список
@@ -479,8 +479,8 @@ public final class FileSearchResultsHook implements IStartup
             updateTableFromSelection(treeViewer, tableViewer);
 
         installFileTreeMatchCount(treeViewer);
-        TreeAutoExpand.installWhitelisted(
-                TreeAutoExpand.Target.SEARCH_FILES, treeViewer);
+        TreeExpander.installWhitelisted(
+                TreeExpander.Target.SEARCH_FILES, treeViewer);
 
         log("installSplitLayout: done");
     }
@@ -1343,13 +1343,13 @@ public final class FileSearchResultsHook implements IStartup
                 tv.setSelection(new StructuredSelection(firstRoot), true);
                 // reveal у setSelection развернул путь до терминального узла — сбрасываем
                 // и разворачиваем по своим правилам (как selectFirstTreeResult раньше).
-                TreeAutoExpand.resetExpansionAfterReveal(tv, !searchCoversMultipleProjects);
+                TreeExpander.resetExpansionAfterReveal(tv, !searchCoversMultipleProjects);
                 redirected = true;
             }
             else if (!searchCoversMultipleProjects && attempt == 0)
             {
                 // Первый тик уже на корне — применяем правила разворота один раз.
-                TreeAutoExpand.notifyContentLoaded(tv);
+                TreeExpander.notifyContentLoaded(tv);
             }
 
             TableViewer tableViewer = cachedResultTableViewer;
@@ -1397,7 +1397,7 @@ public final class FileSearchResultsHook implements IStartup
             return false;
         log("redirectToFirstRoot: " + current + " -> " + firstRoot);
         treeViewer.setSelection(new StructuredSelection(firstRoot), true);
-        TreeAutoExpand.resetExpansionAfterReveal(treeViewer, !searchCoversMultipleProjects);
+        TreeExpander.resetExpansionAfterReveal(treeViewer, !searchCoversMultipleProjects);
         return true;
     }
 

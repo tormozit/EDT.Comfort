@@ -1053,6 +1053,45 @@ public class FormEditorHook implements IStartup
         return false;
     }
 
+    /** Элемент дерева реквизитов формы. */
+    public static boolean isFormAttributeTreeElement(Object element)
+    {
+        return element instanceof PropertyInfo;
+    }
+
+    /**
+     * Узел реквизитов формы, чей тип значения подходит под {@code *Ссылка.*}
+     * (и английский {@code *Ref.*}: {@code CatalogRef.Номенклатура}).
+     */
+    public static boolean isFormAttributeReferenceNode(Object element)
+    {
+        if (!(element instanceof PropertyInfo info))
+            return false;
+        TypeDescription valueType = info.getValueType();
+        if (valueType == null)
+            return false;
+        for (TypeItem typeItem : valueType.getTypes())
+        {
+            if (typeItem == null)
+                continue;
+            TypeItem resolved = typeItem;
+            if (typeItem.eIsProxy() && info.getForm() != null)
+                resolved = (TypeItem) EcoreUtil.resolve(typeItem, info.getForm());
+            String typeName = McoreUtil.getTypeName(resolved);
+            if (matchesReferenceTypeMask(typeName))
+                return true;
+        }
+        return false;
+    }
+
+    /** Маска {@code *Ссылка.*}; для англоязычных имён типов — {@code *Ref.*}. */
+    private static boolean matchesReferenceTypeMask(String typeName)
+    {
+        if (typeName == null || typeName.isEmpty())
+            return false;
+            return typeName.contains("Ссылка.") || typeName.contains("Ref."); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
     private static List<PropertyInfo> buildPropertyInfoChain(PropertyInfo anchor, PropertyInfo leaf)
     {
         List<PropertyInfo> fromRoot = new ArrayList<>();

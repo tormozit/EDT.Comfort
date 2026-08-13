@@ -23,7 +23,7 @@
     <startup class="tormozit.QueryTextEditDialogHook"/>
     <startup class="tormozit.QueryConstructorFilterHook"/>
     <startup class="tormozit.FormEditorHook"/>
-    <startup class="tormozit.TreeAutoExpand"/>
+    <startup class="tormozit.TreeExpander"/>
     <startup class="tormozit.ProblemViewPropertyFocusHook"/>
     <startup class="tormozit.IrKeyBindingHook"/>
     <startup class="tormozit.IrBslEditorHoverHook"/>
