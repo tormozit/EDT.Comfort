@@ -55,6 +55,16 @@ final class FilterInputBox
         + "• \"текст в кавычках\" — точная фраза целиком; точки и пробелы внутри неё не разделяют\n" //$NON-NLS-1$
         + "• ищет по имени подсистемы; родители совпадений не скрываются"; //$NON-NLS-1$
 
+    /**
+     * Панель «Структура проекта»: иерархический фильтр, как в навигаторе;
+     * русские названия папок из декоратора; суффикс {@code <объект>} в поиск не входит.
+     */
+    static final String PROJECT_STRUCTURE_FILTER_TOOLTIP =
+        HIERARCHICAL_FILTER_TOOLTIP + "\n" //$NON-NLS-1$
+        + "• ищет по имени файла/папки и русскому названию типа из декоратора\n" //$NON-NLS-1$
+        + "• суффикс <объект> в фильтре не участвует\n" //$NON-NLS-1$
+        + "• видны только совпадения и их родители"; //$NON-NLS-1$
+
     private static final int MAX_ITEMS = 20;
     /** Максимальная ширина поля фильтра. */
     static final int MAX_WIDTH = 300;
@@ -107,7 +117,10 @@ final class FilterInputBox
             "comfort.stacktracesList.filter.history."), //$NON-NLS-1$
         COLUMN_VALUES(
             "comfort.formTableColumnValues.filter.history.count", //$NON-NLS-1$
-            "comfort.formTableColumnValues.filter.history."); //$NON-NLS-1$
+            "comfort.formTableColumnValues.filter.history."), //$NON-NLS-1$
+        PROJECT_STRUCTURE(
+            "comfort.projectStructure.filter.history.count", //$NON-NLS-1$
+            "comfort.projectStructure.filter.history."); //$NON-NLS-1$
 
         final String prefCountKey;
         final String prefItemPrefix;
@@ -265,6 +278,35 @@ final class FilterInputBox
         return create(parent, opts, onSearch);
     }
 
+    /** Фильтр дерева «Структура проекта» — на всю ширину, с историей. */
+    static FilterInputBox forProjectStructure(Composite parent, Runnable onSearch)
+    {
+        Options opts = new Options();
+        opts.scope = Scope.PROJECT_STRUCTURE;
+        opts.layoutData = new GridData(SWT.FILL, SWT.CENTER, true, false);
+        opts.message = "Фильтр..."; //$NON-NLS-1$
+        opts.tooltip = PROJECT_STRUCTURE_FILTER_TOOLTIP;
+        opts.searchDelay = 200;
+        return create(parent, opts, onSearch);
+    }
+
+    /**
+     * Подключает уже созданный {@link SearchBox} (повтор патча после оборачивания дерева).
+     */
+    static FilterInputBox wrapExisting(SearchBox box, Scope scope, Runnable onSearch)
+    {
+        if (box == null || box.isDisposed() || scope == null)
+            return null;
+        FilterInputBoxListNavigation.ensureSearchBoxStockKeyStripped(box);
+        box.setHistory(new PrefsSearchHistory(scope));
+        if (onSearch != null)
+        {
+            box.setSearchListener((text, monitor) -> onSearch.run());
+            FilterInputBoxListNavigation.installHistoryCommit(box);
+        }
+        return new FilterInputBox(box, scope);
+    }
+
     /** Замена штатного поля в {@code FilteredList}-диалогах (см. {@code FilteredListDialogFilterHook}) — на всю ширину. */
     static FilterInputBox forFilteredListDialog(Composite parent, Runnable onSearch)
     {
@@ -342,6 +384,7 @@ final class FilterInputBox
             case VALIDATION_CHECKS -> throw new IllegalStateException("VALIDATION_CHECKS: use attachHistory(SearchBox, Scope.VALIDATION_CHECKS)"); //$NON-NLS-1$
             case STACKTRACES -> forStacktraces(parent, onSearch);
             case COLUMN_VALUES -> forColumnValues(parent, onSearch);
+            case PROJECT_STRUCTURE -> forProjectStructure(parent, onSearch);
         };
     }
 

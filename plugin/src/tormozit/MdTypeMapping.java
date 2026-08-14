@@ -315,6 +315,21 @@ public final class MdTypeMapping
     }
 
     /**
+     * Имя папки EDT ({@code Catalogs}, {@code Forms}…) → отображаемое RU мн.ч. для декоратора
+     * и фильтра «Структуры проекта» (например «Catalogs» → «Справочники»).
+     *
+     * @return RU мн.ч., или {@code null}, если папка не из таблицы типов МД
+     */
+    public static String folderToGroupPlural(String folderName)
+    {
+        String ru = folderToRu(folderName);
+        if (ru == null)
+            return null;
+        String plural = ruSingularToGroupPlural(ru);
+        return plural != null ? plural : ru;
+    }
+
+    /**
      * Первый сегмент точечной ссылки — известный корневой тип МД (ед.ч.)?
      * Например «Справочник», «Документ»; не «Справочники», не «ДлительныеОперации».
      */

@@ -14,8 +14,8 @@ import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
  * При пустом фильтре ячейка не меняется; при поиске — только overlay подсветки
  * и при необходимости серый квалификатор до динамических суффиксов.
  *
- * <p>НЕ ТРОГАТЬ ГРУППЫ: {@link NavigatorTreeElementLabels#isGroupNode(Object)} — без подсветки
- * и без пересборки надписи (только штатный {@code base.update}).
+ * <p>Группы ({@link NavigatorTreeElementLabels#isGroupNode(Object)}) не ищутся фильтром
+ * как объекты. Фрагменты в их надписи подсвечиваются только при иерархическом запросе.
  */
 public final class NavigatorStyledCellLabelWrapper extends StyledCellLabelProvider
         implements SmartLabelHighlight, ILabelProvider
@@ -61,8 +61,7 @@ public final class NavigatorStyledCellLabelWrapper extends StyledCellLabelProvid
         Object element = cell.getElement();
         base.update(cell);
 
-        // НЕ ТРОГАТЬ ГРУППЫ: служебные папки EDT — только штатная отрисовка
-        if (highlightPattern.isEmpty() || NavigatorTreeElementLabels.isGroupNode(element))
+        if (highlightPattern.isEmpty())
             return;
 
         String text = cell.getText();
@@ -70,6 +69,17 @@ public final class NavigatorStyledCellLabelWrapper extends StyledCellLabelProvid
             return;
 
         SmartMatcher matcher = new SmartMatcher(highlightPattern);
+
+        if (NavigatorTreeElementLabels.isGroupNode(element))
+        {
+            if (matcher.hasMultipleSections())
+            {
+                java.util.List<SmartMatcher.HighlightRange> ranges = matcher.getHighlightRanges(text);
+                if (!ranges.isEmpty())
+                    SmartMatchHighlight.appendMatchRanges(cell, ranges);
+            }
+            return;
+        }
 
         if (matcher.hasMultipleSections())
         {

@@ -60,6 +60,7 @@
     <startup class="tormozit.NavigatorOpenObjectMenuHook"/>
     <startup class="tormozit.FileSearchShowInProjectStructureMenuHook"/>
     <startup class="tormozit.InfobasesViewHook"/>
+    <startup class="tormozit.ProjectStructureFilterHook"/>
     <startup class="tormozit.InfobaseActiveProjectApplicationMenuHook"/>
     <startup class="tormozit.OpenMdObjectHook"/>
     <startup class="tormozit.MenuTooltipStatusLineHook"/>

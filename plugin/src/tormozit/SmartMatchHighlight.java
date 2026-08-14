@@ -24,6 +24,8 @@ import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Scrollable;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableItem;
+import org.eclipse.swt.widgets.Tree;
+import org.eclipse.swt.widgets.TreeItem;
 
 /**
  * Подсветка совпадений smart-фильтра: единые цвета для текущей и прочих строк.
@@ -178,6 +180,23 @@ public final class SmartMatchHighlight
         MatchStyle style = resolveMatchStyle(table);
         drawMatchFragments(e.gc, text, matcher, origin.x, origin.y, origin.availableWidth, table.getFont(), style,
             false, bold);
+    }
+
+    /**
+     * Overlay совпадений на {@link TreeItem} поверх уже нарисованного текста (в т.ч. суффиксов
+     * decorating-провайдера). {@code bold=false} — ширина глифов как у исходного текста.
+     */
+    public static void paintTreeItemMatchOverlay(Event e, Tree tree, TreeItem item, String text,
+            List<SmartMatcher.HighlightRange> ranges)
+    {
+        if (e == null || e.gc == null || tree == null || tree.isDisposed() || item == null
+            || item.isDisposed() || text == null || text.isEmpty() || ranges == null || ranges.isEmpty())
+            return;
+        int column = e.index >= 0 ? e.index : 0;
+        CellTextOrigin origin = treeItemTextOrigin(e.gc, tree, item, column, e, text);
+        MatchStyle style = resolveMatchStyle(tree);
+        drawMatchFragments(e.gc, text, ranges, origin.x, origin.y, origin.availableWidth, tree.getFont(), style,
+            false, false);
     }
 
     /** @param backgroundOnly {@code true} — только фон совпадений (текст уже нарисован). */
@@ -458,6 +477,40 @@ public final class SmartMatchHighlight
         // диагностикой на DebugCollectionWindow (issue: подсветка "плыла" вправо-вверх на 1px
         // только при setLinesVisible(true)).
         if (table.getLinesVisible())
+        {
+            x -= 1;
+            y += 1;
+        }
+        return new CellTextOrigin(x, y, availableWidth);
+    }
+
+    private static CellTextOrigin treeItemTextOrigin(GC gc, Tree tree, TreeItem item, int column, Event e,
+            String text)
+    {
+        Font font = tree.getFont();
+        if (font != null && !font.isDisposed())
+            gc.setFont(font);
+        Point ext = gc.textExtent(text, SWT.DRAW_TRANSPARENT | SWT.DRAW_DELIMITER);
+        Rectangle textBounds = item.getTextBounds(column);
+        int x;
+        int y;
+        int availableWidth;
+        if (textBounds != null && !textBounds.isEmpty())
+        {
+            y = textBounds.y + Math.max(0, (textBounds.height - ext.y) / 2);
+            x = textBounds.x;
+            availableWidth = textBounds.width;
+        }
+        else
+        {
+            y = e.y + Math.max(0, (e.height - ext.y) / 2);
+            x = e.x + 6;
+            Rectangle imageBounds = item.getImageBounds(column);
+            if (imageBounds != null && !imageBounds.isEmpty())
+                x = imageBounds.x + imageBounds.width + 2;
+            availableWidth = e.x + e.width - x;
+        }
+        if (tree.getLinesVisible())
         {
             x -= 1;
             y += 1;

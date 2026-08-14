@@ -24,8 +24,8 @@ import org.eclipse.ui.PlatformUI;
  * своего mdo не имеют — для них связь определяется по mdo объекта-владельца
  * (см. {@link #isChildObjectIntegrated}), суффиксы те же.
  * <p>
- * Для папок-групп без своего mdo (Tasks, Catalogs, Forms, Commands…) выводится RU мн.ч.
- * типа МД ({@link MdTypeMapping#ruSingularToGroupPlural}). Элементы этого дерева — обычные
+     * Для папок-групп без своего mdo (Tasks, Catalogs, Forms, Commands…) выводится RU мн.ч.
+     * типа МД ({@link MdTypeMapping#folderToGroupPlural}). Элементы этого дерева — обычные
  * {@link IFolder}/{@link IFile} (не модельные обёртки), поэтому проверка идёт не
  * через резолв модели элемента навигатора, а через путь к файлу на диске.
  */
@@ -140,11 +140,7 @@ public final class MdObjectUsageDecorator extends LabelProvider implements ILigh
     /** RU мн.ч. типа МД для папки-группы (например «Tasks» → «Задачи»), либо {@code null}. */
     private static String groupLabelFor(IFolder folder)
     {
-        String ru = MdTypeMapping.folderToRu(folder.getName());
-        if (ru == null)
-            return null;
-        String plural = MdTypeMapping.ruSingularToGroupPlural(ru);
-        return plural != null ? plural : ru;
+        return MdTypeMapping.folderToGroupPlural(folder.getName());
     }
 
     private static IFile findMdoFile(IResource resource)

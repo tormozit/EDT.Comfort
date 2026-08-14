@@ -40,8 +40,9 @@ import org.eclipse.ui.navigator.INavigatorFilterService;
  * Сортировка навигатора не меняется (без {@link SmartOutlineComparator}).
  *
  * <p><b>НЕ ТРОГАТЬ ГРУППЫ</b> — см. {@link NavigatorTreeElementLabels#isGroupNode(Object)}:
- * служебные папки EDT не раскрашиваются по паттерну ({@link NavigatorHighlightStyledProvider},
- * {@link NavigatorStyledCellLabelWrapper}).
+ * служебные папки EDT не ищутся как объекты фильтра. Подсветка в их надписи —
+ * только при иерархическом запросе ({@code спр.анкет} → «Спр»авочники; одно
+ * {@code спр} группу не красит).
  *
  * <p>Фильтрация — штатный {@code NavigatorSearchFilter} через {@link NavigatorNativeSearchBridge}
  * ({@link ComfortNavigatorSearchEngine}); раскрытие путей — нативный {@code expandTreeViewerStepByStep}.
@@ -836,11 +837,22 @@ public final class NavigatorFilterHook implements IStartup
         public StyledString getStyledText(Object element)
         {
             StyledString styled = obtainBaseStyledText(element);
-            if (highlightPattern.isEmpty() || NavigatorTreeElementLabels.isGroupNode(element))
+            if (highlightPattern.isEmpty())
                 return styled;
 
             SmartMatcher matcher = new SmartMatcher(highlightPattern);
             String plainText = styled.getString();
+
+            if (NavigatorTreeElementLabels.isGroupNode(element))
+            {
+                if (matcher.hasMultipleSections())
+                {
+                    java.util.List<SmartMatcher.HighlightRange> ranges = matcher.getHighlightRanges(plainText);
+                    if (!ranges.isEmpty())
+                        SmartMatchHighlight.applyRanges(styled, ranges);
+                }
+                return styled;
+            }
 
             if (matcher.hasMultipleSections())
             {
