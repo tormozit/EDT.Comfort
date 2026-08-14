@@ -19,6 +19,7 @@ import org.eclipse.swt.widgets.Button;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Label;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
@@ -36,6 +37,9 @@ import org.eclipse.ui.PlatformUI;
 public final class ErrorDialogLinksHook implements IStartup
 {
     private static final String PATCHED_KEY = "tormozit.errorDialogLinksPatched"; //$NON-NLS-1$
+    private static final String SCHEDULED_KEY = "tormozit.errorDialogLinksScheduled"; //$NON-NLS-1$
+    private static final String PAINT_HOOK_KEY = "tormozit.errorDialogLinksPaint"; //$NON-NLS-1$
+    private static final int MAX_ASYNC_RETRIES = 8;
     private static final String LINKS_BUTTON_LABEL = "Ссылки"; //$NON-NLS-1$
     private static final String LINKS_BUTTON_TOOLTIP =
         "Показать ссылки на объекты метаданных из текста ошибки"; //$NON-NLS-1$
@@ -45,6 +49,8 @@ public final class ErrorDialogLinksHook implements IStartup
         "org.eclipse.ui.internal.statushandlers.InternalDialog"; //$NON-NLS-1$
     private static final String RUNTIME_EXECUTION_ERROR_DIALOG =
         "com._1c.g5.v8.dt.platform.services.ui.runtimes.RuntimeExecutionErrorDialog"; //$NON-NLS-1$
+    private static final String STATUS_DIALOG =
+        "com._1c.g5.v8.dt.common.ui.dialogs.StatusDialog"; //$NON-NLS-1$
 
     private static final Set<String> NESTED_FOLDERS = Set.of(
         "Forms", "Templates", "Commands", "Recalculations", "Items", "Help"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$ //$NON-NLS-5$ //$NON-NLS-6$
@@ -62,69 +68,130 @@ public final class ErrorDialogLinksHook implements IStartup
         if (display == null || display.isDisposed())
             return;
 
-        Listener listener = event ->
-        {
-            if (!(event.widget instanceof Shell shell) || shell.isDisposed())
-                return;
-            if (shell.getData(PATCHED_KEY) != null)
-                return;
-            scheduleTryPatch(display, shell, 0);
-        };
-
+        Listener listener = event -> requestPatch(display, event);
         display.addFilter(SWT.Show, listener);
         display.addFilter(SWT.Activate, listener);
     }
 
-    private static void scheduleTryPatch(Display display, Shell shell, int attempt)
+    /**
+     * Патч синхронно в фильтре Show/Activate — до первой отрисовки. Отложенный
+     * {@code timerExec(50)×20} как раз давал вспышку «сначала без кнопки, через секунду с ней»:
+     * Activate приходит на пустой shell в {@code createShell}, цикл ретраев тикает ~1 с,
+     * а окно уже показано с «ОК»/«Сведения».
+     */
+    private static void requestPatch(Display display, Event event)
     {
-        if (shell.isDisposed() || shell.getData(PATCHED_KEY) != null)
+        Shell shell = shellFromEvent(event);
+        if (shell == null || shell.isDisposed())
             return;
-        int delay = attempt == 0 ? 0 : 50;
-        display.timerExec(delay, () ->
+        if (!isCandidateShell(shell) || alreadyPatched(shell))
+            return;
+
+        if (tryPatch(shell))
+            return;
+        scheduleAsyncRetry(display, shell, 0);
+        armPaintRetry(shell);
+    }
+
+    private static Shell shellFromEvent(Event event)
+    {
+        if (event.widget instanceof Shell shell)
+            return shell;
+        if (event.widget instanceof Button button)
         {
-            if (shell.isDisposed() || shell.getData(PATCHED_KEY) != null)
+            if (!isOkOrDetailsLabel(button.getText()))
+                return null;
+            return button.getShell();
+        }
+        return null;
+    }
+
+    private static boolean isCandidateShell(Shell shell)
+    {
+        if (isKnownErrorDialog(shell.getData()))
+            return true;
+        return DIALOG_TITLE.equals(shell.getText());
+    }
+
+    private static boolean alreadyPatched(Shell shell)
+    {
+        Button links = findDialogButtonByLabel(shell, LINKS_BUTTON_LABEL);
+        if (links != null && !links.isDisposed())
+        {
+            shell.setData(PATCHED_KEY, Boolean.TRUE);
+            return true;
+        }
+        if (shell.getData(PATCHED_KEY) != null)
+            shell.setData(PATCHED_KEY, null);
+        return false;
+    }
+
+    private static void scheduleAsyncRetry(Display display, Shell shell, int attempt)
+    {
+        if (attempt >= MAX_ASYNC_RETRIES || shell.isDisposed() || alreadyPatched(shell))
+            return;
+        if (shell.getData(SCHEDULED_KEY) != null && attempt == 0)
+            return;
+        shell.setData(SCHEDULED_KEY, Boolean.TRUE);
+        display.asyncExec(() ->
+        {
+            if (shell.isDisposed())
                 return;
-            if (!isTargetErrorShell(shell))
+            shell.setData(SCHEDULED_KEY, null);
+            if (tryPatch(shell))
                 return;
-            if (!tryPatch(shell) && attempt < 20)
-                scheduleTryPatch(display, shell, attempt + 1);
+            if (isCandidateShell(shell))
+                scheduleAsyncRetry(display, shell, attempt + 1);
         });
     }
 
-    private static boolean isTargetErrorShell(Shell shell)
+    private static void armPaintRetry(Shell shell)
     {
-        Object data = shell.getData();
-        if (data instanceof ErrorDialog)
-            return true;
-        if (data != null)
+        if (shell.getData(PAINT_HOOK_KEY) != null)
+            return;
+        Listener[] holder = new Listener[1];
+        holder[0] = event ->
         {
-            String name = data.getClass().getName();
-            if (INTERNAL_DIALOG.equals(name) || RUNTIME_EXECUTION_ERROR_DIALOG.equals(name))
-                return true;
-        }
-        if (!DIALOG_TITLE.equals(shell.getText()))
-            return false;
-        return hasDetailsButton(shell);
+            shell.removeListener(SWT.Paint, holder[0]);
+            shell.setData(PAINT_HOOK_KEY, null);
+            tryPatch(shell);
+        };
+        shell.setData(PAINT_HOOK_KEY, Boolean.TRUE);
+        shell.addListener(SWT.Paint, holder[0]);
     }
 
-    private static boolean hasDetailsButton(Composite composite)
+    private static boolean isKnownErrorDialog(Object data)
     {
-        for (Control child : composite.getChildren())
-        {
-            if (child instanceof Button button)
-            {
-                String text = button.getText();
-                if (text != null && text.replace("&", "").contains(DETAILS_SNIPPET)) //$NON-NLS-1$ //$NON-NLS-2$
-                    return true;
-            }
-            if (child instanceof Composite childComposite && hasDetailsButton(childComposite))
-                return true;
-        }
-        return false;
+        if (data instanceof ErrorDialog)
+            return true;
+        if (data == null)
+            return false;
+        String name = data.getClass().getName();
+        return INTERNAL_DIALOG.equals(name)
+            || RUNTIME_EXECUTION_ERROR_DIALOG.equals(name)
+            || STATUS_DIALOG.equals(name);
+    }
+
+    private static boolean isOkOrDetailsLabel(String text)
+    {
+        if (text == null || text.isEmpty())
+            return false;
+        String label = text.replace("&", ""); //$NON-NLS-1$ //$NON-NLS-2$
+        if (label.contains(DETAILS_SNIPPET))
+            return true;
+        String ok = IDialogConstants.OK_LABEL;
+        if (ok != null && label.equals(ok.replace("&", ""))) //$NON-NLS-1$ //$NON-NLS-2$
+            return true;
+        return "OK".equals(label) || "ОК".equals(label); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     private static boolean tryPatch(Shell shell)
     {
+        if (shell.isDisposed())
+            return false;
+        if (alreadyPatched(shell))
+            return true;
+
         Button barButton = findOkButton(shell);
         if (barButton == null)
             return false;
@@ -135,23 +202,19 @@ public final class ErrorDialogLinksHook implements IStartup
         if (!(buttonBar.getLayout() instanceof GridLayout layout))
             return false;
 
-        if (findDialogButtonByLabel(shell, LINKS_BUTTON_LABEL) != null)
-        {
-            shell.setData(PATCHED_KEY, Boolean.TRUE);
-            return true;
-        }
-
-        shell.setData(PATCHED_KEY, Boolean.TRUE);
-
         Button links = new Button(buttonBar, SWT.PUSH);
         links.setText(LINKS_BUTTON_LABEL);
         links.setToolTipText(LINKS_BUTTON_TOOLTIP + Global.pluginSignForTooltip());
         applyButtonLayoutData(links, barButton);
+        // Справа от «Сведения» кнопка уезжает за край: панель HORIZONTAL_ALIGN_END
+        // и уже упакована под две кнопки. Ставим «Ссылки» слева от OK.
+        links.moveAbove(barButton);
         layout.numColumns++;
 
         Object dialog = shell.getData();
         links.addListener(SWT.Selection, e -> openLinks(shell, dialog));
-        buttonBar.layout(true, true);
+        relayoutButtonBar(shell, buttonBar, links);
+        shell.setData(PATCHED_KEY, Boolean.TRUE);
         return true;
     }
 
@@ -438,6 +501,35 @@ public final class ErrorDialogLinksHook implements IStartup
     private static boolean isIdentChar(char c)
     {
         return Character.isLetterOrDigit(c) || c == '_';
+    }
+
+    /**
+     * Панель кнопок jface — {@code HORIZONTAL_ALIGN_END} без grab: после pack она
+     * шириной ровно в две кнопки. {@code buttonBar.layout} не двигает родителя,
+     * третья кнопка рисуется правее «Сведения» и обрезается краем окна.
+     */
+    private static void relayoutButtonBar(Shell shell, Composite buttonBar, Button links)
+    {
+        buttonBar.layout(true, true);
+        Composite parent = buttonBar.getParent();
+        if (parent != null && !parent.isDisposed())
+            parent.layout(true, true);
+        shell.layout(true, true);
+
+        Point need = buttonBar.computeSize(SWT.DEFAULT, SWT.DEFAULT, true);
+        Point have = buttonBar.getSize();
+        int extra = Math.max(0, need.x - have.x);
+        if (extra == 0 && !links.isDisposed())
+        {
+            Point linksSize = links.getSize();
+            extra = Math.max(0, links.getLocation().x + linksSize.x - have.x);
+        }
+        if (extra > 0)
+        {
+            Point shellSize = shell.getSize();
+            shell.setSize(shellSize.x + extra, shellSize.y);
+            shell.layout(true, true);
+        }
     }
 
     private static String[] topFolders()

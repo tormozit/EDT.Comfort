@@ -14,6 +14,7 @@
     <startup class="tormozit.BslModulePositionMemoryHook"/>
     <startup class="tormozit.HorizontalScrollBarPositionFixHook"/>
     <startup class="tormozit.BslEditorRevealScrollFixHook"/>
+    <startup class="tormozit.BslRevisionOccurrenceHighlightHook"/>
     <startup class="tormozit.BlameHyperlinkOpenFixHook"/>
     <startup class="tormozit.TextEditorRightClickCaretHook"/>
     <startup class="tormozit.TextEditorCtrlClickSelectWordHook"/>
@@ -90,6 +91,7 @@
     <startup class="tormozit.ErrorDialogActivateHook"/>
     <startup class="tormozit.ErrorDialogLinksHook"/>
     <startup class="tormozit.StacktracesViewInteractionHook"/>
+    <startup class="tormozit.StacktraceCompileFormatHook"/>
     <startup class="tormozit.InfobaseSyncQuestionDialogHook"/>
     <startup class="tormozit.DeployConfigurationFixHook"/>
     <startup class="tormozit.LongOperationNotifyHook"/>

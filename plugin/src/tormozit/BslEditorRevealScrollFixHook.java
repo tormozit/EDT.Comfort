@@ -9,6 +9,7 @@ import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.widgets.Display;
+import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.ScrollBar;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
@@ -53,12 +54,25 @@ import java.util.Set;
  * {@code getHorizontalPixel()} не с чем, «прыжок» этим способом не поймать. Поэтому на самом
  * подключении текущее выделение сразу приводится к тому же виду, не дожидаясь очередного
  * {@code selectionChanged}.
+ *
+ * <p>Восстановление редакторов при старте EDT — тот же штатный {@code selectAndReveal}, но
+ * раньше хук его часто пропускал: активный редактор не находился через
+ * {@code IEditorReference.getEditor(false)} (см. {@link BslModulePositionMemoryHook}),
+ * вложенный BSL-редактор granular-страницы «Модуль» ещё не был создан, а
+ * {@code applyLeftmost} при нулевой ширине клиентской области сам ставил прокрутку по каретке.
+ * Подключение совпадает с соседними хуками; первое применение ждёт ненулевую ширину
+ * ({@code SWT.Resize} + короткие {@code timerExec}, пока пользователь сам не сдвинул полосу).
  */
 public class BslEditorRevealScrollFixHook implements IStartup
 {
     private static final String INSTALLED_MARKER = "tormozit.bslRevealScrollFixInstalled"; //$NON-NLS-1$
     private static final String LAST_SCROLL_MARKER = "tormozit.bslRevealScrollFixLastPixel"; //$NON-NLS-1$
+    private static final String USER_HSCROLL_MARKER = "tormozit.bslRevealScrollFixUserHScroll"; //$NON-NLS-1$
+    private static final String RESIZE_LISTENER_MARKER = "tormozit.bslRevealScrollFixResize"; //$NON-NLS-1$
+    private static final String SETTLE_STARTED_MARKER = "tormozit.bslRevealScrollFixSettle"; //$NON-NLS-1$
     private static final int MAX_ATTACH_ATTEMPTS = 100;
+    /** Повтор apply после раскладки/отложенного reveal при restore (Xtext, позиция модуля). */
+    private static final int[] SETTLE_DELAYS_MS = { 0, 150, 500 };
 
     private final Set<DtGranularEditor<?>> hookedGranularEditors = new HashSet<>();
 
@@ -81,10 +95,21 @@ public class BslEditorRevealScrollFixHook implements IStartup
         IWorkbenchPage page = window.getActivePage();
         if (page != null)
         {
+            // Активный редактор при старте EDT восстановлен синхронно (уже виден на экране),
+            // но остальные вкладки — лениво: ref.getEditor(false) для них вернёт null, и это
+            // нормально, partActivated поймает их при реальном переключении позже. А для уже
+            // активного (значит, точно материализованного) редактора getEditor(false) мог
+            // вернуть null из-за гонки между own asyncExec здесь и восстановлением состояния
+            // workbench — тогда partActivated для него уже не прилетит. Поэтому активный
+            // редактор достаётся отдельно, напрямую через getActiveEditor(), в обход ref.
+            IEditorPart active = page.getActiveEditor();
+            if (active != null)
+                hookEditorIfNeeded(active);
+
             for (IEditorReference ref : page.getEditorReferences())
             {
                 IEditorPart ed = ref.getEditor(false);
-                if (ed != null)
+                if (ed != null && ed != active)
                     hookEditorIfNeeded(ed);
             }
         }
@@ -130,7 +155,7 @@ public class BslEditorRevealScrollFixHook implements IStartup
 
     private void hookGranularEditor(DtGranularEditor<?> editor)
     {
-        hookGranularEditorActivePage(editor);
+        hookGranularEditorActivePage(editor, 0);
 
         if (hookedGranularEditors.add(editor))
         {
@@ -146,13 +171,15 @@ public class BslEditorRevealScrollFixHook implements IStartup
                             ((DtGranularEditorXtextEditorPage<?>)selectedPage).getEmbeddedEditor();
                         if (embedded instanceof BslXtextEditor)
                             hookBslEditor((BslXtextEditor)embedded);
+                        else
+                            hookGranularEditorActivePage(editor, 0);
                     }
                 }
             });
         }
     }
 
-    private void hookGranularEditorActivePage(DtGranularEditor<?> editor)
+    private void hookGranularEditorActivePage(DtGranularEditor<?> editor, int attempt)
     {
         IFormPage activePage = editor.getActivePageInstance();
         if (!(activePage instanceof DtGranularEditorXtextEditorPage<?>))
@@ -160,7 +187,13 @@ public class BslEditorRevealScrollFixHook implements IStartup
         IEditorPart embedded =
             ((DtGranularEditorXtextEditorPage<?>)activePage).getEmbeddedEditor();
         if (embedded instanceof BslXtextEditor)
+        {
             hookBslEditor((BslXtextEditor)embedded);
+            return;
+        }
+        if (attempt >= MAX_ATTACH_ATTEMPTS || isWorkbenchClosing())
+            return;
+        Display.getDefault().asyncExec(() -> hookGranularEditorActivePage(editor, attempt + 1));
     }
 
     private void hookBslEditor(BslXtextEditor editor)
@@ -190,33 +223,39 @@ public class BslEditorRevealScrollFixHook implements IStartup
             return;
         textWidget.setData(INSTALLED_MARKER, Boolean.TRUE);
 
-        // К моменту подключения (мы приходим сюда через asyncExec) штатный selectAndReveal у
-        // свежесозданного виджета уже мог отработать — сравнивать не с чем, «прошлого» состояния
-        // без прыжка мы не видели. Поэтому сразу приводим текущее выделение к тому же виду, не
-        // дожидаясь следующего selectionChanged.
-        Point initialSelection = textWidget.getSelectionRange();
-        if (initialSelection != null)
+        if (viewer.getSelectionProvider() != null)
         {
-            SearchMatchScrollSupport.applyLeftmost(textWidget, initialSelection.x,
-                initialSelection.x + Math.max(0, initialSelection.y));
+            ISelectionChangedListener selListener = event -> onSelectionChanged(textWidget);
+            viewer.getSelectionProvider().addSelectionChangedListener(selListener);
+            textWidget.addDisposeListener(e -> viewer.getSelectionProvider()
+                .removeSelectionChangedListener(selListener));
         }
-        textWidget.setData(LAST_SCROLL_MARKER, textWidget.getHorizontalPixel());
-
-        if (viewer.getSelectionProvider() == null)
-            return;
-
-        ISelectionChangedListener selListener = event -> onSelectionChanged(textWidget);
-        viewer.getSelectionProvider().addSelectionChangedListener(selListener);
-        textWidget.addDisposeListener(e -> viewer.getSelectionProvider().removeSelectionChangedListener(selListener));
 
         // Прокрутка колёсиком/драгом скроллбара без движения каретки не порождает
         // selectionChanged — держим кэш «последней известной» позиции в курсе и от неё,
         // иначе следующий обычный клик по уже видимому месту ошибочно примем за прыжок.
+        // Нативный SWT.Selection полосы — жест пользователя: дальше не перебиваем прокрутку
+        // отложенным apply при restore.
         ScrollBar hBar = textWidget.getHorizontalBar();
         if (hBar != null)
         {
-            hBar.addListener(SWT.Selection, e -> textWidget.setData(LAST_SCROLL_MARKER, textWidget.getHorizontalPixel()));
+            hBar.addListener(SWT.Selection, e ->
+            {
+                textWidget.setData(LAST_SCROLL_MARKER, textWidget.getHorizontalPixel());
+                textWidget.setData(USER_HSCROLL_MARKER, Boolean.TRUE);
+                removeResizeListener(textWidget);
+            });
         }
+
+        // К моменту подключения штатный selectAndReveal у свежесозданного виджета уже мог
+        // отработать — сравнивать не с чем. При restore клиентская область часто ещё нулевая:
+        // applyLeftmost тогда сам ставит прокрутку по каретке. Ждём ширину и короткий settle.
+        Listener resizeListener = e -> applyLeftmostIfReady(textWidget);
+        textWidget.addListener(SWT.Resize, resizeListener);
+        textWidget.setData(RESIZE_LISTENER_MARKER, resizeListener);
+        textWidget.addDisposeListener(e -> removeResizeListener(textWidget));
+
+        applyLeftmostIfReady(textWidget);
     }
 
     private static boolean isWorkbenchClosing()
@@ -227,6 +266,53 @@ public class BslEditorRevealScrollFixHook implements IStartup
     // =========================================================================
     // Коррекция прокрутки
     // =========================================================================
+
+    private static void applyLeftmostIfReady(StyledText textWidget)
+    {
+        if (textWidget.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(textWidget.getData(USER_HSCROLL_MARKER)))
+            return;
+        if (textWidget.getClientArea().width <= 0)
+            return;
+        Point selection = textWidget.getSelectionRange();
+        if (selection == null)
+            return;
+        SearchMatchScrollSupport.applyLeftmost(textWidget, selection.x,
+            selection.x + Math.max(0, selection.y));
+        textWidget.setData(LAST_SCROLL_MARKER, textWidget.getHorizontalPixel());
+        startSettleIfNeeded(textWidget);
+    }
+
+    private static void startSettleIfNeeded(StyledText textWidget)
+    {
+        if (Boolean.TRUE.equals(textWidget.getData(SETTLE_STARTED_MARKER)))
+            return;
+        textWidget.setData(SETTLE_STARTED_MARKER, Boolean.TRUE);
+        Display display = textWidget.getDisplay();
+        int lastDelay = SETTLE_DELAYS_MS[SETTLE_DELAYS_MS.length - 1];
+        for (int delay : SETTLE_DELAYS_MS)
+        {
+            int delayCopy = delay;
+            display.timerExec(delayCopy, () ->
+            {
+                applyLeftmostIfReady(textWidget);
+                if (delayCopy == lastDelay)
+                    removeResizeListener(textWidget);
+            });
+        }
+    }
+
+    private static void removeResizeListener(StyledText textWidget)
+    {
+        if (textWidget.isDisposed())
+            return;
+        Object listener = textWidget.getData(RESIZE_LISTENER_MARKER);
+        if (!(listener instanceof Listener))
+            return;
+        textWidget.removeListener(SWT.Resize, (Listener)listener);
+        textWidget.setData(RESIZE_LISTENER_MARKER, null);
+    }
 
     private static void onSelectionChanged(StyledText textWidget)
     {

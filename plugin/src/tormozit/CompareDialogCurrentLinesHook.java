@@ -32,6 +32,10 @@ import com._1c.g5.v8.dt.core.platform.IDtProject;
  * с {@code DtCompareEditorInput}). Не трогает «Вставить со сравнением» и прочие
  * {@code CompareDialog} без этого input. Класс EDT детектируем по имени — без
  * compile-зависимости на {@code SaveableCompareEditorInput} ({@code org.eclipse.team.ui}).
+ *
+ * <p>Если диалог открыт командой попарного сравнения из 3-way окна объединения модулей,
+ * заголовки сторон берутся из названий сторон исходного окна (колонки дерева /
+ * панель «Текущая строка»), а не из имени секции модуля.
  */
 public final class CompareDialogCurrentLinesHook
 {
@@ -165,12 +169,26 @@ public final class CompareDialogCurrentLinesHook
         viewerControl.setLayoutData(new GridData(SWT.FILL, SWT.FILL, true, true));
 
         CompareConfiguration config = editorInput.getCompareConfiguration();
+        ITypedElement leftElement = resolveLeft(editorInput);
+        ITypedElement rightElement = resolveRight(editorInput);
         /*
          * Семантические подписи (левый/правый input). CLabel при attach часто ещё
          * до применения запомненного MIRRORED — не считать их визуальными.
          */
         String semanticLeft = resolveSemanticSideLabel(viewer, config, true);
         String semanticRight = resolveSemanticSideLabel(viewer, config, false);
+        String[] fromThreeWay = ThreeSideMergeCurrentLinesHook.pairwiseLabelsFromParent(
+            shell, leftElement, rightElement);
+        boolean remappedFromThreeWay = false;
+        if (fromThreeWay != null)
+        {
+            if (fromThreeWay[0] != null && !fromThreeWay[0].isBlank())
+                semanticLeft = fromThreeWay[0];
+            if (fromThreeWay[1] != null && !fromThreeWay[1].isBlank())
+                semanticRight = fromThreeWay[1];
+            remappedFromThreeWay = true;
+            applyHeaderLabels(config, viewer, semanticLeft, semanticRight);
+        }
 
         CompareCurrentLinesPanel panel = CompareCurrentLinesPanel.create(wrapper,
             labelOrDefault(semanticLeft, "Слева:"), labelOrDefault(semanticRight, "Справа:")); //$NON-NLS-1$ //$NON-NLS-2$
@@ -178,6 +196,11 @@ public final class CompareDialogCurrentLinesHook
 
         pane.setContent(wrapper);
         pane.layout(true, true);
+        if (remappedFromThreeWay)
+        {
+            applyHeaderLabels(config, viewer, semanticLeft, semanticRight);
+            scheduleHeaderLabelRefresh(config, viewer, semanticLeft, semanticRight);
+        }
 
         StyledText leftText = MergeViewerReflection.extractStyledText(viewer, "fLeft"); //$NON-NLS-1$
         StyledText rightText = MergeViewerReflection.extractStyledText(viewer, "fRight"); //$NON-NLS-1$
@@ -231,6 +254,41 @@ public final class CompareDialogCurrentLinesHook
         }
         return MergeViewerReflection.extractLabelText(viewer,
             left ? "fLeftLabel" : "fRightLabel"); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    /**
+     * Пишет подписи сторон в {@link CompareConfiguration} и в
+     * {@code ContentMergeViewer.fLeftLabel}/{@code fRightLabel}. Тот же приём, что
+     * {@link GitCompareCurrentLinesHook}: штатный {@code updateHeader} иначе откатывает шапку.
+     */
+    private static void applyHeaderLabels(CompareConfiguration config, TextMergeViewer viewer,
+        String leftLabel, String rightLabel)
+    {
+        if (viewer == null || viewer.getControl() == null || viewer.getControl().isDisposed())
+            return;
+        if (config != null)
+        {
+            if (leftLabel != null)
+                config.setLeftLabel(leftLabel);
+            if (rightLabel != null)
+                config.setRightLabel(rightLabel);
+        }
+        boolean mirrored = config != null && config.isMirrored();
+        String visualLeft = mirrored ? rightLabel : leftLabel;
+        String visualRight = mirrored ? leftLabel : rightLabel;
+        MergeViewerReflection.setLabelText(viewer, "fLeftLabel", visualLeft); //$NON-NLS-1$
+        MergeViewerReflection.setLabelText(viewer, "fRightLabel", visualRight); //$NON-NLS-1$
+    }
+
+    private static void scheduleHeaderLabelRefresh(CompareConfiguration config, TextMergeViewer viewer,
+        String leftLabel, String rightLabel)
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() -> applyHeaderLabels(config, viewer, leftLabel, rightLabel));
+        display.timerExec(100, () -> applyHeaderLabels(config, viewer, leftLabel, rightLabel));
+        display.timerExec(500, () -> applyHeaderLabels(config, viewer, leftLabel, rightLabel));
     }
 
     private static void addToolbarActions(CompareViewerPane pane, CompareCurrentLinesPanel panel,

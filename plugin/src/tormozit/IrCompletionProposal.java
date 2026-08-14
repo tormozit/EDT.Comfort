@@ -377,11 +377,9 @@ public final class IrCompletionProposal implements
     }
 
     /**
-     * Вычисляет позицию начала маски модуля (включая {@code .} перед маской)
-     * для предложений с {@code replaceParentOnInsert}.
-     * <p>Сканирует влево от {@code offset}: пропускает {@code .}, затем идентификаторные
-     * символы маски (как {@link SmartContentAssistProcessor#computeIdentifierWordStart},
-     * но захватывает {@code .} и текст до него).
+     * Начало заменяемого диапазона {@code родитель.маска} при {@code replaceParentOnInsert}.
+     * <p>Влево от каретки: текущий идентификатор (маска), точка, идентификатор родителя.
+     * Покрывает и {@code Служебный_.}, и {@code ОбщегоНазначения._}.
      */
     static int computeMaskPrefixStart(IDocument document, int offset)
     {
@@ -390,6 +388,8 @@ public final class IrCompletionProposal implements
         try
         {
             int pos = offset;
+            while (pos > 0 && SmartContentAssistProcessor.isFilterChar(document.getChar(pos - 1)))
+                pos--;
             if (pos > 0 && document.getChar(pos - 1) == '.')
                 pos--;
             while (pos > 0 && SmartContentAssistProcessor.isFilterChar(document.getChar(pos - 1)))

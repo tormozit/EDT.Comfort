@@ -463,7 +463,7 @@ public final class ParamHintHtmlModifier
             IDocument document = viewer.getDocument();
             if (!(document instanceof IXtextDocument xdoc))
                 return;
-            int caret = viewer.getTextWidget().getCaretOffset();
+            int caret = SmartContentAssistProcessor.resolveWidgetCaret(viewer);
             org.eclipse.ui.IWorkbenchSite site = editor.getSite();
 
             final Object handlerRef = handler;
@@ -3104,9 +3104,8 @@ public final class ParamHintHtmlModifier
             active.document = document;
             active.caret = -1;
             ITextViewer viewer = bslEditor.getInternalSourceViewer();
-            if (viewer != null && viewer.getTextWidget() instanceof StyledText st
-                && !st.isDisposed())
-                active.caret = st.getCaretOffset();
+            if (viewer != null)
+                active.caret = SmartContentAssistProcessor.resolveWidgetCaret(viewer);
             return active;
         }
         catch (Exception ignored)

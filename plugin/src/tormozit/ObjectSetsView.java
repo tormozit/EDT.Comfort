@@ -10,8 +10,12 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 
 import org.eclipse.core.resources.IProject;
+import org.eclipse.core.resources.IResourceChangeEvent;
+import org.eclipse.core.resources.IResourceChangeListener;
+import org.eclipse.core.resources.IResourceDelta;
 import org.eclipse.core.resources.ResourcesPlugin;
 import org.eclipse.emf.ecore.EObject;
 import org.eclipse.jface.dialogs.IDialogSettings;
@@ -58,6 +62,7 @@ import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.FileDialog;
 import org.eclipse.swt.widgets.Label;
+import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Shell;
@@ -92,6 +97,8 @@ public final class ObjectSetsView extends ViewPart
 
     private static final String ITEM_TEXT_SHOW_IN_NAVIGATOR =
         "Показать в навигаторе \tCTRL+T"; //$NON-NLS-1$
+    private static final String ACTIVE_COLUMN_TOOLTIP =
+        "Двойной щелчок делает набор активным"; //$NON-NLS-1$
 
     private static final String SETTINGS_SECTION = "ObjectSetsView"; //$NON-NLS-1$
     private static final String KEY_SASH = "sashWeights"; //$NON-NLS-1$
@@ -182,6 +189,10 @@ public final class ObjectSetsView extends ViewPart
 
     /** Динамический состав системного набора («<Измененные>»); сброс при активации строки. */
     private List<ObjectSets.Item> gitChangedItemsCache;
+    /** Число объектов системного набора по проекту; сброс при изменении git-статуса. */
+    private final Map<String, Integer> gitChangedCountByProject = new HashMap<>();
+    private IResourceChangeListener gitChangedRefreshListener;
+    private boolean gitChangedRefreshPending;
 
     /** Ключ объекта для восстановления после закрытия вкладки (однократно). */
     private String pendingItemKeyRestore;
@@ -285,6 +296,7 @@ public final class ObjectSetsView extends ViewPart
 
         ObjectSets.getInstance().addChangeListener(storeListener);
         ObjectSetsAddTargetState.getInstance().addListener(storeListener);
+        installGitChangedRefreshListener();
         installContextProjectListener();
         refreshSetsTable();
         activateKeyContext();
@@ -325,6 +337,7 @@ public final class ObjectSetsView extends ViewPart
         saveSelection();
         ObjectSets.getInstance().removeChangeListener(storeListener);
         ObjectSetsAddTargetState.getInstance().removeListener(storeListener);
+        uninstallGitChangedRefreshListener();
         IWorkbenchPage page = getSite() != null ? getSite().getPage() : null;
         if (page != null && contextProjectListener != null)
             ActiveProjectTracker.removeListener(page, contextProjectListener);
@@ -497,6 +510,7 @@ public final class ObjectSetsView extends ViewPart
         TableViewerColumn colActive = new TableViewerColumn(setsViewer, SWT.NONE);
         activeColumn = colActive.getColumn();
         activeColumn.setText("Активный"); //$NON-NLS-1$
+        activeColumn.setToolTipText(ACTIVE_COLUMN_TOOLTIP);
         colActive.setLabelProvider(new ColumnLabelProvider()
         {
             @Override
@@ -532,7 +546,7 @@ public final class ObjectSetsView extends ViewPart
             {
                 if (!(element instanceof ObjectSets.SetDef set))
                     return ""; //$NON-NLS-1$
-                return Integer.toString(set.items.size());
+                return Integer.toString(displayItemCount(set));
             }
         });
         layout.setColumnData(countColumn, new ColumnPixelData(64, false, false));
@@ -557,6 +571,7 @@ public final class ObjectSetsView extends ViewPart
         // Отбор по значению ячейки работает по элементу модели — живого TableItem там ещё нет.
         setsInteraction.setFilterTextResolver((element, column) -> setColumnText(element, table, column));
         setsInteraction.install();
+        installActiveColumnHoverTooltip(table);
 
         table.addListener(SWT.MouseDoubleClick, e ->
         {
@@ -600,6 +615,34 @@ public final class ObjectSetsView extends ViewPart
         loadButton = createButton(buttons, "Загрузить", this::importSets); //$NON-NLS-1$
     }
 
+    private void installActiveColumnHoverTooltip(Table table)
+    {
+        Listener hover = e ->
+        {
+            String tip = null;
+            if (e.type != SWT.MouseExit)
+            {
+                Point p = new Point(e.x, e.y);
+                TableItem row = table.getItem(p);
+                if (row != null)
+                {
+                    for (int i = 0; i < table.getColumnCount(); i++)
+                    {
+                        if (row.getBounds(i).contains(p) && table.getColumn(i) == activeColumn)
+                        {
+                            tip = ACTIVE_COLUMN_TOOLTIP;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!Objects.equals(table.getToolTipText(), tip))
+                table.setToolTipText(tip);
+        };
+        table.addListener(SWT.MouseMove, hover);
+        table.addListener(SWT.MouseExit, hover);
+    }
+
     private static Button createButton(Composite parent, String text, Runnable action)
     {
         Button button = new Button(parent, SWT.PUSH);
@@ -634,11 +677,13 @@ public final class ObjectSetsView extends ViewPart
             return;
         ensureDefaultSetForActiveProject();
         filteredSets = new ArrayList<>(ObjectSets.getInstance().getAllSets());
-        filteredSets.removeIf(set -> set.system && !ObjectSetsItems.isProjectUnderGit(set.projectName));
+        filteredSets.removeIf(set -> !ObjectSets.isProjectOpen(set.projectName)
+            || (set.system && !ObjectSetsItems.isProjectUnderGit(set.projectName)));
         filteredSets.sort(SETS_DISPLAY_ORDER);
         applyFilter();
         ObjectSets.SetDef keep = selectedSet;
         setsViewer.setInput(filteredSets);
+        selectedSet = null;
         if (keep != null)
         {
             for (ObjectSets.SetDef set : filteredSets)
@@ -785,6 +830,121 @@ public final class ObjectSetsView extends ViewPart
         ObjectSets.getInstance().ensureSystemSetForProject(projectName);
     }
 
+    /** Число объектов в строке набора: для «<Измененные>» — текущий git-состав, не пустой set.items. */
+    private int displayItemCount(ObjectSets.SetDef set)
+    {
+        if (set == null)
+            return 0;
+        if (!set.system)
+            return set.items.size();
+        if (gitChangedItemsCache != null && selectedSet != null && set.id.equals(selectedSet.id))
+            return gitChangedItemsCache.size();
+        Integer cached = gitChangedCountByProject.get(set.projectName);
+        if (cached != null)
+            return cached;
+        List<ObjectSets.Item> items = ObjectSetsItems.collectGitChangedItems(set.projectName);
+        gitChangedCountByProject.put(set.projectName, items.size());
+        return items.size();
+    }
+
+    private void syncSystemSetCountAfterItemsRefresh()
+    {
+        if (selectedSet == null || !selectedSet.system || gitChangedItemsCache == null)
+            return;
+        int count = gitChangedItemsCache.size();
+        Integer previous = gitChangedCountByProject.put(selectedSet.projectName, count);
+        if (previous != null && previous.intValue() == count)
+            return;
+        if (setsViewer != null && !setsViewer.getControl().isDisposed())
+            setsViewer.refresh(selectedSet, true);
+    }
+
+    private void installGitChangedRefreshListener()
+    {
+        if (gitChangedRefreshListener != null)
+            return;
+        gitChangedRefreshListener = event ->
+        {
+            if (event.getType() != IResourceChangeEvent.POST_CHANGE)
+                return;
+            IResourceDelta root = event.getDelta();
+            if (root == null || !deltaAffectsSystemSetProjects(root))
+                return;
+            scheduleGitChangedRefresh();
+        };
+        ResourcesPlugin.getWorkspace().addResourceChangeListener(
+            gitChangedRefreshListener, IResourceChangeEvent.POST_CHANGE);
+    }
+
+    private void uninstallGitChangedRefreshListener()
+    {
+        if (gitChangedRefreshListener == null)
+            return;
+        ResourcesPlugin.getWorkspace().removeResourceChangeListener(gitChangedRefreshListener);
+        gitChangedRefreshListener = null;
+        gitChangedRefreshPending = false;
+    }
+
+    private void scheduleGitChangedRefresh()
+    {
+        if (gitChangedRefreshPending)
+            return;
+        gitChangedRefreshPending = true;
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed())
+        {
+            gitChangedRefreshPending = false;
+            return;
+        }
+        display.timerExec(400, () ->
+        {
+            gitChangedRefreshPending = false;
+            if (setsViewer == null || setsViewer.getControl().isDisposed())
+                return;
+            gitChangedItemsCache = null;
+            gitChangedCountByProject.clear();
+            refreshSetsTable();
+        });
+    }
+
+    private boolean deltaAffectsSystemSetProjects(IResourceDelta root)
+    {
+        for (ObjectSets.SetDef set : ObjectSets.getInstance().getAllSets())
+        {
+            if (!set.system || !ObjectSets.isProjectOpen(set.projectName))
+                continue;
+            IProject project = ResourcesPlugin.getWorkspace().getRoot().getProject(set.projectName);
+            if (project == null)
+                continue;
+            IResourceDelta member = root.findMember(project.getFullPath());
+            if (member != null && isGitRelevantDelta(member))
+                return true;
+        }
+        return false;
+    }
+
+    private static boolean isGitRelevantDelta(IResourceDelta delta)
+    {
+        if (delta == null)
+            return false;
+        int kind = delta.getKind();
+        if (kind == IResourceDelta.ADDED || kind == IResourceDelta.REMOVED)
+            return true;
+        if (kind == IResourceDelta.CHANGED)
+        {
+            int flags = delta.getFlags();
+            if ((flags & (IResourceDelta.CONTENT | IResourceDelta.REPLACED
+                | IResourceDelta.MOVED_FROM | IResourceDelta.MOVED_TO)) != 0)
+                return true;
+        }
+        for (IResourceDelta child : delta.getAffectedChildren())
+        {
+            if (isGitRelevantDelta(child))
+                return true;
+        }
+        return false;
+    }
+
     void refreshItemsForSetIfSelected(String setId)
     {
         if (setId == null || selectedSet == null || !setId.equals(selectedSet.id))
@@ -915,6 +1075,7 @@ public final class ObjectSetsView extends ViewPart
             if (itemsInteraction != null)
                 itemsInteraction.resyncSelectionTheme();
         }
+        syncSystemSetCountAfterItemsRefresh();
     }
 
     private boolean restoreItemSelectionByKey(String key)
@@ -1372,7 +1533,7 @@ public final class ObjectSetsView extends ViewPart
         if (col == setNameColumn)
             return set.name != null ? set.name : ""; //$NON-NLS-1$
         if (col == countColumn)
-            return Integer.toString(set.items.size());
+            return Integer.toString(displayItemCount(set));
         if (col == projectColumn)
             return set.projectName != null ? set.projectName : ""; //$NON-NLS-1$
         return ""; //$NON-NLS-1$

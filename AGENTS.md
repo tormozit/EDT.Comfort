@@ -258,6 +258,21 @@ powershell -NoProfile -File "C:\VC\EDT.Comfort\.cursor\scripts\repair-double-eol
 
 **Решение:** перехватывать команду, не клавишу — `ICommandService.addExecutionListener` (`preExecute`/`notHandled` срабатывают независимо от пути; `ExecutionEvent.getTrigger()` при необходимости). Эталоны: `KeyBindingToastHook`, `PreferenceSearchFilterAugmenter.wireTreeCopy`/`handlePossibleTreeCopy`. Для View с `IActionBars` — альтернатива через `globalActions`, см. `DebugInspectorTreeEnhancement.hookGlobalCopyAction()` (не подходит для модальных диалогов вроде `PreferenceDialog`).
 
+## Каретка редактора: виджет ≠ модель (folding)
+
+В BSL-редакторе EDT две системы координат. Без свёрток они совпадают — баг молчит. Со свёртками выше каретки виджетный офсет меньше модельного на сумму скрытого текста (типично тысячи символов: `2718` vs `14526`).
+
+| Координаты | Откуда | Для чего |
+| ---------- | ------ | -------- |
+| **Виджет** (видимый текст) | `StyledText.getCaretOffset()`, `getLocationAtOffset`, `getLineAtOffset` | Только API самого `StyledText` (экран, линия виджета, `setCaretOffset`) |
+| **Модель** (весь документ) | `ITextViewer.getSelectedRange()`, `DocumentEvent.getOffset()`, `ContentAssistant` `invocationOffset`/`filterOffset`, `IDocument.get/getChar` | Документ, AST, префикс, LinkedMode, «Родитель:», сравнение каретки с offset события |
+
+`StyledText.getCaretOffset()` **нельзя** передавать в `IDocument`, Xtext/AST, `findMemberAccessDot`, сравнение с `DocumentEvent.getOffset()` / `desiredCaret` LinkedMode, чтение префикса строки.
+
+Перевод: `ITextViewerExtension5.widgetOffset2ModelOffset`. Эталоны: `SmartContentAssistProcessor.resolveWidgetCaret` / `widgetToModelOffset`, `ContentAssistSessionReloader.modelCaretOffset()`. Новый код каретки для документа — только через них, не копировать `getTextWidget().getCaretOffset()`.
+
+Инциденты: issue 278 (автооткрытие), подсказка параметров после вставки (виджет `2718` vs модель `14526`), футер «Родитель:» (виджет попадал в чужой идентификатор).
+
 ## OpenHelper.openEditor(EObject, EStructuralFeature) — feature не «активировать свойство»
 
 `feature` в `OpenHelper.openEditor(...)` — не «какое свойство выделить в Свойствах» и не `eContainingFeature()`. Декомпиляция `getFile()`: `feature` используется только как резерв для поиска BSL-модуля — `object.eGet(feature)`, и если результат `instanceof Module`, открывается его файл (для команд/общих модулей). Иначе — `IllegalArgumentException: The feature 'X' is not a valid feature`.

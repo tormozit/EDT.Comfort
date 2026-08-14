@@ -10,7 +10,10 @@ import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.jface.viewers.CellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
+import org.eclipse.jface.viewers.IColorProvider;
+import org.eclipse.jface.viewers.IFontProvider;
 import org.eclipse.jface.viewers.ILabelProviderListener;
+import org.eclipse.jface.viewers.IToolTipProvider;
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.jface.viewers.StyledString;
@@ -19,6 +22,8 @@ import org.eclipse.jface.viewers.TreeViewerColumn;
 import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.viewers.ViewerFilter;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.graphics.Color;
+import org.eclipse.swt.graphics.Font;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Composite;
@@ -547,7 +552,14 @@ public final class ModuleMergeStructureFilterHook implements IStartup
         }
     }
 
-    private static final class ObjectColumnHighlight implements IStyledLabelProvider, SmartLabelHighlight
+    /**
+     * Раскраска вхождений фильтра в колонке «Объект». Делегирует {@link IColorProvider}/
+     * {@link IFontProvider}/{@link IToolTipProvider} штатному {@code ObjectColumnLabelProvider}:
+     * {@code DelegatingStyledCellLabelProvider} берёт фон сравнения только если внутренний
+     * provider их реализует — иначе первая колонка остаётся без окраски статуса.
+     */
+    private static final class ObjectColumnHighlight implements IStyledLabelProvider, SmartLabelHighlight,
+        IColorProvider, IFontProvider, IToolTipProvider
     {
         private final IStyledLabelProvider delegate;
         private SmartMatcher highlightMatcher = new SmartMatcher(""); //$NON-NLS-1$
@@ -582,6 +594,42 @@ public final class ModuleMergeStructureFilterHook implements IStartup
         public Image getImage(Object element)
         {
             return delegate.getImage(element);
+        }
+
+        @Override
+        public Color getForeground(Object element)
+        {
+            if (delegate instanceof IColorProvider colors)
+                return colors.getForeground(element);
+            Object color = Global.invoke(delegate, "getForeground", element); //$NON-NLS-1$
+            return color instanceof Color c ? c : null;
+        }
+
+        @Override
+        public Color getBackground(Object element)
+        {
+            if (delegate instanceof IColorProvider colors)
+                return colors.getBackground(element);
+            Object color = Global.invoke(delegate, "getBackground", element); //$NON-NLS-1$
+            return color instanceof Color c ? c : null;
+        }
+
+        @Override
+        public Font getFont(Object element)
+        {
+            if (delegate instanceof IFontProvider fonts)
+                return fonts.getFont(element);
+            Object font = Global.invoke(delegate, "getFont", element); //$NON-NLS-1$
+            return font instanceof Font f ? f : null;
+        }
+
+        @Override
+        public String getToolTipText(Object element)
+        {
+            if (delegate instanceof IToolTipProvider tips)
+                return tips.getToolTipText(element);
+            Object tip = Global.invoke(delegate, "getToolTipText", element); //$NON-NLS-1$
+            return tip instanceof String s ? s : null;
         }
 
         @Override

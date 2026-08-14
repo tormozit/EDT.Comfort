@@ -339,7 +339,7 @@ public final class ExceptionSelectionDialogHook implements IStartup
             Object injectorObj = Global.invoke(plugin, "getInjector"); //$NON-NLS-1$
             if (!(injectorObj instanceof Injector injector))
                 return null;
-            return injector.getInstance(IStacktraceParser.class);
+            return StacktraceCompileFormatHook.wrapParser(injector.getInstance(IStacktraceParser.class));
         }
         catch (Exception e)
         {

@@ -190,6 +190,29 @@ public final class ObjectSets
         }
     }
 
+    /** Проект открыт в workspace (закрытый или отсутствующий — {@code false}). */
+    static boolean isProjectOpen(String projectName)
+    {
+        if (projectName == null || projectName.isBlank())
+            return false;
+        try
+        {
+            IProject project = ResourcesPlugin.getWorkspace().getRoot().getProject(projectName);
+            return project != null && project.isOpen();
+        }
+        catch (Exception e)
+        {
+            ObjectSetsDebug.problem("isProjectOpen: " + e.getMessage()); //$NON-NLS-1$
+            return false;
+        }
+    }
+
+    /** Оповестить слушателей без записи (закрытие/открытие проекта и т.п.). */
+    void fireChanged()
+    {
+        notifyChanged();
+    }
+
     /**
      * Если у проекта нет ни одного набора — создать «Основной».
      * @return созданный набор или {@code null}

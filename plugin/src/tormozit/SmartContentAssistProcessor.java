@@ -29,6 +29,7 @@ import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.IDocumentExtension4;
 import org.eclipse.jface.text.IDocumentListener;
 import org.eclipse.jface.text.ITextViewer;
+import org.eclipse.jface.text.ITextViewerExtension5;
 import org.eclipse.jface.text.link.LinkedModeModel;
 import org.eclipse.jface.text.link.LinkedPosition;
 import org.eclipse.jface.text.link.LinkedPositionGroup;
@@ -104,6 +105,8 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
     private boolean fullListComplete = false;
     /** Позиция '.' контекста member-access для кэша, {@code Integer.MIN_VALUE} — без точки. */
     private int fullListContextKey = Integer.MIN_VALUE;
+    /** Выражение слева от точки; смена при том же offset (имена одной длины) — новый контекст. */
+    private String fullListContextReceiver = ""; //$NON-NLS-1$
     /** Отмена устаревших {@link #scheduleMemberAccessReload}. */
     private int memberAccessReloadSeq = 0;
     /** Уже запланирована догрузка для текущего {@link #memberAccessReloadSeq}. */
@@ -219,20 +222,23 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         java.util.LinkedHashSet<String> types = collectParentTypesFromProposals(fullListCache);
         if (types.isEmpty())
             types = collectParentTypesFromProposals(memberStockFullList);
-        if (types.isEmpty() && !SmartAssistFilterState.isSmartFilterEnabled())
-            types = collectParentTypesFromProposals(lastStableEmptyList);
-        if (types.isEmpty())
-            types = collectParentTypesFromProposals(lastStableDelegateList);
 
         if (types.isEmpty())
+        {
+            Global.tempLog("assist-parent", "resolveReceiverTypeLabel result= empty" //$NON-NLS-1$
+                + " fullN=" + (fullListCache == null ? 0 : fullListCache.length) //$NON-NLS-1$
+                + " stockN=" + (memberStockFullList == null ? 0 : memberStockFullList.length)); //$NON-NLS-1$
             return ""; //$NON-NLS-1$
+        }
 
-        // Если все элементы одного типа — показываем просто тип
-        if (types.size() == 1)
-            return types.iterator().next();
-
-        // Несколько типов — счётчик + первый (основной) тип
-        return "(" + types.size() + ") " + types.iterator().next(); //$NON-NLS-1$ //$NON-NLS-2$
+        String result = types.size() == 1
+            ? types.iterator().next()
+            : "(" + types.size() + ") " + types.iterator().next(); //$NON-NLS-1$ //$NON-NLS-2$
+        Global.tempLog("assist-parent", "resolveReceiverTypeLabel result=" + result //$NON-NLS-1$
+            + " fullN=" + (fullListCache == null ? 0 : fullListCache.length) //$NON-NLS-1$
+            + " stockN=" + (memberStockFullList == null ? 0 : memberStockFullList.length) //$NON-NLS-1$
+            + " types=" + types); //$NON-NLS-1$
+        return result;
     }
 
     private static java.util.LinkedHashSet<String> collectParentTypesFromProposals(
@@ -253,6 +259,27 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         return types;
     }
 
+    String dumpAssistParentState()
+    {
+        StringBuilder sb = new StringBuilder();
+        sb.append("ctxKey=").append(fullListContextKey); //$NON-NLS-1$
+        sb.append(" ctxRecv=").append(ContentAssistDebug.jsonEscapeForLog(fullListContextReceiver)); //$NON-NLS-1$
+        sb.append(" fullN=").append(fullListCache == null ? 0 : fullListCache.length); //$NON-NLS-1$
+        sb.append(" stockN=").append(memberStockFullList == null ? 0 : memberStockFullList.length); //$NON-NLS-1$
+        sb.append(" fullParents=").append(collectParentTypesFromProposals(fullListCache)); //$NON-NLS-1$
+        sb.append(" stockParents=").append(collectParentTypesFromProposals(memberStockFullList)); //$NON-NLS-1$
+        int n = fullListCache == null ? 0 : Math.min(3, fullListCache.length);
+        for (int i = 0; i < n; i++)
+        {
+            String d = displayString(unwrapProposal(fullListCache[i]));
+            if (d != null && d.length() > 80)
+                d = d.substring(0, 80);
+            sb.append(" d").append(i).append("=") //$NON-NLS-1$ //$NON-NLS-2$
+                .append(ContentAssistDebug.jsonEscapeForLog(d));
+        }
+        return sb.toString();
+    }
+
     /**
      * Извлекает часть после {@code ~} в displayString элемента автодополнения.
      * Формат: {@code Имя : ТипЗначения ~ ТипРодителя}
@@ -265,7 +292,79 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         if (tilde < 0)
             return null;
         String after = displayString.substring(tilde + 1).trim();
-        return after.isEmpty() ? null : after;
+        return after.isEmpty() ? null : localizeAssistTypeSegment(after);
+    }
+
+    /**
+     * Английские имена классов МД в типе и родителе подписи assist → русские
+     * ({@code CommonModule.X} → {@code ОбщийМодуль.X}). Имя элемента не трогает.
+     */
+    static String localizeAssistTypeNames(String display)
+    {
+        if (display == null || display.isEmpty())
+            return display;
+        int tilde = display.indexOf(" ~ "); //$NON-NLS-1$
+        String head = tilde >= 0 ? display.substring(0, tilde) : display;
+        String localizedHead = localizeAssistHeadTypes(head);
+        if (tilde < 0)
+            return localizedHead;
+        String parent = display.substring(tilde + 3).trim();
+        String localizedParent = localizeAssistTypeSegment(parent);
+        if (localizedHead.equals(head) && localizedParent.equals(parent))
+            return display;
+        return localizedHead + " ~ " + localizedParent; //$NON-NLS-1$
+    }
+
+    private static String localizeAssistHeadTypes(String head)
+    {
+        int closeParen = head.lastIndexOf(')');
+        int searchFrom = closeParen >= 0 ? closeParen + 1 : 0;
+        int colonIdx = head.indexOf(':', searchFrom);
+        if (colonIdx < 0)
+            return head;
+        int typeStart = colonIdx + 1;
+        while (typeStart < head.length() && head.charAt(typeStart) == ' ')
+            typeStart++;
+        if (typeStart >= head.length())
+            return head;
+        String type = head.substring(typeStart);
+        String localizedType = localizeAssistTypeSegment(type);
+        if (localizedType.equals(type))
+            return head;
+        return head.substring(0, typeStart) + localizedType;
+    }
+
+    /** Тип или родитель assist: {@code CommonModule.X} / {@code <CommonModule.X>} → русские имена классов. */
+    static String localizeAssistTypeSegment(String type)
+    {
+        if (type == null || type.isEmpty())
+            return type;
+        String trimmed = type.trim();
+        if (trimmed.isEmpty())
+            return type;
+        boolean angled = trimmed.length() >= 2
+            && trimmed.charAt(0) == '<'
+            && trimmed.charAt(trimmed.length() - 1) == '>';
+        String inner = angled ? trimmed.substring(1, trimmed.length() - 1) : trimmed;
+        String localized = localizeAssistTypeInner(inner);
+        if (localized.equals(inner))
+            return trimmed;
+        return angled ? '<' + localized + '>' : localized;
+    }
+
+    private static String localizeAssistTypeInner(String inner)
+    {
+        if (inner.indexOf(',') < 0)
+            return MdTypeMapping.translateDottedToRu(inner.trim());
+        String[] parts = inner.split(","); //$NON-NLS-1$
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < parts.length; i++)
+        {
+            if (i > 0)
+                sb.append(", "); //$NON-NLS-1$
+            sb.append(MdTypeMapping.translateDottedToRu(parts[i].trim()));
+        }
+        return sb.toString();
     }
 
     /**
@@ -283,6 +382,9 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
             withoutParams = withoutParams.substring(0, ownerSep).trim();
         int colonIdx = withoutParams.indexOf(':');
         String name = colonIdx >= 0 ? withoutParams.substring(0, colonIdx).trim() : withoutParams;
+        int dash = name.indexOf(" - "); //$NON-NLS-1$
+        if (dash > 0)
+            name = name.substring(0, dash).trim();
         return name.isEmpty() ? "" : name; //$NON-NLS-1$
     }
 
@@ -713,6 +815,7 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         lastStableEmptyList = EMPTY;
         lastStableDelegateList = EMPTY;
         fullListContextKey = Integer.MIN_VALUE;
+        fullListContextReceiver = ""; //$NON-NLS-1$
         memberAccessReloadSeq++;
         memberAccessReloadScheduledSeq = -1;
         resetMemberStockFullList();
@@ -3480,9 +3583,11 @@ if (!SmartAssistFilterState.isSmartFilterEnabled())
                                           boolean allowSyncMemberCapture)
     {
         int contextKey = computeFullListContextKey(doc, caret);
-        if (contextKey != fullListContextKey)
+        String receiver = memberAccessReceiver(doc, caret);
+        if (contextKey != fullListContextKey || !receiver.equals(fullListContextReceiver))
         {
             fullListContextKey = contextKey;
+            fullListContextReceiver = receiver;
             fullListReady = false;
             fullListComplete = false;
             terminalEmptyMemberAccess = false;
@@ -3493,6 +3598,7 @@ if (!SmartAssistFilterState.isSmartFilterEnabled())
             lastTrackedFilter = ""; //$NON-NLS-1$
             memberAccessReloadSeq++;
             memberAccessReloadScheduledSeq = -1;
+            memberStockCaptureGen++;
             resetMemberStockFullList();
             cancelIdleFullListLoad();
             cancelAsyncDelegateLoad();
@@ -3521,6 +3627,15 @@ if (!SmartAssistFilterState.isSmartFilterEnabled())
         }
         if (doc != null && caret >= 0 && !terminalEmptyMemberAccess)
             tryTerminalNonObjectMemberAccess(viewer, doc, caret);
+    }
+
+    static String memberAccessReceiver(IDocument doc, int caret)
+    {
+        int dot = ReceiverTypeLabel.findMemberAccessDot(doc, caret);
+        if (dot < 0)
+            return ""; //$NON-NLS-1$
+        String text = ReceiverTypeLabel.readReceiverExpressionText(doc, dot);
+        return text != null ? text : ""; //$NON-NLS-1$
     }
 
     static int computeFullListContextKey(IDocument doc, int caret)
@@ -3919,10 +4034,12 @@ return best;
         {
             if (captureGen != memberStockCaptureGen)
                 return;
-            if (fullListContextKey != dotContextKey)
-                return;
             IDocument doc = viewer.getDocument();
             int caret = resolveWidgetCaret(viewer);
+            if (fullListContextKey != dotContextKey)
+                return;
+            if (!memberAccessReceiver(doc, caret).equals(fullListContextReceiver))
+                return;
             if (isStringLiteralAssistContext(doc, caret))
                 return;
             if (ReceiverTypeLabel.findMemberAccessDot(doc, caret) != dotContextKey)
@@ -4048,8 +4165,12 @@ return finalizeListForIrAssistDisplay(buildDelegateOrderedList(memberStockFullLi
         {
             if (shiftCaret && widget != null && !widget.isDisposed())
             {
-                savedCaret = widget.getCaretOffset();
-                widget.setCaretOffset(probeOffset);
+                int widgetProbe = modelToWidgetOffset(viewer, probeOffset);
+                if (widgetProbe >= 0)
+                {
+                    savedCaret = widget.getCaretOffset();
+                    widget.setCaretOffset(widgetProbe);
+                }
             }
             ICompletionProposal[] raw;
             if (doc instanceof IXtextDocument)
@@ -4118,12 +4239,14 @@ return finalizeListForIrAssistDisplay(buildDelegateOrderedList(memberStockFullLi
                 return;
             if (!shouldScheduleMemberReload(dotContextKey))
                 return;
+            IDocument doc = viewer.getDocument();
+            int caret = resolveWidgetCaret(viewer);
             if (fullListContextKey != dotContextKey)
+                return;
+            if (!memberAccessReceiver(doc, caret).equals(fullListContextReceiver))
                 return;
             if (fullListCache.length >= MIN_STABLE_MEMBER_CACHE)
                 return;
-            IDocument doc = viewer.getDocument();
-            int caret = resolveWidgetCaret(viewer);
             if (ReceiverTypeLabel.findMemberAccessDot(doc, caret) != dotContextKey)
                 return;
             int prev = fullListCache.length;
@@ -4173,7 +4296,7 @@ return finalizeListForIrAssistDisplay(buildDelegateOrderedList(memberStockFullLi
         return widget >= 0 ? widget : 0;
     }
 
-    /** Каретка виджета — для refresh, смены каретки, idle-загрузки кэша. */
+    /** Каретка в координатах документа (не StyledText / folding). */
     static int resolveWidgetCaret(ITextViewer viewer)
     {
         if (viewer == null)
@@ -4187,11 +4310,38 @@ return finalizeListForIrAssistDisplay(buildDelegateOrderedList(memberStockFullLi
             {
                 int caret = viewer.getTextWidget().getCaretOffset();
                 if (caret >= 0)
-                    return caret;
+                    return widgetToModelOffset(viewer, caret);
             }
         }
         catch (Exception ignored) {}
         return -1;
+    }
+
+    static int widgetToModelOffset(ITextViewer viewer, int widgetOffset)
+    {
+        if (widgetOffset < 0 || viewer == null)
+            return widgetOffset;
+        if (viewer instanceof ITextViewerExtension5 ext5)
+        {
+            int mapped = ext5.widgetOffset2ModelOffset(widgetOffset);
+            if (mapped >= 0)
+                return mapped;
+        }
+        return widgetOffset;
+    }
+
+    static int modelToWidgetOffset(ITextViewer viewer, int modelOffset)
+    {
+        if (modelOffset < 0 || viewer == null)
+            return modelOffset;
+        if (viewer instanceof ITextViewerExtension5 ext5)
+        {
+            int mapped = ext5.modelOffset2WidgetOffset(modelOffset);
+            if (mapped >= 0)
+                return mapped;
+            return -1;
+        }
+        return modelOffset;
     }
 
     static int resolveSessionCaret(ContentAssistant assistant, ITextViewer viewer)
@@ -4836,6 +4986,19 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
 
         static int findMemberAccessDot(IDocument doc, int caret)
         {
+            if (doc == null || caret < 0)
+            {
+                Global.tempLog("assist-parent", "findDot caret=" + caret + " result=-1 reason=noDocOrCaret"); //$NON-NLS-1$
+                return -1;
+            }
+            boolean inLiteral = isStringLiteralAssistContext(doc, caret);
+            if (inLiteral)
+            {
+                Global.tempLog("assist-parent", "findDot caret=" + caret //$NON-NLS-1$
+                    + " result=-1 reason=inLiteral snippet=" //$NON-NLS-1$
+                    + ContentAssistDebug.jsonEscapeForLog(caretSnippet(doc, caret)));
+                return -1;
+            }
             try
             {
                 int pos = caret;
@@ -4850,12 +5013,35 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
                         break;
                 }
                 if (pos <= 0 || doc.getChar(pos - 1) != '.')
+                {
+                    Global.tempLog("assist-parent", "findDot caret=" + caret //$NON-NLS-1$
+                        + " result=-1 reason=noDot pos=" + pos //$NON-NLS-1$
+                        + " snippet=" + ContentAssistDebug.jsonEscapeForLog(caretSnippet(doc, caret))); //$NON-NLS-1$
                     return -1;
-                return pos - 1;
+                }
+                int dot = pos - 1;
+                Global.tempLog("assist-parent", "findDot caret=" + caret + " result=" + dot //$NON-NLS-1$
+                    + " snippet=" + ContentAssistDebug.jsonEscapeForLog(caretSnippet(doc, caret))); //$NON-NLS-1$
+                return dot;
             }
-            catch (Exception ignored)
+            catch (Exception e)
             {
+                Global.tempLog("assist-parent", "findDot caret=" + caret + " result=-1 reason=ex " + e); //$NON-NLS-1$
                 return -1;
+            }
+        }
+
+        private static String caretSnippet(IDocument doc, int caret)
+        {
+            try
+            {
+                int start = Math.max(0, caret - 40);
+                int end = Math.min(doc.getLength(), caret + 20);
+                return doc.get(start, end - start).replace("\r", "\\r").replace("\n", "\\n"); //$NON-NLS-1$
+            }
+            catch (Exception e)
+            {
+                return ""; //$NON-NLS-1$
             }
         }
 
@@ -4928,20 +5114,7 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
 
         private static int resolveCaretOffset(ISourceViewer viewer)
         {
-            try
-            {
-                if (viewer.getTextWidget() != null)
-                {
-                    int caret = viewer.getTextWidget().getCaretOffset();
-                    if (caret >= 0)
-                        return caret;
-                }
-                Point sel = viewer.getSelectedRange();
-                if (sel != null && sel.x >= 0)
-                    return sel.x + Math.max(0, sel.y);
-            }
-            catch (Exception ignored) {}
-            return -1;
+            return resolveWidgetCaret(viewer);
         }
 
         /**
@@ -5083,7 +5256,7 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             return text != null ? text.trim() : ""; //$NON-NLS-1$
         }
 
-        private static String readReceiverExpressionText(IDocument doc, int dotOffset)
+        static String readReceiverExpressionText(IDocument doc, int dotOffset)
         {
             try
             {
@@ -5111,10 +5284,10 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
             {
                 String ru = ((DuallyNamedElement) type).getNameRu();
                 if (ru != null && !ru.isEmpty())
-                    return ru;
+                    return localizeAssistTypeSegment(ru);
             }
             String name = type.getName();
-            return name != null ? name : type.toString();
+            return name != null ? localizeAssistTypeSegment(name) : type.toString();
         }
     }
 

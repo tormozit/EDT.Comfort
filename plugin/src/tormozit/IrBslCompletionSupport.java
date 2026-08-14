@@ -596,6 +596,7 @@ String dictKey = dictionaryKey != null ? dictionaryKey : ""; //$NON-NLS-1$
         String type = row.path("Тип").asText(""); //$NON-NLS-1$ //$NON-NLS-2$
         int priority = hasPriority ? row.path("Приоритет").asInt(0) : 0;
 
+        // ИР не шлёт отдельный флаг: заменять родителя, если в слове есть разделитель варианта.
         boolean replaceParent = contextSeparator != null
             && !contextSeparator.isEmpty()
             && word.contains(contextSeparator);

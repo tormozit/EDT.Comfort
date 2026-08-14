@@ -51,8 +51,9 @@ public final class ObjectSetsBootstrapHook implements IStartup
             if (root == null)
                 return;
             List<String> openedProjectNames = new ArrayList<>();
+            List<String> closedProjectNames = new ArrayList<>();
             List<String> removedProjectNames = new ArrayList<>();
-            collectProjectChanges(root, openedProjectNames, removedProjectNames);
+            collectProjectChanges(root, openedProjectNames, closedProjectNames, removedProjectNames);
             for (String projectName : removedProjectNames)
                 ObjectSets.getInstance().removeSetsForProject(projectName);
             for (String projectName : openedProjectNames)
@@ -60,10 +61,12 @@ public final class ObjectSetsBootstrapHook implements IStartup
                 ObjectSets.getInstance().ensureDefaultSetForProject(projectName);
                 ObjectSets.getInstance().ensureSystemSetForProject(projectName);
             }
+            if (!openedProjectNames.isEmpty() || !closedProjectNames.isEmpty())
+                ObjectSets.getInstance().fireChanged();
         }
 
         private static void collectProjectChanges(
-                IResourceDelta delta, List<String> opened, List<String> removed)
+                IResourceDelta delta, List<String> opened, List<String> closed, List<String> removed)
         {
             if (delta == null)
                 return;
@@ -75,15 +78,21 @@ public final class ObjectSetsBootstrapHook implements IStartup
                 {
                     removed.add(project.getName());
                 }
-                else if (project.isOpen()
-                    && (kind == IResourceDelta.ADDED
-                        || (kind == IResourceDelta.CHANGED && (delta.getFlags() & IResourceDelta.OPEN) != 0)))
+                else if (kind == IResourceDelta.ADDED && project.isOpen())
                 {
                     opened.add(project.getName());
                 }
+                else if (kind == IResourceDelta.CHANGED
+                    && (delta.getFlags() & IResourceDelta.OPEN) != 0)
+                {
+                    if (project.isOpen())
+                        opened.add(project.getName());
+                    else
+                        closed.add(project.getName());
+                }
             }
             for (IResourceDelta child : delta.getAffectedChildren())
-                collectProjectChanges(child, opened, removed);
+                collectProjectChanges(child, opened, closed, removed);
         }
     }
 }

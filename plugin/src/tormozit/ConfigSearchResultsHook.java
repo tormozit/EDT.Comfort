@@ -4820,7 +4820,8 @@ public final class ConfigSearchResultsHook implements IStartup
          * Запуск ожидания и активации поля.
          *
          * @param leaf найденный объект (может быть как сам реквизит, так и вложенный в него объект)
-         * @param matchFeature признак вхождения — используется, когда {@code leaf} и есть реквизит
+         * @param matchFeature признак вхождения; для вложенного пути вроде
+         *        «ПутьКДанным.Сегменты» поле панели — первый уровень цепочки, не последний сегмент
          */
         static void schedule(IWorkbenchPage workbenchPage, EObject leaf, EStructuralFeature matchFeature)
         {
@@ -4830,24 +4831,24 @@ public final class ConfigSearchResultsHook implements IStartup
                 return;
             }
             EObject member = nearestMember(leaf);
-            EStructuralFeature feature = targetFeature(leaf, matchFeature);
+            List<EStructuralFeature> chain = featureChainTopDown(leaf, matchFeature);
             Global.tempLog(LOG_TOPIC, "schedule leaf=" + describeEObject(leaf) //$NON-NLS-1$
                     + " member=" + describeEObject(member) //$NON-NLS-1$
                     + " matchFeature=" + featureName(matchFeature) //$NON-NLS-1$
-                    + " targetFeature=" + featureName(feature)); //$NON-NLS-1$
-            if (member == null || feature == null)
+                    + " chain=" + describeFeatureChain(chain)); //$NON-NLS-1$
+            if (member == null || chain.isEmpty())
             {
-                Global.tempLog(LOG_TOPIC, "schedule skip: member/feature null"); //$NON-NLS-1$
+                Global.tempLog(LOG_TOPIC, "schedule skip: member/chain empty"); //$NON-NLS-1$
                 return;
             }
             Object token = new Object();
             activeToken = token;
-            retry(workbenchPage, member, feature, 0, token);
+            retry(workbenchPage, member, chain, 0, token);
         }
 
         /**
          * Прямой фокус: объект палитры и признак уже известны (маркер проверки и т.п.),
-         * без вычисления {@link #nearestMember}/{@link #targetFeature}.
+         * без вычисления {@link #nearestMember}/{@link #featureChainTopDown}.
          */
         static void scheduleExact(IWorkbenchPage workbenchPage, EObject member, EStructuralFeature feature)
         {
@@ -4860,7 +4861,7 @@ public final class ConfigSearchResultsHook implements IStartup
                     + " feature=" + featureName(feature)); //$NON-NLS-1$
             Object token = new Object();
             activeToken = token;
-            retry(workbenchPage, member, feature, 0, token);
+            retry(workbenchPage, member, List.of(feature), 0, token);
         }
 
         /**
@@ -4884,43 +4885,45 @@ public final class ConfigSearchResultsHook implements IStartup
         }
 
         /**
-         * Признак реквизита, соответствующий полю панели: признак, которым сам реквизит содержит
-         * ветку с вхождением (для «Ресурсы.ВажностьПроблемы.Тип.Типы» — {@code type}, т.к. вхождение
-         * лежит внутри {@code TypeDescription}, а её {@code eContainingFeature()} — как раз
-         * {@code type}). Если вхождение — прямо в самом реквизите (напр. его «Имя»/«Комментарий»),
-         * ветки нет и берётся признак самого вхождения.
-         * <p>
-         * Для {@code ExtInfo.picture} containment ребёнка дал бы «extInfo» — берём исходный
-         * {@code matchFeature}, если он принадлежит цепочке от leaf до member.
+         * Признаки от объекта панели к вхождению, сверху вниз. Панель «Свойства» показывает
+         * только первый уровень: для «Элементы.ИсторияСтатусовТаблица.ДанныеКартинкиСтроки.Сегменты»
+         * цепочка {@code [rowPictureDataPath, segments]}, поле панели — {@code ДанныеКартинкиСтроки}.
+         * Для «Ресурсы.ВажностьПроблемы.Тип.Типы» — {@code [type, types]}, поле — «Тип».
+         * Если вхождение прямо в объекте панели (Имя/Комментарий) — один признак вхождения.
          */
-        private static EStructuralFeature targetFeature(EObject leaf, EStructuralFeature matchFeature)
+        private static List<EStructuralFeature> featureChainTopDown(EObject leaf,
+                EStructuralFeature matchFeature)
         {
-            EObject child = null;
-            for (EObject cur = leaf; cur != null; cur = cur.eContainer())
+            List<EStructuralFeature> nested = new ArrayList<>();
+            for (EObject cur = leaf; cur != null && !isPanelMember(cur); cur = cur.eContainer())
             {
-                if (isPanelMember(cur))
-                {
-                    if (matchFeature != null && featureOwnedByChain(leaf, cur, matchFeature))
-                        return matchFeature;
-                    return child != null ? child.eContainingFeature() : matchFeature;
-                }
-                child = cur;
+                EStructuralFeature containing = cur.eContainingFeature();
+                if (containing != null)
+                    nested.add(containing);
             }
-            return null;
+            Collections.reverse(nested);
+            List<EStructuralFeature> chain = new ArrayList<>(nested);
+            if (matchFeature != null && (chain.isEmpty() || chain.get(chain.size() - 1) != matchFeature))
+                chain.add(matchFeature);
+            return chain;
         }
 
-        private static boolean featureOwnedByChain(EObject from, EObject upToExclusive, EStructuralFeature feature)
+        private static String describeFeatureChain(List<EStructuralFeature> chain)
         {
-            for (EObject cur = from; cur != null && cur != upToExclusive; cur = cur.eContainer())
+            if (chain == null || chain.isEmpty())
+                return "empty"; //$NON-NLS-1$
+            StringBuilder sb = new StringBuilder();
+            for (EStructuralFeature feature : chain)
             {
-                if (cur.eClass().getEAllStructuralFeatures().contains(feature))
-                    return true;
+                if (sb.length() > 0)
+                    sb.append('.');
+                sb.append(featureName(feature));
             }
-            return false;
+            return sb.toString();
         }
 
         private static void retry(IWorkbenchPage workbenchPage, EObject member,
-                EStructuralFeature feature, int attempt, Object token)
+                List<EStructuralFeature> chain, int attempt, Object token)
         {
             Display display = Display.getDefault();
             if (display == null || display.isDisposed())
@@ -4933,7 +4936,7 @@ public final class ConfigSearchResultsHook implements IStartup
                 }
                 try
                 {
-                    if (tryFocus(workbenchPage, member, feature, attempt))
+                    if (tryFocus(workbenchPage, member, chain, attempt))
                         return;
                 }
                 catch (Throwable t)
@@ -4942,15 +4945,15 @@ public final class ConfigSearchResultsHook implements IStartup
                     Global.logError("ConfigSearchResults", "PropertyFieldFocus.tryFocus", t); //$NON-NLS-1$ //$NON-NLS-2$
                 }
                 if (attempt + 1 < MAX_ATTEMPTS)
-                    retry(workbenchPage, member, feature, attempt + 1, token);
+                    retry(workbenchPage, member, chain, attempt + 1, token);
                 else
-                    Global.tempLog(LOG_TOPIC, "give up after " + MAX_ATTEMPTS + " attempts feature=" //$NON-NLS-1$ //$NON-NLS-2$
-                            + featureName(feature) + " member=" + describeEObject(member)); //$NON-NLS-1$
+                    Global.tempLog(LOG_TOPIC, "give up after " + MAX_ATTEMPTS + " attempts chain=" //$NON-NLS-1$ //$NON-NLS-2$
+                            + describeFeatureChain(chain) + " member=" + describeEObject(member)); //$NON-NLS-1$
             });
         }
 
         private static boolean tryFocus(IWorkbenchPage workbenchPage, EObject member,
-                EStructuralFeature feature, int attempt)
+                List<EStructuralFeature> chain, int attempt)
         {
             IViewPart view = findPropertySheetView(workbenchPage);
             Object page = view != null ? PropertyNameIdentifierHook.resolvePropertySheetPage(view) : null;
@@ -4975,7 +4978,7 @@ public final class ConfigSearchResultsHook implements IStartup
             // прекратив ожидание раньше, чем оверлей вообще успеет присоединиться. Поэтому здесь
             // либо оверлей, либо ничего: если его нет (составной тип — комбобокса под ним нет
             // вовсе), то фокусировать и нечего.
-            String label = featureLabelForFocus(feature);
+            String label = chain.isEmpty() ? null : featureLabelForFocus(chain.get(0));
             if (TypeComboOverlayHook.coversProperty(label))
             {
                 boolean overlayFocused = TypeComboOverlayHook.focusPropertyOverlay(view, label);
@@ -4990,15 +4993,15 @@ public final class ConfigSearchResultsHook implements IStartup
                 Global.tempLog(LOG_TOPIC, "attempt=" + attempt + " scene=null"); //$NON-NLS-1$ //$NON-NLS-2$
                 return false;
             }
-            Object fieldComponent = findFieldComponent(scene, feature);
+            Object fieldComponent = findFieldComponent(scene, chain);
             if (fieldComponent == null)
             {
-                Global.tempLog(LOG_TOPIC, "attempt=" + attempt + " field not found feature=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + featureName(feature) + " label=" + label); //$NON-NLS-1$
+                Global.tempLog(LOG_TOPIC, "attempt=" + attempt + " field not found chain=" //$NON-NLS-1$ //$NON-NLS-2$
+                        + describeFeatureChain(chain) + " label=" + label); //$NON-NLS-1$
                 return false;
             }
             boolean focused = focusFieldComponent(scene, fieldComponent);
-            Global.tempLog(LOG_TOPIC, "attempt=" + attempt + " focus feature=" + featureName(feature) //$NON-NLS-1$ //$NON-NLS-2$
+            Global.tempLog(LOG_TOPIC, "attempt=" + attempt + " focus chain=" + describeFeatureChain(chain) //$NON-NLS-1$ //$NON-NLS-2$
                     + " label=" + label + " component=" //$NON-NLS-1$ //$NON-NLS-2$
                     + fieldComponent.getClass().getSimpleName() + " ok=" + focused); //$NON-NLS-1$
             return focused;
@@ -5091,22 +5094,34 @@ public final class ConfigSearchResultsHook implements IStartup
          * {@code FieldComponent} методов {@code getFieldDefinition()}/{@code getDefinition()} нет
          * вовсе. Обход ищет узлы с этой картой (палитра — дерево {@code SectionDefinitionComponent},
          * по одному на секцию свойств) и сверяет {@code IFieldDefinition.getFeaturePaths()} с
-         * искомым признаком: путь должен ЗАКАНЧИВАТЬСЯ им.
+         * цепочкой поиска СВЕРХУ ВНИЗ: путь определения должен быть префиксом цепочки.
+         * Для «ДанныеКартинкиСтроки.Сегменты» поле панели — {@code rowPictureDataPath}, а не
+         * вложенные {@code segments}.
          *
          * <p>Каждое поле панели присутствует в карте ДВУМЯ записями с одним и тем же определением —
          * редактор ({@code DtTextComponent}, {@code MultilanguageComponent},
          * {@code TypeDescriptionComponent}, …) и {@code LabelComponent} (подпись, фокуса не имеет и
          * поэтому исключается).
          */
-        private static Object findFieldComponent(Object scene, EStructuralFeature feature)
+        private static Object findFieldComponent(Object scene, List<EStructuralFeature> chain)
         {
-            return findInTree(Global.invoke(scene, "getComponent"), feature.getName(), 0); //$NON-NLS-1$
+            List<String> names = new ArrayList<>(chain.size());
+            for (EStructuralFeature feature : chain)
+                if (feature != null && feature.getName() != null)
+                    names.add(feature.getName());
+            if (names.isEmpty())
+                return null;
+            int[] bestLen = { 0 };
+            Object[] best = { null };
+            findInTree(Global.invoke(scene, "getComponent"), names, 0, best, bestLen); //$NON-NLS-1$
+            return best[0];
         }
 
-        private static Object findInTree(Object component, String featureName, int depth)
+        private static void findInTree(Object component, List<String> chain, int depth,
+                Object[] best, int[] bestLen)
         {
             if (component == null || depth > 32)
-                return null;
+                return;
             Object map = Global.getField(component, "componentToDefinitionMap"); //$NON-NLS-1$
             if (map instanceof Map)
             {
@@ -5116,26 +5131,47 @@ public final class ConfigSearchResultsHook implements IStartup
                     if (candidate == null
                         || candidate.getClass().getName().contains("LabelComponent")) //$NON-NLS-1$
                         continue;
-                    if (definitionTargets(entry.getValue(), featureName))
-                        return candidate;
+                    int len = definitionPrefixLen(entry.getValue(), chain);
+                    if (len > bestLen[0])
+                    {
+                        bestLen[0] = len;
+                        best[0] = candidate;
+                    }
                 }
             }
             for (Object child : childComponents(component))
-            {
-                Object found = findInTree(child, featureName, depth + 1);
-                if (found != null)
-                    return found;
-            }
-            return null;
+                findInTree(child, chain, depth + 1, best, bestLen);
         }
 
-        /** Определение поля описывает именно этот признак — последний в пути {@code getFeaturePaths()}. */
-        private static boolean definitionTargets(Object definition, String featureName)
+        /**
+         * Насколько путь определения совпадает с цепочкой поиска сверху вниз.
+         * Полный путь определения должен быть префиксом цепочки: {@code [rowPictureDataPath]}
+         * подходит к {@code [rowPictureDataPath, segments]}, а последний сегмент {@code segments}
+         * сам по себе поле панели не ищет.
+         */
+        private static int definitionPrefixLen(Object definition, List<String> chain)
         {
+            int best = 0;
             for (List<String> path : featurePathsOfDefinition(definition))
-                if (!path.isEmpty() && featureName.equals(path.get(path.size() - 1)))
-                    return true;
-            return false;
+            {
+                if (path.isEmpty() || path.size() > chain.size())
+                    continue;
+                int n = 0;
+                while (n < path.size() && path.get(n).equals(chain.get(n)))
+                    n++;
+                if (n == path.size() && n > best)
+                    best = n;
+            }
+            // scheduleExact(picture) на FormItem: определение поля — [extInfo, picture],
+            // а цепочка из одного уже известного признака — [picture].
+            if (best == 0 && chain.size() == 1)
+            {
+                String name = chain.get(0);
+                for (List<String> path : featurePathsOfDefinition(definition))
+                    if (path.contains(name))
+                        return 1;
+            }
+            return best;
         }
 
         /**
@@ -5159,8 +5195,8 @@ public final class ConfigSearchResultsHook implements IStartup
 
         /**
          * Пути EMF-признаков определения поля ({@code IFieldDefinition.getFeaturePaths()} →
-         * {@code FeaturePath[]}) — каждый путь как список имён признаков, ПО ПОРЯДКУ (порядок важен
-         * для {@link #score}: последний признак пути определяет, «про что» это поле).
+         * {@code FeaturePath[]}) — каждый путь как список имён признаков, СВЕРХУ ВНИЗ
+         * (первый сегмент — свойство объекта панели).
          */
         private static List<List<String>> featurePathsOfDefinition(Object definition)
         {

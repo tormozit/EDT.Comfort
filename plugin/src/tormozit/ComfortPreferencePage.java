@@ -1,8 +1,21 @@
 package tormozit;
 
+import java.io.InputStream;
+import java.lang.reflect.Method;
+import java.net.URL;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Locale;
+import java.util.Properties;
+
 import org.eclipse.core.resources.IProject;
 import org.eclipse.core.resources.IResource;
 import org.eclipse.core.runtime.IAdaptable;
+import org.eclipse.core.runtime.IProduct;
+import org.eclipse.core.runtime.NullProgressMonitor;
+import org.eclipse.core.runtime.Platform;
 import org.eclipse.jface.dialogs.IDialogConstants;
 import org.eclipse.jface.preference.BooleanFieldEditor;
 import org.eclipse.jface.preference.ColorFieldEditor;
@@ -31,6 +44,9 @@ import org.eclipse.ui.IWorkbench;
 import org.eclipse.ui.IWorkbenchPreferencePage;
 import org.eclipse.ui.IWorkbenchPropertyPage;
 import org.eclipse.ui.preferences.IWorkbenchPreferenceContainer;
+import org.osgi.framework.Bundle;
+import org.osgi.framework.BundleContext;
+import org.osgi.framework.ServiceReference;
 
 /**
  * Страница настроек плагина Comfort:
@@ -878,69 +894,15 @@ public class ComfortPreferencePage
     }
 
     /**
-     * URL «Создать заявку» с предзаполненным телом — версия плагина, версия
-     * 1C:EDT и ОС, чтобы не просить об этом отдельно в каждой заявке.
+     * URL «Создать заявку» с предзаполненным телом — версии, ОС, тема, ИР,
+     * дополнительные плагины и флажки Комфорт.
      */
     private static String buildNewIssueUrl()
     {
-        StringBuilder body = new StringBuilder();
-        body.append("**Версия плагина Комфорт:** ") //$NON-NLS-1$
-            .append(ComfortVersionInfo.installed().getDisplayVersion()).append("\n") //$NON-NLS-1$
-            .append("**Версия 1C:EDT:** ").append(getEdtVersion()).append("\n") //$NON-NLS-1$ //$NON-NLS-2$
-            .append("**ОС:** ").append(getOsInfo()).append("\n"); //$NON-NLS-1$ //$NON-NLS-2$
-
-        String irInfo = getIrTechnicalInfo();
-        if (irInfo != null && !irInfo.isBlank())
-            body.append("**ИР:**\n```\n").append(irInfo.strip()).append("\n```\n"); //$NON-NLS-1$ //$NON-NLS-2$
-        body.append("\n"); //$NON-NLS-1$
-
-        String encodedBody = java.net.URLEncoder.encode(body.toString(), java.nio.charset.StandardCharsets.UTF_8)
+        String encodedBody = java.net.URLEncoder.encode(
+                NewIssueReport.buildBody(), java.nio.charset.StandardCharsets.UTF_8)
             .replace("+", "%20"); //$NON-NLS-1$ //$NON-NLS-2$
         return NEW_ISSUE_URL + "?body=" + encodedBody; //$NON-NLS-1$
-    }
-
-    /**
-     * {@code ирКлиент.ТехническаяИнформацияЛкс()}, если ИР подключён. {@code null},
-     * если подключения нет или вызов не удался — заявка всё равно должна открыться.
-     */
-    private static String getIrTechnicalInfo()
-    {
-        IRSession session = IRApplication.getAnyConnectedSession();
-        if (session == null)
-            return null;
-        try
-        {
-            return session.executeOnComThread(() -> {
-                Object irClient = session.getModule("ирКлиент"); //$NON-NLS-1$
-                return ComBridge.toString(ComBridge.invoke(irClient, "ТехническаяИнформацияЛкс")); //$NON-NLS-1$
-            });
-        }
-        catch (RuntimeException e)
-        {
-            return null;
-        }
-    }
-
-    private static String getEdtVersion()
-    {
-        try
-        {
-            org.eclipse.core.runtime.IProduct product = org.eclipse.core.runtime.Platform.getProduct();
-            if (product != null && product.getDefiningBundle() != null)
-                return product.getDefiningBundle().getVersion().toString();
-        }
-        catch (RuntimeException ignored)
-        {
-            // версия продукта недоступна
-        }
-        return "—"; //$NON-NLS-1$
-    }
-
-    private static String getOsInfo()
-    {
-        return System.getProperty("os.name", "?") + " " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + System.getProperty("os.version", "?") + " (" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
-            + System.getProperty("os.arch", "?") + ")"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
     }
 
     /**
@@ -1121,5 +1083,367 @@ public class ComfortPreferencePage
             return;
         gd.widthHint = width;
         parent.layout(false, false);
+    }
+
+    /**
+     * Текст тела GitHub-заявки: окружение, свёрнутые доп. плагины и флажки.
+     */
+    private static final class NewIssueReport
+    {
+        private static final String BUNDLE_P2_CORE = "org.eclipse.equinox.p2.core"; //$NON-NLS-1$
+        private static final String BUNDLE_P2_ENGINE = "org.eclipse.equinox.p2.engine"; //$NON-NLS-1$
+        private static final String PROP_PROFILE_ROOT_IU =
+            "org.eclipse.equinox.p2.type.root"; //$NON-NLS-1$
+        private static final String PROP_IU_NAME = "org.eclipse.equinox.p2.name"; //$NON-NLS-1$
+        private static final String COMFORT_BUNDLE_ID = "tormozit.comfort"; //$NON-NLS-1$
+
+        static String buildBody()
+        {
+            StringBuilder body = new StringBuilder();
+            body.append("**Версия плагина Комфорт:** ") //$NON-NLS-1$
+                .append(ComfortVersionInfo.installed().getDisplayVersion()).append("\n") //$NON-NLS-1$
+                .append("**Версия 1C:EDT:** ").append(edtVersion()).append("\n") //$NON-NLS-1$ //$NON-NLS-2$
+                .append("**ОС:** ").append(osInfo()).append("\n") //$NON-NLS-1$ //$NON-NLS-2$
+                .append("**Тема:** ").append(themeLabel()).append("\n"); //$NON-NLS-1$ //$NON-NLS-2$
+
+            String irInfo = irTechnicalInfo();
+            if (irInfo != null && !irInfo.isBlank())
+                body.append("**ИР:**\n```\n").append(irInfo.strip()).append("\n```\n"); //$NON-NLS-1$ //$NON-NLS-2$
+
+            appendCollapsed(body, "Установленные плагины", extraPluginsText()); //$NON-NLS-1$
+            appendCollapsed(body, "Флажки Комфорт", comfortFlagsText()); //$NON-NLS-1$
+            body.append("\n"); //$NON-NLS-1$
+            return body.toString();
+        }
+
+        private static void appendCollapsed(StringBuilder body, String title, String content)
+        {
+            body.append("<details>\n<summary>").append(title).append("</summary>\n\n"); //$NON-NLS-1$ //$NON-NLS-2$
+            body.append("```\n").append(content); //$NON-NLS-1$
+            if (!content.endsWith("\n")) //$NON-NLS-1$
+                body.append('\n');
+            body.append("```\n</details>\n"); //$NON-NLS-1$
+        }
+
+        /** Маркетинговая версия из about.mappings и OSGi-версия брендинг-бандла. */
+        private static String edtVersion()
+        {
+            String marketing = aboutMapping("1"); //$NON-NLS-1$
+            String osgi = osgiProductVersion();
+            if (!marketing.isEmpty() && !osgi.isEmpty() && !marketing.equals(osgi))
+                return marketing + " (" + osgi + ")"; //$NON-NLS-1$ //$NON-NLS-2$
+            if (!marketing.isEmpty())
+                return marketing;
+            if (!osgi.isEmpty())
+                return osgi;
+            return "—"; //$NON-NLS-1$
+        }
+
+        private static String osgiProductVersion()
+        {
+            try
+            {
+                IProduct product = Platform.getProduct();
+                if (product != null && product.getDefiningBundle() != null)
+                    return product.getDefiningBundle().getVersion().toString();
+            }
+            catch (RuntimeException ignored)
+            {
+                // версия продукта недоступна
+            }
+            return ""; //$NON-NLS-1$
+        }
+
+        private static String aboutMapping(String key)
+        {
+            try
+            {
+                IProduct product = Platform.getProduct();
+                if (product == null)
+                    return ""; //$NON-NLS-1$
+                Bundle bundle = product.getDefiningBundle();
+                if (bundle == null)
+                    return ""; //$NON-NLS-1$
+                URL url = bundle.getEntry("about.mappings"); //$NON-NLS-1$
+                if (url == null)
+                    return ""; //$NON-NLS-1$
+                Properties props = new Properties();
+                try (InputStream in = url.openStream())
+                {
+                    props.load(in);
+                }
+                String value = props.getProperty(key);
+                return value != null ? value.strip() : ""; //$NON-NLS-1$
+            }
+            catch (Exception ignored)
+            {
+                return ""; //$NON-NLS-1$
+            }
+        }
+
+        private static String osInfo()
+        {
+            return System.getProperty("os.name", "?") + " " //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + System.getProperty("os.version", "?") + " (" //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+                + System.getProperty("os.arch", "?") + ")"; //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+        }
+
+        private static String themeLabel()
+        {
+            try
+            {
+                return ThemeAwareColors.isDarkTheme() ? "тёмная" : "светлая"; //$NON-NLS-1$ //$NON-NLS-2$
+            }
+            catch (RuntimeException ignored)
+            {
+                return "—"; //$NON-NLS-1$
+            }
+        }
+
+        /**
+         * {@code ирКлиент.ТехническаяИнформацияЛкс()}, если ИР подключён. {@code null},
+         * если подключения нет или вызов не удался — заявка всё равно должна открыться.
+         */
+        private static String irTechnicalInfo()
+        {
+            IRSession session = IRApplication.getAnyConnectedSession();
+            if (session == null)
+                return null;
+            try
+            {
+                return session.executeOnComThread(() -> {
+                    Object irClient = session.getModule("ирКлиент"); //$NON-NLS-1$
+                    return ComBridge.toString(ComBridge.invoke(irClient, "ТехническаяИнформацияЛкс")); //$NON-NLS-1$
+                });
+            }
+            catch (RuntimeException e)
+            {
+                return null;
+            }
+        }
+
+        /** Корневые IU p2 кроме продукта EDT; при отсутствии — установленный Комфорт. */
+        private static String extraPluginsText()
+        {
+            List<String> lines = queryExtraRootIus();
+            ensureComfortListed(lines);
+            if (lines.isEmpty())
+                return "—"; //$NON-NLS-1$
+            Collections.sort(lines, String.CASE_INSENSITIVE_ORDER);
+            StringBuilder sb = new StringBuilder();
+            for (String line : lines)
+            {
+                if (sb.length() > 0)
+                    sb.append('\n');
+                sb.append(line);
+            }
+            return sb.toString();
+        }
+
+        private static void ensureComfortListed(List<String> lines)
+        {
+            for (String line : lines)
+            {
+                String lower = line.toLowerCase(Locale.ROOT);
+                if (lower.contains("tormozit") || lower.contains("comfort") //$NON-NLS-1$ //$NON-NLS-2$
+                    || lower.contains("комфорт")) //$NON-NLS-1$
+                    return;
+            }
+            ComfortVersionInfo comfort = ComfortVersionInfo.installed();
+            String version = comfort.getDisplayVersion();
+            if (version == null || version.isBlank() || "—".equals(version)) //$NON-NLS-1$
+            {
+                Bundle bundle = Platform.getBundle(COMFORT_BUNDLE_ID);
+                if (bundle != null && bundle.getVersion() != null)
+                    version = bundle.getVersion().toString();
+            }
+            if (version == null || version.isBlank() || "—".equals(version)) //$NON-NLS-1$
+                version = "—"; //$NON-NLS-1$
+            lines.add("EDT Comfort " + version); //$NON-NLS-1$
+        }
+
+        private static List<String> queryExtraRootIus()
+        {
+            List<String> lines = new ArrayList<>();
+            try
+            {
+                Bundle p2Core = Platform.getBundle(BUNDLE_P2_CORE);
+                Bundle p2Engine = Platform.getBundle(BUNDLE_P2_ENGINE);
+                if (p2Core == null || p2Engine == null)
+                    return lines;
+
+                BundleContext ctx = p2Core.getBundleContext();
+                if (ctx == null)
+                    return lines;
+                ServiceReference<?> agentRef = ctx.getServiceReference(
+                    "org.eclipse.equinox.p2.core.IProvisioningAgent"); //$NON-NLS-1$
+                if (agentRef == null)
+                    return lines;
+
+                Object agent = ctx.getService(agentRef);
+                if (agent == null)
+                    return lines;
+
+                try
+                {
+                    Class<?> registryClass = p2Engine.loadClass(
+                        "org.eclipse.equinox.p2.engine.IProfileRegistry"); //$NON-NLS-1$
+                    Object registry = agent.getClass()
+                        .getMethod("getService", Class.class) //$NON-NLS-1$
+                        .invoke(agent, registryClass);
+                    if (registry == null)
+                        return lines;
+
+                    String profileId = (String) registryClass
+                        .getMethod("getDefaultProfileId") //$NON-NLS-1$
+                        .invoke(registry);
+                    Object profile = registryClass
+                        .getMethod("getProfile", String.class) //$NON-NLS-1$
+                        .invoke(registry, profileId);
+                    if (profile == null)
+                        return lines;
+
+                    Class<?> queryUtil = p2Engine.loadClass(
+                        "org.eclipse.equinox.p2.query.QueryUtil"); //$NON-NLS-1$
+                    Class<?> queryClass = p2Engine.loadClass(
+                        "org.eclipse.equinox.p2.query.IQuery"); //$NON-NLS-1$
+                    Class<?> iuClass = p2Engine.loadClass(
+                        "org.eclipse.equinox.p2.metadata.IInstallableUnit"); //$NON-NLS-1$
+                    Class<?> monitorClass = Platform.getBundle("org.eclipse.core.runtime") //$NON-NLS-1$
+                        .loadClass("org.eclipse.core.runtime.IProgressMonitor"); //$NON-NLS-1$
+
+                    Object query = queryUtil
+                        .getMethod("createIUPropertyQuery", String.class, String.class) //$NON-NLS-1$
+                        .invoke(null, PROP_PROFILE_ROOT_IU, Boolean.TRUE.toString());
+                    Object result = profile.getClass()
+                        .getMethod("query", queryClass, monitorClass) //$NON-NLS-1$
+                        .invoke(profile, query, new NullProgressMonitor());
+                    collectExtraIus(lines, result, profile, queryUtil, iuClass, false);
+
+                    if (lines.isEmpty())
+                    {
+                        Object allQuery = queryUtil.getMethod("createIUAnyQuery").invoke(null); //$NON-NLS-1$
+                        Object allResult = profile.getClass()
+                            .getMethod("query", queryClass, monitorClass) //$NON-NLS-1$
+                            .invoke(profile, allQuery, new NullProgressMonitor());
+                        collectExtraIus(lines, allResult, profile, queryUtil, iuClass, true);
+                    }
+                }
+                finally
+                {
+                    ctx.ungetService(agentRef);
+                }
+            }
+            catch (ReflectiveOperationException | RuntimeException ignored)
+            {
+                return lines;
+            }
+            return lines;
+        }
+
+        private static void collectExtraIus(
+            List<String> lines, Object queryResult, Object profile, Class<?> queryUtil, Class<?> iuClass,
+            boolean requireRootProperty)
+            throws ReflectiveOperationException
+        {
+            @SuppressWarnings("unchecked")
+            Iterator<Object> iterator = (Iterator<Object>) queryResult.getClass()
+                .getMethod("iterator").invoke(queryResult); //$NON-NLS-1$
+            Method isProduct = queryUtil.getMethod("isProduct", iuClass); //$NON-NLS-1$
+            Method isCategory = queryUtil.getMethod("isCategory", iuClass); //$NON-NLS-1$
+            Method getId = iuClass.getMethod("getId"); //$NON-NLS-1$
+            Method getVersion = iuClass.getMethod("getVersion"); //$NON-NLS-1$
+            Method getProperty2 = iuClass.getMethod("getProperty", String.class, String.class); //$NON-NLS-1$
+            Method profileIuProperty = profile.getClass().getMethod(
+                "getInstallableUnitProperty", iuClass, String.class); //$NON-NLS-1$
+
+            String locale = Locale.getDefault().toString();
+            while (iterator.hasNext())
+            {
+                Object iu = iterator.next();
+                String id = String.valueOf(getId.invoke(iu));
+                if (id.isBlank() || isEdtShippedId(id) || id.endsWith(".feature.jar")) //$NON-NLS-1$
+                    continue;
+                if (Boolean.TRUE.equals(isProduct.invoke(null, iu))
+                    || Boolean.TRUE.equals(isCategory.invoke(null, iu)))
+                    continue;
+                if (requireRootProperty && !isRootIu(iu, profile, profileIuProperty, getProperty2))
+                    continue;
+
+                String name = localizedIuName(iu, getProperty2, locale);
+                if (name.isBlank() || name.startsWith("%") || name.equals(id)) //$NON-NLS-1$
+                    name = id;
+                Object version = getVersion.invoke(iu);
+                String versionText = version != null ? version.toString() : ""; //$NON-NLS-1$
+                String line = versionText.isBlank() ? name : name + " " + versionText;
+                if (!lines.contains(line))
+                    lines.add(line);
+            }
+        }
+
+        private static boolean isRootIu(
+            Object iu, Object profile, Method profileIuProperty, Method getProperty2)
+            throws ReflectiveOperationException
+        {
+            Object profileRoot = profileIuProperty.invoke(profile, iu, PROP_PROFILE_ROOT_IU);
+            if (Boolean.TRUE.toString().equals(profileRoot))
+                return true;
+            Object iuRoot = getProperty2.invoke(iu, PROP_PROFILE_ROOT_IU, null);
+            return Boolean.TRUE.toString().equals(iuRoot);
+        }
+
+        private static String localizedIuName(Object iu, Method getProperty2, String locale)
+            throws ReflectiveOperationException
+        {
+            Object named = getProperty2.invoke(iu, PROP_IU_NAME, locale);
+            if (named instanceof String text && !text.isBlank())
+                return text;
+            Object fallback = getProperty2.invoke(iu, PROP_IU_NAME, null);
+            return fallback instanceof String text ? text : ""; //$NON-NLS-1$
+        }
+
+        private static boolean isEdtShippedId(String id)
+        {
+            return id.startsWith("com._1c.") || id.startsWith("com.e1c."); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+
+        /** Флажки Комфорт: страница «Параметры → Комфорт» и соседние настройки-пометки. */
+        private static String comfortFlagsText()
+        {
+            StringBuilder sb = new StringBuilder();
+            appendFlag(sb, "Улучшать списки", ComfortSettings.isReplaceListFiltersEnabled()); //$NON-NLS-1$
+            appendFlag(sb, "Улучшать окна отладчика", //$NON-NLS-1$
+                ComfortSettings.isImproveDebuggerWindowsEnabled());
+            appendFlag(sb, "Группировать общие модули в навигаторе по имени", //$NON-NLS-1$
+                ComfortSettings.isGroupCommonModulesEnabled());
+            appendFlag(sb, "Автооткрытие подсказок при вводе", isContentAssistAutoOpen()); //$NON-NLS-1$
+            appendFlag(sb, "Ctrl+клик выделяет слово", //$NON-NLS-1$
+                ComfortSettings.isCtrlClickSelectWordEnabled());
+            appendFlag(sb, "Подсвечивать серверные вызовы", //$NON-NLS-1$
+                ComfortSettings.isServerCallHighlightingEnabled());
+            appendFlag(sb, "Отображать начало конструкции в её конце", //$NON-NLS-1$
+                ComfortSettings.isBracketContentHintEnabled());
+            appendFlag(sb, "Проверять орфографию в идентификаторах в видимой области", //$NON-NLS-1$
+                ComfortSettings.isSpellingCheckIdentifiersVisible());
+            appendFlag(sb, "Вести журнал", ComfortSettings.isDebugLogEnabled()); //$NON-NLS-1$
+            appendFlag(sb, "Подсказки при наведении без Ctrl", //$NON-NLS-1$
+                ComfortSettings.isHoverHintsEnabled());
+            appendFlag(sb, "Игнорировать сокращения в CamelCase", //$NON-NLS-1$
+                ComfortSettings.isSpellingIgnoreCamelCaseAbbreviations());
+            return sb.toString();
+        }
+
+        private static boolean isContentAssistAutoOpen()
+        {
+            ContentAssistSettings settings = ContentAssistSettings.getInstance();
+            if (settings == null)
+                return ContentAssistSettings.DEFAULT_ENABLED;
+            return settings.getPreferenceStore().getBoolean(ContentAssistSettings.PREF_ENABLED);
+        }
+
+        private static void appendFlag(StringBuilder sb, String label, boolean on)
+        {
+            sb.append(on ? "[x] " : "[ ] ").append(label).append('\n'); //$NON-NLS-1$ //$NON-NLS-2$
+        }
     }
 }

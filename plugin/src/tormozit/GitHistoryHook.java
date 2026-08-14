@@ -1,5 +1,7 @@
 package tormozit;
 
+import java.io.File;
+import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.IdentityHashMap;
@@ -7,7 +9,12 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 
+import org.eclipse.core.resources.IProject;
 import org.eclipse.core.runtime.preferences.InstanceScope;
+import org.eclipse.egit.core.RepositoryCache;
+import org.eclipse.egit.core.RepositoryUtil;
+import org.eclipse.egit.core.project.RepositoryMapping;
+import org.eclipse.jgit.lib.Repository;
 import org.eclipse.jface.dialogs.IDialogSettings;
 import org.eclipse.jface.layout.TableColumnLayout;
 import org.eclipse.jface.preference.IPreferenceStore;
@@ -85,11 +92,17 @@ import org.eclipse.ui.preferences.ScopedPreferenceStore;
  *       ({@link SmartMatchHighlight}).</li>
  *   <li>История запросов в штатном поле «Найти» ({@code FindToolbar#patternField}):
  *       кнопка ▾ и Ctrl+↓ ({@link FilterHistoryUi}), отдельно от фильтра файлов.</li>
+ *   <li>Если при открытии нет {@code GitHistoryPage} (связь с редактором выключена,
+ *       штатный {@code GenericHistoryView} не восстанавливает вход), показывается
+ *       история последнего репозитория или репозитория активного проекта — иначе
+ *       панель остаётся пустой без кнопок Git, в том числе без подменю выбора
+ *       репозитория.</li>
  * </ul>
  *
  * <p>Колонки и фильтр файлов: Параметры → Комфорт → «Улучшать списки»
  * ({@link ComfortSettings#PREF_REPLACE_LIST_FILTERS}). История поиска коммитов
- * ставится всегда. Логирование: Параметры → Комфорт → «Общее логирование».
+ * и восстановление страницы Git ставятся всегда. Логирование: Параметры → Комфорт
+ * → «Общее логирование».
  */
 public final class GitHistoryHook implements IStartup
 {
@@ -101,6 +114,12 @@ public final class GitHistoryHook implements IStartup
         "tormozit.gitHistorySearchHistoryWrap"; //$NON-NLS-1$
     private static final String FIND_TOOLBAR_CLASS =
         "org.eclipse.egit.ui.internal.history.FindToolbar"; //$NON-NLS-1$
+    private static final String GIT_HISTORY_PAGE_CLASS =
+        "org.eclipse.egit.ui.internal.history.GitHistoryPage"; //$NON-NLS-1$
+    private static final String GIT_HISTORY_PAGE_SOURCE_CLASS =
+        "org.eclipse.egit.ui.internal.history.GitHistoryPageSource"; //$NON-NLS-1$
+    private static final String HISTORY_PAGE_INPUT_CLASS =
+        "org.eclipse.egit.ui.internal.history.HistoryPageInput"; //$NON-NLS-1$
     private static final String SEARCH_HISTORY_SCOPE_ID = "gitHistoryCommitSearch"; //$NON-NLS-1$
     private static final String SEARCH_HISTORY_BUTTON_TOOLTIP =
         "История поиска коммитов (или Ctrl+↓ в поле)"; //$NON-NLS-1$
@@ -109,8 +128,10 @@ public final class GitHistoryHook implements IStartup
     private static final Set<IWorkbenchWindow> searchHistoryWindows =
         Collections.newSetFromMap(new IdentityHashMap<>());
     private static int findToolbarRescanGen;
+    private static boolean restoringGitHistoryPage;
     private static final String SORT_STATE_KEY = "tormozit.gitHistorySortState"; //$NON-NLS-1$
     private static final String SETTINGS_SECTION = "GitHistoryFileColumns"; //$NON-NLS-1$
+    private static final String KEY_LAST_REPO = "lastRepoGitDir"; //$NON-NLS-1$
     /** Второстепенные данные (положение разделителя) — в {@link IDialogSettings}, сохраняются при
      * закрытии/пересоздании панели, а не живьём при каждом драге. */
     private static final String KEY_SASH_LEFT = "sashLeft"; //$NON-NLS-1$
@@ -143,8 +164,6 @@ public final class GitHistoryHook implements IStartup
         {
             bootstrapCommitListPrefsOnce();
             installSearchHistory(Display.getDefault());
-            if (!ComfortSettings.isReplaceListFiltersEnabled())
-                return;
             IWorkbench wb = PlatformUI.getWorkbench();
             if (wb == null)
                 return;
@@ -236,12 +255,14 @@ public final class GitHistoryHook implements IStartup
         int delay = attempt == 0 ? 0 : 150;
         display.timerExec(delay, () ->
         {
-            if (!ComfortSettings.isReplaceListFiltersEnabled())
-                return;
-            if (!tryPatch(view) && attempt < 20)
+            boolean pageReady = ensureGitHistoryPage(view);
+            boolean colsReady = !ComfortSettings.isReplaceListFiltersEnabled()
+                || tryPatch(view);
+            if ((!pageReady || !colsReady) && attempt < 20)
                 schedulePatch(view, attempt + 1);
             else if (attempt >= 20)
-                Debug.log("tryPatch GIVE UP after 20 attempts"); //$NON-NLS-1$
+                Debug.log("tryPatch GIVE UP after 20 attempts pageReady=" //$NON-NLS-1$
+                    + pageReady + " colsReady=" + colsReady); //$NON-NLS-1$
         });
     }
 
@@ -283,7 +304,10 @@ public final class GitHistoryHook implements IStartup
                 return false;
 
             if (Boolean.TRUE.equals(table.getData(PATCHED_KEY)))
+            {
+                rememberLastRepo(historyPage);
                 return true;
+            }
 
             // Сохраняем оригинальный FileDiffLabelProvider до замены.
             CellLabelProvider origLabelProvider = null;
@@ -293,6 +317,7 @@ public final class GitHistoryHook implements IStartup
 
             TableColumn[] cols = installColumns(table);
             installFilterComposite(fileViewer, table, origLabelProvider, cols[0], cols[1], cols[2], cols[3]);
+            rememberLastRepo(historyPage);
 
             Debug.log("tryPatch: OK"); //$NON-NLS-1$
             return true;
@@ -307,6 +332,154 @@ public final class GitHistoryHook implements IStartup
     private static boolean isGenericHistoryView(IViewPart view)
     {
         return view != null && TEAM_HISTORY_VIEW_ID.equals(view.getSite().getId());
+    }
+
+    /**
+     * Штатный {@code GenericHistoryView} без связи с редактором не создаёт
+     * {@code GitHistoryPage} (нет bootstrap-входа) — пустая страница без кнопок Git,
+     * в том числе без подменю выбора репозитория. Показываем историю последнего
+     * репозитория или репозитория активного проекта.
+     *
+     * @return {@code true}, если страница Git уже есть; {@code false} — повторить
+     *         позже (панель ещё не видима или репозитории не готовы)
+     */
+    private static boolean ensureGitHistoryPage(IViewPart view)
+    {
+        if (!isHistoryView(view))
+            return true;
+        Object page = Global.call(view, "getHistoryPage"); //$NON-NLS-1$
+        if (isGitHistoryPage(page))
+        {
+            rememberLastRepo(page);
+            return true;
+        }
+        if (restoringGitHistoryPage)
+            return false;
+        Repository repo = resolveRepoToShow(view);
+        if (repo == null)
+        {
+            Debug.log("ensureGitHistoryPage: no repository yet"); //$NON-NLS-1$
+            return false;
+        }
+        Object input = historyPageInput(repo);
+        Object pageSource = gitHistoryPageSource();
+        if (input == null || pageSource == null)
+            return false;
+        restoringGitHistoryPage = true;
+        try
+        {
+            Object shown = Global.invoke(view, "showHistoryPageFor", //$NON-NLS-1$
+                input, Boolean.TRUE, Boolean.TRUE, pageSource);
+            boolean ok = isGitHistoryPage(shown);
+            Debug.log("ensureGitHistoryPage: repo=" + repo.getDirectory() //$NON-NLS-1$
+                + " shown=" + (shown == null ? "null" : shown.getClass().getSimpleName()) //$NON-NLS-1$ //$NON-NLS-2$
+                + " ok=" + ok); //$NON-NLS-1$
+            if (ok)
+                rememberLastRepo(shown);
+            return ok;
+        }
+        catch (Exception e)
+        {
+            Debug.log("ensureGitHistoryPage EXCEPTION: " + e); //$NON-NLS-1$
+            return false;
+        }
+        finally
+        {
+            restoringGitHistoryPage = false;
+        }
+    }
+
+    private static boolean isGitHistoryPage(Object page)
+    {
+        return page != null && GIT_HISTORY_PAGE_CLASS.equals(page.getClass().getName());
+    }
+
+    private static Object gitHistoryPageSource()
+    {
+        try
+        {
+            return Class.forName(GIT_HISTORY_PAGE_SOURCE_CLASS).getField("INSTANCE").get(null); //$NON-NLS-1$
+        }
+        catch (Exception e)
+        {
+            Debug.log("gitHistoryPageSource: " + e); //$NON-NLS-1$
+            return null;
+        }
+    }
+
+    private static Object historyPageInput(Repository repo)
+    {
+        try
+        {
+            return Class.forName(HISTORY_PAGE_INPUT_CLASS)
+                .getConstructor(Repository.class)
+                .newInstance(repo);
+        }
+        catch (Exception e)
+        {
+            Debug.log("historyPageInput: " + e); //$NON-NLS-1$
+            return null;
+        }
+    }
+
+    private static void rememberLastRepo(Object historyPage)
+    {
+        Object repoObj = Global.getField(historyPage, "currentRepo"); //$NON-NLS-1$
+        if (!(repoObj instanceof Repository repo) || repo.getDirectory() == null)
+            return;
+        dialogSettings().put(KEY_LAST_REPO, repo.getDirectory().getAbsolutePath());
+    }
+
+    private static Repository resolveRepoToShow(IViewPart view)
+    {
+        Repository last = repoFromGitDir(dialogSettings().get(KEY_LAST_REPO));
+        if (last != null)
+            return last;
+
+        IProject project = Global.getActiveProject(view, false);
+        if (project != null)
+        {
+            RepositoryMapping mapping = RepositoryMapping.getMapping(project);
+            if (mapping != null && mapping.getRepository() != null)
+                return mapping.getRepository();
+        }
+
+        Repository[] all = RepositoryCache.INSTANCE.getAllRepositories();
+        if (all != null && all.length > 0)
+            return all[0];
+
+        List<String> configured = RepositoryUtil.INSTANCE.getConfiguredRepositories();
+        if (configured != null)
+        {
+            for (String path : configured)
+            {
+                Repository repo = repoFromGitDir(path);
+                if (repo != null)
+                    return repo;
+            }
+        }
+        return null;
+    }
+
+    private static Repository repoFromGitDir(String path)
+    {
+        if (path == null || path.isBlank())
+            return null;
+        String absolute = RepositoryUtil.INSTANCE.getAbsoluteRepositoryPath(path);
+        File dir = new File(absolute != null && !absolute.isBlank() ? absolute : path);
+        Repository cached = RepositoryCache.INSTANCE.getRepository(dir);
+        if (cached != null)
+            return cached;
+        try
+        {
+            if (dir.isDirectory())
+                return RepositoryCache.INSTANCE.lookupRepository(dir);
+        }
+        catch (IOException e)
+        {
+            Debug.log("repoFromGitDir: " + dir + " → " + e); //$NON-NLS-1$ //$NON-NLS-2$
+        }
+        return null;
     }
 
     // -----------------------------------------------------------------------

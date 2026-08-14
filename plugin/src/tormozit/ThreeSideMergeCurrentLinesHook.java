@@ -1,17 +1,23 @@
 package tormozit;
 
 import java.nio.file.Path;
+import java.util.List;
 
 import com._1c.g5.v8.dt.bsl.compare.BslModuleComparisonNode;
+import com._1c.g5.v8.dt.bsl.compare.BslModuleSectionComparisonNode;
+import com._1c.g5.v8.dt.bsl.compare.ComparisonTextRegion;
+import com._1c.g5.v8.dt.bsl.compare.TextRegion;
 import com._1c.g5.v8.dt.bsl.model.BslPackage;
 import com._1c.g5.v8.dt.compare.core.IComparisonSession;
 import com._1c.g5.v8.dt.compare.datasource.IComparisonDataSource;
 import com._1c.g5.v8.dt.compare.model.ComparisonNode;
 import com._1c.g5.v8.dt.compare.model.ComparisonSide;
+import com._1c.g5.v8.dt.compare.ui.editor.ComparisonTreeControl;
 import com._1c.g5.v8.dt.compare.ui.editor.DtComparisonView;
 import com._1c.g5.v8.dt.compare.ui.mergeviewer.IThreeSideTextMergeInput;
 import com._1c.g5.v8.dt.compare.ui.mergeviewer.IThreeSideTextMergeViewerProvider;
 import com._1c.g5.v8.dt.compare.ui.mergeviewer.ThreeSideTextMergeViewer;
+import com._1c.g5.v8.dt.compare.ui.partialmodel.node.ExternalPropertyPartialModelNode;
 import com._1c.g5.v8.dt.compare.ui.partialmodel.node.IPartialModelNode;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 
@@ -23,6 +29,8 @@ import org.eclipse.jface.action.IContributionItem;
 import org.eclipse.jface.action.IToolBarManager;
 import org.eclipse.jface.action.Separator;
 import org.eclipse.jface.resource.ImageDescriptor;
+import org.eclipse.jface.text.source.SourceViewer;
+import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.window.Window;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.SashForm;
@@ -35,7 +43,10 @@ import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Group;
+import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.swt.widgets.Tree;
+import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
@@ -79,6 +90,9 @@ public final class ThreeSideMergeCurrentLinesHook
     private static final String DEFAULT_LEFT_LABEL = "Ваша версия:"; //$NON-NLS-1$
     private static final String DEFAULT_RIGHT_LABEL = "Входящая версия:"; //$NON-NLS-1$
     private static final String DEFAULT_RESULT_LABEL = "Итоговый текст:"; //$NON-NLS-1$
+    /** Имя стороны предка в попарном сравнении — как {@code CompareBslModuleWithParsingModuleStructureDialog_Parent_typed_element_name}. */
+    private static final String ANCESTOR_SIDE_LABEL = "Общий родитель"; //$NON-NLS-1$
+    private static final String RESULT_SIDE_LABEL = "Результат объединения модулей"; //$NON-NLS-1$
 
     private ThreeSideMergeCurrentLinesHook()
     {
@@ -326,6 +340,9 @@ public final class ThreeSideMergeCurrentLinesHook
         hookStyledText(leftText, panel, provider, viewer, leftText, rightText, resultText, activePair);
         hookStyledText(rightText, panel, provider, viewer, leftText, rightText, resultText, activePair);
         hookStyledText(resultText, panel, provider, viewer, leftText, rightText, resultText, activePair);
+
+        if (structured)
+            MethodLineRestore.install(provider, viewer, leftText, rightText, resultText);
 
         StyledText initialSource = leftText != null ? leftText : rightText != null ? rightText : resultText;
         if (initialSource != null)
@@ -727,6 +744,128 @@ public final class ThreeSideMergeCurrentLinesHook
     }
 
     /**
+     * Названия сторон 3-way диалога для попарного «Сравнение текста» (команды
+     * «Сравнить текст слева и справа» и аналогичные). Штатный EDT в шапку 2-way кладёт
+     * имя секции модуля с обеих сторон — здесь подставляются те же подписи, что в
+     * колонках дерева / панели «Текущая строка» исходного окна.
+     *
+     * @return {@code {leftLabel, rightLabel}} или {@code null}, если родитель не 3-way
+     *         либо стороны сопоставить не удалось
+     */
+    static String[] pairwiseLabelsFromParent(Shell twoWayShell, ITypedElement left, ITypedElement right)
+    {
+        if (twoWayShell == null || twoWayShell.isDisposed())
+            return null;
+        Shell threeWay = findThreeWayShell(twoWayShell, left, right);
+        if (threeWay == null || threeWay.isDisposed())
+            return null;
+        if (!(threeWay.getData() instanceof IThreeSideTextMergeViewerProvider provider))
+            return null;
+        ThreeSideTextMergeViewer viewer = provider.getMergeViewer();
+        if (viewer == null)
+            return null;
+        if (!(viewer.getInput() instanceof IThreeSideTextMergeInput mergeInput))
+            return null;
+
+        String[] sides = extractSideLabels(threeWay.getData(), viewer);
+        String resultLabel = resolveResultSideLabel(viewer, mergeInput);
+        String mappedLeft = mapPairwiseElement(left, mergeInput, sides[0], sides[1], resultLabel);
+        String mappedRight = mapPairwiseElement(right, mergeInput, sides[0], sides[1], resultLabel);
+        if (mappedLeft == null && mappedRight == null)
+            return null;
+        /*
+         * Итоговая сторона в 2-way — {@code StringBasedTypedElement}, не тот же экземпляр,
+         * что {@code mergeInput.getMergeResult()}. Несопоставленная сторона — она.
+         */
+        if (mappedLeft == null)
+            mappedLeft = resultLabel;
+        if (mappedRight == null)
+            mappedRight = resultLabel;
+        return new String[] { mappedLeft, mappedRight };
+    }
+
+    private static Shell findThreeWayShell(Shell twoWayShell, ITypedElement left, ITypedElement right)
+    {
+        for (Control c = twoWayShell.getParent(); c != null && !c.isDisposed(); c = c.getParent())
+        {
+            if (c instanceof Shell s && s.getData() instanceof IThreeSideTextMergeViewerProvider)
+                return s;
+        }
+        Display display = twoWayShell.getDisplay();
+        if (display == null || display.isDisposed())
+            return null;
+        Shell fallback = null;
+        for (Shell s : display.getShells())
+        {
+            if (s == null || s.isDisposed() || s == twoWayShell)
+                continue;
+            if (!(s.getData() instanceof IThreeSideTextMergeViewerProvider provider))
+                continue;
+            ThreeSideTextMergeViewer viewer = provider.getMergeViewer();
+            if (viewer == null)
+                continue;
+            if (!(viewer.getInput() instanceof IThreeSideTextMergeInput mergeInput))
+                continue;
+            if (containsSide(mergeInput, left) || containsSide(mergeInput, right))
+                return s;
+            if (fallback == null)
+                fallback = s;
+        }
+        return fallback;
+    }
+
+    private static boolean containsSide(IThreeSideTextMergeInput mergeInput, ITypedElement element)
+    {
+        if (element == null)
+            return false;
+        return element == mergeInput.getLeft()
+            || element == mergeInput.getRight()
+            || element == mergeInput.getAncestor()
+            || element == mergeInput.getMergeResult();
+    }
+
+    private static String mapPairwiseElement(ITypedElement element, IThreeSideTextMergeInput mergeInput,
+        String leftLabel, String rightLabel, String resultLabel)
+    {
+        if (element == null)
+            return null;
+        if (element == mergeInput.getLeft())
+            return leftLabel;
+        if (element == mergeInput.getRight())
+            return rightLabel;
+        if (element == mergeInput.getAncestor())
+            return ANCESTOR_SIDE_LABEL;
+        if (element == mergeInput.getMergeResult())
+            return resultLabel;
+        return null;
+    }
+
+    private static String resolveResultSideLabel(ThreeSideTextMergeViewer viewer, IThreeSideTextMergeInput mergeInput)
+    {
+        String fromViewer = CompareCurrentLinesPanel.sideLabelForCurrentLines(
+            MergeViewerReflection.extractLabelText(viewer, "resultLabel")); //$NON-NLS-1$
+        if (isDistinctResultLabel(fromViewer, mergeInput))
+            return fromViewer;
+        ITypedElement result = mergeInput.getMergeResult();
+        String fromElement = result != null ? result.getName() : null;
+        if (isDistinctResultLabel(fromElement, mergeInput))
+            return fromElement;
+        return RESULT_SIDE_LABEL;
+    }
+
+    /** Итоговая подпись не должна совпадать с именем секции слева/справа (иначе снова «где какая сторона»). */
+    private static boolean isDistinctResultLabel(String label, IThreeSideTextMergeInput mergeInput)
+    {
+        if (label == null || label.isBlank())
+            return false;
+        ITypedElement left = mergeInput.getLeft();
+        ITypedElement right = mergeInput.getRight();
+        String leftName = left != null ? left.getName() : null;
+        String rightName = right != null ? right.getName() : null;
+        return !label.equals(leftName) && !label.equals(rightName);
+    }
+
+    /**
      * Реальные названия сторон («Конфигурация»/«Конфигурация1» и т.п.), те же, что в заголовках
      * колонок дерева объектов / панели «Текущая строка» — см. {@link #refreshLabels}. Общий
      * для неё и для {@link #createStructureController} (комбо «Показывать только …» в
@@ -910,6 +1049,429 @@ public final class ThreeSideMergeCurrentLinesHook
 
         // newIdx — это всегда RESULT (либо colorPartnerIdx=RESULT, либо primaryIdx=RESULT).
         panel.scrollToFirstDifference(panel.getRow(RESULT), aligned.rightTypes);
+    }
+
+    /**
+     * В диалоге «Настройка объединения модулей»: переход с секции (метод/область) на корень
+     * «Модуль» подгружает полный текст — восстанавливаем каретку на ту же строку, что была
+     * активна в поле текста секции.
+     *
+     * <p>Снимок позиции берём в {@code Display}-фильтре {@link SWT#Selection} (до штатного
+     * {@code nodeSelectionChanged} / {@code fireInputChange}); применение — в {@code asyncExec}
+     * после замены документов. Слушатель {@code TreeViewer} регистрируется слишком поздно
+     * и видел бы уже новый текст.
+     */
+    private static final class MethodLineRestore
+    {
+        private static final String TREE_KEY = "tormozit.moduleMergeMethodLineRestore"; //$NON-NLS-1$
+        private static final String TRACK_KEY = "tormozit.moduleMergeMethodLineRestoreTrack"; //$NON-NLS-1$
+        private static final int APPLY_MAX_ATTEMPTS = 20;
+        private static final int APPLY_RETRY_MS = 50;
+
+        private final IThreeSideTextMergeViewerProvider provider;
+        private final Tree tree;
+        private ThreeSideTextMergeViewer viewer;
+        private StyledText leftText;
+        private StyledText rightText;
+        private StyledText resultText;
+        private StyledText lastActive;
+        private Listener selectionFilter;
+        private Pending pending;
+
+        private MethodLineRestore(IThreeSideTextMergeViewerProvider provider, Tree tree)
+        {
+            this.provider = provider;
+            this.tree = tree;
+        }
+
+        static void install(IThreeSideTextMergeViewerProvider provider, ThreeSideTextMergeViewer viewer,
+            StyledText leftText, StyledText rightText, StyledText resultText)
+        {
+            Tree tree = findStructureTree(provider);
+            if (tree == null || tree.isDisposed())
+                return;
+            Object existing = tree.getData(TREE_KEY);
+            MethodLineRestore restore;
+            if (existing instanceof MethodLineRestore current)
+                restore = current;
+            else
+            {
+                restore = new MethodLineRestore(provider, tree);
+                tree.setData(TREE_KEY, restore);
+                restore.hookTree();
+            }
+            restore.bindViewers(viewer, leftText, rightText, resultText);
+        }
+
+        private static Tree findStructureTree(IThreeSideTextMergeViewerProvider provider)
+        {
+            Object viewObj = Global.getField(provider, "comparisonView"); //$NON-NLS-1$
+            if (!(viewObj instanceof DtComparisonView comparisonView))
+                return null;
+            ComparisonTreeControl treeControl = comparisonView.getTreeControl();
+            if (treeControl == null)
+                return null;
+            TreeViewer treeViewer = treeControl.getTreeViewer();
+            return treeViewer != null ? treeViewer.getTree() : null;
+        }
+
+        private void bindViewers(ThreeSideTextMergeViewer viewer, StyledText leftText, StyledText rightText,
+            StyledText resultText)
+        {
+            this.viewer = viewer;
+            this.leftText = leftText;
+            this.rightText = rightText;
+            this.resultText = resultText;
+            trackActive(leftText);
+            trackActive(rightText);
+            trackActive(resultText);
+            if (lastActive == null || lastActive.isDisposed())
+                lastActive = leftText != null ? leftText : rightText != null ? rightText : resultText;
+        }
+
+        private void trackActive(StyledText text)
+        {
+            if (text == null || text.isDisposed() || Boolean.TRUE.equals(text.getData(TRACK_KEY)))
+                return;
+            text.setData(TRACK_KEY, Boolean.TRUE);
+            text.addCaretListener(e -> lastActive = text);
+            text.addListener(SWT.FocusIn, e -> lastActive = text);
+        }
+
+        private void hookTree()
+        {
+            Display display = tree.getDisplay();
+            if (display == null || display.isDisposed())
+                return;
+            selectionFilter = this::handleTreeSelection;
+            display.addFilter(SWT.Selection, selectionFilter);
+            tree.addDisposeListener(e ->
+            {
+                if (display != null && !display.isDisposed() && selectionFilter != null)
+                    display.removeFilter(SWT.Selection, selectionFilter);
+            });
+        }
+
+        private void handleTreeSelection(Event event)
+        {
+            if (event.widget != tree || event.detail == SWT.CHECK)
+                return;
+            Pending snapshot = captureIfSwitchingToRoot();
+            if (snapshot == null)
+                return;
+            pending = snapshot;
+            Display display = tree.getDisplay();
+            if (display == null || display.isDisposed())
+                return;
+            display.asyncExec(() -> applyPending(0));
+        }
+
+        private Pending captureIfSwitchingToRoot()
+        {
+            if (!(Global.getField(provider, "currentSelectedNode") instanceof IPartialModelNode oldNode)) //$NON-NLS-1$
+                return null;
+            ComparisonNode oldComparison = oldNode.retrieveComparisonNode();
+            if (!(oldComparison instanceof BslModuleSectionComparisonNode section))
+                return null;
+            TreeItem[] selection = tree.getSelection();
+            if (selection == null || selection.length == 0 || selection[0] == null || selection[0].isDisposed())
+                return null;
+            if (!(selection[0].getData() instanceof ExternalPropertyPartialModelNode))
+                return null;
+
+            StyledText source = resolveActiveText();
+            if (source == null || source.isDisposed())
+                return null;
+            int pane = paneOf(source);
+            if (pane < 0)
+                return null;
+            SourceViewer sourceViewer = sourceViewerOf(pane);
+            String oldText;
+            int caret;
+            if (sourceViewer != null && sourceViewer.getDocument() != null)
+            {
+                oldText = sourceViewer.getDocument().get();
+                caret = sourceViewer.getSelectedRange().x;
+            }
+            else
+            {
+                oldText = source.getText();
+                caret = source.getCaretOffset();
+            }
+            if (oldText == null)
+                oldText = ""; //$NON-NLS-1$
+            caret = Math.max(0, Math.min(caret, oldText.length()));
+            int relativeLine = 0;
+            int column = 0;
+            try
+            {
+                relativeLine = source.getLineAtOffset(Math.min(caret, source.getCharCount()));
+                column = caret - source.getOffsetAtLine(relativeLine);
+            }
+            catch (RuntimeException ignored)
+            {
+            }
+            return new Pending(pane, oldText, caret, relativeLine, Math.max(0, column), section);
+        }
+
+        private void applyPending(int attempt)
+        {
+            Pending snapshot = pending;
+            if (snapshot == null || tree.isDisposed())
+                return;
+            Object currentObj = Global.getField(provider, "currentSelectedNode"); //$NON-NLS-1$
+            ComparisonNode currentComparison = currentObj instanceof IPartialModelNode current
+                ? current.retrieveComparisonNode() : null;
+            if (currentComparison instanceof BslModuleSectionComparisonNode)
+            {
+                if (currentComparison == snapshot.section && attempt < APPLY_MAX_ATTEMPTS)
+                {
+                    Display display = tree.getDisplay();
+                    if (display != null && !display.isDisposed())
+                        display.timerExec(APPLY_RETRY_MS, () -> applyPending(attempt + 1));
+                    return;
+                }
+                pending = null;
+                return;
+            }
+            if (!(currentComparison instanceof BslModuleComparisonNode))
+            {
+                if (attempt < APPLY_MAX_ATTEMPTS)
+                {
+                    Display display = tree.getDisplay();
+                    if (display != null && !display.isDisposed())
+                        display.timerExec(APPLY_RETRY_MS, () -> applyPending(attempt + 1));
+                    return;
+                }
+                pending = null;
+                return;
+            }
+
+            StyledText target = textOf(snapshot.pane);
+            SourceViewer sourceViewer = sourceViewerOf(snapshot.pane);
+            if (target == null || target.isDisposed())
+                return;
+            String newText = sourceViewer != null && sourceViewer.getDocument() != null
+                ? sourceViewer.getDocument().get() : target.getText();
+            if (newText == null)
+                newText = ""; //$NON-NLS-1$
+
+            int offset = mapOffset(snapshot, newText);
+            if (offset < 0)
+            {
+                if (attempt < APPLY_MAX_ATTEMPTS && newText.length() <= snapshot.oldText.length())
+                {
+                    Display display = tree.getDisplay();
+                    if (display != null && !display.isDisposed())
+                        display.timerExec(APPLY_RETRY_MS, () -> applyPending(attempt + 1));
+                    return;
+                }
+                log("MethodLineRestore: не удалось сопоставить строку секции в полном модуле"); //$NON-NLS-1$
+                pending = null;
+                return;
+            }
+            pending = null;
+            activateOffset(sourceViewer, target, offset);
+        }
+
+        private int mapOffset(Pending snapshot, String newText)
+        {
+            try
+            {
+                ComparisonSide side = sideOf(snapshot.pane);
+                if (side != null)
+                {
+                    int viaRegions = offsetViaRegions(snapshot.section, side, snapshot.caretOffset);
+                    if (viaRegions >= 0 && viaRegions <= newText.length())
+                        return viaRegions;
+                }
+                int viaSubstring = offsetViaUniqueSubstring(snapshot.oldText, snapshot.caretOffset, newText);
+                if (viaSubstring >= 0)
+                    return viaSubstring;
+                return offsetViaSectionName(snapshot, newText);
+            }
+            catch (RuntimeException e)
+            {
+                return -1;
+            }
+        }
+
+        private static int offsetViaRegions(BslModuleSectionComparisonNode section, ComparisonSide side,
+            int caretInSection)
+        {
+            List<ComparisonTextRegion> regions = section.getComparisonRegions();
+            if (regions == null || regions.isEmpty())
+                return -1;
+            int remaining = Math.max(0, caretInSection);
+            for (ComparisonTextRegion comparisonRegion : regions)
+            {
+                if (comparisonRegion == null)
+                    continue;
+                TextRegion region = comparisonRegion.getRegion(side);
+                if (region == null)
+                    continue;
+                int length = Math.max(0, region.getLength());
+                if (remaining <= length)
+                    return region.getOffset() + remaining;
+                remaining -= length;
+            }
+            return -1;
+        }
+
+        private static int offsetViaUniqueSubstring(String oldText, int caretOffset, String newText)
+        {
+            if (oldText == null || oldText.isEmpty() || newText == null)
+                return -1;
+            int first = newText.indexOf(oldText);
+            if (first < 0)
+                return -1;
+            if (newText.indexOf(oldText, first + 1) >= 0)
+                return -1;
+            int offset = first + Math.max(0, Math.min(caretOffset, oldText.length()));
+            return Math.min(offset, newText.length());
+        }
+
+        private int offsetViaSectionName(Pending snapshot, String newText)
+        {
+            String name = sectionName(snapshot.section, sideOf(snapshot.pane));
+            if (name == null || name.isBlank())
+                return -1;
+            BslModuleStructureParser.ParseOutcome outcome = BslModuleStructureParser.parse(newText);
+            if (outcome == null || outcome.root == null)
+                return -1;
+            BslModuleStructureParser.SectionNode found = findSectionByName(outcome.root, name);
+            if (found == null)
+                return -1;
+            StyledText target = textOf(snapshot.pane);
+            if (target == null || target.isDisposed())
+                return found.offset;
+            try
+            {
+                int startLine = target.getLineAtOffset(Math.min(found.offset, target.getCharCount()));
+                int line = Math.min(startLine + snapshot.relativeLine, Math.max(0, target.getLineCount() - 1));
+                int lineStart = target.getOffsetAtLine(line);
+                int lineEnd = line + 1 < target.getLineCount() ? target.getOffsetAtLine(line + 1)
+                    : target.getCharCount();
+                return lineStart + Math.min(snapshot.column, Math.max(0, lineEnd - lineStart));
+            }
+            catch (RuntimeException e)
+            {
+                return found.offset;
+            }
+        }
+
+        private static String sectionName(BslModuleSectionComparisonNode section, ComparisonSide side)
+        {
+            if (side != null)
+            {
+                String named = section.getName(side);
+                if (named != null && !named.isBlank())
+                    return named;
+            }
+            String main = section.getMainName();
+            if (main != null && !main.isBlank())
+                return main;
+            String other = section.getOtherName();
+            return other != null && !other.isBlank() ? other : section.getAncestorName();
+        }
+
+        private static BslModuleStructureParser.SectionNode findSectionByName(
+            BslModuleStructureParser.SectionNode node, String name)
+        {
+            if (node == null || name == null)
+                return null;
+            if (name.equals(node.label))
+                return node;
+            for (BslModuleStructureParser.SectionNode child : node.children)
+            {
+                BslModuleStructureParser.SectionNode found = findSectionByName(child, name);
+                if (found != null)
+                    return found;
+            }
+            return null;
+        }
+
+        private static void activateOffset(SourceViewer sourceViewer, StyledText text, int offset)
+        {
+            if (text == null || text.isDisposed())
+                return;
+            int safe = Math.max(0, Math.min(offset, text.getCharCount()));
+            if (sourceViewer != null)
+                sourceViewer.setSelectedRange(safe, 0);
+            else
+                text.setSelectionRange(safe, 0);
+            try
+            {
+                int line = text.getLineAtOffset(safe);
+                int visibleLines = Math.max(1, text.getClientArea().height / Math.max(1, text.getLineHeight()));
+                text.setTopIndex(Math.max(0, line - visibleLines / 3));
+            }
+            catch (RuntimeException ignored)
+            {
+            }
+        }
+
+        private StyledText resolveActiveText()
+        {
+            if (lastActive != null && !lastActive.isDisposed() && paneOf(lastActive) >= 0)
+                return lastActive;
+            return leftText != null && !leftText.isDisposed() ? leftText
+                : rightText != null && !rightText.isDisposed() ? rightText
+                : resultText != null && !resultText.isDisposed() ? resultText : null;
+        }
+
+        private int paneOf(StyledText text)
+        {
+            if (text == null)
+                return -1;
+            if (text == leftText)
+                return LEFT;
+            if (text == rightText)
+                return RIGHT;
+            if (text == resultText)
+                return RESULT;
+            return -1;
+        }
+
+        private StyledText textOf(int pane)
+        {
+            return switch (pane)
+            {
+                case LEFT -> leftText;
+                case RIGHT -> rightText;
+                case RESULT -> resultText;
+                default -> null;
+            };
+        }
+
+        private ComparisonSide sideOf(int pane)
+        {
+            return switch (pane)
+            {
+                case LEFT -> ComparisonSide.MAIN;
+                case RIGHT -> ComparisonSide.OTHER;
+                default -> null;
+            };
+        }
+
+        private SourceViewer sourceViewerOf(int pane)
+        {
+            if (viewer == null)
+                return null;
+            String field = switch (pane)
+            {
+                case LEFT -> "leftViewer"; //$NON-NLS-1$
+                case RIGHT -> "rightViewer"; //$NON-NLS-1$
+                case RESULT -> "resultViewer"; //$NON-NLS-1$
+                default -> null;
+            };
+            return field != null ? MergeViewerReflection.extractSourceViewer(viewer, field) : null;
+        }
+
+        private record Pending(int pane, String oldText, int caretOffset, int relativeLine, int column,
+            BslModuleSectionComparisonNode section)
+        {
+        }
     }
 
     private static void log(String msg)

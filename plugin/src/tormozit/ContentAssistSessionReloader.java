@@ -825,7 +825,18 @@ suppressDisplay.asyncExec(
         // ИР-вставка: не трогать EDT DataEvent/LinkedMode (ключ Структура() после trim).
         if (irApply)
         {
+            boolean replaceParent = Boolean.TRUE.equals(
+                SmartCompletionProposal.IR_REPLACE_PARENT_APPLY.get());
+            if (replaceParent && hasParen)
+            {
+                int open = text.indexOf('(');
+                pendingShowParamHintAfterInsert = true;
+                pendingParamHintDesiredCaret = open >= 0 ? event.getOffset() + open + 1 : -1;
+                scheduleParamHintAfterIrReplaceParent();
+            }
             logLinkedMode("prepare.skip", "{\"reason\":\"irApply\"" //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"replaceParent\":" + replaceParent //$NON-NLS-1$
+                + ",\"pendingHint\":" + pendingShowParamHintAfterInsert //$NON-NLS-1$
                 + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(clipLogText(text)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
         }
@@ -864,6 +875,22 @@ suppressDisplay.asyncExec(
             + ",\"mapKeys\":" + sampleDataEventMapKeys(bslListener, 8) //$NON-NLS-1$
             + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(clipLogText(text)) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
         schedulePostDoItLinkedModeDiag(doc, event.getOffset(), text);
+    }
+
+    /**
+     * После вставки ИР с заменой родителя {@code Method()}: подсказка параметров
+     * (штатный LinkedMode/DataEvent для ИР-вставки не поднимается).
+     */
+    private void scheduleParamHintAfterIrReplaceParent()
+    {
+        if (!pendingShowParamHintAfterInsert || pendingParamHintDesiredCaret < 0)
+            return;
+        StyledText widget = viewer != null ? viewer.getTextWidget() : null;
+        Display display = widget != null && !widget.isDisposed() ? widget.getDisplay() : null;
+        if (display == null || display.isDisposed())
+            return;
+        final int desired = pendingParamHintDesiredCaret;
+        display.asyncExec(() -> maybeShowParamHintAfterInsert(desired));
     }
 
     /**
@@ -953,9 +980,11 @@ suppressDisplay.asyncExec(
         int desired = pendingParamHintDesiredCaret;
         IDocument doc = viewer != null ? viewer.getDocument() : null;
         boolean hasModel = doc != null && LinkedModeModel.hasInstalledModel(doc);
+        int modelCaret = modelCaretOffset();
         if (!pending)
         {
-            logLinkedMode("hint.skip", "{\"reason\":\"notPending\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+            logLinkedMode("hint.skip", "{\"reason\":\"notPending\",\"caret\":" + modelCaret //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"passed\":" + caret //$NON-NLS-1$
                 + ",\"desired\":" + desired //$NON-NLS-1$
                 + ",\"hasModel\":" + hasModel //$NON-NLS-1$
                 + ",\"hover\":" + isParamHoverShellVisible() + "}"); //$NON-NLS-1$ //$NON-NLS-2$
@@ -963,9 +992,10 @@ suppressDisplay.asyncExec(
         }
         pendingShowParamHintAfterInsert = false;
         pendingParamHintDesiredCaret = -1;
-        if (desired < 0 || caret != desired)
+        if (desired < 0 || modelCaret != desired)
         {
-            logLinkedMode("hint.skip", "{\"reason\":\"caretMismatch\",\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+            logLinkedMode("hint.skip", "{\"reason\":\"caretMismatch\",\"caret\":" + modelCaret //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"passed\":" + caret //$NON-NLS-1$
                 + ",\"desired\":" + desired //$NON-NLS-1$
                 + ",\"hasModel\":" + hasModel + "}"); //$NON-NLS-1$ //$NON-NLS-2$
             return;
@@ -974,13 +1004,13 @@ suppressDisplay.asyncExec(
         Display display = widget != null && !widget.isDisposed() ? widget.getDisplay() : null;
         if (display == null || display.isDisposed())
         {
-            logLinkedMode("hint.skip", "{\"reason\":\"noDisplay\",\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            logLinkedMode("hint.skip", "{\"reason\":\"noDisplay\",\"caret\":" + modelCaret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
         }
         final int desiredCaret = desired;
         final int gen = paramHintPostGen.incrementAndGet();
         final long startedMs = System.currentTimeMillis();
-        logLinkedMode("hint.poll", "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+        logLinkedMode("hint.poll", "{\"caret\":" + modelCaret //$NON-NLS-1$ //$NON-NLS-2$
             + ",\"gen\":" + gen //$NON-NLS-1$
             + ",\"hasModel\":" + hasModel + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         display.timerExec(0, () -> pollAstReadyThenShowParamHint(desiredCaret, gen, 0, startedMs));
@@ -1370,6 +1400,7 @@ return false;
         {
             StyledText st = viewer != null ? viewer.getTextWidget() : null;
             int caret = st != null && !st.isDisposed() ? st.getCaretOffset() : -1;
+            int modelCaret = modelCaretOffset();
             boolean hasModel = doc != null && LinkedModeModel.hasInstalledModel(doc);
             boolean bslPresent = findBslDocumentListener(doc) != null;
             IDocumentListener bsl = findBslDocumentListener(doc);
@@ -1392,6 +1423,7 @@ return false;
                     + ",\"text\":\"" + ContentAssistDebug.jsonEscapeForLog(
                         text != null && text.length() > 80 ? text.substring(0, 80) : text) + "\"}"); //$NON-NLS-1$ //$NON-NLS-2$
             logLinkedMode("diag." + phase, "{\"caret\":" + caret //$NON-NLS-1$ //$NON-NLS-2$
+                + ",\"modelCaret\":" + modelCaret //$NON-NLS-1$
                 + ",\"desired\":" + desired //$NON-NLS-1$
                 + ",\"insertEnd\":" + insertEnd //$NON-NLS-1$
                 + ",\"hasModel\":" + hasModel //$NON-NLS-1$
@@ -1469,13 +1501,15 @@ return false;
         }
         boolean hasModel = LinkedModeModel.hasInstalledModel(doc);
         StyledText st = viewer != null ? viewer.getTextWidget() : null;
-        int caret = st != null && !st.isDisposed() ? st.getCaretOffset() : -1;
+        int widgetCaret = st != null && !st.isDisposed() ? st.getCaretOffset() : -1;
+        int caret = modelCaretOffset();
         IDocumentListener bslNow = findBslDocumentListener(doc);
         DataEventDiag mapDiag = readDataEventDiag(bslNow != null ? bslNow : remembered, text);
         logLinkedMode("ensureBsl", "{\"present\":" + present //$NON-NLS-1$ //$NON-NLS-2$
             + ",\"readded\":" + readded //$NON-NLS-1$
             + ",\"hasModel\":" + hasModel //$NON-NLS-1$
             + ",\"caret\":" + caret //$NON-NLS-1$
+            + ",\"widgetCaret\":" + widgetCaret //$NON-NLS-1$
             + ",\"hasKey\":" + mapDiag.hasKey //$NON-NLS-1$
             + ",\"objects\":" + mapDiag.objectsSize + "}"); //$NON-NLS-1$ //$NON-NLS-2$
         logLinkedModeDiagPhase("async0", doc, insertOffset, text); //$NON-NLS-1$
@@ -2661,7 +2695,7 @@ if (!inLiteral)
         IrBslCompletionSupport.Snapshot snapshot = irCompletionSnapshot;
         if (snapshot == null || snapshot.contextType == null || snapshot.contextType.isEmpty())
             return null;
-        return snapshot.contextType;
+        return SmartContentAssistProcessor.localizeAssistTypeSegment(snapshot.contextType);
     }
 
     public boolean isWordsTableReady()

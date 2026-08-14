@@ -16,7 +16,6 @@ import org.eclipse.jface.text.contentassist.ContentAssistant;
 import org.eclipse.jface.text.contentassist.ICompletionProposal;
 import org.eclipse.jface.text.contentassist.ICompletionProposalExtension3;
 import org.eclipse.jface.text.source.SourceViewer;
-import org.eclipse.swt.custom.StyledText;
 import org.eclipse.xtext.ui.editor.hover.IEObjectHover;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal;
@@ -497,10 +496,7 @@ trace.creator = resolveAssistBrowserCreatorChain(assistant, viewer, reloader);
 
     private static int resolveLiteralCaretForProbe(SourceViewer viewer)
     {
-        if (viewer != null && viewer.getTextWidget() instanceof StyledText st
-            && !st.isDisposed())
-            return st.getCaretOffset();
-        return -1;
+        return SmartContentAssistProcessor.resolveWidgetCaret(viewer);
     }
 
     /**

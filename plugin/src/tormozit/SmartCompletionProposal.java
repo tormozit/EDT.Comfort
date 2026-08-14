@@ -18,7 +18,6 @@ import org.eclipse.jface.text.contentassist.ICompletionProposalExtension6;
 import org.eclipse.jface.text.contentassist.IContextInformation;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.jface.viewers.StyledString;
-import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.widgets.Display;
@@ -59,6 +58,21 @@ public class SmartCompletionProposal implements
      */
     static final ThreadLocal<Boolean> IR_PROPOSAL_APPLY_IN_PROGRESS = new ThreadLocal<>();
 
+    /**
+     * Вставка слова ИР с заменой родителя ({@code слово} содержит разделитель варианта).
+     * Нужна {@link ContentAssistSessionReloader} для подсказки параметров после {@code ()}.
+     */
+    static final ThreadLocal<Boolean> IR_REPLACE_PARENT_APPLY = new ThreadLocal<>();
+
+    /**
+     * ИР-слово с заменой родителя для overlap EDT, запомненное в {@link #selected}
+     * до {@code assistSessionEnded} (там {@code irProposals} уже пуст).
+     */
+    private IrCompletionProposal overlapReplaceParentIr;
+
+    /** Каретка после overlap-вставки ИР; {@code -1} — не задана. */
+    private int overlapIrCaret = -1;
+
     public SmartCompletionProposal(ICompletionProposal delegate)
     {
         this(delegate, -1);
@@ -86,24 +100,23 @@ public class SmartCompletionProposal implements
     public StyledString getStyledDisplayString()
     {
         String overlapDisplay = resolveIrOverlapDisplayOverride();
+        String sourceDisplay = overlapDisplay != null
+            ? overlapDisplay
+            : delegate.getDisplayString();
+        String localized = SmartContentAssistProcessor.localizeAssistTypeNames(sourceDisplay);
         StyledString result;
-        if (overlapDisplay != null)
-            result = buildIrStyledDisplayString(overlapDisplay);
-        else if (delegate instanceof IrCompletionProposal ir)
-            result = buildIrStyledDisplayString(ir.getDisplayString());
-        else if (delegate instanceof ICompletionProposalExtension6 ext6)
+        if (overlapDisplay != null || delegate instanceof IrCompletionProposal)
+            result = buildIrStyledDisplayString(localized);
+        else if (localized != null && localized.equals(sourceDisplay)
+            && delegate instanceof ICompletionProposalExtension6 ext6)
             result = ext6.getStyledDisplayString();
         else
-        {
-            String display = delegate.getDisplayString();
-            result = new StyledString(display != null ? display : ""); //$NON-NLS-1$
-        }
+            result = buildIrStyledDisplayString(localized != null ? localized : ""); //$NON-NLS-1$
         SmartCodeMatcher matcher = resolveHighlightMatcher();
         if (!matcher.isEmpty)
         {
-            String display = overlapDisplay != null ? overlapDisplay : delegate.getDisplayString();
-            String nameOnly = SmartContentAssistProcessor.parseProposalListName(
-                display != null ? display : ""); //$NON-NLS-1$
+            String display = localized != null ? localized : ""; //$NON-NLS-1$
+            String nameOnly = SmartContentAssistProcessor.parseProposalListName(display);
             if (!nameOnly.isEmpty())
                 SmartMatchHighlight.applyRanges(result, matcher.getHighlightRanges(nameOnly));
         }
@@ -127,9 +140,8 @@ public class SmartCompletionProposal implements
     public String getDisplayString()
     {
         String overlapDisplay = resolveIrOverlapDisplayOverride();
-        if (overlapDisplay != null)
-            return overlapDisplay;
-        return delegate.getDisplayString();
+        String raw = overlapDisplay != null ? overlapDisplay : delegate.getDisplayString();
+        return SmartContentAssistProcessor.localizeAssistTypeNames(raw);
     }
 
     /**
@@ -159,6 +171,12 @@ public class SmartCompletionProposal implements
     @Override
     public Point getSelection(IDocument document)
     {
+        if (overlapIrCaret >= 0)
+        {
+            int caret = overlapIrCaret;
+            overlapIrCaret = -1;
+            return new Point(caret, 0);
+        }
         return delegate.getSelection(document);
     }
 
@@ -171,14 +189,14 @@ public class SmartCompletionProposal implements
     @Override
     public void apply(IDocument document)
     {
-        PROPOSAL_APPLY_IN_PROGRESS.set(Boolean.TRUE);
         boolean irApply = delegate instanceof IrCompletionProposal;
-        if (irApply)
-            IR_PROPOSAL_APPLY_IN_PROGRESS.set(Boolean.TRUE);
+        boolean replaceParentOverlap = isEdtOverlapReplaceParent();
+        beginProposalApply(document, irApply, replaceParentOverlap);
         try
         {
-            SmartContentAssistProcessor.bindCtorFakeCtorBeforeApply(delegate, document);
             logApplyStart("doc"); //$NON-NLS-1$
+            if (replaceParentOverlap && tryApplyEdtOverlapReplaceParent(document, null, -1))
+                return;
             if (tryApplyWordOnly(document, null, -1, null))
             {
                 logApplyWordOnly("doc"); //$NON-NLS-1$
@@ -193,10 +211,7 @@ public class SmartCompletionProposal implements
         }
         finally
         {
-            SmartContentAssistProcessor.clearCtorPendingApplyState();
-            if (irApply)
-                IR_PROPOSAL_APPLY_IN_PROGRESS.remove();
-            PROPOSAL_APPLY_IN_PROGRESS.remove();
+            endProposalApply();
         }
     }
 
@@ -205,14 +220,14 @@ public class SmartCompletionProposal implements
     @Override
     public void apply(IDocument document, char trigger, int offset)
     {
-        PROPOSAL_APPLY_IN_PROGRESS.set(Boolean.TRUE);
         boolean irApply = delegate instanceof IrCompletionProposal;
-        if (irApply)
-            IR_PROPOSAL_APPLY_IN_PROGRESS.set(Boolean.TRUE);
+        boolean replaceParentOverlap = isEdtOverlapReplaceParent();
+        beginProposalApply(document, irApply, replaceParentOverlap);
         try
         {
-            SmartContentAssistProcessor.bindCtorFakeCtorBeforeApply(delegate, document);
             logApplyStart("docTrigger"); //$NON-NLS-1$
+            if (replaceParentOverlap && tryApplyEdtOverlapReplaceParent(document, null, offset))
+                return;
             if (tryApplyWordOnly(document, null, offset, null))
             {
                 logApplyWordOnly("docTrigger"); //$NON-NLS-1$
@@ -230,10 +245,7 @@ public class SmartCompletionProposal implements
         }
         finally
         {
-            SmartContentAssistProcessor.clearCtorPendingApplyState();
-            if (irApply)
-                IR_PROPOSAL_APPLY_IN_PROGRESS.remove();
-            PROPOSAL_APPLY_IN_PROGRESS.remove();
+            endProposalApply();
         }
     }
 
@@ -264,15 +276,15 @@ public class SmartCompletionProposal implements
     @Override
     public void apply(ITextViewer viewer, char trigger, int stateMask, int offset)
     {
-        PROPOSAL_APPLY_IN_PROGRESS.set(Boolean.TRUE);
         boolean irApply = delegate instanceof IrCompletionProposal;
-        if (irApply)
-            IR_PROPOSAL_APPLY_IN_PROGRESS.set(Boolean.TRUE);
+        boolean replaceParentOverlap = isEdtOverlapReplaceParent();
+        beginProposalApply(viewer != null ? viewer.getDocument() : null, irApply, replaceParentOverlap);
         try
         {
-            SmartContentAssistProcessor.bindCtorFakeCtorBeforeApply(delegate,
-                viewer != null ? viewer.getDocument() : null);
             logApplyStart("viewer"); //$NON-NLS-1$
+            if (replaceParentOverlap && tryApplyEdtOverlapReplaceParent(
+                viewer != null ? viewer.getDocument() : null, viewer, offset))
+                return;
             if (viewer != null && tryApplyWordOnly(viewer.getDocument(), viewer, offset, stateMask))
             {
                 logApplyWordOnly("viewer"); //$NON-NLS-1$
@@ -294,10 +306,7 @@ public class SmartCompletionProposal implements
         }
         finally
         {
-            SmartContentAssistProcessor.clearCtorPendingApplyState();
-            if (irApply)
-                IR_PROPOSAL_APPLY_IN_PROGRESS.remove();
-            PROPOSAL_APPLY_IN_PROGRESS.remove();
+            endProposalApply();
         }
     }
 
@@ -306,6 +315,7 @@ public class SmartCompletionProposal implements
     public void selected(ITextViewer viewer, boolean smartToggle)
     {
         logProposalAtSelection(viewer);
+        stashOverlapReplaceParentIr();
         if (delegate instanceof IrCompletionProposal ir)
             scheduleIrWordActivation(ir);
         else
@@ -331,6 +341,80 @@ public class SmartCompletionProposal implements
     }
 
     // ---- ICompletionProposalExtension4 --------------------------------------
+
+    private void beginProposalApply(IDocument document, boolean irApply, boolean replaceParentOverlap)
+    {
+        PROPOSAL_APPLY_IN_PROGRESS.set(Boolean.TRUE);
+        if (irApply || replaceParentOverlap)
+            IR_PROPOSAL_APPLY_IN_PROGRESS.set(Boolean.TRUE);
+        boolean replaceParent = replaceParentOverlap
+            || irApply && ((IrCompletionProposal) delegate).isReplaceParentOnInsert();
+        if (replaceParent)
+            IR_REPLACE_PARENT_APPLY.set(Boolean.TRUE);
+        SmartContentAssistProcessor.bindCtorFakeCtorBeforeApply(delegate, document);
+    }
+
+    private static void endProposalApply()
+    {
+        SmartContentAssistProcessor.clearCtorPendingApplyState();
+        IR_REPLACE_PARENT_APPLY.remove();
+        IR_PROPOSAL_APPLY_IN_PROGRESS.remove();
+        PROPOSAL_APPLY_IN_PROGRESS.remove();
+    }
+
+    /** Overlap EDT+ИР: слово ИР содержит разделитель варианта — вставка с заменой родителя. */
+    private boolean isEdtOverlapReplaceParent()
+    {
+        return resolveOverlapReplaceParentIr() != null;
+    }
+
+    private IrCompletionProposal resolveOverlapReplaceParentIr()
+    {
+        if (delegate instanceof IrCompletionProposal)
+            return null;
+        if (overlapReplaceParentIr != null && overlapReplaceParentIr.isReplaceParentOnInsert())
+            return overlapReplaceParentIr;
+        IrCompletionProposal ir = findIrOverlapForEdt(delegate);
+        if (ir != null && ir.isReplaceParentOnInsert())
+            return ir;
+        return null;
+    }
+
+    private void stashOverlapReplaceParentIr()
+    {
+        if (delegate instanceof IrCompletionProposal)
+            return;
+        IrCompletionProposal ir = findIrOverlapForEdt(delegate);
+        overlapReplaceParentIr = ir != null && ir.isReplaceParentOnInsert() ? ir : null;
+    }
+
+    private boolean tryApplyEdtOverlapReplaceParent(IDocument document, ITextViewer viewer,
+        int offset)
+    {
+        IrCompletionProposal ir = resolveOverlapReplaceParentIr();
+        if (ir == null)
+            return false;
+        IDocument doc = document != null ? document
+            : viewer != null ? viewer.getDocument() : null;
+        if (viewer != null && tryApplyWithIrAdapter(ir, viewer, offset))
+        {
+            captureOverlapIrCaret(ir);
+            return true;
+        }
+        int caret = offset >= 0 ? offset : resolveApplyCaretOffset(doc);
+        applyIrInsertion(ir, doc, null, caret, false, false, "", false, null); //$NON-NLS-1$
+        captureOverlapIrCaret(ir);
+        return true;
+    }
+
+    private void captureOverlapIrCaret(IrCompletionProposal ir)
+    {
+        if (ir == null)
+            return;
+        Point sel = ir.getSelection(null);
+        if (sel != null)
+            overlapIrCaret = sel.x;
+    }
 
     /**
      * Порт RDT {@code ПриВыбореЗначенияТ9}: перехват вставки ИР-предложения через
@@ -379,7 +463,7 @@ public class SmartCompletionProposal implements
         int deleteFrom = -1;
         int deleteTo   = -1;
         if (result.newTemplate != null || result.isGeneratorWithLineStart) {
-           int[] range = resolveDeleteRange(result, document, session, offset, viewer);
+           int[] range = resolveDeleteRange(result, document, session, offset, viewer, ir);
             deleteFrom = range[0];
             deleteTo   = range[1];
         }
@@ -500,7 +584,8 @@ public class SmartCompletionProposal implements
      * @return массив [deleteFrom, deleteTo]; оба -1 если не вычислено
      */
     private static int[] resolveDeleteRange(IRSession.CompletionAdapterResult result,
-        IDocument document, IRSession session, int completionOffset, ITextViewer viewer)
+        IDocument document, IRSession session, int completionOffset, ITextViewer viewer,
+        IrCompletionProposal ir)
     {
         // Приоритет — мЗаменяемыйДиапазон, уже прочитаный на COM-потоке
         if (result.deleteFromLf >= 0 && result.deleteToLf > result.deleteFromLf)
@@ -514,9 +599,11 @@ public class SmartCompletionProposal implements
         //        УдалитьТекстПо = Позиция + СтрДлина(ВыделенныйТекст)
         try
         {
-            int wordStart = SmartContentAssistProcessor.computeIdentifierWordStart(
-                document, completionOffset);
-            String effectivePrefix = document.get(wordStart, completionOffset - wordStart);
+            int prefixStart = ir != null && ir.isReplaceParentOnInsert()
+                ? IrCompletionProposal.computeMaskPrefixStart(document, completionOffset)
+                : SmartContentAssistProcessor.computeIdentifierWordStart(
+                    document, completionOffset);
+            String effectivePrefix = document.get(prefixStart, completionOffset - prefixStart);
             int deleteFrom = completionOffset - effectivePrefix.length();
             if (result.isGeneratorWithLineStart)
             {
@@ -931,10 +1018,7 @@ public class SmartCompletionProposal implements
         SourceViewer viewer = ContentAssistSessionReloader.getActiveViewer();
         if (viewer == null || viewer.getDocument() != document)
             return -1;
-        if (!(viewer.getTextWidget() instanceof StyledText text) || text.isDisposed())
-            return -1;
-        int caret = text.getCaretOffset();
-        return caret >= 0 ? caret : -1;
+        return SmartContentAssistProcessor.resolveWidgetCaret(viewer);
     }
 
     private static boolean needsWordOnlyInsert(ConfigurableCompletionProposal cp,
