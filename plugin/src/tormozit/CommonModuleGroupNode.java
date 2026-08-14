@@ -27,13 +27,16 @@ public final class CommonModuleGroupNode implements IAdaptable
     private final List<CommonModule> members;
     private final Object parent;
     private final IProject project;
+    /** Индекс самого верхнего участника в исходном порядке папки «Общие модули». */
+    private final int sortIndex;
 
-    public CommonModuleGroupNode(String baseName, List<CommonModule> members, Object parent)
+    public CommonModuleGroupNode(String baseName, List<CommonModule> members, Object parent, int sortIndex)
     {
         this.baseName = baseName;
         this.members = members;
         this.parent = parent;
         this.project = resolveProject();
+        this.sortIndex = sortIndex;
     }
 
     public String getBaseName()
@@ -49,6 +52,11 @@ public final class CommonModuleGroupNode implements IAdaptable
     public Object getParent()
     {
         return parent;
+    }
+
+    public int getSortIndex()
+    {
+        return sortIndex;
     }
 
     @Override

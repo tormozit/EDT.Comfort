@@ -55,7 +55,10 @@ public final class CommonModuleGroupContentProvider implements ICommonContentPro
             return group.getMembers().toArray();
 
         if (isCommonModulesFolder(parentElement))
+        {
+            CommonModuleGroupSorter.installOn(viewer);
             return snapshotFor(parentElement).nodes.toArray();
+        }
 
         return NO_CHILDREN;
     }
@@ -101,6 +104,7 @@ public final class CommonModuleGroupContentProvider implements ICommonContentPro
     public void inputChanged(Viewer viewer, Object oldInput, Object newInput)
     {
         this.viewer = viewer;
+        CommonModuleGroupSorter.installOn(viewer);
     }
 
     /**
@@ -166,6 +170,7 @@ public final class CommonModuleGroupContentProvider implements ICommonContentPro
         final List<String> suffixes1;
         final List<String> suffixes2;
         final Map<CommonModule, CommonModuleGroupNode> nodeByModule = new HashMap<>();
+        final Map<CommonModule, Integer> indexByModule = new HashMap<>();
         final List<CommonModuleGroupNode> nodes = new ArrayList<>();
         final long builtAt = System.currentTimeMillis();
         volatile long lastAccess = builtAt;
@@ -174,11 +179,21 @@ public final class CommonModuleGroupContentProvider implements ICommonContentPro
         {
             this.suffixes1 = new ArrayList<>(suffixes1 == null ? List.of() : suffixes1);
             this.suffixes2 = new ArrayList<>(suffixes2 == null ? List.of() : suffixes2);
+            for (int i = 0; i < modules.size(); i++)
+                indexByModule.put(modules.get(i), i);
             Map<String, List<CommonModule>> groups =
                     CommonModuleGrouping.groupBySuffix(modules, this.suffixes1, this.suffixes2);
             for (Map.Entry<String, List<CommonModule>> entry : groups.entrySet())
             {
-                CommonModuleGroupNode node = new CommonModuleGroupNode(entry.getKey(), entry.getValue(), folder);
+                int topIndex = Integer.MAX_VALUE;
+                for (CommonModule member : entry.getValue())
+                {
+                    Integer idx = indexByModule.get(member);
+                    if (idx != null && idx < topIndex)
+                        topIndex = idx;
+                }
+                CommonModuleGroupNode node =
+                        new CommonModuleGroupNode(entry.getKey(), entry.getValue(), folder, topIndex);
                 nodes.add(node);
                 for (CommonModule member : entry.getValue())
                     nodeByModule.put(member, node);
@@ -212,6 +227,26 @@ public final class CommonModuleGroupContentProvider implements ICommonContentPro
         {
             SNAPSHOTS.clear();
             SNAPSHOT_BY_MODULE.clear();
+        }
+    }
+
+    /**
+     * Позиция в исходном порядке папки «Общие модули»: у группы — индекс самого верхнего
+     * участника, у модуля — его собственный индекс. Неизвестный элемент — в конец.
+     */
+    static int sortIndex(Object element)
+    {
+        if (element instanceof CommonModuleGroupNode group)
+            return group.getSortIndex();
+        if (!(element instanceof CommonModule module))
+            return Integer.MAX_VALUE;
+        synchronized (CACHE_LOCK)
+        {
+            GroupingSnapshot snapshot = SNAPSHOT_BY_MODULE.get(module);
+            if (snapshot == null)
+                return Integer.MAX_VALUE;
+            Integer idx = snapshot.indexByModule.get(module);
+            return idx != null ? idx : Integer.MAX_VALUE;
         }
     }
 
