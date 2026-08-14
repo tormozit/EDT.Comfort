@@ -29,6 +29,7 @@ import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.CLabel;
 import org.eclipse.swt.custom.CTabFolder;
 import org.eclipse.swt.custom.CTabItem;
+import org.eclipse.swt.custom.ScrolledComposite;
 import org.eclipse.swt.dnd.Clipboard;
 import org.eclipse.swt.dnd.TextTransfer;
 import org.eclipse.swt.dnd.Transfer;
@@ -37,6 +38,7 @@ import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Button;
+import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Group;
 import org.eclipse.swt.widgets.Control;
@@ -286,6 +288,7 @@ public final class ComfortKeysPreferences
         LocalConflictUi.install(page);
         installUserIndicatorCheckbox(page);
         translateShowKeysControls(page);
+        KeysPageMinWidth.install(page);
     }
 
     // =========================================================================
@@ -953,6 +956,28 @@ public final class ComfortKeysPreferences
         return null;
     }
 
+    private static void setPageField(IPreferencePage page, String fieldName, Object value)
+    {
+        if (page == null)
+            return;
+        Class<?> type = page.getClass();
+        while (type != null)
+        {
+            try
+            {
+                Field field = type.getDeclaredField(fieldName);
+                field.setAccessible(true);
+                field.set(page, value);
+                return;
+            }
+            catch (Exception ignored)
+            {
+                // поле в суперклассе или переименовано
+            }
+            type = type.getSuperclass();
+        }
+    }
+
     private static void removeMirrorBindingHint(IPreferencePage page)
     {
         FilteredTree tree = resolveFilteredTree(page);
@@ -1113,6 +1138,127 @@ public final class ComfortKeysPreferences
             context = binding.getContext().getName();
         String category = binding.getCategory() != null ? binding.getCategory() : ""; //$NON-NLS-1$
         return command + '\t' + sequence + '\t' + context + '\t' + category;
+    }
+
+    /**
+     * Горизонтальный скролл страницы Keys: {@code PreferenceDialog.showPage}
+     * делает {@code scrolled.setMinSize(currentPage.computeSize())}, а
+     * {@code PreferencePage.computeSize} кэширует {@code size}. Без widthHint
+     * GridLayout берёт preferred дерева (колонки 240+130+130+130+50) и вкладок
+     * конфликтов. Сжимаем preferred (hint=1 + grab), сбрасываем кэш, ставим minSize.
+     */
+    private static final class KeysPageMinWidth
+    {
+        private static final String WIRED_KEY = "tormozit.comfort.keys.pageMinWidth"; //$NON-NLS-1$
+
+        private static final int SHRINK_HINT = 1;
+
+        static void install(IPreferencePage page)
+        {
+            if (page == null)
+                return;
+            Control root = page.getControl();
+            if (root == null || root.isDisposed())
+                return;
+
+            applyShrinkableHints(page);
+            ComfortKeysPreferences.setPageField(page, "size", null); //$NON-NLS-1$
+            resetDescriptionWidthHint(page);
+
+            Point recomputed = page.computeSize();
+            ScrolledComposite scrolled = findScrolled(root);
+            if (scrolled != null && !scrolled.isDisposed() && recomputed != null)
+                scrolled.setMinSize(recomputed);
+
+            layoutUp(root);
+
+            Display display = root.getDisplay();
+            if (display != null && !display.isDisposed()
+                    && !Boolean.TRUE.equals(root.getData(WIRED_KEY + ".timers"))) //$NON-NLS-1$
+            {
+                root.setData(WIRED_KEY + ".timers", Boolean.TRUE); //$NON-NLS-1$
+                display.timerExec(0, () -> install(page));
+                display.timerExec(200, () -> install(page));
+            }
+        }
+
+        private static void applyShrinkableHints(IPreferencePage page)
+        {
+            Control root = page.getControl();
+            makeShrinkable(root);
+            Object body = ComfortKeysPreferences.resolvePageField(page, "body"); //$NON-NLS-1$
+            if (body instanceof Control bodyControl)
+            {
+                makeShrinkable(bodyControl);
+                shrinkGrabChildren(bodyControl, 2);
+            }
+            else if (root instanceof Composite composite)
+                shrinkGrabChildren(composite, 2);
+
+            FilteredTree tree = ComfortKeysPreferences.resolveFilteredTree(page);
+            if (tree != null && !tree.isDisposed())
+                makeShrinkable(tree);
+        }
+
+        private static void shrinkGrabChildren(Control control, int depth)
+        {
+            if (depth < 0 || !(control instanceof Composite composite) || composite.isDisposed())
+                return;
+            for (Control child : composite.getChildren())
+            {
+                if (child.isDisposed())
+                    continue;
+                makeShrinkable(child);
+                shrinkGrabChildren(child, depth - 1);
+            }
+        }
+
+        private static void makeShrinkable(Control control)
+        {
+            if (control == null || control.isDisposed())
+                return;
+            if (control instanceof Button || control instanceof Combo)
+                return;
+            if (!(control.getLayoutData() instanceof GridData gd))
+                return;
+            if (!gd.grabExcessHorizontalSpace || gd.widthHint != SWT.DEFAULT)
+                return;
+            gd.widthHint = SHRINK_HINT;
+            control.setLayoutData(gd);
+        }
+
+        private static void resetDescriptionWidthHint(IPreferencePage page)
+        {
+            Object label = ComfortKeysPreferences.resolvePageField(page, "descriptionLabel"); //$NON-NLS-1$
+            if (label instanceof Label desc && !desc.isDisposed()
+                    && desc.getLayoutData() instanceof GridData gd)
+            {
+                gd.widthHint = SHRINK_HINT;
+                desc.setLayoutData(gd);
+            }
+        }
+
+        private static ScrolledComposite findScrolled(Control start)
+        {
+            Control current = start;
+            while (current != null && !current.isDisposed())
+            {
+                if (current instanceof ScrolledComposite scrolled)
+                    return scrolled;
+                current = current.getParent();
+            }
+            return null;
+        }
+
+        private static void layoutUp(Control start)
+        {
+            Composite current = start instanceof Composite composite ? composite : start.getParent();
+            while (current != null && !(current instanceof Shell))
+            {
+                current.layout(true, true);
+                current = current.getParent();
+            }
+        }
     }
 
     /**
@@ -1410,12 +1556,13 @@ public final class ComfortKeysPreferences
                         source.grabExcessHorizontalSpace, true,
                         source.horizontalSpan, source.verticalSpan);
                 gd.minimumHeight = Math.max(80, source.minimumHeight);
-                gd.widthHint = source.widthHint;
+                gd.widthHint = 1;
                 gd.heightHint = source.heightHint;
                 return gd;
             }
             GridData gd = new GridData(SWT.FILL, SWT.FILL, true, true);
             gd.minimumHeight = 80;
+            gd.widthHint = 1;
             return gd;
         }
 
