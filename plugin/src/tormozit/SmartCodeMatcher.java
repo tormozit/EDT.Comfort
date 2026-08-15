@@ -5,12 +5,50 @@ import java.util.List;
 
 public class SmartCodeMatcher extends SmartMatcher {
 
+    /** Служебные символы начала слова: аннотация, препроцессор, метка. */
+    private static final String SERVICE_PREFIX_CHARS = "&#~";
+
+    /** Первый символ фильтра, если он служебный; иначе 0. */
+    private final char servicePrefix;
+    /** Тот же фильтр без служебного символа — для имён, которые его не содержат. */
+    private SmartCodeMatcher bareMatcher;
+
     public SmartCodeMatcher(String filterPattern) {
         super(filterPattern);
+        servicePrefix = !isEmpty && SERVICE_PREFIX_CHARS.indexOf(fullPattern.charAt(0)) >= 0
+            ? fullPattern.charAt(0) : 0;
+    }
+
+    /**
+     * Фильтр начинается со служебного символа, а имя предложения — нет: сравниваем без него.
+     * EDT отдаёт аннотации именем без амперсанда (иконка отдельно), а слова ИР — с ним;
+     * без этого при вводе "&На" отбор по имени "НаКлиенте" давал 0 и список пустел.
+     */
+    private SmartCodeMatcher matcherForName(String name) {
+        if (servicePrefix == 0 || name == null || name.isEmpty()
+            || name.charAt(0) == servicePrefix) {
+            return this;
+        }
+        if (bareMatcher == null)
+            bareMatcher = new SmartCodeMatcher(fullPattern.substring(1));
+        return bareMatcher;
     }
 
     @Override
     public int computeNamePremium(String text) {
+        String name = extractName(text);
+        SmartCodeMatcher matcher = matcherForName(name);
+        if (matcher != this)
+            return matcher.isEmpty ? 1 : matcher.computeAdaptivePremium(name);
+        return computeAdaptivePremium(name);
+    }
+
+    /**
+     * Премия без «прощения» ведущего служебного символа — для источников, которые его
+     * всегда пишут в имени (слова ИР). Иначе фильтр из одного символа пропускал бы
+     * все слова ИР подряд: при "&" в списке появлялись "Если … Тогда", "Новый()" и т.п.
+     */
+    public int computeNamePremiumStrict(String text) {
         return computeAdaptivePremium(extractName(text));
     }
 
@@ -249,6 +287,9 @@ public class SmartCodeMatcher extends SmartMatcher {
         if (isEmpty || text == null) return ranges;
         // Подсвечиваем только в имени, не в параметрах и не в типе
         String namePart = extractName(text);
+        SmartCodeMatcher matcher = matcherForName(namePart);
+        if (matcher != this)
+            return matcher.isEmpty ? ranges : matcher.getHighlightRanges(text);
         String lowerName = namePart.toLowerCase();
         String lowerFull = fullPattern.toLowerCase();
 

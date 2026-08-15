@@ -4570,7 +4570,7 @@ return result;
         String name = filterMatchName(proposal);
         if (name.isEmpty())
             return 0;
-        int nameScore = matcher.computeNamePremium(name);
+        int nameScore = namePremium(matcher, proposal, name);
         if (nameScore <= 0)
             return 0;
         return nameScore * NAME_WEIGHT + matcher.computeParamPremium(display) * PARAM_WEIGHT;
@@ -4622,8 +4622,21 @@ return result;
         String name = filterMatchName(proposal);
         if (name.isEmpty())
             return 0;
-        int nameScore = matcher.computeNamePremium(name);
+        int nameScore = namePremium(matcher, proposal, name);
         return nameScore <= 0 ? 0 : nameScore * NAME_WEIGHT;
+    }
+
+    /**
+     * Слова ИР всегда содержат ведущий {@code &}/{@code #} в имени, поэтому для них премия
+     * считается строго. Штатная EDT отдаёт аннотации без амперсанда (иконка отдельно) —
+     * там символ в фильтре можно не требовать.
+     */
+    private static int namePremium(SmartCodeMatcher matcher, ICompletionProposal proposal,
+                                   String name)
+    {
+        return unwrapProposal(proposal) instanceof IrCompletionProposal
+            ? matcher.computeNamePremiumStrict(name)
+            : matcher.computeNamePremium(name);
     }
 
     static int resolveNativePriority(ICompletionProposal proposal)
@@ -4771,7 +4784,10 @@ private static int compareDelegateOrder(ICompletionProposal p1, ICompletionPropo
 
     static boolean isFilterChar(char c)
     {
-        return Character.isLetterOrDigit(c) || c == '_' || c == '&' || c == '~';
+        // '#' — как '&' у аннотаций: часть вводимого слова препроцессора (#Область).
+        // Без него фильтр для "#Об" равен "Об", предложения ИР приходят с решёткой,
+        // и "#Область" не может получить премию «начало имени» (issue 313).
+        return Character.isLetterOrDigit(c) || c == '_' || c == '&' || c == '~' || c == '#';
     }
 
     /** Закрыть assist, если в документ вставлен символ вне {@link #isFilterChar}. */

@@ -2238,6 +2238,14 @@ if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
                 completionAutoOpenEdtOpened = false;
                 completionAutoOpenActiveSeq = seq;
             }
+            else if ("symbol".equals(branch)
+                && IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer) == null)
+            {
+                // Решать некому: без ИР ветка &~# молчала совсем — открываем список EDT
+                // (после # это слова препроцессора). Пробел не трогаем: без ИР popup
+                // после каждого пробела не нужен.
+                scheduleCompletionAutoOpen(caretAfter, seq);
+            }
         }
         else
         {

@@ -17,6 +17,8 @@ import org.eclipse.jface.text.contentassist.ICompletionProposal;
 import org.eclipse.jface.text.contentassist.ICompletionProposalExtension3;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.xtext.ui.editor.hover.IEObjectHover;
+import org.eclipse.xtext.ui.editor.hover.IEObjectHoverProvider;
+import org.eclipse.xtext.ui.editor.hover.html.DefaultEObjectHoverProvider;
 import org.eclipse.xtext.ui.editor.model.IXtextDocument;
 import org.eclipse.xtext.ui.editor.contentassist.ConfigurableCompletionProposal;
 import org.eclipse.xtext.resource.IResourceServiceProvider;
@@ -375,9 +377,34 @@ trace.creator = resolveAssistBrowserCreatorChain(assistant, viewer, reloader);
             }
         }
         IInformationControlCreator creator = bslHover.getHoverControlCreator();
+        if (creator == null)
+            creator = resolveHoverCreatorFromHoverProvider(viewer);
         if (creator != null && editor != null)
             rememberEditorBrowserCreator(editor, creator);
         return creator;
+    }
+
+    /**
+     * Browser creator напрямую у {@code IEObjectHoverProvider} — единственный путь в пустом
+     * модуле. {@code DispatchingEObjectTextHover.getHoverControlCreator()} отдаёт creator
+     * последнего сработавшего ховера ({@code lastCreatorProvider}), а в модуле без кода
+     * наводиться не на что: ховер ни разу не диспетчеризован, creator остаётся {@code null},
+     * и assist показывает HTML боковой подсказки текстовым контролом как есть.
+     */
+    static IInformationControlCreator resolveHoverCreatorFromHoverProvider(SourceViewer viewer)
+    {
+        if (viewer == null || !(viewer.getDocument() instanceof IXtextDocument xtextDoc))
+            return null;
+        URI resourceUri = xtextDoc.getResourceURI();
+        if (resourceUri == null)
+            return null;
+        IResourceServiceProvider rsp =
+            IResourceServiceProvider.Registry.INSTANCE.getResourceServiceProvider(resourceUri);
+        if (rsp == null)
+            return null;
+        IEObjectHoverProvider provider = rsp.get(IEObjectHoverProvider.class);
+        return provider instanceof DefaultEObjectHoverProvider defaultProvider
+            ? defaultProvider.getHoverControlCreator() : null;
     }
 
     /** RSP IEObjectHover → browser creator (unwrap htmlHover при необходимости). */
@@ -425,7 +452,8 @@ trace.creator = resolveAssistBrowserCreatorChain(assistant, viewer, reloader);
         IEObjectHover hover = rsp.get(IEObjectHover.class);
         if (!(hover instanceof BslDispatchingEObjectTextHover bslHover))
             return null;
-        return bslHover.getHoverControlCreator();
+        creator = bslHover.getHoverControlCreator();
+        return creator != null ? creator : resolveHoverCreatorFromHoverProvider(viewer);
     }
 
     /** Hover creator через редактор — fallback, если RSP ещё не отдал IEObjectHover. */
