@@ -252,7 +252,7 @@ public class CompareConfigMenuHook implements IStartup
             CompareConfigSearchDialogHook.install(Display.getDefault());
             CompareConfigOpenModuleMergeHandler.install(Display.getDefault());
             RightsDialogFilterHook.install(Display.getDefault());
-            ThreeSideMergeCurrentLinesHook.install(Display.getDefault());
+            TextMergeEditorHook.install(Display.getDefault());
             GitCompareCurrentLinesHook.install();
             CompareDialogCurrentLinesHook.install(Display.getDefault());
 

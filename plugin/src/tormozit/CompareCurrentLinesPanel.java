@@ -33,7 +33,7 @@ import org.osgi.framework.Bundle;
  *
  * <p>Используется и в модальном «Вставить со сравнением»
  * ({@link PasteWithCompareActions}, две строки), и в окнах трёхстороннего
- * слияния 1C:EDT ({@link ThreeSideMergeCurrentLinesHook}, три строки).
+ * слияния 1C:EDT ({@link TextMergeEditorHook}, три строки).
  */
 public final class CompareCurrentLinesPanel
 {
@@ -74,7 +74,7 @@ public final class CompareCurrentLinesPanel
      * (DELETE) зелёная, справа (INSERT) красная.
      * {@code false} — классика добавление/удаление: INSERT зелёный, DELETE красный
      * (трёхстороннее слияние: добавления в результат зелёные, см.
-     * {@link ThreeSideMergeCurrentLinesHook}).
+     * {@link TextMergeEditorHook}).
      */
     private boolean sideAlignedDiffColors = true;
 
@@ -197,7 +197,7 @@ public final class CompareCurrentLinesPanel
      * {@link #compareInIrSupplier}. Кнопку/пункт меню, вызывающие этот метод, размещает
      * вызывающая сторона — в верхней командной панели просмотрщика сравнения
      * ({@link PasteWithCompareActions}, {@link GitCompareCurrentLinesHook},
-     * {@link ThreeSideMergeCurrentLinesHook}), а не в этой панели.
+     * {@link TextMergeEditorHook}), а не в этой панели.
      */
     public void triggerCompareInIr()
     {

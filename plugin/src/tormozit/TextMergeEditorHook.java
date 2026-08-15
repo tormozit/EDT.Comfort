@@ -22,6 +22,8 @@ import com._1c.g5.v8.dt.compare.ui.partialmodel.node.IPartialModelNode;
 import com._1c.g5.v8.dt.core.platform.IDtProject;
 
 import org.eclipse.compare.ITypedElement;
+import org.eclipse.core.commands.AbstractHandler;
+import org.eclipse.core.commands.ExecutionEvent;
 import org.eclipse.core.resources.IFile;
 import org.eclipse.core.resources.IProject;
 import org.eclipse.jface.action.Action;
@@ -29,6 +31,7 @@ import org.eclipse.jface.action.IContributionItem;
 import org.eclipse.jface.action.IToolBarManager;
 import org.eclipse.jface.action.Separator;
 import org.eclipse.jface.resource.ImageDescriptor;
+import org.eclipse.jface.text.IDocument;
 import org.eclipse.jface.text.source.SourceViewer;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.window.Window;
@@ -36,6 +39,8 @@ import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.SashForm;
 import org.eclipse.swt.custom.StyledText;
 import org.eclipse.swt.custom.ViewForm;
+import org.eclipse.swt.events.VerifyEvent;
+import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Composite;
@@ -50,6 +55,10 @@ import org.eclipse.swt.widgets.TreeItem;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.contexts.IContextActivation;
+import org.eclipse.ui.contexts.IContextService;
+import org.eclipse.ui.handlers.IHandlerActivation;
+import org.eclipse.ui.handlers.IHandlerService;
 
 /**
  * Панель «Текущая строка» (см. {@link CompareCurrentLinesPanel}) в любом окне
@@ -69,7 +78,7 @@ import org.eclipse.ui.PlatformUI;
  * если каретка в итоговой панели); третья, не участвующая сторона показывается
  * обычным текстом сопоставленной строки (или пусто, если сопоставленной строки нет).
  */
-public final class ThreeSideMergeCurrentLinesHook
+public final class TextMergeEditorHook
 {
     private static final String TAG = "ThreeSideMergeCurrentLines"; //$NON-NLS-1$
 
@@ -94,7 +103,7 @@ public final class ThreeSideMergeCurrentLinesHook
     private static final String ANCESTOR_SIDE_LABEL = "Общий родитель"; //$NON-NLS-1$
     private static final String RESULT_SIDE_LABEL = "Результат объединения модулей"; //$NON-NLS-1$
 
-    private ThreeSideMergeCurrentLinesHook()
+    private TextMergeEditorHook()
     {
     }
 
@@ -102,7 +111,8 @@ public final class ThreeSideMergeCurrentLinesHook
     {
         if (display == null || display.isDisposed())
             return;
-        display.addFilter(SWT.Show, ThreeSideMergeCurrentLinesHook::handleShow);
+        display.addFilter(SWT.Show, TextMergeEditorHook::handleShow);
+        MergeResultEditorKeys.installFocusFilter(display);
     }
 
     private static void handleShow(Event event)
@@ -340,6 +350,8 @@ public final class ThreeSideMergeCurrentLinesHook
         hookStyledText(leftText, panel, provider, viewer, leftText, rightText, resultText, activePair);
         hookStyledText(rightText, panel, provider, viewer, leftText, rightText, resultText, activePair);
         hookStyledText(resultText, panel, provider, viewer, leftText, rightText, resultText, activePair);
+
+        MergeResultEditorKeys.install(MergeViewerReflection.extractSourceViewer(viewer, "resultViewer")); //$NON-NLS-1$
 
         if (structured)
             MethodLineRestore.install(provider, viewer, leftText, rightText, resultText);
@@ -1471,6 +1483,376 @@ public final class ThreeSideMergeCurrentLinesHook
         private record Pending(int pane, String oldText, int caretOffset, int relativeLine, int column,
             BslModuleSectionComparisonNode section)
         {
+        }
+    }
+
+    /**
+     * Tab / Shift+Tab и «Переключить комментарий» в поле «результат объединения» —
+     * как в редакторе модуля.
+     *
+     * <p>Поле объединения — это {@code SourceViewer}, сконфигурированный тем же
+     * {@code XtextSourceViewerConfiguration}, что и редактор модуля (см. декомпиляцию
+     * {@code XtextThreeSideTextMergeViewer.configureSourceViewer} в
+     * {@code .tmp/bundles/xtext-compare-ui/}), но это не {@code ITextEditor} — штатных
+     * действий редактора («Сдвиг вправо», {@code ToggleSLCommentAction}) и их привязок
+     * клавиш здесь нет.
+     *
+     * <p>И сдвиг строк, и переключение комментария делаем своим кодом поверх
+     * {@link StyledText}: операции вьюера ({@code SHIFT_RIGHT}/{@code SHIFT_LEFT},
+     * {@code PREFIX}) доступны только при выделении нескольких строк, а поле результата
+     * попарного сравнения — вообще виджет без доступного нам вьюера. Единица отступа и
+     * префикс комментария берутся из настроек вьюера, когда он есть, — тогда они совпадают
+     * с редактором модуля.
+     */
+    private static final class MergeResultEditorKeys
+    {
+        private static final String INSTALLED_KEY = "tormozit.threeSideMergeResultEditorKeys"; //$NON-NLS-1$
+        private static final java.util.regex.Pattern LINE_DELIMITER =
+            java.util.regex.Pattern.compile("\r\n|\r|\n"); //$NON-NLS-1$
+        private static final String TOGGLE_COMMENT_COMMAND_ID = "org.eclipse.xtext.ui.ToggleCommentAction"; //$NON-NLS-1$
+        private static final String XTEXT_EDITOR_SCOPE_ID = "org.eclipse.xtext.ui.XtextEditorScope"; //$NON-NLS-1$
+
+        private MergeResultEditorKeys()
+        {
+        }
+
+        /**
+         * Ставится на КАЖДОЕ редактируемое текстовое поле окна объединения, а не только на
+         * {@code resultViewer} трёхстороннего вьюера: поле «Результат объединения модулей»
+         * попарного сравнения в диалоге «Настройка объединения модулей» — отдельный виджет,
+         * до которого установка по одному полю не дотягивалась.
+         */
+        static void installFocusFilter(Display display)
+        {
+            display.addFilter(SWT.FocusIn, MergeResultEditorKeys::handleFocusIn);
+        }
+
+        private static void handleFocusIn(Event event)
+        {
+            if (!(event.widget instanceof StyledText text) || text.isDisposed())
+                return;
+            Shell shell = text.getShell();
+            if (shell == null || !(shell.getData() instanceof IThreeSideTextMergeViewerProvider))
+                return;
+            if (text.getEditable())
+                install(text, null);
+        }
+
+        static void install(SourceViewer viewer)
+        {
+            if (viewer != null)
+                install(viewer.getTextWidget(), viewer);
+        }
+
+        /** {@code viewer} может быть {@code null} — тогда работаем только через сам виджет. */
+        static void install(StyledText text, SourceViewer viewer)
+        {
+            if (text == null || text.isDisposed())
+                return;
+            if (Boolean.TRUE.equals(text.getData(INSTALLED_KEY)))
+                return;
+            text.setData(INSTALLED_KEY, Boolean.TRUE);
+
+            /*
+             * Без отмены обхода по Tab клавиша уводит фокус на соседний контрол и до
+             * KeyDown не доходит (StyledText сам вставляет табуляцию только если обход
+             * не состоялся).
+             */
+            text.addListener(SWT.Traverse, e ->
+            {
+                if ((e.detail == SWT.TRAVERSE_TAB_NEXT || e.detail == SWT.TRAVERSE_TAB_PREVIOUS)
+                    && text.getEditable())
+                    e.doit = false;
+            });
+            /*
+             * ИМЕННО addVerifyKeyListener, а не слушатель SWT.KeyDown: свою обработку клавиш
+             * StyledText делает во ВНУТРЕННЕМ слушателе SWT.KeyDown, зарегистрированном при
+             * создании виджета, то есть РАНЬШЕ нашего. Подтверждено логом: на Tab сначала
+             * verify range=216..390 new=\t (выделение уже заменено табуляцией), и только потом
+             * наш KeyDown с пустым выделением. ST.VerifyKey вызывается до этой обработки, и
+             * doit=false её отменяет.
+             */
+            text.addVerifyKeyListener(e -> handleVerifyKey(text, viewer, e));
+            hookToggleCommentCommand(text, viewer);
+        }
+
+        /**
+         * «Переключить комментарий» — не перехватом клавиши, а активацией контекста
+         * {@link #XTEXT_EDITOR_SCOPE_ID} и обработчика команды на время, пока фокус в поле
+         * результата.
+         *
+         * <p>Привязки клавиш разбирает фильтр воркбенча на уровне {@code Display} — он
+         * срабатывает раньше слушателей виджета, поэтому перехват клавиши у себя не мешал
+         * воркбенчу выполнить СВОЮ команду для того же сочетания (в диалоге, без контекста
+         * редактора Xtext, это оказывалась «Свертывание» — она и всплывала в индикаторе
+         * выполненных команд). С активным контекстом редактора воркбенч сам выбирает более
+         * частную привязку — переключение комментария — и вызывает обработчик ниже.
+         */
+        private static void hookToggleCommentCommand(StyledText text, SourceViewer viewer)
+        {
+            IContextService contextService =
+                PlatformUI.getWorkbench().getService(IContextService.class);
+            IHandlerService handlerService =
+                PlatformUI.getWorkbench().getService(IHandlerService.class);
+            if (contextService == null || handlerService == null)
+                return;
+
+            IContextActivation[] context = new IContextActivation[1];
+            IHandlerActivation[] handler = new IHandlerActivation[1];
+            Listener deactivate = e ->
+            {
+                if (context[0] != null)
+                {
+                    contextService.deactivateContext(context[0]);
+                    context[0] = null;
+                }
+                if (handler[0] != null)
+                {
+                    handlerService.deactivateHandler(handler[0]);
+                    handler[0] = null;
+                }
+            };
+            text.addListener(SWT.FocusIn, e ->
+            {
+                if (context[0] == null)
+                    context[0] = contextService.activateContext(XTEXT_EDITOR_SCOPE_ID);
+                if (handler[0] == null)
+                    handler[0] = handlerService.activateHandler(TOGGLE_COMMENT_COMMAND_ID,
+                        new ToggleCommentHandler(text, viewer));
+            });
+            text.addListener(SWT.FocusOut, deactivate);
+            text.addListener(SWT.Dispose, deactivate);
+        }
+
+        private static final class ToggleCommentHandler extends AbstractHandler
+        {
+            private final StyledText text;
+            private final SourceViewer viewer;
+
+            ToggleCommentHandler(StyledText text, SourceViewer viewer)
+            {
+                this.text = text;
+                this.viewer = viewer;
+            }
+
+            @Override
+            public Object execute(ExecutionEvent event)
+            {
+                if (!text.isDisposed())
+                    toggleComment(text, viewer);
+                return null;
+            }
+        }
+
+        private static void handleVerifyKey(StyledText text, SourceViewer viewer, VerifyEvent event)
+        {
+            if (event.keyCode != SWT.TAB && event.character != '\t')
+                return;
+            if (!event.doit || text.isDisposed() || !text.getEditable())
+                return;
+            if ((event.stateMask & (SWT.CTRL | SWT.ALT)) != 0)
+                return;
+            boolean back = (event.stateMask & SWT.SHIFT) != 0;
+            /*
+             * Tab без выделения (и с выделением внутри одной строки) — обычная вставка
+             * табуляции, как в редакторе; сдвигаем блок только при выделении нескольких строк.
+             * Shift+Tab снимает отступ всегда, в том числе по одной строке под кареткой.
+             */
+            if (!back && !isMultiLineSelection(text))
+                return;
+            if (shiftSelectedLines(text, viewer, back))
+                event.doit = false;
+        }
+
+        /** Сдвиг строк выделения (или строки каретки) на один уровень отступа. */
+        private static boolean shiftSelectedLines(StyledText text, SourceViewer viewer, boolean back)
+        {
+            String indent = resolveIndentUnit(viewer);
+            int tabWidth = text.getTabs();
+            return replaceLineBlock(text, line -> back
+                ? line.substring(leadingIndentLength(line, tabWidth))
+                : line.isBlank() ? line : indent + line);
+        }
+
+        /**
+         * Применяет преобразование к каждой строке выделения и записывает результат ОДНОЙ
+         * заменой — иначе правка распадается на несколько шагов отмены.
+         *
+         * <p>Работаем через сам {@link StyledText}, а не через {@code IDocument} вьюера:
+         * поле результата попарного сравнения — виджет без доступного нам вьюера, а операции
+         * {@code SHIFT_RIGHT}/{@code SHIFT_LEFT}/{@code PREFIX} вьюер и вовсе разрешает
+         * только при выделении нескольких строк.
+         */
+        /**
+         * Границы выделения. Не {@code getSelectionRange()}: в режиме блочного выделения он
+         * возвращает только каретку (нулевую длину), а сами выделенные куски лежат в
+         * {@code getSelectionRanges()}.
+         */
+        private static Point selectionSpan(StyledText text)
+        {
+            int[] ranges = text.getSelectionRanges();
+            if (ranges != null && ranges.length >= 2)
+            {
+                int start = ranges[0];
+                int end = ranges[ranges.length - 2] + ranges[ranges.length - 1];
+                if (end > start)
+                    return new Point(start, end - start);
+            }
+            return text.getSelectionRange();
+        }
+
+        private static boolean replaceLineBlock(StyledText text, java.util.function.UnaryOperator<String> lineOp)
+        {
+            Point selection = selectionSpan(text);
+            int firstLine = text.getLineAtOffset(selection.x);
+            int end = selection.x + Math.max(selection.y, 0);
+            int lastLine = text.getLineAtOffset(end);
+            if (selection.y > 0 && lastLine > firstLine && end == text.getOffsetAtLine(lastLine))
+                lastLine--;
+
+            int blockStart = text.getOffsetAtLine(firstLine);
+            int blockEnd = text.getOffsetAtLine(lastLine) + text.getLine(lastLine).length();
+            String block = text.getTextRange(blockStart, blockEnd - blockStart);
+
+            StringBuilder result = new StringBuilder(block.length() + 16);
+            boolean changed = false;
+            int position = 0;
+            java.util.regex.Matcher matcher = LINE_DELIMITER.matcher(block);
+            while (matcher.find())
+            {
+                String line = block.substring(position, matcher.start());
+                String shifted = lineOp.apply(line);
+                changed |= !shifted.equals(line);
+                result.append(shifted).append(matcher.group());
+                position = matcher.end();
+            }
+            String lastLineText = block.substring(position);
+            String shiftedLast = lineOp.apply(lastLineText);
+            changed |= !shiftedLast.equals(lastLineText);
+            result.append(shiftedLast);
+
+            if (!changed)
+                return false;
+            text.replaceTextRange(blockStart, block.length(), result.toString());
+            if (selection.y > 0)
+                text.setSelectionRange(blockStart, result.length());
+            else
+                text.setCaretOffset(Math.max(blockStart,
+                    Math.min(selection.x + result.length() - block.length(), blockStart + result.length())));
+            return true;
+        }
+
+        /**
+         * Единица отступа — из настроек вьюера ({@code TextViewer.fIndentChars}, заполняется из
+         * {@code SourceViewerConfiguration.getIndentPrefixes}), как у штатного сдвига; без
+         * вьюера — табуляция.
+         */
+        private static String resolveIndentUnit(SourceViewer viewer)
+        {
+            String indent = viewer != null
+                ? resolvePrefix(Global.getField(viewer, "fIndentChars")) : null; //$NON-NLS-1$
+            return indent != null ? indent : "\t"; //$NON-NLS-1$
+        }
+
+        private static int leadingIndentLength(String lineText, int tabWidth)
+        {
+            if (lineText.startsWith("\t")) //$NON-NLS-1$
+                return 1;
+            int spaces = 0;
+            while (spaces < lineText.length() && spaces < Math.max(tabWidth, 1)
+                && lineText.charAt(spaces) == ' ')
+                spaces++;
+            return spaces;
+        }
+
+        private static boolean isMultiLineSelection(StyledText text)
+        {
+            Point selection = selectionSpan(text);
+            return selection.y > 0
+                && text.getLineAtOffset(selection.x) != text.getLineAtOffset(selection.x + selection.y);
+        }
+
+        private static boolean toggleComment(StyledText text, SourceViewer viewer)
+        {
+            String prefix = resolveCommentPrefix(viewer);
+            boolean commented = isSelectionCommented(text, prefix);
+            return replaceLineBlock(text, line -> commented ? removePrefix(line, prefix)
+                : line.isBlank() ? line : prefix + line);
+        }
+
+        private static String removePrefix(String line, String prefix)
+        {
+            int at = line.indexOf(prefix);
+            return at < 0 || !line.substring(0, at).isBlank()
+                ? line : line.substring(0, at) + line.substring(at + prefix.length());
+        }
+
+        /**
+         * Префикс комментария — из самого вьюера ({@code TextViewer.fDefaultPrefixChars},
+         * заполняется в {@code configure()} из {@code SourceViewerConfiguration.getDefaultPrefixes}),
+         * чтобы совпадал с языком, на который вьюер настроен; без вьюера — «//» (окна
+         * объединения модулей всегда про встроенный язык).
+         */
+        private static String resolveCommentPrefix(SourceViewer viewer)
+        {
+            String prefix = viewer != null
+                ? resolvePrefix(Global.getField(viewer, "fDefaultPrefixChars")) : null; //$NON-NLS-1$
+            return prefix != null ? prefix : "//"; //$NON-NLS-1$
+        }
+
+        /** Первый непустой префикс из карты «тип содержимого → префиксы» {@code TextViewer}. */
+        private static String resolvePrefix(Object prefixes)
+        {
+            if (!(prefixes instanceof java.util.Map<?, ?> map) || map.isEmpty())
+                return null;
+            String prefix = firstNonEmpty(map.get(IDocument.DEFAULT_CONTENT_TYPE));
+            if (prefix != null)
+                return prefix;
+            for (Object value : map.values())
+            {
+                prefix = firstNonEmpty(value);
+                if (prefix != null)
+                    return prefix;
+            }
+            return null;
+        }
+
+        private static String firstNonEmpty(Object prefixes)
+        {
+            if (!(prefixes instanceof String[] array))
+                return null;
+            for (String prefix : array)
+            {
+                if (prefix != null && !prefix.isEmpty())
+                    return prefix;
+            }
+            return null;
+        }
+
+        /**
+         * Как {@code ToggleSLCommentAction.isSelectionCommented}: снимаем комментарий,
+         * только если закомментированы все непустые строки выделения (иначе — комментируем).
+         */
+        private static boolean isSelectionCommented(StyledText text, String prefix)
+        {
+            Point selection = selectionSpan(text);
+            int firstLine = text.getLineAtOffset(selection.x);
+            int end = selection.x + Math.max(selection.y, 0);
+            int lastLine = text.getLineAtOffset(end);
+            if (selection.y > 0 && lastLine > firstLine && end == text.getOffsetAtLine(lastLine))
+                lastLine--;
+
+            boolean hasContentLine = false;
+            for (int line = firstLine; line <= lastLine; line++)
+            {
+                String lineText = text.getLine(line).trim();
+                if (lineText.isEmpty())
+                    continue;
+                hasContentLine = true;
+                if (!lineText.startsWith(prefix))
+                    return false;
+            }
+            return hasContentLine;
         }
     }
 

@@ -25,7 +25,7 @@ import org.eclipse.swt.widgets.ToolBar;
  * {@link CompareDialogCurrentLinesHook} (штатный EDT {@code DtCompareEditorInput}),
  * {@link GitCompareCurrentLinesHook} (EGit «Сравнить с … »), см. также, где ещё добавляется
  * «Сравнить ИР» ({@code IrCompareValuesHandler.MENU_LABEL}) — тот же охват, плюс 3-way
- * «Объединение» ({@link ThreeSideMergeCurrentLinesHook}) — но ТОЛЬКО у plain-варианта
+ * «Объединение» ({@link TextMergeEditorHook}) — но ТОЛЬКО у plain-варианта
  * ({@code ThreeSideTextMergeDialog}, без разбора структуры); у structured-варианта
  * ({@code CompareBslModuleWithParsingModuleStructureDialog}) уже есть штатная панель
  * структуры — дублировать её не нужно (см. проверку {@code node != null} в вызывающем коде).
@@ -77,7 +77,7 @@ final class StructureToggleController
     /**
      * Среднее поле (результат объединения, 3-way) — по умолчанию нет (2-way/git/paste), пара
      * секций там просто не с чем сопоставлять. Вызывается сразу после конструктора, только
-     * из {@link ThreeSideMergeCurrentLinesHook} — отдельный сеттер, а не параметр конструктора,
+     * из {@link TextMergeEditorHook} — отдельный сеттер, а не параметр конструктора,
      * чтобы не трогать остальные 3 места создания.
      */
     void setResultText(StyledText resultText)

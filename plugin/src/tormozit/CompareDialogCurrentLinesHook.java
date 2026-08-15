@@ -177,7 +177,7 @@ public final class CompareDialogCurrentLinesHook
          */
         String semanticLeft = resolveSemanticSideLabel(viewer, config, true);
         String semanticRight = resolveSemanticSideLabel(viewer, config, false);
-        String[] fromThreeWay = ThreeSideMergeCurrentLinesHook.pairwiseLabelsFromParent(
+        String[] fromThreeWay = TextMergeEditorHook.pairwiseLabelsFromParent(
             shell, leftElement, rightElement);
         boolean remappedFromThreeWay = false;
         if (fromThreeWay != null)

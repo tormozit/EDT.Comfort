@@ -258,6 +258,12 @@ powershell -NoProfile -File "C:\VC\EDT.Comfort\.cursor\scripts\repair-double-eol
 
 **Решение:** перехватывать команду, не клавишу — `ICommandService.addExecutionListener` (`preExecute`/`notHandled` срабатывают независимо от пути; `ExecutionEvent.getTrigger()` при необходимости). Эталоны: `KeyBindingToastHook`, `PreferenceSearchFilterAugmenter.wireTreeCopy`/`handlePossibleTreeCopy`. Для View с `IActionBars` — альтернатива через `globalActions`, см. `DebugInspectorTreeEnhancement.hookGlobalCopyAction()` (не подходит для модальных диалогов вроде `PreferenceDialog`).
 
+## SWT: клавиши в StyledText — только `addVerifyKeyListener`
+
+Свою обработку клавиш `StyledText` делает во внутреннем слушателе `SWT.KeyDown`, добавленном при создании виджета — раньше нашего. К нашему `SWT.KeyDown` виджет уже отработал (на Tab выделение заменено табуляцией), `doit = false` бесполезен. Перехват — `addVerifyKeyListener` (`ST.VerifyKey`, до обработки); обход по Tab гасится отдельно на `SWT.Traverse`. Эталон: `TextMergeEditorHook.MergeResultEditorKeys`.
+
+Диагностика: «состояние уже изменено» в позднем слушателе — про порядок слушателей, а не про бездействие пользователя. Для `Ctrl+<буква>` этого мало, см. раздел выше.
+
 ## Каретка редактора: виджет ≠ модель (folding)
 
 В BSL-редакторе EDT две системы координат. Без свёрток они совпадают — баг молчит. Со свёртками выше каретки виджетный офсет меньше модельного на сумму скрытого текста (типично тысячи символов: `2718` vs `14526`).

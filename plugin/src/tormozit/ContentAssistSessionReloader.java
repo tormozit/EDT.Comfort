@@ -4029,6 +4029,8 @@ scheduleFilterToggleUiSync();
             if (!isCtrlSpaceKeyEvent(event))
                 return;
             StyledText text = viewer.getTextWidget() instanceof StyledText st ? st : null;
+            if (!isOwnWidgetFocused(text))
+                return;
             int probeCaret = modelCaretOffset();
             boolean popupVisible = ContentAssistPopupSync.isPopupVisible(assistant);
             boolean inLiteralProbe = probeCaret >= 0
@@ -4092,6 +4094,24 @@ return;
             beginManualDualAssist(caret);
             logAssistOpen("ctrlSpace.swallow", "{\"caret\":" + caret + "}"); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             event.doit = false;
+        }
+
+        /**
+         * Фильтр висит на {@link Display} (по одному на каждый пропатченный редактор),
+         * поэтому Ctrl+Space из ЛЮБОГО места (например, поле «результат объединения»
+         * трёхстороннего сравнителя или другой BSL-редактор) доходит до всех фильтров сразу.
+         * Без проверки «свой-чужой» каждый из них открывал popup своего фонового редактора
+         * (чужая позиция, чужие элементы, недоступен для клика под модальным диалогом)
+         * и съедал клавишу через {@code event.doit = false}.
+         */
+        private boolean isOwnWidgetFocused(StyledText text)
+        {
+            if (text == null || text.isDisposed())
+                return false;
+            Display display = text.getDisplay();
+            if (display == null || display.isDisposed())
+                return false;
+            return display.getFocusControl() == text;
         }
     }
 }
