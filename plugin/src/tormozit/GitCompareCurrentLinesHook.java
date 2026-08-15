@@ -795,11 +795,29 @@ public final class GitCompareCurrentLinesHook
         toolBarManager.add(showInModuleAction);
 
         toolBarManager.add(panel.createVisibilityToggleAction());
+        toolBarManager.add(OccurrencesToggleHook.createToggleAction());
         toolBarManager.add(new Separator());
         for (IContributionItem item : existingItems)
-            toolBarManager.add(item);
+        {
+            // Кнопка вхождений от прошлой сборки — иначе в панели два переключателя
+            if (!OccurrencesToggleHook.isStaleToggleItem(item))
+                toolBarManager.add(item);
+        }
 
         toolBarManager.update(true);
+
+        /*
+         * Переключатель вхождений — именно через IToolBarManager, а не «сырым» ToolItem
+         * универсального скана шеллов: этот тулбар принадлежит ToolBarManager, и его
+         * update(true) чужие ToolItem не сохраняет — кнопка от скана и терялась,
+         * и дублировалась. Шелл помечаем обслуженным, ранее добавленное сканом убираем.
+         */
+        if (!pane.isDisposed())
+        {
+            Shell shell = pane.getShell();
+            OccurrencesToggleHook.markShellHandled(shell);
+            OccurrencesToggleHook.removeDialogItems(shell);
+        }
     }
 
     private static boolean isMxlxFile(IFile file)

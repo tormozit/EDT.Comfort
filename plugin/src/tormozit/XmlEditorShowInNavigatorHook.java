@@ -25,11 +25,12 @@ import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.texteditor.ITextEditor;
 
 /**
- * Пункт «Показать в навигаторе» в подменю «Комфорт» контекстного меню редактора XML
+ * Пункты подменю «Комфорт» в контекстном меню редактора XML
  * (страница Source редактора {@code XMLMultiPageEditorPart} WST, а также обычный текстовый
- * редактор Workbench с открытым {@code .xml}).
+ * редактор Workbench с открытым {@code .xml}): «Показать в навигаторе» и переключатель
+ * «Подсказки при наведении без Ctrl».
  *
- * <p>Действие и сама команда (CTRL+T) — в {@link XmlEditorShowInNavigatorHandler}.
+ * <p>Действие «Показать в навигаторе» и сама команда (CTRL+T) — в {@link XmlEditorShowInNavigatorHandler}.
  */
 public class XmlEditorShowInNavigatorHook implements IStartup
 {
@@ -98,7 +99,13 @@ public class XmlEditorShowInNavigatorHook implements IStartup
             || !XmlEditorShowInNavigatorHandler.isXmlEditor(editor))
             return;
 
-        StyledText textWidget = resolveTextWidget(editor);
+        ITextEditor textEditor = TextEditor.resolveTextEditor(editor);
+        if (textEditor == null)
+            return;
+        ISourceViewer viewer = TextEditor.getSourceViewer(textEditor);
+        BslHoverHintState.applyToViewer(viewer);
+
+        StyledText textWidget = viewer != null ? viewer.getTextWidget() : null;
         if (textWidget == null || textWidget.isDisposed())
             return;
 
@@ -116,20 +123,11 @@ public class XmlEditorShowInNavigatorHook implements IStartup
         });
     }
 
-    private static StyledText resolveTextWidget(IEditorPart editor)
-    {
-        ITextEditor textEditor = TextEditor.resolveTextEditor(editor);
-        if (textEditor == null)
-            return null;
-        ISourceViewer viewer = TextEditor.getSourceViewer(textEditor);
-        return viewer != null ? viewer.getTextWidget() : null;
-    }
-
     private static MenuAdapter buildMenuListener(IEditorPart editor)
     {
         return new MenuAdapter()
         {
-            private final List<MenuItem> addedItems = new ArrayList<>(1);
+            private final List<MenuItem> addedItems = new ArrayList<>(2);
 
             @Override
             public void menuShown(MenuEvent e)
@@ -160,6 +158,8 @@ public class XmlEditorShowInNavigatorHook implements IStartup
                     }
                 });
                 addedItems.add(item);
+
+                addedItems.add(BslHoverHintState.addMenuItem(comfortSub));
             }
 
             @Override

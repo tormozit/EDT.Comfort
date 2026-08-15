@@ -34,6 +34,7 @@ import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
 import org.eclipse.jface.viewers.ILabelProviderListener;
+import org.eclipse.jface.viewers.ISelection;
 import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.ITreeContentProvider;
 import org.eclipse.jface.viewers.LabelProvider;
@@ -72,6 +73,8 @@ import com._1c.g5.v8.dt.form.model.FormParameter;
 import com._1c.g5.v8.dt.mcore.Help;
 import com._1c.g5.v8.dt.mcore.HelpPage;
 import com._1c.g5.v8.dt.mcore.McorePackage;
+import com._1c.g5.v8.dt.mcore.TypeDescription;
+import com._1c.g5.v8.dt.mcore.TypeItem;
 import com._1c.g5.v8.dt.moxel.Cell;
 import com._1c.g5.v8.dt.moxel.Row;
 import com._1c.g5.v8.dt.moxel.SpreadsheetDocument;
@@ -81,7 +84,14 @@ import com._1c.g5.v8.dt.dcs.ui.settings.Settings;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorEmbeddedEditorPage;
 import com._1c.g5.v8.dt.metadata.mdclass.BasicFeature;
+import com._1c.g5.v8.dt.metadata.mdclass.ExchangePlan;
+import com._1c.g5.v8.dt.metadata.mdclass.ExchangePlanContentItem;
+import com._1c.g5.v8.dt.metadata.mdclass.MdClassPackage;
 import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
+import com._1c.g5.v8.dt.metadata.mdclass.Subsystem;
+import com._1c.g5.v8.dt.ui.editor.DtEditorSelectionProcessingPolicy;
+import com._1c.g5.v8.dt.ui.editor.input.DtEditorInputFactory;
+import com._1c.g5.v8.dt.ui.editor.input.IDtEditorInput;
 import com._1c.g5.v8.dt.ui.util.OpenHelper;
 import com._1c.g5.v8.dt.search.core.BmObjectMatch;
 import com._1c.g5.v8.dt.search.core.refs.BmReferenceMatch;
@@ -103,6 +113,7 @@ import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
 import org.eclipse.swt.widgets.ScrollBar;
+import org.eclipse.swt.widgets.Shell;
 import org.eclipse.swt.widgets.Table;
 import org.eclipse.swt.widgets.TableColumn;
 import org.eclipse.swt.widgets.TableItem;
@@ -211,7 +222,6 @@ public final class ConfigSearchResultsHook implements IStartup
             {
                 @Override public void queryAdded(ISearchQuery query)
                 {
-                    Global.tempLog("search-tree-empty", "config.queryAdded: " + describeQuery(query)); //$NON-NLS-1$ //$NON-NLS-2$
                     // История/повторный показ без Dispose панели — сначала зафиксировать текущие ширины.
                     saveMatchColumnStateOnUiThread();
                     onQueryEvent("queryAdded"); //$NON-NLS-1$
@@ -222,12 +232,10 @@ public final class ConfigSearchResultsHook implements IStartup
                 }
                 @Override public void queryStarting(ISearchQuery query)
                 {
-                    Global.tempLog("search-tree-empty", "config.queryStarting: " + describeQuery(query)); //$NON-NLS-1$ //$NON-NLS-2$
                     onSearchStarting();
                 }
                 @Override public void queryFinished(ISearchQuery query)
                 {
-                    Global.tempLog("search-tree-empty", "config.queryFinished: " + describeQuery(query)); //$NON-NLS-1$ //$NON-NLS-2$
                     onSearchFinished(); onQueryEvent("queryFinished"); //$NON-NLS-1$
                 }
             });
@@ -958,6 +966,11 @@ public final class ConfigSearchResultsHook implements IStartup
                 if (matchObj instanceof BmReferenceMatch)
                 {
                     EObject leaf = resolveMatchLeaf(matchObj);
+                    List<String> typeTargets = compositeTypeDialogTargets(matchObj, leaf);
+                    if (openMdObjectTypeDialogMatch(leaf, workbenchPage, typeTargets))
+                        return true;
+                    if (openContentMatch(matchObj, leaf, workbenchPage))
+                        return true;
                     if (leaf != null && isInsideForm(leaf))
                     {
                         EObject formChildElement = findNearestFormChild(leaf);
@@ -971,7 +984,8 @@ public final class ConfigSearchResultsHook implements IStartup
                             catch (Exception e)
                             {
                             }
-                            PropertyFieldFocus.schedule(workbenchPage, leaf, resolveMatchFeature(matchObj));
+                            PropertyFieldFocus.schedule(workbenchPage, leaf, resolveMatchFeature(matchObj),
+                                typeTargets);
                             return true;
                         }
                     }
@@ -980,7 +994,8 @@ public final class ConfigSearchResultsHook implements IStartup
                     // совпадение прямо по реквизиту (Комментарий) — штатный handleOpen + фокус поля.
                     else if (leaf != null && isInsideMdObjectMember(leaf))
                     {
-                        if (openNestedMdObjectMemberMatch(leaf, workbenchPage, resolveMatchFeature(matchObj)))
+                        if (openNestedMdObjectMemberMatch(leaf, workbenchPage, resolveMatchFeature(matchObj),
+                            typeTargets))
                             return true;
                         try
                         {
@@ -989,7 +1004,8 @@ public final class ConfigSearchResultsHook implements IStartup
                         catch (Exception e)
                         {
                         }
-                        PropertyFieldFocus.schedule(workbenchPage, leaf, resolveMatchFeature(matchObj));
+                        PropertyFieldFocus.schedule(workbenchPage, leaf, resolveMatchFeature(matchObj),
+                            typeTargets);
                     }
                 }
                 return false;
@@ -1014,7 +1030,13 @@ public final class ConfigSearchResultsHook implements IStartup
                 // feature=attributes и selection=leaf (не реквизит) — редактор кратко выделяет
                 // реквизит, затем активирует группу «Реквизиты». Для плоских свойств самого
                 // реквизита (Комментарий) leaf уже BasicFeature — штатный путь корректен.
-                if (openNestedMdObjectMemberMatch(matchedObject, workbenchPage, match.getFeature()))
+                List<String> typeTargets = compositeTypeDialogTargets(match, matchedObject);
+                if (openMdObjectTypeDialogMatch(matchedObject, workbenchPage, typeTargets))
+                    return true;
+                if (openContentMatch(match, matchedObject, workbenchPage))
+                    return true;
+                if (openNestedMdObjectMemberMatch(matchedObject, workbenchPage, match.getFeature(),
+                    typeTargets))
                     return true;
                 // Штатная обработка EDT (handleOpen) сама корректно открывает форму и выделяет
                 // найденный элемент (реквизит/команду/элемент формы) — это уже подтверждено и трогать
@@ -1037,7 +1059,8 @@ public final class ConfigSearchResultsHook implements IStartup
                 // МД-объекта, и для элемента формы: у элемента формы свой редактор есть, но
                 // свойство вроде «ПутьКДанным» правится всё равно только в панели «Свойства».
                 if (isInsideMdObjectMember(matchedObject) || isInsideForm(matchedObject))
-                    PropertyFieldFocus.schedule(workbenchPage, matchedObject, match.getFeature());
+                    PropertyFieldFocus.schedule(workbenchPage, matchedObject, match.getFeature(),
+                        typeTargets);
                 return false;
             }
 
@@ -1863,6 +1886,583 @@ public final class ConfigSearchResultsHook implements IStartup
     }
 
     /**
+     * Вхождение в списке типов СОСТАВНОГО типа реквизита («Реквизиты.Касса.Тип.Типы»): поле «Тип»
+     * панели «Свойства» показывает у такого реквизита только слово «Составной тип» — ни искомого
+     * объекта, ни даже возможности его увидеть без открытия диалога «Редактирование типа данных».
+     * Поэтому для этого случая вместо активации поля сразу открывается сам диалог с активной
+     * строкой найденного объекта — как команда «Открыть связь» в дереве подписок (общий механизм
+     * {@link TypeDescriptionDialogFlow}).
+     *
+     * <p>Одиночный тип сюда не попадает: там поле «Тип» само показывает нужный объект, и
+     * достаточно его активировать (оверлей {@link TypeComboOverlayHook}) — открывать поверх него
+     * модальный диалог было бы навязчиво.
+     *
+     * <p>Обязательное условие — {@code TypeDescription} является ПРЯМЫМ свойством объекта,
+     * который показывает панель (реквизит/элемент формы) или редактор (сам МД-объект: определяемый
+     * тип и т.п.). Иначе сюда попадали бы и вхождения вроде
+     * «Элементы.Касса.ПутьКДанным.Objects.ValueType.Типы» у элемента формы (лог {@code propfocus}:
+     * 31 попытка искала кнопку «…», хотя поле панели там — «Путь к данным», и в итоге не
+     * активировалось вообще ничего).
+     *
+     * @return {@code null} — обычный случай (активация поля); иначе имена искомого типа для
+     *         выделения в диалоге (пустой список — объект поиска определить не удалось, диалог
+     *         просто открывается)
+     */
+    private static List<String> compositeTypeDialogTargets(Object matchObj, EObject leaf)
+    {
+        if (!(leaf instanceof TypeDescription typeDescription) || typeDescription.getTypes().size() < 2)
+            return null;
+        EObject owner = leaf.eContainer();
+        if (owner == null
+            || !(PropertyFieldFocus.isPanelMember(owner) || owner instanceof MdObject))
+            return null;
+
+        String targetName = referenceTargetName(matchObj);
+        List<String> names = new ArrayList<>();
+        if (targetName != null)
+        {
+            // Имя найденного типа берётся из самого списка типов и ОБА варианта — английский
+            // («CatalogObject._ДемоКассы») и русский («СправочникОбъект._ДемоКассы»). Русский нужен
+            // для дерева диалога: там группы подписаны по-русски («СправочникСсылка»,
+            // «СправочникОбъект»), а без имени группы строка «_ДемоКассы» неоднозначна — тип
+            // «СправочникОбъект._ДемоКассы» находился в группе «СправочникСсылка», которая в дереве
+            // идёт раньше.
+            for (TypeItem type : typeDescription.getTypes())
+            {
+                if (type == null || !isSameTypeName(type, targetName))
+                    continue;
+                for (String name : new String[] { type.getName(), type.getNameRu() })
+                    if (name != null && !name.isBlank() && !names.contains(name))
+                        names.add(name);
+            }
+            if (names.isEmpty())
+                names.add(targetName);
+        }
+        return names;
+    }
+
+    /**
+     * Вхождение в списке типов свойства «Тип» самого МД-объекта — определяемого типа
+     * («ОпределяемыйТип.ВладелецЗначенийКлючейДоступа», колонка «Свойство» = «Тип.Типы») и
+     * подобных. У такого объекта есть собственный редактор, и свойство «Тип» правится именно в
+     * нём, а не в панели «Свойства», — то есть это ровно сценарий команды «Открыть связь» дерева
+     * подписок ({@link EventHandlersOpenHandlerHook}), только вместо поля «Источник» поле «Тип».
+     * Штатное открытие такого вхождения ничего дополнительно не делает: объект не реквизит и не
+     * элемент формы, поэтому обе ветки панели «Свойства» его отбрасывают.
+     *
+     * @return {@code true}, если открытие обработано здесь (штатный {@code handleOpen} не нужен)
+     */
+    private static boolean openMdObjectTypeDialogMatch(EObject leaf, IWorkbenchPage workbenchPage,
+            List<String> typeDialogTargets)
+    {
+        if (typeDialogTargets == null || leaf == null || workbenchPage == null)
+            return false;
+        if (!(leaf.eContainer() instanceof MdObject mdObject))
+            return false;
+        // Реквизит/измерение/ресурс — тоже MdObject (BasicFeature наследует MdObject), но своего
+        // редактора у него нет: его «Тип» правится в панели «Свойства». Без этой проверки вхождение
+        // «Реквизиты.Касса.Тип.Типы» уходило открывать редактор ДОКУМЕНТА и 40 попыток искало там
+        // поле типа, которого нет вовсе (лог propfocus: «компонентов типа=0», «поле типа в
+        // редакторе не найдено за 40 попыток»), — и не делало ничего.
+        if (PropertyFieldFocus.isPanelMember(mdObject))
+            return false;
+        IEditorPart editor;
+        try
+        {
+            editor = new OpenHelper(workbenchPage).openEditor(mdObject);
+        }
+        catch (RuntimeException e)
+        {
+            return false;
+        }
+        if (editor == null)
+        {
+            return false;
+        }
+        // Открытие вхождения обесценивает ожидание поля панели от предыдущего открытия: иначе тот
+        // цикл продолжит драться за фокус уже в другом редакторе.
+        PropertyFieldFocus.cancel();
+        TypeDescriptionDialogFlow.openInEditor(editor, typeDialogTargets, null);
+        return true;
+    }
+
+    /**
+     * Вхождение в свойстве «Состав» объекта конфигурации: открывает редактор владельца, активирует
+     * его страницу «Состав» и выделяет там строку найденного объекта.
+     *
+     * <p>Поддержаны два вида владельцев — их редакторы устроены одинаково (страница с деревом
+     * {@code NavigatorTreeComponent}):
+     * <ul>
+     * <li>план обмена: вхождение — отдельный элемент состава ({@code ExchangePlanContentItem}),
+     * объект берётся из него ({@code getMdObject()});</li>
+     * <li>подсистема: состав — прямой список объектов, поэтому вхождение приходится на саму
+     * подсистему, а искомый объект — цель ссылки ({@code BmReferenceMatch.getTarget()}).</li>
+     * </ul>
+     *
+     * <p>Страницу переключает штатный {@code showEditorInput} (см. {@link #revealContentItem}), а
+     * строку выделяет сам компонент дерева (см. {@link #selectContentRow}).
+     *
+     * @return {@code true}, если открытие обработано здесь (штатный {@code handleOpen} не нужен)
+     */
+    private static boolean openContentMatch(Object matchObj, EObject leaf, IWorkbenchPage workbenchPage)
+    {
+        if (leaf == null || workbenchPage == null)
+            return false;
+
+        MdObject owner;
+        ContentKind kind;
+        EStructuralFeature feature;
+        String componentClass;
+        MdObject target;
+        EObject selectionObject;
+        if (leaf instanceof ExchangePlanContentItem contentItem)
+        {
+            if (!(contentItem.eContainer() instanceof MdObject exchangePlan))
+                return false;
+            owner = exchangePlan;
+            kind = ContentKind.NAVIGATOR_TREE;
+            feature = MdClassPackage.Literals.EXCHANGE_PLAN__CONTENT;
+            componentClass = EXCHANGE_PLAN_CONTENT_COMPONENT_CLASS;
+            target = contentItem.getMdObject();
+            selectionObject = contentItem;
+        }
+        else if (leaf instanceof Subsystem subsystem
+            && resolveMatchFeature(matchObj) == MdClassPackage.Literals.SUBSYSTEM__CONTENT)
+        {
+            owner = subsystem;
+            kind = ContentKind.NAVIGATOR_TREE;
+            feature = MdClassPackage.Literals.SUBSYSTEM__CONTENT;
+            componentClass = SUBSYSTEM_CONTENT_COMPONENT_CLASS;
+            target = referenceTargetObject(matchObj) instanceof MdObject mdTarget ? mdTarget : null;
+            selectionObject = target;
+        }
+        else if (isObjectRights(leaf))
+        {
+            owner = roleOfObjectRights(matchObj, leaf);
+            if (owner == null)
+                return false;
+            kind = ContentKind.ROLE_RIGHTS;
+            feature = MdClassPackage.Literals.ROLE__RIGHTS;
+            componentClass = null;
+            target = Global.invoke(leaf, "getObject") instanceof MdObject mdTarget ? mdTarget : null; //$NON-NLS-1$
+            selectionObject = leaf;
+        }
+        else
+            return false;
+
+        if (target == null)
+            return false;
+        IEditorPart editor;
+        try
+        {
+            editor = new OpenHelper(workbenchPage).openEditor(owner);
+        }
+        catch (RuntimeException e)
+        {
+            return false;
+        }
+        if (editor == null)
+        {
+            return false;
+        }
+        scheduleContentReveal(editor,
+            new ContentTarget(kind, feature, componentClass, target, selectionObject), 0);
+        return true;
+    }
+
+    /**
+     * Чем на странице выделяется строка: дерево AEF-компонента (план обмена, подсистема) либо
+     * секция объектов редактора роли — она не AEF, а обычный {@code TreeViewer} в
+     * {@code ObjectsSection}.
+     */
+    private enum ContentKind
+    {
+        NAVIGATOR_TREE, ROLE_RIGHTS
+    }
+
+    /** Куда переходить в редакторе владельца состава — см. {@link #openContentMatch}. */
+    private record ContentTarget(ContentKind kind, EStructuralFeature feature, String componentClass,
+        MdObject target, EObject selectionObject)
+    {
+    }
+
+    /**
+     * Права роли на объект ({@code ObjectRights} из {@code com._1c.g5.v8.dt.rights.model}).
+     * Бандл прав в {@code Require-Bundle} плагина не заявлен, поэтому проверка — по EMF-классу.
+     */
+    private static boolean isObjectRights(EObject leaf)
+    {
+        EClass eClass = leaf.eClass();
+        return eClass != null && "ObjectRights".equals(eClass.getName()) //$NON-NLS-1$
+            && eClass.getEPackage() != null && eClass.getEPackage().getNsURI() != null
+            && eClass.getEPackage().getNsURI().contains("rights"); //$NON-NLS-1$
+    }
+
+    /**
+     * Роль-владелец прав. Описание прав ({@code RoleDescription}) лежит в собственном BM-ресурсе,
+     * поэтому если подъём по контейнерам до МД-объекта не удался — берём верхний объект вхождения
+     * (тот же механизм, что даёт колонку «Путь»).
+     */
+    private static MdObject roleOfObjectRights(Object matchObj, EObject leaf)
+    {
+        for (EObject current = leaf.eContainer(); current != null; current = current.eContainer())
+            if (current instanceof MdObject mdObject)
+                return mdObject;
+        return resolveMatchTopMdObject(matchObj) instanceof MdObject top ? top : null;
+    }
+
+    /** Объект, ссылки на который искали, — сам объект, а не его имя (см. {@link #referenceTargetName}). */
+    private static EObject referenceTargetObject(Object matchObj)
+    {
+        try
+        {
+            if (!(matchObj instanceof BmReferenceMatch referenceMatch))
+                return null;
+            Optional<BmObjectMatch> target = referenceMatch.getTarget();
+            if (target.isEmpty())
+                return null;
+            Optional<?> resolved = target.get().resolve();
+            return resolved.isPresent() && resolved.get() instanceof EObject object ? object : null;
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+    }
+    /**
+     * Ожидание готовности редактора владельца состава (~12 с при шаге 150 мс): страницы поднимаются
+     * заметно позже модели, а у большой конфигурации — и позже нескольких секунд.
+     */
+    private static final int EXCHANGE_PLAN_MAX_ATTEMPTS = 80;
+
+    /** Модель редактора наполняется асинхронно — ждём её так же, как поле панели «Свойства». */
+    private static void scheduleContentReveal(IEditorPart editor, ContentTarget content, int attempt)
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed() || attempt >= EXCHANGE_PLAN_MAX_ATTEMPTS)
+        {
+            return;
+        }
+        display.timerExec(attempt == 0 ? 0 : 150, () -> {
+            // Элемент состава плана обмена берём ИЗ МОДЕЛИ ОТКРЫТОГО РЕДАКТОРА: BM-объект из
+            // результатов поиска и из редактора — разные экземпляры. У подсистемы состав — прямой
+            // список объектов, отдельного элемента нет.
+            EObject selectionObject = content.selectionObject() instanceof ExchangePlanContentItem
+                ? findContentItem(editor, content.target()) : content.selectionObject();
+            // Модель редактора доступна РАНЬШЕ его страниц: сразу после открытия редактор показывает
+            // страницу загрузки, и getPageForFeatureOrDefault отдаёт её же для любого признака (лог:
+            // «страница признака=DtGranularEditorProgressPage(editors.pages.loading)»). Переход,
+            // сделанный в этот момент, уходит в никуда — ждём настоящую страницу признака.
+            if (selectionObject == null || !isRealFeaturePage(editor, content.feature()))
+            {
+                scheduleContentReveal(editor, content, attempt + 1);
+                return;
+            }
+            revealContentRow(editor, content, selectionObject, attempt);
+        });
+    }
+
+    /** Страница загрузки редактора — не страница признака (см. {@link #scheduleContentReveal}). */
+    private static final String LOADING_PAGE_ID = "editors.pages.loading"; //$NON-NLS-1$
+
+    private static boolean isRealFeaturePage(IEditorPart editor, EStructuralFeature feature)
+    {
+        Object page = Global.invoke(editor, "getPageForFeatureOrDefault", feature); //$NON-NLS-1$
+        return page != null && !LOADING_PAGE_ID.equals(Global.invoke(page, "getId")); //$NON-NLS-1$
+    }
+
+    /**
+     * Переход к строке состава. {@code selectReveal} (он же {@code gotoSelection}) не годится:
+     * прежде чем искать признак модели, он поднимается от объекта выделения вверх, пока у
+     * контейнера есть свой контейнер (декомпиляция), — и для элемента состава это уводит его на
+     * сам план обмена, у которого признака с планом обмена внутри, разумеется, нет; вызов проходит
+     * без ошибки и без единого видимого действия (лог: «строка состава выделена», а на экране
+     * ничего). Поэтому выполняется ровно то, что делает {@code gotoSelection} в удачной ветке, но
+     * с уже известным признаком: {@code setActiveFeature} + {@code setActiveSelection(Immediate)} +
+     * {@code showEditorInput} — последний и переключает редактор на страницу признака.
+     */
+    private static void revealContentRow(IEditorPart editor, ContentTarget content,
+            EObject selectionObject, int attempt)
+    {
+        Object model = Global.invoke(editor, "getModel"); //$NON-NLS-1$
+        EStructuralFeature feature = content.feature();
+        ISelection selection = new StructuredSelection(selectionObject);
+        boolean featureSet = Global.invokeVoid(editor, "setActiveFeature", feature); //$NON-NLS-1$
+        boolean selectionSet = Global.invokeVoid(editor, "setActiveSelection", selection, //$NON-NLS-1$
+            DtEditorSelectionProcessingPolicy.Immediate);
+        boolean inputShown = false;
+        if (model instanceof EObject modelObject)
+        {
+            IDtEditorInput<?> input = DtEditorInputFactory.create(modelObject, feature, selection);
+            inputShown = Global.invokeVoid(editor, "showEditorInput", input); //$NON-NLS-1$
+        }
+        // Само выделение строки штатной цепочкой не доходит: страница шлёт
+        // ClientSetSelectionEvent в сцену по ключу-признаку, а дерево (DtTreeView) обрабатывает
+        // только TreeSetSelectionEvent — вызов «проходит», а на экране ничего. Выделяем строку
+        // самим компонентом дерева, см. selectContentRow.
+        scheduleContentRowSelect(editor, content, 0);
+    }
+
+    /**
+     * Выделение строки объекта в дереве страницы «Состав». Дерево наполняется после переключения
+     * страницы, поэтому попытки повторяются; после успеха выделение ещё раз подтверждается —
+     * страница может дозагрузить содержимое и сбросить его.
+     */
+    private static void scheduleContentRowSelect(IEditorPart editor, ContentTarget content, int attempt)
+    {
+        Display display = Display.getDefault();
+        if (display == null || display.isDisposed() || attempt >= 40)
+            return;
+        display.timerExec(attempt == 0 ? 0 : 150, () -> {
+            if (selectContentRow(editor, content))
+            {
+                for (int delay : new int[] { 300, 800, 1500 })
+                    display.timerExec(delay, () -> selectContentRow(editor, content));
+                return;
+            }
+            scheduleContentRowSelect(editor, content, attempt + 1);
+        });
+    }
+
+    /** Компонент дерева состава на странице «Состав» редактора плана обмена. */
+    private static final String EXCHANGE_PLAN_CONTENT_COMPONENT_CLASS =
+        "com._1c.g5.v8.dt.md.ui.editor.aef.descriptor.exchangeplan.ExchangePlanContentComponent"; //$NON-NLS-1$
+
+    /** То же для подсистемы — тот же {@code NavigatorTreeComponent}, только своя страница. */
+    private static final String SUBSYSTEM_CONTENT_COMPONENT_CLASS =
+        "com._1c.g5.v8.dt.internal.md.ui.editors.subsystem.SubsystemEditorContentPageComponent"; //$NON-NLS-1$
+
+    /** Ключ, под которым {@code DtTreeView} кладёт свой {@code TreeViewer} в данные контрола. */
+    private static final String DT_TREE_VIEWER_KEY =
+        "com._1c.g5.v8.dt.ui.aef.swt.views.DtTreeView.treeViewer"; //$NON-NLS-1$
+
+    /**
+     * Выделяет строку объекта в дереве состава ШТАТНЫМ способом самого компонента:
+     * {@code DtDynamicTreeComponent.setSelection(Collection)} (public) сам переводит модель в
+     * view model своим маппером и шлёт {@code TreeSetSelectionEvent} — а именно это событие
+     * {@code DtTreeView.handleEventChannelEvent} и обрабатывает выделением строк
+     * (декомпиляция). Выделение, которое шлёт сама страница
+     * ({@code ClientSetSelectionEvent} в сцену по ключу-признаку), до дерева не доходит.
+     *
+     * <p>Модель для {@code setSelection} — элемент навигаторного дерева, поэтому берётся из
+     * {@code getMapper().getMappedModels()}: сравнивать с объектом метаданных надёжнее, чем
+     * угадывать тип обёртки. Если объект ещё не отображён (свёрнутая группа), пробуем сам
+     * объект метаданных.
+     *
+     * @return {@code true}, если строка выделена
+     */
+    private static boolean selectContentRow(IEditorPart editor, ContentTarget content)
+    {
+        if (content.kind() == ContentKind.ROLE_RIGHTS)
+            return selectRoleRightsRow(editor, content.target());
+        Object page = Global.invoke(editor, "getActivePageInstance"); //$NON-NLS-1$
+        Object root = page != null ? Global.getField(page, "pageComponent") : null; //$NON-NLS-1$
+        Object component = findComponentByClass(root, content.componentClass(), 0);
+        if (component == null)
+            return false;
+
+        MdObject target = content.target();
+        Object mapper = Global.invoke(component, "getMapper"); //$NON-NLS-1$
+        Object mappedModels = mapper != null ? Global.invoke(mapper, "getMappedModels") : null; //$NON-NLS-1$
+        Object model = null;
+        if (mappedModels instanceof Iterable<?> iterable)
+        {
+            for (Object candidate : iterable)
+            {
+                if (isModelFor(candidate, content.selectionObject(), target))
+                {
+                    model = candidate;
+                    break;
+                }
+            }
+        }
+        // Объект ещё не отображён (свёрнутая группа) — пробуем сам объект метаданных.
+        if (model == null)
+            model = target;
+        if (model == null || !Global.invokeVoid(component, "setSelection", List.of(model))) //$NON-NLS-1$
+            return false;
+
+        TreeViewer viewer = findContentTreeViewer(page);
+        if (viewer == null || viewer.getStructuredSelection().isEmpty())
+            return false;
+        Tree tree = viewer.getTree();
+        if (tree != null && !tree.isDisposed() && tree.getSelectionCount() > 0)
+            tree.showSelection();
+        return true;
+    }
+
+    /**
+     * Строка объекта на странице «Права» редактора роли. Эта страница — не AEF: у неё своя секция
+     * {@code ObjectsSection} с обычным {@code TreeViewer}, строки которого — {@code TreeViewerItem}
+     * с {@code getEObject()}. Бандл прав в {@code Require-Bundle} не заявлен, поэтому доступ к
+     * секции, её viewer и объекту строки — рефлексией.
+     *
+     * @return {@code true}, если строка выделена
+     */
+    private static boolean selectRoleRightsRow(IEditorPart editor, MdObject target)
+    {
+        Object page = Global.invoke(editor, "getActivePageInstance"); //$NON-NLS-1$
+        Object section = page != null ? Global.getField(page, "objectsSection") : null; //$NON-NLS-1$
+        if (section == null || !(Global.getField(section, "viewer") instanceof TreeViewer viewer) //$NON-NLS-1$
+            || !(viewer.getContentProvider() instanceof ITreeContentProvider provider))
+            return false;
+        Object row = findRightsRow(provider, provider.getElements(viewer.getInput()), target, 0);
+        if (row == null)
+            return false;
+        viewer.setSelection(new StructuredSelection(row), true);
+        Tree tree = viewer.getTree();
+        if (tree != null && !tree.isDisposed() && tree.getSelectionCount() > 0)
+            tree.showSelection();
+        return true;
+    }
+
+    private static Object findRightsRow(ITreeContentProvider provider, Object[] rows, MdObject target,
+            int depth)
+    {
+        if (rows == null || target == null || depth > 4)
+            return null;
+        for (Object row : rows)
+        {
+            if (row == null)
+                continue;
+            if (Global.invoke(row, "getEObject") instanceof EObject rowObject //$NON-NLS-1$
+                && sameShownMdObject(rowObject, target))
+                return row;
+            Object found = findRightsRow(provider, provider.getChildren(row), target, depth + 1);
+            if (found != null)
+                return found;
+        }
+        return null;
+    }
+
+    /** Модель строки дерева соответствует элементу состава либо его объекту метаданных. */
+    private static boolean isModelFor(Object candidate, EObject contentObject, MdObject target)
+    {
+        if (candidate == contentObject || candidate == target)
+            return true;
+        if (candidate instanceof EObject candidateObject)
+            return (contentObject != null && sameShownMdObject(candidateObject, contentObject))
+                || (target != null && sameShownMdObject(candidateObject, target));
+        return false;
+    }
+
+    private static Object findComponentByClass(Object component, String className, int depth)
+    {
+        if (component == null || depth > 20)
+            return null;
+        if (className.equals(component.getClass().getName()))
+            return component;
+        for (Object child : AefFieldFocus.childComponents(component))
+        {
+            Object found = findComponentByClass(child, className, depth + 1);
+            if (found != null)
+                return found;
+        }
+        return null;
+    }
+
+    /**
+     * {@code TreeViewer} дерева состава: {@code DtTreeView} кладёт его в данные созданного
+     * контрола под {@link #DT_TREE_VIEWER_KEY} (декомпиляция) — надёжнее, чем угадывать по вёрстке.
+     */
+    private static TreeViewer findContentTreeViewer(Object page)
+    {
+        Object control = page != null ? Global.invoke(page, "getPartControl") : null; //$NON-NLS-1$
+        return control instanceof Composite composite && !composite.isDisposed()
+            ? findTreeViewerInData(composite, 0) : null;
+    }
+
+    private static TreeViewer findTreeViewerInData(Composite composite, int depth)
+    {
+        if (composite.isDisposed() || depth > 20)
+            return null;
+        if (composite.getData(DT_TREE_VIEWER_KEY) instanceof TreeViewer viewer)
+            return viewer;
+        for (Control child : composite.getChildren())
+        {
+            if (child instanceof Composite childComposite)
+            {
+                TreeViewer found = findTreeViewerInData(childComposite, depth + 1);
+                if (found != null)
+                    return found;
+            }
+        }
+        return null;
+    }
+
+
+    private static ExchangePlanContentItem findContentItem(IEditorPart editor, MdObject target)
+    {
+        Object model = Global.invoke(editor, "getModel"); //$NON-NLS-1$
+        if (!(model instanceof ExchangePlan exchangePlan))
+            return null;
+        for (ExchangePlanContentItem item : exchangePlan.getContent())
+        {
+            if (item != null && sameShownMdObject(item.getMdObject(), target))
+                return item;
+        }
+        return null;
+    }
+
+    /** Один и тот же объект метаданных из разных резолвов: BM-идентификатор, затем EMF-URI. */
+    private static boolean sameShownMdObject(EObject a, EObject b)
+    {
+        if (a == null || b == null)
+            return false;
+        if (sameBmObject(a, b))
+            return true;
+        try
+        {
+            URI uriA = EcoreUtil.getURI(a);
+            return uriA != null && uriA.equals(EcoreUtil.getURI(b));
+        }
+        catch (Exception e)
+        {
+            return false;
+        }
+    }
+
+    /** Тип из списка — это и есть найденный объект (сравнение по обоим вариантам имени). */
+    private static boolean isSameTypeName(TypeItem type, String targetName)
+    {
+        for (String name : new String[] { type.getName(), type.getNameRu() })
+        {
+            if (name == null || name.isBlank())
+                continue;
+            if (name.equalsIgnoreCase(targetName))
+                return true;
+        }
+        return false;
+    }
+
+    /**
+     * Имя объекта, ссылки на который искали ({@code BmReferenceMatch.getTarget()} — второй
+     * BM-объект вхождения, в отличие от {@code getSource()}, где ссылка найдена).
+     *
+     * @return {@code null} для поиска другого вида (текстовый поиск цели не имеет)
+     */
+    private static String referenceTargetName(Object matchObj)
+    {
+        try
+        {
+            if (!(matchObj instanceof BmReferenceMatch referenceMatch))
+                return null;
+            Optional<BmObjectMatch> target = referenceMatch.getTarget();
+            if (target.isEmpty())
+                return null;
+            Optional<?> resolved = target.get().resolve();
+            if (resolved.isEmpty() || !(resolved.get() instanceof EObject targetObject))
+                return null;
+            Object name = Global.invoke(targetObject, "getName"); //$NON-NLS-1$
+            return name instanceof String text && !text.isBlank() ? text : null;
+        }
+        catch (Exception e)
+        {
+            return null;
+        }
+    }
+
+    /**
      * Вхождение внутри реквизита МД, но не в самом реквизите (Синоним.ru, Подсказка.ru, Тип.Типы…):
      * открывает ближайший {@code BasicFeature} через 1-arg {@code OpenHelper.openEditor} (как
      * {@link GoToDefinition#openTopLevelFormElement}) и фокусирует поле панели «Свойства».
@@ -1877,41 +2477,34 @@ public final class ConfigSearchResultsHook implements IStartup
      * @return {@code true}, если открытие обработано здесь (штатный {@code handleOpen} не нужен)
      */
     private static boolean openNestedMdObjectMemberMatch(EObject leaf, IWorkbenchPage workbenchPage,
-            EStructuralFeature matchFeature)
+            EStructuralFeature matchFeature, List<String> typeDialogTargets)
     {
         EObject member = findNearestMdObjectMember(leaf);
         if (member == null || member == leaf)
             return false;
-        Global.tempLog(PropertyFieldFocus.LOG_TOPIC, "openNested start leaf=" //$NON-NLS-1$
-                + describeEObject(leaf) + " member=" + describeEObject(member) //$NON-NLS-1$
-                + " matchFeature=" + featureName(matchFeature)); //$NON-NLS-1$
         try
         {
             workbenchPage.showView(IPageLayout.ID_PROP_SHEET);
         }
         catch (Exception e)
         {
-            Global.tempLog(PropertyFieldFocus.LOG_TOPIC, "openNested showView: " + e); //$NON-NLS-1$
         }
         // Ждём палитру ДО openEditor — тот же порядок, что showView+schedule → handleOpen
         // для «Комментарий»; иначе первые попытки фокуса идут в ещё старую палитру.
-        PropertyFieldFocus.schedule(workbenchPage, leaf, matchFeature);
+        PropertyFieldFocus.schedule(workbenchPage, leaf, matchFeature, typeDialogTargets);
         try
         {
             if (new OpenHelper(workbenchPage).openEditor(member) == null)
             {
-                Global.tempLog(PropertyFieldFocus.LOG_TOPIC, "openNested openEditor=null, cancel focus"); //$NON-NLS-1$
                 PropertyFieldFocus.cancel();
                 return false;
             }
         }
         catch (RuntimeException e)
         {
-            Global.tempLog(PropertyFieldFocus.LOG_TOPIC, "openNested openEditor: " + e.getMessage()); //$NON-NLS-1$
             PropertyFieldFocus.cancel();
             return false;
         }
-        Global.tempLog(PropertyFieldFocus.LOG_TOPIC, "openNested openEditor ok, focus loop running"); //$NON-NLS-1$
         return true;
     }
 
@@ -2215,8 +2808,6 @@ public final class ConfigSearchResultsHook implements IStartup
      */
     private static void onTreeInputChanged()
     {
-        Global.tempLog("search-tree-empty", "config.onTreeInputChanged: guard=" + guardFirstRootSelection //$NON-NLS-1$ //$NON-NLS-2$
-            + " running=" + searchQueryRunning); //$NON-NLS-1$
         if (guardFirstRootSelection || searchQueryRunning)
             return; // уже обрабатывается обычным стартом поиска (onSearchStarting)
         guardFirstRootSelection = true;
@@ -2656,8 +3247,6 @@ public final class ConfigSearchResultsHook implements IStartup
             if (!(view instanceof ISearchResultViewPart))
                 return false;
             ISearchResultPage activePage = ((ISearchResultViewPart) view).getActivePage();
-            Global.tempLog("search-tree-empty", "config.tryPatch: activePage=" //$NON-NLS-1$ //$NON-NLS-2$
-                + (activePage != null ? activePage.getClass().getName() + "@" + System.identityHashCode(activePage) : "null")); //$NON-NLS-1$ //$NON-NLS-2$
             if (activePage == null)
             {
                 log("tryPatch: activePage=null"); //$NON-NLS-1$
@@ -2712,9 +3301,6 @@ public final class ConfigSearchResultsHook implements IStartup
             installTreeInputChangeWatch(treeViewer);
 
             treeViewer.getTree().setData(HOOKED_KEY, Boolean.TRUE);
-            Global.tempLog("search-tree-empty", "config.tryPatch: PATCH OK treeItems=" //$NON-NLS-1$ //$NON-NLS-2$
-                + treeViewer.getTree().getItemCount() + " input=" //$NON-NLS-1$
-                + (treeViewer.getInput() != null ? treeViewer.getInput().getClass().getName() : "null")); //$NON-NLS-1$
             log("tryPatch: PATCH OK для " + activePage.getClass().getName()); //$NON-NLS-1$
             return true;
         }
@@ -4796,8 +5382,21 @@ public final class ConfigSearchResultsHook implements IStartup
         /** Панель наполняется асинхронно (MdPropertySheetPage ведёт свой прогресс) — ждём до ~6с. */
         private static final int MAX_ATTEMPTS = 40;
         private static final int RETRY_DELAY_MS = 150;
-        /** Тема {@link Global#tempLog} — см. {@code .tmp/temp-logs/propfocus.log}. */
-        static final String LOG_TOPIC = "propfocus"; //$NON-NLS-1$
+        /**
+         * Сколько последних попыток отдаются штатному AEF-пути, если наш оверлей поля «Тип» так и
+         * не присоединился (см. {@link #tryFocus}). До этого — только оверлей: он присоединяется
+         * асинхронно и в норме успевает.
+         */
+        private static final int OVERLAY_FALLBACK_ATTEMPTS = 8;
+
+        /**
+         * Моменты проверки, что ввод остался в активированном поле, мс от активации. Панель
+         * «Свойства» доводит свою загрузку асинхронно и уводит ввод обратно уже ПОСЛЕ того, как
+         * поле найдено и активировано (в логе это выглядит как успешная активация без результата
+         * на экране) — проверок ограниченное число, и каждая возвращает фокус, только если он
+         * действительно сбит.
+         */
+        private static final int[] FOCUS_RECHECK_DELAYS = { 200, 500, 1000, 1800 };
 
         /**
          * Метка текущего цикла ожидания. Каждое новое открытие вхождения обесценивает предыдущий
@@ -4813,7 +5412,6 @@ public final class ConfigSearchResultsHook implements IStartup
         static void cancel()
         {
             activeToken = new Object();
-            Global.tempLog(LOG_TOPIC, "cancel"); //$NON-NLS-1$
         }
 
         /**
@@ -4825,25 +5423,30 @@ public final class ConfigSearchResultsHook implements IStartup
          */
         static void schedule(IWorkbenchPage workbenchPage, EObject leaf, EStructuralFeature matchFeature)
         {
+            schedule(workbenchPage, leaf, matchFeature, null);
+        }
+
+        /**
+         * @param typeDialogTargets не {@code null} — вместо активации поля открыть диалог
+         *        «Редактирование типа данных» и выделить в нём эти типы (составной тип, см.
+         *        {@link ConfigSearchResultsHook#compositeTypeDialogTargets})
+         */
+        static void schedule(IWorkbenchPage workbenchPage, EObject leaf, EStructuralFeature matchFeature,
+                List<String> typeDialogTargets)
+        {
             if (workbenchPage == null || leaf == null)
             {
-                Global.tempLog(LOG_TOPIC, "schedule skip: page/leaf null"); //$NON-NLS-1$
                 return;
             }
             EObject member = nearestMember(leaf);
             List<EStructuralFeature> chain = featureChainTopDown(leaf, matchFeature);
-            Global.tempLog(LOG_TOPIC, "schedule leaf=" + describeEObject(leaf) //$NON-NLS-1$
-                    + " member=" + describeEObject(member) //$NON-NLS-1$
-                    + " matchFeature=" + featureName(matchFeature) //$NON-NLS-1$
-                    + " chain=" + describeFeatureChain(chain)); //$NON-NLS-1$
             if (member == null || chain.isEmpty())
             {
-                Global.tempLog(LOG_TOPIC, "schedule skip: member/chain empty"); //$NON-NLS-1$
                 return;
             }
             Object token = new Object();
             activeToken = token;
-            retry(workbenchPage, member, chain, 0, token);
+            retry(workbenchPage, member, chain, typeDialogTargets, 0, token);
         }
 
         /**
@@ -4854,14 +5457,11 @@ public final class ConfigSearchResultsHook implements IStartup
         {
             if (workbenchPage == null || member == null || feature == null)
             {
-                Global.tempLog(LOG_TOPIC, "scheduleExact skip: page/member/feature null"); //$NON-NLS-1$
                 return;
             }
-            Global.tempLog(LOG_TOPIC, "scheduleExact member=" + describeEObject(member) //$NON-NLS-1$
-                    + " feature=" + featureName(feature)); //$NON-NLS-1$
             Object token = new Object();
             activeToken = token;
-            retry(workbenchPage, member, List.of(feature), 0, token);
+            retry(workbenchPage, member, List.of(feature), null, 0, token);
         }
 
         /**
@@ -4923,7 +5523,7 @@ public final class ConfigSearchResultsHook implements IStartup
         }
 
         private static void retry(IWorkbenchPage workbenchPage, EObject member,
-                List<EStructuralFeature> chain, int attempt, Object token)
+                List<EStructuralFeature> chain, List<String> typeDialogTargets, int attempt, Object token)
         {
             Display display = Display.getDefault();
             if (display == null || display.isDisposed())
@@ -4931,80 +5531,158 @@ public final class ConfigSearchResultsHook implements IStartup
             display.timerExec(RETRY_DELAY_MS, () -> {
                 if (token != activeToken)
                 {
-                    Global.tempLog(LOG_TOPIC, "retry aborted stale token attempt=" + attempt); //$NON-NLS-1$
                     return;
                 }
                 try
                 {
-                    if (tryFocus(workbenchPage, member, chain, attempt))
+                    if (tryFocus(workbenchPage, member, chain, typeDialogTargets, attempt, token))
                         return;
                 }
                 catch (Throwable t)
                 {
-                    Global.tempLog(LOG_TOPIC, "tryFocus throw attempt=" + attempt + " " + t); //$NON-NLS-1$ //$NON-NLS-2$
                     Global.logError("ConfigSearchResults", "PropertyFieldFocus.tryFocus", t); //$NON-NLS-1$ //$NON-NLS-2$
                 }
                 if (attempt + 1 < MAX_ATTEMPTS)
-                    retry(workbenchPage, member, chain, attempt + 1, token);
-                else
-                    Global.tempLog(LOG_TOPIC, "give up after " + MAX_ATTEMPTS + " attempts chain=" //$NON-NLS-1$ //$NON-NLS-2$
-                            + describeFeatureChain(chain) + " member=" + describeEObject(member)); //$NON-NLS-1$
+                    retry(workbenchPage, member, chain, typeDialogTargets, attempt + 1, token);
             });
         }
 
         private static boolean tryFocus(IWorkbenchPage workbenchPage, EObject member,
-                List<EStructuralFeature> chain, int attempt)
+                List<EStructuralFeature> chain, List<String> typeDialogTargets, int attempt, Object token)
         {
             IViewPart view = findPropertySheetView(workbenchPage);
             Object page = view != null ? PropertyNameIdentifierHook.resolvePropertySheetPage(view) : null;
             if (page == null)
             {
-                Global.tempLog(LOG_TOPIC, "attempt=" + attempt + " no property sheet page view=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + (view != null ? view.getClass().getSimpleName() : "null")); //$NON-NLS-1$
                 return false;
             }
             // Панель ещё может показывать ПРЕДЫДУЩИЙ объект — тогда нужное поле найдётся, но не то.
             if (!paletteShowsObject(page, member))
             {
-                Global.tempLog(LOG_TOPIC, "attempt=" + attempt + " palette not yet on member=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + describeEObject(member) + " palette=" + describePaletteObjects(page)); //$NON-NLS-1$
                 return false;
-            }
-
-            // Поле «Тип» в панели «Свойства» перекрыто нашим же SWT-оверлеем (TypeComboOverlayHook):
-            // видимый ввод — его Text, а штатный LightCombo под ним только визуально закрыт.
-            // Для таких свойств штатный AEF-путь НЕ годится и не является запасным: он поставил бы
-            // фокус в невидимый контрол под оверлеем — причём успешно и на первой же попытке,
-            // прекратив ожидание раньше, чем оверлей вообще успеет присоединиться. Поэтому здесь
-            // либо оверлей, либо ничего: если его нет (составной тип — комбобокса под ним нет
-            // вовсе), то фокусировать и нечего.
-            String label = chain.isEmpty() ? null : featureLabelForFocus(chain.get(0));
-            if (TypeComboOverlayHook.coversProperty(label))
-            {
-                boolean overlayFocused = TypeComboOverlayHook.focusPropertyOverlay(view, label);
-                Global.tempLog(LOG_TOPIC, "attempt=" + attempt + " typeOverlay label=" + label //$NON-NLS-1$ //$NON-NLS-2$
-                        + " ok=" + overlayFocused); //$NON-NLS-1$
-                return overlayFocused;
             }
 
             Object scene = Global.invoke(page, "getScene"); //$NON-NLS-1$
             if (scene == null)
             {
-                Global.tempLog(LOG_TOPIC, "attempt=" + attempt + " scene=null"); //$NON-NLS-1$ //$NON-NLS-2$
                 return false;
             }
+
+            // Составной тип: активировать нечего (поле показывает только «Составной тип») — сразу
+            // открываем диалог «Редактирование типа данных» с найденным объектом.
+            if (typeDialogTargets != null)
+                return openTypeDialog(view, scene, chain, typeDialogTargets, attempt, token);
+
+            // Поле «Тип» в панели «Свойства» перекрыто нашим же SWT-оверлеем (TypeComboOverlayHook):
+            // видимый ввод — его Text, а штатный LightCombo под ним только визуально закрыт.
+            // Для таких свойств штатный AEF-путь НЕ годится и не является запасным на РАННИХ
+            // попытках: он поставил бы фокус в невидимый контрол под оверлеем — причём успешно и на
+            // первой же попытке, прекратив ожидание раньше, чем оверлей вообще успеет
+            // присоединиться. Но и «либо оверлей, либо ничего» тоже неверно: если оверлей так и не
+            // появился (диагностика TypeComboOverlayHook знает случаи, когда присоединение
+            // откладывается или срывается), лучше активировать штатный контрол, чем не активировать
+            // ничего — поэтому на последних попытках управление уходит в штатный путь ниже.
+            String label = chain.isEmpty() ? null : featureLabelForFocus(chain.get(0));
+            if (TypeComboOverlayHook.coversProperty(label))
+            {
+                boolean overlayFocused = TypeComboOverlayHook.focusPropertyOverlay(view, label);
+                if (overlayFocused)
+                {
+                    scheduleOverlayFocusRecheck(view, label, 0, token);
+                    return true;
+                }
+                if (attempt < MAX_ATTEMPTS - OVERLAY_FALLBACK_ATTEMPTS)
+                    return false;
+            }
+
             Object fieldComponent = findFieldComponent(scene, chain);
             if (fieldComponent == null)
             {
-                Global.tempLog(LOG_TOPIC, "attempt=" + attempt + " field not found chain=" //$NON-NLS-1$ //$NON-NLS-2$
-                        + describeFeatureChain(chain) + " label=" + label); //$NON-NLS-1$
                 return false;
             }
             boolean focused = focusFieldComponent(scene, fieldComponent);
-            Global.tempLog(LOG_TOPIC, "attempt=" + attempt + " focus chain=" + describeFeatureChain(chain) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " label=" + label + " component=" //$NON-NLS-1$ //$NON-NLS-2$
-                    + fieldComponent.getClass().getSimpleName() + " ok=" + focused); //$NON-NLS-1$
             return focused;
+        }
+
+        /**
+         * Открывает диалог «Редактирование типа данных» поля «Тип» панели «Свойства» и выделяет в
+         * нём строку найденного объекта (общий механизм {@link TypeDescriptionDialogFlow}).
+         *
+         * @return {@code true}, если диалог запрошен (ожидание закончено); {@code false} — поле
+         *         типа ещё не отрисовано, нужна следующая попытка
+         */
+        private static boolean openTypeDialog(IViewPart view, Object scene,
+                List<EStructuralFeature> chain, List<String> targets, int attempt, Object token)
+        {
+            Object fieldComponent = findFieldComponent(scene, chain);
+            Object typeComponent = fieldComponent != null
+                ? TypeDescriptionDialogFlow.findComponentWithSelectButton(fieldComponent) : null;
+            if (typeComponent == null)
+            {
+                // Компонент поля панели ищется по EMF-признаку (findFieldComponent), и это основной
+                // путь. Запасной — единственное поле типа во всей сцене: у реквизита/измерения/
+                // ресурса оно одно, а сам признак связи «компонент → определение» может ещё не быть
+                // заполнен в момент попытки.
+                typeComponent = TypeDescriptionDialogFlow
+                    .findComponentWithSelectButton(Global.invoke(scene, "getComponent")); //$NON-NLS-1$
+            }
+            if (typeComponent == null)
+            {
+                return false;
+            }
+            // После закрытия диалога ввод остаётся там, где его оставил диалог — возвращаем его в
+            // поле «Тип» панели, как «Открыть связь» возвращает его в поле «Источник».
+            Object field = typeComponent;
+            String label = chain.isEmpty() ? null : featureLabelForFocus(chain.get(0));
+            return TypeDescriptionDialogFlow.open(typeComponent, targets,
+                () -> focusPanelTypeField(view, scene, field, label, token));
+        }
+
+        /**
+         * Активация поля «Тип» панели «Свойства»: сначала наш оверлей (если он накрывает поле —
+         * видимый ввод именно его), иначе штатный контрол компонента.
+         */
+        private static void focusPanelTypeField(IViewPart view, Object scene, Object component,
+                String label, Object token)
+        {
+            boolean focused = TypeComboOverlayHook.coversProperty(label)
+                && TypeComboOverlayHook.focusPropertyOverlay(view, label);
+            if (focused)
+            {
+                scheduleOverlayFocusRecheck(view, label, 0, token);
+            }
+            else
+            {
+                focused = AefFieldFocus.focusComponent(scene, component);
+            }
+        }
+
+        /**
+         * Проверки, что ввод остался в поле-оверлее «Тип» (см. {@link #FOCUS_RECHECK_DELAYS}).
+         * Если пользователь тем временем ушёл в другое окно (или открылся диалог), ввод не
+         * отбирается — проверка просто прекращается.
+         */
+        private static void scheduleOverlayFocusRecheck(IViewPart view, String label, int attempt,
+                Object token)
+        {
+            if (attempt >= FOCUS_RECHECK_DELAYS.length)
+                return;
+            Display display = Display.getDefault();
+            if (display == null || display.isDisposed())
+                return;
+            display.timerExec(FOCUS_RECHECK_DELAYS[attempt], () -> {
+                if (token != activeToken || view.getSite() == null)
+                    return;
+                Shell viewShell = view.getSite().getShell();
+                Shell activeShell = display.getActiveShell();
+                if (viewShell == null || viewShell.isDisposed() || activeShell != viewShell)
+                    return;
+                if (!TypeComboOverlayHook.isPropertyOverlayFocused(view, label))
+                {
+                    boolean refocused = TypeComboOverlayHook.focusPropertyOverlay(view, label);
+                }
+                scheduleOverlayFocusRecheck(view, label, attempt + 1, token);
+            });
         }
 
         private static String describePaletteObjects(Object page)

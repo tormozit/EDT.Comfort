@@ -49,6 +49,8 @@ public final class NavigatorShowInExplorerMenuHook implements IStartup
     @Override
     public void earlyStartup()
     {
+        // Те же пункты — во внешние меню объекта (например, меню имени в заголовке редактора МД)
+        ComfortSubmenuHelper.addExternalMenuFiller(context -> hookComfortSubmenu(context.menu(), null));
         Display.getDefault().asyncExec(() -> {
             IWorkbench wb = PlatformUI.getWorkbench();
             if (wb == null)
@@ -163,7 +165,7 @@ public final class NavigatorShowInExplorerMenuHook implements IStartup
             @Override
             public void menuShown(MenuEvent e)
             {
-                ISelection selection = viewer.getSelection();
+                ISelection selection = ComfortSubmenuHelper.menuSelection(subMenu, viewer);
                 if (!(selection instanceof IStructuredSelection structured) || structured.isEmpty())
                     return;
                 if (NavigatorResourceResolver.resolveFirst(structured) == null)
@@ -178,7 +180,7 @@ public final class NavigatorShowInExplorerMenuHook implements IStartup
                     @Override
                     public void widgetSelected(SelectionEvent ev)
                     {
-                        ISelection current = viewer.getSelection();
+                        ISelection current = ComfortSubmenuHelper.menuSelection(subMenu, viewer);
                         if (current instanceof IStructuredSelection currentStructured)
                             NavigatorShowInExplorerHandler.showInExplorer(currentStructured, subMenu.getShell());
                     }
@@ -227,7 +229,7 @@ public final class NavigatorShowInExplorerMenuHook implements IStartup
             @Override
             public void menuShown(MenuEvent e)
             {
-                ISelection selection = viewer.getSelection();
+                ISelection selection = ComfortSubmenuHelper.menuSelection(comfortSub, viewer);
                 if (!(selection instanceof IStructuredSelection structured) || structured.isEmpty())
                     return;
                 if (NavigatorResourceResolver.resolveFirst(structured) == null)
@@ -241,7 +243,7 @@ public final class NavigatorShowInExplorerMenuHook implements IStartup
                     @Override
                     public void widgetSelected(SelectionEvent ev)
                     {
-                        ISelection current = viewer.getSelection();
+                        ISelection current = ComfortSubmenuHelper.menuSelection(comfortSub, viewer);
                         if (current instanceof IStructuredSelection currentStructured)
                             NavigatorShowInExplorerHandler.showInExplorer(currentStructured, comfortSub.getShell());
                     }
@@ -256,7 +258,7 @@ public final class NavigatorShowInExplorerMenuHook implements IStartup
                     @Override
                     public void widgetSelected(SelectionEvent ev)
                     {
-                        ISelection current = viewer.getSelection();
+                        ISelection current = ComfortSubmenuHelper.menuSelection(comfortSub, viewer);
                         if (current instanceof IStructuredSelection currentStructured)
                             NavigatorShowInProjectStructureHandler.showInProjectStructure(currentStructured);
                     }

@@ -170,7 +170,7 @@ public final class ComfortSettings
 
     // ---- Hover hints (подсказки при наведении) ----
 
-    /** Ключ: показывать ли всплывающие подсказки при удержании мыши на слове в модуле. */
+    /** Ключ: показывать ли всплывающие подсказки при удержании мыши на слове в модуле и XML. */
     public static final String PREF_ENABLE_HOVER_HINTS = "comfort.enableHoverHints"; //$NON-NLS-1$
 
     /** Подсказки при наведении включены по умолчанию. */
@@ -976,7 +976,7 @@ public final class ComfortSettings
     }
 
     /**
-     * Показывать ли подсказки при удержании мыши на слове в модуле
+     * Показывать ли подсказки при удержании мыши на слове в модуле и в редакторе XML
      * (штатный doc-hover, ИР-обогащение).
      */
     public static boolean isHoverHintsEnabled()

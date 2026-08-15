@@ -20,6 +20,8 @@
     <startup class="tormozit.TextEditorRightClickCaretHook"/>
     <startup class="tormozit.TextEditorCtrlClickSelectWordHook"/>
     <startup class="tormozit.TextEditorIdentifierSelectionHook"/>
+    <startup class="tormozit.UniversalOccurrencesHook"/>
+    <startup class="tormozit.OccurrencesToggleHook"/>
     <startup class="tormozit.TextEditorMenuHook"/>
     <startup class="tormozit.XmlEditorShowInNavigatorHook"/>
     <startup class="tormozit.QueryTextEditDialogHook"/>
@@ -39,6 +41,8 @@
     <startup class="tormozit.FormMainAttributeTypeDecorator"/>
     <startup class="tormozit.MdObjectUsageDecorator"/>
     <startup class="tormozit.MdEventHandlersPageHook"/>
+    <startup class="tormozit.MdEditorTitleNavigatorMenuHook"/>
+    <startup class="tormozit.MdEditorListTabCountHook"/>
     <startup class="tormozit.EventHandlersFilterHook"/>
     <startup class="tormozit.EventHandlersOpenHandlerHook"/>
     <!-- ГЛОБАЛЬНЫЙ СКАН ОТКЛЮЧЁН ОКОНЧАТЕЛЬНО (issue #165), 2026-07-20. История фиксов: v1

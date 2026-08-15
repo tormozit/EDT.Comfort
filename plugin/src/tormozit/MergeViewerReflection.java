@@ -44,7 +44,15 @@ public final class MergeViewerReflection
         if (mergeSourceViewer == null)
             return null;
         Object sourceViewer = Global.invoke(mergeSourceViewer, "getSourceViewer"); //$NON-NLS-1$
-        return sourceViewer instanceof SourceViewer sv ? sv : null;
+        if (!(sourceViewer instanceof SourceViewer sv))
+            return null;
+        /*
+         * Единственная точка, где панель сравнения отдаёт свой SourceViewer: сам он не
+         * Control, по цепочке родителей StyledText его не найти — регистрируем пару
+         * «виджет → вьюер» для маркеров вхождений (UniversalOccurrencesSupport).
+         */
+        UniversalOccurrencesSupport.registerViewer(sv);
+        return sv;
     }
 
     /**

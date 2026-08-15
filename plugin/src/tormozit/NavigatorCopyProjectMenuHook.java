@@ -71,6 +71,8 @@ public final class NavigatorCopyProjectMenuHook implements IStartup
     @Override
     public void earlyStartup()
     {
+        // Те же пункты — во внешние меню объекта (например, меню имени в заголовке редактора МД)
+        ComfortSubmenuHelper.addExternalMenuFiller(context -> hookComfortSubmenu(context.menu(), null));
         Display.getDefault().asyncExec(() -> {
             IWorkbench wb = PlatformUI.getWorkbench();
             if (wb == null)
@@ -179,7 +181,7 @@ public final class NavigatorCopyProjectMenuHook implements IStartup
             @Override
             public void menuShown(MenuEvent e)
             {
-                ISelection selection = viewer.getSelection();
+                ISelection selection = ComfortSubmenuHelper.menuSelection(comfortSub, viewer);
                 if (!(selection instanceof IStructuredSelection structured) || structured.size() != 1)
                     return;
                 IProject project = resolveSingleProject(structured);

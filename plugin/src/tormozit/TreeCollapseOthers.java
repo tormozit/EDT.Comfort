@@ -15,6 +15,7 @@ import org.eclipse.swt.events.SelectionAdapter;
 import org.eclipse.swt.events.SelectionEvent;
 import org.eclipse.swt.graphics.Image;
 import org.eclipse.swt.widgets.Control;
+import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.swt.widgets.Tree;
@@ -156,19 +157,27 @@ final class TreeCollapseOthers
         });
     }
 
-    /** Дерево-владелец контекстного меню, из которого открыто подменю {@code comfortSub}. */
+    /**
+     * Дерево-владелец контекстного меню, из которого открыто подменю {@code comfortSub}.
+     *
+     * <p>Определяется по контролу с фокусом: {@code Menu.getParent()} для этого не годится —
+     * в SWT он возвращает {@link org.eclipse.swt.widgets.Decorations} (окно), а не контрол,
+     * которому меню назначено, и обратной ссылки Menu → Control в SWT нет. Правый щелчок
+     * ставит фокус на контрол, поэтому в момент показа меню фокус и есть его владелец.
+     *
+     * <p>Побочный полезный эффект: для меню, открытого не над деревом (например, наше меню
+     * объекта в заголовке редактора), владелец не найдётся — и древесный пункт туда
+     * не попадёт, что и требуется.
+     */
     static Tree resolveOwnerTree(Menu comfortSub)
     {
         if (comfortSub == null || comfortSub.isDisposed())
             return null;
-        MenuItem parentItem = comfortSub.getParentItem();
-        if (parentItem == null || parentItem.isDisposed())
+        Display display = comfortSub.getDisplay();
+        if (display == null || display.isDisposed())
             return null;
-        Menu contextMenu = parentItem.getParent();
-        if (contextMenu == null || contextMenu.isDisposed())
-            return null;
-        Control owner = contextMenu.getParent();
-        return owner instanceof Tree tree && !tree.isDisposed() ? tree : null;
+        Control focused = display.getFocusControl();
+        return focused instanceof Tree tree && !tree.isDisposed() ? tree : null;
     }
 
     /**

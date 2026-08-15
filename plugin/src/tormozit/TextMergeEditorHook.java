@@ -502,11 +502,26 @@ public final class TextMergeEditorHook
         toolBarManager.add(showInModuleAction);
 
         toolBarManager.add(panel.createVisibilityToggleAction());
+        toolBarManager.add(OccurrencesToggleHook.createToggleAction());
         toolBarManager.add(new Separator());
         for (IContributionItem item : existingItems)
-            toolBarManager.add(item);
+        {
+            // Кнопка вхождений от прошлой сборки — иначе в панели два переключателя
+            if (!OccurrencesToggleHook.isStaleToggleItem(item))
+                toolBarManager.add(item);
+        }
 
         toolBarManager.update(true);
+
+        // Шелл обслужен: универсальный скан OccurrencesToggleHook не добавит свою
+        // кнопку — она уже лежит рядом с «Текущие строки» (и уберём добавленную ранее)
+        Control viewerControl = viewer.getControl();
+        if (viewerControl != null && !viewerControl.isDisposed())
+        {
+            Shell shell = viewerControl.getShell();
+            OccurrencesToggleHook.markShellHandled(shell);
+            OccurrencesToggleHook.removeDialogItems(shell);
+        }
     }
 
     private static boolean isMxlxViewerInput(ThreeSideTextMergeViewer viewer)

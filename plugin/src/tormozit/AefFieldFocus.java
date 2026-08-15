@@ -59,45 +59,19 @@ final class AefFieldFocus
      */
     static void clearSelectionInUnfocusedFields(Object scene, Object rootComponent)
     {
-        clearSelectionInUnfocusedFields(scene, rootComponent, null);
-    }
-
-    /**
-     * @param logTopic тема {@link Global#tempLog} для разового дампа найденных контролов
-     * ({@code null} — без лога). Поля страниц МД рисует LWT, и что именно попадётся здесь —
-     * SWT {@link Text} или LWT-контрол — видно только по факту.
-     */
-    static void clearSelectionInUnfocusedFields(Object scene, Object rootComponent, String logTopic)
-    {
         for (Object nativeControl : editorNativeControls(scene, rootComponent))
         {
-            String handled;
             if (nativeControl instanceof Control control)
             {
                 if (control.isDisposed() || control.isFocusControl())
                     continue;
                 if (control instanceof Text text)
-                {
                     text.setSelection(0, 0);
-                    handled = "swt Text"; //$NON-NLS-1$
-                }
                 else if (control instanceof StyledText styledText)
-                {
                     styledText.setSelection(0, 0);
-                    handled = "swt StyledText"; //$NON-NLS-1$
-                }
-                else
-                    handled = "swt прочий"; //$NON-NLS-1$
             }
-            else
-            {
-                if (Boolean.TRUE.equals(Global.invoke(nativeControl, "isFocused"))) //$NON-NLS-1$
-                    continue;
-                handled = clearLightTreeSelection(nativeControl, 0);
-            }
-            if (logTopic != null)
-                Global.tempLog(logTopic, "сброс выделения: " + nativeControl.getClass().getName() //$NON-NLS-1$
-                    + " → " + handled); //$NON-NLS-1$
+            else if (!Boolean.TRUE.equals(Global.invoke(nativeControl, "isFocused"))) //$NON-NLS-1$
+                clearLightTreeSelection(nativeControl, 0);
         }
     }
 

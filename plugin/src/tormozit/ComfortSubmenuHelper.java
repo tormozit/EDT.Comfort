@@ -2,8 +2,10 @@ package tormozit;
 
 import java.text.Collator;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 import org.eclipse.core.commands.ParameterizedCommand;
 import org.eclipse.jface.bindings.Binding;
@@ -12,8 +14,13 @@ import org.eclipse.jface.bindings.keys.KeySequence;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
+import org.eclipse.jface.viewers.ISelection;
+import org.eclipse.jface.viewers.IStructuredSelection;
+import org.eclipse.jface.viewers.StructuredSelection;
 import org.eclipse.swt.widgets.Shell;
+import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.navigator.CommonViewer;
 import org.eclipse.ui.internal.keys.BindingService;
 import org.eclipse.ui.keys.IBindingService;
 
@@ -25,10 +32,126 @@ final class ComfortSubmenuHelper
     static final String SUBMENU_TEXT = "Комфорт"; //$NON-NLS-1$
     static final String SUBMENU_MARKER = "tormozit.comfortSubmenu"; //$NON-NLS-1$
 
+    /** Ключ данных подменю: выделение внешнего меню (см. {@link #fillExternalMenu}). */
+    private static final String EXTERNAL_SELECTION_KEY = "tormozit.comfortSubmenu.selection"; //$NON-NLS-1$
+
     private static final String DEFAULT_SCHEME_ID =
             "org.eclipse.ui.defaultAcceleratorConfiguration"; //$NON-NLS-1$
 
+    /**
+     * Наполнители подменю «Комфорт» для меню, показывающих объекты метаданных вне дерева
+     * навигатора. Регистрируются хуками навигатора; см. {@link #fillExternalMenu}.
+     */
+    private static final List<NavigatorMenuFiller> EXTERNAL_FILLERS = new CopyOnWriteArrayList<>();
+
     private ComfortSubmenuHelper() {}
+
+    /**
+     * Наполнитель подменю «Комфорт» для стороннего меню.
+     *
+     * <p>Регистрируют только те хуки, чьи пункты осмысленны для объекта самого по себе.
+     * Пункты, работающие с деревом навигатора (свернуть/развернуть узлы и т.п.),
+     * не регистрируются — вне дерева им нечего делать.
+     */
+    interface NavigatorMenuFiller
+    {
+        void fill(NavigatorMenuContext context);
+    }
+
+    /** Что наполнять и для чего: меню, выделенные объекты и панель «Навигатор». */
+    static final class NavigatorMenuContext
+    {
+        private final Menu menu;
+
+        private final IViewPart navigator;
+
+        private final IStructuredSelection selection;
+
+        NavigatorMenuContext(Menu menu, IViewPart navigator, IStructuredSelection selection)
+        {
+            this.menu = menu;
+            this.navigator = navigator;
+            this.selection = selection;
+        }
+
+        Menu menu()
+        {
+            return menu;
+        }
+
+        IViewPart navigator()
+        {
+            return navigator;
+        }
+
+        /**
+         * Выделение, для которого строится меню. Это <em>не</em> выделение дерева навигатора:
+         * объект может быть скрыт фильтром, и тогда в дереве выделения нет вовсе.
+         */
+        IStructuredSelection selection()
+        {
+            return selection;
+        }
+    }
+
+    /** Регистрация наполнителя; повторные вызовы одного хука безопасны — список без дублей. */
+    static void addExternalMenuFiller(NavigatorMenuFiller filler)
+    {
+        if (filler != null && !EXTERNAL_FILLERS.contains(filler))
+            EXTERNAL_FILLERS.add(filler);
+    }
+
+    /**
+     * Наполняет подменю «Комфорт» стороннего меню теми же пунктами, что и в навигаторе.
+     *
+     * <p>Меню навигатора этот путь не использует: там каждый хук по-прежнему сам слушает
+     * своё меню, поэтому дублей не возникает.
+     *
+     * <p>Выделение запоминается на самом подменю: наполнители читают его не сейчас, а когда
+     * пользователь раскроет «Комфорт», — см. {@link #menuSelection}.
+     */
+    static void fillExternalMenu(Menu menu, IViewPart navigator, IStructuredSelection selection)
+    {
+        if (menu == null || menu.isDisposed() || selection == null || selection.isEmpty())
+            return;
+
+        // Подменю создаётся заранее, чтобы записать в него выделение: наполнители найдут
+        // это же подменю (find-or-create) и прочитают выделение при его раскрытии.
+        Menu comfortSub = findOrCreateComfortSubmenu(menu, menu.getShell());
+        if (comfortSub == null || comfortSub.isDisposed())
+            return;
+        comfortSub.setData(EXTERNAL_SELECTION_KEY, selection);
+
+        NavigatorMenuContext context = new NavigatorMenuContext(menu, navigator, selection);
+        for (NavigatorMenuFiller filler : EXTERNAL_FILLERS)
+        {
+            try
+            {
+                filler.fill(context);
+            }
+            catch (Exception e)
+            {
+                Global.logError("ComfortSubmenuHelper", "external menu filler", e); //$NON-NLS-1$ //$NON-NLS-2$
+            }
+        }
+    }
+
+    /**
+     * Выделение, для которого строится подменю «Комфорт».
+     *
+     * <p>В меню навигатора это выделение дерева, как и раньше. Во внешнем меню строка объекта
+     * в дереве может отсутствовать (скрыта фильтром), поэтому используется выделение,
+     * записанное в {@link #fillExternalMenu}.
+     */
+    static ISelection menuSelection(Menu comfortSub, CommonViewer viewer)
+    {
+        Object external = comfortSub == null || comfortSub.isDisposed()
+            ? null : comfortSub.getData(EXTERNAL_SELECTION_KEY);
+        if (external instanceof IStructuredSelection selection)
+            return selection;
+        return viewer == null || viewer.getControl() == null || viewer.getControl().isDisposed()
+            ? StructuredSelection.EMPTY : viewer.getSelection();
+    }
 
     /**
      * Текст пункта SWT-меню с колонкой сочетания клавиш ({@code label\tCtrl+…}).

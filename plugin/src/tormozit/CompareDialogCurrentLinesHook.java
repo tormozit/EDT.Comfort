@@ -226,6 +226,10 @@ public final class CompareDialogCurrentLinesHook
         structureController.setSourceViewers(MergeViewerReflection.extractSourceViewer(viewer, "fLeft"), //$NON-NLS-1$
             MergeViewerReflection.extractSourceViewer(viewer, "fRight")); //$NON-NLS-1$
         addToolbarActions(pane, panel, editorInput, viewer, semanticLeft, semanticRight, structureController);
+        // Переключатель маркеров вхождений — рядом с «Текущие строки» (добавлен в
+        // addToolbarActions); шелл обслужен, универсальный скан своё не добавит
+        OccurrencesToggleHook.markShellHandled(shell);
+        OccurrencesToggleHook.removeDialogItems(shell);
 
         TwoSideCurrentLinesSync.hook(panel, leftText, rightText, viewer, config, semanticLeft, semanticRight);
 
@@ -357,9 +361,14 @@ public final class CompareDialogCurrentLinesHook
         toolBarManager.add(compareInIrAction);
 
         toolBarManager.add(panel.createVisibilityToggleAction());
+        toolBarManager.add(OccurrencesToggleHook.createToggleAction());
         toolBarManager.add(new Separator());
         for (IContributionItem item : existingItems)
-            toolBarManager.add(item);
+        {
+            // Кнопка вхождений от прошлой сборки — иначе в панели два переключателя
+            if (!OccurrencesToggleHook.isStaleToggleItem(item))
+                toolBarManager.add(item);
+        }
 
         toolBarManager.update(true);
     }

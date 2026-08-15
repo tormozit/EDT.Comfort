@@ -1,20 +1,29 @@
 package tormozit;
 
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Vector;
 
 import org.eclipse.jface.text.AbstractInformationControlManager;
+import org.eclipse.jface.text.ITextHover;
+import org.eclipse.jface.text.ITextViewerExtension2;
 import org.eclipse.jface.text.source.ISourceViewer;
 import org.eclipse.swt.SWT;
+import org.eclipse.swt.events.SelectionAdapter;
+import org.eclipse.swt.events.SelectionEvent;
 import org.eclipse.swt.internal.win32.OS;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Listener;
+import org.eclipse.swt.widgets.Menu;
+import org.eclipse.swt.widgets.MenuItem;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IEditorReference;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.forms.editor.IFormPage;
+import org.eclipse.ui.texteditor.ITextEditor;
 
 import com._1c.g5.v8.dt.bsl.ui.editor.BslXtextEditor;
 import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditor;
@@ -22,7 +31,7 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
 
 /**
  * Состояние глобального переключателя «Подсказки при наведении без Ctrl»
- * (пункт подменю «Комфорт» в контекстном меню BSL-редактора).
+ * (пункт подменю «Комфорт» в контекстном меню BSL- и XML-редактора).
  *
  * <p>Два режима:
  * <ul>
@@ -38,12 +47,21 @@ import com._1c.g5.v8.dt.md.ui.editor.base.DtGranularEditorXtextEditorPage;
  * нельзя полагаться на {@code event.stateMask}: {@code TextEditorCtrlClickSelectWordHook}
  * снимает бит Ctrl, чтобы не рисовать гиперссылку до выделения слова.
  *
+ * <p>В XML (WST) hover зарегистрирован на маску «без модификаторов», а не на
+ * {@code DEFAULT_HOVER_STATE_MASK}: при зажатом Ctrl штатный lookup его не находит.
+ * Поэтому при выключенном тумблере тот же hover дополнительно вешается на {@link SWT#MOD1}.
+ *
  * <p>{@code fInformationPresenter} (Ctrl+hover / Ctrl+F2) сознательно не трогаем:
  * это не «удержание указателя мыши», а осознанное действие с клавиатуры.
  */
 final class BslHoverHintState
 {
     private static final String[] MANAGER_FIELDS = { "fTextHoverManager" }; //$NON-NLS-1$
+
+    private static final String ITEM_TEXT = "Подсказки при наведении без Ctrl"; //$NON-NLS-1$
+
+    private static final String ITEM_TOOLTIP =
+        "Включено — подсказки при наведении указателя. Выключено — требуется нажатый Ctrl"; //$NON-NLS-1$
 
     /** Кэш состояния Ctrl, обновляется глобальным Display-фильтром. */
     private static volatile boolean ctrlHeld;
@@ -57,11 +75,28 @@ final class BslHoverHintState
         return ComfortSettings.isHoverHintsEnabled();
     }
 
-    /** Сохранить настройку и применить ко всем открытым BSL-редакторам. */
+    /** Сохранить настройку и применить ко всем открытым BSL- и XML-редакторам. */
     static void setEnabled(boolean enabled)
     {
         ComfortSettings.setHoverHintsEnabled(enabled);
         applyToAllEditors();
+    }
+
+    /** Пункт-переключатель в подменю «Комфорт». */
+    static MenuItem addMenuItem(Menu comfortSub)
+    {
+        MenuItem item = ComfortSubmenuHelper.createSortedMenuItem(comfortSub, SWT.CHECK, ITEM_TEXT);
+        item.setToolTipText(ITEM_TOOLTIP + Global.pluginSignForTooltip());
+        item.setSelection(isEnabled());
+        item.addSelectionListener(new SelectionAdapter()
+        {
+            @Override
+            public void widgetSelected(SelectionEvent ev)
+            {
+                setEnabled(item.getSelection());
+            }
+        });
+        return item;
     }
 
     /** Итоговая доступность hover: тумблер вкл → всегда; тумблер выкл → только при Ctrl. */
@@ -95,6 +130,7 @@ final class BslHoverHintState
             {
             }
         }
+        syncCtrlStateMaskHovers(viewer);
     }
 
     static void applyToAllEditors()
@@ -137,6 +173,12 @@ final class BslHoverHintState
                         applyToFormPage(formPage);
             }
         }
+        else if (XmlEditorShowInNavigatorHandler.isXmlEditor(editor))
+        {
+            ITextEditor textEditor = TextEditor.resolveTextEditor(editor);
+            if (textEditor != null)
+                applyToViewer(TextEditor.getSourceViewer(textEditor));
+        }
     }
 
     private static void applyToFormPage(IFormPage page)
@@ -149,8 +191,58 @@ final class BslHoverHintState
     }
 
     /**
+     * WST регистрирует hover на маску 0 (без модификаторов). При зажатом Ctrl
+     * lookup идёт по {@link SWT#MOD1} и без копии туда штатная подсказка не находится.
+     * Копия ставится только если на Ctrl ещё нет своего hover; снимается, если это
+     * та же самая копия.
+     */
+    private static void syncCtrlStateMaskHovers(ISourceViewer viewer)
+    {
+        if (!(viewer instanceof ITextViewerExtension2 ext))
+            return;
+        Object raw = Global.getField(viewer, "fTextHovers"); //$NON-NLS-1$
+        if (!(raw instanceof Map<?, ?> hovers) || hovers.isEmpty())
+            return;
+
+        Map<String, ITextHover> atNone = new HashMap<>();
+        Map<String, ITextHover> atCtrl = new HashMap<>();
+        for (Map.Entry<?, ?> entry : hovers.entrySet())
+        {
+            if (!(entry.getValue() instanceof ITextHover hover))
+                continue;
+            Object typeObj = Global.getField(entry.getKey(), "fContentType"); //$NON-NLS-1$
+            Object maskObj = Global.getField(entry.getKey(), "fStateMask"); //$NON-NLS-1$
+            if (!(typeObj instanceof String type) || !(maskObj instanceof Integer mask))
+                continue;
+            if (mask == 0)
+                atNone.put(type, hover);
+            else if (mask == SWT.MOD1)
+                atCtrl.put(type, hover);
+        }
+        if (atNone.isEmpty())
+            return;
+
+        boolean hoverWithoutCtrl = ComfortSettings.isHoverHintsEnabled();
+        for (Map.Entry<String, ITextHover> entry : atNone.entrySet())
+        {
+            String type = entry.getKey();
+            ITextHover noneHover = entry.getValue();
+            ITextHover ctrlHover = atCtrl.get(type);
+            if (!hoverWithoutCtrl)
+            {
+                if (ctrlHover == null)
+                    ext.setTextHover(noneHover, type, SWT.MOD1);
+            }
+            else if (ctrlHover != null && ctrlHover == noneHover)
+            {
+                ext.setTextHover(null, type, SWT.MOD1);
+            }
+        }
+    }
+
+    /**
      * Установить (один раз) глобальный Display-фильтр слежения за Ctrl.
-     * При смене состояния применяет гейт ко всем открытым BSL-редакторам.
+     * При смене состояния применяет гейт ко всем открытым BSL- и XML-редакторам.
      */
     private static void ensureCtrlFilterInstalled()
     {

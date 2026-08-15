@@ -591,6 +591,21 @@ public class TypeComboOverlayHook implements IStartup
         return state.text.setFocus();
     }
 
+    /**
+     * Ввод сейчас в нашем поле-оверлее. Нужен потребителям, которые после активации поля
+     * ограниченное время проверяют, не увёл ли ввод обратно чужой асинхронный код (панель
+     * «Свойства» доводит свою загрузку уже после того, как поле найдено и активировано) — см.
+     * {@code ConfigSearchResultsHook.PropertyFieldFocus}.
+     */
+    static boolean isPropertyOverlayFocused(IViewPart view, String propertyLabel)
+    {
+        if (view == null || !coversProperty(propertyLabel))
+            return false;
+        OverlayState state = PROPERTY_OVERLAYS.get(view);
+        return state != null && state.text != null && !state.text.isDisposed()
+            && state.text.isFocusControl();
+    }
+
     private static void disposePropertyOverlay(IViewPart view)
     {
         OverlayState state = PROPERTY_OVERLAYS.remove(view);
