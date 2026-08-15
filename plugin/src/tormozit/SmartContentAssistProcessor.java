@@ -758,6 +758,35 @@ public class SmartContentAssistProcessor implements IContentAssistProcessor
         return collapsed.toArray(new ICompletionProposal[collapsed.size()]);
     }
 
+    /** Слово ИР с ведущим амперсандом — аннотация вида {@code &НаКлиенте}. */
+    private static boolean isAmpersandIrWord(IrCompletionProposal ir)
+    {
+        if (ir == null)
+            return false;
+        String name = ir.getFilterName();
+        if (name == null || name.isEmpty())
+            name = ir.getWordValue();
+        return name != null && !name.isEmpty() && name.charAt(0) == '&';
+    }
+
+    /**
+     * Аннотации: в списке остаётся строка ИР, а не EDT. Имя ИР содержит амперсанд
+     * ({@code &НаКлиенте}), у EDT он вынесен в иконку — при обычном мёрже (строка EDT
+     * вместо слова ИР) в списке оставалась подпись без амперсанда.
+     */
+    private static boolean prefersIrOverDelegate(ICompletionProposal irP)
+    {
+        return unwrapProposal(irP) instanceof IrCompletionProposal ir && isAmpersandIrWord(ir);
+    }
+
+    /** Строки EDT из очереди перекрытия не попадают в список, но и не добавляются повторно. */
+    private static void dropDelegateOverlapQueue(Deque<ICompletionProposal> queue,
+        Set<ICompletionProposal> placedDelegates)
+    {
+        while (queue != null && !queue.isEmpty())
+            placedDelegates.add(unwrapProposal(queue.removeFirst()));
+    }
+
     private static void mergeDelegateOverlapQueue(Deque<ICompletionProposal> queue,
         List<ICompletionProposal> merged, Set<ICompletionProposal> placedDelegates)
     {
@@ -1531,6 +1560,8 @@ return resolveProposalList(viewer, probeOffset, caret, filter, smart);
             ICompletionProposal raw = unwrapProposal(p);
             if (!(raw instanceof IrCompletionProposal ir))
                 continue;
+            if (isAmpersandIrWord(ir))
+                continue; // амперсанд уже в самом слове — иконка EDT дала бы второй
             org.eclipse.swt.graphics.Image img = images.get(dedupKey(p));
             if (img != null)
                 ir.applyStockAssistImage(img);
@@ -2522,7 +2553,13 @@ return lastMergeResult;
             Deque<ICompletionProposal> queue = key.isEmpty() ? null : delegateByKey.get(key);
             if (queue != null && !queue.isEmpty())
             {
-                mergeDelegateOverlapQueue(queue, merged, placedDelegates);
+                if (prefersIrOverDelegate(irP))
+                {
+                    dropDelegateOverlapQueue(queue, placedDelegates);
+                    merged.add(irP);
+                }
+                else
+                    mergeDelegateOverlapQueue(queue, merged, placedDelegates);
             }
             else if (!key.isEmpty() && isBareUnmatchedIrProposalAllowed(irP, delegateByKey))
                 merged.add(irP);
@@ -2581,7 +2618,13 @@ return finalResult;
             Deque<ICompletionProposal> queue = key.isEmpty() ? null : delegateByKey.get(key);
             if (queue != null && !queue.isEmpty())
             {
-                mergeDelegateOverlapQueue(queue, merged, placedDelegates);
+                if (prefersIrOverDelegate(irP))
+                {
+                    dropDelegateOverlapQueue(queue, placedDelegates);
+                    merged.add(irP);
+                }
+                else
+                    mergeDelegateOverlapQueue(queue, merged, placedDelegates);
             }
             else if (!key.isEmpty() && isBareUnmatchedIrProposalAllowed(irP, delegateByKey))
                 merged.add(irP);
@@ -2871,9 +2914,23 @@ return stripEmptyPlaceholderProposals(result);
     {
         ICompletionProposal raw = unwrapProposal(proposal);
         if (raw instanceof IrCompletionProposal ir)
-            return IrBslCompletionSupport.normalizeFilterKey(ir.getFilterName());
-        return IrBslCompletionSupport.normalizeFilterKey(
-            parseProposalListName(raw.getDisplayString()));
+            return stripServicePrefix(IrBslCompletionSupport.normalizeFilterKey(ir.getFilterName()));
+        return stripServicePrefix(IrBslCompletionSupport.normalizeFilterKey(
+            parseProposalListName(raw.getDisplayString())));
+    }
+
+    /**
+     * Ключ мёржа без ведущего амперсанда: имя аннотации ИР пишет как {@code &НаКлиенте},
+     * а штатная EDT — как {@code НаКлиенте} (амперсанд там иконка), и одно слово от двух
+     * источников попадало в список дважды.
+     * <p>Решётку срезать нельзя: её пишут оба источника, а вот {@code #Если} и оператор
+     * {@code Если} — разные слова, и без символа их ключи схлопнулись бы в один.
+     */
+    private static String stripServicePrefix(String key)
+    {
+        if (key == null)
+            return ""; //$NON-NLS-1$
+        return !key.isEmpty() && key.charAt(0) == '&' ? key.substring(1) : key;
     }
 
     private static final char MERGE_MATCH_PAREN_SEP = '';
@@ -2893,13 +2950,14 @@ return stripEmptyPlaceholderProposals(result);
         boolean hasParens;
         if (raw instanceof IrCompletionProposal ir)
         {
-            base = IrBslCompletionSupport.normalizeFilterKey(ir.getFilterName());
+            base = stripServicePrefix(
+                IrBslCompletionSupport.normalizeFilterKey(ir.getFilterName()));
             hasParens = irProposalHasParens(ir);
         }
         else
         {
-            base = IrBslCompletionSupport.normalizeFilterKey(
-                parseProposalListName(raw.getDisplayString()));
+            base = stripServicePrefix(IrBslCompletionSupport.normalizeFilterKey(
+                parseProposalListName(raw.getDisplayString())));
             hasParens = edtProposalHasParens(raw);
         }
         if (base.isEmpty())
@@ -4634,9 +4692,21 @@ return result;
     private static int namePremium(SmartCodeMatcher matcher, ICompletionProposal proposal,
                                    String name)
     {
-        return unwrapProposal(proposal) instanceof IrCompletionProposal
-            ? matcher.computeNamePremiumStrict(name)
-            : matcher.computeNamePremium(name);
+        if (unwrapProposal(proposal) instanceof IrCompletionProposal)
+            return matcher.computeNamePremiumStrict(name);
+        // Фильтр из одного служебного символа: имена без него — это общий список EDT,
+        // он доливался в попап целиком. При активном ИР строки со символом уже есть,
+        // поэтому остальные отсекаем; без ИР отбирать нечем — там EDT сама отдаёт
+        // только аннотации, и мягкий путь нужен, чтобы список не оказался пустым.
+        if (matcher.isServicePrefixOnly() && irProposalsActiveForCurrentContext())
+            return matcher.computeNamePremiumStrict(name);
+        return matcher.computeNamePremium(name);
+    }
+
+    private static boolean irProposalsActiveForCurrentContext()
+    {
+        SmartContentAssistProcessor processor = ContentAssistSessionReloader.getActiveProcessor();
+        return processor != null && processor.hasIrProposalsForCurrentContext();
     }
 
     static int resolveNativePriority(ICompletionProposal proposal)

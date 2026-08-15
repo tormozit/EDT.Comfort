@@ -38,6 +38,9 @@
     <startup class="tormozit.TemplateTypeSuffixDecorator"/>
     <startup class="tormozit.FormMainAttributeTypeDecorator"/>
     <startup class="tormozit.MdObjectUsageDecorator"/>
+    <startup class="tormozit.MdEventHandlersPageHook"/>
+    <startup class="tormozit.EventHandlersFilterHook"/>
+    <startup class="tormozit.EventHandlersOpenHandlerHook"/>
     <!-- ГЛОБАЛЬНЫЙ СКАН ОТКЛЮЧЁН ОКОНЧАТЕЛЬНО (issue #165), 2026-07-20. История фиксов: v1
          (guard+debounce SWT.Show), v2 (исключить редакторы из partOpened/partVisible), v3
          (debounce и для part-триггеров тоже), v4 (defer FocusIn/FocusOut через asyncExec —

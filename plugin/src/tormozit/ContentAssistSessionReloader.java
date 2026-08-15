@@ -2238,12 +2238,22 @@ if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
                 completionAutoOpenEdtOpened = false;
                 completionAutoOpenActiveSeq = seq;
             }
-            else if ("symbol".equals(branch)
+            else if ("symbol".equals(branch) && inserted != '&'
                 && IrBslExpressionHtmlSupport.resolveIrSessionForAssist(facade, viewer) == null)
             {
                 // Решать некому: без ИР ветка &~# молчала совсем — открываем список EDT
                 // (после # это слова препроцессора). Пробел не трогаем: без ИР popup
                 // после каждого пробела не нужен.
+                //
+                // Амперсанд исключён намеренно. Имена аннотаций штатная EDT отдаёт БЕЗ
+                // амперсанда (он у неё иконка), поэтому фильтр "&" по именам ничего не
+                // отбирает: строгий отбор оставил бы пустой список, а мягкий пропускает
+                // весь список EDT для этого места модуля — в попап доливались общие модули
+                // и прочий мусор. Отличить аннотацию от обычного имени в этот момент нечем:
+                // при подключённом ИР это делают слова ИР (они с амперсандом), а без него
+                // единственный надёжный источник — список делегата, посчитанный для офсета
+                // каретки, то есть Ctrl+Space. Он после & работает правильно, автооткрытие
+                // же собирает попап по кэшу и без такой гарантии.
                 scheduleCompletionAutoOpen(caretAfter, seq);
             }
         }
@@ -2251,6 +2261,25 @@ if (!pendingAutoOpen || !ComfortSettings.isReplaceListFiltersEnabled())
         {
             scheduleCompletionAutoOpen(caretAfter, seq);
         }
+    }
+
+    /**
+     * Слово слева от каретки — только если оно начинается со служебного символа
+     * ({@code #}, {@code ~}), иначе пусто (как было до правки).
+     * <p>Ветки «пробел / {@code =} / буква» открываются с пустым словом и рассчитывают на
+     * пустой фильтр; ветка {@code symbol} — с уже набранным символом, и при пустом фильтре
+     * попап собирался по кэшированному полному списку вместо списка для этой позиции.
+     */
+    private String currentDocumentFilter(int caret)
+    {
+        IDocument doc = viewer != null ? viewer.getDocument() : null;
+        if (doc == null || caret < 0)
+            return ""; //$NON-NLS-1$
+        String filter = SmartContentAssistProcessor.computeIdentifierFilter(doc, caret);
+        if (filter.isEmpty())
+            return ""; //$NON-NLS-1$
+        char first = filter.charAt(0);
+        return first == '#' || first == '~' ? filter : ""; //$NON-NLS-1$
     }
 
     private void scheduleCompletionAutoOpen(int expectedCaretAfter, int autoOpenSeq)
@@ -2357,7 +2386,10 @@ openCompletionAutoEdtPopup(caret, autoOpenSeq);
 
     private void openCompletionAutoEdtPopup(int expectedCaret, int autoOpenSeq)
     {
-        SmartFilterTracker.setCurrentFilter(""); //$NON-NLS-1$
+        // Ветки «пробел / = / буква» открываются с пустым словом, а «&~#» — со уже набранным
+        // символом. Обнулять фильтр там нельзя: попап собирался по кэшированному полному
+        // списку, и после амперсанда в него доливался весь список EDT для этого места модуля.
+        SmartFilterTracker.setCurrentFilter(currentDocumentFilter(expectedCaret));
         ContentAssistPopupSync.ensureEmptyListAllowed(assistant, false); // false Заставляет штатную логику JFace вообще не открывать окно, если фильтрат пустой, но при этом вызывает звук Display.beep()
         beginLiteralOpenTracking();
         preShowLiteralBrowserPatch(expectedCaret);

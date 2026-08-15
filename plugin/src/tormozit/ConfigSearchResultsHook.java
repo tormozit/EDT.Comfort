@@ -5181,16 +5181,7 @@ public final class ConfigSearchResultsHook implements IStartup
          */
         private static List<Object> childComponents(Object component)
         {
-            List<Object> out = new ArrayList<>();
-            Object children = Global.invoke(component, "getComponents"); //$NON-NLS-1$
-            if (children instanceof Iterable)
-                for (Object child : (Iterable<?>)children)
-                    if (child != null)
-                        out.add(child);
-            Object definitionComponent = Global.invoke(component, "getDefinitionComponent"); //$NON-NLS-1$
-            if (definitionComponent != null && !out.contains(definitionComponent))
-                out.add(definitionComponent);
-            return out;
+            return AefFieldFocus.childComponents(component);
         }
 
         /**
@@ -5242,87 +5233,8 @@ public final class ConfigSearchResultsHook implements IStartup
          */
         private static boolean focusFieldComponent(Object scene, Object fieldComponent)
         {
-            for (Object nativeControl : editorNativeControls(scene, fieldComponent))
-                if (focusNativeControl(nativeControl))
-                    return true;
-            return false;
+            return AefFieldFocus.focusComponent(scene, fieldComponent);
         }
 
-        /**
-         * Нативные контролы редакторов компонента и его потомков в порядке обхода. Подписи
-         * ({@code LabelViewModel}/{@code LabelComponent}) исключаются — фокус нужен в поле ввода.
-         */
-        private static List<Object> editorNativeControls(Object scene, Object component)
-        {
-            Object renderer = Global.invoke(scene, "getRenderer"); //$NON-NLS-1$
-            Object mapObj = renderer != null ? Global.getField(renderer, "viewModelToView") : null; //$NON-NLS-1$
-            List<Object> out = new ArrayList<>();
-            if (mapObj instanceof Map)
-                collectEditorNativeControls((Map<?, ?>)mapObj, component, out, 0);
-            return out;
-        }
-
-        private static void collectEditorNativeControls(Map<?, ?> viewModelToView, Object component,
-                List<Object> out, int depth)
-        {
-            if (component == null || depth > 8)
-                return;
-            Object viewModels = Global.invoke(component, "getViewModels"); //$NON-NLS-1$
-            if (viewModels instanceof Iterable)
-            {
-                for (Object viewModel : (Iterable<?>)viewModels)
-                {
-                    if (viewModel == null || viewModel.getClass().getName().contains("LabelViewModel")) //$NON-NLS-1$
-                        continue;
-                    Object view = viewModelToView.get(viewModel);
-                    Object nativeControl = view != null ? Global.invoke(view, "getNativeControl") : null; //$NON-NLS-1$
-                    if (nativeControl != null && !out.contains(nativeControl))
-                        out.add(nativeControl);
-                }
-            }
-            for (Object child : childComponents(component))
-                if (!child.getClass().getName().contains("LabelComponent")) //$NON-NLS-1$
-                    collectEditorNativeControls(viewModelToView, child, out, depth + 1);
-        }
-
-        /** @return {@code true}, если контрол реально ЗАБРАЛ фокус (а не просто принял вызов) */
-        private static boolean focusNativeControl(Object nativeControl)
-        {
-            if (nativeControl instanceof Control control)
-                return !control.isDisposed() && control.setFocus() && control.isFocusControl();
-            Object focusSource = lwtKeyboardFocusSource(nativeControl);
-            if (focusSource == null)
-                return false;
-            Object result = Global.invoke(nativeControl, "setFocus", focusSource); //$NON-NLS-1$
-            return Boolean.TRUE.equals(result)
-                || Boolean.TRUE.equals(Global.invoke(nativeControl, "isFocused")); //$NON-NLS-1$
-        }
-
-        /**
-         * {@code com._1c.g5.lwt.FocusSource.Keyboard} — аргумент {@code ILightControl.setFocus}.
-         * Бандл LWT в {@code Require-Bundle} плагина не заявлен, поэтому класс грузится по имени
-         * через загрузчик самого контрола (тот же приём, что и в
-         * {@code TypeComboOverlayHook.resolveHost} для {@code SwtLightComposite}).
-         */
-        private static volatile Object lwtKeyboardFocusSource;
-
-        private static Object lwtKeyboardFocusSource(Object nativeControl)
-        {
-            Object cached = lwtKeyboardFocusSource;
-            if (cached != null)
-                return cached;
-            try
-            {
-                Class<?> focusSourceClass = Class.forName("com._1c.g5.lwt.FocusSource", true, //$NON-NLS-1$
-                    nativeControl.getClass().getClassLoader());
-                cached = focusSourceClass.getField("Keyboard").get(null); //$NON-NLS-1$
-                lwtKeyboardFocusSource = cached;
-                return cached;
-            }
-            catch (Exception e)
-            {
-                return null;
-            }
-        }
     }
 }

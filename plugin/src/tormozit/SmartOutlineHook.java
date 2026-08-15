@@ -1762,7 +1762,7 @@ public class SmartOutlineHook implements IStartup {
 
         Button onlyMarkedBtn = new Button(buttonParent, SWT.CHECK);
         onlyMarkedBtn.setText("Только помеченные"); //$NON-NLS-1$
-        onlyMarkedBtn.setToolTipText("Показать только элементы с установленным флажком"); //$NON-NLS-1$
+        onlyMarkedBtn.setToolTipText("Показать только элементы с установленным флажком" + Global.pluginSignForTooltip()); //$NON-NLS-1$
         onlyMarkedBtn.setLayoutData(new GridData(SWT.BEGINNING, SWT.CENTER, false, false));
 
         patchedShell.setData(TYPE_MARKED_CHECKBOX_KEY, onlyMarkedBtn);
@@ -1782,6 +1782,9 @@ public class SmartOutlineHook implements IStartup {
             stored = isCompositeTypeEnabled(patchedShell);
         onlyMarkedBtn.setSelection(stored);
         smartFilter.setMarkedOnly(stored);
+        // Фильтр применяется при открытии диалога (setComparator → refresh) уже после того,
+        // как строка выбрана — без этого выбранная строка уезжает за пределы видимой области.
+        keepSelectionVisible(viewer);
 
         onlyMarkedBtn.addListener(SWT.Selection, e -> {
             boolean enabled = onlyMarkedBtn.getSelection();
@@ -1801,10 +1804,30 @@ public class SmartOutlineHook implements IStartup {
                     if (!tree.isDisposed())
                         tree.setRedraw(true);
                 }
+                keepSelectionVisible(viewer);
             }
         });
 
         buttonParent.layout(true, true);
+    }
+
+    /**
+     * Держит выбранную строку в видимой области после перефильтрации: сам по себе
+     * {@code refresh()} сохраняет выбор, но прокрутку не восстанавливает, и строка уезжает.
+     * {@code asyncExec} — чтобы прокрутка отработала после отложенного рендера дерева.
+     */
+    private static void keepSelectionVisible(TreeViewer viewer)
+    {
+        if (viewer == null)
+            return;
+        Tree tree = viewer.getTree();
+        if (tree == null || tree.isDisposed())
+            return;
+        tree.getDisplay().asyncExec(() -> {
+            if (tree.isDisposed() || tree.getSelectionCount() == 0)
+                return;
+            tree.showSelection();
+        });
     }
 
     /**

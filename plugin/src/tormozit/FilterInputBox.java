@@ -120,7 +120,10 @@ final class FilterInputBox
             "comfort.formTableColumnValues.filter.history."), //$NON-NLS-1$
         PROJECT_STRUCTURE(
             "comfort.projectStructure.filter.history.count", //$NON-NLS-1$
-            "comfort.projectStructure.filter.history."); //$NON-NLS-1$
+            "comfort.projectStructure.filter.history."), //$NON-NLS-1$
+        EVENT_HANDLERS(
+            "comfort.eventHandlers.filter.history.count", //$NON-NLS-1$
+            "comfort.eventHandlers.filter.history."); //$NON-NLS-1$
 
         final String prefCountKey;
         final String prefItemPrefix;
@@ -385,6 +388,7 @@ final class FilterInputBox
             case STACKTRACES -> forStacktraces(parent, onSearch);
             case COLUMN_VALUES -> forColumnValues(parent, onSearch);
             case PROJECT_STRUCTURE -> forProjectStructure(parent, onSearch);
+            case EVENT_HANDLERS -> throw new IllegalStateException("EVENT_HANDLERS: use attachHistory(SearchBox, Scope.EVENT_HANDLERS)"); //$NON-NLS-1$
         };
     }
 

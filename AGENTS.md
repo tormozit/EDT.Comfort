@@ -285,6 +285,10 @@ powershell -NoProfile -File "C:\VC\EDT.Comfort\.cursor\scripts\repair-double-eol
 
 **Для активации произвольного EObject — 1-arg `openEditor(EObject)`, без feature.** Эталон: `CompareConfigOpenObjectHandler.openInEditor()`.
 
+## Активация поля AEF (фокус ввода) — только `AefFieldFocus`
+
+Фокус в поле AEF (панель «Свойства», редакторы МД и т.п.) — `AefFieldFocus.focusComponent(scene, component)`, не дублировать обход `viewModelToView`/`getNativeControl`. Детали механики и неработающие пути (`ClientFocusEvent`, `setSelection`) — в javadoc класса.
+
 ## Комфорт-подменю (сортировка)
 
 Использовать `ComfortSubmenuHelper.createSortedMenuItem` везде, где элементы добавляются в подменю «Комфорт»; несколько хуков могут разделять один и тот же экземпляр подменю.

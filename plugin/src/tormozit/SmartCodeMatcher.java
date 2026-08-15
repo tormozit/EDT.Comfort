@@ -43,6 +43,11 @@ public class SmartCodeMatcher extends SmartMatcher {
         return computeAdaptivePremium(name);
     }
 
+    /** Фильтр — один служебный символ ({@code &}, {@code #}, {@code ~}) без букв. */
+    public boolean isServicePrefixOnly() {
+        return servicePrefix != 0 && fullPattern.length() == 1;
+    }
+
     /**
      * Премия без «прощения» ведущего служебного символа — для источников, которые его
      * всегда пишут в имени (слова ИР). Иначе фильтр из одного символа пропускал бы
