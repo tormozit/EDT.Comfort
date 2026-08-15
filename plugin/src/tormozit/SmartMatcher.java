@@ -162,6 +162,66 @@ public class SmartMatcher {
         return true;
     }
 
+    /**
+     * Как {@link #matchesTree}, но секции пути уже разделены по узлам дерева
+     * (имя файла {@code RecordSetModule.bsl} — одна секция, точка расширения не режет путь).
+     * Хвостовые секции фильтра, которые все входят в имя последнего узла, относятся к нему;
+     * оставшиеся выравниваются с родителями с конца.
+     */
+    public boolean matchesTreeParts(List<String> parts)
+    {
+        if (isEmpty)
+            return true;
+        if (parts == null || parts.isEmpty())
+            return false;
+        if (sections.size() <= 1)
+            return matches(parts.get(parts.size() - 1));
+
+        String lastPart = parts.get(parts.size() - 1).toLowerCase();
+        int filterCount = sections.size();
+        for (int eaten = filterCount; eaten >= 1; eaten--)
+        {
+            if (!sectionRangeInText(lastPart, filterCount - eaten, filterCount))
+                continue;
+            int remaining = filterCount - eaten;
+            if (remaining == 0)
+                return true;
+            if (matchPrefixSectionsFromEnd(parts.subList(0, parts.size() - 1), remaining))
+                return true;
+        }
+        return false;
+    }
+
+    private boolean sectionRangeInText(String lowerText, int fromSection, int toSection)
+    {
+        for (int i = fromSection; i < toSection; i++)
+        {
+            for (String frag : sections.get(i))
+            {
+                if (!lowerText.contains(frag))
+                    return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean matchPrefixSectionsFromEnd(List<String> parts, int filterCount)
+    {
+        if (filterCount > parts.size())
+            return false;
+        int offset = parts.size() - filterCount;
+        for (int i = 0; i < filterCount; i++)
+        {
+            String elemSection = parts.get(offset + i).toLowerCase();
+            for (String frag : sections.get(i))
+            {
+                if (!elemSection.contains(frag))
+                    return false;
+            }
+        }
+        return true;
+    }
+
     /** Фрагменты, которые есть в {@code text}, но отсутствуют в {@code other}. */
     public List<String> fragmentsInNotIn(String text, String other)
     {

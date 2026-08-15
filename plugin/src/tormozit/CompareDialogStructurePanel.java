@@ -22,6 +22,7 @@ import org.eclipse.swt.layout.GridData;
 import org.eclipse.swt.layout.GridLayout;
 import org.eclipse.swt.widgets.Combo;
 import org.eclipse.swt.widgets.Composite;
+import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.swt.widgets.Tree;
@@ -179,14 +180,8 @@ final class CompareDialogStructurePanel
         });
         if (onDoubleClick != null)
         {
-            viewer.addDoubleClickListener(event ->
-            {
-                Object selection = event.getSelection();
-                Object selected = selection instanceof org.eclipse.jface.viewers.IStructuredSelection s
-                    ? s.getFirstElement() : null;
-                if (selected instanceof DiffNode node && node.kind != Kind.ROOT)
-                    onDoubleClick.accept(node);
-            });
+            viewer.addDoubleClickListener(event -> fireDiffNodeOpen(event.getSelection(), onDoubleClick));
+            viewer.addOpenListener(event -> fireDiffNodeOpen(event.getSelection(), onDoubleClick));
         }
         wireTreeCopy(tree);
 
@@ -199,8 +194,14 @@ final class CompareDialogStructurePanel
             textFilter.setPattern(pattern);
             labelProvider.setHighlightPattern(pattern);
             viewer.refresh();
+            FilterInputBoxListNavigation.selectFirstRowIfSelectionLost(tree);
         });
         filterBoxHolder[0] = filterBox;
+        Control filterKeys = filterBox.inputControl();
+        if (filterKeys == null)
+            filterKeys = filterBox.widget();
+        if (filterKeys != null && !filterKeys.isDisposed())
+            FilterInputBoxListNavigation.installTreeNavigation(filterKeys, tree);
 
         // Комбо само подгоняет ширину под самый длинный пункт (без grab) — тоже компактно.
         Combo kindCombo = new Combo(filterRow, SWT.READ_ONLY);
@@ -214,9 +215,21 @@ final class CompareDialogStructurePanel
             int i = kindCombo.getSelectionIndex();
             kindFilter.onlyKind = i >= 0 && i < comboKinds.size() ? comboKinds.get(i) : null;
             viewer.refresh();
+            FilterInputBoxListNavigation.selectFirstRowIfSelectionLost(tree);
         });
 
         return container;
+    }
+
+    /** Двойной щелчок и Enter из фильтра — переход к первому отличию внутри узла. */
+    private static void fireDiffNodeOpen(org.eclipse.jface.viewers.ISelection selection, Consumer<DiffNode> onOpen)
+    {
+        if (onOpen == null)
+            return;
+        Object selected = selection instanceof org.eclipse.jface.viewers.IStructuredSelection s
+            ? s.getFirstElement() : null;
+        if (selected instanceof DiffNode node && node.kind != Kind.ROOT)
+            onOpen.accept(node);
     }
 
     /**

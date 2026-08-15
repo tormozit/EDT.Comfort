@@ -43,6 +43,8 @@ public final class FilterInputBoxListNavigation
     private static volatile boolean displayMouseUpHistoryFilterInstalled;
     private static final java.util.Set<SearchBox> HISTORY_COMMIT_BOXES =
             java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
+    private static final java.util.Set<SearchBox> GUARDED_BOXES =
+            java.util.Collections.newSetFromMap(new java.util.WeakHashMap<>());
 
     private static final class NavContext
     {
@@ -131,6 +133,8 @@ public final class FilterInputBoxListNavigation
         filterControl.addListener(SWT.KeyDown, event -> {
             if (handleCtrlDownHistory(event, filterControl))
                 return;
+            if (isCtrlHistoryShortcut(event))
+                return;
             SearchBox searchBoxPopup = resolveSearchBox(filterControl);
             if (searchBoxPopup != null && Boolean.TRUE.equals(Global.getField(searchBoxPopup, "displayingPopup"))) //$NON-NLS-1$
             {
@@ -170,6 +174,8 @@ public final class FilterInputBoxListNavigation
         });
         filterControl.addListener(SWT.Traverse, event -> {
             if (handleCtrlDownHistoryTraverse(event, filterControl))
+                return;
+            if (isCtrlHistoryShortcut(event))
                 return;
             if (isSearchBoxPopupActive(resolveSearchBox(filterControl)))
                 return;
@@ -247,6 +253,28 @@ public final class FilterInputBoxListNavigation
         fireTableSelection(table);
     }
 
+    /**
+     * То же для дерева: если после фильтра видимое выделение пропало, а строки есть —
+     * выделяем первую видимую и шлём {@code SWT.Selection} (как при навигации ↓/↑).
+     */
+    public static void selectFirstRowIfSelectionLost(Tree tree)
+    {
+        if (tree == null || tree.isDisposed())
+            return;
+        if (tree.getSelectionCount() > 0 || tree.getItemCount() == 0)
+            return;
+        TreeItem first = tree.getItem(0);
+        if (first == null || first.isDisposed())
+            return;
+        tree.setSelection(first);
+        tree.showItem(first);
+        Event event = new Event();
+        event.type = SWT.Selection;
+        event.widget = tree;
+        event.item = first;
+        tree.notifyListeners(SWT.Selection, event);
+    }
+
     /** Синхронизация {@link org.eclipse.jface.viewers.TableViewer} и строки статуса после программного выбора. */
     private static void fireTableSelection(Table table)
     {
@@ -292,9 +320,10 @@ public final class FilterInputBoxListNavigation
         installTreeNavigation((Control) filterText, tree);
     }
 
+    /** Enter из фильтра — основное действие по текущей строке дерева (как двойной щелчок). */
     public static void installTreeNavigation(Control filterControl, Tree tree)
     {
-        installTreeNavigation(filterControl, tree, null);
+        installTreeNavigation(filterControl, tree, () -> fireTreeDefaultSelection(tree));
     }
 
     public static void installTreeNavigation(Control filterControl, Tree tree, EnterListener onEnter)
@@ -319,6 +348,8 @@ public final class FilterInputBoxListNavigation
         filterControl.addListener(SWT.KeyDown, event -> {
             if (handleCtrlDownHistory(event, filterControl))
                 return;
+            if (isCtrlHistoryShortcut(event))
+                return;
             if (isSearchBoxPopupActive(resolveSearchBox(filterControl)))
                 return;
             if (event.keyCode == SWT.CR || event.keyCode == SWT.KEYPAD_CR)
@@ -337,6 +368,8 @@ public final class FilterInputBoxListNavigation
         });
         filterControl.addListener(SWT.Traverse, event -> {
             if (handleCtrlDownHistoryTraverse(event, filterControl))
+                return;
+            if (isCtrlHistoryShortcut(event))
                 return;
             if (isSearchBoxPopupActive(resolveSearchBox(filterControl)))
                 return;
@@ -381,11 +414,14 @@ public final class FilterInputBoxListNavigation
         if (box == null || box.isDisposed())
             return;
         ensureDisplayTraverseFilter();
+        ensureDisplayMouseUpHistoryFilter();
         stripSearchBoxStockKeyListener(box);
+        GUARDED_BOXES.add(box);
         if (!Boolean.TRUE.equals(box.getData(SEARCH_BOX_KEY_GUARD_KEY)))
         {
             box.setData(SEARCH_BOX_KEY_GUARD_KEY, Boolean.TRUE);
             box.addVerifyKeyListener(e -> handleSearchBoxVerifyKey(box, e));
+            box.addDisposeListener(e -> GUARDED_BOXES.remove(box));
         }
         if (!Boolean.TRUE.equals(box.getData(SEARCH_BOX_KEY_DOWN_GUARD_KEY)))
         {
@@ -439,8 +475,9 @@ public final class FilterInputBoxListNavigation
     }
 
     /**
-     * Фильтр до stock {@code MouseUp} на popup: после выбора пункта истории форсируем
-     * {@code performSearch} (иначе при том же тексте, что уже в поле, Modify не приходит).
+     * Фильтр до stock {@code MouseUp} на popup: после выбора пункта истории каретка в конец
+     * поля (штатный {@code setText} ставит её в начало); для полей с {@code onSearch} ещё
+     * {@code performSearch} (иначе при том же тексте Modify не приходит).
      */
     private static void displayMouseUpHistoryFilter(Event event)
     {
@@ -450,7 +487,7 @@ public final class FilterInputBoxListNavigation
         if (eventShell == null || eventShell.isDisposed())
             return;
         SearchBox match = null;
-        for (SearchBox box : HISTORY_COMMIT_BOXES)
+        for (SearchBox box : GUARDED_BOXES)
         {
             if (box == null || box.isDisposed())
                 continue;
@@ -475,7 +512,9 @@ public final class FilterInputBoxListNavigation
                 return;
             if (Boolean.TRUE.equals(Global.getField(box, "displayingPopup"))) //$NON-NLS-1$
                 return;
-            Global.invoke(box, "performSearch"); //$NON-NLS-1$
+            moveSearchBoxCaretToEnd(box, box.getText());
+            if (HISTORY_COMMIT_BOXES.contains(box))
+                Global.invoke(box, "performSearch"); //$NON-NLS-1$
         });
     }
 
@@ -609,8 +648,20 @@ public final class FilterInputBoxListNavigation
     {
         if (box == null || box.isDisposed())
             return;
-        int len = text != null ? text.length() : box.getText().length();
+        int max = box.getCharCount();
+        int len = text != null ? Math.min(text.length(), max) : max;
+        box.setCaretOffset(len);
         box.setSelection(len, len);
+        Display display = box.getDisplay();
+        if (display == null || display.isDisposed())
+            return;
+        display.asyncExec(() -> {
+            if (box.isDisposed())
+                return;
+            int end = box.getCharCount();
+            box.setCaretOffset(end);
+            box.setSelection(end, end);
+        });
     }
 
     private static void ensureDisplayTraverseFilter()
@@ -759,6 +810,12 @@ public final class FilterInputBoxListNavigation
         return inner.getClass().getName().contains("SearchBox$"); //$NON-NLS-1$
     }
 
+    /** Ctrl+↓ — история запросов; не перехватывать как навигацию по списку (поле {@code Text}). */
+    private static boolean isCtrlHistoryShortcut(Event event)
+    {
+        return event != null && event.keyCode == SWT.ARROW_DOWN && (event.stateMask & SWT.CTRL) != 0;
+    }
+
     private static boolean handleCtrlDownHistory(Event event, Control filterControl)
     {
         if (event.keyCode != SWT.ARROW_DOWN)
@@ -817,6 +874,37 @@ public final class FilterInputBoxListNavigation
             if (!filterControl.isDisposed())
                 filterControl.forceFocus();
         });
+    }
+
+    /** Двойной щелчок / Enter по текущей (или первой) строке дерева. */
+    private static boolean fireTreeDefaultSelection(Tree tree)
+    {
+        if (tree == null || tree.isDisposed() || tree.getItemCount() == 0)
+            return false;
+        TreeItem[] selection = tree.getSelection();
+        TreeItem item;
+        if (selection.length == 0)
+        {
+            item = tree.getItem(0);
+            if (item == null || item.isDisposed())
+                return false;
+            tree.setSelection(item);
+            tree.showItem(item);
+            Event sel = new Event();
+            sel.widget = tree;
+            sel.item = item;
+            tree.notifyListeners(SWT.Selection, sel);
+        }
+        else
+            item = selection[0];
+        if (item == null || item.isDisposed())
+            return false;
+        Event event = new Event();
+        event.widget = tree;
+        event.item = item;
+        event.type = SWT.DefaultSelection;
+        tree.notifyListeners(SWT.DefaultSelection, event);
+        return true;
     }
 
     public static void navigateTree(Tree tree, int keyCode)

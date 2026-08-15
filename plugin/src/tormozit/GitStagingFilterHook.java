@@ -575,6 +575,11 @@ public final class GitStagingFilterHook implements IStartup
             FilterHistoryUi.wireKeyboard(filterText, HISTORY_SCOPE_ID);
             addHistoryButton(filterText);
 
+            TreeViewer unstaged = treeViewerOf(view, "unstagedViewer"); //$NON-NLS-1$
+            Tree unstagedTree = unstaged != null ? unstaged.getTree() : null;
+            if (unstagedTree != null && !unstagedTree.isDisposed())
+                FilterInputBoxListNavigation.installTreeNavigation(filterText, unstagedTree);
+
             installCopyOverride(view);
 
             session.onModify();
@@ -914,6 +919,29 @@ public final class GitStagingFilterHook implements IStartup
             {
                 viewer.getTree().setRedraw(true);
             }
+            selectFirstMatchIfSelectionLost(viewer, matchedLeaves);
+        }
+
+        /** Если прежняя строка скрыта фильтром — выделяем первое совпадение (иначе первую видимую). */
+        private static void selectFirstMatchIfSelectionLost(TreeViewer viewer, List<Object> matchedLeaves)
+        {
+            Tree tree = viewer.getTree();
+            if (tree == null || tree.isDisposed())
+                return;
+            if (tree.getSelectionCount() > 0)
+                return;
+            if (matchedLeaves != null)
+            {
+                for (Object leaf : matchedLeaves)
+                {
+                    if (leaf == null)
+                        continue;
+                    viewer.setSelection(new StructuredSelection(leaf), true);
+                    if (tree.getSelectionCount() > 0)
+                        return;
+                }
+            }
+            FilterInputBoxListNavigation.selectFirstRowIfSelectionLost(tree);
         }
 
         private TreeViewer getViewer(String fieldName)

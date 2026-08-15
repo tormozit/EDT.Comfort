@@ -8,6 +8,15 @@ import java.util.Map;
 import java.util.Set;
 import java.util.function.IntSupplier;
 
+import org.eclipse.core.commands.AbstractHandler;
+import org.eclipse.core.commands.ExecutionEvent;
+import org.eclipse.core.commands.ExecutionException;
+import org.eclipse.core.commands.IExecutionListener;
+import org.eclipse.core.commands.NotHandledException;
+import org.eclipse.core.expressions.EvaluationResult;
+import org.eclipse.core.expressions.Expression;
+import org.eclipse.core.expressions.ExpressionInfo;
+import org.eclipse.core.expressions.IEvaluationContext;
 import org.eclipse.core.resources.IContainer;
 import org.eclipse.core.resources.IFolder;
 import org.eclipse.core.resources.IProject;
@@ -21,6 +30,8 @@ import org.eclipse.core.runtime.IProgressMonitor;
 import org.eclipse.core.runtime.IStatus;
 import org.eclipse.core.runtime.Status;
 import org.eclipse.core.runtime.jobs.Job;
+import org.eclipse.jface.action.Action;
+import org.eclipse.jface.action.IAction;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider;
 import org.eclipse.jface.viewers.DelegatingStyledCellLabelProvider.IStyledLabelProvider;
 import org.eclipse.jface.viewers.IBaseLabelProvider;
@@ -28,6 +39,8 @@ import org.eclipse.jface.viewers.IStructuredSelection;
 import org.eclipse.jface.viewers.TreeViewer;
 import org.eclipse.jface.viewers.Viewer;
 import org.eclipse.jface.viewers.ViewerFilter;
+import org.eclipse.swt.events.FocusAdapter;
+import org.eclipse.swt.events.FocusEvent;
 import org.eclipse.swt.SWT;
 import org.eclipse.swt.custom.StackLayout;
 import org.eclipse.swt.custom.StyledText;
@@ -40,6 +53,8 @@ import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Text;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
+import org.eclipse.ui.ISources;
+import org.eclipse.ui.IActionBars;
 import org.eclipse.ui.IPartListener2;
 import org.eclipse.ui.IStartup;
 import org.eclipse.ui.IViewPart;
@@ -50,6 +65,10 @@ import org.eclipse.ui.IWorkbenchPart;
 import org.eclipse.ui.IWorkbenchPartReference;
 import org.eclipse.ui.IWorkbenchWindow;
 import org.eclipse.ui.PlatformUI;
+import org.eclipse.ui.actions.ActionFactory;
+import org.eclipse.ui.actions.TextActionHandler;
+import org.eclipse.ui.commands.ICommandService;
+import org.eclipse.ui.handlers.IHandlerService;
 import org.eclipse.ui.navigator.CommonNavigator;
 import org.eclipse.ui.navigator.CommonViewer;
 
@@ -61,8 +80,9 @@ import com._1c.g5.v8.dt.common.ui.controls.search.SearchBox;
  *
  * <p>Штатного поля поиска у Project Explorer нет — над деревом вставляется
  * {@link FilterInputBox} ({@code SearchBox} с историей). Матчинг — иерархический
- * {@link SmartMatcher#matchesTree}: точка в фильтре делит его на секции, они
- * сравниваются с конца пути (родитель.узел), как в навигаторе. Текст узла —
+ * {@link SmartMatcher#matchesTreeParts}: точка в фильтре делит его на секции, они
+ * сравниваются с конца пути (родитель.узел). Имя файла — одна секция, точка
+ * расширения иерархию не режет. Текст узла —
  * имя ресурса и русское название папки-группы из {@link MdObjectUsageDecorator}.
  * Обезличенный суффикс {@code <объект>} (и {@code <?>}) в поиск не входит.
  * В дереве остаются совпавшие узлы и их родители.
@@ -81,6 +101,7 @@ public final class ProjectStructureFilterHook implements IStartup
     private static final String RAW_LABEL_PROVIDER_KEY = "tormozit.projectStructureRawLp"; //$NON-NLS-1$
     private static final String FILTER_ACTIVE_KEY = "tormozit.projectStructureFilterActive"; //$NON-NLS-1$
     private static final String MATCHER_KEY = "tormozit.projectStructureMatcher"; //$NON-NLS-1$
+    private static final String CLIPBOARD_KEY = "tormozit.projectStructureFilterClipboard"; //$NON-NLS-1$
 
     private static final String OBJECT_SUFFIX = " <объект>"; //$NON-NLS-1$
     private static final String ORPHAN_SUFFIX = " <?>"; //$NON-NLS-1$
@@ -261,6 +282,7 @@ public final class ProjectStructureFilterHook implements IStartup
             tree.addDisposeListener(e -> session.cancelActiveJob());
             installEmptyPageGuard(tree);
             installDecorationHighlight(tree);
+            installFilterClipboardOverride(view, viewer, tree, box);
 
             tree.setData(PATCHED_KEY, Boolean.TRUE);
             probe("tryPatch #" + attempt + " PATCH OK highlight=" + (highlight != null)); //$NON-NLS-1$ //$NON-NLS-2$
@@ -477,6 +499,182 @@ public final class ProjectStructureFilterHook implements IStartup
         Global.tempLog("project-structure-filter", text); //$NON-NLS-1$
     }
 
+    /**
+     * Ctrl+C / Ctrl+V в {@link SearchBox} (это {@link StyledText}) не регистрируются в штатном
+     * {@link TextActionHandler} Project Explorer — он умеет только {@link Text}. Поэтому fallback
+     * уходит в вставку/копирование файла. Подменяем fallback {@code setPasteAction}/{@code setCopyAction}
+     * и дублируем обработчик команды с выражением по фокусу.
+     */
+    private static void installFilterClipboardOverride(IViewPart view, CommonViewer viewer, Tree tree,
+        FilterInputBox box)
+    {
+        if (view == null || view.getViewSite() == null || box == null || tree == null || tree.isDisposed())
+            return;
+        if (Boolean.TRUE.equals(tree.getData(CLIPBOARD_KEY)))
+            return;
+        boolean hooked = hookExplorerTextActionHandler(view, box);
+        probe("clipboard tahHook=" + hooked); //$NON-NLS-1$
+        viewer.addSelectionChangedListener(e -> hookExplorerTextActionHandler(view, box));
+        SearchBox searchBox = box.widget();
+        if (searchBox != null && !searchBox.isDisposed())
+        {
+            searchBox.addFocusListener(new FocusAdapter()
+            {
+                @Override
+                public void focusGained(FocusEvent e)
+                {
+                    hookExplorerTextActionHandler(view, box);
+                }
+            });
+        }
+        IHandlerService handlers = view.getViewSite().getService(IHandlerService.class);
+        if (handlers != null)
+        {
+            Expression whenFilter = new FilterFocusExpression(box);
+            handlers.activateHandler(ActionFactory.COPY.getId(), new AbstractHandler()
+            {
+                @Override
+                public Object execute(ExecutionEvent event)
+                {
+                    probeClipboard("handler COPY", box);
+                    copyFromFilter(box);
+                    return null;
+                }
+            }, whenFilter, false);
+            handlers.activateHandler(ActionFactory.PASTE.getId(), new AbstractHandler()
+            {
+                @Override
+                public Object execute(ExecutionEvent event)
+                {
+                    probeClipboard("handler PASTE", box);
+                    pasteIntoFilter(box);
+                    return null;
+                }
+            }, whenFilter, false);
+        }
+        ICommandService commands = view.getViewSite().getService(ICommandService.class);
+        if (commands != null)
+        {
+            commands.addExecutionListener(new IExecutionListener()
+            {
+                @Override
+                public void preExecute(String commandId, ExecutionEvent event)
+                {
+                    if (ActionFactory.COPY.getId().equals(commandId)
+                        || ActionFactory.PASTE.getId().equals(commandId))
+                        probeClipboard("cmd " + commandId, box);
+                }
+
+                @Override
+                public void postExecuteSuccess(String commandId, Object returnValue) {}
+
+                @Override
+                public void notHandled(String commandId, NotHandledException exception) {}
+
+                @Override
+                public void postExecuteFailure(String commandId, ExecutionException exception) {}
+            });
+        }
+        tree.setData(CLIPBOARD_KEY, Boolean.TRUE);
+        probe("clipboard override installed"); //$NON-NLS-1$
+    }
+
+    private static boolean hookExplorerTextActionHandler(IViewPart view, FilterInputBox box)
+    {
+        Object editGroup = findEditActionGroup(view);
+        if (editGroup == null)
+            return false;
+        Object handlerObj = Global.getField(editGroup, "textActionHandler"); //$NON-NLS-1$
+        if (!(handlerObj instanceof TextActionHandler textHandler))
+            return false;
+        IAction resourceCopy = (IAction) Global.getField(editGroup, "copyAction"); //$NON-NLS-1$
+        IAction resourcePaste = (IAction) Global.getField(editGroup, "pasteAction"); //$NON-NLS-1$
+        IAction currentPaste = (IAction) Global.getField(textHandler, "pasteAction"); //$NON-NLS-1$
+        IAction currentCopy = (IAction) Global.getField(textHandler, "copyAction"); //$NON-NLS-1$
+        if (!(currentCopy instanceof FilterClipboardAction))
+            textHandler.setCopyAction(new FilterClipboardAction(box, resourceCopy, false));
+        if (!(currentPaste instanceof FilterClipboardAction))
+            textHandler.setPasteAction(new FilterClipboardAction(box, resourcePaste, true));
+        return true;
+    }
+
+    private static Object findEditActionGroup(IViewPart view)
+    {
+        if (!(view instanceof CommonNavigator navigator))
+            return null;
+        Object service = navigator.getNavigatorActionService();
+        if (service == null)
+            return null;
+        Object group = findEditActionGroupInService(service);
+        if (group != null)
+            return group;
+        IActionBars bars = view.getViewSite() != null ? view.getViewSite().getActionBars() : null;
+        if (bars != null && service instanceof org.eclipse.ui.actions.ActionGroup actionGroup)
+            actionGroup.fillActionBars(bars);
+        return findEditActionGroupInService(service);
+    }
+
+    private static Object findEditActionGroupInService(Object service)
+    {
+        Object mapObj = Global.getField(service, "actionProviderInstances"); //$NON-NLS-1$
+        if (!(mapObj instanceof Map<?, ?> map))
+            return null;
+        for (Object provider : map.values())
+        {
+            if (provider == null)
+                continue;
+            Object group = Global.getField(provider, "editGroup"); //$NON-NLS-1$
+            if (group != null && group.getClass().getName().contains("EditActionGroup")) //$NON-NLS-1$
+                return group;
+        }
+        return null;
+    }
+
+    private static void probeClipboard(String where, FilterInputBox box)
+    {
+        Display display = Display.getCurrent();
+        Control focus = display != null ? display.getFocusControl() : null;
+        probe(where + " inFilter=" + focusInFilter(box) //$NON-NLS-1$
+            + " focus=" + (focus != null ? focus.getClass().getName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$
+    }
+
+    private static boolean focusInFilter(FilterInputBox box)
+    {
+        if (box == null || box.isDisposed())
+            return false;
+        if (box.isFocusControl())
+            return true;
+        Display display = Display.getCurrent();
+        Control focus = display != null ? display.getFocusControl() : null;
+        SearchBox widget = box.widget();
+        if (widget == null || widget.isDisposed())
+            return false;
+        for (Control current = focus; current != null && !current.isDisposed(); current = current.getParent())
+        {
+            if (current == widget)
+                return true;
+        }
+        return false;
+    }
+
+    private static void copyFromFilter(FilterInputBox box)
+    {
+        if (box == null || box.isDisposed())
+            return;
+        SearchBox widget = box.widget();
+        if (widget != null && !widget.isDisposed())
+            widget.copy();
+    }
+
+    private static void pasteIntoFilter(FilterInputBox box)
+    {
+        if (box == null || box.isDisposed())
+            return;
+        SearchBox widget = box.widget();
+        if (widget != null && !widget.isDisposed())
+            widget.paste();
+    }
+
     private static SearchBox findSearchBoxChild(Composite parent)
     {
         for (Control child : parent.getChildren())
@@ -594,12 +792,12 @@ public final class ProjectStructureFilterHook implements IStartup
         return name + " " + ru; //$NON-NLS-1$
     }
 
-    /** Путь для {@link SmartMatcher#matchesTree}: секции от корня к узлу через точку. */
-    static String treePath(IResource resource)
+    /** Имена узлов от корня к ресурсу: каждый файл/папка — одна секция, точка в имени не режет путь. */
+    static List<String> pathParts(IResource resource)
     {
-        if (resource == null)
-            return ""; //$NON-NLS-1$
         List<String> parts = new ArrayList<>();
+        if (resource == null)
+            return parts;
         IResource walk = resource;
         while (walk != null && !(walk instanceof IWorkspaceRoot))
         {
@@ -609,7 +807,7 @@ public final class ProjectStructureFilterHook implements IStartup
             walk = walk.getParent();
         }
         java.util.Collections.reverse(parts);
-        return String.join(".", parts); //$NON-NLS-1$
+        return parts;
     }
 
     // -----------------------------------------------------------------------
@@ -727,7 +925,7 @@ public final class ProjectStructureFilterHook implements IStartup
                         List<IResource> matchedLeaves = new ArrayList<>();
                         int[] visited = { 0 };
                         for (IResource root : roots)
-                            computeMatches(root, matcher, "", results, matchedLeaves, visited, generation, //$NON-NLS-1$
+                            computeMatches(root, matcher, List.of(), results, matchedLeaves, visited, generation,
                                 () -> activeGeneration, monitor);
 
                         int trueCount = 0;
@@ -846,7 +1044,7 @@ public final class ProjectStructureFilterHook implements IStartup
         }
     }
 
-    private static void computeMatches(IResource resource, SmartMatcher matcher, String parentPath,
+    private static void computeMatches(IResource resource, SmartMatcher matcher, List<String> parentParts,
         Map<IPath, Boolean> results, List<IResource> matchedLeaves, int[] visited, int generation,
         IntSupplier currentGeneration, IProgressMonitor monitor)
     {
@@ -855,9 +1053,14 @@ public final class ProjectStructureFilterHook implements IStartup
             throw CANCELLED;
 
         String selfText = matchText(resource);
-        String fullName = selfText.isEmpty() ? parentPath
-            : (parentPath.isEmpty() ? selfText : parentPath + "." + selfText); //$NON-NLS-1$
-        boolean self = matcher.matchesTree(fullName);
+        List<String> parts = parentParts;
+        if (!selfText.isEmpty())
+        {
+            parts = new ArrayList<>(parentParts.size() + 1);
+            parts.addAll(parentParts);
+            parts.add(selfText);
+        }
+        boolean self = matcher.matchesTreeParts(parts);
         boolean any = self;
         if (resource instanceof IContainer container && container.isAccessible())
         {
@@ -872,7 +1075,7 @@ public final class ProjectStructureFilterHook implements IStartup
             }
             for (IResource child : members)
             {
-                computeMatches(child, matcher, fullName, results, matchedLeaves, visited, generation,
+                computeMatches(child, matcher, parts, results, matchedLeaves, visited, generation,
                     currentGeneration, monitor);
                 if (Boolean.TRUE.equals(results.get(child.getFullPath())))
                     any = true;
@@ -932,7 +1135,75 @@ public final class ProjectStructureFilterHook implements IStartup
                     return cached.booleanValue();
             }
             // Узла нет в снимке (появился после обхода) — не прячем, без рекурсии по UI-потоку.
-            return matcher.matchesTree(treePath(resource));
+            return matcher.matchesTreeParts(pathParts(resource));
+        }
+    }
+
+    private static final class FilterFocusExpression extends Expression
+    {
+        private final FilterInputBox box;
+
+        FilterFocusExpression(FilterInputBox box)
+        {
+            this.box = box;
+        }
+
+        @Override
+        public EvaluationResult evaluate(IEvaluationContext context)
+        {
+            return focusInFilter(box) ? EvaluationResult.TRUE : EvaluationResult.FALSE;
+        }
+
+        @Override
+        public void collectExpressionInfo(ExpressionInfo info)
+        {
+            info.addVariableNameAccess(ISources.ACTIVE_FOCUS_CONTROL_NAME);
+        }
+    }
+
+    private static final class FilterClipboardAction extends Action
+    {
+        private final FilterInputBox box;
+        private final IAction original;
+        private final boolean paste;
+
+        FilterClipboardAction(FilterInputBox box, IAction original, boolean paste)
+        {
+            this.box = box;
+            this.original = original;
+            this.paste = paste;
+        }
+
+        @Override
+        public void run()
+        {
+            probeClipboard(paste ? "tah PASTE" : "tah COPY", box); //$NON-NLS-1$ //$NON-NLS-2$
+            if (focusInFilter(box))
+            {
+                if (paste)
+                    pasteIntoFilter(box);
+                else
+                    copyFromFilter(box);
+                return;
+            }
+            if (original != null)
+                original.run();
+        }
+
+        @Override
+        public void runWithEvent(org.eclipse.swt.widgets.Event event)
+        {
+            probeClipboard((paste ? "tah PASTE" : "tah COPY") + " event", box); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
+            if (focusInFilter(box))
+            {
+                if (paste)
+                    pasteIntoFilter(box);
+                else
+                    copyFromFilter(box);
+                return;
+            }
+            if (original != null)
+                original.runWithEvent(event);
         }
     }
 
