@@ -3,6 +3,7 @@ package tormozit;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Objects;
 import java.util.function.Predicate;
 
 import org.eclipse.emf.ecore.EObject;
@@ -15,18 +16,24 @@ import org.eclipse.swt.SWT;
 import org.eclipse.swt.events.MenuAdapter;
 import org.eclipse.swt.events.MenuEvent;
 import org.eclipse.swt.graphics.Image;
+import org.eclipse.swt.graphics.Point;
 import org.eclipse.swt.widgets.Composite;
 import org.eclipse.swt.widgets.Control;
 import org.eclipse.swt.widgets.Display;
 import org.eclipse.swt.widgets.Event;
 import org.eclipse.swt.widgets.Menu;
 import org.eclipse.swt.widgets.MenuItem;
+import org.eclipse.swt.widgets.Table;
+import org.eclipse.swt.widgets.TableItem;
 import org.eclipse.swt.widgets.Tree;
 import org.eclipse.swt.widgets.TreeItem;
+import org.eclipse.swt.widgets.Widget;
 import org.eclipse.ui.IEditorPart;
 import org.eclipse.ui.IStartup;
+import org.eclipse.ui.IViewPart;
 import org.eclipse.ui.IWorkbenchPage;
 import org.eclipse.ui.IWorkbenchWindow;
+import org.eclipse.ui.PartInitException;
 import org.eclipse.ui.PlatformUI;
 import org.eclipse.ui.forms.editor.IFormPage;
 
@@ -43,9 +50,13 @@ import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
 import com._1c.g5.v8.dt.ui.util.OpenHelper;
 
 /**
- * Контекстное меню дерева реквизитов вкладки «Данные» редактора объекта метаданных:
- * переход к текущему реквизиту на вкладке «Функц. опции», подстановка относительного
- * имени в фильтр вкладки «Права» и открытие редактора «Все роли» с этой строкой.
+ * Вкладка «Данные» редактора объекта метаданных:
+ * <ul>
+ *   <li>контекстное меню дерева реквизитов — переход на «Функц. опции», «Права»
+ *       и открытие редактора «Все роли»;</li>
+ *   <li>двойной клик в «Общие реквизиты» — {@code bringToTop} панели «Свойства».
+ *       Дерево «Стандартные реквизиты» не перехватывать: Grok 4.6 (2026-08-16) за ~40 попыток не смог правильно загрузить реквизит в панель «Свойства».</li>
+ * </ul>
  */
 public final class MdEditorAttributeMenuHook implements IStartup
 {
@@ -77,6 +88,16 @@ public final class MdEditorAttributeMenuHook implements IStartup
 
     private static final int RETRY_MS = 100;
 
+    private static final String PROPERTY_SHEET_VIEW_ID = "org.eclipse.ui.views.PropertySheet"; //$NON-NLS-1$
+
+    private static Widget lastDownWidget;
+
+    private static Object lastDownItem;
+
+    private static int sameItemDowns;
+
+    private static long lastDownMs;
+
     @Override
     public void earlyStartup()
     {
@@ -87,7 +108,142 @@ public final class MdEditorAttributeMenuHook implements IStartup
                 return;
             display.addFilter(SWT.MenuDetect, MdEditorAttributeMenuHook::handleMenuDetect);
             display.addFilter(SWT.Show, MdEditorAttributeMenuHook::handleMenuShow);
+            display.addFilter(SWT.MouseDown, MdEditorAttributeMenuHook::handleMouseDown);
+            display.addFilter(SWT.MouseDoubleClick, MdEditorAttributeMenuHook::handleMouseDoubleClick);
         });
+    }
+
+    /**
+     * Счётчик кликов по одному и тому же элементу: display-level {@code MouseDoubleClick}
+     * срабатывает и при втором клике в другом виджете в пределах {@link Display#getDoubleClickTime}.
+     */
+    private static void handleMouseDown(Event event)
+    {
+        if (event.button != 1)
+            return;
+        Control control = dataPageTableOrTree(event);
+        if (control == null)
+            return;
+        Object item = itemDataOf(event);
+        long now = System.currentTimeMillis();
+        int dblTime = event.display != null ? event.display.getDoubleClickTime() : 500;
+        boolean same = event.widget == lastDownWidget
+            && Objects.equals(item, lastDownItem)
+            && (now - lastDownMs) <= dblTime;
+        sameItemDowns = same ? sameItemDowns + 1 : 1;
+        lastDownWidget = event.widget;
+        lastDownItem = item;
+        lastDownMs = now;
+    }
+
+    /**
+     * «Общие реквизиты»: {@code bringToTop}.
+     * Деревья вкладки не перехватываем. В «Стандартные реквизиты» не лезть:
+     * Grok 4.6 (2026-08-16) за ~40 попыток не смог правильно загрузить реквизит в панель «Свойства».
+     */
+    private static void handleMouseDoubleClick(Event event)
+    {
+        if (event.button != 1)
+            return;
+        Control control = dataPageTableOrTree(event);
+        if (!(control instanceof Table table))
+            return;
+        Object item = itemDataOf(event);
+        boolean genuine = event.widget == lastDownWidget
+            && sameItemDowns >= 2
+            && Objects.equals(item, lastDownItem);
+        DtGranularEditor<?> editor = editorOf(table);
+        if (selectedCommonAttribute(table) == null)
+            return;
+        if (!genuine || item == null || editor == null || editor.getSite() == null)
+            return;
+        event.doit = false;
+        bringPropertiesViewToFront(editor);
+    }
+
+    private static void bringPropertiesViewToFront(DtGranularEditor<?> editor)
+    {
+        IViewPart view = propertiesView(editor);
+        if (view == null)
+            return;
+        editor.getSite().getPage().bringToTop(view);
+    }
+
+    private static IViewPart propertiesView(DtGranularEditor<?> editor)
+    {
+        IWorkbenchPage page = editor.getSite().getPage();
+        if (page == null)
+            return null;
+        IViewPart view = page.findView(PROPERTY_SHEET_VIEW_ID);
+        if (view == null)
+        {
+            try
+            {
+                view = page.showView(PROPERTY_SHEET_VIEW_ID, null, IWorkbenchPage.VIEW_VISIBLE);
+            }
+            catch (PartInitException e)
+            {
+                Global.logError(TAG, "showView PropertySheet", e); //$NON-NLS-1$
+                return null;
+            }
+        }
+        return view;
+    }
+
+    private static Control dataPageTableOrTree(Event event)
+    {
+        if (event.widget instanceof Table table && !table.isDisposed())
+        {
+            DtGranularEditor<?> editor = editorOf(table);
+            return isDataPageControl(editor, table) ? table : null;
+        }
+        if (event.widget instanceof Tree tree && !tree.isDisposed())
+        {
+            DtGranularEditor<?> editor = editorOf(tree);
+            return isDataPageControl(editor, tree) ? tree : null;
+        }
+        return null;
+    }
+
+    private static Object itemDataOf(Event event)
+    {
+        Point point = new Point(event.x, event.y);
+        if (event.widget instanceof Table table && !table.isDisposed())
+        {
+            TableItem item = table.getItem(point);
+            return item == null ? null : item.getData();
+        }
+        if (event.widget instanceof Tree tree && !tree.isDisposed())
+        {
+            TreeItem item = tree.getItem(point);
+            return item == null ? null : item.getData();
+        }
+        return null;
+    }
+
+    private static boolean isDataPageControl(DtGranularEditor<?> editor, Control control)
+    {
+        if (editor == null || control == null || control.isDisposed())
+            return false;
+        IFormPage page = editor.getActivePageInstance();
+        if (!isDataPage(page))
+            return false;
+        Control root = page.getPartControl();
+        return root != null && isUnder(root, control);
+    }
+
+    private static EObject selectedCommonAttribute(Table table)
+    {
+        TableItem[] selection = table.getSelection();
+        if (selection == null || selection.length == 0)
+            return null;
+        Object data = selection[0].getData();
+        if (data == null)
+            return null;
+        String typeName = data.getClass().getName();
+        if (typeName == null || !typeName.contains("CommonAttributesDataItemViewModel")) //$NON-NLS-1$
+            return null;
+        return mapViewModelToEObject(table, data);
     }
 
     private static void handleMenuDetect(Event event)
@@ -368,11 +524,11 @@ public final class MdEditorAttributeMenuHook implements IStartup
         return isDataMember(mapped) ? mapped : null;
     }
 
-    private static EObject mapViewModelToEObject(Tree tree, Object viewModel)
+    private static EObject mapViewModelToEObject(Control control, Object viewModel)
     {
         if (viewModel == null)
             return null;
-        Object mapper = mapperOwningViewModel(tree, viewModel);
+        Object mapper = mapperOwningViewModel(control, viewModel);
         if (mapper == null)
             return null;
         Object model;
@@ -388,9 +544,9 @@ public final class MdEditorAttributeMenuHook implements IStartup
         return NavigatorElementModels.resolveEObject(model);
     }
 
-    private static Object mapperOwningViewModel(Tree tree, Object viewModel)
+    private static Object mapperOwningViewModel(Control control, Object viewModel)
     {
-        DtGranularEditor<?> editor = editorOf(tree);
+        DtGranularEditor<?> editor = editorOf(control);
         IFormPage page = editor != null ? editor.getActivePageInstance() : null;
         Object root = page != null ? Global.getField(page, "pageComponent") : null; //$NON-NLS-1$
         return findMapperOwning(root, viewModel, 0);
@@ -567,11 +723,7 @@ public final class MdEditorAttributeMenuHook implements IStartup
     {
         Display display = Display.getDefault();
         if (display == null || display.isDisposed() || attempt >= MAX_ATTEMPTS)
-        {
-            if (attempt >= MAX_ATTEMPTS)
-                Global.tempLog("md-attr-menu", "FO give up after " + attempt + " name=" + objectName(member)); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return;
-        }
         display.timerExec(attempt == 0 ? 0 : RETRY_MS, () ->
         {
             if (selectOnFunctionalOptions(editor, member, attempt))
@@ -593,17 +745,11 @@ public final class MdEditorAttributeMenuHook implements IStartup
     {
         IFormPage page = editor.getActivePageInstance();
         if (!isFunctionalOptionsPage(page))
-        {
-            Global.tempLog("md-attr-menu", "FO skip notFoPage attempt=" + attempt); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
-        }
         Object root = Global.getField(page, "pageComponent"); //$NON-NLS-1$
         Object component = findComponentByClass(root, FO_CONTENT_COMPONENT_CLASS, 0);
         if (component == null)
-        {
-            Global.tempLog("md-attr-menu", "FO skip noComponent attempt=" + attempt); //$NON-NLS-1$ //$NON-NLS-2$
             return false;
-        }
 
         TreeViewer viewer = findContentTreeViewer(component);
         if (viewer != null && viewer.getTree() != null && !viewer.getTree().isDisposed())
@@ -614,28 +760,17 @@ public final class MdEditorAttributeMenuHook implements IStartup
         if (model == null)
             model = modelIfMapperKnows(mapper, member);
         if (model == null)
-        {
-            Global.tempLog("md-attr-menu", "FO skip notMapped attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                + " viewer=" + (viewer != null) //$NON-NLS-1$
-                + " name=" + objectName(member)); //$NON-NLS-1$
             return false;
-        }
         boolean invoked;
         try
         {
             invoked = Global.invokeVoid(component, "setSelection", List.of(model)); //$NON-NLS-1$
         }
-        catch (RuntimeException e)
+        catch (RuntimeException ignored)
         {
-            Global.tempLog("md-attr-menu", "FO setSelection throw attempt=" + attempt + " " + e); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
             return false;
         }
         boolean selected = selectionIsMember(viewer, mapper, member);
-        Global.tempLog("md-attr-menu", "FO attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-            + " invoked=" + invoked //$NON-NLS-1$
-            + " selected=" + selected //$NON-NLS-1$
-            + " sel=" + selectionBrief(viewer, mapper) //$NON-NLS-1$
-            + " name=" + objectName(member)); //$NON-NLS-1$
         if (!invoked || !selected)
             return false;
         Tree tree = viewer.getTree();
@@ -697,32 +832,6 @@ public final class MdEditorAttributeMenuHook implements IStartup
         {
             return false;
         }
-    }
-
-    private static String selectionBrief(TreeViewer viewer, Object mapper)
-    {
-        if (viewer == null)
-            return "no-viewer"; //$NON-NLS-1$
-        IStructuredSelection selection = viewer.getStructuredSelection();
-        if (selection == null || selection.isEmpty())
-            return "empty"; //$NON-NLS-1$
-        Object element = selection.getFirstElement();
-        EObject object = NavigatorElementModels.resolveEObject(element);
-        if (object == null && mapper != null)
-        {
-            try
-            {
-                object = NavigatorElementModels.resolveEObject(Global.invoke(mapper, "mapViewToModel", element)); //$NON-NLS-1$
-            }
-            catch (RuntimeException ignored)
-            {
-                // brief only
-            }
-        }
-        if (object == null)
-            return element.getClass().getSimpleName();
-        String name = objectName(object);
-        return object.eClass().getName() + (name != null ? ":" + name : ""); //$NON-NLS-1$ //$NON-NLS-2$
     }
 
     /** TreeViewer дерева «Состав объекта», не списка функциональных опций. */

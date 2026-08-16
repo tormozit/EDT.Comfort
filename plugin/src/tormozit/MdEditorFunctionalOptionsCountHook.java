@@ -75,8 +75,6 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
 
     private static final String ADAPTER_KEY = "tormozit.foContentCountAdapter"; //$NON-NLS-1$
 
-    private static final String LP_LOG_KEY = "tormozit.foContentCountLpLog"; //$NON-NLS-1$
-
     private static final String LAYOUT_PENDING_KEY = "tormozit.foContentCountLayoutPending"; //$NON-NLS-1$
 
     private static final int COUNT_COL_MIN_WIDTH = 32;
@@ -95,7 +93,6 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
     {
         Display.getDefault().asyncExec(() ->
         {
-            Global.tempLog("md-fo-count", "earlyStartup"); //$NON-NLS-1$ //$NON-NLS-2$
             IWorkbench workbench = PlatformUI.getWorkbench();
             workbench.addWindowListener(new IWindowListener()
             {
@@ -141,17 +138,11 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
         if (editor == null)
             return;
         boolean first = hookedEditors.add(editor);
-        Global.tempLog("md-fo-count", "hookEditor first=" + first //$NON-NLS-1$ //$NON-NLS-2$
-            + " " + editorBrief(editor) //$NON-NLS-1$
-            + " active=" + pageBrief(editor.getActivePageInstance())); //$NON-NLS-1$
         if (first)
         {
             editor.addPageChangedListener((PageChangedEvent event) ->
             {
                 IFormPage hinted = event.getSelectedPage() instanceof IFormPage form ? form : null;
-                Global.tempLog("md-fo-count", "pageChanged selected=" + pageBrief(hinted) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " active=" + pageBrief(editor.getActivePageInstance()) //$NON-NLS-1$
-                    + " " + editorBrief(editor)); //$NON-NLS-1$
                 scheduleInstall(editor, 0, hinted);
                 Display display = Display.getDefault();
                 if (display == null || display.isDisposed())
@@ -166,68 +157,36 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
     private static void scheduleInstall(DtGranularEditor<?> editor, int attempt, IFormPage hintedPage)
     {
         Display display = Display.getDefault();
-        if (display == null || display.isDisposed())
+        if (display == null || display.isDisposed() || attempt >= MAX_ATTEMPTS)
             return;
-        if (attempt >= MAX_ATTEMPTS)
-        {
-            Global.tempLog("md-fo-count", "GIVE UP attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                + " hinted=" + pageBrief(hintedPage) //$NON-NLS-1$
-                + " active=" + pageBrief(editor.getActivePageInstance()) //$NON-NLS-1$
-                + " " + editorBrief(editor)); //$NON-NLS-1$
-            return;
-        }
         display.timerExec(attempt == 0 ? 0 : RETRY_MS, () ->
         {
             try
             {
-                if (install(editor, attempt, hintedPage))
+                if (install(editor, hintedPage))
                     return;
             }
             catch (RuntimeException e)
             {
-                Global.tempLogException("md-fo-count", "install throw attempt=" + attempt, e); //$NON-NLS-1$ //$NON-NLS-2$
+                Global.logError(TAG, "install", e); //$NON-NLS-1$
             }
             scheduleInstall(editor, attempt + 1, hintedPage);
         });
     }
 
-    private static boolean install(DtGranularEditor<?> editor, int attempt, IFormPage hintedPage)
+    private static boolean install(DtGranularEditor<?> editor, IFormPage hintedPage)
     {
         IFormPage active = editor.getActivePageInstance();
         IFormPage page = isFunctionalOptionsPage(hintedPage) ? hintedPage : active;
         if (!isFunctionalOptionsPage(page))
-        {
-            Global.tempLog("md-fo-count", "skip-not-fo attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-                + " hinted=" + pageBrief(hintedPage) //$NON-NLS-1$
-                + " active=" + pageBrief(active) //$NON-NLS-1$
-                + " " + editorBrief(editor)); //$NON-NLS-1$
             return true;
-        }
         Object root = Global.getField(page, "pageComponent"); //$NON-NLS-1$
         Object component = findComponentByClass(root, FO_CONTENT_COMPONENT_CLASS, 0);
         TreeViewer viewer = component != null ? findContentTreeViewer(component, page) : null;
         Tree tree = viewer != null ? viewer.getTree() : null;
-        boolean disposed = tree != null && tree.isDisposed();
-        int cols = tree != null && !disposed ? tree.getColumnCount() : -1;
-        int items = tree != null && !disposed ? tree.getItemCount() : -1;
-        boolean hooked = tree != null && !disposed && Boolean.TRUE.equals(tree.getData(HOOK_MARKER));
-        Global.tempLog("md-fo-count", "install attempt=" + attempt //$NON-NLS-1$ //$NON-NLS-2$
-            + " page=" + pageBrief(page) //$NON-NLS-1$
-            + " root=" + className(root) //$NON-NLS-1$
-            + " component=" + className(component) //$NON-NLS-1$
-            + " viewer=" + (viewer != null) //$NON-NLS-1$
-            + " treeDisposed=" + disposed //$NON-NLS-1$
-            + " cols=" + cols //$NON-NLS-1$
-            + " items=" + items //$NON-NLS-1$
-            + " hooked=" + hooked //$NON-NLS-1$
-            + " header=" + (tree != null && !disposed && tree.getHeaderVisible()) //$NON-NLS-1$
-            + (component == null ? " children=" + componentTreeBrief(root, 0) : "") //$NON-NLS-1$ //$NON-NLS-2$
-            + (component != null && viewer == null ? " " + viewerLookupBrief(component, page) : "") //$NON-NLS-1$ //$NON-NLS-2$
-            + (viewer != null ? " via=" + (findViewerViaNativeControls(component) != null ? "native" : "partControl") : "")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$ //$NON-NLS-4$
-        if (component == null)
+        if (component == null || viewer == null || tree == null || tree.isDisposed())
             return false;
-        if (viewer == null || tree == null || disposed)
-            return false;
+        boolean hooked = Boolean.TRUE.equals(tree.getData(HOOK_MARKER));
         Object mapper = Global.invoke(component, "getMapper"); //$NON-NLS-1$
         tree.setData(MAPPER_KEY, mapper);
         CountIndex index;
@@ -243,18 +202,11 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
         if (!hooked)
         {
             if (tree.getColumnCount() == 0)
-            {
-                Global.tempLog("md-fo-count", "wait-no-columns attempt=" + attempt); //$NON-NLS-1$ //$NON-NLS-2$
                 return false;
-            }
             installCountColumn(viewer, tree);
             tree.setData(HOOK_MARKER, Boolean.TRUE);
-            Global.tempLog("md-fo-count", "column-added cols=" + tree.getColumnCount() //$NON-NLS-1$ //$NON-NLS-2$
-                + " headerVisible=" + tree.getHeaderVisible() //$NON-NLS-1$
-                + " widths=" + columnWidths(tree)); //$NON-NLS-1$
         }
         Configuration configuration = configurationOf(editor);
-        Global.tempLog("md-fo-count", "config=" + (configuration != null ? configuration.getName() : "null")); //$NON-NLS-1$ //$NON-NLS-2$ //$NON-NLS-3$
         attachModelListener(tree, configuration, index, viewer);
         scheduleRebuild(index, configuration, viewer);
         return true;
@@ -323,7 +275,6 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
         int nameW = Math.min(packed, maxName);
         int oldName = nameCol.getWidth();
         int oldCount = countCol.getWidth();
-        boolean hBarWasVisible = tree.getHorizontalBar() != null && tree.getHorizontalBar().getVisible();
         if (oldName != nameW)
             nameCol.setWidth(nameW);
         if (oldCount != countW)
@@ -331,14 +282,6 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
         ScrollBar hBar = tree.getHorizontalBar();
         if (hBar != null && hBar.getVisible())
             hBar.setVisible(false);
-        if (oldName != nameCol.getWidth() || oldCount != countCol.getWidth() || hBarWasVisible)
-        {
-            Global.tempLog("md-fo-count", "layout client=" + client //$NON-NLS-1$ //$NON-NLS-2$
-                + " packed=" + packed //$NON-NLS-1$
-                + " name=" + nameCol.getWidth() //$NON-NLS-1$
-                + " fo=" + countCol.getWidth() //$NON-NLS-1$
-                + " hBar=" + (hBar != null && hBar.getVisible())); //$NON-NLS-1$
-        }
     }
 
     private static Integer countForElement(Tree tree, Object element)
@@ -431,8 +374,6 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
                     if (toApply == null)
                         return;
                     index.apply(toApply);
-                    Global.tempLog("md-fo-count", "index-applied bm=" + toApply.byBmId.size() //$NON-NLS-1$ //$NON-NLS-2$
-                        + " uri=" + toApply.byUri.size()); //$NON-NLS-1$
                     viewer.refresh();
                     scheduleColumnLayout(viewer.getTree());
                 });
@@ -453,65 +394,6 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
         if (FO_PAGE_ID.equals(id))
             return true;
         return page.getClass().getName().contains("FunctionalOptionsPage"); //$NON-NLS-1$
-    }
-
-    private static String editorBrief(DtGranularEditor<?> editor)
-    {
-        if (editor == null)
-            return "editor=null"; //$NON-NLS-1$
-        EObject model = editor.getModel();
-        return "editor=" + editor.getClass().getSimpleName() //$NON-NLS-1$
-            + " model=" + (model != null ? model.eClass().getName() : "null"); //$NON-NLS-1$ //$NON-NLS-2$
-    }
-
-    private static String pageBrief(IFormPage page)
-    {
-        if (page == null)
-            return "null"; //$NON-NLS-1$
-        return page.getId() + "/" + page.getClass().getSimpleName(); //$NON-NLS-1$
-    }
-
-    private static String className(Object object)
-    {
-        return object != null ? object.getClass().getName() : "null"; //$NON-NLS-1$
-    }
-
-    private static String columnWidths(Tree tree)
-    {
-        if (tree == null || tree.isDisposed())
-            return ""; //$NON-NLS-1$
-        StringBuilder sb = new StringBuilder();
-        for (TreeColumn column : tree.getColumns())
-        {
-            if (sb.length() > 0)
-                sb.append(',');
-            sb.append(column.getText()).append('=').append(column.getWidth());
-        }
-        return sb.toString();
-    }
-
-    private static String componentTreeBrief(Object component, int depth)
-    {
-        if (component == null || depth > 4)
-            return ""; //$NON-NLS-1$
-        StringBuilder sb = new StringBuilder();
-        sb.append(component.getClass().getSimpleName());
-        if (depth >= 3)
-            return sb.toString();
-        List<Object> children = AefFieldFocus.childComponents(component);
-        if (children == null || children.isEmpty())
-            return sb.toString();
-        sb.append('[');
-        boolean first = true;
-        for (Object child : children)
-        {
-            if (!first)
-                sb.append(',');
-            first = false;
-            sb.append(componentTreeBrief(child, depth + 1));
-        }
-        sb.append(']');
-        return sb.toString();
     }
 
     private static Configuration configurationOf(DtGranularEditor<?> editor)
@@ -608,46 +490,6 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
         }
     }
 
-    private static String viewerLookupBrief(Object component, IFormPage page)
-    {
-        Object scene = Global.invoke(component, "getScene"); //$NON-NLS-1$
-        List<Object> natives = AefFieldFocus.editorNativeControls(scene, component);
-        Object viewModels = Global.invoke(component, "getViewModels"); //$NON-NLS-1$
-        Control part = page != null ? page.getPartControl() : null;
-        List<TreeViewer> partViewers = new ArrayList<>();
-        if (part instanceof Composite composite && !composite.isDisposed())
-            collectTreeViewers(composite, partViewers, 0);
-        return "scene=" + className(scene) //$NON-NLS-1$
-            + " natives=" + classNames(natives) //$NON-NLS-1$
-            + " vms=" + classNames(viewModels) //$NON-NLS-1$
-            + " part=" + className(part) //$NON-NLS-1$
-            + " partViewers=" + partViewers.size() //$NON-NLS-1$
-            + " wantedInput=" + className(treeViewModelInput(component)); //$NON-NLS-1$
-    }
-
-    private static String classNames(Object value)
-    {
-        if (!(value instanceof Iterable<?> iterable))
-            return className(value);
-        StringBuilder sb = new StringBuilder("["); //$NON-NLS-1$
-        boolean first = true;
-        int n = 0;
-        for (Object item : iterable)
-        {
-            if (!first)
-                sb.append(',');
-            first = false;
-            sb.append(item != null ? item.getClass().getSimpleName() : "null"); //$NON-NLS-1$
-            n++;
-            if (n >= 8)
-            {
-                sb.append(",..."); //$NON-NLS-1$
-                break;
-            }
-        }
-        return sb.append(']').toString();
-    }
-
     private static TreeViewer treeViewerOfNative(Object nativeControl)
     {
         Control control = nativeControl instanceof Control swt ? swt : null;
@@ -733,17 +575,6 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
             cell.setText(count == null ? "" : Integer.toString(count)); //$NON-NLS-1$
             if (count != null && !tree.isDisposed())
                 cell.setForeground(tree.getDisplay().getSystemColor(SWT.COLOR_DARK_GRAY));
-            int logged = tree.getData(LP_LOG_KEY) instanceof Integer n ? n.intValue() : 0;
-            if (logged < 8 && !tree.isDisposed())
-            {
-                tree.setData(LP_LOG_KEY, Integer.valueOf(logged + 1));
-                EObject model = modelOf(tree.getData(MAPPER_KEY), element);
-                Object ready = tree.getData(INDEX_KEY) instanceof CountIndex index && index.ready;
-                Global.tempLog("md-fo-count", "lp el=" + className(element) //$NON-NLS-1$ //$NON-NLS-2$
-                    + " model=" + (model != null ? model.eClass().getName() : "null") //$NON-NLS-1$ //$NON-NLS-2$
-                    + " count=" + count //$NON-NLS-1$
-                    + " ready=" + ready); //$NON-NLS-1$
-            }
         }
     }
 
@@ -755,7 +586,6 @@ public final class MdEditorFunctionalOptionsCountHook implements IStartup
         }
         catch (RuntimeException e)
         {
-            Global.tempLogException("md-fo-count", "tryCompute", e); //$NON-NLS-1$ //$NON-NLS-2$
             if (Global.isLogEnabled())
                 Global.log(TAG, "счёт ФО: " + e); //$NON-NLS-1$
             return null;

@@ -68,8 +68,9 @@ import com._1c.g5.v8.dt.metadata.mdclass.MdObject;
  * <p>Заголовок страницы («Справочник._ДемоКассы.Основные») — это заголовок формы
  * Eclipse Forms: {@code DtGranularEditorPage.createFormContentInternal} вызывает
  * {@code ScrolledForm.setText(getPageTitle())}. Комфорт приводит штатный путь
- * («Справочники → … → Основные») к полному имени: системные слова в единственном
- * числе, сегменты через точку. Область заголовка ({@code TitleRegion})
+ * («Справочники → … → Основные») к полному имени: системные слова пути в единственном
+ * числе, сегменты через точку; имя текущей страницы (последнее звено) не меняется.
+ * Область заголовка ({@code TitleRegion})
  * всегда содержит два контрола — {@code Label} и {@code StyledText}, видим ровно один;
  * переключение — {@link Form#setTitleTextSelectable(boolean)}. Ссылку можно оформить только на
  * {@code StyledText} ({@code Label} не поддерживает стили части текста), поэтому хук
@@ -273,6 +274,8 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
 
     /**
      * Сегменты штатного пути (разделитель {@code →}) → ед.ч. системных слов, стык через точку.
+     * Последнее звено — имя страницы EDT (вкладки), его не трогаем: «Функциональные опции»
+     * это заголовок страницы, а не тип МД «ФункциональнаяОпция».
      * Уже отформатированный заголовок (без стрелки) не меняет.
      */
     private static String formatPageTitle(String title)
@@ -284,6 +287,15 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
         if (parts.length < 2)
             return title;
 
+        int lastNonEmpty = -1;
+        for (int i = 0; i < parts.length; i++)
+        {
+            if (!parts[i].strip().isEmpty())
+                lastNonEmpty = i;
+        }
+        if (lastNonEmpty < 1)
+            return title;
+
         StringBuilder formatted = new StringBuilder();
         for (int i = 0; i < parts.length; i++)
         {
@@ -292,8 +304,13 @@ public final class MdEditorTitleNavigatorMenuHook implements IStartup
                 continue;
             if (formatted.length() > 0)
                 formatted.append('.');
-            String singular = MdTypeMapping.systemLabelToSingular(segment);
-            formatted.append(singular != null ? singular : segment);
+            if (i != lastNonEmpty)
+            {
+                String singular = MdTypeMapping.systemLabelToSingular(segment);
+                formatted.append(singular != null ? singular : segment);
+            }
+            else
+                formatted.append(segment);
         }
         return formatted.length() == 0 ? title : formatted.toString();
     }
